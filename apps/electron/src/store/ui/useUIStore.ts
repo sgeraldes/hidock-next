@@ -39,6 +39,9 @@ export const useUIStore = create<UIStore>()(
   // QA monitoring toggle
   qaLogsEnabled: false,
 
+  // Theme preference — defaults to following the OS.
+  theme: 'system',
+
   // Actions
   toggleSidebar: () => {
     set((state) => ({ sidebarOpen: !state.sidebarOpen }))
@@ -124,6 +127,11 @@ export const useUIStore = create<UIStore>()(
   setQaLogsEnabled: (enabled: boolean) => {
     set({ qaLogsEnabled: enabled })
   },
+
+  // Theme actions — the applied `dark` class is reconciled by useTheme().
+  setTheme: (theme) => {
+    set({ theme })
+  },
     }),
     {
       name: 'hidock-ui-store',
@@ -132,6 +140,7 @@ export const useUIStore = create<UIStore>()(
       partialize: (state) => ({
         sidebarOpen: state.sidebarOpen,
         qaLogsEnabled: state.qaLogsEnabled,
+        theme: state.theme, // persisted: user preference (also read pre-paint in main.tsx)
         // recordingsCompactView NOT persisted here - useLibraryStore.viewMode is the single source of truth (LB-13)
         // currentlyPlayingId intentionally not persisted - transient playback
         // currentlyPlayingPath intentionally not persisted - transient playback
@@ -165,6 +174,7 @@ export const useIsPlaying = () => useUIStore((s) => s.isPlaying)
 export const useWaveformLoadingId = () => useUIStore((s) => s.waveformLoadingId)
 export const useWaveformLoadedForId = () => useUIStore((s) => s.waveformLoadedForId)
 export const useQaLogsEnabled = () => useUIStore((s) => s.qaLogsEnabled)
+export const useThemePreference = () => useUIStore((s) => s.theme)
 
 // ✅ Single reference selectors - no wrapper needed
 export const usePlaybackWaveformData = () => useUIStore((s) => s.playbackWaveformData)

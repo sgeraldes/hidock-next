@@ -167,11 +167,12 @@ describe('useUIStore', () => {
       expect(stored.state.playbackSentimentData).toBeUndefined()
     })
 
-    it('only persists exactly sidebarOpen and qaLogsEnabled', () => {
+    it('only persists exactly sidebarOpen, qaLogsEnabled and theme', () => {
       // Set various state values
       const store = useUIStore.getState()
       store.setSidebarOpen(false)
       store.setQaLogsEnabled(true)
+      store.setTheme('dark')
       store.selectMeeting('meeting-1')
       store.setCurrentlyPlaying('rec-1', '/path')
       store.setIsPlaying(true)
@@ -181,7 +182,8 @@ describe('useUIStore', () => {
 
       expect(persistedKeys).toContain('sidebarOpen')
       expect(persistedKeys).toContain('qaLogsEnabled')
-      expect(persistedKeys.length).toBe(2)
+      expect(persistedKeys).toContain('theme') // user preference; read pre-paint in main.tsx
+      expect(persistedKeys.length).toBe(3)
     })
   })
 

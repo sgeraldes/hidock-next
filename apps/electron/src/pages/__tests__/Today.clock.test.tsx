@@ -64,16 +64,17 @@ describe('Today — live clock', () => {
     // Wait for the async briefing load (vi.waitFor drives the fake clock).
     await vi.waitFor(() => expect(screen.getByText('Sprint Planning')).toBeInTheDocument())
 
-    // Before the start: upcoming badge.
+    // Before the start: upcoming badge. (Match the meeting BADGE specifically —
+    // the ribbon's now-line also carries a standalone "Now" label.)
     expect(screen.getByText('in 2 min')).toBeInTheDocument()
-    expect(screen.queryByText(/^Now/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/^Now ·/)).not.toBeInTheDocument()
 
     // Advance past the start (and several 15s ticks).
     await vi.advanceTimersByTimeAsync(3 * 60_000)
 
     // The clock advanced → the meeting is now in progress.
     expect(screen.queryByText('in 2 min')).not.toBeInTheDocument()
-    expect(screen.getByText(/^Now/)).toBeInTheDocument()
+    expect(screen.getByText(/^Now ·/)).toBeInTheDocument()
   })
 
   it('refreshes the clock on visibilitychange (recovers from a throttled background interval)', async () => {
@@ -94,7 +95,9 @@ describe('Today — live clock', () => {
 
     // …until the window becomes visible again, which must force a refresh.
     document.dispatchEvent(new Event('visibilitychange'))
-    await vi.waitFor(() => expect(screen.getByText(/^Now/)).toBeInTheDocument())
-    expect(screen.queryByText('in 2 min')).not.toBeInTheDocument()
+    await vi.waitFor(() => {
+      expect(screen.getByText(/^Now ·/)).toBeInTheDocument()
+      expect(screen.queryByText('in 2 min')).not.toBeInTheDocument()
+    })
   })
 })

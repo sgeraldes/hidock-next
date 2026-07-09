@@ -2,6 +2,11 @@ import ReactDOM from 'react-dom/client'
 import { HashRouter } from 'react-router-dom'
 import App from './App'
 import './index.css'
+import { bootstrapTheme } from './lib/theme'
+
+// Apply the persisted (or OS-default) theme BEFORE React mounts, so there is no
+// light/dark flash on load. useTheme() then keeps it reconciled at runtime.
+bootstrapTheme()
 
 // Guard against the entry module executing more than once (seen with
 // electron-vite dev double-loading). A second createRoot() on the same

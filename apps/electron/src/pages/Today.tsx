@@ -1,8 +1,7 @@
-import { Fragment, useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Sun,
-  CalendarDays,
   Sparkles,
   ListTodo,
   Bot,
@@ -14,6 +13,9 @@ import {
   BookOpen,
   Video,
   Mic,
+  ChevronRight,
+  CheckCircle2,
+  Info,
   Settings as SettingsIcon
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -33,6 +35,12 @@ import {
   formatMinutesSinceEnd,
   recordingOverlapsMeeting,
   allDayMeetingOnLocalDate,
+  meetingZone,
+  groupEarlierMeetings,
+  categorizeMeeting,
+  MEETING_CATEGORY_LABELS,
+  type MeetingTiming,
+  type MeetingCategory,
   type RecordingSpan
 } from '@/lib/meeting-timing'
 import type { Contact } from '@/types'
@@ -88,6 +96,24 @@ interface BriefingData {
   stats: { transcribedCount: number; indexedChunks: number; pendingActionables: number }
 }
 
+/** Semantic category → dot color (a data dimension the eye can read). */
+const CATEGORY_DOT: Record<MeetingCategory, string> = {
+  recurring: 'bg-sky-500',
+  one_on_one: 'bg-violet-500',
+  external: 'bg-amber-500',
+  personal: 'bg-emerald-500',
+  general: 'bg-slate-400 dark:bg-slate-500'
+}
+/** Category → tinted time-chip (carries the color without a thick side border). */
+const CATEGORY_CHIP: Record<MeetingCategory, string> = {
+  recurring: 'bg-sky-500/10 text-sky-700 dark:text-sky-300',
+  one_on_one: 'bg-violet-500/10 text-violet-700 dark:text-violet-300',
+  external: 'bg-amber-500/10 text-amber-700 dark:text-amber-300',
+  personal: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
+  general: 'bg-slate-500/10 text-slate-600 dark:text-slate-300'
+}
+const CATEGORY_ORDER: MeetingCategory[] = ['recurring', 'one_on_one', 'external', 'personal', 'general']
+
 function greeting(): string {
   const h = new Date().getHours()
   if (h < 12) return 'Good morning'
@@ -101,10 +127,109 @@ function formatTime(iso?: string): string {
   return isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
+function formatClock(d: Date): string {
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
 function formatDay(iso?: string): string {
   if (!iso) return ''
   const d = new Date(iso)
   return isNaN(d.getTime()) ? '' : d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })
+}
+
+// ── Shared, stateless ribbon primitives (module scope: stable identity) ───────
+
+const RelativeBadge = ({ vm, subtle }: { vm: MeetingVM; subtle?: boolean }) => {
+  if (vm.cancelled) return null
+  if (!(vm.inProgress || vm.ranOver || vm.timing.state === 'upcoming')) return null
+  return (
+    <span
+      className={cn(
+        'flex items-center gap-1.5 text-xs whitespace-nowrap rounded-full px-2 py-0.5 flex-shrink-0',
+        vm.runningOver
+          ? 'bg-red-500/10 text-red-600 dark:text-red-400 font-medium'
+          : vm.inProgress || vm.isHero || vm.timing.isNextUp
+            ? 'bg-primary/10 text-primary font-medium'
+            : subtle
+              ? 'text-foreground/45'
+              : 'text-foreground/55'
+      )}
+    >
+      {(vm.inProgress || vm.runningOver) && (
+        <span
+          className={cn(
+            'h-1.5 w-1.5 rounded-full flex-shrink-0 animate-pulse motion-reduce:animate-none',
+            vm.recording || vm.runningOver ? 'bg-red-500' : 'bg-primary'
+          )}
+        />
+      )}
+      <span key={vm.badgeLabel} className="animate-in fade-in duration-300 motion-reduce:animate-none">
+        {vm.badgeLabel}
+      </span>
+    </span>
+  )
+}
+
+const RecordingMic = ({ vm }: { vm: MeetingVM }) =>
+  vm.hasRecording ? (
+    <Mic className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-500 flex-shrink-0" aria-label="Recording linked" />
+  ) : vm.recordedOnDevice ? (
+    <span
+      className="flex items-center gap-1 flex-shrink-0 text-amber-600 dark:text-amber-500"
+      aria-label="Recorded — on device, not yet downloaded"
+    >
+      <Mic className="h-3.5 w-3.5" />
+      <span className="text-[10px] font-medium whitespace-nowrap">recorded · on device</span>
+    </span>
+  ) : null
+
+const RecordingChip = ({ vm }: { vm: MeetingVM }) =>
+  vm.recording || vm.runningOver ? (
+    <span
+      className="flex items-center gap-1 flex-shrink-0 rounded-full bg-red-500/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-600 dark:text-red-400"
+      aria-label="Recording in progress"
+    >
+      <span className="h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse motion-reduce:animate-none" />
+      Recording
+    </span>
+  ) : null
+
+/**
+ * Inline node dot carrying the meeting's semantic category color — the leading
+ * element of every ribbon item, forming a vertical "spine" of colored dots that
+ * reads as a timeline without fragile absolute positioning.
+ */
+const CategoryDot = ({ vm, className }: { vm: MeetingVM; className?: string }) => (
+  <span
+    className={cn(
+      'flex-shrink-0 rounded-full',
+      CATEGORY_DOT[vm.category],
+      vm.dimmed && 'opacity-50',
+      className
+    )}
+    aria-hidden="true"
+  />
+)
+
+/** Everything the ribbon needs to render one meeting, derived once. */
+interface MeetingVM {
+  m: BriefingMeeting
+  timing: MeetingTiming
+  category: MeetingCategory
+  names: string[]
+  extra: number
+  secondary: string
+  online: boolean
+  hasRecording: boolean
+  recordedOnDevice: boolean
+  recording: boolean
+  runningOver: boolean
+  cancelled: boolean
+  inProgress: boolean
+  ranOver: boolean
+  dimmed: boolean
+  badgeLabel: string
+  isHero: boolean
 }
 
 export function Today() {
@@ -114,40 +239,63 @@ export function Today() {
   const [error, setError] = useState<string | null>(null)
   const [participantsByMeeting, setParticipantsByMeeting] = useState<Record<string, Contact[]>>({})
   const [recordingByMeeting, setRecordingByMeeting] = useState<Record<string, boolean>>({})
-  // Which meetings have a recording sitting on the device but not yet downloaded
-  // (from the cached device file listing). Distinct from recordingByMeeting, which
-  // tracks recordings already ingested and linked.
   const [recordedOnDeviceByMeeting, setRecordedOnDeviceByMeeting] = useState<Record<string, boolean>>({})
-  // Live device-recording flag (see useAppStore.deviceRecording TODO). Scalar → no
-  // useShallow needed. Stays false until a device-status read path sets it.
+  // Which earlier-group capsules the user has expanded (keyed by block start ms).
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
+
   const deviceRecording = useAppStore((s) => s.deviceRecording)
   const activeRecordingFilename = useAppStore((s) => s.activeRecordingFilename)
-  // Live clock so relative "in X min" badges and the next-meeting highlight stay
-  // accurate; ticks every 15s (WCAG reduced-motion is unaffected — it's data,
-  // not animation).
-  //
-  // CRITICAL: Chromium throttles/pauses setInterval in a backgrounded or occluded
-  // renderer window. While the user is in their actual meeting the HiDock window
-  // sits in the background, so the interval stops firing and `now` freezes at
-  // roughly when the window was last foregrounded — leaving a started meeting stuck
-  // showing "in X min". Refreshing `now` on visibilitychange/focus makes the clock
-  // correct the instant the user looks at the window, independent of the throttled
-  // interval.
+
+  // Live clock so relative badges, zone classification, and the now-line stay
+  // accurate; ticks every 15s. Chromium throttles setInterval in a backgrounded
+  // renderer, so we also refresh on visibilitychange/focus — which additionally
+  // re-anchors the ribbon on the now-line when the user returns to the page.
   const [now, setNow] = useState(() => new Date())
+
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const nowLineRef = useRef<HTMLDivElement>(null)
+
+  /** Bring the now-line to ~30% from the top of the scroll viewport. */
+  const anchorToNow = useCallback((smooth: boolean) => {
+    const sc = scrollRef.current
+    const nl = nowLineRef.current
+    if (!sc || !nl || typeof sc.scrollTo !== 'function') return
+    try {
+      const scRect = sc.getBoundingClientRect()
+      const nlRect = nl.getBoundingClientRect()
+      const target = sc.scrollTop + (nlRect.top - scRect.top) - sc.clientHeight * 0.3
+      const prefersReduced =
+        typeof window !== 'undefined' &&
+        typeof window.matchMedia === 'function' &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      sc.scrollTo({ top: Math.max(0, target), behavior: smooth && !prefersReduced ? 'smooth' : 'auto' })
+    } catch {
+      /* jsdom / unsupported — no-op */
+    }
+  }, [])
+
   useEffect(() => {
     const tick = () => setNow(new Date())
     const id = setInterval(tick, 15_000)
     const onVisible = () => {
-      if (!document.hidden) tick()
+      if (!document.hidden) {
+        tick()
+        // Returning to the page re-anchors on NOW (don't yank while reading).
+        requestAnimationFrame(() => anchorToNow(true))
+      }
+    }
+    const onFocus = () => {
+      tick()
+      requestAnimationFrame(() => anchorToNow(true))
     }
     document.addEventListener('visibilitychange', onVisible)
-    window.addEventListener('focus', tick)
+    window.addEventListener('focus', onFocus)
     return () => {
       clearInterval(id)
       document.removeEventListener('visibilitychange', onVisible)
-      window.removeEventListener('focus', tick)
+      window.removeEventListener('focus', onFocus)
     }
-  }, [])
+  }, [anchorToNow])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -170,10 +318,7 @@ export function Today() {
     load()
   }, [load])
 
-  // Refetch the briefing when a calendar sync completes. The briefing loads once
-  // on mount, so a boot/background sync (which lands new meetings in the DB) would
-  // otherwise leave this page showing the pre-sync list. Multiple syncs in quick
-  // succession are debounced into a single reload.
+  // Refetch when a calendar sync completes (debounced).
   useEffect(() => {
     const onDomainEvent = window.electronAPI?.onDomainEvent
     if (!onDomainEvent) return
@@ -192,9 +337,9 @@ export function Today() {
     }
   }, [load])
 
-  // Fetch known participants for today's meetings once per briefing load, in
-  // parallel and tolerant of failures (empty results simply hide the line).
   const todayMeetings = data?.todayMeetings
+
+  // Participants for today's meetings (parallel, failure-tolerant).
   useEffect(() => {
     if (!todayMeetings || todayMeetings.length === 0) {
       setParticipantsByMeeting({})
@@ -212,8 +357,7 @@ export function Today() {
     }
   }, [todayMeetings])
 
-  // Whether each meeting already has a linked recording, so the row can show a
-  // "recorded" indicator. Tolerant of a missing/failing API (empty = no badge).
+  // Which meetings already have a linked recording (green mic).
   useEffect(() => {
     if (!todayMeetings || todayMeetings.length === 0) {
       setRecordingByMeeting({})
@@ -243,10 +387,7 @@ export function Today() {
     }
   }, [todayMeetings])
 
-  // Which of today's meetings were recorded on the device (from the cached file
-  // listing) even before the file is downloaded. One fetch per briefing load,
-  // tolerant of an empty/stale/absent cache (then simply no amber badge). Recording
-  // start is parsed from the filename; the span uses the cached duration (seconds).
+  // Which meetings were recorded on-device but not yet downloaded (amber mic).
   useEffect(() => {
     if (!todayMeetings || todayMeetings.length === 0) {
       setRecordedOnDeviceByMeeting({})
@@ -285,37 +426,33 @@ export function Today() {
     }
   }, [todayMeetings])
 
-  const timings = classifyMeetingTimings(data?.todayMeetings ?? [], now)
+  const timings = useMemo(
+    () => classifyMeetingTimings(data?.todayMeetings ?? [], now),
+    [data?.todayMeetings, now]
+  )
 
-  // Split all-day / holiday events out of the timed list — they render as a slim
-  // banner, never as time-ranged rows (and never steal the "what's next" highlight).
-  // All-day events name a calendar DAY, so they must match TODAY by local calendar
-  // date — a stored UTC instant would otherwise leak tomorrow's holiday into today
-  // (or push today's onto yesterday) in any non-UTC timezone.
+  // All-day / holiday events render as a slim banner, never as timed rows.
   const allDayMeetings = (data?.todayMeetings ?? []).filter(
     (m) => timings.get(m.id)?.state === 'all_day' && allDayMeetingOnLocalDate(m, now)
   )
   const timedMeetings = (data?.todayMeetings ?? []).filter((m) => timings.get(m.id)?.state !== 'all_day')
 
-  // When the device is recording, where did the current capture start? Used to
-  // decide whether a just-ended ("ran over") meeting is still the one being
-  // recorded — the recording began inside its scheduled window.
   const recordingStart =
     deviceRecording && activeRecordingFilename ? parseRecordingStart(activeRecordingFilename) : null
 
-  const recordingStartedDuring = (m: BriefingMeeting): boolean => {
-    if (!recordingStart) return false
-    const start = new Date(m.start_time).getTime()
-    const end = new Date(m.end_time).getTime()
-    if (!Number.isFinite(start) || !Number.isFinite(end)) return false
-    const t = recordingStart.getTime()
-    return t >= start && t <= end
-  }
+  const recordingStartedDuring = useCallback(
+    (m: BriefingMeeting): boolean => {
+      if (!recordingStart) return false
+      const start = new Date(m.start_time).getTime()
+      const end = new Date(m.end_time).getTime()
+      if (!Number.isFinite(start) || !Number.isFinite(end)) return false
+      const t = recordingStart.getTime()
+      return t >= start && t <= end
+    },
+    [recordingStart]
+  )
 
-  // Attribution candidates for the live "Recording now" card: meetings in progress,
-  // PLUS a meeting that just ran over but whose window the current recording started
-  // in (it's almost certainly still that meeting). In-progress first so the card
-  // ranks a live meeting above one that has technically ended.
+  // Attribution candidates for the live "Recording now" card.
   const attributionCandidates = [
     ...(data?.todayMeetings ?? []).filter((m) => timings.get(m.id)?.state === 'in_progress'),
     ...(data?.todayMeetings ?? []).filter(
@@ -323,25 +460,374 @@ export function Today() {
     )
   ]
 
+  // Build a view-model per timed meeting, then split into ribbon zones.
+  const buildVM = useCallback(
+    (m: BriefingMeeting): MeetingVM => {
+      const timing = timings.get(m.id)!
+      const people = participantsByMeeting[m.id] ?? []
+      const names = people.slice(0, TODAY_PARTICIPANT_LIMIT).map(participantFirstName)
+      const extra = people.length - names.length
+      const cancelled = timing.state === 'cancelled'
+      const inProgress = timing.state === 'in_progress'
+      const ranOver = timing.state === 'ran_over'
+      const isFocus = timing.isFocus ?? false
+      const online = isOnlineMeeting(m)
+      const hasRecording = !!recordingByMeeting[m.id]
+      const recordedOnDevice = !hasRecording && !!recordedOnDeviceByMeeting[m.id]
+      const recording = inProgress && isFocus && deviceRecording
+      const runningOver = ranOver && deviceRecording && recordingStartedDuring(m)
+      const secondary =
+        names.length > 0
+          ? `${names.join(', ')}${extra > 0 ? ` +${extra}` : ''}`
+          : firstMeaningfulLine(m.description) || m.location || ''
+      const badgeLabel = inProgress
+        ? formatMinutesLeft(timing.minutes ?? 0)
+        : ranOver
+          ? runningOver
+            ? 'Running over · recording continues'
+            : formatMinutesSinceEnd(timing.minutes ?? 0)
+          : formatMinutesUntil(timing.minutes ?? 0)
+      const category = categorizeMeeting({ subject: m.subject, attendeeCount: people.length || undefined })
+      return {
+        m,
+        timing,
+        category,
+        names,
+        extra,
+        secondary,
+        online,
+        hasRecording,
+        recordedOnDevice,
+        recording,
+        runningOver,
+        cancelled,
+        inProgress,
+        ranOver,
+        dimmed: timing.state === 'past' || cancelled,
+        badgeLabel,
+        isHero: isFocus
+      }
+    },
+    [
+      timings,
+      participantsByMeeting,
+      recordingByMeeting,
+      recordedOnDeviceByMeeting,
+      deviceRecording,
+      recordingStartedDuring
+    ]
+  )
+
+  const byStart = (a: BriefingMeeting, b: BriefingMeeting) =>
+    new Date(a.start_time).getTime() - new Date(b.start_time).getTime()
+
+  const zoned = useMemo(() => {
+    const sorted = [...timedMeetings].sort(byStart)
+    const earlier: BriefingMeeting[] = []
+    const recent: BriefingMeeting[] = []
+    const focus: BriefingMeeting[] = []
+    const later: BriefingMeeting[] = []
+    for (const m of sorted) {
+      switch (meetingZone(m, now)) {
+        case 'earlier':
+          earlier.push(m)
+          break
+        case 'recent':
+          recent.push(m)
+          break
+        case 'later':
+          later.push(m)
+          break
+        default:
+          focus.push(m)
+      }
+    }
+    return { earlier, recent, focus, later }
+  }, [timedMeetings, now])
+
+  const earlierGroups = useMemo(() => groupEarlierMeetings(zoned.earlier), [zoned.earlier])
+
+  const recordedSet = useMemo(() => {
+    const s = new Set<string>()
+    for (const m of timedMeetings) {
+      if (recordingByMeeting[m.id] || recordedOnDeviceByMeeting[m.id]) s.add(m.id)
+    }
+    return s
+  }, [timedMeetings, recordingByMeeting, recordedOnDeviceByMeeting])
+
+  // Re-anchor on the now-line once meetings are laid out (and whenever the set
+  // of visible meetings changes materially).
+  const ribbonSignature = `${zoned.earlier.length}:${zoned.recent.length}:${zoned.focus.length}:${zoned.later.length}`
+  useEffect(() => {
+    if (!data?.calendar.configured) return
+    const id = requestAnimationFrame(() => anchorToNow(false))
+    return () => cancelAnimationFrame(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ribbonSignature, data?.calendar.configured])
+
   const latest = data?.recentKnowledge[0]
 
   const generateFor = (sourceId: string, templateId: string) => {
     navigate('/actionables', { state: { sourceId, action: 'generate', templateId } })
   }
 
+  const toggleGroup = (key: string) =>
+    setExpandedGroups((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+
+  // ── Row builders (close over navigate + ribbon state) ─────────────────────
+
+  const withHover = (m: BriefingMeeting, node: ReactNode) =>
+    meetingHoverWillHaveContent(m, ['title', 'time']) ? (
+      <HoverCard key={m.id}>
+        <HoverCardTrigger asChild>{node}</HoverCardTrigger>
+        <HoverCardContent align="start">
+          <MeetingHoverCard id={m.id} name={m.subject} visibleFields={['title', 'time']} />
+        </HoverCardContent>
+      </HoverCard>
+    ) : (
+      <Fragment key={m.id}>{node}</Fragment>
+    )
+
+  // ── Focus card (full richness; hero = current/next) ───────────────────────
+  const FocusCard = (vm: MeetingVM, index: number) => {
+    const { m } = vm
+    const node = (
+      <button
+        onClick={() => navigate(`/meeting/${m.id}`)}
+        data-testid="focus-card"
+        data-hero={vm.isHero ? 'true' : 'false'}
+        style={{ animationDelay: `${Math.min(index, 6) * 45}ms` }}
+        className={cn(
+          'group animate-rise-in lift w-full rounded-xl border bg-card p-4 text-left',
+          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+          vm.isHero
+            ? 'border-primary/40 shadow-lg ring-1 ring-primary/15'
+            : 'border-border/70 shadow-sm dark:border-white/[0.06]',
+          vm.runningOver && 'border-red-500/40 ring-1 ring-red-500/15',
+          vm.dimmed && 'opacity-70'
+        )}
+      >
+        <div className="flex items-start gap-3">
+          <CategoryDot vm={vm} className={cn('mt-2', vm.isHero ? 'h-3 w-3' : 'h-2.5 w-2.5')} />
+          {/* Time chip carries the category tint. */}
+          <span
+            className={cn(
+              'mt-0.5 flex-shrink-0 rounded-md px-2 py-1 text-xs font-semibold tabular-nums',
+              CATEGORY_CHIP[vm.category],
+              vm.cancelled && 'line-through opacity-70'
+            )}
+          >
+            {formatTime(m.start_time)}
+            <span className="mx-0.5 opacity-50">–</span>
+            {formatTime(m.end_time)}
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span
+                className={cn(
+                  'font-semibold text-foreground',
+                  vm.isHero ? 'text-base' : 'text-sm',
+                  vm.cancelled && 'line-through text-foreground/70'
+                )}
+              >
+                {m.subject}
+              </span>
+              {vm.online && (
+                <Video className="h-3.5 w-3.5 text-foreground/50 flex-shrink-0" aria-label="Online meeting" />
+              )}
+              <RecordingMic vm={vm} />
+              <RecordingChip vm={vm} />
+            </div>
+            {vm.secondary && (
+              <div className="mt-0.5 text-xs text-foreground/60 truncate">{vm.secondary}</div>
+            )}
+            {/* Hero surfaces a join affordance directly. */}
+            {vm.isHero && vm.online && (m.meeting_url || vm.inProgress) && (
+              <div className="mt-3">
+                <span className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground shadow-sm transition-colors group-hover:bg-primary/90">
+                  <Video className="h-3.5 w-3.5" />
+                  {vm.inProgress ? 'Join now' : 'Join meeting'}
+                </span>
+              </div>
+            )}
+          </div>
+          <div className="flex-shrink-0 self-center">
+            <RelativeBadge vm={vm} />
+          </div>
+        </div>
+      </button>
+    )
+    return withHover(m, node)
+  }
+
+  // ── Recent row (ended within the hour) — slim + faded; running-over stays hot ─
+  const RecentRow = (vm: MeetingVM, index: number) => {
+    const { m } = vm
+    const node = (
+      <button
+        onClick={() => navigate(`/meeting/${m.id}`)}
+        data-testid="recent-row"
+        style={{ animationDelay: `${Math.min(index, 6) * 40}ms` }}
+        className={cn(
+          'group animate-rise-in flex w-full items-center gap-3 rounded-lg border px-3 py-2 text-left transition-colors',
+          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring hover:bg-muted/50',
+          vm.runningOver
+            ? 'border-red-500/40 bg-red-500/[0.05] ring-1 ring-red-500/10'
+            : 'border-transparent',
+          !vm.runningOver && 'opacity-70 hover:opacity-100'
+        )}
+      >
+        <CategoryDot vm={vm} className="h-2 w-2" />
+        <span className="w-20 flex-shrink-0 text-xs font-medium tabular-nums text-foreground/55">
+          {formatTime(m.start_time)}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="flex items-center gap-1.5">
+            <span className="truncate text-sm text-foreground/80">{m.subject}</span>
+            <RecordingMic vm={vm} />
+            <RecordingChip vm={vm} />
+          </span>
+        </span>
+        <RelativeBadge vm={vm} subtle />
+      </button>
+    )
+    return withHover(m, node)
+  }
+
+  // ── Later row (>2h ahead) — compact single line; grows into a card in time ──
+  const LaterRow = (vm: MeetingVM, index: number) => {
+    const { m } = vm
+    const node = (
+      <button
+        onClick={() => navigate(`/meeting/${m.id}`)}
+        data-testid="later-row"
+        style={{ animationDelay: `${Math.min(index, 6) * 40}ms` }}
+        className={cn(
+          'group animate-rise-in flex w-full items-center gap-3 rounded-lg border border-transparent px-3 py-1.5 text-left transition-colors',
+          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring hover:bg-muted/50',
+          vm.cancelled && 'opacity-60'
+        )}
+      >
+        <CategoryDot vm={vm} className="h-2 w-2 opacity-70" />
+        <span className="w-20 flex-shrink-0 text-xs font-medium tabular-nums text-foreground/50">
+          {formatTime(m.start_time)}
+        </span>
+        <span
+          className={cn(
+            'min-w-0 flex-1 truncate text-sm text-foreground/65',
+            vm.cancelled && 'line-through'
+          )}
+        >
+          {m.subject}
+        </span>
+        {vm.online && <Video className="h-3.5 w-3.5 flex-shrink-0 text-foreground/40" aria-label="Online meeting" />}
+        <RecordingMic vm={vm} />
+        <RelativeBadge vm={vm} subtle />
+      </button>
+    )
+    return withHover(m, node)
+  }
+
+  // ── Earlier group capsule (collapsed block of >1h-old meetings) ────────────
+  const GroupCapsule = (group: { meetings: BriefingMeeting[]; label: string; startMs: number; endMs: number }) => {
+    const key = String(group.startMs)
+    const expanded = expandedGroups.has(key)
+    const recordedCount = group.meetings.filter((m) => recordedSet.has(m.id)).length
+    return (
+      <div key={key}>
+        <button
+          onClick={() => toggleGroup(key)}
+          aria-expanded={expanded}
+          data-testid="group-capsule"
+          className="group flex w-full items-center gap-2 rounded-lg border border-transparent bg-muted/40 px-3 py-2 text-left transition-colors hover:bg-muted/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <ChevronRight
+            className={cn('h-3.5 w-3.5 flex-shrink-0 text-foreground/45 transition-transform', expanded && 'rotate-90')}
+          />
+          <span className="text-xs font-semibold uppercase tracking-wide text-foreground/55">{group.label}</span>
+          <span className="text-xs text-foreground/50">
+            · {group.meetings.length} {group.meetings.length === 1 ? 'meeting' : 'meetings'}
+          </span>
+          {recordedCount > 0 && (
+            <span className="flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-500">
+              · {recordedCount} recorded
+              <CheckCircle2 className="h-3 w-3" />
+            </span>
+          )}
+          {/* Tiny dot row previewing each meeting's category. */}
+          <span className="ml-auto flex items-center gap-1">
+            {group.meetings.slice(0, 8).map((m) => {
+              const cat = categorizeMeeting({
+                subject: m.subject,
+                attendeeCount: participantsByMeeting[m.id]?.length || undefined
+              })
+              return <span key={m.id} className={cn('h-1.5 w-1.5 rounded-full', CATEGORY_DOT[cat])} aria-hidden="true" />
+            })}
+          </span>
+        </button>
+        {expanded && (
+          <div className="mt-1 space-y-0.5 pl-6">
+            {group.meetings.map((m) => {
+              const vm = buildVM(m)
+              return (
+                <button
+                  key={m.id}
+                  onClick={() => navigate(`/meeting/${m.id}`)}
+                  className="flex w-full items-center gap-3 rounded-md px-3 py-1.5 text-left text-sm opacity-80 transition-colors hover:bg-muted/50 hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <span className={cn('h-2 w-2 flex-shrink-0 rounded-full', CATEGORY_DOT[vm.category])} aria-hidden="true" />
+                  <span className="w-20 flex-shrink-0 text-xs tabular-nums text-foreground/55">
+                    {formatTime(m.start_time)}
+                  </span>
+                  <span className={cn('min-w-0 flex-1 truncate text-foreground/80', vm.cancelled && 'line-through')}>
+                    {m.subject}
+                  </span>
+                  <RecordingMic vm={vm} />
+                </button>
+              )
+            })}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // ── Ribbon empty/edge states ───────────────────────────────────────────────
+  const anyUpcomingOrLive = zoned.focus.length > 0 || zoned.later.length > 0
+  const dayOver = anyUpcomingOrLive === false && (zoned.recent.length > 0 || zoned.earlier.length > 0)
+  const preFirstMeeting =
+    zoned.focus.length === 0 &&
+    zoned.later.length > 0 &&
+    zoned.recent.length === 0 &&
+    zoned.earlier.length === 0
+  const firstUpcoming = zoned.later[0]
+  const firstUpcomingTiming = firstUpcoming ? timings.get(firstUpcoming.id) : undefined
+
+  const focusVMs = zoned.focus.map(buildVM)
+  // Hero (isFocus) first, then the rest by start.
+  const orderedFocus = [...focusVMs].sort((a, b) => {
+    if (a.isHero !== b.isHero) return a.isHero ? -1 : 1
+    return new Date(a.m.start_time).getTime() - new Date(b.m.start_time).getTime()
+  })
+
   return (
-    <div className="h-full overflow-y-auto p-6">
-      <div className="max-w-5xl mx-auto space-y-6">
+    <div ref={scrollRef} className="h-full overflow-y-auto bg-background">
+      <div className="mx-auto max-w-3xl space-y-6 px-6 py-6">
         {/* Header */}
-        <div className="flex items-end justify-between">
+        <div className="flex items-end justify-between animate-rise-in">
           <div>
-            <div className="flex items-center gap-1.5 text-primary text-sm font-semibold uppercase tracking-wide">
+            <div className="flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide text-primary">
               <Sun className="h-4 w-4" />
               {new Date().toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' })}
             </div>
-            <h1 className="text-4xl font-bold tracking-tight mt-1">{greeting()}, Sebastián</h1>
+            <h1 className="mt-1 text-4xl font-bold tracking-tight">{greeting()}, Sebastián</h1>
             {data && (
-              <p className="text-sm text-foreground/70 mt-2">
+              <p className="mt-2 text-sm text-foreground/70">
                 <span className="font-semibold text-foreground">{data.stats.transcribedCount}</span> meetings in your
                 knowledge base ·{' '}
                 <span className="font-semibold text-foreground">{data.stats.indexedChunks}</span> memory chunks indexed
@@ -350,7 +836,7 @@ export function Today() {
             )}
           </div>
           <Button variant="outline" size="sm" onClick={load} disabled={loading}>
-            <RefreshCw className={cn('h-4 w-4 mr-2', loading && 'animate-spin')} />
+            <RefreshCw className={cn('mr-2 h-4 w-4', loading && 'animate-spin')} />
             Refresh
           </Button>
         </div>
@@ -361,18 +847,37 @@ export function Today() {
           </Card>
         )}
 
-        {/* Live "Recording now" card — renders only while the device is capturing */}
-        <LiveRecordingCard
-          inProgressMeetings={attributionCandidates}
-          allMeetings={data?.todayMeetings ?? []}
-        />
-
-        {/* Today's meetings */}
-        <Card>
+        {/* The living time ribbon */}
+        <Card className="animate-rise-in overflow-hidden">
           <CardHeader className="pb-3">
-            <CardTitle className="flex items-center gap-2 text-base">
-              <CalendarDays className="h-4 w-4" />
-              Today&apos;s meetings
+            <CardTitle className="flex items-center justify-between text-base">
+              <span className="flex items-center gap-2">
+                <Clock className="h-4 w-4" />
+                Your day
+              </span>
+              {/* Category legend on hover. */}
+              <HoverCard openDelay={100}>
+                <HoverCardTrigger asChild>
+                  <button
+                    className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs font-normal text-foreground/45 transition-colors hover:text-foreground/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    aria-label="Meeting category legend"
+                  >
+                    <Info className="h-3.5 w-3.5" />
+                    Legend
+                  </button>
+                </HoverCardTrigger>
+                <HoverCardContent align="end" className="w-52">
+                  <div className="space-y-1.5">
+                    <div className="text-xs font-semibold text-foreground/70">Meeting types</div>
+                    {CATEGORY_ORDER.map((c) => (
+                      <div key={c} className="flex items-center gap-2 text-xs">
+                        <span className={cn('h-2.5 w-2.5 rounded-full', CATEGORY_DOT[c])} />
+                        <span className="text-foreground/70">{MEETING_CATEGORY_LABELS[c]}</span>
+                      </div>
+                    ))}
+                  </div>
+                </HoverCardContent>
+              </HoverCard>
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -383,187 +888,99 @@ export function Today() {
                   will appear here, correlate with recordings automatically, and enrich every transcript.
                 </div>
                 <Button size="sm" onClick={() => navigate('/settings')}>
-                  <SettingsIcon className="h-4 w-4 mr-2" />
+                  <SettingsIcon className="mr-2 h-4 w-4" />
                   Connect calendar
                 </Button>
               </div>
             ) : data.todayMeetings.length === 0 ? (
               <p className="text-sm text-muted-foreground">No meetings scheduled today.</p>
+            ) : timedMeetings.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No timed meetings today.</p>
             ) : (
-              <div className="space-y-3">
-                {timedMeetings.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">No timed meetings today.</p>
-                ) : (
-                  <div className="space-y-2">
-                {timedMeetings.map((m) => {
-                  const people = participantsByMeeting[m.id] ?? []
-                  const names = people.slice(0, TODAY_PARTICIPANT_LIMIT).map(participantFirstName)
-                  const extra = people.length - names.length
-                  const timing = timings.get(m.id)
-                  const cancelled = timing?.state === 'cancelled'
-                  const past = timing?.state === 'past'
-                  const inProgress = timing?.state === 'in_progress'
-                  const upcoming = timing?.state === 'upcoming'
-                  // Ran over: scheduled end passed within the last ~20 min. Still current
-                  // (not dimmed like a fully-past meeting).
-                  const ranOver = timing?.state === 'ran_over'
-                  const isFocus = timing?.isFocus ?? false
-                  const isNextUp = timing?.isNextUp ?? false
-                  // The soonest upcoming meeting while another is in progress — gets a
-                  // lighter secondary accent so "what's next" reads at a glance.
-                  const secondaryEmphasis = isNextUp && !isFocus
-                  const online = isOnlineMeeting(m)
-                  const hasRecording = recordingByMeeting[m.id]
-                  // Recorded on the device but not yet downloaded/linked — amber hint,
-                  // distinct from the green "linked recording" mic.
-                  const recordedOnDevice = !hasRecording && !!recordedOnDeviceByMeeting[m.id]
-                  // Live capture: the HiDock is recording and this is the meeting in
-                  // progress it's most likely capturing (the focused running meeting).
-                  const recording = inProgress && isFocus && deviceRecording
-                  // Running over: the meeting's slot ended but the device is still
-                  // recording a capture that began during it — treat as still ongoing.
-                  const runningOver = ranOver && deviceRecording && recordingStartedDuring(m)
-                  // Ran-over meetings are NOT dimmed — they're still the current context.
-                  const dimmed = past || cancelled
-                  // Secondary line: participants, else first meaningful description line, else location.
-                  const secondary =
-                    names.length > 0
-                      ? `${names.join(', ')}${extra > 0 ? ` +${extra}` : ''}`
-                      : firstMeaningfulLine(m.description) || m.location || ''
-                  const badgeLabel = inProgress
-                    ? formatMinutesLeft(timing?.minutes ?? 0)
-                    : ranOver
-                      ? runningOver
-                        ? 'Running over · recording continues'
-                        : formatMinutesSinceEnd(timing?.minutes ?? 0)
-                      : formatMinutesUntil(timing?.minutes ?? 0)
-                  const rowButton = (
-                        <button
-                          onClick={() => navigate(`/meeting/${m.id}`)}
-                          className={cn(
-                            'group w-full flex items-center gap-3 rounded-lg border p-3 text-left',
-                            'transition-all duration-150 ease-out hover:bg-muted/60 hover:shadow-sm hover:-translate-y-px',
-                            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                            (inProgress || isFocus) && 'border-primary/40 bg-primary/[0.04] ring-1 ring-primary/10',
-                            runningOver && 'border-red-500/40 bg-red-500/[0.04] ring-1 ring-red-500/10',
-                            secondaryEmphasis && 'border-primary/25 ring-1 ring-primary/[0.06]',
-                            dimmed && 'opacity-60'
-                          )}
-                        >
-                          <Clock
-                            className={cn(
-                              'h-4 w-4 flex-shrink-0',
-                              inProgress || isFocus ? 'text-primary' : 'text-foreground/60'
-                            )}
-                          />
-                          <span
-                            className={cn(
-                              'text-sm font-medium w-24 flex-shrink-0 text-foreground/80',
-                              cancelled && 'line-through'
-                            )}
-                          >
-                            {formatTime(m.start_time)}–{formatTime(m.end_time)}
-                          </span>
-                          <span className="min-w-0 flex-1">
-                            <span className="flex items-center gap-1.5">
-                              <span
-                                className={cn(
-                                  'text-sm font-medium text-foreground truncate',
-                                  cancelled && 'line-through text-foreground/70'
-                                )}
-                              >
-                                {m.subject}
-                              </span>
-                              {online && (
-                                <Video
-                                  className="h-3.5 w-3.5 text-foreground/50 flex-shrink-0"
-                                  aria-label="Online meeting"
-                                />
-                              )}
-                              {hasRecording ? (
-                                <Mic
-                                  className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-500 flex-shrink-0"
-                                  aria-label="Recording linked"
-                                />
-                              ) : recordedOnDevice ? (
-                                <span
-                                  className="flex items-center gap-1 flex-shrink-0 text-amber-600 dark:text-amber-500"
-                                  aria-label="Recorded — on device, not yet downloaded"
-                                >
-                                  <Mic className="h-3.5 w-3.5" />
-                                  <span className="text-[10px] font-medium whitespace-nowrap">recorded · on device</span>
-                                </span>
-                              ) : null}
-                              {(recording || runningOver) && (
-                                <span
-                                  className="flex items-center gap-1 flex-shrink-0 rounded-full bg-red-500/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-600 dark:text-red-500"
-                                  aria-label="Recording in progress"
-                                >
-                                  <span className="h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse motion-reduce:animate-none" />
-                                  Recording
-                                </span>
-                              )}
-                            </span>
-                            {secondary && (
-                              <span className="text-xs text-foreground/60 truncate block">{secondary}</span>
-                            )}
-                          </span>
-                          {(inProgress || upcoming || ranOver) && !cancelled && (
-                            <span
-                              className={cn(
-                                'flex items-center gap-1.5 text-xs whitespace-nowrap rounded-full px-2 py-0.5 flex-shrink-0',
-                                runningOver
-                                  ? 'bg-red-500/10 text-red-600 dark:text-red-500 font-medium'
-                                  : inProgress || isFocus || isNextUp
-                                    ? 'bg-primary/10 text-primary font-medium'
-                                    : ranOver
-                                      ? 'text-foreground/50'
-                                      : 'text-foreground/55'
-                              )}
-                            >
-                              {(inProgress || runningOver) && (
-                                <span
-                                  className={cn(
-                                    'h-1.5 w-1.5 rounded-full flex-shrink-0 animate-pulse motion-reduce:animate-none',
-                                    recording || runningOver ? 'bg-red-500' : 'bg-primary'
-                                  )}
-                                />
-                              )}
-                              {/* Re-key on label change so the text fades in on each tick update. */}
-                              <span
-                                key={badgeLabel}
-                                className="animate-in fade-in duration-300 motion-reduce:animate-none"
-                              >
-                                {badgeLabel}
-                              </span>
-                            </span>
-                          )}
-                        </button>
-                  )
-                  return meetingHoverWillHaveContent(m, ['title', 'time']) ? (
-                    <HoverCard key={m.id}>
-                      <HoverCardTrigger asChild>{rowButton}</HoverCardTrigger>
-                      <HoverCardContent align="start">
-                        <MeetingHoverCard id={m.id} name={m.subject} visibleFields={['title', 'time']} />
-                      </HoverCardContent>
-                    </HoverCard>
-                  ) : (
-                    <Fragment key={m.id}>{rowButton}</Fragment>
-                  )
-                })}
+              <div>
+                <div className="space-y-2">
+                  {/* Earlier — collapsed capsules */}
+                  {earlierGroups.map((g) => GroupCapsule(g))}
+
+                  {/* Recent — ended within the hour */}
+                  {zoned.recent.map((m, i) => RecentRow(buildVM(m), i))}
+
+                  {/* NOW line */}
+                  <div ref={nowLineRef} className="flex items-center gap-2 py-1.5" aria-label="Current time">
+                    <span className="relative flex h-3 w-3 flex-shrink-0">
+                      <span className="absolute inline-flex h-full w-full rounded-full bg-primary opacity-60 animate-ping motion-reduce:hidden" />
+                      <span className="relative inline-flex h-3 w-3 rounded-full bg-primary" />
+                    </span>
+                    <span className="text-xs font-bold uppercase tracking-wider text-primary tabular-nums">
+                      {formatClock(now)}
+                    </span>
+                    <span className="ml-1 text-[11px] font-medium uppercase tracking-wider text-primary/60">Now</span>
+                    <span className="h-px flex-1 bg-gradient-to-r from-primary/40 to-transparent" aria-hidden="true" />
                   </div>
-                )}
-                {/* All-day / holiday context — placed below the schedule and kept
-                    subtle: it's background context for the day, not a timed slot. */}
+
+                  {/* Live recording card slots directly under the now-line */}
+                  {deviceRecording && activeRecordingFilename && (
+                    <LiveRecordingCard
+                      inProgressMeetings={attributionCandidates}
+                      allMeetings={data.todayMeetings}
+                    />
+                  )}
+
+                  {/* pre-first-meeting hero countdown */}
+                  {preFirstMeeting && firstUpcoming && (
+                    <div>
+                      <div className="rounded-xl border border-primary/30 bg-primary/[0.04] p-5 shadow-sm">
+                        <div className="text-xs font-medium uppercase tracking-wide text-primary/70">First meeting</div>
+                        <div className="mt-1 text-2xl font-bold tracking-tight text-foreground">
+                          {formatMinutesUntil(firstUpcomingTiming?.minutes ?? 0).replace(/^in /, '')}
+                        </div>
+                        <div className="mt-1 text-sm text-foreground/70">
+                          {firstUpcoming.subject} · {formatTime(firstUpcoming.start_time)}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Focus — full cards (hero first) */}
+                  {orderedFocus.map((vm, i) => FocusCard(vm, i))}
+
+                  {/* day-over completion summary */}
+                  {dayOver && (
+                    <div>
+                      <div className="rounded-xl border border-border/70 bg-muted/40 p-5">
+                        <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                          <CheckCircle2 className="h-4 w-4 text-emerald-600 dark:text-emerald-500" />
+                          That&apos;s a wrap for today
+                        </div>
+                        <div className="mt-1 text-sm text-foreground/65">
+                          {timedMeetings.length} {timedMeetings.length === 1 ? 'meeting' : 'meetings'} ·{' '}
+                          {recordedSet.size} recorded
+                        </div>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="mt-3"
+                          onClick={() => navigate('/actionables')}
+                        >
+                          Review actionables
+                          <ArrowRight className="ml-1 h-4 w-4" />
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Later — compact rows */}
+                  {zoned.later.map((m, i) => LaterRow(buildVM(m), i))}
+                </div>
+
+                {/* All-day / holiday context — subtle, below the ribbon. */}
                 {allDayMeetings.length > 0 && (
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-1 pt-1 text-foreground/45">
-                    <CalendarDays className="h-3 w-3 flex-shrink-0" aria-hidden="true" />
+                  <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 px-1 pt-2 text-foreground/45">
+                    <CalendarBadge />
                     <span className="text-[10px] font-semibold uppercase tracking-wide">All day</span>
                     {allDayMeetings.map((m, i) => (
                       <Fragment key={m.id}>
-                        {i > 0 && (
-                          <span aria-hidden="true">·</span>
-                        )}
+                        {i > 0 && <span aria-hidden="true">·</span>}
                         <span className="text-[11px] font-medium text-foreground/60">{m.subject}</span>
                       </Fragment>
                     ))}
@@ -576,7 +993,7 @@ export function Today() {
 
         {/* Follow up on your last meeting */}
         {latest && (
-          <Card className="border-primary/30 bg-primary/[0.03]">
+          <Card className="animate-rise-in border-primary/30 bg-primary/[0.03]">
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-base">
                 <Sparkles className="h-4 w-4 text-amber-500" />
@@ -590,12 +1007,10 @@ export function Today() {
                   {formatDay(latest.dateRecorded)} · {latest.wordCount ?? '—'} words
                   {latest.actionItems.length > 0 && ` · ${latest.actionItems.length} action items detected`}
                 </div>
-                {latest.summary && (
-                  <p className="text-sm text-muted-foreground mt-2 line-clamp-2">{latest.summary}</p>
-                )}
+                {latest.summary && <p className="mt-2 line-clamp-2 text-sm text-muted-foreground">{latest.summary}</p>}
               </div>
               {latest.actionItems.length > 0 && (
-                <ul className="text-sm space-y-1">
+                <ul className="space-y-1 text-sm">
                   {latest.actionItems.slice(0, 4).map((a, i) => (
                     <li key={i} className="flex gap-2">
                       <span className="text-muted-foreground">→</span>
@@ -606,11 +1021,11 @@ export function Today() {
               )}
               <div className="flex flex-wrap gap-2 pt-1">
                 <Button size="sm" onClick={() => generateFor(latest.recordingId, 'claude_code_prompt')}>
-                  <Terminal className="h-4 w-4 mr-2" />
+                  <Terminal className="mr-2 h-4 w-4" />
                   Claude Code handoff
                 </Button>
                 <Button size="sm" variant="outline" onClick={() => generateFor(latest.recordingId, 'meeting_minutes')}>
-                  <FileText className="h-4 w-4 mr-2" />
+                  <FileText className="mr-2 h-4 w-4" />
                   Meeting minutes
                 </Button>
                 <Button
@@ -618,7 +1033,7 @@ export function Today() {
                   variant="outline"
                   onClick={() => navigate('/assistant', { state: { contextId: latest.recordingId } })}
                 >
-                  <Bot className="h-4 w-4 mr-2" />
+                  <Bot className="mr-2 h-4 w-4" />
                   Ask the assistant
                 </Button>
                 <Button
@@ -627,7 +1042,7 @@ export function Today() {
                   onClick={() => navigate('/library', { state: { selectedId: latest.recordingId } })}
                 >
                   Open in Library
-                  <ArrowRight className="h-4 w-4 ml-1" />
+                  <ArrowRight className="ml-1 h-4 w-4" />
                 </Button>
               </div>
             </CardContent>
@@ -637,9 +1052,9 @@ export function Today() {
         {/* Identity suggestions (renders only when the queue is non-empty) */}
         <TodayIdentitySuggestions />
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           {/* Pending actions */}
-          <Card>
+          <Card className="animate-rise-in">
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center justify-between text-base">
                 <span className="flex items-center gap-2">
@@ -648,7 +1063,7 @@ export function Today() {
                 </span>
                 <Button variant="ghost" size="sm" onClick={() => navigate('/actionables')}>
                   View all
-                  <ArrowRight className="h-4 w-4 ml-1" />
+                  <ArrowRight className="ml-1 h-4 w-4" />
                 </Button>
               </CardTitle>
             </CardHeader>
@@ -661,8 +1076,8 @@ export function Today() {
                 <div className="space-y-2">
                   {data.pendingActionables.slice(0, 5).map((a) => (
                     <div key={a.id} className="flex items-center gap-3 rounded-lg border p-3">
-                      <div className="flex-1 min-w-0">
-                        <div className="text-sm font-medium truncate">{a.title}</div>
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm font-medium">{a.title}</div>
                         <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
                           {a.type.replace(/_/g, ' ')}
                         </div>
@@ -673,7 +1088,7 @@ export function Today() {
                         className="flex-shrink-0"
                         onClick={() => generateFor(a.sourceKnowledgeId, a.suggestedTemplate || 'meeting_minutes')}
                       >
-                        <Sparkles className="h-4 w-4 mr-1" />
+                        <Sparkles className="mr-1 h-4 w-4" />
                         Generate
                       </Button>
                     </div>
@@ -684,7 +1099,7 @@ export function Today() {
           </Card>
 
           {/* Recent knowledge */}
-          <Card>
+          <Card className="animate-rise-in">
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center justify-between text-base">
                 <span className="flex items-center gap-2">
@@ -693,7 +1108,7 @@ export function Today() {
                 </span>
                 <Button variant="ghost" size="sm" onClick={() => navigate('/library')}>
                   Library
-                  <ArrowRight className="h-4 w-4 ml-1" />
+                  <ArrowRight className="ml-1 h-4 w-4" />
                 </Button>
               </CardTitle>
             </CardHeader>
@@ -707,13 +1122,13 @@ export function Today() {
                   {data.recentKnowledge.map((k) => (
                     <div
                       key={k.recordingId}
-                      className="w-full rounded-lg border p-3 hover:bg-muted/50 transition-colors flex items-center justify-between gap-3"
+                      className="flex w-full items-center justify-between gap-3 rounded-lg border p-3 transition-colors hover:bg-muted/50"
                     >
                       <button
                         onClick={() => navigate('/library', { state: { selectedId: k.recordingId } })}
-                        className="min-w-0 flex-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
+                        className="min-w-0 flex-1 rounded text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                       >
-                        <div className="text-sm font-medium truncate">{k.title}</div>
+                        <div className="truncate text-sm font-medium">{k.title}</div>
                       </button>
                       {k.dateRecorded && (
                         <EntityMention
@@ -732,6 +1147,16 @@ export function Today() {
         </div>
       </div>
     </div>
+  )
+}
+
+/** Small calendar glyph reused for the all-day banner (kept local + tiny). */
+function CalendarBadge() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <rect x="3" y="4" width="18" height="18" rx="2" />
+      <path d="M16 2v4M8 2v4M3 10h18" />
+    </svg>
   )
 }
 

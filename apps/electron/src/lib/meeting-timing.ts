@@ -214,6 +214,136 @@ export function formatMinutesLeft(minutes: number): string {
   return m === 0 ? `Now · ${h} h left` : `Now · ${h} h ${m} min left`
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Time-ribbon zones
+//
+// The Today ribbon compresses time with distance from NOW. Every meeting stays
+// in the DOM; its zone decides how richly it renders:
+//   earlier — ended more than an hour ago → collapsed into a grouped capsule
+//   recent  — ended within the last hour → slim faded row
+//   focus   — in progress, OR upcoming within FOCUS_AHEAD → full card
+//   later   — upcoming beyond FOCUS_AHEAD → compact single-line row
+// A meeting migrates zones over time (a `later` row grows into a `focus` card as
+// NOW approaches it) — the caller recomputes on each clock tick.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type MeetingZone = 'earlier' | 'recent' | 'focus' | 'later'
+
+/** Ended within this window → `recent` (else `earlier`). */
+export const RECENT_WINDOW_MS = 60 * 60 * 1000
+/** Upcoming within this window → `focus` (else `later`). */
+export const FOCUS_AHEAD_MS = 2 * 60 * 60 * 1000
+/** Earlier meetings closer together than this gap collapse into one capsule. */
+export const GROUP_GAP_MS = 90 * 60 * 1000
+
+/** Zone for a single timed meeting. All-day / cancelled are handled upstream. */
+export function meetingZone(m: { start_time: string; end_time: string }, now: Date): MeetingZone {
+  const start = instant(m.start_time)
+  const end = instant(m.end_time)
+  const nowMs = now.getTime()
+
+  // Unparseable timestamps → keep it visible in the focus band.
+  if (!Number.isFinite(start) && !Number.isFinite(end)) return 'focus'
+
+  if (Number.isFinite(end) && end <= nowMs) {
+    return nowMs - end <= RECENT_WINDOW_MS ? 'recent' : 'earlier'
+  }
+  // In progress (started, not yet ended) → focus.
+  if (Number.isFinite(start) && start <= nowMs) return 'focus'
+  // Upcoming.
+  if (Number.isFinite(start)) {
+    return start - nowMs <= FOCUS_AHEAD_MS ? 'focus' : 'later'
+  }
+  return 'focus'
+}
+
+/** Time-of-day label for a grouped block of earlier meetings. */
+export function dayPartLabel(d: Date): string {
+  const h = d.getHours()
+  if (h < 12) return 'Morning'
+  if (h < 18) return 'Afternoon'
+  return 'Evening'
+}
+
+export interface EarlierGroup<T> {
+  meetings: T[]
+  /** "Morning" / "Afternoon" / "Evening" — from the block's first meeting. */
+  label: string
+  startMs: number
+  endMs: number
+}
+
+/**
+ * Collapse `earlier` meetings into contiguous blocks. A gap larger than
+ * {@link GROUP_GAP_MS} between one meeting's end and the next's start starts a
+ * new block, so the morning's cluster and a lone late-afternoon call don't merge.
+ */
+export function groupEarlierMeetings<T extends { start_time: string; end_time: string }>(
+  meetings: T[]
+): EarlierGroup<T>[] {
+  const sorted = [...meetings].sort((a, b) => instant(a.start_time) - instant(b.start_time))
+  const groups: EarlierGroup<T>[] = []
+  for (const m of sorted) {
+    const s = instant(m.start_time)
+    const e = instant(m.end_time)
+    const safeStart = Number.isFinite(s) ? s : 0
+    const safeEnd = Number.isFinite(e) ? e : safeStart
+    const last = groups[groups.length - 1]
+    if (last && Number.isFinite(s) && s - last.endMs <= GROUP_GAP_MS) {
+      last.meetings.push(m)
+      last.endMs = Math.max(last.endMs, safeEnd)
+    } else {
+      groups.push({ meetings: [m], label: '', startMs: safeStart, endMs: safeEnd })
+    }
+  }
+  for (const g of groups) g.label = dayPartLabel(new Date(g.startMs))
+  return groups
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Semantic category — a color the eye can read as a data dimension (dot + chip),
+// derived heuristically from the subject and attendee count. NO thick borders.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type MeetingCategory = 'recurring' | 'one_on_one' | 'external' | 'personal' | 'general'
+
+/** Human labels for the ribbon legend. */
+export const MEETING_CATEGORY_LABELS: Record<MeetingCategory, string> = {
+  recurring: 'Recurring / team',
+  one_on_one: '1:1',
+  external: 'Client / external',
+  personal: 'Personal',
+  general: 'Other'
+}
+
+/**
+ * Best-effort category from a meeting's subject and attendee count. Order is
+ * deliberate: a personal block wins over everything; an explicit 1:1 (or a
+ * two-person meeting) beats the client/recurring heuristics; a "sync with X"
+ * reads as a 1:1 while a bare "sync" reads as recurring.
+ */
+export function categorizeMeeting(m: { subject?: string | null; attendeeCount?: number }): MeetingCategory {
+  const s = (m.subject || '').toLowerCase()
+  const n = m.attendeeCount
+
+  if (/(almuerzo|lunch|break|descanso|gym|gimnasio|personal|dentista|doctor|m[eé]dico|caf[eé]|coffee|birthday|cumplea)/.test(s)) {
+    return 'personal'
+  }
+  if (/(1:1|1-1|one[- ]?on[- ]?one|sync with|uno a uno)/.test(s) || n === 2) {
+    return 'one_on_one'
+  }
+  if (
+    /(belcorp|ita[uú]|bol[ií]var|\baval\b|seguros|cliente|client|external|externo|kickoff|kick-off)/.test(s) ||
+    (typeof n === 'number' && n >= 6)
+  ) {
+    return 'external'
+  }
+  if (/(daily|stand[- ]?up|standup|weekly|semanal|diari[oa]|sprint|retro|planning|planeaci|refinement|grooming|comit[eé]|\bsync\b|sincron)/.test(s)) {
+    return 'recurring'
+  }
+  return 'general'
+}
+
 /** Fraction of a meeting a recording must cover (by time overlap) to count as its capture. */
 export const RECORDING_OVERLAP_THRESHOLD = 0.25
 

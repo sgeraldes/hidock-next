@@ -8,6 +8,7 @@ import { ToastProvider } from '@/components/ui/toaster'
 import { getHiDockDeviceService } from '@/services/hidock-device'
 import { NavigationLogger, initInteractionLogger, initErrorLogger, cleanupQAMonitor } from '@/services/qa-monitor'
 import { lazyWithRetry } from '@/lib/lazyWithRetry'
+import { useTheme } from '@/hooks/useTheme'
 
 // Lazy load all page components for code splitting
 // Each page becomes a separate chunk, reducing initial bundle size
@@ -26,6 +27,9 @@ const Settings = lazyWithRetry(() => import('@/pages/Settings'))
 const KnowledgeGraph = lazyWithRetry(() => import('@/pages/KnowledgeGraph'))
 
 function App(): React.ReactElement {
+  // Keep the applied theme reconciled with the persisted preference + OS.
+  useTheme()
+
   // Initialize QA monitoring and auto-connect
   useEffect(() => {
     // Initialize QA Monitoring

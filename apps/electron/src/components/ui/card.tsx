@@ -5,7 +5,13 @@ const Card = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElemen
   ({ className, ...props }, ref) => (
     <div
       ref={ref}
-      className={cn('rounded-xl border border-border/70 bg-card text-card-foreground shadow-sm', className)}
+      className={cn(
+        // Elevated tier: real shadow in both themes + a subtle inner hairline in
+        // dark (white/6) so a slate-900 card separates from the slate-950 canvas.
+        'rounded-xl border border-border/70 bg-card text-card-foreground shadow-sm',
+        'dark:border-white/[0.06] dark:shadow-md',
+        className
+      )}
       {...props}
     />
   )

@@ -4,6 +4,7 @@ import { PanelLeft, Search, CheckCircle2, Loader2, Usb, ChevronDown, LogOut, Arr
 import { cn } from '@/lib/utils'
 import { useDeviceConnection } from '@/hooks/useDeviceConnection'
 import { useAppStore } from '@/store'
+import { ThemeToggle } from '@/components/ThemeToggle'
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -96,6 +97,9 @@ export function TitleBar({ sidebarOpen, onToggleSidebar }: TitleBarProps) {
           />
         </div>
       </form>
+
+      {/* Theme toggle — sun/moon morph, sits just before the connection pill. */}
+      <ThemeToggle />
 
       {/* Device connection control — same status + connect/disconnect action as
           the Device Sync page (via useDeviceConnection). */}

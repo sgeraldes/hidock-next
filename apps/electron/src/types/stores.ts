@@ -182,7 +182,14 @@ export interface UIStore {
   // QA monitoring toggle
   qaLogsEnabled: boolean
   setQaLogsEnabled: (enabled: boolean) => void
+
+  // Theme preference. 'system' follows the OS (prefers-color-scheme); 'light'/
+  // 'dark' pin it. Persisted to localStorage (and mirrored to config).
+  theme: ThemePreference
+  setTheme: (theme: ThemePreference) => void
 }
+
+export type ThemePreference = 'light' | 'dark' | 'system'
 
 // =============================================================================
 // Recordings Store (existing, but typed)

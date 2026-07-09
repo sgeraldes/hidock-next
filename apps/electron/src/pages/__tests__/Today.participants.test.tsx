@@ -14,10 +14,15 @@ vi.mock('@/components/identity/TodayIdentitySuggestions', () => ({
   TodayIdentitySuggestions: () => null
 }))
 
+// Built relative to real time so zone classification is deterministic without
+// fake timers: m1 is in progress (focus zone → rich card, participant line
+// visible); m2 is >2h out (later zone → compact row, subject still visible).
+const now = Date.now()
+const iso = (offsetMin: number) => new Date(now + offsetMin * 60000).toISOString()
 const briefing = {
   todayMeetings: [
-    { id: 'm1', subject: 'Sprint Planning', start_time: '2026-07-08T10:00:00Z', end_time: '2026-07-08T11:00:00Z' },
-    { id: 'm2', subject: 'Empty Standup', start_time: '2026-07-08T12:00:00Z', end_time: '2026-07-08T12:15:00Z' }
+    { id: 'm1', subject: 'Sprint Planning', start_time: iso(-10), end_time: iso(50) },
+    { id: 'm2', subject: 'Empty Standup', start_time: iso(180), end_time: iso(195) }
   ],
   recentKnowledge: [],
   pendingActionables: [],
