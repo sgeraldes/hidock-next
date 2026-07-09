@@ -7,16 +7,23 @@ docs. Companions: ROADMAP.md (audit ledger + coverage map), INTELLIGENCE.md
 (process retrospective), OVERNIGHT_PLAN.md (session issue log), GOAL.md
 (mission + method).*
 
-## 1. IN FLIGHT RIGHT NOW (3 Opus agents, uncommitted work in tree)
+## 1. IN FLIGHT RIGHT NOW
+
+All three audit-fix slices LANDED (2026-07-08 evening, all pushed):
+- 222f6b95 group merge cards (canonical-name picker, swap, topic overlap,
+  role hygiene, keeper-death cascade) — verified live: Nauman/Numan folded
+  into Nouman via "All the same person…", journaled, undo offered.
+- c13c97c6 Today ribbon regressions (end times all variants, hover cards on
+  capsule rows, clickable legend popover, "Meeting" fallback label) —
+  verified live via CDP walk.
+- b95ecbe2 Actionables decidability (inline ActionableDetail, per-template
+  "Generate X" labels, WILL GENERATE panel) — verified live.
 
 | Agent | Scope | Files |
 |---|---|---|
-| fix-group-merge-card | 7 fixes to identity suggestion group cards: consolidated one-keeper-panel layout, per-candidate direction swap, **group action "all the same person — pick correct name (or type it)"**, stuck "checking transcripts…" regression, semantic (fuzzy) topic overlap for the different-circles warning, role hygiene strip "(mencionado)", keeper-death suggestion cascade | src/components/identity/*, identity-handlers, entity-resolver (topic helper) |
-| fix-ribbon-regressions | Today ribbon: restore END TIMES on all row variants, MeetingHoverCard on expanded-capsule rows, category-color legend as clickable popover + dot tooltips | Today.tsx, meeting-timing.ts |
-| fix-actionables-decide | Actionables B7 round: card click → full detail (title/desc/source-meeting link/recipient chips), explicit "Will generate: Meeting minutes" template naming, per-template button labels | Actionables.tsx, MeetingActionables.tsx |
+| fix-actionable-source | Found in re-walk: actionables store `knowledgeCapture?.id \|\| recordingId` in source_knowledge_id (transcription.ts:1499); ActionableDetail only resolves the capture path → SOURCE renders dead "Source recording" text. Fix: dual resolution (capture → recording fallback, like output-generator.ts:133) + honest "Source unavailable" + tests | ActionableDetail.tsx, maybe recordings IPC |
 
-On their reports: gate (typecheck+lint+full test:run), commit each slice, then
-run /verify-journeys + /dogfood re-walk, rescore ROADMAP §D.
+On its report: gate (typecheck + full test:run), commit, push.
 
 ## 2. DEVICE STATE
 
@@ -52,8 +59,12 @@ run /verify-journeys + /dogfood re-walk, rescore ROADMAP §D.
    on People edit) or **C2 connector host + Slack** — per decision #3.
 3. **/verify-journeys + /dogfood full pass** after in-flight agents land;
    rescore ROADMAP §D; fix what the walk finds.
-4. **R4c**: re-key knowledge-graph person nodes by contact id (ingest-time);
-   visual graph view (KnowledgeGraph page is still a text console).
+4. **Context Graph redesign** (user directive 2026-07-08, ROADMAP §C.9):
+   replace the Knowledge Graph surface entirely — rename to *Context Graph*,
+   real interactive visualization (entity nodes + relationship edges,
+   neighborhood focus, click-through), usable by BOTH human and AI (assistant/
+   RAG walks graph edges for context). Current text console "does not help".
+   R4c (re-key person nodes by contact id) is the data prerequisite.
 5. **Person-type auto-classification** (everyone 'unknown' unless hand-set).
 6. **RECITATION chunk retry** (ISSUE-15, 1 occurrence): temp-adjusted retry +
    visible "[content blocked]" placeholder.

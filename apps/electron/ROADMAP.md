@@ -53,7 +53,25 @@ INTERACTIVITY_PLAN.md, OVERNIGHT_PLAN.md.*
 6. **Fine-grained coverage map** (per component function w/ metadata) — see D.
 7. C2 Slack connector (living channel captures).
 8. json-mime attempt-order swap; person-type classification; alias list UI.
-9. R4c graph re-key by contact id; visual graph view.
+9. **Context Graph — full surface redesign (replaces "Knowledge Graph")** —
+   user directive 2026-07-08: the current Knowledge Graph surface "does not
+   help, has no visualization, lacks usage both for human and AI. Context
+   Graph is the way to go." Scope:
+   - **Rename + reframe**: nav item, page, and mental model become *Context
+     Graph* — the entity/relationship substrate that gives both the human AND
+     the assistant/RAG pipeline usable context, not a text query console.
+   - **Real visualization**: interactive graph view (people, projects,
+     meetings, topics, artifacts as nodes; mentions/attendance/assignment as
+     edges), zoom/filter/focus on an entity's neighborhood, click-through to
+     the entity page. Today's text-only console retires.
+   - **Human usage**: answer "who/what is connected to X and through which
+     conversations" visually; neighborhood view doubles as merge/identity
+     context (feeds the suggestion cards).
+   - **AI usage**: the graph becomes retrievable context — assistant answers
+     and RAG cite/walk graph edges (person→meetings→decisions), not just
+     vector chunks.
+   - Subsumes R4c (re-key person nodes by contact id at ingest) as the data
+     prerequisite; supersedes the old "visual graph view" line item.
 10. Backlog decision: Process All (1,795) budget + old-transcript upgrades.
 
 ## D. Fine-grained coverage map (the "mapping" — per component, per function)
@@ -120,7 +138,7 @@ the living artifact; INTELLIGENCE.md §5 keeps the per-surface rollup.
 |---|---|---|---|---|---|
 | Chat + citations | 80 | 30 | 65 | 70 | chunk cards inert; no conv rename |
 | Explore results | 95 | 0 | 75 | 90 | |
-| Graph queries | 70 | 0 | 55 | 60 | name-keyed; no visual graph |
+| Graph queries | 70 | 0 | 55 | 60 | name-keyed; no visual graph — surface slated for full **Context Graph** redesign (§C.9) |
 
 ## E. Loop correction (why the participants miss happened)
 Verification was diff-driven (does what I built work?) not journey-driven
