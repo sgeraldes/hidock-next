@@ -13,10 +13,39 @@
  *   2. Structural Repair — app callback force-adds missing columns (idempotent)
  *   3. Migrations        — version-gated transforms via the migrations map
  *   4. Full Schema       — re-run all statements to apply indexes/constraints
+ *
+ * ── Persistence: adaptive flush policy (INTERIM relief) ──────────────────────
+ * sql.js has no incremental writer: persisting means `db.export()` (a full
+ * in-memory copy of the entire database) followed by writing that whole buffer
+ * to disk. For a small database this is cheap; for a large one (hundreds of MB)
+ * a single export blocks the Electron main thread for *seconds*. Under a
+ * sustained write stream (e.g. continuous backlog transcription) the naive
+ * debounce would fire an export every few seconds and starve the app.
+ *
+ * To bound that cost, the debounced async writer enforces a MINIMUM INTERVAL
+ * between full exports that scales with the database size (see
+ * {@link flushIntervalForBytes}):
+ *   - < 50MB   → no extra throttle (the debounce/max-wait window governs)
+ *   - 50–200MB → ≥ 60s   between full exports
+ *   - > 200MB  → ≥ 300s  between full exports
+ * A {@link flushNow} escape hatch bypasses the throttle for durability-critical
+ * moments (app quit, post-migration, every Nth expensive artifact).
+ *
+ * ── Crash-safety trade-off ──────────────────────────────────────────────────
+ * Every physical write goes to `${dbPath}.tmp` then atomically renames over the
+ * real file, so a crash mid-write can never leave a torn/corrupt database. The
+ * cost of the size-scaled interval is a wider crash-loss window: with a 300s
+ * interval a crash can lose up to ~5 minutes of writes that only reached memory.
+ * Callers with expensive/irreplaceable writes must call {@link flushNow} at
+ * their own durability points (this engine does so on close and after init).
+ * The rotating on-boot backup ({@link DatabaseEngineConfig.backupOnBoot}) is the
+ * coarser safety net against a corrupting migration. The real fix — migrating to
+ * a journaled store (better-sqlite3 + WAL) — is deliberately out of scope here;
+ * the per-flush duration warning below is the signal that it is due.
  */
 
 import type { Database as SqlJsDatabase } from 'sql.js'
-import { existsSync, readFileSync, writeFileSync, renameSync, copyFileSync, readdirSync, rmSync } from 'fs'
+import { existsSync, readFileSync, writeFileSync, renameSync, copyFileSync, readdirSync, rmSync, statSync } from 'fs'
 import { writeFile, rename, unlink } from 'fs/promises'
 import { dirname, basename, join } from 'path'
 
@@ -39,6 +68,32 @@ export class MassDeleteError extends Error {
 const MASS_DELETE_MIN_ROWS = 20
 /** Refuse a single statement that would remove more than this fraction of rows. */
 const MASS_DELETE_FRACTION = 0.5
+
+// --- Adaptive flush policy (interval scales with DB size) ---
+// Below the small threshold the ordinary debounce/max-wait governs — full
+// backward-compatible behavior. Between small and large, and above large, a
+// minimum gap between full exports is enforced to keep the multi-second
+// export() off the hot path when the database is big. Sizes in MEBIBYTES.
+const ADAPTIVE_SMALL_MB = 50 //   < 50MB   → no extra throttle
+const ADAPTIVE_LARGE_MB = 200 //  ≥ 200MB  → large interval
+const ADAPTIVE_MEDIUM_INTERVAL_MS = 60_000 //  50–200MB → ≥ 60s between exports
+const ADAPTIVE_LARGE_INTERVAL_MS = 300_000 // > 200MB   → ≥ 300s between exports
+/** A flush taking longer than this (ms) is logged as a warning — the signal
+ *  that the better-sqlite3/WAL migration is overdue. */
+const SLOW_FLUSH_WARN_MS = 3_000
+const BYTES_PER_MB = 1024 * 1024
+
+/** Resolved adaptive-flush thresholds (all overridable via config). */
+export interface AdaptiveFlushConfig {
+  /** Below this size (MiB) no extra throttle is applied. Default 50. */
+  smallMb?: number
+  /** At/above this size (MiB) the large interval applies. Default 200. */
+  largeMb?: number
+  /** Min ms between exports in the small–large band. Default 60000. */
+  mediumIntervalMs?: number
+  /** Min ms between exports at/above largeMb. Default 300000. */
+  largeIntervalMs?: number
+}
 
 /** Parse a leading DELETE/DROP TABLE statement's target table (null otherwise). */
 export function parseDestructiveStatement(sql: string): { kind: 'delete' | 'drop'; table: string } | null {
@@ -108,6 +163,13 @@ export interface DatabaseEngineConfig {
    * for a corrupting migration. Omit to disable.
    */
   backupOnBoot?: { keep: number }
+  /**
+   * Overrides for the adaptive flush policy — the minimum interval between full
+   * exports as a function of DB size. Omit to use the documented defaults
+   * (50MB / 200MB thresholds → 60s / 300s intervals). Chiefly a test seam and
+   * an escape valve for unusual deployments.
+   */
+  adaptiveFlush?: AdaptiveFlushConfig
 }
 
 /** Column names for a table (empty if the table does not exist). */
@@ -165,6 +227,19 @@ export class DatabaseEngine {
   private saveSeq = 0
   private committedSeq = 0
 
+  // --- Adaptive flush policy state ---
+  // Wall-clock time of the last physical write (any path). The debounced writer
+  // uses this to enforce a size-scaled minimum gap between full exports.
+  private lastFlushAt = 0
+  // Byte length of the most recently exported buffer — a free proxy for DB size
+  // (avoids a stat() syscall on the hot path). Falls back to the on-disk size
+  // before the first write.
+  private lastFlushBytes = 0
+  private readonly adaptiveSmallBytes: number
+  private readonly adaptiveLargeBytes: number
+  private readonly adaptiveMediumIntervalMs: number
+  private readonly adaptiveLargeIntervalMs: number
+
   // --- Mass-delete tripwire state ---
   private readonly protectedTables: Set<string>
   // When true, the tripwire is bypassed (an intentional bulk operation).
@@ -174,6 +249,52 @@ export class DatabaseEngine {
     this.saveDebounceMs = config.saveDebounceMs ?? 1000
     this.saveMaxWaitMs = config.saveMaxWaitMs ?? 5000
     this.protectedTables = new Set((config.protectedTables ?? []).map((t) => t.toLowerCase()))
+    const af = config.adaptiveFlush ?? {}
+    this.adaptiveSmallBytes = (af.smallMb ?? ADAPTIVE_SMALL_MB) * BYTES_PER_MB
+    this.adaptiveLargeBytes = (af.largeMb ?? ADAPTIVE_LARGE_MB) * BYTES_PER_MB
+    this.adaptiveMediumIntervalMs = af.mediumIntervalMs ?? ADAPTIVE_MEDIUM_INTERVAL_MS
+    this.adaptiveLargeIntervalMs = af.largeIntervalMs ?? ADAPTIVE_LARGE_INTERVAL_MS
+  }
+
+  /**
+   * The minimum interval (ms) that must elapse between full `db.export()` flushes
+   * for a database of `sizeBytes`. Returns 0 below the small threshold (no extra
+   * throttle). Pure function of the configured thresholds — exposed for testing
+   * the policy without materializing a large database.
+   */
+  flushIntervalForBytes(sizeBytes: number): number {
+    if (sizeBytes < this.adaptiveSmallBytes) return 0
+    if (sizeBytes < this.adaptiveLargeBytes) return this.adaptiveMediumIntervalMs
+    return this.adaptiveLargeIntervalMs
+  }
+
+  /** Best-effort current DB size in bytes: the last exported buffer length, or
+   *  the on-disk file size before the first write (0 if neither is available). */
+  private currentDbSizeBytes(): number {
+    if (this.lastFlushBytes > 0) return this.lastFlushBytes
+    try {
+      return existsSync(this.dbPath) ? statSync(this.dbPath).size : 0
+    } catch {
+      return 0
+    }
+  }
+
+  /** Format a byte count as a compact MB string for flush instrumentation. */
+  private static formatBytes(n: number): string {
+    return `${(n / BYTES_PER_MB).toFixed(1)}MB`
+  }
+
+  /** Emit the per-flush cost log; warn (with migration hint) when it is slow. */
+  private logFlush(bytes: number, durationMs: number): void {
+    const line = `[Database] Flushed ${DatabaseEngine.formatBytes(bytes)} in ${(durationMs / 1000).toFixed(1)}s`
+    if (durationMs > SLOW_FLUSH_WARN_MS) {
+      console.warn(
+        `${line} — slow flush (>${(SLOW_FLUSH_WARN_MS / 1000).toFixed(0)}s); ` +
+          `consider migrating to better-sqlite3 + WAL for incremental writes.`
+      )
+    } else {
+      console.log(line)
+    }
   }
 
   /**
@@ -382,10 +503,10 @@ export class DatabaseEngine {
   }
 
   /**
-   * Persist the database to disk NOW, synchronously. Cancels any pending
-   * debounced write and clears the dirty flag. Use at durability-critical
-   * points (initialize, close, after saving an expensive artifact) — the
-   * high-frequency run() path uses scheduleSave() instead.
+   * Persist the database to disk NOW, synchronously — bypassing the adaptive
+   * flush throttle. Cancels any pending debounced write and clears the dirty
+   * flag. Use at durability-critical points (initialize, close, after saving an
+   * expensive artifact) — the high-frequency run() path uses scheduleSave().
    *
    * Writes to a temp file then renames, so a crash mid-write cannot leave a
    * torn/corrupt database file in place.
@@ -399,12 +520,26 @@ export class DatabaseEngine {
     this.dirty = false
     this.firstDirtyAt = 0
     const seq = ++this.saveSeq
+    const t0 = Date.now()
     const data = this.db.export()
     const tmp = `${this.dbPath}.tmp`
     writeFileSync(tmp, Buffer.from(data))
     renameSync(tmp, this.dbPath)
     this.committedSeq = Math.max(this.committedSeq, seq)
     this.physicalSaveCount++
+    this.lastFlushBytes = data.length
+    this.lastFlushAt = Date.now()
+    this.logFlush(data.length, this.lastFlushAt - t0)
+  }
+
+  /**
+   * Durability escape hatch: force an immediate synchronous flush regardless of
+   * the adaptive throttle. Alias for {@link saveDatabase} with an intent-revealing
+   * name — call it at the app's own durability points (app quit, post-migration,
+   * every Nth expensive artifact) where losing the write is unacceptable.
+   */
+  flushNow(): void {
+    this.saveDatabase()
   }
 
   /**
@@ -438,9 +573,29 @@ export class DatabaseEngine {
     if (this.saving) return
     if (this.disposed || !this.dirty || !this.db || !this.dbPath) return
 
+    // Adaptive throttle: for a large database, enforce a minimum gap between
+    // full exports so the multi-second export()+write does not run every
+    // debounce window. If we flushed too recently, defer this write until the
+    // interval elapses (staying dirty) instead of exporting now. This overrides
+    // the max-wait bound by design — the whole point is to flush LESS often as
+    // the DB grows (see the crash-safety trade-off in the file header).
+    const minInterval = this.flushIntervalForBytes(this.currentDbSizeBytes())
+    if (minInterval > 0) {
+      const sinceLast = Date.now() - this.lastFlushAt
+      if (sinceLast < minInterval) {
+        const wait = minInterval - sinceLast
+        this.saveTimer = setTimeout(() => {
+          void this.persistDirty()
+        }, wait)
+        if (typeof this.saveTimer.unref === 'function') this.saveTimer.unref()
+        return
+      }
+    }
+
     // Snapshot the current DB state synchronously, then clear dirty. Writes that
     // arrive during the async write re-set dirty and get their own flush.
     const seq = ++this.saveSeq
+    const t0 = Date.now()
     const data = this.db.export()
     this.dirty = false
     this.firstDirtyAt = 0
@@ -460,6 +615,9 @@ export class DatabaseEngine {
         await rename(tmp, dbPath)
         this.committedSeq = Math.max(this.committedSeq, seq)
         this.physicalSaveCount++
+        this.lastFlushBytes = data.length
+        this.lastFlushAt = Date.now()
+        this.logFlush(data.length, this.lastFlushAt - t0)
       } catch (e) {
         // Keep the DB marked dirty so the next scheduleSave() retries.
         this.dirty = true

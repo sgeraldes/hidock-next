@@ -13,4 +13,4 @@ export {
   parseDestructiveStatement,
   MassDeleteError,
 } from './engine.js'
-export type { DatabaseEngineConfig, SqlJsDatabase } from './engine.js'
+export type { DatabaseEngineConfig, AdaptiveFlushConfig, SqlJsDatabase } from './engine.js'

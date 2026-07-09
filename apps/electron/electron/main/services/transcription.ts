@@ -122,6 +122,13 @@ let isProcessing = false
 let processingInterval: ReturnType<typeof setInterval> | null = null
 let lastSkipLogAt = 0 // Throttle "skipping" spam to once per 60s
 
+// Force a synchronous DB flush (saveDatabase() is the engine's flushNow escape
+// hatch) only every Nth completed transcript. A full sql.js export on EVERY
+// completion is what freezes the app once the DB is large and the backlog runs
+// continuously; the adaptive debounced path persists the in-between writes.
+const FLUSH_EVERY_N_TRANSCRIPTS = 10
+let completedTranscriptsSinceFlush = 0
+
 export function setMainWindowForTranscription(win: BrowserWindow): void {
   mainWindow = win
 }
@@ -1487,11 +1494,16 @@ Meeting ${i + 1}: "${m.subject}"
   }
   // AI-13: Use standard enum value 'complete' (not 'transcribed')
   updateRecordingTranscriptionStatus(recordingId, 'complete')
-  // Durability: a completed transcript is an expensive artifact (API cost + time).
-  // The default run() path is debounced/async, so force a synchronous flush here
-  // to guarantee it survives a crash. This is infrequent (once per transcription)
-  // and does not contribute to the bulk-write freeze.
-  saveDatabase()
+  // Durability: a completed transcript is an expensive artifact (API cost + time),
+  // so we force a synchronous flush to guarantee it survives a crash. But a full
+  // sql.js export on EVERY completion blocks the main thread for seconds once the
+  // DB is large — under continuous backlog that starves the app. So flush every
+  // Nth completion instead; the adaptive debounced path persists the rest, and a
+  // crash loses at most the last <N transcripts (still on disk on next flush).
+  if (++completedTranscriptsSinceFlush >= FLUSH_EVERY_N_TRANSCRIPTS) {
+    completedTranscriptsSinceFlush = 0
+    saveDatabase()
+  }
 
   // Auto-update recording title if we have a title suggestion
   if (analysis.title_suggestion) {

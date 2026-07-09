@@ -13,7 +13,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { existsSync, rmSync } from 'fs'
 import initSqlJs from 'sql.js'
-import { DatabaseEngine, getTableColumns } from '../src/index.js'
+import { DatabaseEngine, getTableColumns, type AdaptiveFlushConfig } from '../src/index.js'
 
 function tempDbPath(name: string): string {
   // Stable per-test path (no Date.now/Math.random — keep deterministic)
@@ -54,6 +54,7 @@ describe('DatabaseEngine', () => {
     repairPhase?: () => void
     saveDebounceMs?: number
     saveMaxWaitMs?: number
+    adaptiveFlush?: AdaptiveFlushConfig
   }) {
     return {
       initSqlJs,
@@ -64,6 +65,7 @@ describe('DatabaseEngine', () => {
       repairPhase: opts.repairPhase,
       saveDebounceMs: opts.saveDebounceMs,
       saveMaxWaitMs: opts.saveMaxWaitMs,
+      adaptiveFlush: opts.adaptiveFlush,
     }
   }
 
@@ -279,6 +281,132 @@ describe('DatabaseEngine', () => {
       await reopened.initialize()
       expect(reopened.queryOne('SELECT * FROM items WHERE id = ?', ['z'])).toBeDefined()
       reopened.closeDatabase()
+    })
+  })
+
+  describe('adaptive flush policy', () => {
+    it('scales the minimum flush interval with DB size (default thresholds)', async () => {
+      // Pure policy — no timers, no I/O. Verifies the documented 50MB / 200MB
+      // boundaries map to the 0 / 60s / 300s intervals.
+      const engine = makeEngine('policy')
+      const MB = 1024 * 1024
+      expect(engine.flushIntervalForBytes(0)).toBe(0)
+      expect(engine.flushIntervalForBytes(49 * MB)).toBe(0)
+      expect(engine.flushIntervalForBytes(50 * MB)).toBe(60_000)
+      expect(engine.flushIntervalForBytes(199 * MB)).toBe(60_000)
+      expect(engine.flushIntervalForBytes(200 * MB)).toBe(300_000)
+      expect(engine.flushIntervalForBytes(600 * MB)).toBe(300_000)
+    })
+
+    it('honours overridden adaptive thresholds', async () => {
+      const engine = makeEngine('policy-override', {
+        adaptiveFlush: { smallMb: 10, largeMb: 20, mediumIntervalMs: 111, largeIntervalMs: 222 },
+      })
+      const MB = 1024 * 1024
+      expect(engine.flushIntervalForBytes(9 * MB)).toBe(0)
+      expect(engine.flushIntervalForBytes(10 * MB)).toBe(111)
+      expect(engine.flushIntervalForBytes(20 * MB)).toBe(222)
+    })
+
+    it('throttles debounced writes to the min interval when the DB exceeds the threshold', async () => {
+      // smallMb:0 forces even the tiny test DB into the throttled band, so we can
+      // exercise the real deferral path with short (real-timer) intervals — the
+      // engine performs real async fs writes, which fake timers do not drive.
+      const engine = makeEngine('throttle', {
+        saveDebounceMs: 10,
+        saveMaxWaitMs: 20,
+        adaptiveFlush: { smallMb: 0, mediumIntervalMs: 300 },
+      })
+      await engine.initialize() // one synchronous flush; sets lastFlushAt baseline
+      const base = engine.getPhysicalSaveCount()
+
+      // A burst of writes right after init. The debounce timer fires at ~10ms but
+      // the throttle defers the export because <300ms elapsed since the init flush.
+      for (let i = 0; i < 10; i++) {
+        engine.run('INSERT INTO items (id, name) VALUES (?, ?)', [`k${i}`, `v${i}`])
+      }
+      await sleep(120)
+      expect(engine.getPhysicalSaveCount()).toBe(base) // still throttled — no export yet
+
+      // Once the 300ms interval elapses, exactly one coalesced export lands.
+      await sleep(260)
+      expect(engine.getPhysicalSaveCount()).toBe(base + 1)
+
+      // Durability: reopening from disk sees the whole burst.
+      engine.closeDatabase()
+      const reopened = new DatabaseEngine(makeEngineConfig({ path: tempDbPath('throttle') }))
+      await reopened.initialize()
+      expect(reopened.queryAll('SELECT * FROM items')).toHaveLength(10)
+      reopened.closeDatabase()
+    })
+
+    it('flushNow() bypasses the throttle and writes immediately', async () => {
+      const engine = makeEngine('flushnow', {
+        saveDebounceMs: 10,
+        adaptiveFlush: { smallMb: 0, mediumIntervalMs: 10_000 }, // would defer ~10s
+      })
+      await engine.initialize()
+      const base = engine.getPhysicalSaveCount()
+
+      engine.run('INSERT INTO items (id, name) VALUES (?, ?)', ['a', 'A'])
+      // The debounced path is throttled for ~10s; without the escape hatch nothing
+      // would be written yet.
+      await sleep(40)
+      expect(engine.getPhysicalSaveCount()).toBe(base)
+
+      engine.flushNow() // escape hatch — forced synchronous write
+      expect(engine.getPhysicalSaveCount()).toBe(base + 1)
+
+      // The forced write is durable on disk immediately.
+      const reopened = new DatabaseEngine(makeEngineConfig({ path: tempDbPath('flushnow') }))
+      await reopened.initialize()
+      expect(reopened.queryOne('SELECT * FROM items WHERE id = ?', ['a'])).toBeDefined()
+      reopened.closeDatabase()
+      engine.closeDatabase()
+    })
+
+    it('closeDatabase() flushes the latest state even while the throttle would defer', async () => {
+      // Simulates app quit under a large DB: the adaptive interval would otherwise
+      // hold the write back, but quit must not lose it.
+      const engine = makeEngine('quit-flush', {
+        saveDebounceMs: 10,
+        adaptiveFlush: { smallMb: 0, mediumIntervalMs: 10_000 },
+      })
+      await engine.initialize()
+
+      engine.run('INSERT INTO items (id, name) VALUES (?, ?)', ['q', 'Q'])
+      await sleep(40)
+      // Throttled: not yet on disk via the debounced path.
+      const before = new DatabaseEngine(makeEngineConfig({ path: tempDbPath('quit-flush') }))
+      await before.initialize()
+      expect(before.queryOne('SELECT * FROM items WHERE id = ?', ['q'])).toBeUndefined()
+      before.closeDatabase()
+
+      engine.closeDatabase() // quit path — synchronous forced flush
+
+      const reopened = new DatabaseEngine(makeEngineConfig({ path: tempDbPath('quit-flush') }))
+      await reopened.initialize()
+      expect(reopened.queryOne('SELECT * FROM items WHERE id = ?', ['q'])).toBeDefined()
+      reopened.closeDatabase()
+    })
+
+    it('a synchronous flush leaves no lingering .tmp file (atomic temp+rename)', async () => {
+      const path = tempDbPath('atomic')
+      paths.push(path)
+      const engine = new DatabaseEngine(makeEngineConfig({ path, saveDebounceMs: 10_000 }))
+      await engine.initialize()
+
+      engine.run('INSERT INTO items (id, name) VALUES (?, ?)', ['a', 'A'])
+      engine.flushNow() // temp file written then renamed over the db atomically
+
+      expect(existsSync(path)).toBe(true)
+      expect(existsSync(`${path}.tmp`)).toBe(false) // rename consumed the temp file
+      // And the renamed file is a valid, complete database.
+      const reopened = new DatabaseEngine(makeEngineConfig({ path }))
+      await reopened.initialize()
+      expect(reopened.queryOne('SELECT * FROM items WHERE id = ?', ['a'])).toBeDefined()
+      reopened.closeDatabase()
+      engine.closeDatabase()
     })
   })
 })
