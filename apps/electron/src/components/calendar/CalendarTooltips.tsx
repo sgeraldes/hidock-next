@@ -137,7 +137,9 @@ export const RecordingTooltipContent = memo(function RecordingTooltipContent({ r
         </div>
       )}
 
-      <div className="text-xs text-muted-foreground pt-1 border-t">Click for details</div>
+      <div className="text-xs text-muted-foreground pt-1 border-t">
+        {recording.linkedMeeting ? 'Click to open meeting' : 'Click to review · assign to a meeting'}
+      </div>
     </div>
   )
 })
@@ -149,7 +151,12 @@ export const MeetingOverlayTooltipContent = memo(function MeetingOverlayTooltipC
   const duration = (meeting.endTime.getTime() - meeting.startTime.getTime()) / 1000
   return (
     <div className="space-y-2 max-w-[280px]">
-      <div className="font-semibold text-muted-foreground">{meeting.subject}</div>
+      {/* Names the dashed ghost state up front (mirrors the legend entry). */}
+      <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">
+        <span className="h-2 w-2 rounded-full border border-dashed border-slate-400" aria-hidden="true" />
+        Scheduled — not recorded
+      </div>
+      <div className="font-semibold text-foreground">{meeting.subject}</div>
       <div className="text-xs space-y-1">
         <div className="flex items-center gap-2">
           <span className="text-muted-foreground">Scheduled:</span>
@@ -168,7 +175,6 @@ export const MeetingOverlayTooltipContent = memo(function MeetingOverlayTooltipC
           </div>
         )}
         <ParticipantsLine meetingId={meeting.id} />
-        <div className="text-amber-500 italic mt-1">No recording captured</div>
       </div>
     </div>
   )

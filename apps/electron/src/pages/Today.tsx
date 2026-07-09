@@ -44,6 +44,7 @@ import {
   type MeetingCategory,
   type RecordingSpan
 } from '@/lib/meeting-timing'
+import { CATEGORY_DOT, CATEGORY_CHIP, CATEGORY_ORDER } from '@/lib/meeting-category-colors'
 import type { Contact } from '@/types'
 
 const TODAY_PARTICIPANT_LIMIT = 4
@@ -96,24 +97,6 @@ interface BriefingData {
   calendar: { configured: boolean; syncEnabled: boolean; lastSyncAt: string | null }
   stats: { transcribedCount: number; indexedChunks: number; pendingActionables: number }
 }
-
-/** Semantic category → dot color (a data dimension the eye can read). */
-const CATEGORY_DOT: Record<MeetingCategory, string> = {
-  recurring: 'bg-sky-500',
-  one_on_one: 'bg-violet-500',
-  external: 'bg-amber-500',
-  personal: 'bg-emerald-500',
-  general: 'bg-slate-400 dark:bg-slate-500'
-}
-/** Category → tinted time-chip (carries the color without a thick side border). */
-const CATEGORY_CHIP: Record<MeetingCategory, string> = {
-  recurring: 'bg-sky-500/10 text-sky-700 dark:text-sky-300',
-  one_on_one: 'bg-violet-500/10 text-violet-700 dark:text-violet-300',
-  external: 'bg-amber-500/10 text-amber-700 dark:text-amber-300',
-  personal: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
-  general: 'bg-slate-500/10 text-slate-600 dark:text-slate-300'
-}
-const CATEGORY_ORDER: MeetingCategory[] = ['recurring', 'one_on_one', 'external', 'personal', 'general']
 
 function greeting(): string {
   const h = new Date().getHours()

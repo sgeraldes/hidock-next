@@ -4,6 +4,7 @@
 
 export { CalendarHeader } from './CalendarHeader'
 export { CalendarStatsBar } from './CalendarStatsBar'
+export { CalendarLegend } from './CalendarLegend'
 export type { LocationFilter, SortOption, RecordingStats } from './CalendarStatsBar'
 export {
   StatusIcon,

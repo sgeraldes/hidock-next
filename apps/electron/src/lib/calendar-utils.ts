@@ -4,6 +4,7 @@
 
 import type { Meeting } from '@/types'
 import type { UnifiedRecording } from '@/types/unified-recording'
+import { categorizeMeeting, type MeetingCategory } from './meeting-timing'
 
 // Calendar view types
 export type CalendarViewType = 'day' | 'workweek' | 'week' | 'month'
@@ -469,6 +470,30 @@ export function buildCalendarRecordings(
   }))
 
   return { calendarRecordings, meetingOverlays }
+}
+
+/**
+ * Category color key for a recording block, derived from its linked meeting's
+ * subject. A recording that matched no meeting has no category — it renders in
+ * the distinct "unmatched" style instead — so this falls back to 'general'.
+ */
+export function recordingCategory(recording: CalendarRecording): MeetingCategory {
+  if (!recording.linkedMeeting) return 'general'
+  return categorizeMeeting({ subject: recording.linkedMeeting.subject })
+}
+
+/** Primary block label for a recording that matched no calendar meeting. */
+export const UNMATCHED_RECORDING_LABEL = 'Unmatched recording'
+
+/**
+ * Sub-label for an unmatched recording block: "<duration> · <start time>", e.g.
+ * "12m · 2:07 PM". The raw device filename (e.g. "2026Jul08-140719-Rec46.hda")
+ * is intentionally NOT surfaced here — it belongs in the hover tooltip.
+ */
+export function formatUnmatchedRecordingMeta(recording: CalendarRecording): string {
+  const duration = formatDurationStr(recording.durationSeconds)
+  const time = recording.startTime.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+  return `${duration} · ${time}`
 }
 
 /**

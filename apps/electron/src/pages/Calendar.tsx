@@ -23,6 +23,10 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { HoverCard, HoverCardTrigger, HoverCardContent } from '@/components/ui/hover-card'
+import { MeetingHoverCard, meetingHoverWillHaveContent } from '@/components/entity'
+import { categorizeMeeting } from '@/lib/meeting-timing'
+import { CATEGORY_DOT, CATEGORY_BLOCK, UNMATCHED_BLOCK } from '@/lib/meeting-category-colors'
 import { RecordingLinkDialog } from '@/components/RecordingLinkDialog'
 import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
 import { useToday } from '@/hooks/useToday'
@@ -56,6 +60,9 @@ import {
   formatDurationStr,
   groupByDay,
   computeVisibleHourRange,
+  recordingCategory,
+  formatUnmatchedRecordingMeta,
+  UNMATCHED_RECORDING_LABEL,
 } from '@/lib/calendar-utils'
 
 // Helper functions for date/time formatting in list views
@@ -1158,7 +1165,7 @@ export function Calendar() {
 
           {/* Month Grid */}
           <div className="flex-1 overflow-auto">
-            <div className="grid grid-cols-7 h-full" style={{ gridAutoRows: 'minmax(100px, 1fr)' }}>
+            <div className="grid grid-cols-7 h-full animate-rise-in" style={{ gridAutoRows: 'minmax(100px, 1fr)' }}>
               {monthDates.map((date) => {
                 const key = date.toISOString().split('T')[0]
                 const dayMeetings = meetingsByMonth[key] || []
@@ -1221,10 +1228,12 @@ export function Calendar() {
                           className={cn(
                             'w-full text-left text-xs p-1 rounded truncate transition-colors',
                             'hover:ring-1 hover:ring-ring',
-                            meeting.hasRecording && !meeting.isPlaceholder && 'bg-green-100 text-green-800 dark:bg-green-900/50 dark:text-green-300',
-                            meeting.isPlaceholder && 'bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-300 border-dashed border border-amber-300',
-                            meeting.recordingLocation === 'device-only' && 'bg-orange-100 text-orange-800 dark:bg-orange-900/50 dark:text-orange-300',
-                            !meeting.hasRecording && !meeting.isPlaceholder && 'bg-gray-50/50 text-gray-400 dark:bg-gray-800/30 dark:text-gray-500 opacity-50 border border-dashed border-gray-300',
+                            // Unmatched recording placeholder → amber exception style
+                            meeting.isPlaceholder && UNMATCHED_BLOCK,
+                            // Recorded meeting → its category color (a badge, below, marks "recorded")
+                            meeting.hasRecording && !meeting.isPlaceholder && CATEGORY_BLOCK[categorizeMeeting({ subject: meeting.subject })],
+                            // Scheduled, not recorded → faded dashed ghost
+                            !meeting.hasRecording && !meeting.isPlaceholder && 'border border-dashed border-border bg-muted/30 text-muted-foreground/70 opacity-70',
                             meeting.hasConflicts && 'ring-1 ring-orange-400'
                           )}
                         >
@@ -1299,7 +1308,7 @@ export function Calendar() {
 
           {/* Time Grid - scrollable, with stable scrollbar gutter */}
           <div ref={scrollContainerRef} className="flex-1 overflow-auto" style={{ scrollbarGutter: 'stable' }}>
-            <div className="flex min-h-full">
+            <div className="flex min-h-full animate-rise-in">
               {/* Time Labels - B-CAL-003: Uses dynamic visibleHours */}
               <div className="w-14 flex-shrink-0 bg-background">
                 {visibleHours.map((hour) => (
@@ -1369,12 +1378,13 @@ export function Calendar() {
                           <TooltipTrigger asChild>
                             <button
                               onClick={() => handleMeetingClick({ id: meeting.id } as Meeting)}
+                              aria-label={`Scheduled meeting, not recorded: ${meeting.subject}`}
                               className={cn(
-                                'absolute rounded-md px-2 py-1 text-xs overflow-hidden transition-all text-left',
+                                'absolute rounded-md px-2 py-1 text-xs overflow-hidden transition-colors text-left',
                                 'border-2 border-dashed border-slate-300 dark:border-slate-600',
-                                'bg-slate-50/30 dark:bg-slate-800/20 text-slate-400 dark:text-slate-500',
-                                'hover:bg-slate-100/50 dark:hover:bg-slate-700/30 hover:border-slate-400',
-                                'opacity-60 hover:opacity-80'
+                                'bg-slate-50/30 dark:bg-slate-800/20 text-slate-500 dark:text-slate-400',
+                                'hover:bg-slate-100/60 dark:hover:bg-slate-700/30 hover:border-slate-400',
+                                'opacity-70 hover:opacity-90'
                               )}
                               style={{
                                 top,
@@ -1406,8 +1416,10 @@ export function Calendar() {
                       )
                     })}
 
-                    {/* ===== RECORDINGS (SOLID - PRIMARY) ===== */}
-                    {/* Recordings shown as solid blocks - positioned by RECORDING time */}
+                    {/* ===== RECORDINGS (PRIMARY) ===== */}
+                    {/* Recordings shown as category-tinted blocks - positioned by RECORDING time.
+                        The block's FILL carries the linked meeting's category; a compact badge
+                        (mic + location glyph) carries the "recorded" state — not the whole color. */}
                     {(recordingsByDay[key] || []).map((recording, recIdx) => {
                       const { top, height } = getRecordingStyle(recording)
 
@@ -1417,62 +1429,88 @@ export function Calendar() {
                       const canShowTime = height > 35
                       const canShowMultiline = height > 60
 
-                      // Display label: meeting subject if linked, otherwise filename
-                      const displayLabel = recording.linkedMeeting?.subject || recording.filename
+                      const linked = recording.linkedMeeting
+                      const isUnmatched = !linked
+                      const category = recordingCategory(recording)
+                      // Matched → meeting subject; unmatched → a human label (filename lives in the tooltip)
+                      const displayLabel = linked ? linked.subject : UNMATCHED_RECORDING_LABEL
                       // Outlook-style conflict columns for overlapping recordings
                       const layout = recordingColumnsByDay[key]?.get(recording.id) ?? { col: 0, cols: 1 }
 
+                      const button = (
+                        <button
+                          onClick={() => handleRecordingClick(recording)}
+                          className={cn(
+                            'absolute rounded-md px-2 py-1 text-xs overflow-hidden text-left transition-[filter,box-shadow]',
+                            'shadow-sm hover:z-30 hover:ring-2 hover:ring-ring/60 hover:brightness-[1.03]',
+                            isUnmatched ? UNMATCHED_BLOCK : CATEGORY_BLOCK[category]
+                          )}
+                          style={{
+                            top,
+                            height,
+                            minHeight: 24,
+                            left: `calc(${(layout.col / layout.cols) * 100}% + 4px)`,
+                            width: `calc(${100 / layout.cols}% - 8px)`,
+                            zIndex: 15 + recIdx // Above meeting overlays
+                          }}
+                        >
+                          <div className="flex items-start gap-1 h-full">
+                            {!isUnmatched && (
+                              <span
+                                className={cn('mt-1 h-2 w-2 flex-shrink-0 rounded-full', CATEGORY_DOT[category])}
+                                aria-hidden="true"
+                              />
+                            )}
+                            <div className="flex-1 min-w-0">
+                              <div className={cn(
+                                'font-semibold leading-tight',
+                                canShowMultiline ? 'line-clamp-2' : 'truncate'
+                              )}>
+                                {displayLabel}
+                              </div>
+                              {canShowTime && (
+                                <div className={cn(
+                                  'text-[10px] mt-0.5 opacity-80',
+                                  canShowMultiline ? '' : 'truncate'
+                                )}>
+                                  {isUnmatched
+                                    ? formatUnmatchedRecordingMeta(recording)
+                                    : `${formatTime(recording.startTime.toISOString())} - ${formatTime(recording.endTime.toISOString())}${recording.durationSeconds > 0 ? ` (${formatDurationStr(recording.durationSeconds)})` : ''}`}
+                                </div>
+                              )}
+                            </div>
+                            {/* Recorded badge: mic + where the audio lives */}
+                            <span
+                              className="flex flex-shrink-0 items-center gap-0.5 rounded bg-background/40 px-1 py-0.5"
+                              title="Recorded"
+                            >
+                              <Mic className="h-3 w-3" aria-hidden="true" />
+                              <StatusIcon location={recording.location} />
+                            </span>
+                          </div>
+                        </button>
+                      )
+
+                      // Matched recordings get the richer MeetingHoverCard (organizer /
+                      // location / participants) — gated so it never pops in empty; else
+                      // fall back to the recording tooltip (also used for unmatched blocks).
+                      const meetingLike = linked
+                        ? { id: linked.id, organizer_name: linked.organizer, location: linked.location }
+                        : null
+                      if (meetingLike && meetingHoverWillHaveContent(meetingLike, ['title', 'time'])) {
+                        return (
+                          <HoverCard key={recording.id}>
+                            <HoverCardTrigger asChild>{button}</HoverCardTrigger>
+                            <HoverCardContent side="right" align="start">
+                              <MeetingHoverCard id={linked!.id} name={linked!.subject} visibleFields={['title', 'time']} />
+                            </HoverCardContent>
+                          </HoverCard>
+                        )
+                      }
+
                       return (
                         <Tooltip key={recording.id}>
-                          <TooltipTrigger asChild>
-                            <button
-                              onClick={() => handleRecordingClick(recording)}
-                              className={cn(
-                                'absolute rounded-md px-2 py-1 text-xs overflow-hidden transition-all text-left',
-                                'hover:ring-2 hover:ring-ring hover:z-30 hover:shadow-lg',
-                                'shadow-sm',
-                                // Synced/downloaded recording (green)
-                                (recording.location === 'both' || recording.location === 'local-only') &&
-                                  'bg-emerald-500 text-white border-l-4 border-emerald-700',
-                                // Device-only recording (orange)
-                                recording.location === 'device-only' &&
-                                  'bg-orange-500 text-white border-l-4 border-orange-700',
-                                // No linked meeting - slightly different shade
-                                !recording.linkedMeeting && recording.location !== 'device-only' &&
-                                  'bg-amber-500 text-white border-l-4 border-amber-700'
-                              )}
-                              style={{
-                                top,
-                                height,
-                                minHeight: 24,
-                                left: `calc(${(layout.col / layout.cols) * 100}% + 4px)`,
-                                width: `calc(${100 / layout.cols}% - 8px)`,
-                                zIndex: 15 + recIdx // Above meeting overlays
-                              }}
-                            >
-                              <div className="flex items-start gap-1 h-full relative z-10">
-                                <Mic className="h-3 w-3 flex-shrink-0 mt-0.5 opacity-90" />
-                                <div className="flex-1 min-w-0">
-                                  <div className={cn(
-                                    'font-semibold leading-tight',
-                                    canShowMultiline ? 'line-clamp-2' : 'truncate'
-                                  )}>
-                                    {displayLabel}
-                                  </div>
-                                  {canShowTime && (
-                                    <div className={cn(
-                                      'text-[10px] mt-0.5 opacity-80',
-                                      canShowMultiline ? '' : 'truncate'
-                                    )}>
-                                      {formatTime(recording.startTime.toISOString())} - {formatTime(recording.endTime.toISOString())}
-                                      {recording.durationSeconds > 0 && ` (${formatDurationStr(recording.durationSeconds)})`}
-                                    </div>
-                                  )}
-                                </div>
-                                <StatusIcon location={recording.location} />
-                              </div>
-                            </button>
-                          </TooltipTrigger>
+                          <TooltipTrigger asChild>{button}</TooltipTrigger>
                           <TooltipContent side="right" align="start">
                             <RecordingTooltipContent recording={recording} />
                           </TooltipContent>

@@ -6,6 +6,9 @@ import {
   createPlaceholderMeetings,
   groupByDay,
   formatDurationStr,
+  recordingCategory,
+  formatUnmatchedRecordingMeta,
+  UNMATCHED_RECORDING_LABEL,
   type CalendarRecording,
   type CalendarMeetingOverlay,
 } from '../calendar-utils'
@@ -375,5 +378,58 @@ describe('formatDurationStr', () => {
   it('should handle fractional seconds', () => {
     expect(formatDurationStr(90)).toBe('2m') // 1.5 minutes rounds to 2
     expect(formatDurationStr(30)).toBe('1m') // 0.5 minutes rounds to 1
+  })
+})
+
+/**
+ * Calendar design language: a recording block's category is derived from its
+ * linked meeting's subject, and an unmatched recording is labeled by a human
+ * string (never the raw device filename).
+ */
+describe('recordingCategory', () => {
+  const withMeeting = (subject: string): CalendarRecording => ({
+    ...makeRecording(9, 0, 10, 0),
+    linkedMeeting: {
+      id: 'm1',
+      subject,
+      startTime: new Date(2026, 2, 2, 9, 0, 0),
+      endTime: new Date(2026, 2, 2, 10, 0, 0),
+      location: null,
+      organizer: null,
+    },
+  })
+
+  it('classifies a recurring meeting subject as recurring', () => {
+    expect(recordingCategory(withMeeting('Daily WTS Standup'))).toBe('recurring')
+  })
+
+  it('classifies a 1:1 subject as one_on_one', () => {
+    expect(recordingCategory(withMeeting('1:1 with Yaraví'))).toBe('one_on_one')
+  })
+
+  it('classifies a client subject as external', () => {
+    expect(recordingCategory(withMeeting('Belcorp kickoff'))).toBe('external')
+  })
+
+  it('falls back to general for a recording with no linked meeting', () => {
+    expect(recordingCategory(makeRecording(9, 0, 10, 0))).toBe('general')
+  })
+})
+
+describe('formatUnmatchedRecordingMeta / UNMATCHED_RECORDING_LABEL', () => {
+  it('uses a human label, not the device filename', () => {
+    expect(UNMATCHED_RECORDING_LABEL).toBe('Unmatched recording')
+    expect(UNMATCHED_RECORDING_LABEL).not.toMatch(/\.hda$/i)
+  })
+
+  it('formats duration + start time (no filename)', () => {
+    const rec: CalendarRecording = {
+      ...makeRecording(14, 7, 14, 19),
+      filename: '2026Jul08-140719-Rec46.hda',
+    }
+    const meta = formatUnmatchedRecordingMeta(rec)
+    expect(meta).toContain('12m')
+    expect(meta).toMatch(/\d{1,2}:\d{2}/) // e.g. "2:07 PM"
+    expect(meta).not.toContain('.hda')
   })
 })
