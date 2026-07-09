@@ -40,7 +40,7 @@ const GRAPH_SCOPES = ['User.Read', 'Calendars.Read', 'Contacts.Read', 'People.Re
 
 const CALENDAR_WINDOW_PAST_DAYS = 30
 const CALENDAR_WINDOW_FUTURE_DAYS = 120
-const MSAL_CACHE_SECRET = 'msalCache'
+const MSAL_CACHE_SECRET = 'msalCache' // pragma: allowlist secret — store KEY name, not a credential
 
 const CALENDAR_CONTAINER: SourceContainer = {
   externalId: 'calendar',
