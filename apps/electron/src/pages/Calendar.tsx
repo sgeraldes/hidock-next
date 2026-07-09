@@ -171,14 +171,9 @@ export function Calendar() {
   const [deleting, setDeleting] = useState<string | null>(null)
   const [transcribing, setTranscribing] = useState<string | null>(null)
 
-  // State for recording link dialog. Carries the recording's transcript-derived
-  // title/summary so the assignment surface can lead with what the recording IS.
+  // State for recording link dialog
   const [linkDialogRecording, setLinkDialogRecording] = useState<
-    | (Pick<Recording, 'id' | 'filename' | 'date_recorded' | 'duration_seconds'> & {
-        title?: string | null
-        summary?: string | null
-      })
-    | null
+    Pick<Recording, 'id' | 'filename' | 'date_recorded' | 'duration_seconds'> | null
   >(null)
 
   // Load config on mount - must complete BEFORE first sync
@@ -498,15 +493,13 @@ export function Calendar() {
     if (recording.linkedMeeting) {
       navigate(`/meeting/${recording.linkedMeeting.id}`)
     } else {
-      // Open link dialog for orphan recordings, passing what the recording IS so
-      // the dialog can lead with title/summary and offer candidate meetings.
+      // Open link dialog for orphan recordings (assignment surface owned by the
+      // recording-match flow).
       setLinkDialogRecording({
         id: recording.id,
         filename: recording.filename,
         date_recorded: recording.startTime.toISOString(),
-        duration_seconds: recording.durationSeconds,
-        title: recording.title,
-        summary: recording.summary
+        duration_seconds: recording.durationSeconds
       })
     }
   }
