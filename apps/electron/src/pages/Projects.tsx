@@ -22,7 +22,10 @@ import {
   AlertTriangle,
   ShieldAlert,
   Pencil,
-  Sparkles
+  Sparkles,
+  ChevronRight,
+  ArrowRight,
+  BookOpen
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -46,7 +49,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle
 } from '@/components/ui/alert-dialog'
-import type { Project } from '@/types/knowledge'
+import type { Project, KnowledgeCapture } from '@/types/knowledge'
 import { EntityMention } from '@/components/entity'
 import {
   IdentitySuggestionsSection,
@@ -119,6 +122,9 @@ export function Projects() {
   // Issues / risks + actionables (R3b)
   const [notes, setNotes] = useState<ProjectNote[]>([])
   const [actionables, setActionables] = useState<ProjectActionable[]>([])
+
+  // Linked knowledge items — resolved so the count card becomes a clickable list.
+  const [knowledgeItems, setKnowledgeItems] = useState<KnowledgeCapture[]>([])
   const [newIssue, setNewIssue] = useState('')
   const [newRisk, setNewRisk] = useState('')
 
@@ -273,6 +279,7 @@ export function Projects() {
     setProjectMembers([])
     setNotes([])
     setActionables([])
+    setKnowledgeItems([])
     setDetailLoading(true)
     setIsEditingDescription(false)
     setIsEditingName(false)
@@ -297,6 +304,16 @@ export function Projects() {
         setEditFolder(detailed.folderPath || '')
         setEditUrl(detailed.url || '')
         void loadProjectExtras(detailed.id)
+
+        // Resolve linked knowledge items so the count becomes a clickable list.
+        if (detailed.knowledgeIds && detailed.knowledgeIds.length > 0) {
+          try {
+            const items = await window.electronAPI.knowledge?.getByIds?.(detailed.knowledgeIds)
+            setKnowledgeItems(Array.isArray(items) ? items : [])
+          } catch {
+            setKnowledgeItems([])
+          }
+        }
 
         // Resolve person names from IDs in parallel (fixes N+1 query)
         if (detailed.personIds && detailed.personIds.length > 0) {
@@ -559,34 +576,52 @@ export function Projects() {
             </div>
           ) : (
             <div className="space-y-1">
-              {filteredProjects.map((project) => (
-                <div
-                  key={project.id}
-                  onClick={() => handleSelectProject(project)}
-                  className={cn(
-                    "w-full text-left p-3 rounded-xl transition-all cursor-pointer group",
-                    activeProject?.id === project.id
-                      ? "bg-primary text-primary-foreground shadow-md"
-                      : "hover:bg-muted text-muted-foreground hover:text-foreground"
-                  )}
-                >
-                  <div className="flex items-start gap-3">
-                    <div className={cn(
-                      "w-10 h-10 rounded-xl flex items-center justify-center border shadow-sm",
-                      activeProject?.id === project.id ? "bg-primary-foreground/10 border-primary-foreground/20" : "bg-background border-border"
-                    )}>
-                      <Folder className={cn("h-5 w-5", activeProject?.id === project.id ? "text-primary-foreground" : "text-muted-foreground")} />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm font-semibold truncate">{project.name}</p>
-                      <div className="flex items-center gap-2 mt-1 text-[10px] opacity-70">
-                        <Clock className="h-3 w-3" />
-                        <span>{new Date(project.createdAt).toLocaleDateString()}</span>
+              {filteredProjects.map((project, index) => {
+                const isActive = activeProject?.id === project.id
+                return (
+                  <button
+                    key={project.id}
+                    type="button"
+                    onClick={() => handleSelectProject(project)}
+                    aria-current={isActive ? 'true' : undefined}
+                    title={`${project.name} · ${project.status} · created ${new Date(project.createdAt).toLocaleDateString()}`}
+                    style={{ animationDelay: `${Math.min(index, 8) * 35}ms` }}
+                    className={cn(
+                      "animate-rise-in lift w-full text-left p-3 rounded-xl cursor-pointer group",
+                      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                      isActive
+                        ? "bg-primary text-primary-foreground shadow-md"
+                        : "border border-transparent bg-card/40 text-muted-foreground hover:text-foreground hover:border-border"
+                    )}
+                  >
+                    <div className="flex items-start gap-3">
+                      <div className={cn(
+                        "w-10 h-10 rounded-xl flex items-center justify-center border shadow-sm shrink-0",
+                        isActive ? "bg-primary-foreground/10 border-primary-foreground/20" : "bg-background border-border"
+                      )}>
+                        <Folder className={cn("h-5 w-5", isActive ? "text-primary-foreground" : "text-muted-foreground")} />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-semibold truncate">{project.name}</p>
+                        <div className="flex items-center gap-2 mt-1 text-[10px] opacity-70">
+                          <span
+                            className={cn(
+                              "h-1.5 w-1.5 rounded-full shrink-0",
+                              project.status === 'active'
+                                ? "bg-emerald-500"
+                                : isActive ? "bg-primary-foreground/50" : "bg-slate-400 dark:bg-slate-500"
+                            )}
+                            title={project.status === 'active' ? 'Active project' : 'Archived project'}
+                            aria-hidden="true"
+                          />
+                          <Clock className="h-3 w-3" aria-hidden="true" />
+                          <span>{new Date(project.createdAt).toLocaleDateString()}</span>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                </div>
-              ))}
+                  </button>
+                )
+              })}
             </div>
           )}
         </div>
@@ -646,10 +681,15 @@ export function Projects() {
                     </div>
                   )}
                   <div className="flex items-center gap-3 mt-1">
-                    <span className={cn(
-                      "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border",
-                      activeProject.status === 'active' ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/20" : "bg-slate-500/10 text-slate-600 border-slate-500/20"
-                    )}>
+                    <span
+                      title={activeProject.status === 'active' ? 'Active project' : 'Archived project'}
+                      className={cn(
+                        "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border",
+                        activeProject.status === 'active'
+                          ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/20"
+                          : "bg-slate-500/10 text-slate-600 dark:text-slate-300 border-slate-500/20"
+                      )}
+                    >
                       {activeProject.status}
                     </span>
                     <span className="text-xs text-muted-foreground">Created {new Date(activeProject.createdAt).toLocaleDateString()}</span>
@@ -695,27 +735,31 @@ export function Projects() {
               <div className="max-w-4xl mx-auto space-y-8">
                 {/* Stats Grid */}
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                  <Card className="bg-muted/5">
+                  <Card className="lift animate-rise-in bg-muted/5" style={{ animationDelay: '0ms' }}>
                     <CardContent className="pt-6">
                       <div className="flex items-center justify-between">
                         <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Knowledge</p>
-                        <FileText className="h-4 w-4 text-primary" />
+                        <span title="Knowledge items linked to this project"><FileText className="h-4 w-4 text-primary" aria-hidden="true" /></span>
                       </div>
                       <p className="text-2xl font-bold mt-2">{activeProject.knowledgeIds?.length ?? '\u2014'} {activeProject.knowledgeIds ? 'Items' : ''}</p>
                     </CardContent>
                   </Card>
-                  <Card className="bg-muted/5">
+                  <Card className="lift animate-rise-in bg-muted/5" style={{ animationDelay: '45ms' }}>
                     <CardContent className="pt-6">
                       <div className="flex items-center justify-between">
                         <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">People</p>
-                        <Users className="h-4 w-4 text-primary" />
+                        <span title="People involved in this project"><Users className="h-4 w-4 text-primary" aria-hidden="true" /></span>
                       </div>
                       <p className="text-2xl font-bold mt-2">{activeProject.personIds?.length ?? '\u2014'} {activeProject.personIds ? 'Involved' : ''}</p>
                       {projectMembers.length > 0 && (
                         <div className="mt-3 space-y-1.5">
                           {projectMembers.slice(0, 5).map((member) => (
                             <div key={member.id} className="flex items-center gap-2 text-xs">
-                              <div className="w-5 h-5 rounded-full bg-primary/10 text-primary flex items-center justify-center text-[10px] font-bold">
+                              <div
+                                className="w-5 h-5 rounded-full bg-primary/10 text-primary flex items-center justify-center text-[10px] font-bold shrink-0"
+                                title={member.name}
+                                aria-hidden="true"
+                              >
                                 {member.name.charAt(0).toUpperCase()}
                               </div>
                               <EntityMention type="person" id={member.id} name={member.name} />
@@ -728,19 +772,78 @@ export function Projects() {
                       )}
                     </CardContent>
                   </Card>
-                  <Card className="bg-muted/5">
+                  <Card className="lift animate-rise-in bg-muted/5" style={{ animationDelay: '90ms' }}>
                     <CardContent className="pt-6">
                       <div className="flex items-center justify-between">
                         <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Actions</p>
-                        <CheckCircle2 className="h-4 w-4 text-primary" />
+                        <span title="Action items linked to this project"><CheckCircle2 className="h-4 w-4 text-primary" aria-hidden="true" /></span>
                       </div>
                       <p className="text-2xl font-bold mt-2">{actionables.length || '\u2014'} {actionables.length ? 'Items' : ''}</p>
                     </CardContent>
                   </Card>
                 </div>
 
+                {/* Linked knowledge \u2014 the count above, made browsable. Rows deep-link into Library. */}
+                {activeProject.knowledgeIds && activeProject.knowledgeIds.length > 0 && (
+                  <Card className="animate-rise-in bg-muted/5" style={{ animationDelay: '120ms' }}>
+                    <CardContent className="p-6 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span title="Knowledge captured for this project"><BookOpen className="h-4 w-4 text-primary" aria-hidden="true" /></span>
+                          <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground">Knowledge</h3>
+                          <span className="text-xs text-muted-foreground">{activeProject.knowledgeIds.length}</span>
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 text-xs gap-1"
+                          onClick={() => navigate('/library')}
+                        >
+                          View all in Library
+                          <ArrowRight className="h-3 w-3" />
+                        </Button>
+                      </div>
+                      {knowledgeItems.length === 0 ? (
+                        <p className="text-sm text-muted-foreground italic">
+                          {activeProject.knowledgeIds.length} linked {activeProject.knowledgeIds.length === 1 ? 'item' : 'items'} \u2014 open Library to browse them.
+                        </p>
+                      ) : (
+                        <div className="space-y-1.5">
+                          {knowledgeItems.slice(0, 5).map((k) => (
+                            <button
+                              key={k.id}
+                              onClick={() => navigate('/library', { state: { selectedId: k.id } })}
+                              title={`Open "${k.title || 'Untitled'}" in Library`}
+                              className="w-full flex items-center gap-3 p-2.5 rounded-lg text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group"
+                            >
+                              <FileText className="h-4 w-4 shrink-0 text-muted-foreground group-hover:text-primary transition-colors" aria-hidden="true" />
+                              <div className="min-w-0 flex-1">
+                                <p className="text-sm font-medium truncate group-hover:text-primary transition-colors">{k.title || 'Untitled'}</p>
+                                {(k.summary || k.capturedAt) && (
+                                  <p className="text-[10px] text-muted-foreground truncate mt-0.5">
+                                    {k.summary || new Date(k.capturedAt).toLocaleDateString()}
+                                  </p>
+                                )}
+                              </div>
+                              <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" aria-hidden="true" />
+                            </button>
+                          ))}
+                          {knowledgeItems.length > 5 && (
+                            <button
+                              onClick={() => navigate('/library')}
+                              className="w-full text-center text-xs text-muted-foreground hover:text-primary transition-colors py-1.5 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            >
+                              +{knowledgeItems.length - 5} more in Library
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                )}
+
                 {/* Location & Links (folder-on-disk + webpage) */}
-                <Card className="bg-muted/5">
+                <Card className="animate-rise-in bg-muted/5" style={{ animationDelay: '150ms' }}>
                   <CardContent className="p-6 space-y-5">
                     <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground">Location & Links</h3>
 
@@ -854,10 +957,10 @@ export function Projects() {
                 </Card>
 
                 {/* Issues & Risks */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 animate-rise-in" style={{ animationDelay: '210ms' }}>
                   <NoteList
                     title="Issues"
-                    icon={<AlertTriangle className="h-4 w-4 text-amber-500" />}
+                    icon={<span title="Open issues on this project"><AlertTriangle className="h-4 w-4 text-amber-500" aria-hidden="true" /></span>}
                     items={issues}
                     newValue={newIssue}
                     onNewValueChange={setNewIssue}
@@ -868,7 +971,7 @@ export function Projects() {
                   />
                   <NoteList
                     title="Risks"
-                    icon={<ShieldAlert className="h-4 w-4 text-rose-500" />}
+                    icon={<span title="Risks tracked for this project"><ShieldAlert className="h-4 w-4 text-rose-500" aria-hidden="true" /></span>}
                     items={risks}
                     newValue={newRisk}
                     onNewValueChange={setNewRisk}
@@ -880,11 +983,11 @@ export function Projects() {
                 </div>
 
                 {/* Action items by project */}
-                <Card className="bg-muted/5">
+                <Card className="animate-rise-in bg-muted/5" style={{ animationDelay: '180ms' }}>
                   <CardContent className="p-6 space-y-3">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
-                        <CheckCircle2 className="h-4 w-4 text-primary" />
+                        <span title="Action items surfaced from this project's knowledge"><CheckCircle2 className="h-4 w-4 text-primary" aria-hidden="true" /></span>
                         <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground">Action Items</h3>
                       </div>
                       {actionables.length > 0 && (
@@ -899,22 +1002,27 @@ export function Projects() {
                           <button
                             key={a.id}
                             onClick={() => navigate('/actionables')}
-                            className="w-full flex items-center gap-3 p-2.5 rounded-lg text-left hover:bg-muted transition-colors group"
+                            title={`Open "${a.title}" in Actionables`}
+                            className="w-full flex items-center gap-3 p-2.5 rounded-lg text-left hover:bg-muted transition-colors group focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                           >
                             <div className="min-w-0 flex-1">
                               <p className="text-sm font-medium truncate group-hover:text-primary transition-colors">{a.title}</p>
                               <p className="text-[10px] text-muted-foreground mt-0.5">{new Date(a.createdAt).toLocaleDateString()}</p>
                             </div>
-                            <span className={cn(
-                              "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border shrink-0",
-                              a.status === 'shared' || a.status === 'generated'
-                                ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/20"
-                                : a.status === 'dismissed'
-                                  ? "bg-slate-500/10 text-slate-600 border-slate-500/20"
-                                  : "bg-amber-500/10 text-amber-600 border-amber-500/20"
-                            )}>
+                            <span
+                              title={`Status: ${a.status}`}
+                              className={cn(
+                                "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border shrink-0",
+                                a.status === 'shared' || a.status === 'generated'
+                                  ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/20"
+                                  : a.status === 'dismissed'
+                                    ? "bg-slate-500/10 text-slate-600 dark:text-slate-300 border-slate-500/20"
+                                    : "bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/20"
+                              )}
+                            >
                               {a.status}
                             </span>
+                            <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" aria-hidden="true" />
                           </button>
                         ))}
                       </div>
@@ -923,7 +1031,7 @@ export function Projects() {
                 </Card>
 
                 {/* Description (inline editable) */}
-                <div className="space-y-3">
+                <div className="space-y-3 animate-rise-in" style={{ animationDelay: '240ms' }}>
                   <div className="flex items-center justify-between">
                     <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground">Description</h3>
                     {!isEditingDescription && (
@@ -969,10 +1077,10 @@ export function Projects() {
                 </div>
 
                 {/* AI Suggestions */}
-                <Card className="border-primary/20 bg-primary/5">
+                <Card className="animate-rise-in border-primary/20 bg-primary/5" style={{ animationDelay: '270ms' }}>
                   <CardContent className="p-6">
                     <div className="flex items-center gap-2 mb-4">
-                      <Bot className="h-5 w-5 text-primary" />
+                      <span title="AI-generated project insight"><Bot className="h-5 w-5 text-primary" aria-hidden="true" /></span>
                       <h3 className="font-bold text-sm uppercase tracking-wider">AI Project Insight</h3>
                     </div>
                     <p className="text-sm leading-relaxed text-muted-foreground italic">

@@ -10,6 +10,13 @@ vi.mock('@/components/ui/toaster', () => ({
   toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() }
 }))
 
+// Spy on navigation so we can assert the knowledge/actionable click-through.
+const mockNavigate = vi.fn()
+vi.mock('react-router-dom', async () => {
+  const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom')
+  return { ...actual, useNavigate: () => mockNavigate }
+})
+
 const mockGetAll = vi.fn().mockResolvedValue({
   success: true,
   data: {
@@ -43,6 +50,11 @@ const mockCreate = vi.fn().mockResolvedValue({
   data: { id: 'pr3', name: 'New Project', status: 'active', createdAt: new Date().toISOString() }
 })
 
+const mockKnowledgeGetByIds = vi.fn().mockResolvedValue([
+  { id: 'k1', title: 'Kickoff notes', summary: 'Project kickoff', capturedAt: new Date().toISOString() },
+  { id: 'k2', title: 'Design review', summary: 'UI review', capturedAt: new Date().toISOString() }
+])
+
 // Mock Electron API
 global.window.electronAPI = {
   projects: {
@@ -50,7 +62,12 @@ global.window.electronAPI = {
     getById: mockGetById,
     create: mockCreate,
     delete: vi.fn().mockResolvedValue({ success: true }),
-    update: vi.fn().mockResolvedValue({ success: true, data: {} })
+    update: vi.fn().mockResolvedValue({ success: true, data: {} }),
+    getNotes: vi.fn().mockResolvedValue({ success: true, data: [] }),
+    getActionables: vi.fn().mockResolvedValue({ success: true, data: [] })
+  },
+  knowledge: {
+    getByIds: mockKnowledgeGetByIds
   },
   contacts: {
     getById: vi.fn().mockResolvedValue({
@@ -341,5 +358,45 @@ describe('Projects Page', () => {
     expect((await screen.findAllByText(/ProjectCandidate/)).length).toBeGreaterThan(0)
     // ...while the person-kind suggestion is filtered out.
     expect(screen.queryByText(/PersonCandidate/)).not.toBeInTheDocument()
+  })
+
+  // Knowledge click-through — the count card renders the actual items as
+  // clickable rows that deep-link into the Library with the item selected.
+  it('renders linked knowledge items as clickable rows that navigate into Library', async () => {
+    ;(global.window.electronAPI as any).projects.getById = mockGetById
+
+    render(
+      <MemoryRouter>
+        <Projects />
+      </MemoryRouter>
+    )
+
+    await screen.findByText('Project Alpha')
+    fireEvent.click(screen.getByText('Project Alpha'))
+
+    // Knowledge items resolved via knowledge.getByIds are rendered by title.
+    const row = await screen.findByText('Kickoff notes')
+    expect(mockKnowledgeGetByIds).toHaveBeenCalledWith(['k1', 'k2'])
+
+    // Clicking a row navigates to /library with that item pre-selected.
+    fireEvent.click(row)
+    expect(mockNavigate).toHaveBeenCalledWith('/library', { state: { selectedId: 'k1' } })
+  })
+
+  it('offers a "View all in Library" affordance on the knowledge card', async () => {
+    ;(global.window.electronAPI as any).projects.getById = mockGetById
+
+    render(
+      <MemoryRouter>
+        <Projects />
+      </MemoryRouter>
+    )
+
+    await screen.findByText('Project Alpha')
+    fireEvent.click(screen.getByText('Project Alpha'))
+
+    const viewAll = await screen.findByText('View all in Library')
+    fireEvent.click(viewAll)
+    expect(mockNavigate).toHaveBeenCalledWith('/library')
   })
 })
