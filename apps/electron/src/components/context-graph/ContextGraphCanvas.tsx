@@ -11,6 +11,13 @@ interface GLink {
   weight: number
 }
 
+/**
+ * Below this zoom, node labels are illegible noise, so we hide them and only
+ * reveal a label for the focused or hovered node. Above it (the user has zoomed
+ * in) every visible node is labelled.
+ */
+const LABEL_ZOOM_THRESHOLD = 1.8
+
 interface ContextGraphCanvasProps {
   data: ContextGraphData
   /** Node to spotlight (centers + zooms on it, draws a ring). */
@@ -40,6 +47,7 @@ export function ContextGraphCanvas({
   const fgRef = useRef<ForceGraphMethods<GNode, GLink> | undefined>(undefined)
   const containerRef = useRef<HTMLDivElement>(null)
   const [size, setSize] = useState({ width: 800, height: 600 })
+  const [hoverId, setHoverId] = useState<string | null>(null)
   const didFitRef = useRef(false)
 
   // React-force-graph mutates node objects (x/y). Rebuild only when data changes.
@@ -109,7 +117,10 @@ export function ContextGraphCanvas({
         ctx.stroke()
       }
 
-      const showLabel = bright && (globalScale > 1.5 || isFocus || (node.degree || 0) >= 6)
+      // Low zoom = labels are illegible noise: show them only when zoomed in,
+      // or for the focused/hovered node (common force-graph practice).
+      const showLabel =
+        bright && (globalScale > LABEL_ZOOM_THRESHOLD || isFocus || node.id === hoverId)
       if (showLabel) {
         const fontSize = Math.max(11 / globalScale, 2)
         ctx.font = `${fontSize}px Inter, system-ui, sans-serif`
@@ -121,7 +132,7 @@ export function ContextGraphCanvas({
       }
       ctx.globalAlpha = 1
     },
-    [focusId, hasHighlight, highlightIds, isDark]
+    [focusId, hasHighlight, highlightIds, isDark, hoverId]
   )
 
   const paintPointerArea = useCallback(
@@ -161,7 +172,10 @@ export function ContextGraphCanvas({
           }
         }}
         onNodeClick={(n: GNode) => onNodeClick?.(n)}
-        onNodeHover={(n: GNode | null) => onNodeHover?.(n ?? null)}
+        onNodeHover={(n: GNode | null) => {
+          setHoverId(n?.id ?? null)
+          onNodeHover?.(n ?? null)
+        }}
       />
     </div>
   )

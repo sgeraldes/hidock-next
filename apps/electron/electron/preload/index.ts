@@ -685,6 +685,11 @@ export interface ElectronAPI {
       data?: { rekeyed: number; merged: number; skipped: number }
       error?: string
     }>
+    prune: () => Promise<{
+      success: boolean
+      data?: { removedNodes: number; removedEdges: number }
+      error?: string
+    }>
   }
 
   // Identity suggestions (Round 4a) — the resolver's 0.5–0.8 review queue
@@ -1263,6 +1268,7 @@ const electronAPI: ElectronAPI = {
       callIPC('contextGraph:getNeighborhood', entityId, hops),
     search: (query: string) => callIPC('contextGraph:search', query),
     rekey: () => callIPC('contextGraph:rekey'),
+    prune: () => callIPC('contextGraph:prune'),
   },
 
   // Identity suggestions (Round 4a)

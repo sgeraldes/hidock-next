@@ -1,5 +1,6 @@
 import type { KnowledgeGraphStore } from './graph-store.js'
 import type { ExtractionResult, ExtractionMeta } from './extract.js'
+import { isGenericEntityLabel } from './stop-list.js'
 
 /**
  * Resolves a raw person name to a canonical contact identity. Injected by the
@@ -59,7 +60,9 @@ export function ingestExtraction(
 
   // People: ATTENDED meeting, DEMONSTRATED skills
   for (const person of extraction.people) {
-    if (!person.name.trim()) continue
+    // Skip generic collective/role words ("All attendees", "Team", "el equipo")
+    // — extraction noise that would otherwise become useless hub nodes.
+    if (!person.name.trim() || isGenericEntityLabel(person.name)) continue
     const personId = upsertPerson(person.name)
     store.upsertEdge({ sourceId: personId, targetId: meetingId, type: 'ATTENDED', now })
     store.upsertEdge({ sourceId: meetingId, targetId: personId, type: 'MENTIONED', now })
@@ -96,7 +99,7 @@ export function ingestExtraction(
   for (const ai of extraction.action_items) {
     if (!ai.text.trim()) continue
     const aiId = store.upsertNode({ type: 'action_item', label: ai.text, now })
-    if (ai.owner?.trim()) {
+    if (ai.owner?.trim() && !isGenericEntityLabel(ai.owner)) {
       const ownerId = upsertPerson(ai.owner)
       store.upsertEdge({ sourceId: ownerId, targetId: aiId, type: 'OWNS', now })
     }
@@ -107,7 +110,7 @@ export function ingestExtraction(
   for (const risk of extraction.risks) {
     if (!risk.text.trim()) continue
     const riskId = store.upsertNode({ type: 'risk', label: risk.text, now })
-    if (risk.raised_by?.trim()) {
+    if (risk.raised_by?.trim() && !isGenericEntityLabel(risk.raised_by)) {
       const raiserId = upsertPerson(risk.raised_by)
       store.upsertEdge({ sourceId: raiserId, targetId: riskId, type: 'RAISED', now })
     }

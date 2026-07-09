@@ -12,6 +12,8 @@ import {
   Maximize2,
   ArrowUpRight,
   GitMerge,
+  Sparkles,
+  Plus,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -32,6 +34,12 @@ interface GraphStats {
 }
 
 const EMPTY_GRAPH: ContextGraphData = { center: null, nodes: [], edges: [] }
+
+// The overview renders only the most-connected hubs so the first paint is
+// digestible, not a whole-graph hairball. "Show more" raises the cap in steps.
+const OVERVIEW_BASE_LIMIT = 150
+const OVERVIEW_MAX_LIMIT = 2000
+const OVERVIEW_STEP = 3
 
 function usePrefersReducedMotion(): boolean {
   const [reduced, setReduced] = useState(false)
@@ -93,6 +101,8 @@ export function ContextGraph() {
 
   const [ingestLoading, setIngestLoading] = useState(false)
   const [rekeyLoading, setRekeyLoading] = useState(false)
+  const [pruneLoading, setPruneLoading] = useState(false)
+  const [overviewLimit, setOverviewLimit] = useState(OVERVIEW_BASE_LIMIT)
 
   const log = useCallback(
     (...args: unknown[]) => {
@@ -107,9 +117,9 @@ export function ContextGraph() {
     setLoading(true)
     setError(null)
     try {
-      log('Loading overview graph + stats')
+      log('Loading overview graph + stats', 'limit', overviewLimit)
       const [graphRes, statsRes] = await Promise.all([
-        window.electronAPI.contextGraph.getGraph(),
+        window.electronAPI.contextGraph.getGraph(overviewLimit),
         window.electronAPI.graph.stats(),
       ])
       if (graphRes.success && graphRes.data) {
@@ -123,7 +133,7 @@ export function ContextGraph() {
     } finally {
       setLoading(false)
     }
-  }, [log])
+  }, [log, overviewLimit])
 
   useEffect(() => {
     loadGraph()
@@ -244,6 +254,36 @@ export function ContextGraph() {
     }
   }
 
+  const handlePrune = async () => {
+    setPruneLoading(true)
+    try {
+      const res = await window.electronAPI.contextGraph.prune()
+      if (res.success && res.data) {
+        const { removedNodes, removedEdges } = res.data
+        if (removedNodes > 0) {
+          toast.success(
+            'Graph cleaned',
+            `Removed ${removedNodes} generic node${removedNodes === 1 ? '' : 's'} and ${removedEdges} edge${removedEdges === 1 ? '' : 's'}`
+          )
+          await loadGraph()
+        } else {
+          toast.info('Nothing to clean', 'No generic collective/role nodes were found.')
+        }
+      } else {
+        toast.error('Clean-up failed', res.error ?? 'Unexpected error')
+      }
+    } catch (err) {
+      toast.error('Clean-up failed', err instanceof Error ? err.message : 'Unexpected error')
+    } finally {
+      setPruneLoading(false)
+    }
+  }
+
+  // Explicit "show more" — raise the overview cap in steps (chunked expansion).
+  const handleExpand = () => {
+    setOverviewLimit((l) => Math.min(l * OVERVIEW_STEP, OVERVIEW_MAX_LIMIT))
+  }
+
   // ---- Node interactions ----------------------------------------------------
 
   const onNodeClick = useCallback(
@@ -308,6 +348,10 @@ export function ContextGraph() {
             <Button variant="outline" size="sm" onClick={handleRekey} disabled={rekeyLoading} className="gap-2" title="Re-key people by contact identity">
               {rekeyLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <GitMerge className="h-4 w-4" />}
               Re-key
+            </Button>
+            <Button variant="outline" size="sm" onClick={handlePrune} disabled={pruneLoading} className="gap-2" title="Remove generic collective/role nodes (e.g. “Team”, “All attendees”)">
+              {pruneLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+              Clean up
             </Button>
             <Button size="sm" onClick={handleIngest} disabled={ingestLoading} className="gap-2">
               {ingestLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
@@ -432,6 +476,29 @@ export function ContextGraph() {
                 onNodeClick={onNodeClick}
               />
             </Suspense>
+          )}
+
+          {/* Overview hint — the first render shows only the most-connected hubs */}
+          {viewMode === 'overview' && !isEmpty && !loading && (
+            <div className="absolute top-3 left-1/2 -translate-x-1/2 flex items-center gap-2 rounded-full border bg-background/85 backdrop-blur px-3 py-1.5 text-[11px] text-muted-foreground shadow-sm max-w-[90%]">
+              <Info className="h-3.5 w-3.5 shrink-0 text-violet-500" />
+              <span className="truncate">
+                Showing the{' '}
+                <strong className="text-foreground tabular-nums">{overview.nodes.length}</strong>{' '}
+                most connected entities — search or click any node to explore.
+              </span>
+              {stats && stats.nodes > overview.nodes.length && overviewLimit < OVERVIEW_MAX_LIMIT && (
+                <button
+                  onClick={handleExpand}
+                  disabled={loading}
+                  className="flex items-center gap-1 rounded-full border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 font-medium text-violet-600 hover:bg-violet-500/20 dark:text-violet-300 shrink-0"
+                  title="Load more of the graph"
+                >
+                  <Plus className="h-3 w-3" />
+                  Show more
+                </button>
+              )}
+            </div>
           )}
 
           {/* Legend */}

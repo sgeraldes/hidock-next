@@ -27,6 +27,7 @@ import {
   queryNeighborhood,
   searchGraphNodes,
   rekeyExistingPersonNodes,
+  pruneGenericGraphNodes,
 } from '../services/knowledge-graph-service'
 import { getContactByName } from '../services/database'
 
@@ -197,6 +198,17 @@ export function registerKnowledgeGraphHandlers(): void {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       console.error('[contextGraph:rekey] Error:', e)
+      return { success: false, error: msg }
+    }
+  })
+
+  // Prune generic "garbage" nodes (collective/role words) + their edges. Idempotent.
+  ipcMain.handle('contextGraph:prune', async () => {
+    try {
+      return { success: true, data: pruneGenericGraphNodes() }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('[contextGraph:prune] Error:', e)
       return { success: false, error: msg }
     }
   })

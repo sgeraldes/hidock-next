@@ -20,6 +20,8 @@ import {
   meetingSummaryGraph,
   fullGraph,
   neighborhood,
+  pruneGenericNodes,
+  DEFAULT_OVERVIEW_NODE_LIMIT,
 } from '@hidock/knowledge-graph'
 import type {
   GraphDb,
@@ -509,10 +511,24 @@ function toDTO(sub: SubGraph): ContextGraphData {
   return { center: sub.center?.id ?? null, nodes, edges }
 }
 
-/** The whole graph (capped to the highest-degree `limit` nodes) for an overview render. */
-export function queryContextGraph(limit = 600): ContextGraphData {
+/**
+ * The overview graph — capped to the highest-degree `limit` nodes so the initial
+ * render is a digestible set of hubs, not an unreadable whole-graph hairball.
+ * Defaults to {@link DEFAULT_OVERVIEW_NODE_LIMIT}; callers pass a larger cap only
+ * for an explicit "show more" expansion.
+ */
+export function queryContextGraph(limit: number = DEFAULT_OVERVIEW_NODE_LIMIT): ContextGraphData {
   const store = getKnowledgeGraphStore()
   return toDTO(fullGraph(store, limit))
+}
+
+/**
+ * One-time maintenance: prune generic "garbage" person nodes (collective/role
+ * words) and their edges from the live graph. Idempotent.
+ */
+export function pruneGenericGraphNodes(): { removedNodes: number; removedEdges: number } {
+  const store = getKnowledgeGraphStore()
+  return pruneGenericNodes(store)
 }
 
 /**

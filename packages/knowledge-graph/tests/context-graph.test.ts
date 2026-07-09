@@ -8,7 +8,12 @@ import initSqlJs from 'sql.js'
 import { DatabaseEngine } from '@hidock/database'
 import { KnowledgeGraphStore } from '../src/graph-store.js'
 import { ingestExtraction, type PersonResolver } from '../src/ingest.js'
-import { fullGraph, neighborhood } from '../src/queries.js'
+import {
+  fullGraph,
+  neighborhood,
+  pruneGenericNodes,
+  DEFAULT_OVERVIEW_NODE_LIMIT,
+} from '../src/queries.js'
 import type { ExtractionResult, ExtractionMeta } from '../src/extract.js'
 
 function tempPath(name: string) {
@@ -193,5 +198,133 @@ describe('Context Graph: neighborhood + fullGraph traversal', () => {
     // Every retained edge connects two retained nodes.
     const kept = new Set(capped.nodes.map((n) => n.id))
     expect(capped.edges.every((e) => kept.has(e.source_id) && kept.has(e.target_id))).toBe(true)
+  })
+})
+
+describe('Context Graph: top-N overview default selection', () => {
+  const paths: string[] = []
+  afterEach(() => {
+    for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
+    paths.length = 0
+  })
+
+  it('DEFAULT_OVERVIEW_NODE_LIMIT is a small, digestible cap', () => {
+    expect(DEFAULT_OVERVIEW_NODE_LIMIT).toBeGreaterThan(0)
+    expect(DEFAULT_OVERVIEW_NODE_LIMIT).toBeLessThanOrEqual(300)
+  })
+
+  it('overview keeps exactly the top-N HIGHEST-degree nodes (hubs)', async () => {
+    const { store, dbPath } = await makeStore('topn')
+    paths.push(dbPath)
+
+    // A hub node connected to many leaves has the highest degree; each leaf has
+    // degree 1. With N=3 the overview must retain the hub + 2 leaves = 3 nodes,
+    // and the hub must be among them.
+    const hub = store.upsertNode({ type: 'topic', label: 'Hub' })
+    const leafIds: string[] = []
+    for (let i = 0; i < 8; i++) {
+      const leaf = store.upsertNode({ type: 'person', label: `Leaf ${i}` })
+      leafIds.push(leaf)
+      store.upsertEdge({ sourceId: hub, targetId: leaf, type: 'ABOUT' })
+    }
+
+    const sub = fullGraph(store, 3)
+    expect(sub.nodes).toHaveLength(3)
+    const ids = sub.nodes.map((n) => n.id)
+    expect(ids).toContain(hub)
+    // The hub is the single highest-degree node.
+    const top = [...sub.nodes].sort((a, b) => b.degree - a.degree)[0]
+    expect(top.id).toBe(hub)
+    expect(top.degree).toBe(8)
+  })
+})
+
+describe('Context Graph: generic-node pruning', () => {
+  const paths: string[] = []
+  afterEach(() => {
+    for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
+    paths.length = 0
+  })
+
+  it('prunes generic person nodes + their edges, and is idempotent', async () => {
+    const { store, dbPath } = await makeStore('prune')
+    paths.push(dbPath)
+
+    const extraction: ExtractionResult = {
+      // "All attendees" / "Team" are generic — but seed them directly to simulate
+      // pre-existing garbage from before the ingest-time stop-list existed.
+      people: [{ name: 'Alice', skills: [] }],
+      topics: [], projects: [], decisions: [], action_items: [], risks: [], next_steps: [],
+    }
+    ingestExtraction(store, extraction, meta)
+
+    // Inject legacy garbage person nodes with edges to the meeting.
+    const meetingId = store.findNodes({ type: 'meeting' })[0].id
+    for (const label of ['All attendees', 'Team', 'el equipo']) {
+      const gid = store.upsertNode({ type: 'person', label })
+      store.upsertEdge({ sourceId: gid, targetId: meetingId, type: 'ATTENDED' })
+    }
+
+    expect(store.findNodes({ type: 'person' })).toHaveLength(4) // Alice + 3 garbage
+
+    const res = pruneGenericNodes(store)
+    expect(res.removedNodes).toBe(3)
+    expect(res.removedEdges).toBe(3)
+
+    const remaining = store.findNodes({ type: 'person' })
+    expect(remaining).toHaveLength(1)
+    expect(remaining[0].label).toBe('Alice')
+    // No dangling edges reference a removed node.
+    const edges = store.db.queryAll<{ source_id: string; target_id: string }>(
+      'SELECT source_id, target_id FROM graph_edges'
+    )
+    const nodeIds = new Set(store.db.queryAll<{ id: string }>('SELECT id FROM graph_nodes').map((r) => r.id))
+    expect(edges.every((e) => nodeIds.has(e.source_id) && nodeIds.has(e.target_id))).toBe(true)
+
+    // Idempotent: a second pass removes nothing.
+    const res2 = pruneGenericNodes(store)
+    expect(res2.removedNodes).toBe(0)
+    expect(res2.removedEdges).toBe(0)
+  })
+})
+
+describe('Context Graph: ingest-time stop-list', () => {
+  const paths: string[] = []
+  afterEach(() => {
+    for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
+    paths.length = 0
+  })
+
+  it('skips generic collective/role people (EN + ES) at ingest', async () => {
+    const { store, dbPath } = await makeStore('ingest-skip')
+    paths.push(dbPath)
+
+    const extraction: ExtractionResult = {
+      people: [
+        { name: 'Mario', skills: [] },
+        { name: 'All attendees', skills: [] },
+        { name: 'Team', skills: [] },
+        { name: 'todos', skills: [] },
+        { name: 'Gerente de proyecto', skills: [] },
+      ],
+      topics: [],
+      projects: [],
+      decisions: [],
+      action_items: [{ text: 'Ship it', owner: 'All team members' }],
+      risks: [],
+      next_steps: [],
+    }
+    ingestExtraction(store, extraction, meta)
+
+    const people = store.findNodes({ type: 'person' })
+    expect(people).toHaveLength(1)
+    expect(people[0].label).toBe('Mario')
+
+    // The action item still exists, but has no OWNS edge (generic owner dropped).
+    expect(store.findNodes({ type: 'action_item' })).toHaveLength(1)
+    const ownsEdges = store.db.queryAll<{ id: string }>(
+      "SELECT id FROM graph_edges WHERE type = 'OWNS'"
+    )
+    expect(ownsEdges).toHaveLength(0)
   })
 })

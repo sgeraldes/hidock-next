@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { ContextGraph } from '../ContextGraph'
 
@@ -52,6 +52,7 @@ function mockAPI(overrides: Record<string, any> = {}) {
       getNeighborhood: vi.fn().mockResolvedValue({ success: true, data: neighborhood }),
       search: vi.fn().mockResolvedValue({ success: true, data: [marioNode] }),
       rekey: vi.fn().mockResolvedValue({ success: true, data: { rekeyed: 1, merged: 0, skipped: 0 } }),
+      prune: vi.fn().mockResolvedValue({ success: true, data: { removedNodes: 0, removedEdges: 0 } }),
       ...overrides.contextGraph,
     },
     graph: {
@@ -83,7 +84,12 @@ describe('ContextGraph page', () => {
       </MemoryRouter>
     )
     expect(await screen.findByRole('heading', { name: /context graph/i })).toBeInTheDocument()
-    await waitFor(() => expect(screen.getByText('2')).toBeInTheDocument()) // node count
+    // Node count "2" renders in the stats strip (scoped — the overview hint also
+    // shows the node count, so a bare getByText('2') would be ambiguous).
+    await waitFor(() => {
+      const nodesStat = screen.getByText('nodes').closest('span') as HTMLElement
+      expect(within(nodesStat).getByText('2')).toBeInTheDocument()
+    })
   })
 
   it('clicking a node focuses its neighborhood and opens a detail panel with click-through', async () => {

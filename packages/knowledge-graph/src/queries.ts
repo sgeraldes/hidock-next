@@ -1,4 +1,14 @@
 import type { KnowledgeGraphStore, GraphNode } from './graph-store.js'
+import { isGenericEntityLabel } from './stop-list.js'
+
+/**
+ * Default node cap for the OVERVIEW render. The graph can hold tens of thousands
+ * of nodes; rendering them all is an unreadable hairball. The overview shows only
+ * the top-N highest-degree hubs (see {@link fullGraph}) — a digestible entry
+ * point. Deeper exploration happens via search + click-to-focus, or an explicit
+ * "show more" that raises this cap.
+ */
+export const DEFAULT_OVERVIEW_NODE_LIMIT = 150
 
 export interface AttendeeResult {
   person: string
@@ -82,6 +92,43 @@ export function fullGraph(store: KnowledgeGraphStore, limit?: number): SubGraph 
     .filter((e) => kept.has(e.source_id) && kept.has(e.target_id))
 
   return { center: undefined, nodes, edges }
+}
+
+export interface PruneResult {
+  removedNodes: number
+  removedEdges: number
+}
+
+/**
+ * One-time maintenance: delete already-ingested "garbage" person nodes whose
+ * label is a generic collective/role word (see {@link isGenericEntityLabel}),
+ * along with every edge touching them. Complements the ingest-time stop-list,
+ * cleaning the live graph without a full re-ingest.
+ *
+ * Conservative (person nodes only, curated multilingual predicate) and
+ * IDEMPOTENT — a second run removes nothing.
+ */
+export function pruneGenericNodes(store: KnowledgeGraphStore): PruneResult {
+  const persons = store.db.queryAll<{ id: string; label: string }>(
+    "SELECT id, label FROM graph_nodes WHERE type = 'person'"
+  )
+
+  let removedNodes = 0
+  let removedEdges = 0
+
+  for (const p of persons) {
+    if (!isGenericEntityLabel(p.label)) continue
+    const counted = store.db.queryOne<{ c: number }>(
+      'SELECT COUNT(*) AS c FROM graph_edges WHERE source_id = ? OR target_id = ?',
+      [p.id, p.id]
+    )
+    removedEdges += counted?.c ?? 0
+    store.db.run('DELETE FROM graph_edges WHERE source_id = ? OR target_id = ?', [p.id, p.id])
+    store.db.run('DELETE FROM graph_nodes WHERE id = ?', [p.id])
+    removedNodes++
+  }
+
+  return { removedNodes, removedEdges }
 }
 
 /**

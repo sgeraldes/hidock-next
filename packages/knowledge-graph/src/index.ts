@@ -17,6 +17,8 @@ export type {
 export { ingestExtraction } from './ingest.js'
 export type { PersonResolver, IngestOptions } from './ingest.js'
 
+export { isGenericEntityLabel, normalizeGenericLabel } from './stop-list.js'
+
 export {
   topAttendeesForProjectOrTopic,
   topSkillDemonstrators,
@@ -24,6 +26,8 @@ export {
   meetingSummaryGraph,
   fullGraph,
   neighborhood,
+  pruneGenericNodes,
+  DEFAULT_OVERVIEW_NODE_LIMIT,
 } from './queries.js'
 export type {
   AttendeeResult,
@@ -33,4 +37,5 @@ export type {
   GraphEdgeLite,
   GraphNodeWithDegree,
   SubGraph,
+  PruneResult,
 } from './queries.js'
