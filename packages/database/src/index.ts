@@ -6,5 +6,11 @@
  * migration runner, 4-phase boot, and query helpers.
  */
 
-export { DatabaseEngine, getTableColumns, stripLeadingSqlComments } from './engine.js'
+export {
+  DatabaseEngine,
+  getTableColumns,
+  stripLeadingSqlComments,
+  parseDestructiveStatement,
+  MassDeleteError,
+} from './engine.js'
 export type { DatabaseEngineConfig, SqlJsDatabase } from './engine.js'

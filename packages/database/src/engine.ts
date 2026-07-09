@@ -16,10 +16,38 @@
  */
 
 import type { Database as SqlJsDatabase } from 'sql.js'
-import { existsSync, readFileSync, writeFileSync, renameSync } from 'fs'
+import { existsSync, readFileSync, writeFileSync, renameSync, copyFileSync, readdirSync, rmSync } from 'fs'
 import { writeFile, rename, unlink } from 'fs/promises'
+import { dirname, basename, join } from 'path'
 
 export type { SqlJsDatabase }
+
+/**
+ * Thrown by the mass-delete tripwire when a single DELETE/DROP would remove more
+ * than {@link MASS_DELETE_FRACTION} of a protected table's rows (table must hold
+ * more than {@link MASS_DELETE_MIN_ROWS}). Wrap the intentional bulk operation in
+ * {@link DatabaseEngine.runWithMassDeleteAllowed} to bypass.
+ */
+export class MassDeleteError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'MassDeleteError'
+  }
+}
+
+/** A protected table is only guarded once it holds more than this many rows. */
+const MASS_DELETE_MIN_ROWS = 20
+/** Refuse a single statement that would remove more than this fraction of rows. */
+const MASS_DELETE_FRACTION = 0.5
+
+/** Parse a leading DELETE/DROP TABLE statement's target table (null otherwise). */
+export function parseDestructiveStatement(sql: string): { kind: 'delete' | 'drop'; table: string } | null {
+  const del = /^\s*DELETE\s+FROM\s+["'`[]?([A-Za-z_][A-Za-z0-9_]*)["'`\]]?/i.exec(sql)
+  if (del) return { kind: 'delete', table: del[1] }
+  const drop = /^\s*DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?["'`[]?([A-Za-z_][A-Za-z0-9_]*)["'`\]]?/i.exec(sql)
+  if (drop) return { kind: 'drop', table: drop[1] }
+  return null
+}
 
 /**
  * Minimal shape of the sql.js module returned by initSqlJs().
@@ -65,6 +93,21 @@ export interface DatabaseEngineConfig {
    * bulk download). Default 5000.
    */
   saveMaxWaitMs?: number
+  /**
+   * Tables guarded by the mass-delete tripwire. A DELETE/DROP that would remove
+   * >50% of one of these tables' rows (when it holds >20 rows) is refused with a
+   * {@link MassDeleteError} unless wrapped in runWithMassDeleteAllowed(). Guards
+   * against a broken join/reconciler silently wiping a whole entity table. Empty
+   * (default) disables the tripwire — fully backward-compatible.
+   */
+  protectedTables?: string[]
+  /**
+   * When set, initialize() copies the on-disk database to
+   * `<dbPath>.bak-<YYYY-MM-DD>` before any migration/repair runs, keeping the
+   * newest `keep` daily backups. A cheap file copy (no export) — the safety net
+   * for a corrupting migration. Omit to disable.
+   */
+  backupOnBoot?: { keep: number }
 }
 
 /** Column names for a table (empty if the table does not exist). */
@@ -122,9 +165,123 @@ export class DatabaseEngine {
   private saveSeq = 0
   private committedSeq = 0
 
+  // --- Mass-delete tripwire state ---
+  private readonly protectedTables: Set<string>
+  // When true, the tripwire is bypassed (an intentional bulk operation).
+  private massDeleteAllowed = false
+
   constructor(private readonly config: DatabaseEngineConfig) {
     this.saveDebounceMs = config.saveDebounceMs ?? 1000
     this.saveMaxWaitMs = config.saveMaxWaitMs ?? 5000
+    this.protectedTables = new Set((config.protectedTables ?? []).map((t) => t.toLowerCase()))
+  }
+
+  /**
+   * Run `fn` with the mass-delete tripwire suspended — for legitimate bulk
+   * operations (migrations, explicit purges). Re-entrant and restores the prior
+   * state on exit, even if `fn` throws.
+   */
+  runWithMassDeleteAllowed<T>(fn: () => T): T {
+    const prev = this.massDeleteAllowed
+    this.massDeleteAllowed = true
+    try {
+      return fn()
+    } finally {
+      this.massDeleteAllowed = prev
+    }
+  }
+
+  /**
+   * Tripwire: before executing a DELETE/DROP against a protected table, measure
+   * how many rows it would remove and refuse the catastrophic case. Runs on every
+   * run()/runNoSave() (including inside a transaction, so the throw triggers the
+   * enclosing ROLLBACK). No-op when no protected tables are configured.
+   */
+  private guardDestructive(sql: string, params: unknown[]): void {
+    if (this.massDeleteAllowed || this.protectedTables.size === 0) return
+    const parsed = parseDestructiveStatement(sql)
+    if (!parsed || !this.protectedTables.has(parsed.table.toLowerCase())) return
+
+    const database = this.getDatabase()
+    const countRows = (countSql: string, countParams: unknown[] = []): number => {
+      const stmt = database.prepare(countSql)
+      try {
+        stmt.bind(countParams as never)
+        stmt.step()
+        return Number((stmt.getAsObject() as { c?: number }).c ?? 0)
+      } finally {
+        stmt.free()
+      }
+    }
+
+    let total: number
+    try {
+      total = countRows(`SELECT COUNT(*) AS c FROM ${parsed.table}`)
+    } catch {
+      return // table unreadable/absent — let the statement itself surface the error
+    }
+    if (total <= MASS_DELETE_MIN_ROWS) return // nothing precious to protect yet
+
+    let would = total // DROP removes everything; DELETE measured below
+    if (parsed.kind === 'delete') {
+      // Swap the leading `DELETE FROM <table>` for a COUNT, preserving the WHERE
+      // clause and its bound params, to learn the blast radius without executing.
+      const countSql = sql.replace(
+        /^\s*DELETE\s+FROM\s+["'`[]?[A-Za-z_][A-Za-z0-9_]*["'`\]]?/i,
+        `SELECT COUNT(*) AS c FROM ${parsed.table}`
+      )
+      try {
+        would = countRows(countSql, params)
+      } catch {
+        would = total // can't measure the predicate — treat as full-table (conservative)
+      }
+    }
+
+    if (would > total * MASS_DELETE_FRACTION) {
+      const pct = Math.round(MASS_DELETE_FRACTION * 100)
+      const msg =
+        `[Database] MASS-DELETE TRIPWIRE: refused ${parsed.kind.toUpperCase()} on protected table ` +
+        `"${parsed.table}" — would remove ${would}/${total} rows (>${pct}%). ` +
+        `Wrap the intended bulk operation in runWithMassDeleteAllowed() to override.`
+      console.error(msg)
+      console.error(new Error('mass-delete tripwire — call site').stack)
+      throw new MassDeleteError(msg)
+    }
+  }
+
+  /**
+   * Copy the current on-disk database to a dated backup before any migration or
+   * repair mutates it, retaining the newest `keep` daily backups. A plain file
+   * copy (no export) — never blocks boot on failure.
+   */
+  private backupOnBoot(): void {
+    const cfg = this.config.backupOnBoot
+    if (!cfg || cfg.keep <= 0) return
+    try {
+      if (!existsSync(this.dbPath)) return // fresh database — nothing to back up
+      const dir = dirname(this.dbPath)
+      const base = basename(this.dbPath)
+      const prefix = `${base}.bak-`
+      const day = new Date().toISOString().slice(0, 10)
+      const bak = join(dir, `${prefix}${day}`)
+      if (!existsSync(bak)) {
+        copyFileSync(this.dbPath, bak)
+        console.log(`[Database] Boot backup written: ${bak}`)
+      }
+      // Retain the newest `keep`; dated suffix sorts chronologically by name.
+      const existing = readdirSync(dir)
+        .filter((f) => f.startsWith(prefix))
+        .sort()
+      for (const stale of existing.slice(0, Math.max(0, existing.length - cfg.keep))) {
+        try {
+          rmSync(join(dir, stale), { force: true })
+        } catch {
+          /* best-effort prune */
+        }
+      }
+    } catch (e) {
+      console.warn('[Database] Boot backup failed (non-fatal):', (e as Error).message)
+    }
   }
 
   /**
@@ -134,6 +291,9 @@ export class DatabaseEngine {
    */
   async initialize(): Promise<void> {
     this.dbPath = this.config.dbPathProvider()
+
+    // Safety net: snapshot the existing file BEFORE any migration/repair touches it.
+    this.backupOnBoot()
 
     try {
       const SQL = await this.config.initSqlJs()
@@ -349,6 +509,7 @@ export class DatabaseEngine {
   }
 
   run(sql: string, params: unknown[] = []): void {
+    this.guardDestructive(sql, params)
     this.getDatabase().run(sql, params as never)
     // Persisting (db.export) mid-transaction ends the active transaction in
     // sql.js, which then breaks the enclosing COMMIT/ROLLBACK. Inside a
@@ -358,6 +519,7 @@ export class DatabaseEngine {
 
   /** run() variant that does not persist — for use inside a transaction. */
   runNoSave(sql: string, params: unknown[] = []): void {
+    this.guardDestructive(sql, params)
     this.getDatabase().run(sql, params as never)
   }
 

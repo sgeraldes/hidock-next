@@ -115,6 +115,7 @@ import {
 } from './database'
 import { BrowserWindow } from 'electron'
 import { getVectorStore } from './vector-store'
+import { ensureKnowledgeCaptureForRecording } from './knowledge-capture-backfill'
 
 let mainWindow: BrowserWindow | null = null
 let isProcessing = false
@@ -1475,6 +1476,15 @@ Meeting ${i + 1}: "${m.subject}"
   }
 
   insertTranscript(transcript)
+  // Populate the Knowledge Library entity (knowledge_captures) for this recording.
+  // This is the canonical capture creator — without it the captures table stays
+  // empty on a device-first library. Idempotent + non-fatal; it also sets
+  // recordings.migrated_to_capture_id so updateKnowledgeCaptureTitle() below works.
+  try {
+    ensureKnowledgeCaptureForRecording(recordingId)
+  } catch (e) {
+    console.warn('[KnowledgeCapture] ensure failed (non-fatal):', e)
+  }
   // AI-13: Use standard enum value 'complete' (not 'transcribed')
   updateRecordingTranscriptionStatus(recordingId, 'complete')
   // Durability: a completed transcript is an expensive artifact (API cost + time).

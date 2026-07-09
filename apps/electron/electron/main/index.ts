@@ -330,6 +330,15 @@ app.whenReady().then(async () => {
       .catch((e) => console.error('[OrgReconciler] error:', e))
   }, 8000)
 
+  // Self-heal the Knowledge Library: create a knowledge_capture for any transcript
+  // that lacks one. Cheap, DB-only, idempotent — recovers a library that predates
+  // capture-on-transcription wiring (or was emptied by an earlier bug).
+  setTimeout(() => {
+    import('./services/knowledge-capture-backfill')
+      .then(({ backfillKnowledgeCaptures }) => backfillKnowledgeCaptures())
+      .catch((e) => console.error('[KnowledgeCaptureBackfill] error:', e))
+  }, 12000)
+
   // Self-heal transcripts whose Gemini analysis failed (or was never run on an
   // older build) by re-analysing the stored full_text. Bounded per run to keep
   // API cost predictable. Deferred so startup stays fast.

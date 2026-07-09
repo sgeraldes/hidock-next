@@ -2031,7 +2031,21 @@ const engine = new DatabaseEngine({
   schema: SCHEMA,
   migrations: MIGRATIONS,
   repairPhase,
+  // Safety net (P0 knowledge_captures loss): refuse any single statement that
+  // would wipe >50% of these entity tables (when >20 rows), and keep the last
+  // 3 daily on-boot backups before migrations run. Intentional bulk purges use
+  // runWithMassDeleteAllowed().
+  protectedTables: ['knowledge_captures', 'transcripts', 'recordings', 'meetings', 'contacts'],
+  backupOnBoot: { keep: 3 },
 })
+
+/**
+ * Run `fn` with the mass-delete tripwire suspended — for legitimate bulk deletes
+ * (migrations, explicit user-confirmed purges). Restores the guard afterwards.
+ */
+export function runWithMassDeleteAllowed<T>(fn: () => T): T {
+  return engine.runWithMassDeleteAllowed(fn)
+}
 
 /**
  * Safe database initialization. Delegates the 4-phase boot sequence
