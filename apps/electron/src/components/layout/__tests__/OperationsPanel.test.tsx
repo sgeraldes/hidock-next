@@ -74,12 +74,28 @@ function setupDefaultMocks() {
   vi.mocked(useTranscriptionPaused).mockReturnValue(false)
 }
 
+/** Seed one pending item + optional recording, and open the detail overlay so
+ *  its per-item + queue controls (which no longer live in the sidebar) render. */
+function setupOverlayWithPending(recording?: Record<string, unknown>) {
+  vi.mocked(useTranscriptionStats).mockReturnValue({
+    total: 1, completed: 0, failed: 0, processing: 0, pending: 1, aggregateProgress: 0
+  })
+  const queue = new Map<string, unknown>([
+    ['t1', { id: 't1', recordingId: 'rec-1', filename: 'REC_1.wav', status: 'pending', progress: 0, retryCount: 0, attempts: 0, priority: 0 }]
+  ])
+  vi.mocked(useTranscriptionStore).mockImplementation((selector: any) => {
+    const state = makeTranscriptionState(queue)
+    return typeof selector === 'function' ? selector(state) : state
+  })
+  if (recording) vi.mocked(useUnifiedRecordings).mockReturnValue([recording] as any)
+  useUIStore.setState({ operationsOverlayOpen: true })
+}
+
 describe('OperationsPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     setupDefaultMocks()
-    // Reset dock chrome to defaults (real UI store).
-    useUIStore.setState({ operationsDockCollapsed: false, operationsOverlayOpen: false })
+    useUIStore.setState({ operationsOverlayOpen: false })
   })
 
   it('renders null when no operations are active', () => {
@@ -87,112 +103,63 @@ describe('OperationsPanel', () => {
     expect(container.firstChild).toBeNull()
   })
 
-  it('renders download section when downloads are active', () => {
+  it('shows a compact download badge (not a list) when downloads are active', () => {
     const downloadQueue = new Map([['dl-1', { filename: 'REC0001.WAV', progress: 50 }]])
     vi.mocked(useDownloadQueue).mockReturnValue(downloadQueue as any)
-    vi.mocked(useAppStore).mockImplementation((selector: any) => {
-      const state = { downloadQueue, deviceSyncProgress: null, deviceSyncEta: null }
-      return typeof selector === 'function' ? selector(state) : state
-    })
-
     render(<OperationsPanel sidebarOpen={true} />)
-    expect(screen.getByText(/Downloads/)).toBeInTheDocument()
+    // Compact badge: a single "N downloading" summary that opens the overlay.
+    expect(screen.getByText(/downloading/i)).toBeInTheDocument()
+    expect(screen.getByLabelText('Open operations detail')).toBeInTheDocument()
   })
 
-  it('renders transcription section when transcriptions are pending', () => {
+  it('shows a compact "N transcribing" badge when transcriptions are active', () => {
     vi.mocked(useTranscriptionStats).mockReturnValue({
       total: 2, completed: 0, failed: 0, processing: 1, pending: 1, aggregateProgress: 25
     })
-
     render(<OperationsPanel sidebarOpen={true} />)
-    expect(screen.getByText(/Transcriptions/)).toBeInTheDocument()
+    expect(screen.getByText(/transcribing/i)).toBeInTheDocument()
+    // The full list does NOT render in the sidebar — only the badge.
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
-  it('hides cancel button when sidebar is collapsed', () => {
+  it('renders a tiny badge (no list) when the sidebar is collapsed', () => {
     const downloadQueue = new Map([['dl-1', { filename: 'REC0001.WAV', progress: 50 }]])
     vi.mocked(useDownloadQueue).mockReturnValue(downloadQueue as any)
-    vi.mocked(useAppStore).mockImplementation((selector: any) => {
-      const state = { downloadQueue, deviceSyncProgress: null, deviceSyncEta: null }
-      return typeof selector === 'function' ? selector(state) : state
-    })
-
     render(<OperationsPanel sidebarOpen={false} />)
     expect(screen.queryByText(/Cancel all downloads/)).not.toBeInTheDocument()
+    // The collapsed rail still exposes an open-detail affordance.
+    expect(screen.getByLabelText(/Operations:/)).toBeInTheDocument()
   })
 
-  describe('dock collapse/expand', () => {
-    function setupTranscriptions() {
-      vi.mocked(useTranscriptionStats).mockReturnValue({
-        total: 1, completed: 0, failed: 0, processing: 0, pending: 1, aggregateProgress: 0
-      })
-      const queue = new Map<string, unknown>([
-        ['t1', { id: 't1', recordingId: 'rec-1', filename: 'REC_1.wav', status: 'pending', progress: 0, retryCount: 0, attempts: 0, priority: 0 }]
-      ])
-      vi.mocked(useTranscriptionStore).mockImplementation((selector: any) => {
-        const state = makeTranscriptionState(queue)
-        return typeof selector === 'function' ? selector(state) : state
-      })
-    }
+  it('opens the detail overlay from the compact badge', () => {
+    setupOverlayWithPending()
+    useUIStore.setState({ operationsOverlayOpen: false }) // start closed
+    render(<OperationsPanel sidebarOpen={true} />)
 
-    it('collapses the dock to a compact chip and persists the choice', () => {
-      setupTranscriptions()
-      const { rerender } = render(<OperationsPanel sidebarOpen={true} />)
-
-      // Full dock shows the collapse control.
-      const collapseBtn = screen.getByLabelText('Collapse operations dock')
-      fireEvent.click(collapseBtn)
-
-      // Persisted to the UI store (and localStorage via persist middleware).
-      expect(useUIStore.getState().operationsDockCollapsed).toBe(true)
-
-      rerender(<OperationsPanel sidebarOpen={true} />)
-      // Now shows the compact chip with an expand control.
-      expect(screen.getByLabelText('Expand operations dock')).toBeInTheDocument()
-    })
-
-    it('opens the detail overlay from the dock header', () => {
-      setupTranscriptions()
-      render(<OperationsPanel sidebarOpen={true} />)
-
-      fireEvent.click(screen.getByLabelText('Open operations detail'))
-      expect(useUIStore.getState().operationsOverlayOpen).toBe(true)
-      expect(screen.getByRole('dialog', { name: /operations detail/i })).toBeInTheDocument()
-    })
+    fireEvent.click(screen.getByLabelText('Open operations detail'))
+    expect(useUIStore.getState().operationsOverlayOpen).toBe(true)
+    expect(screen.getByRole('dialog', { name: /operations detail/i })).toBeInTheDocument()
   })
 
-  describe('per-item affordances', () => {
-    function setupOnePending(recording: Record<string, unknown>) {
-      vi.mocked(useTranscriptionStats).mockReturnValue({
-        total: 1, completed: 0, failed: 0, processing: 0, pending: 1, aggregateProgress: 0
-      })
-      const queue = new Map<string, unknown>([
-        ['t1', { id: 't1', recordingId: 'rec-1', filename: 'REC_1.wav', status: 'pending', progress: 0, retryCount: 0, attempts: 0, priority: 0 }]
-      ])
-      vi.mocked(useTranscriptionStore).mockImplementation((selector: any) => {
-        const state = makeTranscriptionState(queue)
-        return typeof selector === 'function' ? selector(state) : state
-      })
-      vi.mocked(useUnifiedRecordings).mockReturnValue([recording] as any)
-    }
-
+  describe('overlay per-item affordances', () => {
     it('go-to navigates to the linked meeting when the recording has a meetingId', () => {
-      setupOnePending({ id: 'rec-1', location: 'local-only', meetingId: 'm-99' })
+      setupOverlayWithPending({ id: 'rec-1', location: 'local-only', meetingId: 'm-99' })
       render(<OperationsPanel sidebarOpen={true} />)
 
-      fireEvent.click(screen.getByLabelText('Go to source'))
+      fireEvent.click(screen.getAllByLabelText('Go to source')[0])
       expect(mockNavigate).toHaveBeenCalledWith('/meeting/m-99')
     })
 
     it('go-to falls back to the library when there is no linked meeting', () => {
-      setupOnePending({ id: 'rec-1', location: 'device-only' })
+      setupOverlayWithPending({ id: 'rec-1', location: 'device-only' })
       render(<OperationsPanel sidebarOpen={true} />)
 
-      fireEvent.click(screen.getByLabelText('Go to source'))
+      fireEvent.click(screen.getAllByLabelText('Go to source')[0])
       expect(mockNavigate).toHaveBeenCalledWith('/library', { state: { selectedId: 'rec-1' } })
     })
 
     it('prioritize invokes the store action for the item', () => {
-      setupOnePending({ id: 'rec-1', location: 'device-only' })
+      setupOverlayWithPending({ id: 'rec-1', location: 'device-only' })
       render(<OperationsPanel sidebarOpen={true} />)
 
       fireEvent.click(screen.getByLabelText('Prioritize'))
@@ -200,8 +167,8 @@ describe('OperationsPanel', () => {
     })
   })
 
-  describe('queue pause/resume control', () => {
-    function setupActiveQueue() {
+  describe('overlay queue pause/resume control', () => {
+    function setupActiveOverlay() {
       vi.mocked(useTranscriptionStats).mockReturnValue({
         total: 2, completed: 0, failed: 0, processing: 1, pending: 1, aggregateProgress: 25
       })
@@ -212,10 +179,11 @@ describe('OperationsPanel', () => {
         const state = makeTranscriptionState(queue)
         return typeof selector === 'function' ? selector(state) : state
       })
+      useUIStore.setState({ operationsOverlayOpen: true })
     }
 
-    it('shows an enabled Pause control (no "coming soon" placeholder) and calls pauseQueue', () => {
-      setupActiveQueue()
+    it('shows an enabled Pause control and calls pauseQueue', () => {
+      setupActiveOverlay()
       render(<OperationsPanel sidebarOpen={true} />)
 
       const pauseBtn = screen.getByLabelText('Pause transcription queue')
@@ -225,21 +193,22 @@ describe('OperationsPanel', () => {
     })
 
     it('flips to a Resume control and shows a Paused badge when paused', () => {
-      setupActiveQueue()
+      setupActiveOverlay()
       vi.mocked(useTranscriptionPaused).mockReturnValue(true)
       render(<OperationsPanel sidebarOpen={true} />)
 
       const resumeBtn = screen.getByLabelText('Resume transcription queue')
       expect(resumeBtn).not.toBeDisabled()
-      expect(screen.getByText(/Paused/)).toBeInTheDocument()
+      // "Paused" shows in both the sidebar badge and the overlay header.
+      expect(screen.getAllByText(/Paused/).length).toBeGreaterThan(0)
 
       fireEvent.click(resumeBtn)
       expect(mockResumeQueue).toHaveBeenCalled()
       expect(mockPauseQueue).not.toHaveBeenCalled()
     })
 
-    it('never renders the old disabled "coming soon" pause placeholder', () => {
-      setupActiveQueue()
+    it('never renders a disabled "coming soon" pause placeholder', () => {
+      setupActiveOverlay()
       render(<OperationsPanel sidebarOpen={true} />)
 
       expect(screen.queryByText(/coming soon/i)).not.toBeInTheDocument()
