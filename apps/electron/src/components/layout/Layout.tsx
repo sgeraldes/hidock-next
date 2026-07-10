@@ -43,6 +43,7 @@ import { OperationController } from '@/components/OperationController'
 import { OperationsPanel } from '@/components/layout/OperationsPanel'
 import { ActivityLogPanel } from '@/components/layout/ActivityLogPanel'
 import { useUIStore } from '@/store/ui/useUIStore'
+import { useActionablesPendingCount, useActionablesStore } from '@/store'
 
 interface LayoutProps {
   children: ReactNode
@@ -102,7 +103,9 @@ const navCountAriaLabel: Record<string, (n: number) => string> = {
 export function NavCountBadge({ href, count, collapsed, active }: { href: string; count: number; collapsed: boolean; active: boolean }) {
   if (count <= 0) return null
   const label = (navCountAriaLabel[href] ?? ((n: number) => `${n} items`))(count)
-  const display = count > 99 ? '99+' : String(count)
+  // Exact count (the badge is a rounded pill that widens for more digits); only
+  // cap at an absurd width to avoid breaking the layout.
+  const display = count > 9999 ? '9999+' : String(count)
   if (collapsed) {
     return (
       <span
@@ -150,21 +153,12 @@ export function Layout({ children }: LayoutProps) {
   })
   // Sync: device-only recordings not yet downloaded (useAppStore.unifiedRecordings).
   const unsyncedCount = useAppStore((s) => s.unifiedRecordings.filter((r) => r.location === 'device-only').length)
-  // Actionables have no renderer store (page holds them in component state), so we
-  // read the count from the EXISTING actionables IPC method — no new channel added.
-  const [pendingActionables, setPendingActionables] = useState(0)
+  // Actionables: exact pending count from the shared store (single source of truth
+  // for both this badge and the Actionables page), refreshed on navigation so the
+  // badge stays live after bulk triage on the page.
+  const pendingActionables = useActionablesPendingCount()
   useEffect(() => {
-    let cancelled = false
-    const api = window.electronAPI?.actionables
-    if (!api?.getAll) return
-    api.getAll()
-      .then((items) => {
-        if (cancelled || !Array.isArray(items)) return
-        setPendingActionables(items.filter((a: { status?: string }) => a.status === 'pending').length)
-      })
-      .catch(() => {})
-    return () => { cancelled = true }
-    // Re-read when navigating (cheap single call; keeps the badge fresh after triage).
+    useActionablesStore.getState().loadActionables()
   }, [location.pathname])
 
   const navCounts: Record<string, number> = {
