@@ -7,7 +7,87 @@ docs. Companions: ROADMAP.md (audit ledger + coverage map), INTELLIGENCE.md
 (process retrospective), OVERNIGHT_PLAN.md (session issue log), GOAL.md
 (mission + method).*
 
-## 1. IN FLIGHT RIGHT NOW
+## 0. CURRENT STATE — 2026-07-10 ~03:00 (READ THIS FIRST, supersedes below)
+
+**HEAD `53204b84`, schema v38, all pushed. better-sqlite3/WAL engine (NOT
+sql.js — migrated after the 2GB-DB P0). Suite ~2,511. Backlog ~960 draining.**
+
+### DEV/ABI GOTCHA (critical): the on-disk `better-sqlite3` binary is the
+ELECTRON ABI (the running app holds it). So:
+- Run vitest via: `cd apps/electron && ELECTRON_RUN_AS_NODE=1 ./node_modules/electron/dist/electron.exe node_modules/vitest/vitest.mjs run <files>`. Plain `npm run test:run`/`npx vitest` under system node fails with ~71 native-ABI errors — NOT real failures.
+- After any `npm install` touching better-sqlite3: `npx @electron/rebuild -f -w better-sqlite3` for the app to boot; check-native.mjs swaps back to Node ABI for tests.
+- typecheck (`npm run typecheck`) is safe under system node.
+
+### AGENTS IN FLIGHT (based on 53204b84 → they seed from stale `main` 89cb03ac and MUST ff to the branch tip; VERIFY base in their report; CHERRY-PICK their commit onto current HEAD since HEAD advances, don't ff-merge):
+- **library-redesign** (aa34bf2a8007efc85): Knowledge Library redesign — AI Assistant→dockable/pinnable overlay (2-pane default), multi-format rows (image=dimensions not duration), simplified filters + source-type control + working duration filter/sort, de-dup the in-library vs global search, RESPONSIVENESS. DATA FIXES: backfill `recordings.duration_seconds` (NULL for 1903/1911 — that's why duration sort/filter return nothing), honest empty-state for Quality (900 captures all 'unrated'). Owns v39 if needed. Composes with delete for the cleanup flow.
+- **wer-hybrid-spike** (aced5f54d46abb8af): RESEARCH — WER comparison Gemini-only vs hybrid (local VAD/turn chunks→Gemini) vs full-local WhisperX vs top Spanish model (Canary-Qwen 2.5B / ARK-ASR-3B). USER CARES: Gemini Spanish WER is reportedly MUCH better than WhisperX, so we do NOT just switch to local — test the hybrid. Heavy GPU + web-leaderboard research; produces docs/experiments/wer-hybrid-spike.md + side-by-side transcripts for the user to judge. **USER ASKED: send them the WER results when in.**
+- **responsive-layout** (a657977c775c2993b): fix wide-window dead-gutters on NON-Library pages (Today caps at max-w-3xl=768px etc.; go multi-column/wider-cap). Does NOT touch Library (redesign owns it).
+
+### QUEUED (dispatch after library-redesign frees Library/database files):
+- **Merge "Correct" mode + transcript entity-linking**: distinguish ALIAS
+  (valid alt name) from CORRECTION (ASR error like Noman→Nouman → find-replace
+  the wrong form across transcript text, don't keep as alias); + mentions of
+  known people in transcript BODY become clickable EntityMentions. Shares
+  database.ts + TranscriptViewer — sequence after redesign.
+- **Speaker-intelligence Wave C**: unlink cascade (provenance reset + dirty
+  rebuild), recording SPLIT tool (one .wav → N logical segments for the
+  meeting-switch-mid-recording case), re-attribution post-process (LLM
+  cross-checks candidate parallel meetings after summary, auto-place best or
+  make ad-hoc). Reversible/journaled.
+- **Wave D (GATED on explicit user OK — destructive):** repair Memo↔Luis
+  mis-identity (unmerge), + bulk re-attribution re-run over existing polluted
+  data (rewrites participant lists — DB-checkpoint first).
+
+### NEW BUGS FOUND (not yet fixed):
+- **Explore global search FAILED** (2026-07-10 screenshot): "Search failed /
+  Global search failed", 0 results. The whole Explore/global search is broken
+  — investigate the search IPC/handler. HIGH: it's the app's global search.
+- Quality never auto-classified (900 unrated) → no value/personal tags.
+- quality-assessment.ts apparently never wrote ratings — root-cause.
+- Pre-existing flaky `hidock-device.test.ts` EnvironmentTeardownError under
+  full-suite parallel load (passes in isolation) — quiet its teardown logging.
+- ~135 eslint warnings; apps/electron has NO eslint config.
+
+### PENDING USER DECISIONS (on the ops dashboard as clickable items):
+- ASR pipeline direction — awaits WER spike results (keep Gemini / hybrid /
+  local model). Then: pilot re-transcribe ~20 → maybe full ~1,900 archive.
+- Entra app client ID for M365 (register in DFX5 tenant; personal-account reg
+  is deprecated by Microsoft) → paste to me → I bake into default-app.ts.
+- Rec46→Retro Belcorp confirm; backlog routing; 5 flagged re-transcriptions;
+  delete merged worktree branches.
+
+### SHIPPED THIS SESSION (2026-07-09/10, all pushed):
+Context Graph v2 (lens/strata/provenance/budgets), connector platform
+(host+M365+Slack), transcript triage, better-sqlite3 migration (2GB→673MB),
+single-instance lock, waveform-play fix, ambiguous-name per-recording
+resolution + signal-tiers, **attribution scorer** (all-day bridge 1.00→0.11),
+**reader/meeting UX** (clickable timestamped speakers in MeetingDetail,
+auto-scroll, contrast, past-meeting Join hidden, none→Not-transcribed),
+**self-ID pass** (roll-call self-intros→named speakers, v0.97 tier, Rec47
+yields Santiago de la Colina/Óscar Pereda), **per-turn/split speaker
+correction** (v37 — the Memo-at-0:00 fix), **source deletion cascade** (v38 —
+mark-personal + soft/hard delete of all derived data + audio file).
+
+### ROADMAP additions (in ROADMAP.md §C-NEW): PixelRAG PDF/image visual
+index (next major feature), WhisperLive real-time streaming (add-on), Mac
+on-device ASR, Library redesign, deletion, correct-mode+entity-linking.
+
+### OPS DASHBOARD (private artifact, republished each loop tick):
+https://claude.ai/code/artifact/46d6454c-62ab-4d46-a824-1809a6a29d45 —
+source file: `<scratchpad>/hidock-ops-dashboard.html` (Artifact tool, same
+path re-publishes to same URL). Has clickable waiting-on-you items w/ steps.
+
+### DEV WORKFLOW: worktree agents ALWAYS collide-check — one agent per
+file-set, migrations claimed by number, CHERRY-PICK not ff-merge when HEAD
+advanced, verify agent base commit, remove worktree + its stray `NUL` file
+after merge (`cmd /c 'del /f /q "\\?\...\NUL"'` then `git worktree remove`).
+dogfood skill now has B8 Responsiveness (screenshot ≥3 widths each round).
+The Sean/HiDock email (firmware/mic-array/loaner asks) is DRAFTED + given to
+the user to send — not a code task.
+
+---
+
+## 1. IN FLIGHT RIGHT NOW (STALE — 2026-07-08, see §0 above)
 
 All three audit-fix slices LANDED (2026-07-08 evening, all pushed):
 - 222f6b95 group merge cards (canonical-name picker, swap, topic overlap,
