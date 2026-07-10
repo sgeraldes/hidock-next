@@ -18,10 +18,7 @@ const baseRecording: UnifiedRecording = {
 }
 
 const defaultProps = {
-  recording: baseRecording,
-  isPlaying: false,
-  onPlay: vi.fn(),
-  onStop: vi.fn()
+  recording: baseRecording
 }
 
 describe('SourceRow second line', () => {
@@ -94,5 +91,53 @@ describe('SourceRow never renders blank (title + dated second line always presen
     render(<SourceRow {...defaultProps} recording={rec} />)
     // Title <p> is never empty — the filename is the guaranteed fallback.
     expect(screen.getByText('2026Jul08-190246-Rec49.hda')).toBeInTheDocument()
+  })
+})
+
+describe('SourceRow has no per-row Play/Stop button', () => {
+  it('renders no Play control (playback lives in the mid-panel player)', () => {
+    render(<SourceRow {...defaultProps} onSelectionChange={vi.fn()} />)
+    expect(screen.queryByLabelText(/Play capture|Download to play|File missing/i)).not.toBeInTheDocument()
+  })
+
+  it('renders no Stop control', () => {
+    render(<SourceRow {...defaultProps} onSelectionChange={vi.fn()} />)
+    expect(screen.queryByLabelText(/Stop playback/i)).not.toBeInTheDocument()
+  })
+
+  it('still exposes the overflow "More actions" menu', () => {
+    render(<SourceRow {...defaultProps} onSelectionChange={vi.fn()} />)
+    expect(screen.getByLabelText(/More actions/i)).toBeInTheDocument()
+  })
+})
+
+describe('SourceRow selection checkbox visibility', () => {
+  const getCheckbox = () => screen.getByLabelText(/^Select /i)
+
+  it('renders no checkbox at all when selection is not wired', () => {
+    render(<SourceRow {...defaultProps} />)
+    expect(screen.queryByLabelText(/^Select /i)).not.toBeInTheDocument()
+  })
+
+  it('is hidden by default (revealed only on hover/focus)', () => {
+    render(<SourceRow {...defaultProps} onSelectionChange={vi.fn()} />)
+    const cb = getCheckbox()
+    // opacity-0 keeps it out of sight until the row is hovered/focused.
+    expect(cb.className).toContain('opacity-0')
+    expect(cb.className).toContain('group-hover:opacity-100')
+  })
+
+  it('is visible when this row is selected', () => {
+    render(<SourceRow {...defaultProps} onSelectionChange={vi.fn()} isSelected />)
+    const cb = getCheckbox()
+    expect(cb.className).toContain('opacity-100')
+    expect(cb.className).not.toContain('opacity-0')
+  })
+
+  it('is visible for every row while selection mode is active (anySelected)', () => {
+    render(<SourceRow {...defaultProps} onSelectionChange={vi.fn()} isSelected={false} anySelected />)
+    const cb = getCheckbox()
+    expect(cb.className).toContain('opacity-100')
+    expect(cb.className).not.toContain('opacity-0')
   })
 })

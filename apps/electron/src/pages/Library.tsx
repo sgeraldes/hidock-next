@@ -526,6 +526,22 @@ export function Library() {
   // Memoize the list of IDs for keyboard navigation
   const itemIds = useMemo(() => filteredRecordings.map((r) => r.id), [filteredRecordings])
 
+  // Are all currently-shown rows selected? Drives the header select-all/deselect-all
+  // toggle label + behavior. Only meaningful once selection mode is active.
+  const allShownSelected = useMemo(
+    () => filteredRecordings.length > 0 && filteredRecordings.every((r) => selectedIds.has(r.id)),
+    [filteredRecordings, selectedIds]
+  )
+
+  // Header toggle: select every shown row, or clear when they're all already selected.
+  const toggleSelectAllShown = useCallback(() => {
+    if (allShownSelected) {
+      clearSelection()
+    } else {
+      selectAll(filteredRecordings.map((r) => r.id))
+    }
+  }, [allShownSelected, clearSelection, selectAll, filteredRecordings])
+
   // C-005: Ref to hold the latest openDetail handler, wired to handleRowClick below
   const openDetailRef = useRef<(id: string) => void>(() => {})
 
@@ -1274,9 +1290,23 @@ export function Library() {
             <div className="animate-rise-in">
               {compactView && (
                 <div className="mb-2 flex items-center justify-between px-1">
-                  <span className="text-xs text-muted-foreground">
-                    {filteredRecordings.length} shown
-                  </span>
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs text-muted-foreground">
+                      {filteredRecordings.length} shown
+                    </span>
+                    {/* Select-all / deselect-all appears only once selection mode is
+                        active (≥1 row selected), toggling every currently-shown row. */}
+                    {selectedCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={toggleSelectAllShown}
+                        aria-pressed={allShownSelected}
+                        className="text-xs font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 rounded"
+                      >
+                        {allShownSelected ? 'Deselect all' : 'Select all'}
+                      </button>
+                    )}
+                  </div>
                   <StatusLegend />
                 </div>
               )}
@@ -1321,21 +1351,14 @@ export function Library() {
                           recording={recording}
                           meeting={meeting}
                           transcript={transcripts.get(recording.id)}
-                          isPlaying={currentlyPlayingId === recording.id}
                           isSelected={selectedIds.has(recording.id)}
+                          anySelected={selectedCount > 0}
                           isActiveSource={selectedSourceId === recording.id}
                           searchQuery={deferredSearchQuery}
                           onSelectionChange={(id, shiftKey) =>
                             handleSelectionClick(id, shiftKey, filteredRecordings.map((r) => r.id))
                           }
                           onClick={() => handleRowClick(recording)}
-                          onPlay={() => {
-                            if (hasLocalPath(recording)) {
-                              setSelectedSourceId(recording.id)
-                              handlePlayCallback(recording.id, recording.localPath)
-                            }
-                          }}
-                          onStop={handleStopCallback}
                           onDownload={() => handleDownloadCallback(recording)}
                           onDelete={() => handleDeleteCallback(recording)}
                           onDeletePermanent={() => handleDeletePermanentCallback(recording)}

@@ -1,5 +1,5 @@
 import { memo } from 'react'
-import { Play, X, AlertCircle, Download, Trash2, Wand2, Sparkles, FileText, RefreshCw, AudioLines, MoreHorizontal, Calendar, EyeOff, Eye } from 'lucide-react'
+import { AlertCircle, Download, Trash2, Wand2, Sparkles, FileText, RefreshCw, AudioLines, MoreHorizontal, Calendar, EyeOff, Eye } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -25,14 +25,14 @@ interface SourceRowProps {
   recording: UnifiedRecording
   meeting?: Meeting
   transcript?: Transcript
-  isPlaying: boolean
   isSelected?: boolean
   isActiveSource?: boolean
+  /** True when ≥1 row anywhere in the list is selected (selection mode active) —
+      keeps every row's checkbox revealed so the selected set stays adjustable. */
+  anySelected?: boolean
   searchQuery?: string
   onSelectionChange?: (id: string, shiftKey: boolean) => void
   onClick?: () => void
-  onPlay: () => void
-  onStop: () => void
   // Action handlers
   onDownload?: () => void
   onDelete?: () => void
@@ -52,14 +52,12 @@ export const SourceRow = memo(function SourceRow({
   recording,
   meeting,
   transcript,
-  isPlaying,
   isSelected = false,
   isActiveSource = false,
+  anySelected = false,
   searchQuery = '',
   onSelectionChange,
   onClick,
-  onPlay,
-  onStop,
   onDownload,
   onDelete,
   onDeletePermanent,
@@ -72,7 +70,6 @@ export const SourceRow = memo(function SourceRow({
   downloadProgress,
   deviceConnected = false
 }: SourceRowProps) {
-  const canPlay = hasLocalPath(recording)
   const error = useLibraryStore((state) => state.recordingErrors.get(recording.id))
 
   // Smart title
@@ -108,7 +105,8 @@ export const SourceRow = memo(function SourceRow({
   return (
     <div
       className={[
-        '@container flex items-center justify-between py-2 px-3 cursor-pointer',
+        // `group` lets the selection checkbox reveal on row hover/focus.
+        'group @container flex items-center justify-between py-2 px-3 cursor-pointer',
         'transition-[background-color,box-shadow] duration-150',
         // Hover reads as a gentle elevation (bg + inner ring — the row list is
         // overflow-clipped, so an inset ring conveys lift where a drop shadow can't).
@@ -132,7 +130,15 @@ export const SourceRow = memo(function SourceRow({
             checked={isSelected}
             onClick={handleCheckboxClick}
             aria-label={`Select ${recording.filename}`}
-            className="shrink-0"
+            // The checkbox is not permanent chrome: it reveals on row hover/focus,
+            // stays visible once this row is selected, and stays visible for every
+            // row while selection mode is active (≥1 selected anywhere).
+            className={[
+              'shrink-0 transition-opacity',
+              isSelected || anySelected
+                ? 'opacity-100'
+                : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100'
+            ].join(' ')}
           />
         )}
         <StatusIcon recording={recording} />
@@ -191,7 +197,8 @@ export const SourceRow = memo(function SourceRow({
         </div>
       </div>
 
-      {/* Action area — error + primary Play; everything else in an overflow menu */}
+      {/* Action area — error + overflow menu. Playback lives in the mid-panel
+          player (clicking the row opens it), so there is no per-row Play button. */}
       <div className="flex items-center gap-1 shrink-0 ml-2">
         {/* Error indicator */}
         {error && (
@@ -214,32 +221,6 @@ export const SourceRow = memo(function SourceRow({
             <RefreshCw className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
             <span>{downloadProgress ?? 0}%</span>
           </div>
-        )}
-
-        {/* Primary action: Play / Stop (always visible) */}
-        {isPlaying ? (
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            onClick={(e) => { e.stopPropagation(); onStop(); }}
-            aria-label="Stop playback"
-          >
-            <X className="h-3.5 w-3.5" aria-hidden="true" />
-          </Button>
-        ) : (
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            onClick={(e) => { e.stopPropagation(); onPlay(); }}
-            disabled={!canPlay || error?.type === 'audio_not_found'}
-            aria-label={
-              error?.type === 'audio_not_found' ? 'File missing'
-                : canPlay ? 'Play capture'
-                  : 'Download to play'
-            }
-          >
-            <Play className="h-3.5 w-3.5" aria-hidden="true" />
-          </Button>
         )}
 
         {/* Secondary actions: overflow menu (labeled, keeps the row uncluttered) */}
@@ -352,8 +333,8 @@ export const SourceRow = memo(function SourceRow({
     prevProps.recording.quality === nextProps.recording.quality &&
     prevProps.recording.duration === nextProps.recording.duration &&
     prevProps.recording.size === nextProps.recording.size &&
-    prevProps.isPlaying === nextProps.isPlaying &&
     prevProps.isSelected === nextProps.isSelected &&
+    prevProps.anySelected === nextProps.anySelected &&
     prevProps.isActiveSource === nextProps.isActiveSource &&
     prevProps.transcript?.id === nextProps.transcript?.id &&
     prevProps.transcript?.title_suggestion === nextProps.transcript?.title_suggestion &&
