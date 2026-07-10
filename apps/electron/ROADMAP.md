@@ -105,6 +105,12 @@ INTERACTIVITY_PLAN.md, OVERNIGHT_PLAN.md.*
    (hybrid, for better WER than the current MPEG-frame chunking), and/or a
    better Spanish-first local model (Canary-Qwen 2.5B / ARK-ASR-3B / whisper
    variants). Diarization already proven better locally (2:31 boundary).
+2b. **Local real-time transcription (add-on, future phase).** WhisperLive
+    (https://github.com/collabora/WhisperLive) — streaming ASR (WebSocket,
+    faster-whisper) for LIVE as-you-speak transcription during a meeting,
+    distinct from the current batch/post-hoc path. Fits behind the same ASR
+    provider abstraction; natural pairing with the meeting-assistant app's
+    live session capture. Optional add-on, gated on GPU.
 3. **Mac local transcription** — a macOS build with on-device ASR
    (whisper.cpp+CoreML or Apple Speech). Parked; revisit after the ASR
    decision so the provider abstraction covers it.
