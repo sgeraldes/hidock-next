@@ -61,6 +61,29 @@ INTERACTIVITY_PLAN.md, OVERNIGHT_PLAN.md.*
     pipelines, keep file) and full delete cascade (transcript, embeddings,
     actionables, speaker maps, participant contribution, graph nodes/edges,
     wiki, audio file) with soft-delete+undo then hard-purge. v38.
+0c. **Knowledge Library redesign (QUEUED, after 0a — shares Library files).**
+    - AI Assistant → collapsible/pinnable overlay (2-pane default; source-scoped
+      chat as a dockable drawer), distinct from the global Assistant surface.
+    - Multi-format rows: metadata adapts by type (audio=duration+time,
+      image=dimensions+date-added, pdf=pages, note=words) + type icon.
+    - Filters simplified: default = search + source-type segmented control +
+      a "Filters" popover hiding Quality/Status/Location/Count-as. ADD
+      source-type filter, duration filter (<10s/<1min/<5min/range), working
+      sort-by-duration.
+    - **DATA-LAYER (verified via DB query, the real blockers):**
+      · `recordings.duration_seconds` is NULL for 1,903/1,911 (UI shows a
+        device-derived duration that was never persisted) → sort/filter by
+        duration silently returns nothing. BACKFILL duration_seconds from
+        device/audio metadata; persist on ingest going forward.
+      · Quality: 900 captures ALL 'unrated', 0 low-value/valuable/archived →
+        the "Low-Value" filter isn't broken, it's EMPTY. Root-cause why
+        quality-assessment.ts never wrote ratings; add a cheap value
+        classifier (valuable / low-value / personal — family call vs work)
+        so the filter has data. Composes with 0a mark-personal + delete.
+    - De-duplicate the in-library "Search captures" vs the global top-bar
+      search (list-filter vs global, clearly labeled).
+    - Composes with 0a: filter Low-value/short → select all → delete (the
+      "clean up family calls / can't-talk junk" flow).
 0b. **Merge "Correct" mode + transcript entity-linking (QUEUED, after 0a — same
     database.ts).** Distinguish ALIAS (valid alternate name) from CORRECTION
     (ASR error like Noman→Nouman): correction find-replaces the wrong form in
