@@ -21,6 +21,15 @@ interface AudioPlayerProps {
    * (these live in global store fields) never bleeds onto this one.
    */
   recordingId?: string
+  /**
+   * Local file path for this recording. Required for the Play button to do the
+   * INITIAL load+play when this recording isn't already the one loaded in the
+   * shared audio engine (fresh open). When absent (device-only, not downloaded)
+   * and nothing is loaded, the Play button is disabled ("Download to play").
+   * Thread it from the same source the file-list uses:
+   * `hasLocalPath(recording) ? recording.localPath : undefined`.
+   */
+  filePath?: string
   onClose?: () => void
 }
 
@@ -30,9 +39,10 @@ interface AudioPlayerProps {
  * The actual audio playback is handled by OperationController.
  * This component displays the playback state, waveform, and controls.
  */
-export function AudioPlayer({ filename, recordingId, onClose }: AudioPlayerProps) {
+export function AudioPlayer({ filename, recordingId, filePath, onClose }: AudioPlayerProps) {
   // Read playback state from UIStore
   const isPlaying = useUIStore((state) => state.isPlaying)
+  const currentlyPlayingId = useUIStore((state) => state.currentlyPlayingId)
   const currentTime = useUIStore((state) => state.playbackCurrentTime)
   const duration = useUIStore((state) => state.playbackDuration)
   const playbackWaveformData = useUIStore((state) => state.playbackWaveformData)
@@ -57,13 +67,30 @@ export function AudioPlayer({ filename, recordingId, onClose }: AudioPlayerProps
   // Local state for playback speed
   const [playbackRate, setPlaybackRate] = useState('1')
 
+  // Is THIS recording the one currently loaded in the shared audio engine?
+  // When no recordingId is provided (legacy mount sites that only render while
+  // their own recording is playing), treat it as loaded so pause/resume works.
+  const isLoaded = !recordingId || currentlyPlayingId === recordingId
+
+  // The Play button can act when: this recording is already loaded (pause/resume),
+  // OR it isn't loaded but we have what we need to load+play it (id + local path).
+  const canPlayThis = isLoaded || (!!recordingId && !!filePath)
+
   const togglePlay = useCallback(() => {
-    if (isPlaying) {
-      audioControls.pause()
-    } else {
-      audioControls.resume()
+    if (isLoaded) {
+      // Already the active recording — just pause/resume.
+      if (isPlaying) {
+        audioControls.pause()
+      } else {
+        audioControls.resume()
+      }
+    } else if (recordingId && filePath) {
+      // Fresh open: nothing loaded yet for this recording. Do the initial
+      // load+play, which also kicks off the waveform generation the panel
+      // promises ("Press Play to load the waveform").
+      audioControls.play(recordingId, filePath)
     }
-  }, [isPlaying, audioControls])
+  }, [isLoaded, isPlaying, audioControls, recordingId, filePath])
 
   const handleStop = useCallback(() => {
     audioControls.stop()
@@ -158,6 +185,8 @@ export function AudioPlayer({ filename, recordingId, onClose }: AudioPlayerProps
             variant="outline"
             size="icon"
             onClick={togglePlay}
+            disabled={!canPlayThis}
+            title={canPlayThis ? undefined : 'Download to play'}
             className="h-10 w-10"
           >
             {isPlaying ? (
