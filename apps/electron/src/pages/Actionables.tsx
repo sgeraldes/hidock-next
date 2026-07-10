@@ -31,12 +31,28 @@ import {
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
-import { cn, formatDateTime } from '@/lib/utils'
+import { cn } from '@/lib/utils'
+import { formatSmartDate, formatRelativeDate } from '@/lib/smartDate'
 import { pageContent } from '@/lib/pageLayout'
 import { toast } from '@/components/ui/toaster'
+import { Checkbox } from '@/components/ui/checkbox'
 import { EntityMention, useContactResolver } from '@/components/entity'
 import { ActionableDetail } from '@/components/actionables/ActionableDetail'
 import { getTemplateInfo, humanizeActionableType } from '@/components/actionables/templateInfo'
+import { ActionablesControls } from '@/components/actionables/ActionablesControls'
+import { BulkActionBar } from '@/components/actionables/BulkActionBar'
+import {
+  sortActionables,
+  groupActionables,
+  filterByType,
+  filterByDate,
+  distinctTypes,
+  type ActionableSortKey,
+  type ActionableGroupKey,
+  type DateFilterKey,
+  type SortDirection
+} from '@/components/actionables/actionablesFilters'
+import { useActionablesStore, useActionablesCounts } from '@/store/features/useActionablesStore'
 import type { Actionable, ActionableStatus } from '@/types/knowledge'
 import type { OutputTemplateId } from '@/types'
 
@@ -73,9 +89,24 @@ export function Actionables() {
   const location = useLocation()
   const navigate = useNavigate()
   const { resolveRecipient } = useContactResolver()
-  const [actionables, setActionables] = useState<Actionable[]>([])
-  const [loading, setLoading] = useState(true)
+  // Shared store is the single source of truth so the sidebar nav badge and this
+  // page stay in sync and counts are always exact (no "99+" cap).
+  const actionables = useActionablesStore((s) => s.actionables)
+  const loading = useActionablesStore((s) => s.loading)
+  const loadActionables = useActionablesStore((s) => s.loadActionables)
+  const counts = useActionablesCounts()
   const [statusFilter, setStatusFilter] = useState<ActionableStatus | 'all'>('pending')
+
+  // Sort / group / filter controls
+  const [sortKey, setSortKey] = useState<ActionableSortKey>('date')
+  const [sortDir, setSortDir] = useState<SortDirection>('desc')
+  const [groupKey, setGroupKey] = useState<ActionableGroupKey>('none')
+  const [typeFilter, setTypeFilter] = useState<string>('all')
+  const [dateFilter, setDateFilter] = useState<DateFilterKey>('all')
+
+  // Bulk selection (transient — a Set of actionable ids)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [bulkBusy, setBulkBusy] = useState(false)
 
   // C-ACT-005: Pagination state
   const [currentPage, setCurrentPage] = useState(1)
@@ -147,18 +178,6 @@ export function Actionables() {
       }
     }
     cache.set(id, output)
-  }, [])
-
-  const loadActionables = useCallback(async () => {
-    setLoading(true)
-    try {
-      const data = await window.electronAPI.actionables.getAll()
-      setActionables(data)
-    } catch (error) {
-      console.error('Failed to load actionables:', error)
-    } finally {
-      setLoading(false)
-    }
   }, [])
 
   // AC-06: Use ref to read generationHistory, avoiding stale closure and unstable deps
@@ -289,24 +308,64 @@ export function Actionables() {
     }
   }, [location.state, handleAutoGenerate, navigate, location.pathname])
 
+  // Distinct actionable types present, for the Type filter dropdown.
+  const typeOptions = useMemo(() => distinctTypes(actionables), [actionables])
+
+  // Filter: status (tabs) + type + date window.
   const filteredActionables = useMemo(() => {
-    return actionables.filter(a => {
-      if (statusFilter !== 'all' && a.status !== statusFilter) return false
-      return true
-    })
-  }, [actionables, statusFilter])
+    let list = actionables.filter((a) => statusFilter === 'all' || a.status === statusFilter)
+    list = filterByType(list, typeFilter)
+    list = filterByDate(list, dateFilter)
+    return list
+  }, [actionables, statusFilter, typeFilter, dateFilter])
 
-  // C-ACT-005: Paginated subset of filtered actionables
-  const totalPages = Math.max(1, Math.ceil(filteredActionables.length / PAGE_SIZE))
+  // Sort by date / confidence / type in the chosen direction.
+  const sortedActionables = useMemo(
+    () => sortActionables(filteredActionables, sortKey, sortDir),
+    [filteredActionables, sortKey, sortDir]
+  )
+
+  // Pagination applies only when NOT grouping (grouping renders every bucket).
+  const grouped = groupKey !== 'none'
+  const totalPages = Math.max(1, Math.ceil(sortedActionables.length / PAGE_SIZE))
   const paginatedActionables = useMemo(() => {
+    if (grouped) return sortedActionables
     const start = (currentPage - 1) * PAGE_SIZE
-    return filteredActionables.slice(start, start + PAGE_SIZE)
-  }, [filteredActionables, currentPage])
+    return sortedActionables.slice(start, start + PAGE_SIZE)
+  }, [sortedActionables, currentPage, grouped])
 
-  // C-ACT-005: Reset page to 1 when filter changes
+  // The groups actually rendered (a single unlabelled group when grouping is off).
+  const renderGroups = useMemo(
+    () => groupActionables(paginatedActionables, groupKey),
+    [paginatedActionables, groupKey]
+  )
+
+  // C-ACT-005: Reset page when any filter/sort/group input changes.
   useEffect(() => {
     setCurrentPage(1)
-  }, [statusFilter])
+  }, [statusFilter, typeFilter, dateFilter, sortKey, sortDir, groupKey])
+
+  // ---- Bulk selection (operates over the full filtered/sorted set) ----
+  const visibleIds = useMemo(() => sortedActionables.map((a) => a.id), [sortedActionables])
+  const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id))
+
+  const toggleSelect = useCallback((id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
+
+  const toggleSelectAll = useCallback(() => {
+    setSelectedIds(() => {
+      const everyOn = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id))
+      return everyOn ? new Set<string>() : new Set(visibleIds)
+    })
+  }, [visibleIds, selectedIds])
+
+  const clearSelection = useCallback(() => setSelectedIds(new Set()), [])
 
   // B-ACT-002: Per-actionable loading state, disable button during operation, server-side revert on failure
   const handleApprove = async (actionable: Actionable) => {
@@ -415,6 +474,74 @@ export function Actionables() {
     }
   }
 
+  // ---- Bulk actions over the current selection ----
+  const handleBulkDismiss = async () => {
+    const targets = actionables.filter((a) => selectedIds.has(a.id) && a.status !== 'dismissed')
+    if (targets.length === 0) {
+      toast.info('Nothing to dismiss', 'The selected items are already dismissed.')
+      return
+    }
+    setBulkBusy(true)
+    let ok = 0
+    let failed = 0
+    try {
+      for (const a of targets) {
+        try {
+          const res = await window.electronAPI.actionables.updateStatus(a.id, 'dismissed')
+          if (res.success) ok++
+          else failed++
+        } catch {
+          failed++
+        }
+      }
+      await loadActionables()
+      clearSelection()
+      if (failed === 0) toast.success('Dismissed', `${ok} actionable${ok === 1 ? '' : 's'} dismissed.`)
+      else toast.warning('Partially dismissed', `${ok} dismissed, ${failed} failed.`)
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
+  const handleBulkGenerate = async () => {
+    const targets = actionables.filter((a) => selectedIds.has(a.id) && a.status === 'pending')
+    if (targets.length === 0) {
+      toast.info('Nothing to generate', 'Select one or more pending actionables to generate.')
+      return
+    }
+    setBulkBusy(true)
+    let ok = 0
+    let failed = 0
+    try {
+      for (const a of targets) {
+        try {
+          const templateId = (a.suggestedTemplate || 'meeting_minutes') as OutputTemplateId
+          const result = await window.electronAPI.outputs.generate({
+            templateId,
+            knowledgeCaptureId: a.sourceKnowledgeId,
+            actionableId: a.id
+          })
+          if (result.success) {
+            await window.electronAPI.actionables.updateStatus(a.id, 'generated').catch(() => {})
+            ok++
+          } else {
+            failed++
+            await window.electronAPI.actionables.updateStatus(a.id, 'pending').catch(() => {})
+          }
+        } catch {
+          failed++
+          await window.electronAPI.actionables.updateStatus(a.id, 'pending').catch(() => {})
+        }
+      }
+      await loadActionables()
+      clearSelection()
+      if (failed === 0) toast.success('Outputs generated', `${ok} output${ok === 1 ? '' : 's'} generated.`)
+      else toast.warning('Partially generated', `${ok} generated, ${failed} failed.`)
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
   // C-ACT-003: Consistent status icon mapping
   const getStatusIcon = (status: ActionableStatus) => {
     switch (status) {
@@ -458,20 +585,29 @@ export function Actionables() {
           </div>
         </div>
 
-        {/* Filter bar - AC-03 FIX: Added 'in_progress' to filter options */}
+        {/* Filter bar - AC-03 FIX: Added 'in_progress'. Each tab shows the EXACT
+            count (no "99+" cap) sourced from the shared actionables store. */}
         <div className="flex items-center gap-2 mt-4 overflow-x-auto pb-2">
           {(['all', 'pending', 'in_progress', 'generated', 'shared', 'dismissed'] as const).map((s) => (
             <button
               key={s}
               onClick={() => setStatusFilter(s)}
               className={cn(
-                "px-4 py-1.5 rounded-full text-xs font-semibold border transition-all whitespace-nowrap capitalize",
+                "px-4 py-1.5 rounded-full text-xs font-semibold border transition-all whitespace-nowrap capitalize flex items-center gap-1.5",
                 statusFilter === s
                   ? "bg-primary border-primary text-primary-foreground shadow-sm"
                   : "bg-background border-border text-muted-foreground hover:bg-muted"
               )}
             >
-              {s === 'in_progress' ? 'In Progress' : s}
+              <span>{s === 'in_progress' ? 'In Progress' : s}</span>
+              <span
+                className={cn(
+                  "tabular-nums rounded-full px-1.5 text-[10px] font-bold",
+                  statusFilter === s ? "bg-primary-foreground/20" : "bg-muted-foreground/10"
+                )}
+              >
+                {counts[s]}
+              </span>
             </button>
           ))}
         </div>
@@ -480,22 +616,55 @@ export function Actionables() {
       {/* Content */}
       <div className="flex-1 overflow-auto p-6">
         <div className={cn(pageContent, 'space-y-6')}>
+          {/* Sort / group / filter / select-all toolbar — shown whenever there is
+              anything to organize, so filters remain reachable even if the current
+              status tab is empty. */}
+          {actionables.length > 0 && (
+            <ActionablesControls
+              sortKey={sortKey}
+              onSortKeyChange={setSortKey}
+              sortDir={sortDir}
+              onToggleSortDir={() => setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))}
+              groupKey={groupKey}
+              onGroupKeyChange={setGroupKey}
+              typeFilter={typeFilter}
+              onTypeFilterChange={setTypeFilter}
+              typeOptions={typeOptions}
+              dateFilter={dateFilter}
+              onDateFilterChange={setDateFilter}
+              allSelected={allSelected}
+              onToggleSelectAll={toggleSelectAll}
+              visibleCount={sortedActionables.length}
+            />
+          )}
+
           {/* C-ACT-006: Loading skeleton instead of spinner */}
           {loading && actionables.length === 0 ? (
             <ActionableSkeleton />
-          ) : filteredActionables.length === 0 ? (
+          ) : sortedActionables.length === 0 ? (
             <Card className="border-dashed bg-muted/5">
               <CardContent className="py-16 text-center">
                 <ListTodo className="h-12 w-12 mx-auto mb-4 text-muted-foreground opacity-30" />
-                <h3 className="text-lg font-medium mb-2">No {statusFilter} Actionables</h3>
+                <h3 className="text-lg font-medium mb-2">No matching Actionables</h3>
                 <p className="text-muted-foreground text-sm max-w-xs mx-auto">
-                  Suggestions will appear here as you transcribe meetings and capture knowledge.
+                  {actionables.length === 0
+                    ? 'Suggestions will appear here as you transcribe meetings and capture knowledge.'
+                    : 'No actionables match the current filters. Try widening the status, type, or date filters.'}
                 </p>
               </CardContent>
             </Card>
           ) : (
-            <div className="space-y-4">
-              {paginatedActionables.map((actionable, index) => (
+            <div className="space-y-6">
+              {renderGroups.map((group) => (
+                <div key={group.key} className="space-y-4">
+                  {group.label && (
+                    <div className="flex items-center gap-2 sticky top-0 z-10 -mx-1 px-1 py-1 bg-background/95 backdrop-blur-sm">
+                      <h2 className="text-xs font-bold uppercase tracking-widest text-muted-foreground">{group.label}</h2>
+                      <span className="text-[10px] font-semibold text-muted-foreground/70 tabular-nums">{group.items.length}</span>
+                      <div className="flex-1 h-px bg-border" />
+                    </div>
+                  )}
+                  {group.items.map((actionable, index) => (
                 <Card
                   key={actionable.id}
                   style={{ animationDelay: `${Math.min(index, 6) * 45}ms` }}
@@ -504,12 +673,21 @@ export function Actionables() {
                     // + hover lift (`.lift`), no side-stripe. Entrance rises in with a
                     // staggered delay (reduced-motion collapses it via the global CSS).
                     "group animate-rise-in lift overflow-hidden border shadow-sm",
-                    getStatusTint(actionable.status)
+                    getStatusTint(actionable.status),
+                    selectedIds.has(actionable.id) && "ring-2 ring-primary ring-offset-1 ring-offset-background"
                   )}
                 >
                   <div className="min-h-[100px]">
                     {/* min-w-0 lets the title truncate instead of pushing the action buttons out of the card */}
                     <div className="min-w-0 p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                      {/* Bulk-select checkbox */}
+                      <div className="flex items-start pt-1 sm:self-center sm:pt-0">
+                        <Checkbox
+                          checked={selectedIds.has(actionable.id)}
+                          onCheckedChange={() => toggleSelect(actionable.id)}
+                          aria-label={`Select actionable: ${actionable.title}`}
+                        />
+                      </div>
                       <div className="flex-1 min-w-0">
                         {/* Clickable title area toggles the inline detail panel.
                             Kept separate from the recipients row below so those
@@ -542,9 +720,16 @@ export function Actionables() {
                           )}
                         </button>
                         <div className="flex items-center gap-3 mt-3">
-                          <div className="flex items-center gap-1 text-[10px] text-muted-foreground font-medium bg-muted/50 px-2 py-0.5 rounded-full">
+                          <div
+                            className="flex items-center gap-1 text-[10px] text-muted-foreground font-medium bg-muted/50 px-2 py-0.5 rounded-full"
+                            title={formatSmartDate(actionable.createdAt)}
+                          >
                             <Clock className="h-3 w-3" />
-                            <span>{formatDateTime(actionable.createdAt)}</span>
+                            {/* Absolute date carries the YEAR; relative hint gives recency at a glance. */}
+                            <span>{formatSmartDate(actionable.createdAt, { time: false })}</span>
+                            {formatRelativeDate(actionable.createdAt) && (
+                              <span className="text-muted-foreground/70">· {formatRelativeDate(actionable.createdAt)}</span>
+                            )}
                           </div>
                           {actionable.confidence && actionable.status === 'pending' && (
                             // Confidence carries hierarchy through weight + tint, not
@@ -707,15 +892,17 @@ export function Actionables() {
                     </div>
                   </div>
                 </Card>
+                  ))}
+                </div>
               ))}
             </div>
           )}
 
-          {/* C-ACT-005: Pagination controls */}
-          {filteredActionables.length > PAGE_SIZE && (
+          {/* C-ACT-005: Pagination controls (only when the flat list is un-grouped) */}
+          {!grouped && sortedActionables.length > PAGE_SIZE && (
             <div className="flex items-center justify-between pt-2">
               <span className="text-xs text-muted-foreground">
-                Showing {(currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, filteredActionables.length)} of {filteredActionables.length}
+                Showing {(currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, sortedActionables.length)} of {sortedActionables.length}
               </span>
               <div className="flex items-center gap-1">
                 <Button
@@ -756,6 +943,18 @@ export function Actionables() {
           </Card>
         </div>
       </div>
+
+      {/* Bulk action bar — appears while items are selected. Hidden when the error
+          banner is up so the two don't stack on top of each other. */}
+      {!generationError && (
+        <BulkActionBar
+          count={selectedIds.size}
+          onGenerate={handleBulkGenerate}
+          onDismiss={handleBulkDismiss}
+          onClear={clearSelection}
+          busy={bulkBusy}
+        />
+      )}
 
       {/* C-ACT-M07: Error banner positioned at bottom to avoid overlapping header/nav */}
       {generationError && (
@@ -830,7 +1029,7 @@ export function Actionables() {
               {/* C-ACT-008: Show timestamp on generated output */}
               {generatedOutput?.generatedAt && (
                 <span className="ml-2 text-xs text-muted-foreground">
-                  &middot; {formatDateTime(generatedOutput.generatedAt)}
+                  &middot; {formatSmartDate(generatedOutput.generatedAt)}
                 </span>
               )}
             </DialogDescription>
