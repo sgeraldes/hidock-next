@@ -40,6 +40,7 @@ import { getStoragePolicyService } from './services/storage-policy'
 import { setMainWindowForMigration } from './ipc/migration-handlers'
 import { getIntegrityService } from './services/integrity-service'
 import { acquireSingleInstanceLock } from './single-instance'
+import { registerBootTask, startBootScheduler } from './services/boot-scheduler'
 
 let mainWindow: BrowserWindow | null = null
 let splashWindow: BrowserWindow | null = null
@@ -326,54 +327,111 @@ app.whenReady().then(async () => {
     setMainWindowForMigration(mainWindow)
   }
 
+  // The recording watcher is cheap and powers auto-refresh — start it now.
   startRecordingWatcher()
-  startTranscriptionProcessor()
-  console.log('Background services started')
+  console.log('Recording watcher started')
 
-  // Backfill vector embeddings for transcripts indexed before embeddings
-  // worked (or added while the app was closed). Deferred so startup stays fast.
-  setTimeout(() => {
-    import('./services/vector-store')
-      .then(async ({ getVectorStore }) => {
-        const store = getVectorStore()
-        await store.initialize()
-        await store.backfillMissingTranscripts()
-      })
-      .catch((e) => console.error('[VectorStore] Backfill error:', e))
-  }, 15000)
+  // ---------------------------------------------------------------------------
+  // Deferred heavy boot work — spread out, not bursted.
+  //
+  // ROOT CAUSE of the post-restart freeze: on a large DB these tasks used to
+  // fire together right after the window showed (the transcription backlog drain
+  // plus five overlapping setTimeout backfills at 8–20s, plus the living-graph
+  // ingest they trigger). All of it is synchronous sql.js work on the single
+  // main-process event loop, so it starved the renderer's IPC → "not responding"
+  // with high CPU for a while.
+  //
+  // Fix: register them on the boot scheduler, which runs them ONE AT A TIME with
+  // idle gaps in between (concurrency cap = 1) and only AFTER the renderer has
+  // painted. The same work still runs — just spread out so the UI stays live.
+  // Ordered cheapest/most-user-visible DB self-heals first; the sustained
+  // network-bound drains (transcription, embeddings) last so first paint and the
+  // initial library load are not competing for the event loop.
+  // ---------------------------------------------------------------------------
 
-  // Backfill the plain-markdown meeting wiki (no API calls — DB → files).
-  setTimeout(() => {
-    import('./services/meeting-wiki')
-      .then(({ backfillMeetingWiki }) => backfillMeetingWiki())
-      .catch((e) => console.error('[MeetingWiki] Backfill error:', e))
-  }, 10000)
+  // 1. Reconcile organization data (meeting↔recording links, People from
+  //    attendees, ICS text repair, ~1,521-row status self-heal). DB-only, idempotent.
+  registerBootTask({
+    name: 'org-reconcile',
+    run: async () => {
+      await import('./services/org-reconciler')
+        .then(({ reconcileOrganization }) => reconcileOrganization())
+        .catch((e) => console.error('[OrgReconciler] error:', e))
+    }
+  })
 
-  // Reconcile organization data (meeting↔recording links, People from
-  // attendees, ICS text repair). Cheap, DB-only, idempotent.
-  setTimeout(() => {
-    import('./services/org-reconciler')
-      .then(({ reconcileOrganization }) => reconcileOrganization())
-      .catch((e) => console.error('[OrgReconciler] error:', e))
-  }, 8000)
+  // 2. Self-heal the Knowledge Library: create a knowledge_capture for any
+  //    transcript that lacks one. Cheap, DB-only, idempotent.
+  registerBootTask({
+    name: 'knowledge-capture-backfill',
+    run: async () => {
+      await import('./services/knowledge-capture-backfill')
+        .then(({ backfillKnowledgeCaptures }) => backfillKnowledgeCaptures())
+        .catch((e) => console.error('[KnowledgeCaptureBackfill] error:', e))
+    }
+  })
 
-  // Self-heal the Knowledge Library: create a knowledge_capture for any transcript
-  // that lacks one. Cheap, DB-only, idempotent — recovers a library that predates
-  // capture-on-transcription wiring (or was emptied by an earlier bug).
-  setTimeout(() => {
-    import('./services/knowledge-capture-backfill')
-      .then(({ backfillKnowledgeCaptures }) => backfillKnowledgeCaptures())
-      .catch((e) => console.error('[KnowledgeCaptureBackfill] error:', e))
-  }, 12000)
+  // 3. Backfill the plain-markdown meeting wiki (no API calls — DB → files).
+  registerBootTask({
+    name: 'meeting-wiki-backfill',
+    run: async () => {
+      await import('./services/meeting-wiki')
+        .then(({ backfillMeetingWiki }) => backfillMeetingWiki())
+        .catch((e) => console.error('[MeetingWiki] Backfill error:', e))
+    }
+  })
 
-  // Self-heal transcripts whose Gemini analysis failed (or was never run on an
-  // older build) by re-analysing the stored full_text. Bounded per run to keep
-  // API cost predictable. Deferred so startup stays fast.
-  setTimeout(() => {
-    import('./services/transcription')
-      .then(({ reanalyzeFailedTranscripts }) => reanalyzeFailedTranscripts())
-      .catch((e) => console.error('[Reanalyze] Backfill error:', e))
-  }, 20000)
+  // 4. Start the transcription processor. This returns promptly (it arms the
+  //    10s interval and kicks a first pass); the backlog drain then runs in the
+  //    background, mutex-gated to one item at a time. Deferred to here so the
+  //    240-item drain does not compete with first paint + the library load.
+  //    NOTE: correctness and the queue's newest-first order are unchanged — only
+  //    WHEN the processor starts moved.
+  registerBootTask({
+    name: 'start-transcription-processor',
+    run: () => {
+      startTranscriptionProcessor()
+    }
+  })
+
+  // 5. Backfill vector embeddings for transcripts indexed before embeddings
+  //    worked (or added while the app was closed). Network-bound, per-item.
+  registerBootTask({
+    name: 'embeddings-backfill',
+    run: () =>
+      import('./services/vector-store')
+        .then(async ({ getVectorStore }) => {
+          const store = getVectorStore()
+          await store.initialize()
+          await store.backfillMissingTranscripts()
+        })
+        .catch((e) => console.error('[VectorStore] Backfill error:', e))
+  })
+
+  // 6. Self-heal transcripts whose Gemini analysis failed (or was never run on an
+  //    older build) by re-analysing the stored full_text. Bounded per run.
+  registerBootTask({
+    name: 'reanalyze-failed-transcripts',
+    run: async () => {
+      await import('./services/transcription')
+        .then(({ reanalyzeFailedTranscripts }) => reanalyzeFailedTranscripts())
+        .catch((e) => console.error('[Reanalyze] Backfill error:', e))
+    }
+  })
+
+  // Kick the scheduler once the renderer has painted its first frame, so heavy
+  // work never competes with first paint / the initial library IPC. A fallback
+  // timer covers the rare case where 'did-finish-load' never fires (load error);
+  // startBootScheduler is idempotent, so whichever fires first wins.
+  const kickBootScheduler = (): void => {
+    startBootScheduler().catch((e) => console.error('[BootScheduler] error:', e))
+  }
+  if (mainWindow) {
+    mainWindow.webContents.once('did-finish-load', kickBootScheduler)
+  }
+  setTimeout(kickBootScheduler, 30000)
+
+  console.log('Background services scheduled')
 
   // Show security warning in production when remote debugging is explicitly enabled
   if (!is.dev && process.env.ENABLE_REMOTE_DEBUGGING === 'true' && mainWindow) {
