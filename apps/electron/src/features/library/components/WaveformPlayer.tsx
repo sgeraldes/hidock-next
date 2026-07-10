@@ -13,10 +13,22 @@
  * Playback is owned by OperationController (via `useAudioControls`); this
  * component only reflects state and drives transport, exactly like AudioPlayer.
  *
+ * Silent auto-load: the peaks load on open WITHOUT playback. If the player is on
+ * screen for a recording that has a file but no decoded peaks (and none is
+ * loading/errored), it kicks `loadWaveformOnly` itself — so the visualization
+ * appears immediately, and RE-appears if a prior stop/end cleared it. It never
+ * starts playback to do this.
+ *
+ * Time axis: the rich timeline (speaker-colored bars, sentiment curve, numbered
+ * markers) is drawn against the recording's REAL duration (`durationSec`, from
+ * the stored/decoded value), NOT the live-playback duration — which is 0 until
+ * you press Play. Using the real duration is what makes the colored bars +
+ * sentiment + markers render on a silent open. Only the playhead uses live time.
+ *
  * Full-mode "meeting timeline" (rendered only in 'full' mode, each part a no-op
  * when its data is absent, so the reader degrades gracefully):
- *  - `speakerRanges` + `speakerLegend` — per-speaker colored bars + a clickable
- *    legend that isolates one speaker's bars.
+ *  - `speakerRanges` — per-speaker colored bars (the color legend lives in the
+ *    reader's Participants chips, NOT inside the player).
  *  - `events` — numbered action/decision markers on the axis, cross-linked with
  *    an events list below (click a marker → seek + highlight; click a list item →
  *    seek + highlight the marker).
@@ -37,7 +49,7 @@ import {
 import { useUIStore } from '@/store/useUIStore'
 import { useAudioControls } from '@/components/OperationController'
 import { WaveformCanvas, type SentimentSegment, type WaveformSpeakerRange } from '@/components/WaveformCanvas'
-import type { DerivedSpeakerRange, SpeakerLegendEntry } from '../utils/speakerRanges'
+import type { DerivedSpeakerRange } from '../utils/speakerRanges'
 import { formatTimestamp } from '@/utils/audioUtils'
 import { cn } from '@/lib/utils'
 
@@ -74,6 +86,12 @@ interface WaveformPlayerProps {
   /** Presentation. Defaults to the docked 'pill'. */
   mode?: WaveformPlayerMode
   /**
+   * The recording's REAL duration (seconds) — stored, or decoded by the waveform
+   * load. Drives the rich-timeline time axis so speaker colors, sentiment and
+   * markers render on a silent open (before any playback sets the live duration).
+   */
+  durationSec?: number
+  /**
    * Full-width docked bar. When true the 'pill' spans its container (a sticky
    * player bar across the whole reader pane) instead of a compact left-aligned
    * chip. No-op for 'scrubber' (already fluid) and 'full'.
@@ -81,8 +99,6 @@ interface WaveformPlayerProps {
   fluid?: boolean
   /** Per-speaker colored bars (full mode only; no-op when absent). */
   speakerRanges?: SpeakerRange[]
-  /** Distinct speakers for the color legend (full mode only). */
-  speakerLegend?: SpeakerLegendEntry[]
   /** Numbered event markers (full mode only; no-op when absent). */
   events?: TimelineEvent[]
   /** Score-based sentiment for the curve + bar-coloring hook (full mode). */
@@ -206,9 +222,9 @@ export function WaveformPlayer({
   recordingId,
   filePath,
   mode = 'pill',
+  durationSec,
   fluid = false,
   speakerRanges,
-  speakerLegend,
   events,
   sentiment,
   onSeek,
@@ -220,19 +236,28 @@ export function WaveformPlayer({
   const wf = useScopedWaveform(recordingId)
   const [playbackRate, setPlaybackRate] = useState('1')
 
-  // Full-mode timeline interactions (local to the player):
-  //  - isolatedKey: a legend click fades every other speaker's bars.
-  //  - internalActiveEvent: which event marker/list row is highlighted, unless a
-  //    parent drives it via `activeEventId`.
-  const [isolatedKey, setIsolatedKey] = useState<string | null>(null)
+  // Full-mode timeline interaction (local to the player): which event
+  // marker/list row is highlighted, unless a parent drives it via `activeEventId`.
   const [internalActiveEvent, setInternalActiveEvent] = useState<string | null>(null)
   const activeEvent = activeEventId !== undefined ? activeEventId : internalActiveEvent
 
-  // Reset transient timeline selections when the recording changes.
+  // Reset the transient event selection when the recording changes.
   useEffect(() => {
-    setIsolatedKey(null)
     setInternalActiveEvent(null)
   }, [recordingId])
+
+  // Silent auto-load. The player owns "there must be peaks whenever I'm showing a
+  // recording that has a file". If none is decoded (and not currently loading or
+  // errored for THIS recording), decode them now — WITHOUT playing. This makes the
+  // visualization appear on open, and re-appear after a prior stop/end cleared it
+  // (the reader/list guards key off `waveformLoadedForId`, which can outlive the
+  // data — this heals that). Guarded so it fires once per missing state, never
+  // looping: once loadWaveformOnly runs it sets `waveformLoadingId` synchronously.
+  useEffect(() => {
+    if (!recordingId || !filePath) return
+    if (wf.waveformData || wf.isLoadingThis || wf.waveformLoadingError) return
+    window.__audioControls?.loadWaveformOnly?.(recordingId, filePath)
+  }, [recordingId, filePath, wf.waveformData, wf.isLoadingThis, wf.waveformLoadingError])
 
   const handleRate = useCallback(
     (value: string) => {
@@ -297,7 +322,7 @@ export function WaveformPlayer({
             <WaveformCanvas
               audioData={wf.waveformData}
               currentTime={pb.liveTime}
-              duration={pb.liveDuration}
+              duration={pb.liveDuration || durationSec || 0}
               onSeek={seekTo}
               height={24}
             />
@@ -349,7 +374,7 @@ export function WaveformPlayer({
           />
         </div>
         <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
-          {formatTimestamp(pb.liveTime)} / {formatTimestamp(pb.liveDuration)}
+          {formatTimestamp(pb.liveTime)} / {formatTimestamp(pb.liveDuration || durationSec || 0)}
         </span>
         <Volume2 className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
       </div>
@@ -357,27 +382,29 @@ export function WaveformPlayer({
   }
 
   // ---- 'full' -------------------------------------------------------------
+  // The rich timeline draws against the REAL duration (stored/decoded), falling
+  // back to the live-playback duration only when no real value is known — so
+  // colored bars + sentiment + markers appear without pressing Play.
+  const axisDuration = durationSec && durationSec > 0 ? durationSec : pb.liveDuration
   return (
     <FullTimeline
       pb={pb}
       wf={wf}
       className={className}
-      progress={progress}
+      axisDuration={axisDuration}
+      hasAudio={!!filePath}
       seekTo={seekTo}
       skipBackward={skipBackward}
       skipForward={skipForward}
       playbackRate={playbackRate}
       handleRate={handleRate}
       speakerRanges={speakerRanges}
-      speakerLegend={speakerLegend}
       events={events}
       sentiment={sentiment}
       storeSentiment={wf.storeSentiment}
       onEventClick={onEventClick}
       activeEvent={activeEvent}
       setInternalActiveEvent={setInternalActiveEvent}
-      isolatedKey={isolatedKey}
-      setIsolatedKey={setIsolatedKey}
     />
   )
 }
@@ -386,22 +413,22 @@ interface FullTimelineProps {
   pb: ReturnType<typeof usePlayback>
   wf: ReturnType<typeof useScopedWaveform>
   className?: string
-  progress: number
+  /** Real duration (seconds) for the time axis — bars/sentiment/markers. */
+  axisDuration: number
+  /** Whether this recording has a playable file (drives the empty vs. loading UI). */
+  hasAudio: boolean
   seekTo: (sec: number) => void
   skipBackward: () => void
   skipForward: () => void
   playbackRate: string
   handleRate: (v: string) => void
   speakerRanges?: SpeakerRange[]
-  speakerLegend?: SpeakerLegendEntry[]
   events?: TimelineEvent[]
   sentiment?: SentimentScorePoint[]
   storeSentiment: SentimentSegment[] | null
   onEventClick?: (event: TimelineEvent) => void
   activeEvent: string | null
   setInternalActiveEvent: (id: string | null) => void
-  isolatedKey: string | null
-  setIsolatedKey: (key: string | null) => void
 }
 
 /** The full-mode meeting timeline: colored bars, playhead, markers, sentiment. */
@@ -409,24 +436,25 @@ function FullTimeline({
   pb,
   wf,
   className,
-  progress,
+  axisDuration,
+  hasAudio,
   seekTo,
   skipBackward,
   skipForward,
   playbackRate,
   handleRate,
   speakerRanges,
-  speakerLegend,
   events,
   sentiment,
   storeSentiment,
   onEventClick,
   activeEvent,
-  setInternalActiveEvent,
-  isolatedKey,
-  setIsolatedKey
+  setInternalActiveEvent
 }: FullTimelineProps) {
-  const duration = pb.liveDuration
+  // The time axis uses the REAL duration so the rich timeline renders on a silent
+  // open; the playhead still tracks live playback position (0 when not playing).
+  const duration = axisDuration
+  const playedProgress = pb.liveDuration > 0 ? Math.min(1, pb.liveTime / pb.liveDuration) : 0
 
   // Speaker bars for the canvas (seconds → the canvas's WaveformSpeakerRange).
   const canvasSpeakerRanges = useMemo<WaveformSpeakerRange[] | undefined>(() => {
@@ -477,8 +505,6 @@ function FullTimeline({
     [duration, seekTo, onEventClick, setInternalActiveEvent]
   )
 
-  const legend = speakerLegend ?? []
-
   return (
     <div className={cn('space-y-2 rounded-lg border bg-muted/40 p-3', className)} data-testid="waveform-player-full">
       {/* Sentiment curve — a thin line above the waveform, same time axis. */}
@@ -508,7 +534,6 @@ function FullTimeline({
             audioData={wf.waveformData}
             sentimentData={canvasSentiment}
             speakerRanges={canvasSpeakerRanges}
-            isolatedSpeakerKey={isolatedKey}
             currentTime={pb.liveTime}
             duration={duration}
             onSeek={seekTo}
@@ -518,8 +543,14 @@ function FullTimeline({
           <div className="flex h-14 items-center justify-center rounded bg-destructive/10 text-xs text-destructive">
             Waveform unavailable
           </div>
-        ) : wf.isLoadingThis ? (
-          <div className="flex h-14 items-center gap-0.5 overflow-hidden rounded">
+        ) : hasAudio ? (
+          // Decoding (the silent auto-load is in flight). Never "Press play…".
+          <div
+            className="relative flex h-14 items-center gap-0.5 overflow-hidden rounded"
+            data-testid="waveform-loading"
+            role="status"
+            aria-label="Loading waveform"
+          >
             {Array.from({ length: 64 }).map((_, i) => (
               <div
                 key={i}
@@ -527,19 +558,23 @@ function FullTimeline({
                 style={{ height: `${((i * 37) % 80) + 20}%`, animationDelay: `${i * 20}ms` }}
               />
             ))}
+            <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-xs text-muted-foreground">
+              Loading waveform…
+            </span>
           </div>
         ) : (
           <div className="flex h-14 items-center justify-center rounded bg-background text-xs text-muted-foreground">
-            Press play to load the waveform
+            No audio to load
           </div>
         )}
 
         {/* Explicit playhead cursor line — reinforces WaveformCanvas's playhead
-            and stays visible over the placeholder/loading states too. */}
+            and stays visible over the placeholder/loading states too. Uses live
+            playback progress, so it sits at the start until Play is pressed. */}
         {duration > 0 && (
           <div
             className="pointer-events-none absolute inset-y-0 w-px bg-foreground/80"
-            style={{ left: `${progress * 100}%` }}
+            style={{ left: `${playedProgress * 100}%` }}
             aria-hidden="true"
           />
         )}
@@ -569,42 +604,9 @@ function FullTimeline({
         })}
       </div>
 
-      {/* Speaker legend — click to isolate one speaker's bars. */}
-      {legend.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5" data-testid="speaker-legend">
-          {legend.map((s) => {
-            const isolated = isolatedKey === s.speakerKey
-            return (
-              <button
-                key={s.speakerKey}
-                type="button"
-                onClick={() => setIsolatedKey(isolated ? null : s.speakerKey)}
-                aria-pressed={isolated}
-                title={isolated ? `Show all speakers` : `Isolate ${s.name}`}
-                className={cn(
-                  'inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50',
-                  isolated ? 'border-foreground/40 bg-background' : 'border-transparent bg-muted/60 hover:bg-muted'
-                )}
-              >
-                <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: s.color }} aria-hidden="true" />
-                <span className="max-w-[9rem] truncate">{s.name}</span>
-                {isolatedKey && !isolated && <span className="text-muted-foreground/60">·</span>}
-              </button>
-            )
-          })}
-          {isolatedKey && (
-            <button
-              type="button"
-              onClick={() => setIsolatedKey(null)}
-              className="rounded-full px-2 py-0.5 text-xs text-muted-foreground underline-offset-2 hover:underline"
-            >
-              Show all
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* Times + transport */}
+      {/* Times + transport. NOTE: no speaker-name legend here — the names (and
+          their matching color swatches) live in the reader's Participants chips,
+          so the waveform is never split from its controls by a legend. */}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1">
           {PlayButtonFull(pb)}
@@ -620,15 +622,17 @@ function FullTimeline({
         </div>
         <div className="flex items-center gap-2">
           <span className="text-xs tabular-nums text-muted-foreground">
-            {formatTimestamp(pb.liveTime)} / {formatTimestamp(pb.liveDuration)}
+            {formatTimestamp(pb.liveTime)} / {formatTimestamp(pb.liveDuration || duration)}
           </span>
           <SpeedPill value={playbackRate} onChange={handleRate} />
         </div>
       </div>
 
-      {/* Event list — numbered actions/decisions, cross-linked with the markers. */}
+      {/* Event list — numbered actions/decisions, cross-linked with the markers.
+          Height-capped + internally scrollable so a long list can't grow the
+          docked header and push the reader's docked essentials off-screen. */}
       {markers.length > 0 && (
-        <ul className="space-y-0.5 border-t pt-2" data-testid="timeline-events">
+        <ul className="max-h-40 space-y-0.5 overflow-y-auto border-t pt-2" data-testid="timeline-events">
           {markers.map((m) => {
             const kind = m.kind ?? 'note'
             const Icon = EVENT_KIND_ICON[kind]

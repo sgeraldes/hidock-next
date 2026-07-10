@@ -99,7 +99,11 @@ export function useAudioPlayback() {
             setIsPlaying(false)
             setCurrentlyPlaying(null, null)
             setPlaybackProgress(0, 0)
-            setWaveformData(null)
+            // Keep the decoded peaks: they belong to the (still-selected) recording
+            // and must stay visible in the docked player after playback ends.
+            // Clearing them here (while `waveformLoadedForId` still points at this
+            // recording) is what left the reader stuck on "Press play to load the
+            // waveform" — the load guards think it's loaded, but the data is gone.
           }
 
           const handleError = (e: ErrorEvent) => {
@@ -291,8 +295,12 @@ export function useAudioPlayback() {
     setIsPlaying(false)
     setCurrentlyPlaying(null, null)
     setPlaybackProgress(0, 0)
-    setWaveformData(null)
-  }, [setCurrentlyPlaying, setIsPlaying, setPlaybackProgress, setWaveformData])
+    // Intentionally do NOT clear the waveform peaks on stop. The reader's list
+    // click calls stop() before (re)selecting, and the docked player should keep
+    // showing the recording's waveform. Clearing here — while `waveformLoadedForId`
+    // still names this recording — made the guarded reload a no-op, leaving the
+    // reader on "Press play to load the waveform" until the user pressed Play.
+  }, [setCurrentlyPlaying, setIsPlaying, setPlaybackProgress])
 
   const seekAudio = useCallback((time: number) => {
     if (audioRef.current) audioRef.current.currentTime = time

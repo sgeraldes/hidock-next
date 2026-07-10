@@ -27,7 +27,7 @@ import { StatusIcon } from './StatusIcon'
 import { WaveformPlayer, type TimelineEvent, type SentimentScorePoint, type WaveformPlayerMode } from './WaveformPlayer'
 import { SpeakerAssignPopover, type AssignScope } from './SpeakerAssignPopover'
 import { useReaderPeople, type ParticipantChip } from '../hooks/useReaderPeople'
-import { deriveSpeakerRanges, type DerivedSpeakerRange, type SpeakerLegendEntry } from '@/features/library/utils/speakerRanges'
+import { deriveSpeakerRanges, type DerivedSpeakerRange } from '@/features/library/utils/speakerRanges'
 import { getDisplayTitle } from '@/features/library/utils/getDisplayTitle'
 import { useUIStore } from '@/store/useUIStore'
 import { useLibraryStore } from '@/store/useLibraryStore'
@@ -802,8 +802,8 @@ export function SourceReader({
             <ReaderPlayer
               recordingId={recording.id}
               filePath={localPath}
+              durationSec={durationSeconds}
               speakerRanges={speakerTimeline.ranges}
-              speakerLegend={speakerTimeline.legend}
               events={timeline?.events}
               sentiment={timeline?.sentiment}
               analyzing={analyzingTimeline}
@@ -1036,8 +1036,9 @@ export function SourceReader({
 interface ReaderPlayerProps {
   recordingId: string
   filePath?: string
+  /** Real recording duration (seconds) — the rich-timeline time axis. */
+  durationSec: number
   speakerRanges: DerivedSpeakerRange[]
-  speakerLegend: SpeakerLegendEntry[]
   events?: TimelineEvent[]
   sentiment?: SentimentScorePoint[]
   analyzing: boolean
@@ -1050,8 +1051,8 @@ interface ReaderPlayerProps {
 function ReaderPlayer({
   recordingId,
   filePath,
+  durationSec,
   speakerRanges,
-  speakerLegend,
   events,
   sentiment,
   analyzing,
@@ -1116,8 +1117,8 @@ function ReaderPlayer({
             fluid
             recordingId={recordingId}
             filePath={filePath}
+            durationSec={durationSec}
             speakerRanges={big ? speakerRanges : undefined}
-            speakerLegend={big ? speakerLegend : undefined}
             events={big ? events : undefined}
             sentiment={big ? sentiment : undefined}
             onSeek={onSeek}

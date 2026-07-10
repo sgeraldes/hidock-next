@@ -77,10 +77,32 @@ describe('WaveformPlayer', () => {
     expect(screen.getByRole('slider', { name: /seek/i })).toBeInTheDocument()
   })
 
-  it('renders the full mode with the waveform placeholder', () => {
+  it('shows a "Loading waveform…" state (never "Press play…") while peaks decode', () => {
     render(<WaveformPlayer mode="full" recordingId="rec-1" filePath="/a.wav" />)
     expect(screen.getByTestId('waveform-player-full')).toBeInTheDocument()
-    expect(screen.getByText(/press play to load the waveform/i)).toBeInTheDocument()
+    expect(screen.getByTestId('waveform-loading')).toBeInTheDocument()
+    expect(screen.getByText(/loading waveform/i)).toBeInTheDocument()
+    expect(screen.queryByText(/press play to load/i)).not.toBeInTheDocument()
+  })
+
+  it('silently kicks loadWaveformOnly when it has a file but no decoded peaks (no Play)', () => {
+    const loadWaveformOnly = vi.fn()
+    ;(window as any).__audioControls.loadWaveformOnly = loadWaveformOnly
+    render(<WaveformPlayer mode="full" recordingId="rec-1" filePath="/a.wav" />)
+    expect(loadWaveformOnly).toHaveBeenCalledWith('rec-1', '/a.wav')
+    // It must NOT start playback to do this.
+    expect(play).not.toHaveBeenCalled()
+  })
+
+  it('does NOT re-request peaks once they are loaded for this recording', () => {
+    const loadWaveformOnly = vi.fn()
+    ;(window as any).__audioControls.loadWaveformOnly = loadWaveformOnly
+    useUIStore.setState({
+      waveformLoadedForId: 'rec-1',
+      playbackWaveformData: new Float32Array([0.2, 0.5, 0.3]),
+    })
+    render(<WaveformPlayer mode="full" recordingId="rec-1" filePath="/a.wav" />)
+    expect(loadWaveformOnly).not.toHaveBeenCalled()
   })
 
   it('renders numbered event markers in full mode when provided', () => {
@@ -135,7 +157,7 @@ describe('WaveformPlayer', () => {
     expect(seek).toHaveBeenCalledWith(25)
   })
 
-  it('renders a speaker legend and isolates a speaker on click', () => {
+  it('does NOT render an in-player speaker-name legend (names live in Participants chips)', () => {
     useUIStore.setState({ currentlyPlayingId: 'rec-1', playbackDuration: 100 })
     render(
       <WaveformPlayer
@@ -143,16 +165,35 @@ describe('WaveformPlayer', () => {
         recordingId="rec-1"
         filePath="/a.wav"
         speakerRanges={[{ startSec: 0, endSec: 50, speakerKey: 'A', name: 'Alice', color: '#2563EB' }]}
-        speakerLegend={[{ speakerKey: 'A', name: 'Alice', color: '#2563EB', turnCount: 3 }]}
       />
     )
-    const legend = screen.getByTestId('speaker-legend')
-    const chip = within(legend).getByRole('button', { name: /alice/i })
-    expect(chip).toHaveAttribute('aria-pressed', 'false')
-    fireEvent.click(chip)
-    // The same chip is now pressed and a "Show all" reset appears.
-    expect(within(legend).getByRole('button', { name: /alice/i })).toHaveAttribute('aria-pressed', 'true')
-    expect(within(legend).getByRole('button', { name: /^show all$/i })).toBeInTheDocument()
+    // The waveform's per-speaker bar colors still come from `speakerRanges`, but
+    // the NAMES (and their swatches) must NOT appear inside the player region.
+    expect(screen.queryByTestId('speaker-legend')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /alice/i })).not.toBeInTheDocument()
+  })
+
+  it('renders markers + sentiment against the REAL duration WITHOUT playback (silent open)', () => {
+    // Nothing is loaded/playing (currentlyPlayingId null → live duration 0), but a
+    // real durationSec is provided: the rich timeline must still render.
+    useUIStore.setState({ currentlyPlayingId: null, playbackDuration: 0 })
+    render(
+      <WaveformPlayer
+        mode="full"
+        recordingId="rec-1"
+        filePath="/a.wav"
+        durationSec={100}
+        events={[{ id: 'e1', timeSec: 50, index: 1, label: 'Decision', kind: 'decision' }]}
+        sentiment={[
+          { startSec: 0, endSec: 50, score: 0.8 },
+          { startSec: 50, endSec: 100, score: -0.6 },
+        ]}
+      />
+    )
+    // Marker + list row (axis-positioned) render even though live duration is 0.
+    expect(screen.getByRole('button', { name: /jump to marker 1/i })).toBeInTheDocument()
+    expect(screen.getByTestId('timeline-events')).toBeInTheDocument()
+    expect(screen.getByTestId('sentiment-curve')).toBeInTheDocument()
   })
 
   it('renders the sentiment curve when sentiment is present and hides it when absent', () => {
