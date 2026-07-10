@@ -19,6 +19,38 @@ interface VectorDocument {
   }
 }
 
+/**
+ * Persist an embedding as a compact binary Float32 BLOB (4 bytes/dimension)
+ * rather than a JSON text array (~13 bytes/dimension). For the 3072-dim vectors
+ * this app stores that is a ~3x size reduction and was the fix for the P0 where
+ * vector_embeddings alone reached 1.7 GB and crashed the database (schema v36).
+ */
+function embeddingToBlob(embedding: number[]): Buffer {
+  return Buffer.from(new Float32Array(embedding).buffer)
+}
+
+/**
+ * Decode a stored embedding back to a float array. Accepts the binary Float32
+ * BLOB (Buffer/Uint8Array, current format) and legacy JSON text (rows written
+ * before the v36 migration, or not yet compacted). Returns [] on anything
+ * unparseable so a single bad row can never break RAG load.
+ */
+function blobToEmbedding(value: unknown): number[] {
+  if (value == null) return []
+  if (typeof value === 'string') {
+    try {
+      const arr = JSON.parse(value)
+      return Array.isArray(arr) ? (arr as number[]) : []
+    } catch {
+      return []
+    }
+  }
+  const bytes =
+    value instanceof Uint8Array ? value : Buffer.isBuffer(value) ? (value as Buffer) : null
+  if (!bytes) return []
+  return Array.from(new Float32Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 4)))
+}
+
 interface SearchResult {
   document: VectorDocument
   score: number
@@ -120,7 +152,7 @@ class VectorStore {
       const vectorDoc: VectorDocument = {
         id: doc['id'] as string,
         content: doc['content'] as string,
-        embedding: JSON.parse(doc['embedding'] as string),
+        embedding: blobToEmbedding(doc['embedding']),
         metadata: {
           meetingId: doc['meeting_id'] as string | undefined,
           recordingId: doc['recording_id'] as string | undefined,
@@ -165,7 +197,7 @@ class VectorStore {
       [
         id,
         content,
-        JSON.stringify(embedding),
+        embeddingToBlob(embedding),
         metadata.meetingId || null,
         metadata.recordingId || null,
         metadata.chunkIndex,
@@ -222,7 +254,7 @@ class VectorStore {
         [
           id,
           chunks[i],
-          JSON.stringify(embedding),
+          embeddingToBlob(embedding),
           metadata.meetingId || null,
           metadata.recordingId || null,
           i,

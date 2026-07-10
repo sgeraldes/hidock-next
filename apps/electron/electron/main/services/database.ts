@@ -1,4 +1,4 @@
-import initSqlJs from 'sql.js'
+import Database from 'better-sqlite3'
 import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
@@ -7,7 +7,7 @@ import { DatabaseEngine, getTableColumns, type SqlJsDatabase } from '@hidock/dat
 import { normalizeName, isGenericSpeakerLabel, detectAmbiguousName } from './entity-normalize'
 import { getEventBus } from './event-bus'
 
-const SCHEMA_VERSION = 35
+const SCHEMA_VERSION = 36
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -1811,6 +1811,85 @@ const MIGRATIONS: Record<number, () => void> = {
       console.warn('[Migration v35] mention_resolutions failed:', e)
     }
     console.log('Migration v35 complete')
+  },
+  36: () => {
+    // v36 (P0 DB-bloat fix): the RAG vector store persisted each embedding as a
+    // JSON text array (avg ~39 KB/row for a 3072-dim vector). At ~46k rows that
+    // was 1.7 GB — 90%+ of the whole database — which drove sql.js past its heap
+    // ceiling and crashed the app. Compact every embedding to a binary Float32
+    // BLOB (~3x smaller) and drop duplicate (recording_id, chunk_index) rows.
+    // Idempotent: only rows whose embedding is still TEXT are converted, so a
+    // re-run is a no-op. The engine runs VACUUM after this migration to reclaim
+    // the freed pages. See vector-store.ts for the matching write/read change.
+    console.log('Running migration to schema v36: compact vector_embeddings (JSON text -> Float32 BLOB) + dedupe')
+    const database = getDatabase()
+
+    // Skip cleanly if the table was never created (RAG never used on this DB).
+    const exists = database.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='vector_embeddings'")
+    if (exists.length === 0) {
+      console.log('[Migration v36] vector_embeddings table absent; nothing to compact')
+      return
+    }
+
+    // 1. Dedupe: one recording indexed twice leaves duplicate (recording_id,
+    // chunk_index) rows. Keep the newest (max rowid).
+    try {
+      run(`
+        DELETE FROM vector_embeddings
+        WHERE recording_id IS NOT NULL
+          AND rowid NOT IN (
+            SELECT MAX(rowid) FROM vector_embeddings
+            WHERE recording_id IS NOT NULL
+            GROUP BY recording_id, chunk_index
+          )
+      `)
+      console.log(`[Migration v36] removed ${database.getRowsModified()} duplicate embedding rows`)
+    } catch (e) {
+      console.warn('[Migration v36] dedupe failed (non-fatal):', e)
+    }
+
+    // 2. Convert JSON-text embeddings to Float32 BLOBs, in bounded batches so a
+    // large table never materializes fully in memory. Each UPDATE flips the row
+    // from typeof 'text' to 'blob', so it drops out of the next batch's filter;
+    // a row with an unparseable embedding is deleted (unusable for search) to
+    // guarantee the loop terminates.
+    let converted = 0
+    let deleted = 0
+    try {
+      for (;;) {
+        const res = database.exec(
+          "SELECT id, embedding FROM vector_embeddings WHERE typeof(embedding) = 'text' LIMIT 500"
+        )
+        if (res.length === 0 || res[0].values.length === 0) break
+        const rows = res[0].values as [string, string][]
+        runInTransaction(() => {
+          for (const [id, embedding] of rows) {
+            try {
+              const arr = JSON.parse(embedding)
+              if (!Array.isArray(arr) || arr.length === 0) {
+                run('DELETE FROM vector_embeddings WHERE id = ?', [id])
+                deleted++
+                continue
+              }
+              const buf = Buffer.from(new Float32Array(arr).buffer)
+              run('UPDATE vector_embeddings SET embedding = ? WHERE id = ?', [buf, id])
+              converted++
+            } catch {
+              // Malformed JSON — unusable chunk; drop it so the filter shrinks.
+              run('DELETE FROM vector_embeddings WHERE id = ?', [id])
+              deleted++
+            }
+          }
+        })
+      }
+      console.log(
+        `[Migration v36] compacted ${converted} embeddings to Float32 BLOB` +
+          (deleted > 0 ? `, dropped ${deleted} malformed` : '') +
+          ' (VACUUM reclaims the freed space)'
+      )
+    } catch (e) {
+      console.warn('[Migration v36] embedding compaction failed (non-fatal):', e)
+    }
   }
 
 }
@@ -2095,7 +2174,7 @@ function repairPhase(): void {
  * and structural-repair callback. Owns the sql.js lifecycle and the 4-phase boot.
  */
 const engine = new DatabaseEngine({
-  initSqlJs,
+  betterSqlite3: Database,
   dbPathProvider: getDatabasePath,
   schemaVersion: SCHEMA_VERSION,
   schema: SCHEMA,

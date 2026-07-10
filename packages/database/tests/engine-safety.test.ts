@@ -14,7 +14,7 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { existsSync, rmSync, readdirSync, writeFileSync } from 'fs'
-import initSqlJs from 'sql.js'
+import Database from 'better-sqlite3'
 import { DatabaseEngine, MassDeleteError, parseDestructiveStatement } from '../src/index.js'
 
 const SCHEMA = `
@@ -32,8 +32,9 @@ describe('mass-delete tripwire', () => {
 
   afterEach(() => {
     for (const p of paths) {
-      if (existsSync(p)) rmSync(p, { force: true })
-      if (existsSync(`${p}.tmp`)) rmSync(`${p}.tmp`, { force: true })
+      for (const suffix of ['', '.tmp', '-wal', '-shm']) {
+        if (existsSync(`${p}${suffix}`)) rmSync(`${p}${suffix}`, { force: true })
+      }
     }
     paths.length = 0
   })
@@ -42,7 +43,7 @@ describe('mass-delete tripwire', () => {
     const path = tempDbPath(name)
     paths.push(path)
     const engine = new DatabaseEngine({
-      initSqlJs,
+      betterSqlite3: Database,
       dbPathProvider: () => path,
       schemaVersion: 1,
       schema: SCHEMA,
@@ -149,13 +150,13 @@ describe('rotating on-boot backup', () => {
     const dir = tmpdir()
     const base = dbPath.split(/[\\/]/).pop() as string
     return readdirSync(dir)
-      .filter((f) => f === base || f.startsWith(`${base}.`))
+      .filter((f) => f === base || f.startsWith(`${base}.`) || f.startsWith(`${base}-`))
       .map((f) => join(dir, f))
   }
 
   function makeEngine(path: string, keep: number) {
     return new DatabaseEngine({
-      initSqlJs,
+      betterSqlite3: Database,
       dbPathProvider: () => path,
       schemaVersion: 1,
       schema: SCHEMA,

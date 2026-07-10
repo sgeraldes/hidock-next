@@ -1,4 +1,4 @@
-import initSqlJs from "sql.js";
+import Database from "better-sqlite3";
 import { existsSync, writeFileSync } from "fs";
 import { join } from "path";
 import { app } from "electron";
@@ -73,7 +73,7 @@ function repairPhase(): void {
  * and structural-repair callback. Owns the sql.js lifecycle and the 4-phase boot.
  */
 const engine = new DatabaseEngine({
-  initSqlJs,
+  betterSqlite3: Database,
   dbPathProvider: getDatabasePath,
   schemaVersion: SCHEMA_VERSION,
   schema: SCHEMA,
