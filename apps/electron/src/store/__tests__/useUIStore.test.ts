@@ -3,7 +3,7 @@
  *
  * Tests cover all store functionality:
  * - Initial state verification
- * - Persist middleware: only sidebarOpen, qaLogsEnabled, theme, operationsDockCollapsed, activityLogExpanded are persisted
+ * - Persist middleware: only sidebarOpen, qaLogsEnabled, theme, operationsDockCollapsed, activityLogExpanded, chatPlacement, chatPosition, chatEmbeddedCollapsed are persisted
  * - Sidebar actions: toggleSidebar, setSidebarOpen, setSidebarContent
  * - QA monitoring: setQaLogsEnabled
  * - Meeting selection: selectMeeting
@@ -48,6 +48,12 @@ beforeEach(() => {
 
   // Reset QA
   store.setQaLogsEnabled(false)
+
+  // Reset AI assistant placement to defaults
+  store.setChatPlacement('floating')
+  store.setChatPosition('right')
+  store.setChatOpen(false)
+  store.setChatEmbeddedCollapsed(false)
 })
 
 describe('useUIStore', () => {
@@ -179,6 +185,10 @@ describe('useUIStore', () => {
       store.setCurrentlyPlaying('rec-1', '/path')
       store.setIsPlaying(true)
       store.openOperationsOverlay() // transient — must NOT persist
+      store.setChatPlacement('embedded')
+      store.setChatPosition('left')
+      store.setChatEmbeddedCollapsed(true)
+      store.setChatOpen(true) // transient — must NOT persist
 
       const stored = JSON.parse(window.localStorage.getItem('hidock-ui-store') || '{}')
       const persistedKeys = Object.keys(stored.state || {})
@@ -188,8 +198,12 @@ describe('useUIStore', () => {
       expect(persistedKeys).toContain('theme') // user preference; read pre-paint in main.tsx
       expect(persistedKeys).toContain('operationsDockCollapsed') // dock chrome pref
       expect(persistedKeys).toContain('activityLogExpanded') // dock chrome pref
+      expect(persistedKeys).toContain('chatPlacement') // assistant placement pref
+      expect(persistedKeys).toContain('chatPosition') // assistant edge pref
+      expect(persistedKeys).toContain('chatEmbeddedCollapsed') // assistant rail pref
       expect(persistedKeys).not.toContain('operationsOverlayOpen') // transient
-      expect(persistedKeys.length).toBe(5)
+      expect(persistedKeys).not.toContain('chatOpen') // transient overlay state
+      expect(persistedKeys.length).toBe(8)
     })
   })
 
@@ -609,6 +623,40 @@ describe('useUIStore', () => {
       expect(finalState.waveformLoadedForId).toBe('rec-1')
       expect(finalState.qaLogsEnabled).toBe(true)
       expect(finalState.recordingsCompactView).toBe(false)
+    })
+  })
+
+  describe('Chat placement (AI assistant)', () => {
+    it('defaults to a floating, right-positioned, closed assistant', () => {
+      const state = useUIStore.getState()
+      expect(state.chatPlacement).toBe('floating')
+      expect(state.chatPosition).toBe('right')
+      expect(state.chatOpen).toBe(false)
+      expect(state.chatEmbeddedCollapsed).toBe(false)
+    })
+
+    it('switching to embedded closes any open floating overlay', () => {
+      const store = useUIStore.getState()
+      store.setChatOpen(true)
+      store.setChatPlacement('embedded')
+      expect(useUIStore.getState().chatPlacement).toBe('embedded')
+      expect(useUIStore.getState().chatOpen).toBe(false)
+    })
+
+    it('toggles the floating overlay and the embedded collapse independently', () => {
+      const store = useUIStore.getState()
+      store.setChatOpen(false)
+      store.toggleChatOpen()
+      expect(useUIStore.getState().chatOpen).toBe(true)
+
+      store.setChatEmbeddedCollapsed(false)
+      store.toggleChatEmbeddedCollapsed()
+      expect(useUIStore.getState().chatEmbeddedCollapsed).toBe(true)
+    })
+
+    it('sets the preferred position', () => {
+      useUIStore.getState().setChatPosition('left')
+      expect(useUIStore.getState().chatPosition).toBe('left')
     })
   })
 })

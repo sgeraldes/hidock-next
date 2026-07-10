@@ -1,5 +1,17 @@
 import { useEffect, useState, useCallback, useMemo, type KeyboardEvent } from 'react'
-import { Save, FolderOpen, RefreshCw, AlertCircle, Eye, EyeOff } from 'lucide-react'
+import {
+  Save,
+  FolderOpen,
+  RefreshCw,
+  AlertCircle,
+  Eye,
+  EyeOff,
+  Sparkles,
+  MessageSquare,
+  PanelRight,
+  PanelLeft,
+  PanelRightOpen
+} from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
@@ -7,7 +19,7 @@ import { Switch } from '@/components/ui/switch'
 import { useAppStore, useCalendarSyncing } from '@/store/useAppStore'
 import { useConfigStore } from '@/store/domain/useConfigStore'
 import { useUIStore } from '@/store/ui/useUIStore'
-import { formatBytes } from '@/lib/utils'
+import { formatBytes, cn } from '@/lib/utils'
 import { HealthCheck } from '@/components/HealthCheck'
 import { ConnectorsSettings } from '@/components/settings/ConnectorsSettings'
 import { toast } from '@/components/ui/toaster'
@@ -41,6 +53,11 @@ export function Settings() {
   // QA Logs toggle — moved here from the sidebar footer (advanced/dev setting).
   const qaLogsEnabled = useUIStore((s) => s.qaLogsEnabled)
   const setQaLogsEnabled = useUIStore((s) => s.setQaLogsEnabled)
+  // Chat Placement — Floating (bubble) vs Embedded (docked pane) + preferred edge.
+  const chatPlacement = useUIStore((s) => s.chatPlacement)
+  const setChatPlacement = useUIStore((s) => s.setChatPlacement)
+  const chatPosition = useUIStore((s) => s.chatPosition)
+  const setChatPosition = useUIStore((s) => s.setChatPosition)
   const { config, loadConfig, updateConfig, configLoading } = useConfigStore()
   const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null)
   const [storageError, setStorageError] = useState<string | null>(null) // B-SET-002: Storage error state
@@ -548,6 +565,102 @@ export function Settings() {
 
       <div className="flex-1 overflow-auto p-6">
         <div className="max-w-2xl mx-auto space-y-6">
+          {/* Assistant — Chat Placement */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Assistant</CardTitle>
+              <CardDescription>Choose how the AI assistant appears while you work</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-5">
+              {/* Placement: Floating (bubble) vs Embedded (docked pane) */}
+              <div className="space-y-2">
+                <span className="text-sm font-medium">Chat placement</span>
+                <div
+                  role="group"
+                  aria-label="Chat placement"
+                  className="inline-flex rounded-lg border border-input bg-muted/40 p-0.5"
+                >
+                  <button
+                    type="button"
+                    aria-pressed={chatPlacement === 'floating'}
+                    onClick={() => setChatPlacement('floating')}
+                    className={cn(
+                      'flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                      chatPlacement === 'floating'
+                        ? 'bg-background font-medium text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground'
+                    )}
+                  >
+                    <MessageSquare className="h-4 w-4" aria-hidden="true" />
+                    Floating
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={chatPlacement === 'embedded'}
+                    onClick={() => setChatPlacement('embedded')}
+                    className={cn(
+                      'flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                      chatPlacement === 'embedded'
+                        ? 'bg-background font-medium text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground'
+                    )}
+                  >
+                    <PanelRightOpen className="h-4 w-4" aria-hidden="true" />
+                    Embedded
+                  </button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {chatPlacement === 'floating'
+                    ? 'A chat bubble floats over the app; click it to open the assistant. Pin it to embed it as a docked pane.'
+                    : 'The assistant is docked as a pane in the Library, collapsible to a side rail. Unpin it to float.'}
+                </p>
+              </div>
+
+              {/* Position: Left / Right edge */}
+              <div className="space-y-2">
+                <span className="text-sm font-medium">Position</span>
+                <div
+                  role="group"
+                  aria-label="Chat position"
+                  className="inline-flex rounded-lg border border-input bg-muted/40 p-0.5"
+                >
+                  <button
+                    type="button"
+                    aria-pressed={chatPosition === 'left'}
+                    onClick={() => setChatPosition('left')}
+                    className={cn(
+                      'flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                      chatPosition === 'left'
+                        ? 'bg-background font-medium text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground'
+                    )}
+                  >
+                    <PanelLeft className="h-4 w-4" aria-hidden="true" />
+                    Left
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={chatPosition === 'right'}
+                    onClick={() => setChatPosition('right')}
+                    className={cn(
+                      'flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                      chatPosition === 'right'
+                        ? 'bg-background font-medium text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground'
+                    )}
+                  >
+                    <PanelRight className="h-4 w-4" aria-hidden="true" />
+                    Right
+                  </button>
+                </div>
+                <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
+                  Sets the bubble corner and the docked pane&apos;s edge.
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+
           {/* Calendar Settings */}
           <Card>
             <CardHeader>

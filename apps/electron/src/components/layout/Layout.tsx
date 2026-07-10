@@ -1,4 +1,4 @@
-import { ReactNode, useEffect, useState, useRef } from 'react'
+import { ReactNode, useEffect, useRef } from 'react'
 import { useLocation, Link } from 'react-router-dom'
 import {
   FileText,
@@ -11,9 +11,10 @@ import {
   Compass,
   ListTodo,
   Settings,
-  RotateCcw,
   Network,
-  Sun
+  Sun,
+  PanelLeftClose,
+  PanelLeftOpen
 } from 'lucide-react'
 import { TitleBar } from '@/components/layout/TitleBar'
 import { cn } from '@/lib/utils'
@@ -26,18 +27,6 @@ import {
 import { useConfigStore } from '@/store/domain/useConfigStore'
 
 type LucideIcon = typeof FileText
-import { Button } from '@/components/ui/button'
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger
-} from '@/components/ui/alert-dialog'
 import { toast } from '@/components/ui/toaster'
 import { OperationController } from '@/components/OperationController'
 import { OperationsPanel } from '@/components/layout/OperationsPanel'
@@ -129,9 +118,29 @@ export function NavCountBadge({ href, count, collapsed, active }: { href: string
   )
 }
 
+/**
+ * Sidebar collapse/expand toggle. Uses the SAME unified Panel affordance as the
+ * Library's list/assistant panes (PanelLeftClose to collapse, PanelLeftOpen to
+ * expand), so every collapse control in the app reads identically.
+ */
+function SidebarCollapseToggle({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
+  const Icon = collapsed ? PanelLeftOpen : PanelLeftClose
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+      aria-pressed={!collapsed}
+      title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+      className="flex h-7 w-7 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+    >
+      <Icon className="h-4 w-4" />
+    </button>
+  )
+}
+
 export function Layout({ children }: LayoutProps) {
   const location = useLocation()
-  const [isDevMode, setIsDevMode] = useState(false)
   // SM-02 fix: Use granular selectors instead of destructuring entire store
   const loadMeetings = useAppStore((s) => s.loadMeetings)
   const syncCalendar = useAppStore((s) => s.syncCalendar)
@@ -171,18 +180,6 @@ export function Layout({ children }: LayoutProps) {
   const prevConnectedRef = useRef<boolean | null>(null)
   const prevStatusStepRef = useRef<string | null>(null)
   const hasShownInitialToast = useRef(false)
-
-  // Check if running in dev mode
-  useEffect(() => {
-    if (window.electronAPI?.app) {
-      window.electronAPI.app.info().then((info) => {
-        setIsDevMode(!info.isPackaged)
-      })
-    } else {
-      // Not in Electron, assume dev mode
-      setIsDevMode(true)
-    }
-  }, [])
 
   // Initialize app on mount
   useEffect(() => {
@@ -263,7 +260,7 @@ export function Layout({ children }: LayoutProps) {
       <OperationController />
 
       {/* Office-365-style unified titlebar (window chrome merged with the app) */}
-      <TitleBar sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+      <TitleBar sidebarOpen={sidebarOpen} />
 
       {/* A1: full-window-width divider under the titlebar. Rendered as its own row
           BELOW the 40px titlebar band so the Windows native-controls overlay (which
@@ -283,13 +280,32 @@ export function Layout({ children }: LayoutProps) {
         {/* Navigation — nav px-2.5 (10px) + item px-3 (12px) + half-icon (10px)
             lands every icon centre on the shared 32px rail axis (see TitleBar). */}
         <nav className="flex-1 px-2.5 pt-3 pb-2 space-y-4 overflow-y-auto">
+          {/* Collapsed rail: the sidebar-collapse toggle has no header row to sit
+              on, so show it centred on the rail axis above the nav icons. Uses the
+              SAME unified Panel collapse affordance as the list/assistant panes. */}
+          {!sidebarOpen && (
+            <div className="flex justify-center">
+              <SidebarCollapseToggle collapsed={!sidebarOpen} onToggle={toggleSidebar} />
+            </div>
+          )}
           {navigationSections.map((section, sectionIdx) => (
             <div key={section.title}>
-              {/* Section Header */}
+              {/* Section Header. The FIRST group ("KNOWLEDGE") also hosts the
+                  sidebar-collapse toggle on its right — un-gluing it from the app
+                  brand mark (which now aligns with the nav-icon column). */}
               {sidebarOpen && (
-                <div className="px-3 mb-2 text-[10px] font-semibold text-slate-500 tracking-wider">
-                  {section.title}
-                </div>
+                sectionIdx === 0 ? (
+                  <div className="flex items-center justify-between pl-3 pr-1 mb-2">
+                    <span className="text-[10px] font-semibold text-slate-500 tracking-wider">
+                      {section.title}
+                    </span>
+                    <SidebarCollapseToggle collapsed={!sidebarOpen} onToggle={toggleSidebar} />
+                  </div>
+                ) : (
+                  <div className="px-3 mb-2 text-[10px] font-semibold text-slate-500 tracking-wider">
+                    {section.title}
+                  </div>
+                )
               )}
               {/* Section Items */}
               <div className="space-y-1">
@@ -353,45 +369,9 @@ export function Layout({ children }: LayoutProps) {
             in a dedicated overlay (see ActivityLogPanel), never inline here. */}
         <ActivityLogPanel sidebarOpen={sidebarOpen} />
 
-        {/* Dev Tools — Restart is gated behind a confirm dialog because it does a
-            raw app restart that reconnects the USB device. QA Logs moved to
-            Settings → Developer (no longer in the always-visible sidebar). */}
-        {isDevMode && (
-          <div className="border-t border-slate-700 p-3">
-            <AlertDialog>
-              <AlertDialogTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className={cn(
-                    'w-full gap-2 bg-slate-800 text-slate-200 hover:bg-slate-700 hover:text-white',
-                    !sidebarOpen && 'px-0 justify-center'
-                  )}
-                  title="Restart App"
-                  aria-label="Restart app"
-                >
-                  <RotateCcw className="h-4 w-4" />
-                  {sidebarOpen && <span>Restart</span>}
-                </Button>
-              </AlertDialogTrigger>
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>Restart the app?</AlertDialogTitle>
-                  <AlertDialogDescription>
-                    This fully restarts the app and reconnects the device. Any in-progress
-                    downloads or transcriptions will be interrupted.
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>Cancel</AlertDialogCancel>
-                  <AlertDialogAction onClick={() => window.electronAPI?.app?.restart()}>
-                    Restart
-                  </AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
-          </div>
-        )}
+        {/* Restart moved OUT of the sidebar into the device pill's dropdown menu
+            (see TitleBar.tsx) — it lives with the device connection controls now
+            and is always available (not dev-mode-gated). */}
       </aside>
 
       {/* Main Content */}

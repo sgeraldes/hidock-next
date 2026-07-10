@@ -115,6 +115,18 @@ export interface FilterStore {
 
 export type SidebarContent = 'calendar' | 'contact' | 'project' | 'chat' | 'none'
 
+/**
+ * Where the AI assistant lives.
+ *  - `floating`: a chat-bubble button floats over the app; clicking opens a
+ *    floating overlay that does NOT push page content.
+ *  - `embedded`: the assistant is a docked pane in the Library tri-pane layout
+ *    (the classic behaviour), collapsible to a thin side rail.
+ */
+export type ChatPlacement = 'floating' | 'embedded'
+
+/** Which edge the assistant favours: the floating bubble corner and the docked pane side. */
+export type ChatPosition = 'left' | 'right'
+
 export interface SentimentSegment {
   startTime: number // Seconds
   endTime: number // Seconds
@@ -134,6 +146,17 @@ export interface UIStore {
   sidebarOpen: boolean
   sidebarContent: SidebarContent
   selectedMeetingId: string | null
+
+  // AI assistant placement (Chat Placement — see ChatPlacement/ChatPosition).
+  /** Floating chat-bubble (default) vs embedded docked pane. Persisted. */
+  chatPlacement: ChatPlacement
+  /** Preferred edge for the bubble/pane (Left/Right). Persisted. */
+  chatPosition: ChatPosition
+  /** Floating overlay open/visible. Transient (renderer-only). */
+  chatOpen: boolean
+  /** Embedded pane collapsed to a thin rail (mirrors the list pane). Persisted. */
+  chatEmbeddedCollapsed: boolean
+
   isGeneratingOutput: boolean
   outputContent: string | null
 
@@ -167,6 +190,15 @@ export interface UIStore {
   toggleSidebar: () => void
   setSidebarOpen: (open: boolean) => void
   setSidebarContent: (content: SidebarContent) => void
+
+  // AI assistant placement actions
+  setChatPlacement: (placement: ChatPlacement) => void
+  setChatPosition: (position: ChatPosition) => void
+  setChatOpen: (open: boolean) => void
+  toggleChatOpen: () => void
+  setChatEmbeddedCollapsed: (collapsed: boolean) => void
+  toggleChatEmbeddedCollapsed: () => void
+
   selectMeeting: (id: string | null) => void
   setGeneratingOutput: (generating: boolean) => void
   setOutputContent: (content: string | null) => void

@@ -15,6 +15,13 @@ export const useUIStore = create<UIStore>()(
   sidebarOpen: true,
   sidebarContent: 'calendar',
   selectedMeetingId: null,
+
+  // AI assistant placement — defaults to the floating chat-bubble experience.
+  chatPlacement: 'floating',
+  chatPosition: 'right',
+  chatOpen: false,
+  chatEmbeddedCollapsed: false,
+
   isGeneratingOutput: false,
   outputContent: null,
 
@@ -58,6 +65,32 @@ export const useUIStore = create<UIStore>()(
 
   setSidebarContent: (content: SidebarContent) => {
     set({ sidebarContent: content, sidebarOpen: true })
+  },
+
+  // AI assistant placement actions. Switching to embedded closes the floating
+  // overlay; switching to floating leaves it closed until the user opens it.
+  setChatPlacement: (placement) => {
+    set(placement === 'embedded' ? { chatPlacement: placement, chatOpen: false } : { chatPlacement: placement })
+  },
+
+  setChatPosition: (position) => {
+    set({ chatPosition: position })
+  },
+
+  setChatOpen: (open) => {
+    set({ chatOpen: open })
+  },
+
+  toggleChatOpen: () => {
+    set((state) => ({ chatOpen: !state.chatOpen }))
+  },
+
+  setChatEmbeddedCollapsed: (collapsed) => {
+    set({ chatEmbeddedCollapsed: collapsed })
+  },
+
+  toggleChatEmbeddedCollapsed: () => {
+    set((state) => ({ chatEmbeddedCollapsed: !state.chatEmbeddedCollapsed }))
   },
 
   selectMeeting: (id: string | null) => {
@@ -169,6 +202,11 @@ export const useUIStore = create<UIStore>()(
       // Only persist user preferences, NOT transient playback/waveform state
       partialize: (state) => ({
         sidebarOpen: state.sidebarOpen,
+        // AI assistant placement preferences (honored on load). chatOpen is
+        // intentionally NOT persisted — the overlay always starts closed.
+        chatPlacement: state.chatPlacement,
+        chatPosition: state.chatPosition,
+        chatEmbeddedCollapsed: state.chatEmbeddedCollapsed,
         qaLogsEnabled: state.qaLogsEnabled,
         theme: state.theme, // persisted: user preference (also read pre-paint in main.tsx)
         operationsDockCollapsed: state.operationsDockCollapsed, // persisted: dock chrome pref
@@ -207,6 +245,12 @@ export const useIsPlaying = () => useUIStore((s) => s.isPlaying)
 export const useWaveformLoadingId = () => useUIStore((s) => s.waveformLoadingId)
 export const useWaveformLoadedForId = () => useUIStore((s) => s.waveformLoadedForId)
 export const useQaLogsEnabled = () => useUIStore((s) => s.qaLogsEnabled)
+
+// AI assistant placement selectors (scalar — Object.is is sufficient)
+export const useChatPlacement = () => useUIStore((s) => s.chatPlacement)
+export const useChatPosition = () => useUIStore((s) => s.chatPosition)
+export const useChatOpen = () => useUIStore((s) => s.chatOpen)
+export const useChatEmbeddedCollapsed = () => useUIStore((s) => s.chatEmbeddedCollapsed)
 export const useThemePreference = () => useUIStore((s) => s.theme)
 export const useOperationsDockCollapsed = () => useUIStore((s) => s.operationsDockCollapsed)
 export const useOperationsOverlayOpen = () => useUIStore((s) => s.operationsOverlayOpen)

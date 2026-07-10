@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { PanelLeft, Search, CheckCircle2, Loader2, Usb, ChevronDown, LogOut, ArrowRight, AlertTriangle } from 'lucide-react'
+import { Search, CheckCircle2, Loader2, Usb, ChevronDown, LogOut, ArrowRight, AlertTriangle, RotateCcw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useDeviceConnection } from '@/hooks/useDeviceConnection'
 import { useAppStore } from '@/store'
@@ -12,6 +12,16 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator
 } from '@/components/ui/dropdown-menu'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle
+} from '@/components/ui/alert-dialog'
 
 /**
  * Office-365-style unified titlebar.
@@ -57,10 +67,9 @@ const MAC_TRAFFIC_LIGHT_INSET = 72
 
 interface TitleBarProps {
   sidebarOpen: boolean
-  onToggleSidebar: () => void
 }
 
-export function TitleBar({ sidebarOpen, onToggleSidebar }: TitleBarProps) {
+export function TitleBar({ sidebarOpen }: TitleBarProps) {
   const navigate = useNavigate()
   // Shared with the Device Sync page — same status source, same connect action.
   const { status, label: connectionLabel, failedHint, connect, disconnect } = useDeviceConnection()
@@ -92,29 +101,21 @@ export function TitleBar({ sidebarOpen, onToggleSidebar }: TitleBarProps) {
         )}
         style={{ paddingLeft: isMac ? MAC_TRAFFIC_LIGHT_INSET : undefined }}
       >
-        {/* Toggle box: 64px wide, icon centred on the 32px rail axis (aligns with
-            the collapsed rail + every nav icon below). */}
+        {/* Brand mark box: 64px wide, mark centred on the 32px rail axis so the
+            app logo lines up vertically with the collapsed rail + every nav icon
+            in the sidebar column below. The sidebar-collapse toggle now lives on
+            the sidebar's "KNOWLEDGE" header row (see Layout.tsx), so the mark is
+            no longer glued to a toggle. */}
         <div className="flex h-full w-16 shrink-0 items-center justify-center">
-          <button
-            type="button"
-            onClick={onToggleSidebar}
-            aria-label={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
-            aria-pressed={sidebarOpen}
-            className="titlebar-no-drag flex h-7 w-7 items-center justify-center rounded-md text-slate-300 transition-colors hover:bg-slate-700 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
-          >
-            <PanelLeft className="h-4 w-4" />
-          </button>
+          <AppMark />
         </div>
 
-        {/* App identity — expanded only; hidden with the sidebar labels when collapsed.
-            The FULL product wordmark ("Meeting Intelligence" — this app is not the
-            device) is sized to fit inside the sidebar column so it never truncates
-            and never straddles the sidebar/content seam. gap/padding are tightened
-            and the wordmark uses a smaller type + tracking so all 20 chars fit the
-            ~160px cell (w-56 − 64px toggle box). */}
+        {/* App identity wordmark — expanded only; hidden with the sidebar labels
+            when collapsed. The FULL product wordmark ("Meeting Intelligence" — this
+            app is not the device) is sized to fit the ~160px cell (w-56 − 64px mark
+            box) so it never truncates or straddles the sidebar/content seam. */}
         {sidebarOpen && (
-          <div className="flex min-w-0 items-center gap-1.5 pr-2">
-            <AppMark />
+          <div className="flex min-w-0 items-center pr-2">
             <span className="whitespace-nowrap text-[11px] font-semibold leading-none tracking-tight text-white">
               Meeting Intelligence
             </span>
@@ -185,6 +186,11 @@ interface ConnectionControlProps {
  *                   disconnecting, so it can't be hit by accident.
  */
 function ConnectionControl({ status, label, failedHint, recording, onConnect, onDisconnect, onGoToSync }: ConnectionControlProps) {
+  // Restart confirm dialog is driven by state (rather than nesting an
+  // AlertDialogTrigger inside a DropdownMenuItem, which is finicky): the menu item
+  // opens it, and the AlertDialog is rendered controlled, outside the menu.
+  const [restartOpen, setRestartOpen] = useState(false)
+
   if (status === 'connecting') {
     return (
       <button
@@ -230,45 +236,72 @@ function ConnectionControl({ status, label, failedHint, recording, onConnect, on
   // Connected — dropdown. DropdownMenuContent renders through a Radix portal, so
   // the menu is never clipped by the titlebar's overflow.
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          title={recording ? `Recording — ${label}` : `Device connected: ${label}`}
-          className={cn(
-            PILL_BASE,
-            recording
-              ? 'border-red-700/50 bg-red-950/40 text-red-300 hover:bg-red-950/60 data-[state=open]:bg-red-950/70'
-              : 'border-emerald-700/50 bg-emerald-900/40 text-emerald-300 hover:bg-emerald-900/60 data-[state=open]:bg-emerald-900/70'
-          )}
-        >
-          {recording ? (
-            <span
-              className="h-2 w-2 rounded-full bg-red-500 animate-pulse motion-reduce:animate-none"
-              aria-label="Recording in progress"
-            />
-          ) : (
-            <CheckCircle2 className="h-3.5 w-3.5" />
-          )}
-          <span className="hidden md:inline">{recording ? 'Recording' : label}</span>
-          <ChevronDown className="h-3 w-3 opacity-70" />
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="titlebar-no-drag w-44">
-        <DropdownMenuItem onSelect={onGoToSync}>
-          <ArrowRight className="mr-2 h-4 w-4" />
-          Go to Sync
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem
-          onSelect={onDisconnect}
-          className="text-red-600 focus:text-red-600 dark:text-red-400 dark:focus:text-red-400"
-        >
-          <LogOut className="mr-2 h-4 w-4" />
-          Disconnect
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            title={recording ? `Recording — ${label}` : `Device connected: ${label}`}
+            className={cn(
+              PILL_BASE,
+              recording
+                ? 'border-red-700/50 bg-red-950/40 text-red-300 hover:bg-red-950/60 data-[state=open]:bg-red-950/70'
+                : 'border-emerald-700/50 bg-emerald-900/40 text-emerald-300 hover:bg-emerald-900/60 data-[state=open]:bg-emerald-900/70'
+            )}
+          >
+            {recording ? (
+              <span
+                className="h-2 w-2 rounded-full bg-red-500 animate-pulse motion-reduce:animate-none"
+                aria-label="Recording in progress"
+              />
+            ) : (
+              <CheckCircle2 className="h-3.5 w-3.5" />
+            )}
+            <span className="hidden md:inline">{recording ? 'Recording' : label}</span>
+            <ChevronDown className="h-3 w-3 opacity-70" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="titlebar-no-drag w-44">
+          <DropdownMenuItem onSelect={onGoToSync}>
+            <ArrowRight className="mr-2 h-4 w-4" />
+            Go to Sync
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            onSelect={onDisconnect}
+            className="text-red-600 focus:text-red-600 dark:text-red-400 dark:focus:text-red-400"
+          >
+            <LogOut className="mr-2 h-4 w-4" />
+            Disconnect
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          {/* Restart lives here now (moved out of the sidebar). onSelect just flips
+              the controlled AlertDialog open — see the note on restartOpen. */}
+          <DropdownMenuItem onSelect={() => setRestartOpen(true)}>
+            <RotateCcw className="mr-2 h-4 w-4" />
+            Restart app
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      <AlertDialog open={restartOpen} onOpenChange={setRestartOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Restart the app?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This fully restarts the app and reconnects the device. Any in-progress
+              downloads or transcriptions will be interrupted.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => window.electronAPI?.app?.restart()}>
+              Restart
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   )
 }
 

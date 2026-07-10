@@ -198,4 +198,32 @@ describe('Settings Page', () => {
     // The mock config has lastSyncAt set to '2026-03-01T10:00:00Z'
     expect(screen.getByText(/Last synced:/)).toBeInTheDocument()
   })
+
+  // Chat Placement control — persists to useUIStore and is honored on load.
+  it('should render the Assistant chat-placement control', async () => {
+    render(<Settings />)
+
+    expect(screen.getByRole('group', { name: /Chat placement/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Floating' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Embedded' })).toBeInTheDocument()
+    expect(screen.getByRole('group', { name: /Chat position/i })).toBeInTheDocument()
+  })
+
+  it('should persist chat placement + position to the UI store', async () => {
+    const { useUIStore } = await import('@/store/ui/useUIStore')
+    useUIStore.getState().setChatPlacement('floating')
+    useUIStore.getState().setChatPosition('right')
+
+    render(<Settings />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Embedded' }))
+    expect(useUIStore.getState().chatPlacement).toBe('embedded')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Left' }))
+    expect(useUIStore.getState().chatPosition).toBe('left')
+
+    // The pressed state reflects the selection (honored on subsequent render).
+    expect(screen.getByRole('button', { name: 'Embedded' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: 'Left' })).toHaveAttribute('aria-pressed', 'true')
+  })
 })

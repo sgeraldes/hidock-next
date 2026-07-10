@@ -103,8 +103,6 @@ export function Library() {
   const setDurationPreset = useLibraryStore((state) => state.setDurationPreset)
   const clearAllFilters = useLibraryStore((state) => state.clearFilters)
 
-  // Source-scoped AI assistant docking (dockable overlay).
-  const setAssistantDock = useLibraryStore((state) => state.setAssistantDock)
 
   // Sort state
   const { sortBy, sortOrder } = useLibrarySorting()
@@ -1502,8 +1500,13 @@ export function Library() {
               onNavigateToMeeting={handleNavigateToMeeting}
               // Metadata editing
               onMetadataEdited={() => refresh(false)}
-              // Open the source-scoped assistant drawer (dockable overlay)
-              onAskAboutSource={() => setAssistantDock('floating')}
+              // Reveal the assistant: open the floating overlay, or expand the
+              // embedded pane if it's collapsed to a rail (honors chat placement).
+              onAskAboutSource={() => {
+                const ui = useUIStore.getState()
+                if (ui.chatPlacement === 'embedded') ui.setChatEmbeddedCollapsed(false)
+                else ui.setChatOpen(true)
+              }}
             />
           }
           rightPanel={
