@@ -513,7 +513,7 @@ ${transcript.substring(0, 8000)}`
 
         const knowledgeRows = db.exec(`
           SELECT id, title, summary, captured_at FROM knowledge_captures
-          WHERE title LIKE ? ESCAPE '\' OR summary LIKE ? ESCAPE '\'
+          WHERE title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\'
           LIMIT ?
         `, [likeQuery, likeQuery, limit])
 
@@ -526,7 +526,7 @@ ${transcript.substring(0, 8000)}`
 
         const peopleRows = db.exec(`
           SELECT id, name, email, type FROM contacts
-          WHERE name LIKE ? ESCAPE '\' OR email LIKE ? ESCAPE '\' OR company LIKE ? ESCAPE '\' OR role LIKE ? ESCAPE '\'
+          WHERE name LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\' OR company LIKE ? ESCAPE '\\' OR role LIKE ? ESCAPE '\\'
           LIMIT ?
         `, [likeQuery, likeQuery, likeQuery, likeQuery, limit])
 
@@ -539,7 +539,7 @@ ${transcript.substring(0, 8000)}`
 
         const projectRows = db.exec(`
           SELECT id, name, description, status FROM projects
-          WHERE name LIKE ? ESCAPE '\' OR description LIKE ? ESCAPE '\'
+          WHERE name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'
           LIMIT ?
         `, [likeQuery, likeQuery, limit])
 
@@ -569,13 +569,13 @@ ${transcript.substring(0, 8000)}`
 
           const colClauses = columns.map((col) => {
             params.push(likeVal)
-            return `${col} LIKE ? ESCAPE '\'`
+            return `${col} LIKE ? ESCAPE '\\'`
           })
           termClauses.push(`(${colClauses.join(' OR ')})`)
 
           const countExpr = columns.map((col) => {
             params.push(likeVal)
-            return `CASE WHEN ${col} LIKE ? ESCAPE '\' THEN 1 ELSE 0 END`
+            return `CASE WHEN ${col} LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END`
           })
           matchCountParts.push(`MAX(${countExpr.join(', ')})`)
         }
