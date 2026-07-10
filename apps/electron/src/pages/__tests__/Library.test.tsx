@@ -16,17 +16,25 @@ vi.mock('@/hooks/useUnifiedRecordings', () => ({
   useUnifiedRecordings: vi.fn()
 }))
 
-vi.mock('@/store/useUIStore', () => ({
-  useUIStore: vi.fn((selector) => {
-    const state = {
-      currentlyPlayingId: null,
-      setCurrentlyPlayingId: vi.fn(),
-      recordingsCompactView: true,
-      setRecordingsCompactView: vi.fn()
-    }
-    return typeof selector === 'function' ? selector(state) : state
-  })
-}))
+vi.mock('@/store/useUIStore', () => {
+  const state = {
+    currentlyPlayingId: null,
+    setCurrentlyPlayingId: vi.fn(),
+    recordingsCompactView: true,
+    setRecordingsCompactView: vi.fn(),
+    // Waveform-preload fields read by SourceReader's preload effect via getState().
+    waveformLoadedForId: null,
+    waveformLoadingId: null,
+    setWaveformLoadedForId: vi.fn(),
+    setWaveformLoadingId: vi.fn()
+  }
+  const useUIStore = vi.fn((selector?: (s: typeof state) => unknown) =>
+    typeof selector === 'function' ? selector(state) : state
+  ) as unknown as { (selector?: (s: typeof state) => unknown): unknown; getState: () => typeof state; setState: ReturnType<typeof vi.fn> }
+  useUIStore.getState = () => state
+  useUIStore.setState = vi.fn()
+  return { useUIStore }
+})
 
 vi.mock('@/store/useAppStore', () => ({
   useAppStore: vi.fn((selector) => {
