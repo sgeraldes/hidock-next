@@ -9,15 +9,24 @@ docs. Companions: ROADMAP.md (audit ledger + coverage map), INTELLIGENCE.md
 
 ## 0. CURRENT STATE — 2026-07-10 ~03:10 (READ THIS FIRST, supersedes below)
 
-**HEAD `4d200e9f`, schema v38, all pushed. better-sqlite3/WAL engine (NOT
-sql.js — migrated after the 2GB-DB P0). Suite **2558 passing / 0 fail**
-(independently re-run after the library cherry-pick). Backlog ~960 draining.
-NOTE: main-process changes (v-migrations, IPC) need an app RESTART to take
-effect; renderer changes arrive via HMR. RESTART PENDING to activate: the
-library-redesign's `recordings:backfillDurations` IPC + duration backfill
-(renderer UX is HMR-live; durations stay NULL until restart runs the backfill).
-Bundle that restart-verify with the Context Graph dogfood walk once ctxgraph
-lands (don't restart mid-meeting — dock = live call audio).**
+**HEAD `cf82c1dc` (pending final suite confirm), schema v38, all pushed.
+better-sqlite3/WAL engine. Suite **2574 passing / 0 fail** (bundling merge);
+re-confirming after ctxgraph merge. IMPORTANT: after cherry-picking any
+knowledge-graph SOURCE change, `cd packages/knowledge-graph && npm run build`
+(tsup) — the electron app resolves @hidock/knowledge-graph via the junctioned
+package's `dist`; stale dist = stale graph behavior.
+NOTE: main-process changes need an app RESTART; renderer arrives via HMR.
+RESTART PENDING to activate (bundle into ONE restart, not mid-meeting — dock =
+live call audio):
+  1. library `recordings:backfillDurations` (durations NULL until it runs).
+  2. status SELF-HEAL (healRecordingStatusFromTranscripts, auto at boot) — fixes
+     the "Not transcribed over a real transcript" data drift across all rows.
+  3. misbundle repair IPC (`repair:previewMisbundled` dry-run → `repair:applyMisbundled`
+     {confirm:true}) — GATED, run preview first, apply on user OK to heal the
+     recurring "Engineering EDF team 1" cross-month bundle.
+  4. contextGraph:* IPC (node inspector edit/merge/convert/locate).
+Then run the dogfood + impeccable walk on Library, Context Graph, MeetingDetail,
+and (once shell-chrome lands) the shell at 3 widths × 2 sidebar states.**
 
 ### DEV/ABI GOTCHA (critical): the on-disk `better-sqlite3` binary is the
 ELECTRON ABI (the running app holds it). So:
@@ -26,8 +35,15 @@ ELECTRON ABI (the running app holds it). So:
 - typecheck (`npm run typecheck`) is safe under system node.
 
 ### AGENTS IN FLIGHT (they seed from stale `main` 89cb03ac and MUST ff to the branch tip; VERIFY base in their report; CHERRY-PICK their commit onto current HEAD since HEAD advances, don't ff-merge):
-- **ctxgraph-affordances** (a82aab752ab06c621): Context Graph clickability/
-  editability/discoverability/navigability overhaul (user's top request).
+- ~~**ctxgraph-affordances**~~ **DONE — landed `cf82c1dc`** (cherry-picked 1f2f3d8a;
+  package rebuilt; 2574 green): NodeInspector panel — linked-contact vs
+  extracted-name badge, what-this-is card (role/org/#meetings/first-last-seen/
+  aliases/pronouns/provenance), clickable source rows → MeetingDetail/PersonDetail,
+  Rename-as-correction (propagates via entity:contact-changed), To-contact,
+  Set-identity (MergeIntoDialog), Pronouns, Locate, Merge (blast-radius preview),
+  Remove. Deferred: bulk multi-select; pronouns not promoted to contact record
+  (no column); name-only rename doesn't rewrite historical transcript text.
+  Original brief (Context Graph clickability/editability/discoverability):
   Node detail = what-each-person-IS (role/org/#meetings/aliases/provenance);
   RENAME as a CORRECTION ("Jiarabi"→"Yaraví" propagates everywhere, He/Him);
   convert name-only node → real contact (manual tier); clickable source line
@@ -36,7 +52,13 @@ ELECTRON ABI (the running app holds it). So:
   parallel system. Owns ContextGraph.tsx + components/context-graph/** +
   packages/knowledge-graph + graph IPC (+ shared handlers.ts/preload this wave).
   Based on `4d200e9f`. Do NOT touch Library/database SCHEMA_VERSION.
-- **bundling-rootcause** (a4c2854f1efab7a95, base 3f45bc74): months-apart
+- ~~**bundling-rootcause**~~ **DONE — landed `93eaf392`** (2574 green). VERDICT:
+  months-apart bundle = STALE DATA, not a live bug (regression test proves
+  current fit-based binding is correct). Shipped: status write-side fix +
+  auto boot self-heal; GATED misbundle repair (preview→apply confirm:true);
+  NUL-byte delimiter hardening. Badge display fix already landed (3f45bc74).
+  ACTION: run repair:previewMisbundled after restart, apply on user OK.
+  Original brief (months-apart
   bundling — a recurring Teams meeting ("Engineering EDF team 1", May 27) has 4
   recordings incl. a July-1 Rec09. Root-cause recurring-OCCURRENCE resolution
   (recording bound to anchor occurrence not the date-matching one) + the
