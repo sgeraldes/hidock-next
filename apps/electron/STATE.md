@@ -46,7 +46,18 @@ ELECTRON ABI (the running app holds it). So:
   reorder/queueState IPC + push. OperationsPanel Pause button enabled + reflects
   state. Optional deferred: persist paused flag/rank across restart (intentionally
   in-memory now).
-- **wer-hybrid-spike** (aced5f54d46abb8af): RESEARCH doc — still out; send WER to user.
+- **wer-part2-run** (a640469be104202fc, base f1e1eaee): run the empirical WER
+  experiment (Gemini-only vs hybrid VAD-chunk vs full-local) using the committed
+  harness scripts/experiments/wer/ on real audio (F:/HiDock-Next-Audios, RTX
+  4090); fill Part 2 + Q2 verdict in docs/experiments/wer-hybrid-spike.md. On
+  land: cherry-pick doc + SEND THE Q2 VERDICT + numbers TO USER (they asked).
+- ~~wer-hybrid-spike (aced5f54d46abb8af)~~ DIED after Part 1 (budget exhaustion,
+  0-byte harness output). RECOVERED its work → committed `f1e1eaee`: Part 1
+  (Spanish-ASR landscape) DONE — whisper-large-v3 best MIT Spanish (2.81%
+  FLEURS-es); Canary-Qwen-2.5B English-only, ARK-ASR-3B no published Spanish =
+  dead ends. Part 2 empirical was NOT run (→ wer-part2-run above). Its stale
+  worktree (agent-aced5f54d46abb8af) still on disk — needs `--force` to remove
+  (leftover files); ask user before force-removing.
 - ~~**ctxgraph-affordances**~~ **DONE — landed `cf82c1dc`** (cherry-picked 1f2f3d8a;
   package rebuilt; 2574 green): NodeInspector panel — linked-contact vs
   extracted-name badge, what-this-is card (role/org/#meetings/first-last-seen/
