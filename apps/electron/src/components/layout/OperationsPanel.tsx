@@ -7,8 +7,6 @@ import {
   RefreshCw,
   AlertCircle,
   RotateCcw,
-  ChevronDown,
-  ChevronUp,
   Maximize2,
   ArrowUp,
   ArrowDown,
@@ -21,11 +19,8 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { cn } from '@/lib/utils'
 import {
   useDownloadQueue,
-  useDeviceSyncProgress,
-  useDeviceSyncEta,
   useUnifiedRecordings
 } from '@/store/useAppStore'
-import { getHiDockDeviceService } from '@/services/hidock-device'
 import {
   useTranscriptionStore,
   useTranscriptionStats,
@@ -35,12 +30,9 @@ import {
 } from '@/store/features/useTranscriptionStore'
 import {
   useUIStore,
-  useOperationsDockCollapsed,
   useOperationsOverlayOpen
 } from '@/store/ui/useUIStore'
 import { useOperations } from '@/hooks/useOperations'
-import { toast } from '@/components/ui/toaster'
-import { formatEta } from '@/utils/formatters'
 import type { UnifiedRecording } from '@/types/unified-recording'
 
 interface OperationsPanelProps {
@@ -64,7 +56,8 @@ function compareTranscriptions(a: TranscriptionItem, b: TranscriptionItem): numb
   const r = statusRank(a.status) - statusRank(b.status)
   if (r !== 0) return r
   if (a.priority !== b.priority) return b.priority - a.priority
-  return a.filename.localeCompare(b.filename)
+  // Newest recording first (filenames start with a date stamp, so reverse-sort).
+  return b.filename.localeCompare(a.filename)
 }
 
 /** Strip the recording extension for a cleaner display name (keeps the date stamp). */
@@ -79,12 +72,15 @@ function sourceTitleFor(item: TranscriptionItem, rec?: UnifiedRecording): string
   return null
 }
 
+/**
+ * The Operations surface does NOT live in the sidebar. The sidebar shows only a
+ * single compact status badge — what's happening (count), how far along
+ * (progress bar), and an error count — that opens the full queue in an overlay.
+ * The whole list is in the overlay, never crammed into the nav column.
+ */
 export function OperationsPanel({ sidebarOpen }: OperationsPanelProps) {
   const navigate = useNavigate()
-  // SM-06 fix: Use granular selector exports
   const downloadQueue = useDownloadQueue()
-  const deviceSyncProgress = useDeviceSyncProgress()
-  const deviceSyncEta = useDeviceSyncEta()
   const transcriptionStats = useTranscriptionStats()
   const transcriptionQueue = useTranscriptionStore((s) => s.queue)
   const prioritize = useTranscriptionStore((s) => s.prioritize)
@@ -99,35 +95,27 @@ export function OperationsPanel({ sidebarOpen }: OperationsPanelProps) {
     else pauseQueue()
   }, [queuePaused, pauseQueue, resumeQueue])
   const recordings = useUnifiedRecordings()
-  const { cancelAllDownloads, cancelAllTranscriptions, cancelTranscription } = useOperations()
+  const { cancelTranscription } = useOperations()
 
-  // Dock chrome (collapse to a compact chip / expand to a larger overlay), persisted.
-  const dockCollapsed = useOperationsDockCollapsed()
   const overlayOpen = useOperationsOverlayOpen()
-  const toggleDock = useUIStore((s) => s.toggleOperationsDock)
   const openOverlay = useUIStore((s) => s.openOperationsOverlay)
   const closeOverlay = useUIStore((s) => s.closeOperationsOverlay)
 
-  // DL-15: Track failed download count for retry button
   const [failedDownloadCount, setFailedDownloadCount] = useState(0)
 
   useEffect(() => {
     if (!window.electronAPI?.downloadService) return
-
     window.electronAPI.downloadService.getState().then((state) => {
       const failedCount = state?.queue?.filter((item: { status: string }) => item.status === 'failed').length ?? 0
       setFailedDownloadCount(failedCount)
     }).catch(() => {})
-
     const unsub = window.electronAPI.downloadService.onStateUpdate((state: { queue: Array<{ status: string }> }) => {
-      const failedCount = state.queue.filter((item) => item.status === 'failed').length
-      setFailedDownloadCount(failedCount)
+      setFailedDownloadCount(state.queue.filter((item) => item.status === 'failed').length)
     })
     return unsub
   }, [])
 
-  // Mirror the main-process transcription queue state (paused? which id is live?):
-  // pull once on mount, then reflect every push. Main owns the truth.
+  // Mirror the main-process transcription queue state (paused? which id is live?).
   useEffect(() => {
     const api = window.electronAPI?.recordings
     if (!api) return
@@ -138,32 +126,11 @@ export function OperationsPanel({ sidebarOpen }: OperationsPanelProps) {
     return unsub
   }, [applyQueueState])
 
-  const handleRetryFailed = useCallback(async () => {
-    try {
-      const deviceConnected = getHiDockDeviceService().isConnected()
-      const result = await window.electronAPI.downloadService.retryFailed(deviceConnected)
-      if (result.error) {
-        toast({ title: 'Cannot retry downloads', description: result.error, variant: 'error' })
-      } else if (result.count > 0) {
-        toast({
-          title: 'Retrying downloads',
-          description: `Re-queued ${result.count} failed download${result.count !== 1 ? 's' : ''}`,
-          variant: 'default'
-        })
-      }
-    } catch (e) {
-      console.error('[OperationsPanel] Failed to retry downloads:', e)
-    }
-  }, [])
-
-  // B6: client-side navigation to the meeting/recording behind a transcription.
+  // Client-side navigation to the meeting/recording behind a transcription.
   const goToSource = useCallback((item: TranscriptionItem) => {
     const rec = recordings.find((r) => r.id === item.recordingId)
-    if (rec?.meetingId) {
-      navigate(`/meeting/${rec.meetingId}`)
-    } else {
-      navigate('/library', { state: { selectedId: item.recordingId } })
-    }
+    if (rec?.meetingId) navigate(`/meeting/${rec.meetingId}`)
+    else navigate('/library', { state: { selectedId: item.recordingId } })
     closeOverlay()
   }, [recordings, navigate, closeOverlay])
 
@@ -171,16 +138,32 @@ export function OperationsPanel({ sidebarOpen }: OperationsPanelProps) {
   const hasFailedDownloads = failedDownloadCount > 0
   const hasTranscriptions =
     transcriptionStats.pending > 0 || transcriptionStats.processing > 0 || transcriptionStats.failed > 0
-  const hasAnyOperations = hasDownloads || hasFailedDownloads || hasTranscriptions
-
-  if (!hasAnyOperations) return null
+  if (!hasDownloads && !hasFailedDownloads && !hasTranscriptions) return null
 
   const activeTranscriptions = transcriptionStats.processing + transcriptionStats.pending
+  const errorCount = transcriptionStats.failed + failedDownloadCount
+  const pct = transcriptionStats.aggregateProgress
   const orderedTranscriptions = Array.from(transcriptionQueue.values())
     .filter((i) => i.status !== 'completed')
     .sort(compareTranscriptions)
 
-  // ── Collapsed sidebar rail: tiny numeric summary that opens the overlay ──────
+  const overlay = (
+    <OperationsOverlay
+      open={overlayOpen}
+      onClose={closeOverlay}
+      items={orderedTranscriptions}
+      recordings={recordings}
+      paused={queuePaused}
+      onTogglePause={toggleQueuePaused}
+      onGoTo={goToSource}
+      onPrioritize={prioritize}
+      onDeprioritize={deprioritize}
+      onCancel={cancelTranscription}
+      onRetry={retryItem}
+    />
+  )
+
+  // Collapsed sidebar rail: tiny icon + count.
   if (!sidebarOpen) {
     return (
       <>
@@ -188,456 +171,80 @@ export function OperationsPanel({ sidebarOpen }: OperationsPanelProps) {
           <button
             type="button"
             onClick={openOverlay}
-            aria-label="Open operations detail"
-            className="flex w-full flex-col items-center gap-1 rounded-md py-1 text-slate-300 hover:bg-slate-800"
+            aria-label={`Operations: ${activeTranscriptions} transcribing${errorCount ? `, ${errorCount} error(s)` : ''}`}
+            className="relative flex w-full flex-col items-center gap-1 rounded-md py-1 text-slate-300 hover:bg-slate-800"
           >
+            {hasTranscriptions && (
+              <span className="flex items-center gap-1 text-[10px] text-purple-400">
+                <Sparkles className={cn('h-3 w-3', activeTranscriptions > 0 && 'animate-pulse')} />
+                {activeTranscriptions}
+              </span>
+            )}
             {(hasDownloads || hasFailedDownloads) && (
               <span className="flex items-center gap-1 text-[10px]">
                 <Download className={cn('h-3 w-3', hasDownloads ? 'text-emerald-400' : 'text-amber-400')} />
                 {hasDownloads ? downloadQueue.size : failedDownloadCount}
               </span>
             )}
-            {hasTranscriptions && (
-              <span className="flex items-center gap-1 text-[10px] text-purple-400">
-                <Sparkles className="h-3 w-3" />
-                {activeTranscriptions}
-              </span>
+            {errorCount > 0 && (
+              <span className="absolute right-1 top-0 rounded-full bg-red-500 px-1 text-[9px] font-semibold text-white">{errorCount}</span>
             )}
           </button>
         </div>
-        <OperationsOverlay
-          open={overlayOpen}
-          onClose={closeOverlay}
-          items={orderedTranscriptions}
-          recordings={recordings}
-          paused={queuePaused}
-          onTogglePause={toggleQueuePaused}
-          onGoTo={goToSource}
-          onPrioritize={prioritize}
-          onDeprioritize={deprioritize}
-          onCancel={cancelTranscription}
-          onRetry={retryItem}
-        />
+        {overlay}
       </>
     )
   }
 
-  // ── Collapsed dock (expanded sidebar): a compact summary chip ────────────────
-  if (dockCollapsed) {
-    return (
-      <>
-        <div className="border-t border-slate-700 px-2 py-1.5">
-          <button
-            type="button"
-            onClick={toggleDock}
-            aria-label="Expand operations dock"
-            className="flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-xs text-slate-300 hover:bg-slate-800"
-          >
-            {(hasDownloads || hasFailedDownloads) && (
-              <span className="flex items-center gap-1">
-                <Download className={cn('h-3 w-3', hasDownloads ? 'text-emerald-400' : 'text-amber-400')} />
-                {hasDownloads ? downloadQueue.size : failedDownloadCount}
-              </span>
-            )}
-            {hasTranscriptions && (
-              <span className="flex items-center gap-1 text-purple-400">
-                <Sparkles className="h-3 w-3" />
-                {activeTranscriptions}
-              </span>
-            )}
-            <span className="ml-auto text-slate-500">Operations</span>
-            <ChevronUp className="h-3 w-3 text-slate-500" />
-          </button>
-        </div>
-        <OperationsOverlay
-          open={overlayOpen}
-          onClose={closeOverlay}
-          items={orderedTranscriptions}
-          recordings={recordings}
-          paused={queuePaused}
-          onTogglePause={toggleQueuePaused}
-          onGoTo={goToSource}
-          onPrioritize={prioritize}
-          onDeprioritize={deprioritize}
-          onCancel={cancelTranscription}
-          onRetry={retryItem}
-        />
-      </>
-    )
-  }
+  // Expanded sidebar: a single compact badge — activity + progress bar + error count.
+  const primaryLabel =
+    activeTranscriptions > 0
+      ? `${activeTranscriptions} transcribing`
+      : hasDownloads
+        ? `${downloadQueue.size} downloading`
+        : errorCount > 0
+          ? `${errorCount} failed`
+          : 'Operations'
 
-  // ── Full dock ────────────────────────────────────────────────────────────────
   return (
     <>
-      <div className="border-t border-slate-700 px-2 py-2 space-y-2">
-        {/* Dock header: title + expand-to-overlay + collapse */}
-        <div className="flex items-center justify-between px-1">
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Operations</span>
-          <div className="flex items-center gap-0.5">
-            <TooltipProvider>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-5 w-5 text-slate-400 hover:text-slate-100"
-                    onClick={openOverlay}
-                    aria-label="Open operations detail"
-                  >
-                    <Maximize2 className="h-3 w-3" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>Expand to detail view</TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
-            <TooltipProvider>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-5 w-5 text-slate-400 hover:text-slate-100"
-                    onClick={toggleDock}
-                    aria-label="Collapse operations dock"
-                  >
-                    <ChevronDown className="h-3 w-3" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>Collapse dock</TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
-          </div>
-        </div>
-
-        {/* Downloads Section */}
-        {(hasDownloads || hasFailedDownloads) && (
-          <div className="space-y-1">
-            <div className="flex items-center justify-between px-1">
-              <div className="flex items-center gap-1.5 text-xs text-slate-300">
-                <Download className={`h-3 w-3 ${hasDownloads ? 'text-emerald-400 animate-pulse' : 'text-amber-400'}`} />
-                <span>
-                  Downloads{' '}
-                  {deviceSyncProgress
-                    ? `(${deviceSyncProgress.current}/${deviceSyncProgress.total})`
-                    : hasDownloads
-                      ? `(${downloadQueue.size})`
-                      : `(${failedDownloadCount} failed)`}
-                </span>
-              </div>
-              {hasDownloads && (
-                <TooltipProvider>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-5 w-5 text-slate-400 hover:text-red-400"
-                        onClick={cancelAllDownloads}
-                        aria-label="Cancel all downloads"
-                      >
-                        <X className="h-3 w-3" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>Cancel all downloads</TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-              )}
-            </div>
-
-            <div className="space-y-1.5 px-1">
-              {deviceSyncProgress && deviceSyncProgress.total > 0 && (
-                <div>
-                  {(() => {
-                    const rawPct = (deviceSyncProgress.current / deviceSyncProgress.total) * 100
-                    const pct = Number.isFinite(rawPct) ? Math.round(rawPct) : 0
-                    return (
-                      <>
-                        <div className="flex justify-between text-[10px] text-slate-400 mb-0.5">
-                          <span>Overall</span>
-                          <span>{pct}%</span>
-                        </div>
-                        <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
-                          <div className="h-full bg-emerald-500 transition-all duration-200" style={{ width: `${pct}%` }} />
-                        </div>
-                      </>
-                    )
-                  })()}
-                  {deviceSyncEta != null && deviceSyncEta > 0 && (
-                    <div className="text-[10px] text-slate-500 mt-0.5">~{formatEta(deviceSyncEta)}</div>
-                  )}
-                </div>
-              )}
-              {Array.from(downloadQueue.entries()).slice(0, 2).map(([id, item]) => (
-                <div key={id} className="space-y-0.5">
-                  <div className="flex justify-between text-[10px]">
-                    <span className="text-slate-400 truncate max-w-[140px]" title={item.filename}>
-                      {(() => {
-                        const name = displayName(item.filename)
-                        return name.length > 24 ? `${name.slice(0, 24)}...` : name
-                      })()}
-                    </span>
-                    <span className="text-slate-500">{Number.isFinite(item.progress) ? item.progress : 0}%</span>
-                  </div>
-                  <div className="h-1 bg-slate-700 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-blue-500 transition-all duration-200"
-                      style={{ width: `${Number.isFinite(item.progress) ? item.progress : 0}%` }}
-                    />
-                  </div>
-                </div>
-              ))}
-              {downloadQueue.size > 2 && (
-                <div className="text-[10px] text-slate-500">+{downloadQueue.size - 2} more in queue</div>
-              )}
-              {failedDownloadCount > 0 && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="w-full h-6 text-[10px] text-amber-400 hover:text-amber-300"
-                  onClick={handleRetryFailed}
-                >
-                  <RotateCcw className="h-2.5 w-2.5 mr-1" />
-                  Retry {failedDownloadCount} Failed
-                </Button>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Transcriptions Section */}
-        {hasTranscriptions && (
-          <div className="space-y-1">
-            <div className="flex items-center justify-between px-1">
-              <div className="flex items-center gap-1.5 text-xs text-slate-300">
-                <Sparkles className="h-3 w-3 text-purple-400 animate-pulse" />
-                <span>
-                  Transcriptions ({activeTranscriptions}
-                  {transcriptionStats.failed > 0 && `, ${transcriptionStats.failed} failed`})
-                </span>
-                {queuePaused && (
-                  <span className="rounded bg-amber-500/20 px-1 text-[9px] font-medium uppercase tracking-wide text-amber-300">
-                    Paused
-                  </span>
-                )}
-              </div>
-              {activeTranscriptions > 0 && (
-                <div className="flex items-center gap-0.5">
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-5 w-5 text-slate-400 hover:text-slate-100"
-                          onClick={toggleQueuePaused}
-                          aria-label={queuePaused ? 'Resume transcription queue' : 'Pause transcription queue'}
-                        >
-                          {queuePaused ? <Play className="h-3 w-3" /> : <Pause className="h-3 w-3" />}
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        {queuePaused ? 'Resume queue' : 'Pause queue (current item finishes)'}
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-5 w-5 text-slate-400 hover:text-red-400"
-                          onClick={cancelAllTranscriptions}
-                          aria-label="Cancel all transcriptions"
-                        >
-                          <X className="h-3 w-3" />
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>Cancel all transcriptions</TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </div>
-              )}
-            </div>
-
-            {activeTranscriptions > 0 && (
-              <div className="px-1">
-                <div className="w-full h-1.5 bg-slate-700 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-purple-500 rounded-full transition-all duration-300"
-                    style={{ width: `${transcriptionStats.aggregateProgress}%` }}
-                  />
-                </div>
-                <div className="text-[9px] text-slate-500 mt-0.5 text-right">
-                  {transcriptionStats.aggregateProgress}% overall
-                </div>
-              </div>
+      <div className="border-t border-slate-700 px-2 py-2">
+        <button
+          type="button"
+          onClick={openOverlay}
+          aria-label="Open operations detail"
+          className="w-full rounded-md px-2 py-1.5 text-left hover:bg-slate-800"
+        >
+          <div className="flex items-center gap-2 text-xs text-slate-300">
+            <Sparkles className={cn('h-3.5 w-3.5 shrink-0', activeTranscriptions > 0 ? 'text-purple-400 animate-pulse' : 'text-slate-500')} />
+            <span className="truncate">{primaryLabel}</span>
+            {queuePaused && (
+              <span className="rounded bg-amber-500/20 px-1 text-[9px] font-medium uppercase tracking-wide text-amber-300">Paused</span>
             )}
-
-            <div className="space-y-0.5 px-1">
-              {orderedTranscriptions.slice(0, 4).map((item) => (
-                <TranscriptionRow
-                  key={item.id}
-                  item={item}
-                  sourceTitle={sourceTitleFor(item, recordings.find((r) => r.id === item.recordingId))}
-                  onGoTo={goToSource}
-                  onPrioritize={prioritize}
-                  onDeprioritize={deprioritize}
-                  onCancel={cancelTranscription}
-                  onRetry={retryItem}
-                />
-              ))}
-              {orderedTranscriptions.length > 4 && (
-                <button
-                  type="button"
-                  onClick={openOverlay}
-                  className="w-full text-left text-[10px] text-slate-500 hover:text-slate-300"
-                >
-                  +{orderedTranscriptions.length - 4} more — view all
-                </button>
+            <span className="ml-auto flex items-center gap-1.5">
+              {errorCount > 0 && (
+                <span className="rounded-full bg-red-500/20 px-1.5 text-[10px] font-semibold text-red-300">{errorCount}</span>
               )}
-            </div>
+              <Maximize2 className="h-3 w-3 text-slate-500" />
+            </span>
           </div>
-        )}
+          {activeTranscriptions > 0 && (
+            <div className="mt-1.5 flex items-center gap-2">
+              <div className="h-1 flex-1 overflow-hidden rounded-full bg-slate-700">
+                <div className="h-full rounded-full bg-purple-500 transition-all duration-300" style={{ width: `${pct}%` }} />
+              </div>
+              <span className="text-[9px] tabular-nums text-slate-500">{pct}%</span>
+            </div>
+          )}
+        </button>
       </div>
-
-      <OperationsOverlay
-        open={overlayOpen}
-        onClose={closeOverlay}
-        items={orderedTranscriptions}
-        recordings={recordings}
-        paused={queuePaused}
-        onTogglePause={toggleQueuePaused}
-        onGoTo={goToSource}
-        onPrioritize={prioritize}
-        onDeprioritize={deprioritize}
-        onCancel={cancelTranscription}
-        onRetry={retryItem}
-      />
+      {overlay}
     </>
   )
 }
 
 // =============================================================================
-// Transcription row — observable + clickable (compact, sidebar)
-// =============================================================================
-
-interface TranscriptionRowProps {
-  item: TranscriptionItem
-  sourceTitle: string | null
-  onGoTo: (item: TranscriptionItem) => void
-  onPrioritize: (id: string) => void
-  onDeprioritize: (id: string) => void
-  onCancel: (recordingId: string) => void
-  onRetry: (id: string) => void
-}
-
-function TranscriptionRow({
-  item,
-  sourceTitle,
-  onGoTo,
-  onPrioritize,
-  onDeprioritize,
-  onCancel,
-  onRetry
-}: TranscriptionRowProps) {
-  const name = displayName(item.filename)
-  const hoverTitle = `${sourceTitle ? `${sourceTitle} — ` : ''}${STATUS_LABEL[item.status]}`
-  const isPending = item.status === 'pending'
-  const isProcessing = item.status === 'processing'
-  const isFailed = item.status === 'failed'
-
-  return (
-    <div className="group flex items-center gap-1 text-[10px]" title={hoverTitle}>
-      {isProcessing && <RefreshCw className="h-2.5 w-2.5 text-purple-400 animate-spin shrink-0" />}
-      {isPending && <div className="h-2.5 w-2.5 rounded-full bg-yellow-500/60 shrink-0" />}
-      {isFailed && <AlertCircle className="h-2.5 w-2.5 text-red-400 shrink-0" />}
-
-      {/* WHAT it is: filename + (net-new) source title on the second line-worth of info */}
-      <button
-        type="button"
-        onClick={() => onGoTo(item)}
-        className="min-w-0 flex-1 truncate text-left text-slate-400 hover:text-sky-300"
-        aria-label={`Go to ${sourceTitle ?? name}`}
-      >
-        {name.length > 18 ? `${name.slice(0, 15)}...` : name}
-      </button>
-
-      {/* Actions — appear on hover to keep the row calm */}
-      <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-        <TooltipProvider>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                onClick={() => onGoTo(item)}
-                className="text-slate-500 hover:text-sky-300"
-                aria-label="Go to source"
-              >
-                <CornerUpRight className="h-2.5 w-2.5" />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent>Go to {sourceTitle ?? 'recording'}</TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
-
-        {isPending && (
-          <>
-            <button
-              type="button"
-              onClick={() => onPrioritize(item.id)}
-              className="text-slate-500 hover:text-emerald-300"
-              aria-label="Prioritize"
-            >
-              <ArrowUp className="h-2.5 w-2.5" />
-            </button>
-            <button
-              type="button"
-              onClick={() => onDeprioritize(item.id)}
-              className="text-slate-500 hover:text-amber-300"
-              aria-label="Deprioritize"
-            >
-              <ArrowDown className="h-2.5 w-2.5" />
-            </button>
-          </>
-        )}
-
-        {isFailed ? (
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  onClick={() => onRetry(item.id)}
-                  className="text-slate-500 hover:text-slate-300"
-                  aria-label="Retry"
-                >
-                  <RotateCcw className="h-2.5 w-2.5" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>
-                <p>Retry</p>
-                {item.error && <p className="text-xs text-muted-foreground">{item.error}</p>}
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-        ) : (
-          <button
-            type="button"
-            onClick={() => onCancel(item.recordingId)}
-            className="text-slate-500 hover:text-red-400"
-            aria-label="Cancel"
-          >
-            <X className="h-2.5 w-2.5" />
-          </button>
-        )}
-      </div>
-    </div>
-  )
-}
-
-// =============================================================================
-// Operations overlay — larger in-app detail surface (renderer-only, not an OS window)
+// Operations overlay — the full detail surface (renderer-only, not an OS window)
 // =============================================================================
 
 interface OperationsOverlayProps {
@@ -686,9 +293,7 @@ function OperationsOverlay({
             <h2 className="text-sm font-semibold">Transcription queue</h2>
             <span className="rounded-full bg-slate-700 px-1.5 text-[10px] text-slate-300">{items.length}</span>
             {paused && (
-              <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-300">
-                Paused
-              </span>
+              <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-300">Paused</span>
             )}
           </div>
           <div className="flex items-center gap-1">
