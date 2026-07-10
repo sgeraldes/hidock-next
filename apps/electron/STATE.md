@@ -36,6 +36,25 @@ ELECTRON ABI (the running app holds it). So:
   parallel system. Owns ContextGraph.tsx + components/context-graph/** +
   packages/knowledge-graph + graph IPC (+ shared handlers.ts/preload this wave).
   Based on `4d200e9f`. Do NOT touch Library/database SCHEMA_VERSION.
+- **bundling-rootcause** (a4c2854f1efab7a95, base 3f45bc74): months-apart
+  bundling — a recurring Teams meeting ("Engineering EDF team 1", May 27) has 4
+  recordings incl. a July-1 Rec09. Root-cause recurring-OCCURRENCE resolution
+  (recording bound to anchor occurrence not the date-matching one) + the
+  status-drift write-side (status stays 'none' with a transcript → resolveRecordingId
+  target). Live-bug-vs-stale-data verdict first; fix logic + GATED repair
+  (reports count before rewrite) + idempotent status self-heal. Owns database.ts,
+  transcription.ts, org-reconciler.ts, calendar-utils.ts, recording-match-scoring.ts
+  + repair IPC. MAY own v39 if needed (ctxgraph/shell told NOT to bump).
+- **shell-chrome** (a617249e6517c7eef, base a97c3096): app SHELL/CHROME
+  (renderer-only). Fix divider-not-reaching-right, "HiDock · Meeting Intelligence"
+  straddling the sidebar seam, collapsed-rail centering/alignment to titlebar
+  (one shared left-gutter grid). Nav COUNTERS on Today/Actionables/Sync (from
+  existing stores, no IPC). Make the bottom Transcriptions/Activity-Log dock
+  (OperationsPanel) collapsible+expandable + per-item observability (what it is,
+  go-to-meeting, prioritize/deprioritize; pause only if store supports it).
+  Owns src/components/layout/{Layout,TitleBar,OperationsPanel}.tsx + a UI store
+  for dock state. MUST NOT touch preload/handlers/*-handlers.ts (2 other agents
+  edit those), transcription.ts, or the ctxgraph/library/bundling files.
 - ~~library-redesign~~ **DONE — landed `4d200e9f`** (cherry-picked from ad1642b9,
   gates re-run green 2558/0): dockable AI assistant (2-pane default), multi-
   format rows (image=type+date not duration), simplified filters + source-type
