@@ -39,6 +39,7 @@ import { setMainWindowForEventBus } from './services/event-bus'
 import { getStoragePolicyService } from './services/storage-policy'
 import { setMainWindowForMigration } from './ipc/migration-handlers'
 import { getIntegrityService } from './services/integrity-service'
+import { acquireSingleInstanceLock } from './single-instance'
 
 let mainWindow: BrowserWindow | null = null
 let splashWindow: BrowserWindow | null = null
@@ -208,6 +209,19 @@ async function initializeServices(): Promise<void> {
   updateSplashStatus('Starting application...', 100)
 }
 
+// Single-instance guard — MUST run before any window is created and before the
+// database is opened. With better-sqlite3 + WAL against one on-disk file, a
+// second concurrent main process running migrations / repair / self-heal
+// backfill / VACUUM is a data-integrity and lock-contention hazard (WAL allows
+// concurrent readers, not two independent app boots each mutating schema). If
+// another instance already owns the lock, acquireSingleInstanceLock() calls
+// app.quit() and returns false; we then skip all boot so this process never
+// touches the DB.
+const hasSingleInstanceLock = acquireSingleInstanceLock({
+  getMainWindow: () => mainWindow,
+  getSplashWindow: () => splashWindow
+})
+
 // Disable WebUSB blocklist to allow HiDock device access
 // Required since Electron 37+ which introduced Chromium's WebUSB blocklist
 // Without this, devices on the blocklist get "Access denied" errors
@@ -229,6 +243,12 @@ if (enableRemoteDebugging) {
 }
 
 app.whenReady().then(async () => {
+  // A non-primary instance already called app.quit() in the single-instance
+  // guard above. Bail before creating any window or opening the DB, even if the
+  // 'ready' event still races the pending quit — this process must never touch
+  // the shared database file.
+  if (!hasSingleInstanceLock) return
+
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.hidock.meeting-intelligence')
 
