@@ -9,10 +9,10 @@ docs. Companions: ROADMAP.md (audit ledger + coverage map), INTELLIGENCE.md
 
 ## 0. CURRENT STATE — 2026-07-10 ~03:10 (READ THIS FIRST, supersedes below)
 
-**HEAD `2c1023cb`, schema v38, all pushed. better-sqlite3/WAL engine.
-Suite **2603 passing / 0 fail** (independently re-run after each of the 4
-merges: library, badge, bundling+status, ctxgraph, shell-chrome). ALL THREE
-overnight UI agents + bundling LANDED. Only wer-hybrid-spike (docs) still out.
+**HEAD `6139f404`, schema v38, all pushed. better-sqlite3/WAL engine.
+Suite **2622 passing / 0 fail** (independently re-run after each merge: library,
+badge, bundling+status, ctxgraph, shell-chrome, transcription-queue-backend).
+ALL overnight feature agents LANDED. Only wer-hybrid-spike (docs) still out.
 NOTE: shell-chrome forced a renderer full-reload (new Layout exports) → device
 pill briefly shows "Connecting…"; that's renderer-only (main/USB NOT restarted),
 clears on next status sync or the pending restart. Do NOT touch USB. IMPORTANT: after cherry-picking any
@@ -39,13 +39,13 @@ ELECTRON ABI (the running app holds it). So:
 - typecheck (`npm run typecheck`) is safe under system node.
 
 ### AGENTS IN FLIGHT (they seed from stale `main` 89cb03ac and MUST ff to the branch tip; VERIFY base in their report; CHERRY-PICK their commit onto current HEAD since HEAD advances, don't ff-merge):
-- **transcription-queue-backend** (a8bf67156cc864a93, base 46a60644): complete the
-  dock's deferred backend — real queue PAUSE/RESUME (pause stops dequeue; in-flight
-  finishes) + real REORDER so prioritize/deprioritize changes actual processing
-  order (not just the renderer view); new transcription:pause/resume/reorder/
-  queueState IPC; enable the OperationsPanel Pause button. Owns transcription.ts,
-  a transcription IPC handler + handlers.ts + preload, useTranscriptionStore.ts,
-  OperationsPanel.tsx. On land: cherry-pick + gates.
+- ~~**transcription-queue-backend**~~ **DONE — landed `6139f404`** (4605041b; 2622
+  green): real queue PAUSE/RESUME (pause stops dequeue, in-flight finishes;
+  in-memory) + real REORDER (main owns queuePriorityRank; renderer sends up/down
+  intent; orderPendingForProcessing honors it). New transcription:pause/resume/
+  reorder/queueState IPC + push. OperationsPanel Pause button enabled + reflects
+  state. Optional deferred: persist paused flag/rank across restart (intentionally
+  in-memory now).
 - **wer-hybrid-spike** (aced5f54d46abb8af): RESEARCH doc — still out; send WER to user.
 - ~~**ctxgraph-affordances**~~ **DONE — landed `cf82c1dc`** (cherry-picked 1f2f3d8a;
   package rebuilt; 2574 green): NodeInspector panel — linked-contact vs
@@ -130,8 +130,16 @@ ELECTRON ABI (the running app holds it). So:
   — investigate the search IPC/handler. HIGH: it's the app's global search.
 - Quality never auto-classified (900 unrated) → no value/personal tags.
 - quality-assessment.ts apparently never wrote ratings — root-cause.
-- Pre-existing flaky `hidock-device.test.ts` EnvironmentTeardownError under
-  full-suite parallel load (passes in isolation) — quiet its teardown logging.
+- Flaky `hidock-device.test.ts` EnvironmentTeardownError ("Closing rpc while
+  onUserConsoleLog was pending") under full-suite PARALLEL load only (183/183
+  clean in isolation; 0 tests ever fail). ROOT CAUSE (investigated 2026-07-10):
+  the file already silences console file-wide (beforeAll spies, no global
+  restoreMocks so they persist correctly), but the `afterAll` restore reopens
+  the REAL console exactly as dangling async from the last test's service
+  instance flushes during worker RPC teardown → the race. Proper fix = dispose
+  each HiDockDeviceService in an afterEach (large, 3775-line file) OR stop
+  restoring console in afterAll (risks masking sibling-file logs — rejected).
+  DEFERRED: non-failing + already mitigated; not worth a risky/large change.
 - ~135 eslint warnings; apps/electron has NO eslint config.
 - **knowledge-graph PACKAGE tests broken + ungated** (found 2026-07-10): after
   the better-sqlite3 migration, `@hidock/database` engine REQUIRES
