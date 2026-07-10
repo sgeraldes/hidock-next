@@ -24,6 +24,13 @@ const mockGetForKnowledge = vi.fn().mockResolvedValue({ success: true, data: [] 
 const mockGetAllProjects = vi.fn().mockResolvedValue({ success: true, data: { projects: [{ id: 'pr1', name: 'Alpha' }], total: 1 } })
 const mockSetProjects = vi.fn().mockResolvedValue({ success: true })
 
+// PeoplePanel (Participants/Invited) calls useNavigate; these tests render
+// without a Router, so stub navigation to keep them Router-independent.
+vi.mock('react-router-dom', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-router-dom')>()
+  return { ...actual, useNavigate: () => vi.fn() }
+})
+
 // Silence @radix-ui portal issues in jsdom
 vi.mock('@radix-ui/react-portal', () => ({
   Portal: ({ children }: { children: React.ReactNode }) => <>{children}</>,
@@ -154,6 +161,9 @@ beforeEach(() => {
         selectMeeting: mockSelectMeeting,
         getCandidates: vi.fn().mockResolvedValue({ success: true, data: [] }),
         getMeetingsNearDate: vi.fn().mockResolvedValue({ success: true, data: [] }),
+      },
+      contacts: {
+        getForMeeting: vi.fn().mockResolvedValue({ success: true, data: [] }),
       },
     },
     writable: true,

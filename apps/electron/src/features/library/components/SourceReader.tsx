@@ -10,6 +10,7 @@
  */
 
 import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { TranscriptViewer, type StoredSegment } from './TranscriptViewer'
 import { TranscriptionStatusBadge } from './TranscriptionStatusBadge'
 import { StatusIcon } from './StatusIcon'
@@ -17,8 +18,8 @@ import { getDisplayTitle } from '@/features/library/utils/getDisplayTitle'
 import { useUIStore } from '@/store/useUIStore'
 import { AudioPlayer } from '@/components/AudioPlayer'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
-import { Transcript, Meeting, parseJsonArray } from '@/types'
-import { Calendar, Download, Trash2, Wand2, RefreshCw, Play, Square, Pencil, Check, Edit2, Link, X, ExternalLink, FolderOpen, MoreHorizontal, Folder, Plus, EyeOff, Eye, Sparkles, ChevronDown, Cloud, Cpu } from 'lucide-react'
+import { Transcript, Meeting, Contact, MeetingAttendee, parseJsonArray, parseAttendees } from '@/types'
+import { Calendar, Download, Trash2, Wand2, RefreshCw, Play, Square, Pencil, Check, Edit2, Link, X, ExternalLink, FolderOpen, MoreHorizontal, Folder, Plus, EyeOff, Eye, Sparkles, ChevronDown, Cloud, Cpu, Users, Mail } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 
@@ -503,6 +504,15 @@ export function SourceReader({
             </div>
           )}
 
+          {/* People: two DISTINCT lists — who actually spoke (Participants) vs.
+              who was calendar-invited (Invited). Only mounted when there's a
+              linked meeting or transcript speaker turns to draw from, so the
+              react-router-dependent PeoplePanel never renders for a bare
+              recording (keeps Router-less unit tests valid). */}
+          {(meeting || (transcriptSegments && transcriptSegments.length > 0)) && (
+            <PeoplePanel meeting={meeting} segments={transcriptSegments} />
+          )}
+
           {/* Device-only notice */}
           {isDeviceOnly(recording) && (
             <p className="mt-3 text-xs text-muted-foreground italic">
@@ -903,6 +913,183 @@ function ProjectAssignmentRow({ knowledgeCaptureId }: { knowledgeCaptureId: stri
           </div>
         </PopoverContent>
       </Popover>
+    </div>
+  )
+}
+
+/**
+ * PeoplePanel — surfaces two DISTINCT people lists for the selected recording:
+ *
+ *  - Participants: who actually spoke / was detected in the meeting. Canonical
+ *    contacts come from the meeting_contacts join (contacts.getForMeeting, the
+ *    same source MeetingDetail uses), plus any transcript speaker labels that
+ *    don't map to a known contact ("who spoke" even before a contact exists).
+ *    Canonical contacts are clickable → /person/:id.
+ *  - Invited: the calendar-invited attendees on the linked meeting's ICS /
+ *    Outlook / M365 event (meeting.attendees JSON). This is who was INVITED,
+ *    which is DIFFERENT from who spoke. Resolves to contacts where possible;
+ *    shows an honest empty state when the calendar event carried no invite list.
+ *
+ * Own component (like ProjectAssignmentRow) so its data-loading hooks and
+ * useNavigate stay isolated from SourceReader's conditional early return, and so
+ * it only mounts when there's a meeting or transcript to draw people from.
+ */
+function PeoplePanel({ meeting, segments }: { meeting?: Meeting; segments?: StoredSegment[] }) {
+  const navigate = useNavigate()
+  const [contacts, setContacts] = useState<Contact[]>([])
+
+  // Canonical contacts for the linked meeting — the meeting_contacts join. Same
+  // IPC MeetingDetail uses; no new read path needed.
+  const meetingId = meeting?.id
+  useEffect(() => {
+    let cancelled = false
+    if (!meetingId) {
+      setContacts([])
+      return
+    }
+    ;(async () => {
+      try {
+        const res = await window.electronAPI.contacts.getForMeeting(meetingId)
+        if (!cancelled) setContacts(res.success ? res.data : [])
+      } catch (err) {
+        console.error('Failed to load meeting contacts:', err)
+        if (!cancelled) setContacts([])
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [meetingId])
+
+  // Distinct speaker labels from the transcript's turns — "who actually spoke".
+  // Keyed lowercase so "Alice"/"alice" collapse; keeps first-seen display form.
+  const speakerNames = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const s of segments ?? []) {
+      const name = s.speaker?.trim()
+      if (name && !map.has(name.toLowerCase())) map.set(name.toLowerCase(), name)
+    }
+    return map
+  }, [segments])
+
+  // A speaker already represented by a canonical contact (by name) shouldn't be
+  // listed twice — surface only the transcript speakers with no contact match.
+  const contactNameKeys = useMemo(
+    () =>
+      new Set(
+        contacts
+          .map((c) => (c.name || c.email || '').trim().toLowerCase())
+          .filter(Boolean)
+      ),
+    [contacts]
+  )
+  const extraSpeakers = useMemo(
+    () =>
+      Array.from(speakerNames.entries())
+        .filter(([key]) => !contactNameKeys.has(key))
+        .map(([, display]) => display),
+    [speakerNames, contactNameKeys]
+  )
+
+  const participantCount = contacts.length + extraSpeakers.length
+
+  // Invited = calendar attendees on the linked meeting. Resolve to a contact by
+  // email (preferred) or name so a chip can deep-link where we know the person.
+  const invited = useMemo(() => parseAttendees(meeting?.attendees), [meeting?.attendees])
+  const resolveAttendee = useCallback(
+    (a: MeetingAttendee): Contact | undefined => {
+      const email = a.email?.trim().toLowerCase()
+      const name = a.name?.trim().toLowerCase()
+      return contacts.find(
+        (c) =>
+          (!!email && c.email?.trim().toLowerCase() === email) ||
+          (!!name && c.name?.trim().toLowerCase() === name)
+      )
+    },
+    [contacts]
+  )
+
+  // Nothing to show at all (no meeting, no speakers) → render nothing.
+  if (!meeting && participantCount === 0) return null
+
+  return (
+    <div className="mt-4 space-y-3">
+      {/* Participants — who actually spoke / was detected */}
+      {participantCount > 0 && (
+        <div>
+          <p className="text-xs font-medium text-muted-foreground mb-1.5 flex items-center gap-1.5">
+            <Users className="h-3.5 w-3.5" aria-hidden="true" />
+            Participants ({participantCount})
+            <span className="font-normal text-muted-foreground/70">From transcripts</span>
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {contacts.map((c) => (
+              <button
+                key={c.id}
+                type="button"
+                onClick={() => navigate(`/person/${c.id}`)}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-secondary text-secondary-foreground text-xs hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                title={`View ${c.name || c.email}`}
+              >
+                {c.name || c.email}
+              </button>
+            ))}
+            {extraSpeakers.map((name) => (
+              <span
+                key={`spk-${name}`}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-secondary/60 text-secondary-foreground text-xs"
+                title={`${name} (from transcript)`}
+              >
+                {name}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Invited — calendar attendees (distinct from who spoke). Only meaningful
+          when a calendar meeting is linked; when the event carried no invite
+          list we say so plainly rather than fabricate names. */}
+      {meeting && (
+        <div>
+          <p className="text-xs font-medium text-muted-foreground mb-1.5 flex items-center gap-1.5">
+            <Mail className="h-3.5 w-3.5" aria-hidden="true" />
+            Invited ({invited.length})
+            <span className="font-normal text-muted-foreground/70">From calendar</span>
+          </p>
+          {invited.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {invited.map((a, i) => {
+                const contact = resolveAttendee(a)
+                const label = a.name || a.email || 'Unknown'
+                return contact ? (
+                  <button
+                    key={`inv-${i}`}
+                    type="button"
+                    onClick={() => navigate(`/person/${contact.id}`)}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-secondary text-secondary-foreground text-xs hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                    title={`View ${label}`}
+                  >
+                    {label}
+                  </button>
+                ) : (
+                  <span
+                    key={`inv-${i}`}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-secondary text-secondary-foreground text-xs"
+                    title={label}
+                  >
+                    {label}
+                  </span>
+                )
+              })}
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground/70 italic">
+              No invite list captured for this meeting.
+            </p>
+          )}
+        </div>
+      )}
     </div>
   )
 }
