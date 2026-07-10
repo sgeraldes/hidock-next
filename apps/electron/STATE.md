@@ -39,6 +39,14 @@ ELECTRON ABI (the running app holds it). So:
 - typecheck (`npm run typecheck`) is safe under system node.
 
 ### AGENTS IN FLIGHT (they seed from stale `main` 89cb03ac and MUST ff to the branch tip; VERIFY base in their report; CHERRY-PICK their commit onto current HEAD since HEAD advances, don't ff-merge):
+- **transcription-queue-backend** (a8bf67156cc864a93, base 46a60644): complete the
+  dock's deferred backend — real queue PAUSE/RESUME (pause stops dequeue; in-flight
+  finishes) + real REORDER so prioritize/deprioritize changes actual processing
+  order (not just the renderer view); new transcription:pause/resume/reorder/
+  queueState IPC; enable the OperationsPanel Pause button. Owns transcription.ts,
+  a transcription IPC handler + handlers.ts + preload, useTranscriptionStore.ts,
+  OperationsPanel.tsx. On land: cherry-pick + gates.
+- **wer-hybrid-spike** (aced5f54d46abb8af): RESEARCH doc — still out; send WER to user.
 - ~~**ctxgraph-affordances**~~ **DONE — landed `cf82c1dc`** (cherry-picked 1f2f3d8a;
   package rebuilt; 2574 green): NodeInspector panel — linked-contact vs
   extracted-name badge, what-this-is card (role/org/#meetings/first-last-seen/
