@@ -178,6 +178,7 @@ describe('useUIStore', () => {
       const store = useUIStore.getState()
       store.setSidebarOpen(false)
       store.setQaLogsEnabled(true)
+      store.setAutoCaptureScreenshots(true)
       store.setTheme('dark')
       store.setOperationsDockCollapsed(true)
       store.setActivityLogExpanded(true)
@@ -195,6 +196,7 @@ describe('useUIStore', () => {
 
       expect(persistedKeys).toContain('sidebarOpen')
       expect(persistedKeys).toContain('qaLogsEnabled')
+      expect(persistedKeys).toContain('autoCaptureScreenshots') // clipboard auto-capture pref
       expect(persistedKeys).toContain('theme') // user preference; read pre-paint in main.tsx
       expect(persistedKeys).toContain('operationsDockCollapsed') // dock chrome pref
       expect(persistedKeys).toContain('activityLogExpanded') // dock chrome pref
@@ -203,7 +205,7 @@ describe('useUIStore', () => {
       expect(persistedKeys).toContain('chatEmbeddedCollapsed') // assistant rail pref
       expect(persistedKeys).not.toContain('operationsOverlayOpen') // transient
       expect(persistedKeys).not.toContain('chatOpen') // transient overlay state
-      expect(persistedKeys.length).toBe(8)
+      expect(persistedKeys.length).toBe(9)
     })
   })
 

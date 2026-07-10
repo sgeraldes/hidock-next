@@ -9,6 +9,7 @@ import { getHiDockDeviceService } from '@/services/hidock-device'
 import { NavigationLogger, initInteractionLogger, initErrorLogger, cleanupQAMonitor } from '@/services/qa-monitor'
 import { lazyWithRetry } from '@/lib/lazyWithRetry'
 import { useTheme } from '@/hooks/useTheme'
+import { ClipboardCapture } from '@/hooks/useClipboardCapture'
 
 // Lazy load all page components for code splitting
 // Each page becomes a separate chunk, reducing initial bundle size
@@ -78,6 +79,7 @@ function App(): React.ReactElement {
 
   return (
     <ToastProvider>
+      <ClipboardCapture />
       <SecurityWarningBanner />
       <Layout>
         <NavigationLogger />

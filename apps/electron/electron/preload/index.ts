@@ -248,6 +248,18 @@ export interface TranscriptionQueueState {
 }
 
 // Type definitions for the API
+/** Result of a clipboard screenshot capture (mirrors main/services/clipboard-capture.ts). */
+export interface ClipboardCaptureResult {
+  ok: boolean
+  reason?: 'no-image' | 'duplicate' | 'error'
+  captureId?: string
+  artifactId?: string
+  title?: string
+  sourceType?: 'image'
+  deduped?: boolean
+  error?: string
+}
+
 export interface ElectronAPI {
   // App
   app: {
@@ -741,6 +753,13 @@ export interface ElectronAPI {
   // Artifacts - entity-type foundation (C0): import files as captures
   artifacts: ArtifactsAPI
 
+  // Clipboard screenshot capture — paste-to-add + optional auto-watch
+  clipboardCapture: {
+    captureImage: () => Promise<ClipboardCaptureResult>
+    setAutoWatch: (enabled: boolean) => Promise<{ active: boolean }>
+    isWatchActive: () => Promise<{ active: boolean }>
+  }
+
   // Connectors (Layer 2) — Settings → Connectors UI bridge
   connectors: {
     list: () => Promise<ConnectorSummary[]>
@@ -1032,6 +1051,9 @@ export interface ElectronAPI {
   // Recording Watcher Events
   onRecordingAdded: (callback: (data: { recording: any }) => void) => () => void
 
+  // Clipboard auto-watch push — emitted when a background clipboard image is auto-added
+  onClipboardCaptured: (callback: (result: ClipboardCaptureResult) => void) => () => void
+
   // Transcription Events
   onTranscriptionStarted: (callback: (data: { queueItemId?: string; recordingId: string }) => void) => () => void
   onTranscriptionProgress: (callback: (data: { queueItemId: string; progress: number; stage: string }) => void) => () => void
@@ -1273,6 +1295,12 @@ const electronAPI: ElectronAPI = {
     pickAndImport: () => callIPC('artifacts:pickAndImport'),
     getForCapture: (knowledgeCaptureId) => callIPC('artifacts:getForCapture', knowledgeCaptureId),
     openInFolder: (id) => callIPC('artifacts:openInFolder', id)
+  },
+
+  clipboardCapture: {
+    captureImage: () => callIPC('clipboard:captureImage'),
+    setAutoWatch: (enabled: boolean) => callIPC('clipboard:setAutoWatch', enabled),
+    isWatchActive: () => callIPC('clipboard:isWatchActive')
   },
 
   connectors: {
@@ -1586,6 +1614,15 @@ const electronAPI: ElectronAPI = {
     ipcRenderer.on('recording:new', handler)
     return () => {
       ipcRenderer.removeListener('recording:new', handler)
+    }
+  },
+
+  // Clipboard auto-watch push listener
+  onClipboardCaptured: (callback: (result: ClipboardCaptureResult) => void) => {
+    const handler = (_event: any, result: ClipboardCaptureResult) => callback(result)
+    ipcRenderer.on('clipboard:captured', handler)
+    return () => {
+      ipcRenderer.removeListener('clipboard:captured', handler)
     }
   },
 

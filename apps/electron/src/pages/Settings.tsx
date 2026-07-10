@@ -53,6 +53,9 @@ export function Settings() {
   // QA Logs toggle — moved here from the sidebar footer (advanced/dev setting).
   const qaLogsEnabled = useUIStore((s) => s.qaLogsEnabled)
   const setQaLogsEnabled = useUIStore((s) => s.setQaLogsEnabled)
+  // Clipboard auto-capture toggle — background poll that adds copied screenshots.
+  const autoCaptureScreenshots = useUIStore((s) => s.autoCaptureScreenshots)
+  const setAutoCaptureScreenshots = useUIStore((s) => s.setAutoCaptureScreenshots)
   // Chat Placement — Floating (bubble) vs Embedded (docked pane) + preferred edge.
   const chatPlacement = useUIStore((s) => s.chatPlacement)
   const setChatPlacement = useUIStore((s) => s.setChatPlacement)
@@ -1162,6 +1165,34 @@ export function Settings() {
                   </div>
                 </>
               )}
+            </CardContent>
+          </Card>
+
+          {/* Capture — turning ambient inputs (clipboard screenshots) into knowledge. */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Capture</CardTitle>
+              <CardDescription>Bring screenshots into your knowledge library</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <label htmlFor="autoCaptureScreenshotsToggle" className="text-sm font-medium">
+                    Auto-capture screenshots from clipboard
+                  </label>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Watch the clipboard and automatically add copied screenshots as image
+                    captures. You can always paste (<code>Ctrl/Cmd+V</code>) to add one manually,
+                    even with this off.
+                  </p>
+                </div>
+                <Switch
+                  id="autoCaptureScreenshotsToggle"
+                  checked={autoCaptureScreenshots}
+                  onCheckedChange={setAutoCaptureScreenshots}
+                  aria-label="Auto-capture screenshots from clipboard"
+                />
+              </div>
             </CardContent>
           </Card>
 

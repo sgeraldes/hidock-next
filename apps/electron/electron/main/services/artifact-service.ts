@@ -40,6 +40,13 @@ export interface ImportArtifactOptions {
   /** Provenance for connector-fed imports (Layer 2); optional for manual imports. */
   sourceConnectorId?: string
   sourceRef?: string
+  /**
+   * Title for the auto-created knowledge_capture. Defaults to the source
+   * filename. Only used when a new capture is created (no knowledgeCaptureId) —
+   * lets callers give, e.g., a clipboard screenshot a human title while the
+   * `.png` extension still drives the Library's image source-type.
+   */
+  title?: string
 }
 
 export interface ImportArtifactResult {
@@ -134,7 +141,7 @@ export async function importArtifact(
       run(
         `INSERT INTO knowledge_captures (id, title, category, status, captured_at, created_at, updated_at)
          VALUES (?, ?, 'note', 'ready', ?, ?, ?)`,
-        [knowledgeCaptureId, filename, now, now, now]
+        [knowledgeCaptureId, opts.title ?? filename, now, now, now]
       )
     }
 

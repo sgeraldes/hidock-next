@@ -231,6 +231,10 @@ export interface UIStore {
   qaLogsEnabled: boolean
   setQaLogsEnabled: (enabled: boolean) => void
 
+  // Auto-capture screenshots from the clipboard (background poll). Default off.
+  autoCaptureScreenshots: boolean
+  setAutoCaptureScreenshots: (enabled: boolean) => void
+
   // Theme preference. 'system' follows the OS (prefers-color-scheme); 'light'/
   // 'dark' pin it. Persisted to localStorage (and mirrored to config).
   theme: ThemePreference

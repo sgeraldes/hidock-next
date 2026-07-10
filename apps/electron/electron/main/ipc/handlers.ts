@@ -33,6 +33,7 @@ import { registerRecordingDeletionHandlers } from './recording-deletion-handlers
 import { registerTranscriptionHandlers } from './transcription-handlers'
 import { registerReDiarizeHandlers } from './re-diarize-handlers'
 import { registerTimelineHandlers } from './timeline-handlers'
+import { registerClipboardCaptureHandlers } from './clipboard-capture-handlers'
 
 export function registerIpcHandlers(): void {
   // Register all IPC handlers
@@ -74,6 +75,7 @@ export function registerIpcHandlers(): void {
   registerTranscriptionHandlers()
   registerReDiarizeHandlers()
   registerTimelineHandlers()
+  registerClipboardCaptureHandlers()
 
   console.log('All IPC handlers registered')
 }

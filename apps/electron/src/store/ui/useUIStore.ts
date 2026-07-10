@@ -51,6 +51,9 @@ export const useUIStore = create<UIStore>()(
   // QA monitoring toggle
   qaLogsEnabled: false,
 
+  // Auto-capture screenshots from clipboard — defaults OFF (opt-in background poll).
+  autoCaptureScreenshots: false,
+
   // Theme preference — defaults to following the OS.
   theme: 'system',
 
@@ -191,6 +194,11 @@ export const useUIStore = create<UIStore>()(
     set({ qaLogsEnabled: enabled })
   },
 
+  // Clipboard auto-capture toggle
+  setAutoCaptureScreenshots: (enabled: boolean) => {
+    set({ autoCaptureScreenshots: enabled })
+  },
+
   // Theme actions — the applied `dark` class is reconciled by useTheme().
   setTheme: (theme) => {
     set({ theme })
@@ -208,6 +216,7 @@ export const useUIStore = create<UIStore>()(
         chatPosition: state.chatPosition,
         chatEmbeddedCollapsed: state.chatEmbeddedCollapsed,
         qaLogsEnabled: state.qaLogsEnabled,
+        autoCaptureScreenshots: state.autoCaptureScreenshots, // persisted: user preference
         theme: state.theme, // persisted: user preference (also read pre-paint in main.tsx)
         operationsDockCollapsed: state.operationsDockCollapsed, // persisted: dock chrome pref
         activityLogExpanded: state.activityLogExpanded, // persisted: dock chrome pref
@@ -245,6 +254,7 @@ export const useIsPlaying = () => useUIStore((s) => s.isPlaying)
 export const useWaveformLoadingId = () => useUIStore((s) => s.waveformLoadingId)
 export const useWaveformLoadedForId = () => useUIStore((s) => s.waveformLoadedForId)
 export const useQaLogsEnabled = () => useUIStore((s) => s.qaLogsEnabled)
+export const useAutoCaptureScreenshots = () => useUIStore((s) => s.autoCaptureScreenshots)
 
 // AI assistant placement selectors (scalar — Object.is is sufficient)
 export const useChatPlacement = () => useUIStore((s) => s.chatPlacement)
