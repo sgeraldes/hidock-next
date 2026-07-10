@@ -9,8 +9,11 @@ docs. Companions: ROADMAP.md (audit ledger + coverage map), INTELLIGENCE.md
 
 ## 0. CURRENT STATE — 2026-07-10 ~03:00 (READ THIS FIRST, supersedes below)
 
-**HEAD `53204b84`, schema v38, all pushed. better-sqlite3/WAL engine (NOT
-sql.js — migrated after the 2GB-DB P0). Suite ~2,511. Backlog ~960 draining.**
+**HEAD `4437b001`, schema v38, all pushed. better-sqlite3/WAL engine (NOT
+sql.js — migrated after the 2GB-DB P0). Suite ~2,515. Backlog ~960 draining.
+NOTE: main-process changes (v-migrations, IPC) need an app RESTART to take
+effect; renderer changes arrive via HMR. Restart activates: nothing pending
+now except the two in-flight agents' work when merged.**
 
 ### DEV/ABI GOTCHA (critical): the on-disk `better-sqlite3` binary is the
 ELECTRON ABI (the running app holds it). So:
@@ -21,7 +24,10 @@ ELECTRON ABI (the running app holds it). So:
 ### AGENTS IN FLIGHT (based on 53204b84 → they seed from stale `main` 89cb03ac and MUST ff to the branch tip; VERIFY base in their report; CHERRY-PICK their commit onto current HEAD since HEAD advances, don't ff-merge):
 - **library-redesign** (aa34bf2a8007efc85): Knowledge Library redesign — AI Assistant→dockable/pinnable overlay (2-pane default), multi-format rows (image=dimensions not duration), simplified filters + source-type control + working duration filter/sort, de-dup the in-library vs global search, RESPONSIVENESS. DATA FIXES: backfill `recordings.duration_seconds` (NULL for 1903/1911 — that's why duration sort/filter return nothing), honest empty-state for Quality (900 captures all 'unrated'). Owns v39 if needed. Composes with delete for the cleanup flow.
 - **wer-hybrid-spike** (aced5f54d46abb8af): RESEARCH — WER comparison Gemini-only vs hybrid (local VAD/turn chunks→Gemini) vs full-local WhisperX vs top Spanish model (Canary-Qwen 2.5B / ARK-ASR-3B). USER CARES: Gemini Spanish WER is reportedly MUCH better than WhisperX, so we do NOT just switch to local — test the hybrid. Heavy GPU + web-leaderboard research; produces docs/experiments/wer-hybrid-spike.md + side-by-side transcripts for the user to judge. **USER ASKED: send them the WER results when in.**
-- **responsive-layout** (a657977c775c2993b): fix wide-window dead-gutters on NON-Library pages (Today caps at max-w-3xl=768px etc.; go multi-column/wider-cap). Does NOT touch Library (redesign owns it).
+- ~~responsive-layout~~ DONE (4437b001): wide-window dead-gutters fixed on
+  non-Library pages via shared src/lib/pageLayout.ts (pageContent/pageWide/
+  proseMeasure); Today now 2-col at 2xl. Needs a restart-verify at 800/1280/
+  2200 widths (per dogfood B8) — do this on the next restart.
 
 ### QUEUED (dispatch after library-redesign frees Library/database files):
 - **Merge "Correct" mode + transcript entity-linking**: distinguish ALIAS
