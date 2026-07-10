@@ -17,11 +17,35 @@ export interface SentimentSegment {
   sentiment: 'positive' | 'negative' | 'neutral'
 }
 
+/**
+ * A per-speaker time band used to color the waveform bars by who was speaking.
+ * Times are in seconds; `color` is a resolved hex; `speakerKey` lets the caller
+ * isolate a single speaker (see `isolatedSpeakerKey`).
+ */
+export interface WaveformSpeakerRange {
+  startTime: number // Seconds
+  endTime: number // Seconds
+  color: string
+  speakerKey: string
+}
+
 export interface WaveformCanvasProps {
   /** PCM audio samples for amplitude-based waveform */
   audioData: Float32Array | null
   /** Optional sentiment analysis data for color coding */
   sentimentData?: SentimentSegment[]
+  /**
+   * Optional per-speaker color bands. When present, a bar is painted with the
+   * color of the speaker active at that time — taking precedence over sentiment
+   * and the played/unplayed split. Sentiment still colors the GAPS between
+   * speaker ranges, so both hooks are honored without fighting.
+   */
+  speakerRanges?: WaveformSpeakerRange[]
+  /**
+   * When set, only bars belonging to this speaker key render at full strength;
+   * every other bar is dimmed. Used by the legend to isolate one speaker.
+   */
+  isolatedSpeakerKey?: string | null
   /** Current playback position in seconds (for playhead) */
   currentTime?: number
   /** Total audio duration in seconds */
@@ -77,6 +101,8 @@ function resolveWaveformColors(el: HTMLElement): {
 export function WaveformCanvas({
   audioData,
   sentimentData,
+  speakerRanges,
+  isolatedSpeakerKey,
   currentTime,
   duration,
   onSeek,
@@ -108,6 +134,8 @@ export function WaveformCanvas({
         ? currentTime / duration
         : 0
 
+    const hasSpeakers = !!speakerRanges && speakerRanges.length > 0
+
     // Draw bars
     for (let i = 0; i < barCount; i++) {
       // Sample audio data for this bar
@@ -116,19 +144,29 @@ export function WaveformCanvas({
       const barHeight = Math.max(2, amplitude * height * 0.9) // Min 2px, max 90% height
       const x = i * (barWidth + barGap)
       const y = (height - barHeight) / 2 // Center vertically
+      const timeForBar = (i / barCount) * duration
 
       // Base color = played/unplayed split (the seek affordance). Bars up to the
       // playhead are filled with the primary color; the rest stay muted.
       const isPlayed = i / barCount <= playedFraction
       let barColor = isPlayed ? colors.played : colors.unplayed
+      let barAlpha = 1
 
-      // Sentiment (when present) overrides the split for pos/neg segments.
-      if (sentimentData && sentimentData.length > 0) {
-        const timeForBar = (i / barCount) * duration
+      // Precedence: speaker color (who is talking) > sentiment (pos/neg) >
+      // played/unplayed split. Speaker ranges win where present; sentiment then
+      // colors the GAPS between speakers — so both hooks are honored.
+      let speakerHit: WaveformSpeakerRange | undefined
+      if (hasSpeakers) {
+        speakerHit = speakerRanges!.find(
+          (r) => timeForBar >= r.startTime && timeForBar < r.endTime
+        )
+        if (speakerHit) barColor = speakerHit.color
+      }
+
+      if (!speakerHit && sentimentData && sentimentData.length > 0) {
         const segment = sentimentData.find(
           (s) => timeForBar >= s.startTime && timeForBar < s.endTime
         )
-
         if (segment) {
           if (segment.sentiment === 'positive') {
             barColor = '#16A34A' // green-600 (AA on light + dark)
@@ -139,9 +177,22 @@ export function WaveformCanvas({
         }
       }
 
+      // Unplayed portion is dimmed so the playhead progress still reads even when
+      // bars carry a speaker/sentiment hue (which ignores the played split).
+      if (!isPlayed && (speakerHit || (hasSpeakers === false && sentimentData?.length))) {
+        barAlpha = 0.45
+      }
+
+      // Legend isolation: fade every bar that isn't the isolated speaker.
+      if (isolatedSpeakerKey) {
+        barAlpha = speakerHit && speakerHit.speakerKey === isolatedSpeakerKey ? 1 : 0.12
+      }
+
       // Draw bar
+      ctx.globalAlpha = barAlpha
       ctx.fillStyle = barColor
       ctx.fillRect(x, y, barWidth, barHeight)
+      ctx.globalAlpha = 1
     }
 
     // Draw a strong, high-contrast playhead if currentTime provided
@@ -154,7 +205,7 @@ export function WaveformCanvas({
       ctx.lineTo(playheadX, height)
       ctx.stroke()
     }
-  }, [audioData, sentimentData, currentTime, duration, height, width])
+  }, [audioData, sentimentData, speakerRanges, isolatedSpeakerKey, currentTime, duration, height, width])
 
   // Handle click to seek
   const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {

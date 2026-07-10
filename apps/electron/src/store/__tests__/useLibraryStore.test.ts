@@ -49,6 +49,7 @@ beforeEach(() => {
 
   // Reset assistant docking + new filters
   store.setAssistantDock('collapsed')
+  store.setWaveformPinned(false)
 
   // Reset panel state
   store.setPanelSizes([25, 45, 30])
@@ -869,6 +870,33 @@ describe('useLibraryStore', () => {
       setAssistantDock('pinned')
       clearFilters()
       expect(useLibraryStore.getState().assistantDock).toBe('pinned')
+    })
+  })
+
+  describe('Waveform timeline pin', () => {
+    it('defaults to unpinned (compact)', () => {
+      expect(useLibraryStore.getState().waveformPinned).toBe(false)
+    })
+
+    it('setWaveformPinned and toggleWaveformPinned control the pin', () => {
+      const { setWaveformPinned, toggleWaveformPinned } = useLibraryStore.getState()
+      setWaveformPinned(true)
+      expect(useLibraryStore.getState().waveformPinned).toBe(true)
+      toggleWaveformPinned()
+      expect(useLibraryStore.getState().waveformPinned).toBe(false)
+    })
+
+    it('PERSISTS the pin to localStorage so it survives a restart', () => {
+      useLibraryStore.getState().setWaveformPinned(true)
+      const persisted = JSON.parse(window.localStorage.getItem('hidock-library-store') as string)
+      expect(persisted.state.waveformPinned).toBe(true)
+    })
+
+    it('is a preference — survives clearFilters (not a filter)', () => {
+      const { setWaveformPinned, clearFilters } = useLibraryStore.getState()
+      setWaveformPinned(true)
+      clearFilters()
+      expect(useLibraryStore.getState().waveformPinned).toBe(true)
     })
   })
 

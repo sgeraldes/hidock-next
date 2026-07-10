@@ -50,6 +50,12 @@ interface LibraryState {
   // Source-scoped AI assistant docking (persisted)
   assistantDock: AssistantDock
 
+  // Whether the reader's full-mode waveform timeline is PINNED open (persisted).
+  // A pin keeps the rich meeting timeline (colored bars, markers, sentiment)
+  // expanded across recordings and restarts, unlike the transient per-recording
+  // expand toggle. Docked pill ↔ pinned full timeline.
+  waveformPinned: boolean
+
   // Selection state (transient - not persisted)
   selectedIds: Set<string>
 
@@ -105,6 +111,10 @@ interface LibraryActions {
   // Assistant docking
   setAssistantDock: (dock: AssistantDock) => void
 
+  // Waveform timeline pin
+  setWaveformPinned: (pinned: boolean) => void
+  toggleWaveformPinned: () => void
+
   // Selection
   selectSingle: (id: string) => void
   toggleSelection: (id: string) => void
@@ -155,6 +165,9 @@ const initialState: LibraryState = {
   searchQuery: '',
   // Default to the two-pane layout with the assistant collapsed to an icon rail.
   assistantDock: 'collapsed',
+  // Compact by default: remember the user's pin, but don't force the full
+  // timeline open until they ask for it.
+  waveformPinned: false,
   selectedIds: new Set(),
   expandedRowIds: new Set(),
   expandedTranscripts: new Set(),
@@ -207,6 +220,10 @@ export const useLibraryStore = create<LibraryStore>()(
 
       // Assistant docking
       setAssistantDock: (dock) => set({ assistantDock: dock }),
+
+      // Waveform timeline pin
+      setWaveformPinned: (pinned) => set({ waveformPinned: pinned }),
+      toggleWaveformPinned: () => set((state) => ({ waveformPinned: !state.waveformPinned })),
 
       // Selection
       selectSingle: (id) =>
@@ -343,6 +360,7 @@ export const useLibraryStore = create<LibraryStore>()(
         sourceTypeFilter: state.sourceTypeFilter,
         durationPreset: state.durationPreset,
         assistantDock: state.assistantDock,
+        waveformPinned: state.waveformPinned,
         panelSizes: state.panelSizes,
         listPaneSize: state.listPaneSize,
         listCollapsed: state.listCollapsed
@@ -365,3 +383,4 @@ export const useLibrarySorting = () =>
     sortOrder: state.sortOrder
   })))
 export const useLibraryAssistantDock = () => useLibraryStore((state) => state.assistantDock)
+export const useWaveformPinned = () => useLibraryStore((state) => state.waveformPinned)

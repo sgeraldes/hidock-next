@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, within } from '@testing-library/react'
 import { WaveformPlayer } from '../WaveformPlayer'
 import { useUIStore } from '@/store/useUIStore'
 
@@ -83,9 +83,87 @@ describe('WaveformPlayer', () => {
         mode="full"
         recordingId="rec-1"
         filePath="/a.wav"
-        events={[{ id: 'e1', timeSec: 50, index: 1, label: 'Decision' }]}
+        events={[{ id: 'e1', timeSec: 50, index: 1, label: 'Decision', kind: 'decision' }]}
       />
     )
     expect(screen.getByRole('button', { name: /jump to marker 1/i })).toBeInTheDocument()
+  })
+
+  it('seeks and highlights when an event marker is clicked', () => {
+    const seek = vi.fn()
+    ;(window as any).__audioControls.seek = seek
+    const onEventClick = vi.fn()
+    useUIStore.setState({ currentlyPlayingId: 'rec-1', playbackDuration: 100 })
+    render(
+      <WaveformPlayer
+        mode="full"
+        recordingId="rec-1"
+        filePath="/a.wav"
+        events={[{ id: 'e1', timeSec: 50, index: 1, label: 'Ship it', kind: 'action' }]}
+        onEventClick={onEventClick}
+      />
+    )
+    fireEvent.click(screen.getByRole('button', { name: /jump to marker 1/i }))
+    expect(seek).toHaveBeenCalledWith(50)
+    expect(onEventClick).toHaveBeenCalledWith(expect.objectContaining({ id: 'e1' }))
+    // Marker + list row both reflect the active state.
+    expect(screen.getByRole('button', { name: /jump to marker 1/i })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('renders a cross-linked event list that seeks on click', () => {
+    const seek = vi.fn()
+    ;(window as any).__audioControls.seek = seek
+    useUIStore.setState({ currentlyPlayingId: 'rec-1', playbackDuration: 100 })
+    render(
+      <WaveformPlayer
+        mode="full"
+        recordingId="rec-1"
+        filePath="/a.wav"
+        events={[{ id: 'e1', timeSec: 25, index: 1, label: 'Kickoff', kind: 'action' }]}
+      />
+    )
+    const list = screen.getByTestId('timeline-events')
+    const row = within(list).getByText('Kickoff')
+    fireEvent.click(row)
+    expect(seek).toHaveBeenCalledWith(25)
+  })
+
+  it('renders a speaker legend and isolates a speaker on click', () => {
+    useUIStore.setState({ currentlyPlayingId: 'rec-1', playbackDuration: 100 })
+    render(
+      <WaveformPlayer
+        mode="full"
+        recordingId="rec-1"
+        filePath="/a.wav"
+        speakerRanges={[{ startSec: 0, endSec: 50, speakerKey: 'A', name: 'Alice', color: '#2563EB' }]}
+        speakerLegend={[{ speakerKey: 'A', name: 'Alice', color: '#2563EB', turnCount: 3 }]}
+      />
+    )
+    const legend = screen.getByTestId('speaker-legend')
+    const chip = within(legend).getByRole('button', { name: /alice/i })
+    expect(chip).toHaveAttribute('aria-pressed', 'false')
+    fireEvent.click(chip)
+    // The same chip is now pressed and a "Show all" reset appears.
+    expect(within(legend).getByRole('button', { name: /alice/i })).toHaveAttribute('aria-pressed', 'true')
+    expect(within(legend).getByRole('button', { name: /^show all$/i })).toBeInTheDocument()
+  })
+
+  it('renders the sentiment curve when sentiment is present and hides it when absent', () => {
+    useUIStore.setState({ currentlyPlayingId: 'rec-1', playbackDuration: 100 })
+    const { rerender } = render(
+      <WaveformPlayer
+        mode="full"
+        recordingId="rec-1"
+        filePath="/a.wav"
+        sentiment={[
+          { startSec: 0, endSec: 50, score: 0.8 },
+          { startSec: 50, endSec: 100, score: -0.6 },
+        ]}
+      />
+    )
+    expect(screen.getByTestId('sentiment-curve')).toBeInTheDocument()
+
+    rerender(<WaveformPlayer mode="full" recordingId="rec-1" filePath="/a.wav" />)
+    expect(screen.queryByTestId('sentiment-curve')).not.toBeInTheDocument()
   })
 })

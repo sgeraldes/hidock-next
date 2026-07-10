@@ -24,14 +24,16 @@ import { useNavigate } from 'react-router-dom'
 import { TranscriptViewer, type StoredSegment } from './TranscriptViewer'
 import { TranscriptionStatusBadge } from './TranscriptionStatusBadge'
 import { StatusIcon } from './StatusIcon'
-import { WaveformPlayer } from './WaveformPlayer'
+import { WaveformPlayer, type TimelineEvent, type SentimentScorePoint } from './WaveformPlayer'
 import { SpeakerAssignPopover, type AssignScope } from './SpeakerAssignPopover'
 import { useReaderPeople, type ParticipantChip } from '../hooks/useReaderPeople'
+import { deriveSpeakerRanges } from '@/features/library/utils/speakerRanges'
 import { getDisplayTitle } from '@/features/library/utils/getDisplayTitle'
 import { useUIStore } from '@/store/useUIStore'
+import { useLibraryStore } from '@/store/useLibraryStore'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { Transcript, Meeting, MeetingAttendee, parseJsonArray } from '@/types'
-import { Calendar, Download, Trash2, Wand2, RefreshCw, Play, Square, Pencil, Check, Edit2, Link, X, ExternalLink, FolderOpen, MoreHorizontal, Folder, Plus, EyeOff, Eye, Sparkles, ChevronDown, Cloud, Cpu, Users, Mail, UserCog } from 'lucide-react'
+import { Calendar, Download, Trash2, Wand2, RefreshCw, Play, Square, Pencil, Check, Edit2, Link, X, ExternalLink, FolderOpen, MoreHorizontal, Folder, Plus, EyeOff, Eye, Sparkles, ChevronDown, Cloud, Cpu, Users, Mail, UserCog, Pin } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 import { HoverCard, HoverCardTrigger, HoverCardContent } from '@/components/ui/hover-card'
@@ -65,6 +67,44 @@ const CATEGORY_OPTIONS = [
   { value: 'note', label: 'Note' },
   { value: 'other', label: 'Other' },
 ] as const
+
+/**
+ * Shape returned by the sibling "timeline-data" agent's IPC. Typed here (and the
+ * call is made via an optional cast) so this file type-checks and degrades
+ * gracefully BEFORE that IPC lands — colored bars + seek still work without it.
+ *   window.electronAPI.recordings.getTimelineAnalysis(recordingId) → this
+ *   window.electronAPI.recordings.analyzeTimeline(recordingId)     → backfill
+ */
+interface TimelineAnalysisResult {
+  sentimentSegments?: Array<{ startSec: number; endSec: number; score: number }>
+  eventMarkers?: Array<{ id: string; kind: 'action' | 'decision'; atSec: number; label: string; refId?: string }>
+}
+
+interface TimelineData {
+  events: TimelineEvent[]
+  sentiment: SentimentScorePoint[]
+}
+
+/** Map the IPC result into the WaveformPlayer's props (1-based marker numbers). */
+function mapTimelineAnalysis(res: TimelineAnalysisResult): TimelineData {
+  const events = (res.eventMarkers ?? [])
+    .slice()
+    .sort((a, b) => a.atSec - b.atSec)
+    .map((m, i) => ({
+      id: m.id,
+      timeSec: m.atSec,
+      index: i + 1,
+      label: m.label,
+      kind: m.kind,
+      refId: m.refId
+    }))
+  const sentiment = (res.sentimentSegments ?? []).map((s) => ({
+    startSec: s.startSec,
+    endSec: s.endSec,
+    score: s.score
+  }))
+  return { events, sentiment }
+}
 
 interface SourceReaderProps {
   recording: UnifiedRecording | null
@@ -133,8 +173,15 @@ export function SourceReader({
   const [linkDialogOpen, setLinkDialogOpen] = useState(false)
 
   // Whether the compact player is expanded to the full waveform (docked, but
-  // collapsed by default so the header stays short).
+  // collapsed by default so the header stays short). A separate PIN (persisted in
+  // useLibraryStore) keeps the full timeline open across recordings + restarts.
   const [playerExpanded, setPlayerExpanded] = useState(false)
+  const waveformPinned = useLibraryStore((s) => s.waveformPinned)
+  const setWaveformPinned = useLibraryStore((s) => s.setWaveformPinned)
+
+  // Rich timeline analysis (event markers + sentiment) for full mode, fetched
+  // from the sibling IPC when a recording opens. Null until (and if) it resolves.
+  const [timeline, setTimeline] = useState<TimelineData | null>(null)
 
   // Transcription warning state. `pendingTranscribe` holds the exact action to
   // run once the user confirms past the "may overwrite your edits" dialog — this
@@ -211,6 +258,58 @@ export function SourceReader({
     recordingId,
     segments: transcriptSegments,
   })
+
+  // Timeline duration for the meeting timeline (stored duration, else the live
+  // decoded value once the waveform loads). Kept as a hook (above the early
+  // return) so the speaker-range memo below has a stable duration input.
+  const timelineDurationSec = useMemo(() => {
+    if (recording?.duration && recording.duration > 0) return recording.duration
+    if (waveformLoadedForId === recording?.id && livePlaybackDuration > 0) return livePlaybackDuration
+    return 0
+  }, [recording?.duration, recording?.id, waveformLoadedForId, livePlaybackDuration])
+
+  // Resolve a raw diarization label ("Speaker 2") to the SAME {key, name} the
+  // Participants chips use, so bar colors and chip swatches share one color key.
+  const labelResolution = useMemo(() => {
+    const m = new Map<string, { key: string; name: string }>()
+    for (const p of people.participants) m.set(p.effectiveLabel, { key: p.key, name: p.name })
+    return m
+  }, [people.participants])
+
+  // Per-speaker colored bars + legend, derived CLIENT-SIDE from the transcript.
+  const speakerTimeline = useMemo(
+    () => deriveSpeakerRanges(transcriptSegments, timelineDurationSec, (base) => labelResolution.get(base)),
+    [transcriptSegments, timelineDurationSec, labelResolution]
+  )
+
+  // Fetch the sibling agent's timeline analysis when a recording opens. Empty or
+  // absent → attempt a one-time backfill via analyzeTimeline, then re-read. All
+  // optional-cast so this file type-checks and no-ops before that IPC lands.
+  useEffect(() => {
+    let cancelled = false
+    setTimeline(null)
+    if (!recordingId) return
+    const api = window.electronAPI?.recordings as unknown as {
+      getTimelineAnalysis?: (id: string) => Promise<TimelineAnalysisResult>
+      analyzeTimeline?: (id: string) => Promise<unknown>
+    } | undefined
+    if (typeof api?.getTimelineAnalysis !== 'function') return
+    ;(async () => {
+      try {
+        let res = await api.getTimelineAnalysis!(recordingId)
+        const isEmpty = (r?: TimelineAnalysisResult) =>
+          !r || ((r.eventMarkers?.length ?? 0) === 0 && (r.sentimentSegments?.length ?? 0) === 0)
+        if (isEmpty(res) && typeof api.analyzeTimeline === 'function') {
+          try {
+            await api.analyzeTimeline(recordingId)
+            res = await api.getTimelineAnalysis!(recordingId)
+          } catch { /* backfill best-effort */ }
+        }
+        if (!cancelled && res) setTimeline(mapTimelineAnalysis(res))
+      } catch { /* non-fatal: colors + seek still work without it */ }
+    })()
+    return () => { cancelled = true }
+  }, [recordingId])
 
   const handleSaveTitle = useCallback(async () => {
     if (!recording?.knowledgeCaptureId) return
@@ -364,12 +463,8 @@ export function SourceReader({
   const { primaryText: displayTitle } = getDisplayTitle(recording, meeting, transcript)
 
   // Prefer the stored duration; fall back to the live decoded value for the
-  // recording whose waveform is currently loaded.
-  const durationSeconds = recording.duration && recording.duration > 0
-    ? recording.duration
-    : waveformLoadedForId === recording.id && livePlaybackDuration > 0
-      ? livePlaybackDuration
-      : 0
+  // recording whose waveform is currently loaded (computed as a hook above).
+  const durationSeconds = timelineDurationSec
 
   // Transcription is "busy" while queued or running — the primary Transcribe
   // control and its ▾ trigger are disabled in that window.
@@ -678,21 +773,47 @@ export function SourceReader({
               <div className="min-w-0 flex-1 @md:hidden">
                 <WaveformPlayer mode="scrubber" recordingId={recording.id} filePath={localPath} />
               </div>
+              {/* Pin keeps the full timeline open across recordings + restarts. */}
+              <Button
+                variant="ghost"
+                size="icon"
+                className={cn('h-8 w-8 shrink-0', waveformPinned && 'text-primary')}
+                onClick={() => setWaveformPinned(!waveformPinned)}
+                aria-pressed={waveformPinned}
+                aria-label={waveformPinned ? 'Unpin timeline' : 'Pin timeline open'}
+                title={waveformPinned ? 'Unpin the expanded timeline' : 'Pin the expanded timeline (stays open)'}
+              >
+                <Pin className={cn('h-4 w-4', waveformPinned && 'fill-current')} />
+              </Button>
               <Button
                 variant="ghost"
                 size="icon"
                 className="h-8 w-8 shrink-0"
-                onClick={() => setPlayerExpanded((v) => !v)}
-                aria-expanded={playerExpanded}
-                aria-label={playerExpanded ? 'Collapse waveform' : 'Expand waveform'}
-                title={playerExpanded ? 'Collapse waveform' : 'Expand waveform'}
+                onClick={() => {
+                  // Collapsing a pinned timeline unpins it too, so the chevron is
+                  // always an intuitive expand/collapse.
+                  if (waveformPinned) { setWaveformPinned(false); setPlayerExpanded(false) }
+                  else setPlayerExpanded((v) => !v)
+                }}
+                aria-expanded={playerExpanded || waveformPinned}
+                aria-label={playerExpanded || waveformPinned ? 'Collapse waveform' : 'Expand waveform'}
+                title={playerExpanded || waveformPinned ? 'Collapse waveform' : 'Expand waveform'}
               >
-                <ChevronDown className={cn('h-4 w-4 transition-transform', playerExpanded && 'rotate-180')} />
+                <ChevronDown className={cn('h-4 w-4 transition-transform', (playerExpanded || waveformPinned) && 'rotate-180')} />
               </Button>
             </div>
-            {playerExpanded && (
+            {(playerExpanded || waveformPinned) && (
               <div className="mt-2">
-                <WaveformPlayer mode="full" recordingId={recording.id} filePath={localPath} />
+                <WaveformPlayer
+                  mode="full"
+                  recordingId={recording.id}
+                  filePath={localPath}
+                  speakerRanges={speakerTimeline.ranges}
+                  speakerLegend={speakerTimeline.legend}
+                  events={timeline?.events}
+                  sentiment={timeline?.sentiment}
+                  onSeek={(sec) => onSeek?.(Math.round(sec * 1000))}
+                />
               </div>
             )}
           </div>
@@ -704,6 +825,7 @@ export function SourceReader({
             <ParticipantsChips
               participants={people.participants}
               contacts={people.allContacts}
+              colorByKey={speakerTimeline.colorByKey}
               onOpenPicker={people.ensureAllContacts}
               onAssign={people.assignSpeaker}
               onUnassign={people.unassignSpeaker}
@@ -1026,12 +1148,15 @@ function ProjectAssignmentRow({ knowledgeCaptureId }: { knowledgeCaptureId: stri
 function ParticipantsChips({
   participants,
   contacts,
+  colorByKey,
   onOpenPicker,
   onAssign,
   onUnassign,
 }: {
   participants: ParticipantChip[]
   contacts: import('@/types/knowledge').Person[]
+  /** speakerKey → color, so a chip shows the SAME swatch as its waveform bars. */
+  colorByKey?: Map<string, string>
   onOpenPicker: () => void
   onAssign: (effectiveLabel: string, turnIndex: number, scope: AssignScope, payload: { contactId?: string; newName?: string }) => void
   onUnassign: (effectiveLabel: string, turnIndex: number) => void
@@ -1047,6 +1172,7 @@ function ParticipantsChips({
       <div className="flex flex-wrap gap-1.5">
         {participants.map((p) => {
           const turnHint = p.turnCount > 0 ? ` · ${p.turnCount} turn${p.turnCount === 1 ? '' : 's'}` : ''
+          const swatch = colorByKey?.get(p.key)
           if (p.contactId) {
             // Resolved to a known person → link to their page, hover for details.
             return (
@@ -1058,6 +1184,7 @@ function ParticipantsChips({
                     className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-secondary text-secondary-foreground text-xs hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
                     title={`View ${p.name}${turnHint}`}
                   >
+                    {swatch && <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: swatch }} aria-hidden="true" />}
                     {p.name}
                   </button>
                 </HoverCardTrigger>
@@ -1071,9 +1198,10 @@ function ParticipantsChips({
           return (
             <span
               key={p.key}
-              className="inline-flex items-center rounded-full bg-secondary/60 px-2 py-0.5 text-xs"
+              className="inline-flex items-center gap-1 rounded-full bg-secondary/60 px-2 py-0.5 text-xs"
               title={`${p.name}${turnHint} — click to identify`}
             >
+              {swatch && <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: swatch }} aria-hidden="true" />}
               <SpeakerAssignPopover
                 label={p.effectiveLabel}
                 turnIndex={p.firstTurnIndex}
