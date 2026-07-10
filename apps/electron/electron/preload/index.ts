@@ -341,6 +341,19 @@ export interface ElectronAPI {
     getMergeSuspected: () => Promise<Result<Array<{ label: string; names: string[] }>>>
   }
 
+  // Per-turn speaker overrides + speaker splits (v37): fix a single turn, or
+  // fork a merged diarization label into an independently-assignable half.
+  turnSpeakers: {
+    getOverrides: (request: { recordingId: string }) => Promise<Result<Array<{ turn_index: number; contact_id: string; name: string }>>>
+    setOverride: (request: { recordingId: string; turnIndex: number; contactId?: string; newName?: string }) => Promise<Result<Contact>>
+    clearOverride: (request: { recordingId: string; turnIndex: number }) => Promise<Result<void>>
+    getSplits: (request: { recordingId: string }) => Promise<Result<Array<{ base_label: string; from_turn_index: number; derived_label: string }>>>
+    split: (request: { recordingId: string; baseLabel: string; fromTurnIndex: number }) => Promise<Result<{ derivedLabel: string }>>
+    mergeSplit: (request: { recordingId: string; baseLabel: string; fromTurnIndex: number }) => Promise<Result<void>>
+    assignFromHere: (request: { recordingId: string; baseLabel: string; fromTurnIndex: number; contactId?: string; newName?: string }) => Promise<Result<{ derivedLabel: string; contact: Contact }>>
+    getMergeHints: (request: { recordingId: string }) => Promise<Result<Array<{ label: string; names: string[] }>>>
+  }
+
   // Today briefing (single round-trip payload for the Today page)
   briefing: {
     get: () => Promise<{ success: boolean; data?: any; error?: string }>
@@ -1009,6 +1022,17 @@ const electronAPI: ElectronAPI = {
     backfill: () => callIPC('self-id:backfill'),
     getStatus: () => callIPC('self-id:getStatus'),
     getMergeSuspected: () => callIPC('self-id:getMergeSuspected')
+  },
+
+  turnSpeakers: {
+    getOverrides: (request) => callIPC('turn-speakers:getOverrides', request),
+    setOverride: (request) => callIPC('turn-speakers:setOverride', request),
+    clearOverride: (request) => callIPC('turn-speakers:clearOverride', request),
+    getSplits: (request) => callIPC('turn-speakers:getSplits', request),
+    split: (request) => callIPC('turn-speakers:split', request),
+    mergeSplit: (request) => callIPC('turn-speakers:mergeSplit', request),
+    assignFromHere: (request) => callIPC('turn-speakers:assignFromHere', request),
+    getMergeHints: (request) => callIPC('turn-speakers:getMergeHints', request)
   },
 
   briefing: {

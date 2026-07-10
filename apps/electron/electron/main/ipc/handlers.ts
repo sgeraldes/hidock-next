@@ -28,6 +28,7 @@ import { registerArtifactHandlers } from './artifact-handlers'
 import { registerTranscriptUpgradeHandlers } from './transcript-upgrade-handlers'
 import { registerConnectorsHandlers } from './connectors-handlers'
 import { registerSelfIdentificationHandlers } from './self-identification-handlers'
+import { registerTurnSpeakersHandlers } from './turn-speakers-handlers'
 
 export function registerIpcHandlers(): void {
   // Register all IPC handlers
@@ -64,6 +65,7 @@ export function registerIpcHandlers(): void {
   registerTranscriptUpgradeHandlers()
   registerConnectorsHandlers()
   registerSelfIdentificationHandlers()
+  registerTurnSpeakersHandlers()
 
   console.log('All IPC handlers registered')
 }

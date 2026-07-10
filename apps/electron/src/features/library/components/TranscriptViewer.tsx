@@ -8,7 +8,7 @@
 
 import { useCallback, useEffect, useRef, useMemo, useState } from 'react'
 import { TimeAnchor } from './TimeAnchor'
-import { SpeakerAssignPopover } from './SpeakerAssignPopover'
+import { SpeakerAssignPopover, type AssignScope } from './SpeakerAssignPopover'
 import { ChevronDown, ChevronRight, ArrowDownToLine } from 'lucide-react'
 import { expandInlineStoredSegments } from '../utils/splitInlineTurns'
 import { useMediaQuery } from '@/hooks/useMediaQuery'
@@ -51,6 +51,28 @@ interface TranscriptSegment {
   endMs?: number
   text: string
   speaker?: string
+}
+
+/** A speaker split loaded from the backend (base label forked from a turn on). */
+interface SpeakerSplit {
+  baseLabel: string
+  fromIndex: number
+  derivedLabel: string
+}
+
+/**
+ * The effective label for a turn: if a split for this base label begins at or
+ * before this turn, the derived label of the latest such boundary; else the raw
+ * base label. Splits are matched only against the turn's own base label so an
+ * unrelated speaker's split never leaks across.
+ */
+function effectiveLabelFor(baseLabel: string, turnIndex: number, splits: SpeakerSplit[]): string {
+  let best: SpeakerSplit | undefined
+  for (const s of splits) {
+    if (s.baseLabel !== baseLabel) continue
+    if (s.fromIndex <= turnIndex && (!best || s.fromIndex > best.fromIndex)) best = s
+  }
+  return best ? best.derivedLabel : baseLabel
 }
 
 /**
@@ -254,10 +276,15 @@ export function TranscriptViewer({
   const prevTimeMsRef = useRef<number | undefined>(undefined)
 
   // Speaker → contact assignment. Only active when a recordingId is supplied.
-  // speakerMap resolves a raw label ("Speaker 2") to the assigned contact; the
-  // contacts list backs the popover's searchable picker (loaded lazily).
+  // speakerMap resolves a label ("Speaker 2", or a split-derived "Speaker 2 · B")
+  // to its assigned contact; turnOverrides supersede the label default for a
+  // single turn; splits fork a merged label from a turn onward. The contacts
+  // list backs the popover's searchable picker (loaded lazily).
   const assignEnabled = Boolean(recordingId)
   const [speakerMap, setSpeakerMap] = useState<Map<string, { contactId: string; name: string }>>(new Map())
+  const [turnOverrides, setTurnOverrides] = useState<Map<number, { contactId: string; name: string }>>(new Map())
+  const [splits, setSplits] = useState<SpeakerSplit[]>([])
+  const [mergeHints, setMergeHints] = useState<Set<string>>(new Set())
   const [contacts, setContacts] = useState<Person[]>([])
   const [contactsLoaded, setContactsLoaded] = useState(false)
 
@@ -278,9 +305,57 @@ export function TranscriptViewer({
     }
   }, [recordingId])
 
+  const loadTurnOverrides = useCallback(async () => {
+    if (!recordingId) {
+      setTurnOverrides(new Map())
+      return
+    }
+    try {
+      const res = await window.electronAPI.turnSpeakers.getOverrides({ recordingId })
+      if (res.success) {
+        const next = new Map<number, { contactId: string; name: string }>()
+        for (const row of res.data) next.set(row.turn_index, { contactId: row.contact_id, name: row.name })
+        setTurnOverrides(next)
+      }
+    } catch {
+      // Non-fatal: turns fall back to their label default.
+    }
+  }, [recordingId])
+
+  const loadSplits = useCallback(async () => {
+    if (!recordingId) {
+      setSplits([])
+      return
+    }
+    try {
+      const res = await window.electronAPI.turnSpeakers.getSplits({ recordingId })
+      if (res.success) {
+        setSplits(res.data.map((r) => ({ baseLabel: r.base_label, fromIndex: r.from_turn_index, derivedLabel: r.derived_label })))
+      }
+    } catch {
+      // Non-fatal: labels render un-split.
+    }
+  }, [recordingId])
+
+  const loadMergeHints = useCallback(async () => {
+    if (!recordingId) {
+      setMergeHints(new Set())
+      return
+    }
+    try {
+      const res = await window.electronAPI.turnSpeakers.getMergeHints({ recordingId })
+      if (res.success) setMergeHints(new Set(res.data.map((h) => h.label)))
+    } catch {
+      // Non-fatal: no hint shown.
+    }
+  }, [recordingId])
+
   useEffect(() => {
     loadSpeakerMap()
-  }, [loadSpeakerMap])
+    loadTurnOverrides()
+    loadSplits()
+    loadMergeHints()
+  }, [loadSpeakerMap, loadTurnOverrides, loadSplits, loadMergeHints])
 
   const ensureContacts = useCallback(async () => {
     if (contactsLoaded) return
@@ -294,41 +369,104 @@ export function TranscriptViewer({
     }
   }, [contactsLoaded])
 
-  const assignSpeaker = useCallback(
-    async (label: string, payload: { contactId?: string; newName?: string }) => {
+  // Assign this turn's speaker at the chosen scope: "everywhere" binds the
+  // (effective) label, "turn" overrides only this turn, "fromHere" splits the
+  // base label at this turn and binds the derived half.
+  const assignSpeakerScoped = useCallback(
+    async (
+      scope: AssignScope,
+      ctx: { effectiveLabel: string; baseLabel: string; turnIndex: number },
+      payload: { contactId?: string; newName?: string }
+    ) => {
       if (!recordingId) return
       try {
-        const res = await window.electronAPI.transcripts.assignSpeaker({ recordingId, speakerLabel: label, ...payload })
-        if (res.success) {
-          await loadSpeakerMap()
-          setContactsLoaded(false) // a new person may have been created
-          toast.success('Speaker assigned', `${label} is now ${res.data.name}.`)
+        if (scope === 'turn') {
+          const res = await window.electronAPI.turnSpeakers.setOverride({ recordingId, turnIndex: ctx.turnIndex, ...payload })
+          if (!res.success) return toast.error('Failed to assign speaker')
+          await loadTurnOverrides()
+          setContactsLoaded(false)
+          toast.success('Turn assigned', `This turn is now ${res.data.name}.`)
+        } else if (scope === 'fromHere') {
+          const res = await window.electronAPI.turnSpeakers.assignFromHere({
+            recordingId,
+            baseLabel: ctx.baseLabel,
+            fromTurnIndex: ctx.turnIndex,
+            ...payload
+          })
+          if (!res.success) return toast.error('Failed to assign speaker')
+          await Promise.all([loadSplits(), loadSpeakerMap()])
+          setContactsLoaded(false)
+          toast.success('Speaker split', `From here on is now ${res.data.contact.name}.`)
         } else {
-          toast.error('Failed to assign speaker')
+          const res = await window.electronAPI.transcripts.assignSpeaker({
+            recordingId,
+            speakerLabel: ctx.effectiveLabel,
+            ...payload
+          })
+          if (!res.success) return toast.error('Failed to assign speaker')
+          await loadSpeakerMap()
+          setContactsLoaded(false)
+          toast.success('Speaker assigned', `${ctx.effectiveLabel} is now ${res.data.name}.`)
         }
       } catch (err) {
         toast.error('Failed to assign speaker', err instanceof Error ? err.message : undefined)
       }
     },
-    [recordingId, loadSpeakerMap]
+    [recordingId, loadSpeakerMap, loadTurnOverrides, loadSplits]
   )
 
-  const unassignSpeaker = useCallback(
-    async (label: string) => {
+  // Clear the effective assignment for a turn: its per-turn override if present,
+  // else the (effective) label binding.
+  const unassignSpeakerScoped = useCallback(
+    async (ctx: { effectiveLabel: string; turnIndex: number; hasOverride: boolean }) => {
       if (!recordingId) return
       try {
-        const res = await window.electronAPI.transcripts.unassignSpeaker({ recordingId, speakerLabel: label })
-        if (res.success) {
+        if (ctx.hasOverride) {
+          const res = await window.electronAPI.turnSpeakers.clearOverride({ recordingId, turnIndex: ctx.turnIndex })
+          if (!res.success) return toast.error('Failed to reset turn')
+          await loadTurnOverrides()
+          toast.success('Turn reset')
+        } else {
+          const res = await window.electronAPI.transcripts.unassignSpeaker({ recordingId, speakerLabel: ctx.effectiveLabel })
+          if (!res.success) return toast.error('Failed to unassign speaker')
           await loadSpeakerMap()
           toast.success('Speaker unassigned')
-        } else {
-          toast.error('Failed to unassign speaker')
         }
       } catch (err) {
         toast.error('Failed to unassign speaker', err instanceof Error ? err.message : undefined)
       }
     },
-    [recordingId, loadSpeakerMap]
+    [recordingId, loadSpeakerMap, loadTurnOverrides]
+  )
+
+  const splitSpeaker = useCallback(
+    async (baseLabel: string, fromTurnIndex: number) => {
+      if (!recordingId) return
+      try {
+        const res = await window.electronAPI.turnSpeakers.split({ recordingId, baseLabel, fromTurnIndex })
+        if (!res.success) return toast.error('Failed to split speaker')
+        await loadSplits()
+        toast.success('Speaker split', `Turns from here are now ${res.data.derivedLabel}.`)
+      } catch (err) {
+        toast.error('Failed to split speaker', err instanceof Error ? err.message : undefined)
+      }
+    },
+    [recordingId, loadSplits]
+  )
+
+  const mergeSplit = useCallback(
+    async (baseLabel: string, fromTurnIndex: number) => {
+      if (!recordingId) return
+      try {
+        const res = await window.electronAPI.turnSpeakers.mergeSplit({ recordingId, baseLabel, fromTurnIndex })
+        if (!res.success) return toast.error('Failed to merge speaker')
+        await Promise.all([loadSplits(), loadSpeakerMap()])
+        toast.success('Merged back', `Rejoined ${baseLabel}.`)
+      } catch (err) {
+        toast.error('Failed to merge speaker', err instanceof Error ? err.message : undefined)
+      }
+    },
+    [recordingId, loadSplits, loadSpeakerMap]
   )
 
   // Prefer pre-parsed segments (timestamped speaker turns) when available;
@@ -474,7 +612,27 @@ export function TranscriptViewer({
           >
             {hasStructure ? (
               <div className="space-y-1">
-                {segments.map((segment, i) => (
+                {segments.map((segment, i) => {
+                  // Per-turn identity resolution (v37). base = raw diarization
+                  // label; effective = base or its split-derived label; a per-turn
+                  // override supersedes the label map for display + reset.
+                  const base = segment.speaker
+                  const effective = base ? effectiveLabelFor(base, i, splits) : undefined
+                  const override = turnOverrides.get(i)
+                  const labelAssign = effective ? speakerMap.get(effective) : undefined
+                  const assignedContactId = override?.contactId ?? labelAssign?.contactId
+                  const assignedName = override?.name ?? labelAssign?.name
+                  const assignmentProvenance: 'turn' | 'label' | undefined = override
+                    ? 'turn'
+                    : labelAssign
+                      ? 'label'
+                      : undefined
+                  const hasSplitHere = base ? splits.some((s) => s.baseLabel === base && s.fromIndex === i) : false
+                  const canSplitHere = base
+                    ? segments.slice(0, i).some((s) => s.speaker === base)
+                    : false
+                  const mergeSuspected = base ? mergeHints.has(base) : false
+                  return (
                   <div
                     key={i}
                     ref={hasTimestamps && i === currentSegmentIndex ? activeSegmentRef : null}
@@ -494,17 +652,27 @@ export function TranscriptViewer({
                             {null}
                           </TimeAnchor>
                         )}
-                        {segment.speaker && (
+                        {segment.speaker && effective && (
                           assignEnabled ? (
                             <SpeakerAssignPopover
-                              label={segment.speaker}
-                              assignedContactId={speakerMap.get(segment.speaker)?.contactId}
-                              assignedName={speakerMap.get(segment.speaker)?.name}
+                              label={effective}
+                              turnIndex={i}
+                              assignedContactId={assignedContactId}
+                              assignedName={assignedName}
+                              assignmentScope={assignmentProvenance}
                               contacts={contacts}
                               onOpen={ensureContacts}
-                              onAssignContact={(contactId) => assignSpeaker(segment.speaker!, { contactId })}
-                              onAssignNew={(name) => assignSpeaker(segment.speaker!, { newName: name })}
-                              onUnassign={() => unassignSpeaker(segment.speaker!)}
+                              onAssign={(scope: AssignScope, payload) =>
+                                assignSpeakerScoped(scope, { effectiveLabel: effective, baseLabel: base!, turnIndex: i }, payload)
+                              }
+                              onUnassign={() =>
+                                unassignSpeakerScoped({ effectiveLabel: effective, turnIndex: i, hasOverride: Boolean(override) })
+                              }
+                              canSplitHere={canSplitHere}
+                              hasSplitHere={hasSplitHere}
+                              onSplit={() => splitSpeaker(base!, i)}
+                              onMergeSplit={() => mergeSplit(base!, i)}
+                              mergeSuspected={mergeSuspected}
                             />
                           ) : (
                             <span className="font-semibold text-foreground">
@@ -516,7 +684,8 @@ export function TranscriptViewer({
                     )}
                     <p className="whitespace-pre-wrap leading-relaxed">{segment.text}</p>
                   </div>
-                ))}
+                  )
+                })}
               </div>
             ) : (
               <div className="space-y-2">

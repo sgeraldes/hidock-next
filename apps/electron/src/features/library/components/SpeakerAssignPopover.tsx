@@ -11,40 +11,66 @@
  *   - Unassigned          → search-or-create picker with rich contact rows.
  *   - Assigned (default)  → a person summary header plus actions: View person,
  *                           Change identity (reveals the picker), and Reset to
- *                           unidentified (clears the assignment — every turn with
- *                           this label reverts to the raw label via the parent's
- *                           re-fetch of the speaker map).
+ *                           unidentified.
  *
- * Data (speaker map, contacts) is owned by the parent (TranscriptViewer); this
- * component handles presentation + interaction only.
+ * Beyond label-level assignment, the popover exposes the finer per-turn controls
+ * (v37) that fix a diarizer that merged two people onto one label:
+ *   - Scope picker         → "This speaker everywhere" (default, unchanged
+ *                            behaviour), "Just this turn", or "From here on".
+ *   - Split speaker here    → forks the label into a new derived label for this
+ *                            turn onward; reversible via "Merge back".
+ *   - Merge hint            → when the self-ID pass suspects the label is two
+ *                            people, a nudge that offers the split.
+ *
+ * Data (speaker map, contacts, splits) is owned by the parent (TranscriptViewer);
+ * this component handles presentation + interaction only.
  */
 
 import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Check, ExternalLink, UserCog, UserPlus, UserX } from 'lucide-react'
+import { Check, ExternalLink, Scissors, Undo2, UserCog, UserPlus, UserX, Users } from 'lucide-react'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 import { HoverCard, HoverCardTrigger, HoverCardContent } from '@/components/ui/hover-card'
 import { PersonHoverCard } from '@/components/entity/EntityHoverCards'
 import { Badge } from '@/components/ui/badge'
 import type { Person } from '@/types/knowledge'
 
+/** How far a name assignment reaches. */
+export type AssignScope = 'everywhere' | 'turn' | 'fromHere'
+
 interface SpeakerAssignPopoverProps {
-  /** The raw speaker label from the transcript (e.g. "Speaker 2"). Assignment key. */
+  /** The effective speaker label for this turn (raw or split-derived). Display +
+   * "everywhere" assignment key. */
   label: string
-  /** Resolved contact id for this label, if assigned. */
+  /** Zero-based index of this turn within the rendered transcript. */
+  turnIndex: number
+  /** Resolved contact id for the current (effective) assignment, if any. */
   assignedContactId?: string
-  /** Resolved display name for this label, if assigned. */
+  /** Resolved display name for the current assignment, if any. */
   assignedName?: string
+  /** Provenance of the current assignment: a per-turn override or the label map. */
+  assignmentScope?: 'turn' | 'label'
   /** All known contacts, for the searchable list. Loaded lazily by the parent. */
   contacts: Person[]
   /** Called when the popover opens, so the parent can lazily load contacts. */
   onOpen: () => void
-  /** Assign this label to an existing contact. */
-  onAssignContact: (contactId: string) => void
-  /** Assign this label to a new person created from the typed name. */
-  onAssignNew: (name: string) => void
-  /** Remove the current assignment. */
+  /** Assign this turn's speaker to a contact (existing id or new name) at a scope. */
+  onAssign: (scope: AssignScope, payload: { contactId?: string; newName?: string }) => void
+  /** Remove the current (effective) assignment — the per-turn override if present,
+   * else the label binding. */
   onUnassign: () => void
+  /** Whether splitting here actually divides the label (a preceding turn shares
+   * the base label). When false, "From here on" == "everywhere" and both the
+   * split action and that scope option are hidden. */
+  canSplitHere: boolean
+  /** Whether a split boundary already begins at this turn (offer "Merge back"). */
+  hasSplitHere: boolean
+  /** Fork the base label into a derived label from this turn onward. */
+  onSplit: () => void
+  /** Undo the split that begins at this turn. */
+  onMergeSplit: () => void
+  /** The self-ID pass suspects this label is two merged people — show a hint. */
+  mergeSuspected?: boolean
 }
 
 /** First character of a name, uppercased, for the avatar circle. */
@@ -135,21 +161,73 @@ function UnidentifiedHint({ label }: { label: string }) {
   )
 }
 
+const SCOPE_OPTIONS: { value: AssignScope; label: string }[] = [
+  { value: 'everywhere', label: 'This speaker everywhere' },
+  { value: 'turn', label: 'Just this turn' },
+  { value: 'fromHere', label: 'From here on' }
+]
+
+/** The scope segmented control shown atop the picker. Default is "everywhere". */
+function ScopePicker({
+  scope,
+  onScope,
+  allowFromHere
+}: {
+  scope: AssignScope
+  onScope: (s: AssignScope) => void
+  allowFromHere: boolean
+}) {
+  const options = allowFromHere ? SCOPE_OPTIONS : SCOPE_OPTIONS.filter((o) => o.value !== 'fromHere')
+  return (
+    <div role="radiogroup" aria-label="Assignment scope" className="flex flex-col gap-0.5">
+      {options.map((o) => (
+        <button
+          key={o.value}
+          type="button"
+          role="radio"
+          aria-checked={scope === o.value}
+          onClick={() => onScope(o.value)}
+          className={`flex items-center gap-2 rounded-sm px-2 py-1 text-left text-xs transition-colors ${
+            scope === o.value ? 'bg-primary/10 text-primary font-medium' : 'text-muted-foreground hover:bg-accent'
+          }`}
+        >
+          <span
+            aria-hidden="true"
+            className={`flex h-3 w-3 shrink-0 items-center justify-center rounded-full border ${
+              scope === o.value ? 'border-primary' : 'border-muted-foreground/50'
+            }`}
+          >
+            {scope === o.value && <span className="h-1.5 w-1.5 rounded-full bg-primary" />}
+          </span>
+          {o.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 export function SpeakerAssignPopover({
   label,
+  turnIndex: _turnIndex,
   assignedContactId,
   assignedName,
+  assignmentScope,
   contacts,
   onOpen,
-  onAssignContact,
-  onAssignNew,
-  onUnassign
+  onAssign,
+  onUnassign,
+  canSplitHere,
+  hasSplitHere,
+  onSplit,
+  onMergeSplit,
+  mergeSuspected = false
 }: SpeakerAssignPopoverProps) {
   const navigate = useNavigate()
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   // For an assigned speaker, the picker is hidden behind "Change identity".
   const [changing, setChanging] = useState(false)
+  const [scope, setScope] = useState<AssignScope>('everywhere')
 
   const displayText = assignedName ?? label
   const isAssigned = Boolean(assignedContactId)
@@ -180,18 +258,19 @@ export function SpeakerAssignPopover({
     if (next) {
       setQuery('')
       setChanging(false)
+      setScope('everywhere')
       onOpen()
     }
   }
 
   function assignContact(contactId: string) {
-    onAssignContact(contactId)
+    onAssign(scope, { contactId })
     setOpen(false)
   }
 
   function assignNew() {
     if (!canCreate) return
-    onAssignNew(trimmed)
+    onAssign(scope, { newName: trimmed })
     setOpen(false)
   }
 
@@ -200,11 +279,23 @@ export function SpeakerAssignPopover({
     setOpen(false)
   }
 
+  function split() {
+    onSplit()
+    setOpen(false)
+  }
+
+  function mergeSplit() {
+    onMergeSplit()
+    setOpen(false)
+  }
+
   function viewPerson() {
     if (!assignedContactId) return
     setOpen(false)
     navigate(`/person/${assignedContactId}`)
   }
+
+  const resetLabel = assignmentScope === 'turn' ? 'Reset this turn' : 'Reset to unidentified'
 
   return (
     <HoverCard suppressed={open}>
@@ -229,11 +320,32 @@ export function SpeakerAssignPopover({
               }
             >
               {displayText}
+              {mergeSuspected && (
+                <span
+                  aria-hidden="true"
+                  title="This speaker may be two people"
+                  className="ml-1 inline-flex h-1.5 w-1.5 rounded-full bg-amber-500 align-middle"
+                />
+              )}
             </button>
           </PopoverTrigger>
         </HoverCardTrigger>
 
         <PopoverContent align="start" className="w-72 p-0">
+          {mergeSuspected && canSplitHere && !hasSplitHere && (
+            <div className="border-b bg-amber-500/10 p-2">
+              <p className="text-xs font-medium text-foreground">This speaker may be two people.</p>
+              <button
+                type="button"
+                onClick={split}
+                className="mt-1 flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm text-amber-700 hover:bg-accent focus-visible:bg-accent focus-visible:outline-none dark:text-amber-400"
+              >
+                <Scissors className="h-4 w-4" aria-hidden="true" />
+                Split speaker from here
+              </button>
+            </div>
+          )}
+
           {isAssigned && (
             <div className="border-b p-2">
               <AssignedSummary person={assignedPerson} fallbackName={displayText} />
@@ -251,6 +363,7 @@ export function SpeakerAssignPopover({
                   onClick={() => {
                     setChanging(true)
                     setQuery('')
+                    setScope('everywhere')
                   }}
                   aria-expanded={changing}
                   className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent focus-visible:bg-accent focus-visible:outline-none"
@@ -264,7 +377,7 @@ export function SpeakerAssignPopover({
                   className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:bg-accent focus-visible:outline-none"
                 >
                   <UserX className="h-4 w-4" aria-hidden="true" />
-                  Reset to unidentified
+                  {resetLabel}
                 </button>
               </div>
             </div>
@@ -272,6 +385,9 @@ export function SpeakerAssignPopover({
 
           {showPicker && (
             <>
+              <div className="border-b p-2">
+                <ScopePicker scope={scope} onScope={setScope} allowFromHere={canSplitHere} />
+              </div>
               <div className="border-b p-2">
                 <input
                   type="text"
@@ -309,6 +425,31 @@ export function SpeakerAssignPopover({
                 )}
               </div>
             </>
+          )}
+
+          {/* Split / merge-back controls (independent of assignment state). */}
+          {(hasSplitHere || (canSplitHere && !mergeSuspected)) && (
+            <div className="border-t p-1">
+              {hasSplitHere ? (
+                <button
+                  type="button"
+                  onClick={mergeSplit}
+                  className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:bg-accent focus-visible:outline-none"
+                >
+                  <Undo2 className="h-4 w-4" aria-hidden="true" />
+                  Merge back into {label.replace(/ · [A-Z0-9]+$/, '')}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={split}
+                  className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:bg-accent focus-visible:outline-none"
+                >
+                  <Users className="h-4 w-4" aria-hidden="true" />
+                  Split speaker from here
+                </button>
+              )}
+            </div>
           )}
         </PopoverContent>
       </Popover>

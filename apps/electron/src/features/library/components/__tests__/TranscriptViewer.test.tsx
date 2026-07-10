@@ -118,6 +118,14 @@ describe('TranscriptViewer speaker assignment (recordingId)', () => {
   const mockGetById = vi.fn()
   const mockAssignSpeaker = vi.fn()
   const mockUnassignSpeaker = vi.fn()
+  const mockGetOverrides = vi.fn()
+  const mockSetOverride = vi.fn()
+  const mockClearOverride = vi.fn()
+  const mockGetSplits = vi.fn()
+  const mockSplit = vi.fn()
+  const mockMergeSplit = vi.fn()
+  const mockAssignFromHere = vi.fn()
+  const mockGetMergeHints = vi.fn()
 
   const segments = [{ speaker: 'Speaker 1', start: 0, end: 5, text: 'Hello there, everyone.' }]
 
@@ -132,6 +140,14 @@ describe('TranscriptViewer speaker assignment (recordingId)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockGetSpeakerMap.mockResolvedValue({ success: true, data: [] })
+    mockGetOverrides.mockResolvedValue({ success: true, data: [] })
+    mockSetOverride.mockResolvedValue({ success: true, data: { id: 'c1', name: 'Alice' } })
+    mockClearOverride.mockResolvedValue({ success: true })
+    mockGetSplits.mockResolvedValue({ success: true, data: [] })
+    mockSplit.mockResolvedValue({ success: true, data: { derivedLabel: 'Speaker 1 · B' } })
+    mockMergeSplit.mockResolvedValue({ success: true })
+    mockAssignFromHere.mockResolvedValue({ success: true, data: { derivedLabel: 'Speaker 1 · B', contact: { id: 'c1', name: 'Alice' } } })
+    mockGetMergeHints.mockResolvedValue({ success: true, data: [] })
     mockGetAll.mockResolvedValue({
       success: true,
       data: {
@@ -174,6 +190,16 @@ describe('TranscriptViewer speaker assignment (recordingId)', () => {
         getSpeakerMap: mockGetSpeakerMap,
         assignSpeaker: mockAssignSpeaker,
         unassignSpeaker: mockUnassignSpeaker
+      },
+      turnSpeakers: {
+        getOverrides: mockGetOverrides,
+        setOverride: mockSetOverride,
+        clearOverride: mockClearOverride,
+        getSplits: mockGetSplits,
+        split: mockSplit,
+        mergeSplit: mockMergeSplit,
+        assignFromHere: mockAssignFromHere,
+        getMergeHints: mockGetMergeHints
       },
       contacts: { getAll: mockGetAll, getById: mockGetById }
     }
@@ -324,6 +350,107 @@ describe('TranscriptViewer speaker assignment (recordingId)', () => {
     )
     expect(screen.getByText('Speaker 1')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Assign speaker/i })).not.toBeInTheDocument()
+  })
+
+  // --- v37: per-turn overrides + splits ------------------------------------
+
+  // Two turns that share the same diarization label — the merged-speaker case.
+  const twoTurns = [
+    { speaker: 'Speaker 1', start: 0, end: 5, text: 'Memo speaking early on.' },
+    { speaker: 'Speaker 1', start: 5, end: 10, text: 'Sebastian speaking later.' }
+  ]
+
+  it('per-turn override supersedes the label assignment at render', async () => {
+    // Label map says Alice, but turn 0 is overridden to Bob → Bob wins for turn 0.
+    mockGetSpeakerMap.mockResolvedValue({
+      success: true,
+      data: [{ speaker_label: 'Speaker 1', contact_id: 'c1', name: 'Alice' }]
+    })
+    mockGetOverrides.mockResolvedValue({ success: true, data: [{ turn_index: 0, contact_id: 'c2', name: 'Bob' }] })
+    renderViewer({ segments: twoTurns })
+
+    // Turn 0 shows the override (Bob); turn 1 shows the label default (Alice).
+    expect(await screen.findByRole('button', { name: /Speaker: Bob/i })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /Speaker: Alice/i })).toBeInTheDocument()
+  })
+
+  it('assigns just this turn without touching the label (scope = Just this turn)', async () => {
+    renderViewer({ segments: twoTurns })
+    await waitFor(() => expect(mockGetOverrides).toHaveBeenCalled())
+
+    // Open the FIRST turn's popover.
+    fireEvent.click(screen.getAllByRole('button', { name: /Assign speaker Speaker 1/i })[0])
+    await waitFor(() => expect(mockGetAll).toHaveBeenCalled())
+
+    // Choose the "Just this turn" scope, then pick Alice.
+    fireEvent.click(screen.getByRole('radio', { name: /Just this turn/i }))
+    fireEvent.click(await screen.findByText('Alice'))
+
+    await waitFor(() =>
+      expect(mockSetOverride).toHaveBeenCalledWith({ recordingId: 'rec1', turnIndex: 0, contactId: 'c1' })
+    )
+    // The label-level binding must be untouched — siblings keep their default.
+    expect(mockAssignSpeaker).not.toHaveBeenCalled()
+  })
+
+  it('splits the speaker from a later turn (forks only that turn onward)', async () => {
+    renderViewer({ segments: twoTurns })
+    await waitFor(() => expect(mockGetSplits).toHaveBeenCalled())
+
+    // The SECOND turn can split (a preceding turn shares the base label).
+    fireEvent.click(screen.getAllByRole('button', { name: /Assign speaker Speaker 1/i })[1])
+    fireEvent.click(await screen.findByText(/Split speaker from here/i))
+
+    await waitFor(() =>
+      expect(mockSplit).toHaveBeenCalledWith({ recordingId: 'rec1', baseLabel: 'Speaker 1', fromTurnIndex: 1 })
+    )
+  })
+
+  it('assigns from here on by splitting + binding in one step (scope = From here on)', async () => {
+    renderViewer({ segments: twoTurns })
+    await waitFor(() => expect(mockGetSplits).toHaveBeenCalled())
+
+    fireEvent.click(screen.getAllByRole('button', { name: /Assign speaker Speaker 1/i })[1])
+    await waitFor(() => expect(mockGetAll).toHaveBeenCalled())
+
+    fireEvent.click(screen.getByRole('radio', { name: /From here on/i }))
+    fireEvent.click(await screen.findByText('Alice'))
+
+    await waitFor(() =>
+      expect(mockAssignFromHere).toHaveBeenCalledWith({
+        recordingId: 'rec1',
+        baseLabel: 'Speaker 1',
+        fromTurnIndex: 1,
+        contactId: 'c1'
+      })
+    )
+  })
+
+  it('renders a split as a derived label and offers merge-back that restores it', async () => {
+    mockGetSplits.mockResolvedValue({
+      success: true,
+      data: [{ base_label: 'Speaker 1', from_turn_index: 1, derived_label: 'Speaker 1 · B' }]
+    })
+    renderViewer({ segments: twoTurns })
+
+    // Turn 1 now renders under the derived label.
+    const derived = await screen.findByRole('button', { name: /Assign speaker Speaker 1 · B/i })
+    fireEvent.click(derived)
+
+    fireEvent.click(await screen.findByText(/Merge back into Speaker 1/i))
+    await waitFor(() =>
+      expect(mockMergeSplit).toHaveBeenCalledWith({ recordingId: 'rec1', baseLabel: 'Speaker 1', fromTurnIndex: 1 })
+    )
+  })
+
+  it('surfaces a merge-suspected hint on a flagged label', async () => {
+    mockGetMergeHints.mockResolvedValue({ success: true, data: [{ label: 'Speaker 1', names: ['Memo', 'Sebastian'] }] })
+    renderViewer({ segments: twoTurns })
+    await waitFor(() => expect(mockGetMergeHints).toHaveBeenCalled())
+
+    // Open the second (splittable) turn — the hint nudges toward a split.
+    fireEvent.click(screen.getAllByRole('button', { name: /Assign speaker Speaker 1/i })[1])
+    expect(await screen.findByText(/This speaker may be two people/i)).toBeInTheDocument()
   })
 })
 

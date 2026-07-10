@@ -7,7 +7,7 @@ import { DatabaseEngine, getTableColumns, type SqlJsDatabase } from '@hidock/dat
 import { normalizeName, isGenericSpeakerLabel, detectAmbiguousName } from './entity-normalize'
 import { getEventBus } from './event-bus'
 
-const SCHEMA_VERSION = 36
+const SCHEMA_VERSION = 37
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -660,6 +660,41 @@ CREATE TABLE IF NOT EXISTS artifacts (
 CREATE INDEX IF NOT EXISTS idx_artifacts_capture ON artifacts(knowledge_capture_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_kind ON artifacts(kind);
 CREATE INDEX IF NOT EXISTS idx_artifacts_content_hash ON artifacts(content_hash);
+
+-- Per-turn speaker override (v37). Supersedes the label→contact default for ONE
+-- transcript turn (identified by its zero-based turn_index within the rendered
+-- turns). Lets a user correct a single turn without rewriting every turn that
+-- shares the diarization label. See "Just this turn" in SpeakerAssignPopover.
+CREATE TABLE IF NOT EXISTS turn_speaker_overrides (
+    id TEXT PRIMARY KEY,
+    recording_id TEXT NOT NULL,
+    turn_index INTEGER NOT NULL,
+    contact_id TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(recording_id, turn_index),
+    FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+    FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+);
+
+-- Speaker splits (v37). Forks a diarization label into an independently
+-- assignable derived label from a chosen turn onward. Fixes the merged-speaker
+-- case (one label = two real people): split at the boundary, then assign each
+-- half its own contact. from_turn_index is the first turn of the derived label;
+-- derived_label (e.g. "Speaker 1 · B") becomes a first-class key in
+-- transcript_speakers. Reversible by deleting the row ("merge back").
+CREATE TABLE IF NOT EXISTS speaker_splits (
+    id TEXT PRIMARY KEY,
+    recording_id TEXT NOT NULL,
+    base_label TEXT NOT NULL,
+    from_turn_index INTEGER NOT NULL,
+    derived_label TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(recording_id, base_label, from_turn_index),
+    FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_turn_overrides_recording ON turn_speaker_overrides(recording_id);
+CREATE INDEX IF NOT EXISTS idx_speaker_splits_recording ON speaker_splits(recording_id);
 
 `
 
@@ -1890,6 +1925,53 @@ const MIGRATIONS: Record<number, () => void> = {
     } catch (e) {
       console.warn('[Migration v36] embedding compaction failed (non-fatal):', e)
     }
+  },
+
+  37: () => {
+    // v37: per-turn speaker overrides + speaker splits. Label-level speaker
+    // assignment (transcript_speakers) rewrites EVERY turn of a diarization
+    // label; when the diarizer merges two people onto one label, the user could
+    // not fix it. These two tables add (a) a per-turn override that supersedes
+    // the label default for a single turn, and (b) a split that forks a label
+    // into an independently-assignable derived label from a turn onward.
+    // Idempotent: CREATE TABLE IF NOT EXISTS + guarded index creation.
+    console.log('Running migration to schema v37: turn_speaker_overrides + speaker_splits')
+    const database = getDatabase()
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS turn_speaker_overrides (
+          id TEXT PRIMARY KEY,
+          recording_id TEXT NOT NULL,
+          turn_index INTEGER NOT NULL,
+          contact_id TEXT NOT NULL,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(recording_id, turn_index),
+          FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+          FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+        )
+      `)
+      database.run('CREATE INDEX IF NOT EXISTS idx_turn_overrides_recording ON turn_speaker_overrides(recording_id)')
+    } catch (e) {
+      console.warn('[Migration v37] turn_speaker_overrides failed (non-fatal):', e)
+    }
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS speaker_splits (
+          id TEXT PRIMARY KEY,
+          recording_id TEXT NOT NULL,
+          base_label TEXT NOT NULL,
+          from_turn_index INTEGER NOT NULL,
+          derived_label TEXT NOT NULL,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(recording_id, base_label, from_turn_index),
+          FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+        )
+      `)
+      database.run('CREATE INDEX IF NOT EXISTS idx_speaker_splits_recording ON speaker_splits(recording_id)')
+    } catch (e) {
+      console.warn('[Migration v37] speaker_splits failed (non-fatal):', e)
+    }
+    console.log('Migration v37 complete')
   }
 
 }
@@ -2027,6 +2109,38 @@ function repairPhase(): void {
         UNIQUE(recording_id, source_name),
         FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
         FOREIGN KEY (resolved_contact_id) REFERENCES contacts(id) ON DELETE SET NULL
+      )
+    `)
+  } catch { /* table already exists */ }
+
+  // Repair per-turn speaker overrides + speaker splits (v37): force-create so an
+  // older on-disk DB that skipped the migration still gets them before any
+  // setTurnOverride/splitSpeakerFrom write. Idempotent.
+  try {
+    database.run(`
+      CREATE TABLE IF NOT EXISTS turn_speaker_overrides (
+        id TEXT PRIMARY KEY,
+        recording_id TEXT NOT NULL,
+        turn_index INTEGER NOT NULL,
+        contact_id TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(recording_id, turn_index),
+        FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+        FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+      )
+    `)
+  } catch { /* table already exists */ }
+  try {
+    database.run(`
+      CREATE TABLE IF NOT EXISTS speaker_splits (
+        id TEXT PRIMARY KEY,
+        recording_id TEXT NOT NULL,
+        base_label TEXT NOT NULL,
+        from_turn_index INTEGER NOT NULL,
+        derived_label TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(recording_id, base_label, from_turn_index),
+        FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
       )
     `)
   } catch { /* table already exists */ }
@@ -4346,6 +4460,193 @@ export function assignSpeaker(
 /** Remove a speaker-label → contact binding for a recording. */
 export function unassignSpeaker(recordingId: string, speakerLabel: string): void {
   run('DELETE FROM transcript_speakers WHERE recording_id = ? AND speaker_label = ?', [recordingId, speakerLabel])
+}
+
+// =============================================================================
+// Per-turn speaker overrides + speaker splits (v37)
+// =============================================================================
+
+export interface TurnOverrideEntry {
+  turn_index: number
+  contact_id: string
+  name: string
+}
+
+export interface SpeakerSplitEntry {
+  base_label: string
+  from_turn_index: number
+  derived_label: string
+}
+
+/**
+ * Resolve a contact from either an existing id or a (case-insensitively upserted)
+ * name. Composes inside an enclosing transaction (uses runNoSave). Mirrors the
+ * contact-resolution used by assignSpeaker so per-turn overrides and splits bind
+ * identities the same way. @throws if neither is usable or the id is unknown.
+ */
+function resolveContactForBinding(opts: { contactId?: string; newName?: string }): Contact {
+  if (opts.contactId) {
+    const contact = queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [opts.contactId])
+    if (!contact) throw new Error(`Contact ${opts.contactId} not found`)
+    return contact
+  }
+  if (opts.newName && opts.newName.trim()) {
+    const name = opts.newName.trim()
+    const existing = queryOne<Contact>('SELECT * FROM contacts WHERE LOWER(name) = LOWER(?)', [name])
+    if (existing) return existing
+    const id = randomUUID()
+    const now = new Date().toISOString()
+    runNoSave(
+      `INSERT INTO contacts (id, name, type, first_seen_at, last_seen_at, meeting_count)
+       VALUES (?, ?, 'unknown', ?, ?, 0)`,
+      [id, name, now, now]
+    )
+    return queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [id])!
+  }
+  throw new Error('A contactId or a newName is required')
+}
+
+/** Per-turn override map for a recording (turn_index → contact), joined to the name. */
+export function getTurnOverrides(recordingId: string): TurnOverrideEntry[] {
+  return queryAll<TurnOverrideEntry>(
+    `SELECT tso.turn_index, tso.contact_id, c.name
+     FROM turn_speaker_overrides tso
+     JOIN contacts c ON c.id = tso.contact_id
+     WHERE tso.recording_id = ?
+     ORDER BY tso.turn_index`,
+    [recordingId]
+  )
+}
+
+/**
+ * Bind a single transcript turn to a contact, superseding the label→contact
+ * default for that turn only ("Just this turn"). Provide an existing contactId
+ * or a newName to upsert. Upserts on (recording_id, turn_index). Returns the
+ * contact. When the recording is linked to a meeting, links the contact to it.
+ */
+export function setTurnOverride(
+  recordingId: string,
+  turnIndex: number,
+  opts: { contactId?: string; newName?: string }
+): Contact {
+  return runInTransaction(() => {
+    const contact = resolveContactForBinding(opts)
+    runNoSave(
+      'INSERT OR REPLACE INTO turn_speaker_overrides (id, recording_id, turn_index, contact_id) VALUES (?, ?, ?, ?)',
+      [randomUUID(), recordingId, turnIndex, contact.id]
+    )
+    const rec = queryOne<{ meeting_id?: string | null }>('SELECT meeting_id FROM recordings WHERE id = ?', [recordingId])
+    if (rec?.meeting_id) {
+      runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)', [
+        rec.meeting_id,
+        contact.id,
+        'attendee'
+      ])
+      recomputeContactMeetingCount(contact.id)
+    }
+    return queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [contact.id])!
+  })
+}
+
+/** Remove a per-turn override, reverting the turn to its label/split default. */
+export function clearTurnOverride(recordingId: string, turnIndex: number): void {
+  run('DELETE FROM turn_speaker_overrides WHERE recording_id = ? AND turn_index = ?', [recordingId, turnIndex])
+}
+
+/** All speaker splits for a recording, ordered so the render can pick the last
+ * boundary at or before a turn. */
+export function getSpeakerSplits(recordingId: string): SpeakerSplitEntry[] {
+  return queryAll<SpeakerSplitEntry>(
+    `SELECT base_label, from_turn_index, derived_label
+     FROM speaker_splits
+     WHERE recording_id = ?
+     ORDER BY base_label, from_turn_index`,
+    [recordingId]
+  )
+}
+
+/** The next unused split suffix letter (B, C, D…) for a base label's derived
+ * labels, so a merge-back + re-split never collides with a live binding. */
+function nextSplitLetter(usedDerived: string[], baseLabel: string): string {
+  const used = new Set(usedDerived)
+  for (let code = 66 /* 'B' */; code < 91 /* 'Z'+1 */; code++) {
+    const candidate = `${baseLabel} · ${String.fromCharCode(code)}`
+    if (!used.has(candidate)) return candidate
+  }
+  // Exhausted A–Z (26 splits on one label is implausible): fall back to a uuid.
+  return `${baseLabel} · ${randomUUID().slice(0, 4)}`
+}
+
+/**
+ * Fork a diarization label into a new derived label from `fromTurnIndex` onward.
+ * Turns at or after the boundary that share `baseLabel` render (and are assigned)
+ * under the returned derived label, leaving earlier turns on the base label.
+ * Idempotent per boundary: an existing split at (recording, base, index) returns
+ * its derived label unchanged. Returns the derived label.
+ */
+export function splitSpeakerFrom(recordingId: string, baseLabel: string, fromTurnIndex: number): string {
+  return runInTransaction(() => {
+    const existing = queryOne<{ derived_label: string }>(
+      'SELECT derived_label FROM speaker_splits WHERE recording_id = ? AND base_label = ? AND from_turn_index = ?',
+      [recordingId, baseLabel, fromTurnIndex]
+    )
+    if (existing) return existing.derived_label
+
+    const priorDerived = queryAll<{ derived_label: string }>(
+      'SELECT derived_label FROM speaker_splits WHERE recording_id = ? AND base_label = ?',
+      [recordingId, baseLabel]
+    ).map((r) => r.derived_label)
+    const derivedLabel = nextSplitLetter(priorDerived, baseLabel)
+
+    runNoSave(
+      'INSERT INTO speaker_splits (id, recording_id, base_label, from_turn_index, derived_label) VALUES (?, ?, ?, ?, ?)',
+      [randomUUID(), recordingId, baseLabel, fromTurnIndex, derivedLabel]
+    )
+    return derivedLabel
+  })
+}
+
+/**
+ * Undo a split ("merge back"): remove the split boundary and drop any speaker
+ * binding attached to its derived label, so the affected turns revert to the
+ * base label's default.
+ */
+export function mergeSpeakerSplit(recordingId: string, baseLabel: string, fromTurnIndex: number): void {
+  runInTransaction(() => {
+    const row = queryOne<{ derived_label: string }>(
+      'SELECT derived_label FROM speaker_splits WHERE recording_id = ? AND base_label = ? AND from_turn_index = ?',
+      [recordingId, baseLabel, fromTurnIndex]
+    )
+    runNoSave('DELETE FROM speaker_splits WHERE recording_id = ? AND base_label = ? AND from_turn_index = ?', [
+      recordingId,
+      baseLabel,
+      fromTurnIndex
+    ])
+    if (row) {
+      runNoSave('DELETE FROM transcript_speakers WHERE recording_id = ? AND speaker_label = ?', [
+        recordingId,
+        row.derived_label
+      ])
+    }
+  })
+}
+
+/**
+ * "From here on": split the label at `fromTurnIndex` and bind the resulting
+ * derived label to a contact in one atomic step. Returns the derived label and
+ * the bound contact.
+ */
+export function assignSpeakerFromHere(
+  recordingId: string,
+  baseLabel: string,
+  fromTurnIndex: number,
+  opts: { contactId?: string; newName?: string }
+): { derivedLabel: string; contact: Contact } {
+  return runInTransaction(() => {
+    const derivedLabel = splitSpeakerFrom(recordingId, baseLabel, fromTurnIndex)
+    const contact = assignSpeaker(recordingId, derivedLabel, opts)
+    return { derivedLabel, contact }
+  })
 }
 
 // =============================================================================
