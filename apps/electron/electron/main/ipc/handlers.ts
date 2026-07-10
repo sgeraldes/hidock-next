@@ -31,6 +31,7 @@ import { registerSelfIdentificationHandlers } from './self-identification-handle
 import { registerTurnSpeakersHandlers } from './turn-speakers-handlers'
 import { registerRecordingDeletionHandlers } from './recording-deletion-handlers'
 import { registerTranscriptionHandlers } from './transcription-handlers'
+import { registerReDiarizeHandlers } from './re-diarize-handlers'
 
 export function registerIpcHandlers(): void {
   // Register all IPC handlers
@@ -70,6 +71,7 @@ export function registerIpcHandlers(): void {
   registerTurnSpeakersHandlers()
   registerRecordingDeletionHandlers()
   registerTranscriptionHandlers()
+  registerReDiarizeHandlers()
 
   console.log('All IPC handlers registered')
 }
