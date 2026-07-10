@@ -152,7 +152,7 @@ export function getDataPath(): string {
 
 // Gemini models that are retired / unavailable for generateContent. Persisted
 // configs holding these are upgraded to the current default on load.
-const RETIRED_GEMINI_MODELS = new Set([
+export const RETIRED_GEMINI_MODELS = new Set([
   'gemini-pro',
   'gemini-1.5-flash',
   'gemini-1.5-pro',
@@ -160,7 +160,7 @@ const RETIRED_GEMINI_MODELS = new Set([
   'gemini-2.5-flash',
   'gemini-3-pro-preview',
 ])
-const CURRENT_GEMINI_MODEL = 'gemini-3.5-flash'
+export const CURRENT_GEMINI_MODEL = 'gemini-3.5-flash'
 
 /** Upgrade any retired geminiModel values in-place. Returns true if changed. */
 function migrateRetiredGeminiModels(cfg: AppConfig): boolean {

@@ -48,7 +48,7 @@ export function Settings() {
   const [syncInterval, setSyncInterval] = useState(15)
   const [transcriptionProvider, setTranscriptionProvider] = useState<'gemini' | 'local-asr' | 'vibevoice'>('gemini')
   const [geminiApiKey, setGeminiApiKey] = useState('')
-  const [geminiModel, setGeminiModel] = useState('gemini-2.5-flash')
+  const [geminiModel, setGeminiModel] = useState('gemini-3.5-flash')
   const [localAsrPath, setLocalAsrPath] = useState('G:\\Code\\claude-plugins\\plugins\\mcp-asr')
   const [localAsrHfToken, setLocalAsrHfToken] = useState('')
   const [localAsrVocabularyFile, setLocalAsrVocabularyFile] = useState('vocabulary.json')
@@ -67,25 +67,47 @@ export function Settings() {
   // C-CHAT: RAG context window — default matches config.ts (10)
   const [ragContextSize, setRagContextSize] = useState<number>(RAG_DEFAULTS.MAX_CONTEXT_CHUNKS)
 
-  // Available Gemini models for transcription (audio-capable)
-  // From: https://ai.google.dev/gemini-api/docs/models
-  const GEMINI_MODELS = [
-    // Gemini 3 Series (note: gemini-3-pro-preview generateContent was deprecated/removed)
-    { value: 'gemini-3-flash-preview', label: 'Gemini 3 Flash Preview (Fast)' },
-    // Gemini 2.5 Pro Series
-    { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro (Best quality)' },
-    { value: 'gemini-2.5-pro-preview-tts', label: 'Gemini 2.5 Pro TTS Preview' },
-    // Gemini 2.5 Flash Series
-    { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (Stable)' },
-    { value: 'gemini-2.5-flash-preview-09-2025', label: 'Gemini 2.5 Flash Preview' },
-    { value: 'gemini-2.5-flash-image', label: 'Gemini 2.5 Flash Image' },
-    { value: 'gemini-2.5-flash-native-audio-preview-12-2025', label: 'Gemini 2.5 Flash Native Audio (Dec 2025)' },
-    { value: 'gemini-2.5-flash-native-audio-preview-09-2025', label: 'Gemini 2.5 Flash Native Audio (Sep 2025)' },
-    { value: 'gemini-2.5-flash-preview-tts', label: 'Gemini 2.5 Flash TTS Preview' },
-    // Gemini 2.5 Flash-Lite Series
-    { value: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite (Stable)' },
-    { value: 'gemini-2.5-flash-lite-preview-09-2025', label: 'Gemini 2.5 Flash Lite Preview' },
-  ]
+  // Transcription models are loaded LIVE from the Gemini API (config:listGeminiModels)
+  // and filtered to audio-capable models, so the picker never drifts out of sync
+  // with the API (the old hand-maintained list wrongly offered TTS/Image/retired
+  // models). This concrete fallback — preferring the rolling `-latest` aliases —
+  // shows before the live list resolves or when offline / no key.
+  const [geminiModels, setGeminiModels] = useState<{ value: string; label: string }[]>([
+    { value: 'gemini-flash-latest', label: 'Gemini Flash (latest)' },
+    { value: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash' },
+    { value: 'gemini-flash-lite-latest', label: 'Gemini Flash-Lite (latest)' },
+    { value: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite' },
+    { value: 'gemini-pro-latest', label: 'Gemini Pro (latest)' },
+  ])
+  const [modelsLive, setModelsLive] = useState(false)
+  const [modelsLoading, setModelsLoading] = useState(false)
+
+  const loadGeminiModels = useCallback(async () => {
+    setModelsLoading(true)
+    try {
+      const res = await window.electronAPI.config.listGeminiModels()
+      const data = res?.success ? res.data : res // tolerate either envelope
+      if (data?.models?.length) {
+        setGeminiModels(data.models)
+        setModelsLive(!!data.ok)
+      }
+    } catch {
+      // keep the fallback list (e.g. IPC not yet available before a restart)
+    } finally {
+      setModelsLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    loadGeminiModels()
+  }, [loadGeminiModels])
+
+  // Always include the currently-saved model in the options so the <select> can
+  // render it even if the live list filtered it out (e.g. a custom/older id).
+  const geminiModelOptions = useMemo(() => {
+    if (!geminiModel || geminiModels.some((m) => m.value === geminiModel)) return geminiModels
+    return [{ value: geminiModel, label: `${geminiModel} (saved)` }, ...geminiModels]
+  }, [geminiModels, geminiModel])
 
   // Validation function for config values
   const validateConfig = useCallback((updates: Partial<AppConfig>): string | null => {
@@ -717,14 +739,18 @@ export function Settings() {
                       aria-describedby="geminiModel-description"
                       className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
                     >
-                      {GEMINI_MODELS.map((model) => (
+                      {geminiModelOptions.map((model) => (
                         <option key={model.value} value={model.value}>
                           {model.label}
                         </option>
                       ))}
                     </select>
                     <p id="geminiModel-description" className="text-xs text-muted-foreground mt-1">
-                      Gemini 3 Pro provides the best transcription accuracy
+                      {modelsLoading
+                        ? 'Loading available models…'
+                        : modelsLive
+                          ? 'Live list from your Gemini API key (audio-capable models only).'
+                          : 'Showing built-in defaults — add/verify your API key to load the live model list.'}
                     </p>
                   </div>
                 </>
