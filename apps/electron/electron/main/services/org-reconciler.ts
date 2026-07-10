@@ -152,6 +152,7 @@ export function autoLinkRecordingsToMeetings(): number {
     `SELECT id, filename, date_recorded, duration_seconds, file_size, meeting_id
      FROM recordings
      WHERE meeting_id IS NULL AND date_recorded IS NOT NULL
+       AND deleted_at IS NULL AND COALESCE(personal, 0) = 0
        AND (correlation_method IS NULL OR correlation_method != '${STANDALONE_METHOD}')`
   )
   if (recordings.length === 0) return 0

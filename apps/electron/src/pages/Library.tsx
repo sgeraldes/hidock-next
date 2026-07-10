@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { RefreshCw, AlertCircle } from 'lucide-react'
+import { RefreshCw, AlertCircle, EyeOff } from 'lucide-react'
 import { toast } from '@/components/ui/toaster'
 import { getHiDockDeviceService } from '@/services/hidock-device'
 import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
@@ -192,6 +192,9 @@ export function Library() {
   const [bulkProcessing, setBulkProcessing] = useState(false)
   const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0 })
   const [deleting, setDeleting] = useState<string | null>(null)
+  // Personal ("ignored") recordings are hidden from the Library by default; this
+  // chip reveals them (they still never enter AI processing). (v38)
+  const [showPersonal, setShowPersonal] = useState(false)
 
   // B-LIB-006: Confirm dialog state (replaces window.confirm)
   const [confirmDialog, setConfirmDialog] = useState<{
@@ -379,6 +382,8 @@ export function Library() {
           : matchesExclusiveFilter(rec.location, exclusiveFilter)
 
       if (!locationMatches) return false
+      // Personal recordings are hidden unless the "Personal" chip is active.
+      if (rec.personal && !showPersonal) return false
       if (categoryFilter !== null && rec.category !== categoryFilter) return false
       if (qualityFilter !== null && rec.quality !== qualityFilter) return false
       if (statusFilter !== null && rec.status !== statusFilter) return false
@@ -436,7 +441,10 @@ export function Library() {
     })
 
     return filtered
-  }, [recordings, filterMode, semanticFilter, exclusiveFilter, categoryFilter, qualityFilter, statusFilter, deferredSearchQuery, sortBy, sortOrder])
+  }, [recordings, filterMode, semanticFilter, exclusiveFilter, categoryFilter, qualityFilter, statusFilter, deferredSearchQuery, sortBy, sortOrder, showPersonal])
+
+  // Count of personal ("ignored") recordings, to decide whether to show the chip.
+  const personalCount = useMemo(() => recordings.filter((r) => r.personal).length, [recordings])
 
   // Announce filter result changes (after filteredRecordings is declared)
   useEffect(() => {
@@ -606,7 +614,9 @@ export function Library() {
             const ok = await deviceService.deleteRecording(recording.deviceFilename)
             if (!ok) throw new Error('Device deletion failed')
           } else {
-            await window.electronAPI.recordings.delete(recording.id)
+            // Soft cascade delete: hides + pulls from AI, restorable, no data leak.
+            const res = await window.electronAPI.recordings.deleteCascade(recording.id, false)
+            if (!res?.success) throw new Error(res?.error || 'Delete failed')
           }
         } catch (e) {
           console.error('Failed to delete:', recording.filename, e)
@@ -661,6 +671,27 @@ export function Library() {
     })
   }, [filteredRecordings, selectedIds, executeBulkDelete])
 
+  // Bulk "mark personal" — flags every eligible (non device-only) selected
+  // recording as ignored. Reversible per-row afterwards.
+  const handleSelectedMarkPersonal = useCallback(async () => {
+    const targets = filteredRecordings.filter((r) => selectedIds.has(r.id) && !isDeviceOnly(r))
+    if (targets.length === 0) return
+    let ok = 0
+    for (const rec of targets) {
+      try {
+        const res = await window.electronAPI.recordings.markPersonal(rec.id, true)
+        if (res?.success) ok++
+      } catch (e) {
+        console.error('Failed to mark personal:', rec.filename, e)
+      }
+    }
+    if (ok > 0) await refresh(false)
+    clearSelection()
+    import('@/components/ui/toaster').then(({ toast }) => {
+      toast.success('Marked personal', `${ok} recording${ok > 1 ? 's' : ''} excluded from AI processing and default views.`)
+    })
+  }, [filteredRecordings, selectedIds, refresh, clearSelection])
+
   // B-LIB-006: Extracted device delete execution.
   // Deletes over USB by device filename — recordings.delete() only removes the
   // LOCAL file and silently no-ops on device-only synthetic ids, so it must
@@ -698,12 +729,26 @@ export function Library() {
     })
   }, [deviceConnected, executeDeleteFromDevice])
 
-  // B-LIB-006: Extracted local delete execution
+  // Soft delete (default): hide the recording (restorable) and pull it from every
+  // AI pipeline + surface. Nothing is removed from disk until "Delete permanently".
   const executeDeleteLocal = useCallback(async (recording: UnifiedRecording) => {
     setDeleting(recording.id)
     try {
-      await window.electronAPI.recordings.delete(recording.id)
+      const res = await window.electronAPI.recordings.deleteCascade(recording.id, false)
+      if (!res?.success) throw new Error(res?.error || 'Delete failed')
       await refresh(false)
+      import('@/components/ui/toaster').then(({ toast }) => {
+        toast.success('Moved to Trash', `"${recording.filename}" is hidden and excluded from processing.`, {
+          duration: 8000,
+          action: {
+            label: 'Undo',
+            onClick: async () => {
+              await window.electronAPI.recordings.restore(recording.id)
+              await refresh(false)
+            }
+          }
+        })
+      })
     } catch (e) {
       console.error('Failed to delete local file:', e)
       import('@/components/ui/toaster').then(({ toast }) => {
@@ -714,22 +759,95 @@ export function Library() {
     }
   }, [refresh])
 
-  // PESSIMISTIC UPDATE: Server-first delete with confirmation dialog
+  // Soft-delete flow: a light confirm, then hide with an Undo toast (reversible).
   const handleDeleteLocal = useCallback(async (recording: UnifiedRecording) => {
     if (!hasLocalPath(recording)) return
-    const hasTranscript = transcripts.has(recording.id)
-    const description = hasTranscript
-      ? `Delete local file and transcript for "${recording.filename}"? The transcript data will be lost.`
-      : `Delete local file "${recording.filename}"?`
-
     setConfirmDialog({
       open: true,
-      title: 'Delete Local File',
-      description,
+      title: 'Delete recording',
+      description:
+        `Move "${recording.filename}" to Trash? It will be hidden and excluded from all AI ` +
+        `processing. Nothing is erased — you can restore it, or delete it permanently later.`,
       actionLabel: 'Delete',
       onConfirm: () => executeDeleteLocal(recording)
     })
-  }, [transcripts, executeDeleteLocal])
+  }, [executeDeleteLocal])
+
+  // Hard purge (privacy): irreversibly remove ALL derived data + files. Confirm
+  // dialog states exactly what will be removed (decidability).
+  const executeDeletePermanent = useCallback(async (recording: UnifiedRecording) => {
+    setDeleting(recording.id)
+    try {
+      const res = await window.electronAPI.recordings.deleteCascade(recording.id, true)
+      if (!res?.success) throw new Error(res?.error || 'Permanent delete failed')
+      await refresh(false)
+      import('@/components/ui/toaster').then(({ toast }) => {
+        toast.success('Deleted permanently', `"${recording.filename}" and all derived data were removed.`)
+      })
+    } catch (e) {
+      console.error('Failed to permanently delete:', e)
+      import('@/components/ui/toaster').then(({ toast }) => {
+        toast.error('Delete Failed', `Failed to permanently delete "${recording.filename}".`)
+      })
+    } finally {
+      setDeleting(null)
+    }
+  }, [refresh])
+
+  const handleDeletePermanent = useCallback(async (recording: UnifiedRecording) => {
+    if (recording.location === 'device-only') return
+    // Fetch the exact impact so the dialog can name what is removed.
+    let removes = 'the audio file and any transcript'
+    try {
+      const imp = await window.electronAPI.recordings.deletionImpact(recording.id)
+      if (imp?.success && imp.data) {
+        const d = imp.data
+        const parts: string[] = []
+        if (d.transcripts) parts.push(`${d.transcripts} transcript${d.transcripts > 1 ? 's' : ''}`)
+        if (d.actionItems) parts.push(`${d.actionItems} action item${d.actionItems > 1 ? 's' : ''}`)
+        if (d.embeddings) parts.push(`${d.embeddings} embedding${d.embeddings > 1 ? 's' : ''}`)
+        if (d.artifacts) parts.push(`${d.artifacts} artifact${d.artifacts > 1 ? 's' : ''}`)
+        if (d.hasAudioFile) parts.push('the audio file')
+        if (parts.length > 0) {
+          removes = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
+        }
+      }
+    } catch {
+      /* fall back to the generic wording */
+    }
+    setConfirmDialog({
+      open: true,
+      title: 'Delete permanently',
+      description:
+        `Permanently delete "${recording.filename}"? This removes ${removes}, plus its embeddings ` +
+        `from the assistant. This CANNOT be undone. The copy on the device (if any) is not touched.`,
+      actionLabel: 'Delete permanently',
+      onConfirm: () => executeDeletePermanent(recording)
+    })
+  }, [executeDeletePermanent])
+
+  // Mark / unmark a recording "personal" (ignore) — reversible, non-destructive.
+  const handleMarkPersonal = useCallback(async (recording: UnifiedRecording) => {
+    const next = !recording.personal
+    try {
+      const res = await window.electronAPI.recordings.markPersonal(recording.id, next)
+      if (!res?.success) throw new Error(res?.error || 'Failed')
+      await refresh(false)
+      import('@/components/ui/toaster').then(({ toast }) => {
+        toast.success(
+          next ? 'Marked personal' : 'Unmarked personal',
+          next
+            ? `"${recording.filename}" is kept but excluded from AI processing and default views.`
+            : `"${recording.filename}" is back in AI processing and views.`
+        )
+      })
+    } catch (e) {
+      console.error('Failed to toggle personal:', e)
+      import('@/components/ui/toaster').then(({ toast }) => {
+        toast.error('Action Failed', `Could not update "${recording.filename}".`)
+      })
+    }
+  }, [refresh])
 
   const handleDelete = useCallback(
     (recording: UnifiedRecording) => {
@@ -774,6 +892,20 @@ export function Library() {
       handleDelete(recording)
     },
     [handleDelete]
+  )
+
+  const handleDeletePermanentCallback = useCallback(
+    (recording: UnifiedRecording) => {
+      handleDeletePermanent(recording)
+    },
+    [handleDeletePermanent]
+  )
+
+  const handleMarkPersonalCallback = useCallback(
+    (recording: UnifiedRecording) => {
+      handleMarkPersonal(recording)
+    },
+    [handleMarkPersonal]
   )
 
   const handleAskAssistantCallback = useCallback(
@@ -938,6 +1070,24 @@ export function Library() {
             onSortByChange={setSortBy}
             onSortOrderChange={setSortOrder}
           />
+          {personalCount > 0 && (
+            <div className="mt-2 flex items-center">
+              <button
+                type="button"
+                onClick={() => setShowPersonal((v) => !v)}
+                aria-pressed={showPersonal}
+                className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors ${
+                  showPersonal
+                    ? 'border-primary/40 bg-primary/10 text-primary'
+                    : 'border-border bg-muted/40 text-muted-foreground hover:text-foreground'
+                }`}
+                title="Personal recordings are kept but excluded from AI processing and hidden by default"
+              >
+                <EyeOff className="h-3 w-3" aria-hidden="true" />
+                {showPersonal ? `Showing ${personalCount} personal` : `Show ${personalCount} personal`}
+              </button>
+            </div>
+          )}
         </div>
         {isFilterPending && (
           <div className="absolute top-2 right-2 pointer-events-none">
@@ -958,6 +1108,7 @@ export function Library() {
         onDownload={handleSelectedDownload}
         onProcess={handleSelectedProcess}
         onDelete={handleSelectedDelete}
+        onMarkPersonal={handleSelectedMarkPersonal}
       />
 
       {/* Error display */}
@@ -1065,6 +1216,8 @@ export function Library() {
                           onStop={handleStopCallback}
                           onDownload={() => handleDownloadCallback(recording)}
                           onDelete={() => handleDeleteCallback(recording)}
+                          onDeletePermanent={() => handleDeletePermanentCallback(recording)}
+                          onMarkPersonal={() => handleMarkPersonalCallback(recording)}
                           onTranscribe={() => queueTranscription(recording)}
                           onReprocessVibeVoice={() => reprocessWithVibeVoice(recording)}
                           onAskAssistant={() => handleAskAssistantCallback(recording)}
@@ -1130,6 +1283,7 @@ export function Library() {
                           onStop={handleStopCallback}
                           onDownload={() => handleDownloadCallback(recording)}
                           onDelete={() => handleDeleteCallback(recording)}
+                          onMarkPersonal={() => handleMarkPersonalCallback(recording)}
                           onTranscribe={() => queueTranscription(recording)}
                           onReprocessVibeVoice={() => reprocessWithVibeVoice(recording)}
                           onAskAssistant={() => handleAskAssistantCallback(recording)}
@@ -1179,6 +1333,12 @@ export function Library() {
               }}
               onDelete={() => {
                 if (selectedRecording) handleDeleteCallback(selectedRecording)
+              }}
+              onDeletePermanent={() => {
+                if (selectedRecording) handleDeletePermanentCallback(selectedRecording)
+              }}
+              onMarkPersonal={() => {
+                if (selectedRecording) handleMarkPersonalCallback(selectedRecording)
               }}
               // State for button disabling
               deviceConnected={deviceConnected}

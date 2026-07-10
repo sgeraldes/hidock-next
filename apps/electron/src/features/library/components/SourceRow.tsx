@@ -1,5 +1,5 @@
 import { memo } from 'react'
-import { Play, X, AlertCircle, Download, Trash2, Wand2, Sparkles, FileText, RefreshCw, AudioLines, MoreHorizontal, Calendar } from 'lucide-react'
+import { Play, X, AlertCircle, Download, Trash2, Wand2, Sparkles, FileText, RefreshCw, AudioLines, MoreHorizontal, Calendar, EyeOff, Eye } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -34,6 +34,8 @@ interface SourceRowProps {
   // Action handlers
   onDownload?: () => void
   onDelete?: () => void
+  onDeletePermanent?: () => void
+  onMarkPersonal?: () => void
   onTranscribe?: () => void
   onReprocessVibeVoice?: () => void
   onAskAssistant?: () => void
@@ -58,6 +60,8 @@ export const SourceRow = memo(function SourceRow({
   onStop,
   onDownload,
   onDelete,
+  onDeletePermanent,
+  onMarkPersonal,
   onTranscribe,
   onReprocessVibeVoice,
   onAskAssistant,
@@ -142,6 +146,19 @@ export const SourceRow = memo(function SourceRow({
             <p className="font-medium text-sm line-clamp-2 text-foreground leading-tight min-w-0" title={primaryText}>
               {searchQuery ? highlightText(primaryText, searchQuery) : primaryText}
             </p>
+            {/* Personal ("ignored") badge — this recording is kept but pulled out of
+                all AI processing and default surfaces (v38). */}
+            {recording.personal && (
+              <span
+                className="mt-[2px] inline-flex shrink-0 items-center gap-1 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+                role="img"
+                aria-label="Personal — excluded from AI processing"
+                title="Personal — kept on disk but excluded from AI processing and default surfaces"
+              >
+                <EyeOff className="h-2.5 w-2.5" aria-hidden="true" />
+                Personal
+              </span>
+            )}
             {/* Provenance chip: the row is linked to a calendar meeting. Surfaces the
                 connection the system already knows (B1) without repeating the subject. */}
             {meeting && (
@@ -277,6 +294,18 @@ export const SourceRow = memo(function SourceRow({
                 {deviceConnected ? 'Download to computer' : 'Device not connected'}
               </DropdownMenuItem>
             )}
+            {onMarkPersonal && recording.location !== 'device-only' && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onClick={(e) => { e.stopPropagation(); onMarkPersonal(); }}
+                >
+                  {recording.personal
+                    ? <><Eye className="h-4 w-4" aria-hidden="true" />Unmark personal</>
+                    : <><EyeOff className="h-4 w-4" aria-hidden="true" />Mark personal (ignore)</>}
+                </DropdownMenuItem>
+              </>
+            )}
             {onDelete && (
               <>
                 <DropdownMenuSeparator />
@@ -289,6 +318,15 @@ export const SourceRow = memo(function SourceRow({
                     : recording.location === 'local-only' ? 'Delete from computer'
                       : 'Delete everywhere'}
                 </DropdownMenuItem>
+                {onDeletePermanent && recording.location !== 'device-only' && (
+                  <DropdownMenuItem
+                    onClick={(e) => { e.stopPropagation(); onDeletePermanent(); }}
+                    className="text-destructive focus:text-destructive"
+                  >
+                    <Trash2 className="h-4 w-4" aria-hidden="true" />
+                    Delete permanently…
+                  </DropdownMenuItem>
+                )}
               </>
             )}
           </DropdownMenuContent>
@@ -302,6 +340,7 @@ export const SourceRow = memo(function SourceRow({
   return (
     prevProps.recording.id === nextProps.recording.id &&
     prevProps.recording.location === nextProps.recording.location &&
+    prevProps.recording.personal === nextProps.recording.personal &&
     prevProps.recording.transcriptionStatus === nextProps.recording.transcriptionStatus &&
     prevProps.recording.title === nextProps.recording.title &&
     prevProps.recording.meetingSubject === nextProps.recording.meetingSubject &&

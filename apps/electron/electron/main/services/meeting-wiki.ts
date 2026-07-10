@@ -133,6 +133,39 @@ function removeStaleWikiPages(dir: string, recordingId: string, keepFilename: st
   }
 }
 
+/**
+ * Delete every exported wiki page for a recording (privacy hard-purge). Matches
+ * pages by the `recording_id` in their YAML frontmatter, so a page whose title
+ * changed is still found. Returns the number of files removed. Safe to call when
+ * the wiki dir does not exist.
+ */
+export function removeMeetingWiki(recordingId: string): number {
+  const dir = getWikiDir()
+  let entries: string[]
+  try {
+    entries = readdirSync(dir)
+  } catch {
+    return 0 // dir absent / unreadable — nothing to remove
+  }
+  let removed = 0
+  for (const entry of entries) {
+    if (!entry.endsWith('.md')) continue
+    const full = join(dir, entry)
+    try {
+      const head = readFileSync(full, 'utf-8').slice(0, 1000)
+      const match = head.match(/^recording_id:\s*(\S+)\s*$/m)
+      if (match && match[1] === recordingId) {
+        unlinkSync(full)
+        removed++
+        console.log(`[MeetingWiki] Purged wiki page ${entry} for ${recordingId}`)
+      }
+    } catch (e) {
+      console.warn(`[MeetingWiki] Could not inspect ${entry} for purge:`, e)
+    }
+  }
+  return removed
+}
+
 /** Export (or re-export) the wiki page for one recording. Returns the path. */
 export function exportMeetingWiki(recordingId: string): string | null {
   const row = queryOne<WikiRow>(

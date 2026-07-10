@@ -3,7 +3,7 @@
  * Simple in-memory vector store with SQLite persistence for meeting transcript embeddings
  */
 
-import { getDatabase } from './database'
+import { getDatabase, getExcludedRecordingIds } from './database'
 import { getEmbeddingsService } from './embeddings'
 
 interface VectorDocument {
@@ -276,10 +276,23 @@ class VectorStore {
       return []
     }
 
+    // Exclude chunks from personal ("ignored") or soft-deleted recordings so the
+    // assistant never surfaces private content. Filtering at query time (rather
+    // than deleting chunks) makes marking a recording personal instantly
+    // effective and fully reversible without re-indexing.
+    let excluded: Set<string>
+    try {
+      excluded = getExcludedRecordingIds()
+    } catch {
+      excluded = new Set()
+    }
+
     // Calculate similarity scores
     const results: SearchResult[] = []
 
     for (const doc of this.documents.values()) {
+      const recId = doc.metadata.recordingId
+      if (recId && excluded.has(recId)) continue
       const score = cosineSimilarity(queryEmbedding, doc.embedding)
       results.push({ document: doc, score })
     }
@@ -301,6 +314,8 @@ class VectorStore {
       FROM transcripts t
       LEFT JOIN recordings r ON r.id = t.recording_id
       WHERE TRIM(COALESCE(t.full_text, '')) != ''
+        AND COALESCE(r.personal, 0) = 0
+        AND r.deleted_at IS NULL
         AND NOT EXISTS (
           SELECT 1 FROM vector_embeddings v WHERE v.recording_id = t.recording_id
         )

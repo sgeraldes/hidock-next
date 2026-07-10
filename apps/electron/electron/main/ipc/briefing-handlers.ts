@@ -93,6 +93,7 @@ export function registerBriefingHandlers(): void {
          LEFT JOIN recordings r ON r.id = t.recording_id
          LEFT JOIN meetings m ON m.id = r.meeting_id
          WHERE TRIM(COALESCE(t.full_text, '')) != ''
+           AND COALESCE(r.personal, 0) = 0 AND r.deleted_at IS NULL
          ORDER BY COALESCE(r.date_recorded, '') DESC
          LIMIT 6`
       ).map(mapTranscriptRow)
@@ -104,6 +105,7 @@ export function registerBriefingHandlers(): void {
          JOIN recordings r ON r.id = t.recording_id
          LEFT JOIN meetings m ON m.id = r.meeting_id
          WHERE TRIM(COALESCE(t.full_text, '')) != ''
+           AND COALESCE(r.personal, 0) = 0 AND r.deleted_at IS NULL
            AND r.date_recorded >= ? AND r.date_recorded < ?
          ORDER BY r.date_recorded DESC`,
         [dayStart, dayEnd]
@@ -113,6 +115,7 @@ export function registerBriefingHandlers(): void {
       const todayRecordingsPending = queryAll<{ n: number }>(
         `SELECT COUNT(1) AS n FROM recordings r
          WHERE r.date_recorded >= ? AND r.date_recorded < ?
+           AND COALESCE(r.personal, 0) = 0 AND r.deleted_at IS NULL
            AND NOT EXISTS (
              SELECT 1 FROM transcripts t
              WHERE t.recording_id = r.id AND TRIM(COALESCE(t.full_text, '')) != ''

@@ -11,7 +11,9 @@ import {
   ChevronDown,
   ChevronUp,
   Wand2,
-  AudioLines
+  AudioLines,
+  EyeOff,
+  Eye
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -41,6 +43,7 @@ interface SourceCardProps {
   onStop: () => void
   onDownload: () => void
   onDelete: () => void
+  onMarkPersonal?: () => void
   onTranscribe?: () => void
   onReprocessVibeVoice?: () => void
   onAskAssistant: () => void
@@ -66,6 +69,7 @@ export const SourceCard = memo(function SourceCard({
   onStop,
   onDownload,
   onDelete,
+  onMarkPersonal,
   onTranscribe,
   onReprocessVibeVoice,
   onAskAssistant,
@@ -223,6 +227,20 @@ export const SourceCard = memo(function SourceCard({
               </Button>
             )}
 
+            {/* Mark personal (ignore) — reversible, non-destructive */}
+            {onMarkPersonal && recording.location !== 'device-only' && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="text-muted-foreground hover:text-foreground"
+                onClick={onMarkPersonal}
+                title={recording.personal ? 'Unmark personal' : 'Mark personal — exclude from AI processing'}
+                aria-label={recording.personal ? 'Unmark personal' : 'Mark personal'}
+              >
+                {recording.personal ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
+              </Button>
+            )}
+
             {/* Delete button */}
             <Button
               variant="ghost"
@@ -367,6 +385,7 @@ export const SourceCard = memo(function SourceCard({
   return (
     prevProps.recording.id === nextProps.recording.id &&
     prevProps.recording.location === nextProps.recording.location &&
+    prevProps.recording.personal === nextProps.recording.personal &&
     prevProps.recording.transcriptionStatus === nextProps.recording.transcriptionStatus &&
     prevProps.recording.quality === nextProps.recording.quality &&
     prevProps.recording.title === nextProps.recording.title &&

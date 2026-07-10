@@ -7,7 +7,7 @@ import { DatabaseEngine, getTableColumns, type SqlJsDatabase } from '@hidock/dat
 import { normalizeName, isGenericSpeakerLabel, detectAmbiguousName } from './entity-normalize'
 import { getEventBus } from './event-bus'
 
-const SCHEMA_VERSION = 37
+const SCHEMA_VERSION = 38
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -57,6 +57,11 @@ CREATE TABLE IF NOT EXISTS recordings (
     migrated_to_capture_id TEXT,
     migration_status TEXT CHECK(migration_status IN ('pending', 'migrated', 'skipped', 'error')) DEFAULT 'pending',
     migrated_at TEXT,
+    -- Privacy / lifecycle (v38). personal = user-marked "ignore" (kept on disk but
+    -- pulled out of every AI pipeline and default surface). deleted_at = soft-delete
+    -- tombstone (hidden everywhere, restorable until hard-purged). See deleteRecordingCascade.
+    personal INTEGER DEFAULT 0,
+    deleted_at TEXT,
     FOREIGN KEY (meeting_id) REFERENCES meetings(id)
 );
 
@@ -695,6 +700,26 @@ CREATE TABLE IF NOT EXISTS speaker_splits (
 
 CREATE INDEX IF NOT EXISTS idx_turn_overrides_recording ON turn_speaker_overrides(recording_id);
 CREATE INDEX IF NOT EXISTS idx_speaker_splits_recording ON speaker_splits(recording_id);
+
+-- Deletion journal (v38): one row per source-delete action so a soft-delete is
+-- restorable and every purge is auditable. recording_snapshot holds the full
+-- recordings row (JSON) captured at delete time (used to restore a soft-delete).
+-- removed_counts holds a JSON summary of derived rows removed (hard purge). A
+-- hard purge is intentionally NOT restorable (privacy) — its journal row is an
+-- audit trail only. restored_at is set when a soft-delete is undone.
+CREATE TABLE IF NOT EXISTS deletion_journal (
+    id TEXT PRIMARY KEY,
+    recording_id TEXT NOT NULL,
+    mode TEXT NOT NULL CHECK(mode IN ('soft', 'hard')),
+    recording_snapshot TEXT,
+    removed_counts TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    restored_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_recordings_personal ON recordings(personal);
+CREATE INDEX IF NOT EXISTS idx_recordings_deleted_at ON recordings(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_deletion_journal_recording ON deletion_journal(recording_id);
 
 `
 
@@ -1972,6 +1997,48 @@ const MIGRATIONS: Record<number, () => void> = {
       console.warn('[Migration v37] speaker_splits failed (non-fatal):', e)
     }
     console.log('Migration v37 complete')
+  },
+  38: () => {
+    // v38: privacy source-deletion. Two per-recording lifecycle flags plus a
+    // deletion journal. `personal` marks a recording "ignore" (kept on disk but
+    // pulled from every AI pipeline + default surface). `deleted_at` is a
+    // soft-delete tombstone (hidden everywhere, restorable). deletion_journal
+    // records each delete so soft-deletes are restorable and purges are audited.
+    // Idempotent: guarded ALTERs + CREATE TABLE IF NOT EXISTS.
+    console.log('Running migration to schema v38: personal + deleted_at + deletion_journal')
+    const database = getDatabase()
+    const recCols = getTableColumns(database, 'recordings')
+    if (recCols.length > 0) {
+      if (!recCols.includes('personal')) {
+        try { database.run('ALTER TABLE recordings ADD COLUMN personal INTEGER DEFAULT 0') } catch (e) {
+          console.warn('[Migration v38] add personal failed:', e)
+        }
+      }
+      if (!recCols.includes('deleted_at')) {
+        try { database.run('ALTER TABLE recordings ADD COLUMN deleted_at TEXT') } catch (e) {
+          console.warn('[Migration v38] add deleted_at failed:', e)
+        }
+      }
+    }
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS deletion_journal (
+          id TEXT PRIMARY KEY,
+          recording_id TEXT NOT NULL,
+          mode TEXT NOT NULL CHECK(mode IN ('soft', 'hard')),
+          recording_snapshot TEXT,
+          removed_counts TEXT,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          restored_at TEXT
+        )
+      `)
+      database.run('CREATE INDEX IF NOT EXISTS idx_recordings_personal ON recordings(personal)')
+      database.run('CREATE INDEX IF NOT EXISTS idx_recordings_deleted_at ON recordings(deleted_at)')
+      database.run('CREATE INDEX IF NOT EXISTS idx_deletion_journal_recording ON deletion_journal(recording_id)')
+    } catch (e) {
+      console.warn('[Migration v38] deletion_journal failed (non-fatal):', e)
+    }
+    console.log('Migration v38 complete')
   }
 
 }
@@ -2006,7 +2073,11 @@ function repairPhase(): void {
   const recordingRepairs = [
     { name: 'migrated_to_capture_id', def: "TEXT" },
     { name: 'migration_status', def: "TEXT CHECK(migration_status IN ('pending', 'migrated', 'skipped', 'error')) DEFAULT 'pending'" },
-    { name: 'migrated_at', def: "TEXT" }
+    { name: 'migrated_at', def: "TEXT" },
+    // v38 privacy source-deletion columns — force-add so older on-disk schemas
+    // have them before any read-site filters on personal/deleted_at.
+    { name: 'personal', def: "INTEGER DEFAULT 0" },
+    { name: 'deleted_at', def: "TEXT" }
   ]
   if (recCols.length > 0) {
     for (const col of recordingRepairs) {
@@ -2776,14 +2847,469 @@ export interface Recording {
   migration_status?: 'pending' | 'migrated' | 'skipped' | 'error' | null
   migrated_to_capture_id?: string | null
   migrated_at?: string | null
+  // Privacy / lifecycle (v38)
+  personal?: number  // 1 = user-marked "ignore" (kept, but out of AI + default surfaces)
+  deleted_at?: string | null  // soft-delete tombstone; hidden everywhere, restorable
 }
 
+/**
+ * All live recordings for the Library, newest first. Excludes soft-deleted rows
+ * (deleted_at set) — those are hidden until restored or hard-purged. Personal
+ * ("ignored") recordings ARE returned so the Library can show them behind a
+ * filter chip; every AI pipeline uses getActiveRecordingIdsForProcessing()
+ * instead, which excludes both personal and soft-deleted.
+ */
 export function getRecordings(): Recording[] {
-  return queryAll<Recording>('SELECT * FROM recordings ORDER BY date_recorded DESC')
+  return queryAll<Recording>('SELECT * FROM recordings WHERE deleted_at IS NULL ORDER BY date_recorded DESC')
 }
 
 export function getRecordingById(id: string): Recording | undefined {
   return queryOne<Recording>('SELECT * FROM recordings WHERE id = ?', [id])
+}
+
+// =============================================================================
+// Privacy source-deletion (v38): personal ("ignore") flag, soft/hard delete
+// cascade, and participant recompute. See the deletion service + IPC for the
+// coordinating file removal and the UI confirm dialog.
+// =============================================================================
+
+/**
+ * Mark / unmark a recording as "personal" (ignored). Non-destructive and fully
+ * reversible: the file and all derived rows stay, but the recording is pulled
+ * from every AI pipeline (transcription queue, graph ingest, vector indexing,
+ * RAG results, Today) and hidden from the Library default view. Returns the new
+ * flag state, or undefined if the recording does not exist.
+ */
+export function setRecordingPersonal(id: string, personal: boolean): boolean | undefined {
+  const rec = getRecordingById(id)
+  if (!rec) return undefined
+  runInTransaction(() => {
+    runNoSave('UPDATE recordings SET personal = ? WHERE id = ?', [personal ? 1 : 0, id])
+    if (personal) {
+      // Pull it out of the transcription queue immediately (a queued personal
+      // recording must not be processed). Leaves completed history intact.
+      runNoSave("DELETE FROM transcription_queue WHERE recording_id = ? AND status IN ('pending', 'failed')", [id])
+    }
+  })
+  return personal
+}
+
+/**
+ * Recording ids that must be excluded from AI processing and RAG surfaces:
+ * every recording flagged `personal` OR soft-deleted (`deleted_at` set). The
+ * vector store filters search results against this set so that marking a
+ * recording personal instantly pulls its chunks from the assistant's answers
+ * WITHOUT re-indexing (reversible), and soft-deleted recordings never surface.
+ */
+export function getExcludedRecordingIds(): Set<string> {
+  const rows = queryAll<{ id: string }>(
+    'SELECT id FROM recordings WHERE personal = 1 OR deleted_at IS NOT NULL'
+  )
+  return new Set(rows.map((r) => r.id))
+}
+
+/** All knowledge_capture ids owned by a recording (via source link or migration). */
+function getCaptureIdsForRecording(recordingId: string): string[] {
+  const rec = queryOne<{ migrated_to_capture_id?: string | null }>(
+    'SELECT migrated_to_capture_id FROM recordings WHERE id = ?',
+    [recordingId]
+  )
+  const rows = queryAll<{ id: string }>(
+    'SELECT id FROM knowledge_captures WHERE source_recording_id = ?',
+    [recordingId]
+  )
+  const ids = new Set(rows.map((r) => r.id))
+  if (rec?.migrated_to_capture_id) ids.add(rec.migrated_to_capture_id)
+  return Array.from(ids)
+}
+
+export interface RecordingDeletionImpact {
+  recordingId: string
+  filename: string
+  transcripts: number
+  actionItems: number
+  embeddings: number
+  captures: number
+  artifacts: number
+  meetingLinks: number
+  hasAudioFile: boolean
+}
+
+/**
+ * Read-only count of everything a hard purge of this recording would remove, so
+ * the confirm dialog can state it plainly ("transcript, N action items,
+ * embeddings, and the audio file"). Counts both transcript embeddings and vector
+ * chunks. Returns undefined if the recording does not exist.
+ */
+export function getRecordingDeletionImpact(recordingId: string): RecordingDeletionImpact | undefined {
+  const rec = getRecordingById(recordingId)
+  if (!rec) return undefined
+
+  const captureIds = getCaptureIdsForRecording(recordingId)
+  const capPlaceholders = captureIds.map(() => '?').join(',')
+
+  const transcripts = queryAll<{ id: string }>(
+    'SELECT id FROM transcripts WHERE recording_id = ?',
+    [recordingId]
+  )
+  const transcriptIds = transcripts.map((t) => t.id)
+  const tPlaceholders = transcriptIds.map(() => '?').join(',')
+
+  // Resilient count: vector_embeddings is created lazily by the vector store, so
+  // a count against it can hit "no such table" on a fresh DB — treat as 0.
+  const count = (sql: string, params: any[]): number => {
+    try {
+      const row = queryOne<{ c: number }>(sql, params)
+      return Number(row?.c ?? 0)
+    } catch {
+      return 0
+    }
+  }
+
+  const transcriptEmbeddings = transcriptIds.length
+    ? count(`SELECT COUNT(1) AS c FROM embeddings WHERE transcript_id IN (${tPlaceholders})`, transcriptIds)
+    : 0
+  const vectorChunks = count('SELECT COUNT(1) AS c FROM vector_embeddings WHERE recording_id = ?', [recordingId])
+  const actionItems = captureIds.length
+    ? count(`SELECT COUNT(1) AS c FROM action_items WHERE knowledge_capture_id IN (${capPlaceholders})`, captureIds)
+    : 0
+  const artifacts = captureIds.length
+    ? count(`SELECT COUNT(1) AS c FROM artifacts WHERE knowledge_capture_id IN (${capPlaceholders})`, captureIds)
+    : 0
+  const meetingLinks = rec.meeting_id
+    ? count('SELECT COUNT(1) AS c FROM meeting_contacts WHERE meeting_id = ?', [rec.meeting_id])
+    : 0
+
+  return {
+    recordingId,
+    filename: rec.filename,
+    transcripts: transcripts.length,
+    actionItems,
+    embeddings: transcriptEmbeddings + vectorChunks,
+    captures: captureIds.length,
+    artifacts,
+    meetingLinks,
+    hasAudioFile: !!(rec.file_path && rec.on_local)
+  }
+}
+
+/**
+ * Recompute a meeting's participant links after a linked recording is removed.
+ * A meeting_contacts row is kept only if the contact is still justified by
+ * either the meeting's own calendar attendees (organizer/attendees email) OR a
+ * REMAINING (non-deleted, non-excluded) recording's speaker/turn assignment for
+ * that meeting. Unjustified links — those contributed solely by the removed
+ * recording — are unlinked (the CONTACT itself is never deleted; shared contacts
+ * that appear elsewhere keep every other link). Runs inside the caller's
+ * transaction. Returns the number of links removed.
+ */
+function recomputeMeetingParticipants(meetingId: string, excludeRecordingId: string): number {
+  const meeting = queryOne<{ organizer_email?: string | null; attendees?: string | null }>(
+    'SELECT organizer_email, attendees FROM meetings WHERE id = ?',
+    [meetingId]
+  )
+  if (!meeting) return 0
+
+  const justifiedEmails = new Set<string>()
+  if (meeting.organizer_email) justifiedEmails.add(meeting.organizer_email.toLowerCase())
+  if (meeting.attendees) {
+    try {
+      const parsed = JSON.parse(meeting.attendees) as Array<{ email?: string }>
+      for (const a of parsed) if (a?.email) justifiedEmails.add(a.email.toLowerCase())
+    } catch {
+      /* invalid attendees JSON — ignore */
+    }
+  }
+
+  const justified = new Set<string>()
+  if (justifiedEmails.size > 0) {
+    const emailRows = queryAll<{ id: string; email?: string | null }>(
+      'SELECT id, email FROM contacts WHERE email IS NOT NULL'
+    )
+    for (const c of emailRows) {
+      if (c.email && justifiedEmails.has(c.email.toLowerCase())) justified.add(c.id)
+    }
+  }
+
+  // Contacts still justified by remaining recordings linked to this meeting.
+  const speakerContacts = queryAll<{ contact_id: string }>(
+    `SELECT DISTINCT contact_id FROM transcript_speakers
+      WHERE recording_id IN (
+        SELECT id FROM recordings
+         WHERE meeting_id = ? AND id != ? AND deleted_at IS NULL
+      )`,
+    [meetingId, excludeRecordingId]
+  )
+  for (const r of speakerContacts) justified.add(r.contact_id)
+  const turnContacts = queryAll<{ contact_id: string }>(
+    `SELECT DISTINCT contact_id FROM turn_speaker_overrides
+      WHERE recording_id IN (
+        SELECT id FROM recordings
+         WHERE meeting_id = ? AND id != ? AND deleted_at IS NULL
+      )`,
+    [meetingId, excludeRecordingId]
+  )
+  for (const r of turnContacts) justified.add(r.contact_id)
+
+  const current = queryAll<{ contact_id: string }>(
+    'SELECT contact_id FROM meeting_contacts WHERE meeting_id = ?',
+    [meetingId]
+  )
+  let removed = 0
+  for (const link of current) {
+    if (!justified.has(link.contact_id)) {
+      runNoSave('DELETE FROM meeting_contacts WHERE meeting_id = ? AND contact_id = ?', [
+        meetingId,
+        link.contact_id
+      ])
+      recomputeContactMeetingCount(link.contact_id)
+      removed++
+    }
+  }
+  return removed
+}
+
+export interface RecordingDeletionResult {
+  mode: 'soft' | 'hard'
+  recordingId: string
+  filename: string
+  originalFilename?: string
+  filePath?: string | null
+  /** Artifact blob paths on disk to unlink (hard purge only). */
+  artifactPaths: string[]
+  removed: {
+    transcripts: number
+    embeddings: number
+    captures: number
+    actionItems: number
+    artifacts: number
+    speakerBindings: number
+    candidates: number
+    meetingLinksRemoved: number
+  }
+}
+
+/**
+ * Delete a recording and everything derived from it.
+ *
+ * Soft ({ hard: false }, the default): set `deleted_at`, snapshot the row into
+ * deletion_journal, hide it everywhere. Fully reversible via restoreRecording.
+ * No files are touched and no derived rows are removed — read-sites filter on
+ * deleted_at, so nothing surfaces.
+ *
+ * Hard ({ hard: true }): irreversibly remove ALL derived DB rows (transcripts +
+ * their embeddings, vector chunks, knowledge_captures and every child, first-
+ * class action items/decisions/follow-ups/outputs/artifacts, speaker bindings,
+ * turn overrides, splits, mention resolutions, meeting candidates,
+ * pre-assignments, synced_files, transcription/quality rows), recompute the
+ * linked meeting's participants from the remaining recordings, then delete the
+ * recording row. Returns the on-disk paths (audio + artifact blobs) for the
+ * caller to unlink. The scoped deletes touch protected tables, so the whole
+ * operation runs inside runWithMassDeleteAllowed — this is an intentional,
+ * bounded single-source purge, not a mass wipe.
+ *
+ * Returns undefined if the recording does not exist.
+ */
+export function deleteRecordingCascade(
+  recordingId: string,
+  opts: { hard?: boolean } = {}
+): RecordingDeletionResult | undefined {
+  const rec = getRecordingById(recordingId)
+  if (!rec) return undefined
+
+  const zero = {
+    transcripts: 0,
+    embeddings: 0,
+    captures: 0,
+    actionItems: 0,
+    artifacts: 0,
+    speakerBindings: 0,
+    candidates: 0,
+    meetingLinksRemoved: 0
+  }
+
+  if (!opts.hard) {
+    const now = new Date().toISOString()
+    runInTransaction(() => {
+      runNoSave('UPDATE recordings SET deleted_at = ? WHERE id = ?', [now, recordingId])
+      // Stop any in-flight/queued transcription for a hidden recording.
+      runNoSave("DELETE FROM transcription_queue WHERE recording_id = ? AND status IN ('pending', 'failed')", [recordingId])
+      runNoSave(
+        `INSERT INTO deletion_journal (id, recording_id, mode, recording_snapshot, created_at)
+         VALUES (?, ?, 'soft', ?, ?)`,
+        [randomUUID(), recordingId, JSON.stringify(rec), now]
+      )
+    })
+    return {
+      mode: 'soft',
+      recordingId,
+      filename: rec.filename,
+      originalFilename: rec.original_filename,
+      filePath: rec.file_path,
+      artifactPaths: [],
+      removed: { ...zero }
+    }
+  }
+
+  // Hard purge — bounded, intentional, single-source. Suspend the mass-delete
+  // tripwire (deletes hit protected tables like transcripts/knowledge_captures)
+  // for this scoped operation only.
+  return runWithMassDeleteAllowed(() =>
+    runInTransaction((): RecordingDeletionResult => {
+      const captureIds = getCaptureIdsForRecording(recordingId)
+      const capPlaceholders = captureIds.map(() => '?').join(',')
+
+      const transcriptRows = queryAll<{ id: string }>(
+        'SELECT id FROM transcripts WHERE recording_id = ?',
+        [recordingId]
+      )
+      const transcriptIds = transcriptRows.map((t) => t.id)
+      const tPlaceholders = transcriptIds.map(() => '?').join(',')
+
+      const countOf = (sql: string, params: any[]): number => {
+        try {
+          const row = queryOne<{ c: number }>(sql, params)
+          return Number(row?.c ?? 0)
+        } catch {
+          return 0 // e.g. vector_embeddings not yet created
+        }
+      }
+
+      // Snapshot counts + on-disk artifact paths BEFORE deleting.
+      const embeddingsCount =
+        (transcriptIds.length
+          ? countOf(`SELECT COUNT(1) AS c FROM embeddings WHERE transcript_id IN (${tPlaceholders})`, transcriptIds)
+          : 0) + countOf('SELECT COUNT(1) AS c FROM vector_embeddings WHERE recording_id = ?', [recordingId])
+      const actionItemsCount = captureIds.length
+        ? countOf(`SELECT COUNT(1) AS c FROM action_items WHERE knowledge_capture_id IN (${capPlaceholders})`, captureIds)
+        : 0
+      const artifactRows = captureIds.length
+        ? queryAll<{ storage_path?: string | null }>(
+            `SELECT storage_path FROM artifacts WHERE knowledge_capture_id IN (${capPlaceholders})`,
+            captureIds
+          )
+        : []
+      const speakerCount = countOf('SELECT COUNT(1) AS c FROM transcript_speakers WHERE recording_id = ?', [recordingId])
+      const candidateCount = countOf(
+        'SELECT COUNT(1) AS c FROM recording_meeting_candidates WHERE recording_id = ?',
+        [recordingId]
+      )
+
+      // 1. Transcript embeddings, then transcripts.
+      if (transcriptIds.length) {
+        runNoSave(`DELETE FROM embeddings WHERE transcript_id IN (${tPlaceholders})`, transcriptIds)
+      }
+      runNoSave('DELETE FROM transcripts WHERE recording_id = ?', [recordingId])
+
+      // 2. Vector chunks (DB rows; the service also clears the in-memory store).
+      //    Table is created lazily by the vector store, so tolerate its absence.
+      try {
+        runNoSave('DELETE FROM vector_embeddings WHERE recording_id = ?', [recordingId])
+      } catch {
+        /* vector_embeddings not yet created — nothing to remove */
+      }
+
+      // 3. Knowledge captures + every child (FKs are OFF, so delete explicitly).
+      if (captureIds.length) {
+        for (const child of [
+          'action_items',
+          'decisions',
+          'follow_ups',
+          'outputs',
+          'audio_sources',
+          'conversation_context',
+          'knowledge_projects',
+          'artifacts',
+          'actionables'
+        ]) {
+          const col = child === 'actionables' ? 'source_knowledge_id' : 'knowledge_capture_id'
+          runNoSave(`DELETE FROM ${child} WHERE ${col} IN (${capPlaceholders})`, captureIds)
+        }
+        runNoSave(`DELETE FROM knowledge_captures WHERE id IN (${capPlaceholders})`, captureIds)
+      }
+
+      // 4. Speaker/identity data keyed by recording.
+      runNoSave('DELETE FROM transcript_speakers WHERE recording_id = ?', [recordingId])
+      runNoSave('DELETE FROM turn_speaker_overrides WHERE recording_id = ?', [recordingId])
+      runNoSave('DELETE FROM speaker_splits WHERE recording_id = ?', [recordingId])
+      runNoSave('DELETE FROM mention_resolutions WHERE recording_id = ?', [recordingId])
+
+      // 5. Meeting candidates + processing/quality rows keyed by recording.
+      runNoSave('DELETE FROM recording_meeting_candidates WHERE recording_id = ?', [recordingId])
+      runNoSave('DELETE FROM transcription_queue WHERE recording_id = ?', [recordingId])
+      runNoSave('DELETE FROM quality_assessments WHERE recording_id = ?', [recordingId])
+
+      // 6. Pre-assignments (keyed by device filename) + synced_files (by filename).
+      runNoSave('DELETE FROM recording_preassignments WHERE filename = ?', [rec.filename])
+      if (rec.original_filename) {
+        runNoSave('DELETE FROM synced_files WHERE original_filename = ?', [rec.original_filename])
+      }
+      runNoSave('DELETE FROM synced_files WHERE local_filename = ? OR file_path = ?', [
+        rec.filename,
+        rec.file_path
+      ])
+
+      // 7. Recompute the linked meeting's participants from what remains.
+      let meetingLinksRemoved = 0
+      if (rec.meeting_id) {
+        meetingLinksRemoved = recomputeMeetingParticipants(rec.meeting_id, recordingId)
+      }
+
+      // 8. Finally the recording row itself, and an audit journal entry.
+      runNoSave('DELETE FROM recordings WHERE id = ?', [recordingId])
+      const removed = {
+        transcripts: transcriptRows.length,
+        embeddings: embeddingsCount,
+        captures: captureIds.length,
+        actionItems: actionItemsCount,
+        artifacts: artifactRows.length,
+        speakerBindings: speakerCount,
+        candidates: candidateCount,
+        meetingLinksRemoved
+      }
+      runNoSave(
+        `INSERT INTO deletion_journal (id, recording_id, mode, recording_snapshot, removed_counts, created_at)
+         VALUES (?, ?, 'hard', ?, ?, ?)`,
+        [randomUUID(), recordingId, JSON.stringify(rec), JSON.stringify(removed), new Date().toISOString()]
+      )
+
+      return {
+        mode: 'hard',
+        recordingId,
+        filename: rec.filename,
+        originalFilename: rec.original_filename,
+        filePath: rec.file_path,
+        artifactPaths: artifactRows
+          .map((a) => a.storage_path)
+          .filter((p): p is string => !!p),
+        removed
+      }
+    })
+  )
+}
+
+/**
+ * Restore a soft-deleted recording (undo). Clears `deleted_at` so it surfaces
+ * again everywhere, and marks the journal row restored. Returns true if a
+ * soft-deleted recording was restored, false otherwise. A hard-purged recording
+ * cannot be restored (its rows and files are gone) — this returns false.
+ */
+export function restoreRecording(recordingId: string): boolean {
+  const rec = queryOne<{ deleted_at?: string | null }>(
+    'SELECT deleted_at FROM recordings WHERE id = ?',
+    [recordingId]
+  )
+  if (!rec || !rec.deleted_at) return false
+  const now = new Date().toISOString()
+  runInTransaction(() => {
+    runNoSave('UPDATE recordings SET deleted_at = NULL WHERE id = ?', [recordingId])
+    runNoSave(
+      `UPDATE deletion_journal SET restored_at = ?
+        WHERE recording_id = ? AND mode = 'soft' AND restored_at IS NULL`,
+      [now, recordingId]
+    )
+  })
+  return true
 }
 
 /**
@@ -3328,6 +3854,17 @@ export interface QueueItem {
 }
 
 export function addToQueue(recordingId: string, provider?: string): string {
+  // Honor the privacy flags at the single enqueue chokepoint: a personal
+  // ("ignored") or soft-deleted recording is never transcribed. Every path
+  // (auto-transcribe, manual, bulk backlog) funnels through here.
+  const rec = queryOne<{ personal?: number; deleted_at?: string | null }>(
+    'SELECT personal, deleted_at FROM recordings WHERE id = ?',
+    [recordingId]
+  )
+  if (rec && (rec.personal === 1 || rec.deleted_at)) {
+    console.log(`[Transcription] Skipping enqueue of personal/deleted recording ${recordingId}`)
+    return ''
+  }
   const id = crypto.randomUUID()
   run(
     'INSERT INTO transcription_queue (id, recording_id, provider) VALUES (?, ?, ?)',
@@ -5800,6 +6337,7 @@ function buildBucketResolution(
              JOIN meetings m ON m.id = r.meeting_id
              JOIN meeting_contacts mc ON mc.meeting_id = m.id
             WHERE mc.contact_id = ?
+              AND COALESCE(r.personal, 0) = 0 AND r.deleted_at IS NULL
             ORDER BY r.date_recorded DESC`,
           [contact.id]
         )

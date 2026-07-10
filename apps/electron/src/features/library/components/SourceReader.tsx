@@ -18,7 +18,7 @@ import { useUIStore } from '@/store/useUIStore'
 import { AudioPlayer } from '@/components/AudioPlayer'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { Transcript, Meeting, parseJsonArray } from '@/types'
-import { Calendar, Download, Trash2, Wand2, RefreshCw, Play, Square, Pencil, Check, Edit2, Link, X, ExternalLink, FolderOpen, AudioLines, MoreHorizontal, Folder, Plus } from 'lucide-react'
+import { Calendar, Download, Trash2, Wand2, RefreshCw, Play, Square, Pencil, Check, Edit2, Link, X, ExternalLink, FolderOpen, AudioLines, MoreHorizontal, Folder, Plus, EyeOff, Eye } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 
@@ -63,6 +63,8 @@ interface SourceReaderProps {
   onTranscribe?: () => void
   onReprocessVibeVoice?: () => void
   onDelete?: () => void
+  onDeletePermanent?: () => void
+  onMarkPersonal?: () => void
   // State for button enabling/disabling
   deviceConnected?: boolean
   isDownloading?: boolean
@@ -87,6 +89,8 @@ export function SourceReader({
   onTranscribe,
   onReprocessVibeVoice,
   onDelete,
+  onDeletePermanent,
+  onMarkPersonal,
   deviceConnected = false,
   isDownloading = false,
   downloadProgress,
@@ -541,6 +545,16 @@ export function SourceReader({
                 Link meeting
               </DropdownMenuItem>
             )}
+            {onMarkPersonal && !isDeviceOnly(recording) && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={onMarkPersonal}>
+                  {recording.personal
+                    ? <><Eye className="h-4 w-4" aria-hidden="true" />Unmark personal</>
+                    : <><EyeOff className="h-4 w-4" aria-hidden="true" />Mark personal (ignore)</>}
+                </DropdownMenuItem>
+              </>
+            )}
             {onDelete && (
               <>
                 <DropdownMenuSeparator />
@@ -558,6 +572,16 @@ export function SourceReader({
                     : recording.location === 'local-only' ? 'Delete from computer'
                       : 'Delete everywhere'}
                 </DropdownMenuItem>
+                {onDeletePermanent && !isDeviceOnly(recording) && (
+                  <DropdownMenuItem
+                    onClick={onDeletePermanent}
+                    disabled={isDeleting}
+                    className="text-destructive focus:text-destructive"
+                  >
+                    <Trash2 className="h-4 w-4" aria-hidden="true" />
+                    Delete permanently…
+                  </DropdownMenuItem>
+                )}
               </>
             )}
           </DropdownMenuContent>

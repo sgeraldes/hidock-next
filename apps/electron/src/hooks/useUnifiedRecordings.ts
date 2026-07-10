@@ -20,6 +20,8 @@ interface DatabaseRecording {
   // FL-001: transcription_status is the authoritative column; status is the legacy fallback
   transcription_status?: string
   status: string
+  // v38: personal ("ignored") flag — 1 = kept but excluded from AI + default surfaces
+  personal?: number
 }
 
 interface SyncedFile {
@@ -211,7 +213,8 @@ function buildRecordingMap(
         quality: capture?.quality,
         category: capture?.category ?? undefined,
         status: capture?.status ?? undefined,
-        summary: capture?.summary ?? undefined
+        summary: capture?.summary ?? undefined,
+        personal: !!dbRec?.personal
       }
       recordingMap.set(baseName, recording)
       processedBaseNames.add(baseName)
@@ -268,7 +271,8 @@ function buildRecordingMap(
         quality: capture?.quality,
         category: capture?.category ?? undefined,
         status: capture?.status ?? undefined,
-        summary: capture?.summary ?? undefined
+        summary: capture?.summary ?? undefined,
+        personal: !!dbRec?.personal
       }
       recordingMap.set(baseName, recording)
       processedBaseNames.add(baseName)

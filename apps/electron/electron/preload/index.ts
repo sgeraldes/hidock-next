@@ -291,6 +291,40 @@ export interface ElectronAPI {
       failed: number
       errors: Array<{ id: string; error: string }>
     }>
+    // Privacy source-deletion (v38)
+    markPersonal: (id: string, personal: boolean) => Promise<{ success: boolean; personal?: boolean; error?: string }>
+    deletionImpact: (id: string) => Promise<{
+      success: boolean
+      data?: {
+        recordingId: string
+        filename: string
+        transcripts: number
+        actionItems: number
+        embeddings: number
+        captures: number
+        artifacts: number
+        meetingLinks: number
+        hasAudioFile: boolean
+      }
+      error?: string
+    }>
+    deleteCascade: (id: string, hard: boolean) => Promise<{
+      success: boolean
+      mode?: 'soft' | 'hard'
+      removed?: {
+        transcripts: number
+        embeddings: number
+        captures: number
+        actionItems: number
+        artifacts: number
+        speakerBindings: number
+        candidates: number
+        meetingLinksRemoved: number
+      }
+      filesRemoved?: { audio: boolean; wikiPages: number; artifactBlobs: number }
+      error?: string
+    }>
+    restore: (id: string) => Promise<{ success: boolean }>
     // Recording-Meeting linking dialog methods
     getCandidates: (recordingId: string) => Promise<{ success: boolean; data: any[]; error?: string }>
     getMeetingsNearDate: (date: string) => Promise<{ success: boolean; data: any[]; error?: string }>
@@ -977,6 +1011,10 @@ const electronAPI: ElectronAPI = {
       callIPC('db:link-recording-to-meeting', recordingId, meetingId, confidence, method),
     delete: (id) => callIPC('recordings:delete', id),
     deleteBatch: (ids) => callIPC('recordings:deleteBatch', ids),
+    markPersonal: (id, personal) => callIPC('recordings:markPersonal', id, personal),
+    deletionImpact: (id) => callIPC('recordings:deletionImpact', id),
+    deleteCascade: (id, hard) => callIPC('recordings:deleteCascade', id, hard),
+    restore: (id) => callIPC('recordings:restore', id),
     // Recording-Meeting linking dialog methods
     getCandidates: (recordingId) => callIPC('recordings:getCandidates', recordingId),
     getMeetingsNearDate: (date) => callIPC('recordings:getMeetingsNearDate', date),

@@ -169,7 +169,11 @@ global.window.electronAPI = {
   recordings: {
     addExternal: vi.fn(),
     delete: vi.fn(),
-    updateStatus: vi.fn()
+    updateStatus: vi.fn(),
+    markPersonal: vi.fn().mockResolvedValue({ success: true, personal: true }),
+    deletionImpact: vi.fn().mockResolvedValue({ success: true, data: { transcripts: 0, actionItems: 0, embeddings: 0, artifacts: 0, hasAudioFile: true } }),
+    deleteCascade: vi.fn().mockResolvedValue({ success: true, mode: 'soft' }),
+    restore: vi.fn().mockResolvedValue({ success: true })
   },
   downloadService: {
     queueDownloads: vi.fn()

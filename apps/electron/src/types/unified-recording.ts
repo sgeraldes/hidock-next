@@ -35,6 +35,8 @@ interface RecordingBase {
   category?: string
   status?: string
   summary?: string
+  /** v38: user-marked "personal" (ignored) — kept, but out of AI + default surfaces. */
+  personal?: boolean
 }
 
 /**

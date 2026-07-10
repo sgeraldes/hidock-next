@@ -180,6 +180,7 @@ export async function ingestFromDbTranscripts(): Promise<IngestResult> {
     FROM transcripts t
     JOIN recordings r ON r.id = t.recording_id
     LEFT JOIN meetings m ON m.id = r.meeting_id
+    WHERE COALESCE(r.personal, 0) = 0 AND r.deleted_at IS NULL
   `)
 
   const result: IngestResult = { ingested: 0, skipped: 0, errors: [] }
