@@ -7,13 +7,17 @@ docs. Companions: ROADMAP.md (audit ledger + coverage map), INTELLIGENCE.md
 (process retrospective), OVERNIGHT_PLAN.md (session issue log), GOAL.md
 (mission + method).*
 
-## 0. CURRENT STATE — 2026-07-10 ~03:00 (READ THIS FIRST, supersedes below)
+## 0. CURRENT STATE — 2026-07-10 ~03:10 (READ THIS FIRST, supersedes below)
 
-**HEAD `4437b001`, schema v38, all pushed. better-sqlite3/WAL engine (NOT
-sql.js — migrated after the 2GB-DB P0). Suite ~2,515. Backlog ~960 draining.
+**HEAD `4d200e9f`, schema v38, all pushed. better-sqlite3/WAL engine (NOT
+sql.js — migrated after the 2GB-DB P0). Suite **2558 passing / 0 fail**
+(independently re-run after the library cherry-pick). Backlog ~960 draining.
 NOTE: main-process changes (v-migrations, IPC) need an app RESTART to take
-effect; renderer changes arrive via HMR. Restart activates: nothing pending
-now except the two in-flight agents' work when merged.**
+effect; renderer changes arrive via HMR. RESTART PENDING to activate: the
+library-redesign's `recordings:backfillDurations` IPC + duration backfill
+(renderer UX is HMR-live; durations stay NULL until restart runs the backfill).
+Bundle that restart-verify with the Context Graph dogfood walk once ctxgraph
+lands (don't restart mid-meeting — dock = live call audio).**
 
 ### DEV/ABI GOTCHA (critical): the on-disk `better-sqlite3` binary is the
 ELECTRON ABI (the running app holds it). So:
@@ -21,8 +25,24 @@ ELECTRON ABI (the running app holds it). So:
 - After any `npm install` touching better-sqlite3: `npx @electron/rebuild -f -w better-sqlite3` for the app to boot; check-native.mjs swaps back to Node ABI for tests.
 - typecheck (`npm run typecheck`) is safe under system node.
 
-### AGENTS IN FLIGHT (based on 53204b84 → they seed from stale `main` 89cb03ac and MUST ff to the branch tip; VERIFY base in their report; CHERRY-PICK their commit onto current HEAD since HEAD advances, don't ff-merge):
-- **library-redesign** (aa34bf2a8007efc85): Knowledge Library redesign — AI Assistant→dockable/pinnable overlay (2-pane default), multi-format rows (image=dimensions not duration), simplified filters + source-type control + working duration filter/sort, de-dup the in-library vs global search, RESPONSIVENESS. DATA FIXES: backfill `recordings.duration_seconds` (NULL for 1903/1911 — that's why duration sort/filter return nothing), honest empty-state for Quality (900 captures all 'unrated'). Owns v39 if needed. Composes with delete for the cleanup flow.
+### AGENTS IN FLIGHT (they seed from stale `main` 89cb03ac and MUST ff to the branch tip; VERIFY base in their report; CHERRY-PICK their commit onto current HEAD since HEAD advances, don't ff-merge):
+- **ctxgraph-affordances** (a82aab752ab06c621): Context Graph clickability/
+  editability/discoverability/navigability overhaul (user's top request).
+  Node detail = what-each-person-IS (role/org/#meetings/aliases/provenance);
+  RENAME as a CORRECTION ("Jiarabi"→"Yaraví" propagates everywhere, He/Him);
+  convert name-only node → real contact (manual tier); clickable source line
+  → MeetingDetail; locate/focus-node; merge-two-nodes (blast-radius preview);
+  remove/hide. MUST reuse existing entity-resolver + contacts merge UI, not a
+  parallel system. Owns ContextGraph.tsx + components/context-graph/** +
+  packages/knowledge-graph + graph IPC (+ shared handlers.ts/preload this wave).
+  Based on `4d200e9f`. Do NOT touch Library/database SCHEMA_VERSION.
+- ~~library-redesign~~ **DONE — landed `4d200e9f`** (cherry-picked from ad1642b9,
+  gates re-run green 2558/0): dockable AI assistant (2-pane default), multi-
+  format rows (image=type+date not duration), simplified filters + source-type
+  segmented control + working duration filter/sort, list-search relabelled
+  (de-dup vs global), duration backfill IPC (NULL 1903/1911 — needs RESTART to
+  populate), honest Quality empty-state + narrow low-value classifier,
+  responsiveness (dropped max-w-4xl). NEEDS restart-verify + dogfood walk.
 - **wer-hybrid-spike** (aced5f54d46abb8af): RESEARCH — WER comparison Gemini-only vs hybrid (local VAD/turn chunks→Gemini) vs full-local WhisperX vs top Spanish model (Canary-Qwen 2.5B / ARK-ASR-3B). USER CARES: Gemini Spanish WER is reportedly MUCH better than WhisperX, so we do NOT just switch to local — test the hybrid. Heavy GPU + web-leaderboard research; produces docs/experiments/wer-hybrid-spike.md + side-by-side transcripts for the user to judge. **USER ASKED: send them the WER results when in.**
 - ~~responsive-layout~~ DONE (4437b001): wide-window dead-gutters fixed on
   non-Library pages via shared src/lib/pageLayout.ts (pageContent/pageWide/
