@@ -9,9 +9,13 @@ docs. Companions: ROADMAP.md (audit ledger + coverage map), INTELLIGENCE.md
 
 ## 0. CURRENT STATE — 2026-07-10 ~03:10 (READ THIS FIRST, supersedes below)
 
-**HEAD `cf82c1dc` (pending final suite confirm), schema v38, all pushed.
-better-sqlite3/WAL engine. Suite **2574 passing / 0 fail** (bundling merge);
-re-confirming after ctxgraph merge. IMPORTANT: after cherry-picking any
+**HEAD `2c1023cb`, schema v38, all pushed. better-sqlite3/WAL engine.
+Suite **2603 passing / 0 fail** (independently re-run after each of the 4
+merges: library, badge, bundling+status, ctxgraph, shell-chrome). ALL THREE
+overnight UI agents + bundling LANDED. Only wer-hybrid-spike (docs) still out.
+NOTE: shell-chrome forced a renderer full-reload (new Layout exports) → device
+pill briefly shows "Connecting…"; that's renderer-only (main/USB NOT restarted),
+clears on next status sync or the pending restart. Do NOT touch USB. IMPORTANT: after cherry-picking any
 knowledge-graph SOURCE change, `cd packages/knowledge-graph && npm run build`
 (tsup) — the electron app resolves @hidock/knowledge-graph via the junctioned
 package's `dist`; stale dist = stale graph behavior.
@@ -67,8 +71,15 @@ ELECTRON ABI (the running app holds it). So:
   (reports count before rewrite) + idempotent status self-heal. Owns database.ts,
   transcription.ts, org-reconciler.ts, calendar-utils.ts, recording-match-scoring.ts
   + repair IPC. MAY own v39 if needed (ctxgraph/shell told NOT to bump).
-- **shell-chrome** (a617249e6517c7eef, base a97c3096): app SHELL/CHROME
-  (renderer-only). Fix divider-not-reaching-right, "HiDock · Meeting Intelligence"
+- ~~**shell-chrome**~~ **DONE — landed `2c1023cb`** (0ce767bd; 2603 green; live-
+  verified via CDP: A1 divider edge-to-edge, A2 identity in sidebar-width cell
+  w/ border-r continuity + dropped subtitle, A3 collapsed rail centered on 32px
+  axis, counters Today=3/Actionables=99+/Sync=hidden, dock collapse+overlay).
+  DEFERRED BACKEND (need main-process + IPC, not faked): real transcription
+  PAUSE/RESUME (transcription.ts + channel); real queue REORDER (prioritize now
+  reorders renderer view/intent only); true pop-out OS window; Activity-Log
+  entries carry no source ref → not yet clickable.
+  Original brief (renderer-only shell): divider-not-reaching-right, identity
   straddling the sidebar seam, collapsed-rail centering/alignment to titlebar
   (one shared left-gutter grid). Nav COUNTERS on Today/Actionables/Sync (from
   existing stores, no IPC). Make the bottom Transcriptions/Activity-Log dock
