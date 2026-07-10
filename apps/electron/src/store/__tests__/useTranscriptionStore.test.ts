@@ -599,6 +599,34 @@ describe('useTranscriptionStore', () => {
         expect(result.current[1].id).toBe('q-2')
         expect(result.current[1].retryCount).toBe(1)
       })
+
+      it('prioritize() moves a pending item to the front of the queue view', () => {
+        const store = useTranscriptionStore.getState()
+        store.addToQueue('q-1', 'rec-1', 'a.wav')
+        store.addToQueue('q-2', 'rec-2', 'b.wav')
+
+        // Default order (FIFO by insertion): q-1 first.
+        let { result } = renderHook(() => usePendingTranscriptions())
+        expect(result.current.map((i) => i.id)).toEqual(['q-1', 'q-2'])
+
+        // Prioritize q-2 → it jumps ahead.
+        store.prioritize('q-2')
+        ;({ result } = renderHook(() => usePendingTranscriptions()))
+        expect(result.current.map((i) => i.id)).toEqual(['q-2', 'q-1'])
+        expect(result.current[0].priority).toBeGreaterThan(result.current[1].priority)
+      })
+
+      it('deprioritize() pushes a pending item to the back of the queue view', () => {
+        const store = useTranscriptionStore.getState()
+        store.addToQueue('q-1', 'rec-1', 'a.wav')
+        store.addToQueue('q-2', 'rec-2', 'b.wav')
+
+        // Deprioritize q-1 → q-2 now leads.
+        store.deprioritize('q-1')
+        const { result } = renderHook(() => usePendingTranscriptions())
+        expect(result.current.map((i) => i.id)).toEqual(['q-2', 'q-1'])
+        expect(result.current[1].priority).toBeLessThan(result.current[0].priority)
+      })
     })
 
     describe('useProcessingTranscriptions', () => {

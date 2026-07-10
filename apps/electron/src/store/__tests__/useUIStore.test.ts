@@ -3,7 +3,7 @@
  *
  * Tests cover all store functionality:
  * - Initial state verification
- * - Persist middleware: only sidebarOpen and qaLogsEnabled are persisted
+ * - Persist middleware: only sidebarOpen, qaLogsEnabled, theme, operationsDockCollapsed, activityLogExpanded are persisted
  * - Sidebar actions: toggleSidebar, setSidebarOpen, setSidebarContent
  * - QA monitoring: setQaLogsEnabled
  * - Meeting selection: selectMeeting
@@ -167,15 +167,18 @@ describe('useUIStore', () => {
       expect(stored.state.playbackSentimentData).toBeUndefined()
     })
 
-    it('only persists exactly sidebarOpen, qaLogsEnabled and theme', () => {
+    it('only persists exactly the whitelisted UI preferences', () => {
       // Set various state values
       const store = useUIStore.getState()
       store.setSidebarOpen(false)
       store.setQaLogsEnabled(true)
       store.setTheme('dark')
+      store.setOperationsDockCollapsed(true)
+      store.setActivityLogExpanded(true)
       store.selectMeeting('meeting-1')
       store.setCurrentlyPlaying('rec-1', '/path')
       store.setIsPlaying(true)
+      store.openOperationsOverlay() // transient — must NOT persist
 
       const stored = JSON.parse(window.localStorage.getItem('hidock-ui-store') || '{}')
       const persistedKeys = Object.keys(stored.state || {})
@@ -183,7 +186,10 @@ describe('useUIStore', () => {
       expect(persistedKeys).toContain('sidebarOpen')
       expect(persistedKeys).toContain('qaLogsEnabled')
       expect(persistedKeys).toContain('theme') // user preference; read pre-paint in main.tsx
-      expect(persistedKeys.length).toBe(3)
+      expect(persistedKeys).toContain('operationsDockCollapsed') // dock chrome pref
+      expect(persistedKeys).toContain('activityLogExpanded') // dock chrome pref
+      expect(persistedKeys).not.toContain('operationsOverlayOpen') // transient
+      expect(persistedKeys.length).toBe(5)
     })
   })
 

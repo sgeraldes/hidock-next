@@ -80,6 +80,45 @@ const navigationSections: NavigationSection[] = [
   }
 ]
 
+// Accessible label templates for the nav count badges — states what the number means.
+const navCountAriaLabel: Record<string, (n: number) => string> = {
+  '/today': (n) => `${n} ${n === 1 ? 'event' : 'events'} today`,
+  '/actionables': (n) => `${n} pending actionable${n === 1 ? '' : 's'}`,
+  '/sync': (n) => `${n} file${n === 1 ? '' : 's'} to sync`
+}
+
+/**
+ * Small count badge for a nav item. Shown only when count > 0. Styled to match
+ * the Activity-Log count badge. When the sidebar is collapsed it sits on the
+ * icon's top-right corner; when expanded it trails the label.
+ */
+export function NavCountBadge({ href, count, collapsed, active }: { href: string; count: number; collapsed: boolean; active: boolean }) {
+  if (count <= 0) return null
+  const label = (navCountAriaLabel[href] ?? ((n: number) => `${n} items`))(count)
+  const display = count > 99 ? '99+' : String(count)
+  if (collapsed) {
+    return (
+      <span
+        aria-label={label}
+        className="absolute right-1 top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-sky-500 px-1 text-[9px] font-semibold leading-none text-white ring-2 ring-slate-900"
+      >
+        {display}
+      </span>
+    )
+  }
+  return (
+    <span
+      aria-label={label}
+      className={cn(
+        'ml-auto flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-semibold leading-none',
+        active ? 'bg-white/25 text-white' : 'bg-slate-700 text-slate-200'
+      )}
+    >
+      {display}
+    </span>
+  )
+}
+
 export function Layout({ children }: LayoutProps) {
   const location = useLocation()
   const [isDevMode, setIsDevMode] = useState(false)
@@ -95,9 +134,45 @@ export function Layout({ children }: LayoutProps) {
   const qaLogsEnabled = useUIStore((s) => s.qaLogsEnabled)
   const setQaLogsEnabled = useUIStore((s) => s.setQaLogsEnabled)
 
+  // Nav count badges — derived from EXISTING renderer stores (no new IPC channels).
+  // Today: meetings whose start is today (useAppStore.meetings, loaded on mount below).
+  const todayCount = useAppStore((s) => {
+    const today = new Date().toDateString()
+    return s.meetings.filter((m) => {
+      const start = m.start_time ? new Date(m.start_time) : null
+      return start != null && !Number.isNaN(start.getTime()) && start.toDateString() === today
+    }).length
+  })
+  // Sync: device-only recordings not yet downloaded (useAppStore.unifiedRecordings).
+  const unsyncedCount = useAppStore((s) => s.unifiedRecordings.filter((r) => r.location === 'device-only').length)
+  // Actionables have no renderer store (page holds them in component state), so we
+  // read the count from the EXISTING actionables IPC method — no new channel added.
+  const [pendingActionables, setPendingActionables] = useState(0)
+  useEffect(() => {
+    let cancelled = false
+    const api = window.electronAPI?.actionables
+    if (!api?.getAll) return
+    api.getAll()
+      .then((items) => {
+        if (cancelled || !Array.isArray(items)) return
+        setPendingActionables(items.filter((a: { status?: string }) => a.status === 'pending').length)
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+    // Re-read when navigating (cheap single call; keeps the badge fresh after triage).
+  }, [location.pathname])
+
+  const navCounts: Record<string, number> = {
+    '/today': todayCount,
+    '/actionables': pendingActionables,
+    '/sync': unsyncedCount
+  }
+
   // AL-001: Global activity log — visible from all pages
   const activityLog = useActivityLog()
-  const [logExpanded, setLogExpanded] = useState(false)
+  // AL: expand state persisted in the UI store so it survives navigation/restart.
+  const logExpanded = useUIStore((s) => s.activityLogExpanded)
+  const toggleActivityLog = useUIStore((s) => s.toggleActivityLog)
   const logContainerRef = useRef<HTMLDivElement>(null)
   const hasErrors = activityLog.some(e => e.type === 'error' || e.type === 'warning')
 
@@ -210,6 +285,12 @@ export function Layout({ children }: LayoutProps) {
       {/* Office-365-style unified titlebar (window chrome merged with the app) */}
       <TitleBar sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
 
+      {/* A1: full-window-width divider under the titlebar. Rendered as its own row
+          BELOW the 40px titlebar band so the Windows native-controls overlay (which
+          occupies the top-right of the titlebar) can't paint over its right end —
+          it now spans edge to edge. */}
+      <div className="h-px w-full shrink-0 bg-slate-700" />
+
       {/* Sidebar + content row (sits below the titlebar) */}
       <div className="flex min-h-0 flex-1">
       {/* Dark Sidebar */}
@@ -219,8 +300,9 @@ export function Layout({ children }: LayoutProps) {
           sidebarOpen ? 'w-56' : 'w-16'
         )}
       >
-        {/* Navigation */}
-        <nav className="flex-1 p-2 pt-3 space-y-4 overflow-y-auto">
+        {/* Navigation — nav px-2.5 (10px) + item px-3 (12px) + half-icon (10px)
+            lands every icon centre on the shared 32px rail axis (see TitleBar). */}
+        <nav className="flex-1 px-2.5 pt-3 pb-2 space-y-4 overflow-y-auto">
           {navigationSections.map((section, sectionIdx) => (
             <div key={section.title}>
               {/* Section Header */}
@@ -238,7 +320,8 @@ export function Layout({ children }: LayoutProps) {
                       key={item.href}
                       to={item.href}
                       className={cn(
-                        'flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400',
+                        'relative flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400',
+                        !sidebarOpen && 'justify-center',
                         isActive
                           ? 'bg-sky-600 text-white font-medium shadow-sm'
                           : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100'
@@ -247,6 +330,12 @@ export function Layout({ children }: LayoutProps) {
                     >
                       <item.icon className="h-5 w-5 flex-shrink-0" />
                       {sidebarOpen && <span>{item.name}</span>}
+                      <NavCountBadge
+                        href={item.href}
+                        count={navCounts[item.href] ?? 0}
+                        collapsed={!sidebarOpen}
+                        active={isActive}
+                      />
                     </Link>
                   )
                 })}
@@ -264,6 +353,7 @@ export function Layout({ children }: LayoutProps) {
               to="/settings"
               className={cn(
                 'flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400',
+                !sidebarOpen && 'justify-center',
                 location.pathname.startsWith('/settings')
                   ? 'bg-sky-600 text-white font-medium shadow-sm'
                   : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100'
@@ -285,7 +375,8 @@ export function Layout({ children }: LayoutProps) {
             <div>
               <button
                 className="flex w-full items-center justify-between px-3 py-2 text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors"
-                onClick={() => setLogExpanded(p => !p)}
+                onClick={toggleActivityLog}
+                aria-expanded={logExpanded}
               >
                 <span className="flex items-center gap-1.5">
                   <Terminal className="h-3.5 w-3.5" />

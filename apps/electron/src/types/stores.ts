@@ -140,6 +140,14 @@ export interface UIStore {
   // Recordings page view preference (persists across navigation)
   recordingsCompactView: boolean
 
+  // Operations dock (bottom Transcriptions/Downloads + Activity Log) chrome state
+  /** Collapse the operations dock to a compact summary chip (persisted). */
+  operationsDockCollapsed: boolean
+  /** Open the larger in-app operations detail overlay (transient, renderer-only). */
+  operationsOverlayOpen: boolean
+  /** Activity Log expanded in the sidebar dock (persisted). */
+  activityLogExpanded: boolean
+
   // Playback state (managed by OperationController)
   currentlyPlayingId: string | null
   currentlyPlayingPath: string | null
@@ -166,6 +174,14 @@ export interface UIStore {
 
   // Recordings view actions
   setRecordingsCompactView: (compact: boolean) => void
+
+  // Operations dock actions
+  toggleOperationsDock: () => void
+  setOperationsDockCollapsed: (collapsed: boolean) => void
+  openOperationsOverlay: () => void
+  closeOperationsOverlay: () => void
+  toggleActivityLog: () => void
+  setActivityLogExpanded: (expanded: boolean) => void
 
   // Playback actions
   setCurrentlyPlaying: (recordingId: string | null, filePath: string | null) => void

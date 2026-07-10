@@ -38,6 +38,23 @@ const isMac =
 // Windows native-controls overlay is ~138px wide; reserve it so nothing hides under it.
 const NATIVE_CONTROLS_WIDTH = 138
 
+// macOS traffic-light inset — reserve the top-left so the toggle box clears the
+// window controls. Windows draws its controls top-right (see NATIVE_CONTROLS_WIDTH),
+// so on Windows the left cell starts flush at x=0 and the grid is pixel-exact.
+const MAC_TRAFFIC_LIGHT_INSET = 72
+
+/**
+ * Shared shell grid (documented for the sidebar to mirror):
+ *  - The titlebar LEFT CELL width == the sidebar width (w-56 open / w-16 collapsed),
+ *    and carries the same `border-r` so the sidebar's vertical divider continues
+ *    up through the titlebar (Office-365 unified chrome).
+ *  - RAIL_AXIS: the collapsed rail is 64px (w-16) wide, so its centre — and the
+ *    centre of every nav icon in BOTH states, and the titlebar toggle icon — sits
+ *    at x = 32px from the window's left edge. The sidebar keeps this by using
+ *    nav `px-2.5` (10px) + item `px-3` (12px) + half-icon (10px) = 32px expanded,
+ *    and `justify-center` in the 64px rail = 32px collapsed.
+ */
+
 interface TitleBarProps {
   sidebarOpen: boolean
   onToggleSidebar: () => void
@@ -62,56 +79,76 @@ export function TitleBar({ sidebarOpen, onToggleSidebar }: TitleBarProps) {
 
   return (
     <header
-      className="titlebar-drag-region relative z-30 flex h-10 shrink-0 items-center gap-3 border-b border-slate-700 bg-slate-900 pl-3 text-slate-100 select-none"
-      style={{ paddingRight: isMac ? 12 : NATIVE_CONTROLS_WIDTH, paddingLeft: isMac ? 78 : undefined }}
+      className="titlebar-drag-region relative z-30 flex h-10 shrink-0 items-center bg-slate-900 text-slate-100 select-none"
+      style={{ paddingRight: isMac ? 12 : NATIVE_CONTROLS_WIDTH }}
     >
-      {/* Sidebar toggle */}
-      <button
-        type="button"
-        onClick={onToggleSidebar}
-        aria-label={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
-        aria-pressed={sidebarOpen}
-        className="titlebar-no-drag flex h-7 w-7 items-center justify-center rounded-md text-slate-300 transition-colors hover:bg-slate-700 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+      {/* LEFT CELL — mirrors the sidebar column (same width + border-r), so the
+          sidebar divider continues up through the titlebar. Identity lives here,
+          bounded by the column, instead of straddling the sidebar/content seam. */}
+      <div
+        className={cn(
+          'flex h-full shrink-0 items-center border-r border-slate-700 transition-all duration-300',
+          sidebarOpen ? 'w-56' : 'w-16'
+        )}
+        style={{ paddingLeft: isMac ? MAC_TRAFFIC_LIGHT_INSET : undefined }}
       >
-        <PanelLeft className="h-4 w-4" />
-      </button>
+        {/* Toggle box: 64px wide, icon centred on the 32px rail axis (aligns with
+            the collapsed rail + every nav icon below). */}
+        <div className="flex h-full w-16 shrink-0 items-center justify-center">
+          <button
+            type="button"
+            onClick={onToggleSidebar}
+            aria-label={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
+            aria-pressed={sidebarOpen}
+            className="titlebar-no-drag flex h-7 w-7 items-center justify-center rounded-md text-slate-300 transition-colors hover:bg-slate-700 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+          >
+            <PanelLeft className="h-4 w-4" />
+          </button>
+        </div>
 
-      {/* App identity */}
-      <div className="titlebar-no-drag flex items-center gap-2">
-        <AppMark />
-        <span className="text-sm font-semibold tracking-tight text-white">HiDock</span>
-        <span className="hidden text-sm text-slate-400 sm:inline">Meeting Intelligence</span>
+        {/* App identity — expanded only; hidden with the sidebar labels when collapsed.
+            Kept to the brand mark + wordmark so it sits coherently inside the sidebar
+            column (the earlier "HiDock · Meeting Intelligence" straddled the seam). */}
+        {sidebarOpen && (
+          <div className="flex min-w-0 items-center gap-2 pr-3">
+            <AppMark />
+            <span className="truncate text-sm font-semibold tracking-tight text-white">HiDock</span>
+          </div>
+        )}
       </div>
 
-      {/* Global search — routes to Explore */}
-      <form onSubmit={submitSearch} className="titlebar-no-drag mx-auto w-full max-w-md px-4">
-        <div className="relative">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
-          <input
-            type="search"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search knowledge, people, projects…"
-            aria-label="Search knowledge, people and projects"
-            className="h-7 w-full select-text rounded-md border border-slate-700 bg-slate-800/80 pl-8 pr-3 text-xs text-slate-100 placeholder:text-slate-500 focus-visible:border-sky-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-500"
-          />
-        </div>
-      </form>
+      {/* RIGHT CELL — content column: search (centred) + theme + connection. */}
+      <div className="flex h-full min-w-0 flex-1 items-center gap-3 px-3">
+        {/* Global search — routes to Explore */}
+        <form onSubmit={submitSearch} className="titlebar-no-drag mx-auto w-full max-w-md">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+            <input
+              type="search"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search knowledge, people, projects…"
+              aria-label="Search knowledge, people and projects"
+              className="h-7 w-full select-text rounded-md border border-slate-700 bg-slate-800/80 pl-8 pr-3 text-xs text-slate-100 placeholder:text-slate-500 focus-visible:border-sky-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-500"
+            />
+          </div>
+        </form>
 
-      {/* Theme toggle — sun/moon morph, sits just before the connection pill. */}
-      <ThemeToggle />
+        {/* Theme toggle — sun/moon morph, sits just before the connection pill. */}
+        <ThemeToggle />
 
-      {/* Device connection control — same status + connect/disconnect action as
-          the Device Sync page (via useDeviceConnection). */}
-      <ConnectionControl
-        status={status}
-        label={connectionLabel}
-        failedHint={failedHint}
-        recording={deviceRecording}
-        onConnect={() => void connect()}
-        onDisconnect={() => void disconnect()}
-        onGoToSync={() => navigate('/sync')}
-      />
+        {/* Device connection control — same status + connect/disconnect action as
+            the Device Sync page (via useDeviceConnection). */}
+        <ConnectionControl
+          status={status}
+          label={connectionLabel}
+          failedHint={failedHint}
+          recording={deviceRecording}
+          onConnect={() => void connect()}
+          onDisconnect={() => void disconnect()}
+          onGoToSync={() => navigate('/sync')}
+        />
+      </div>
     </header>
   )
 }

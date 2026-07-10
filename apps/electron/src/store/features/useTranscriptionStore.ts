@@ -24,6 +24,15 @@ export interface TranscriptionItem {
   startedAt?: Date
   completedAt?: Date
   provider?: string // 'gemini', etc.
+  /**
+   * Renderer-side priority for the queue view. Higher = the user wants it sooner.
+   * Default 0. `prioritize`/`deprioritize` bump it above/below the current
+   * pending set so the dock reorders immediately. NOTE: this reorders the
+   * renderer's view/intent of the pending queue — actual main-process processing
+   * order is driven by transcription.ts and would need a backend reorder IPC to
+   * honor this exactly (deferred follow-up).
+   */
+  priority: number
 }
 
 export interface TranscriptionQueueStore {
@@ -38,6 +47,10 @@ export interface TranscriptionQueueStore {
   markCompleted: (id: string, provider: string) => void
   markFailed: (id: string, error: string) => void
   retry: (id: string) => void
+  /** Bump a pending item to the front of the renderer queue view. */
+  prioritize: (id: string) => void
+  /** Push a pending item to the back of the renderer queue view. */
+  deprioritize: (id: string) => void
   remove: (id: string) => void
   clear: () => void
 
@@ -65,7 +78,8 @@ export const useTranscriptionStore = create<TranscriptionQueueStore>()(
           status: 'pending',
           progress: 0,
           retryCount: 0,
-          attempts: 0
+          attempts: 0,
+          priority: 0
         })
         return { queue }
       })
@@ -179,6 +193,30 @@ export const useTranscriptionStore = create<TranscriptionQueueStore>()(
       })
     },
 
+    prioritize: (id) => {
+      set((state) => {
+        const item = state.queue.get(id)
+        if (!item) return state
+        let max = 0
+        state.queue.forEach((i) => { if (i.priority > max) max = i.priority })
+        const queue = new Map(state.queue)
+        queue.set(id, { ...item, priority: max + 1 })
+        return { queue }
+      })
+    },
+
+    deprioritize: (id) => {
+      set((state) => {
+        const item = state.queue.get(id)
+        if (!item) return state
+        let min = 0
+        state.queue.forEach((i) => { if (i.priority < min) min = i.priority })
+        const queue = new Map(state.queue)
+        queue.set(id, { ...item, priority: min - 1 })
+        return { queue }
+      })
+    },
+
     remove: (id) => {
       set((state) => {
         const item = state.queue.get(id)
@@ -234,8 +272,9 @@ export const usePendingTranscriptions = () => {
         pending.push(item)
       }
     })
-    // Sort by priority: lower retryCount first, then FIFO order
+    // Sort by: explicit user priority (higher first), then lower retryCount, then FIFO
     pending.sort((a, b) => {
+      if (a.priority !== b.priority) return b.priority - a.priority
       if (a.retryCount !== b.retryCount) return a.retryCount - b.retryCount
       // FIFO: items without startedAt come before those with
       const aTime = a.startedAt ? a.startedAt.getTime() : 0

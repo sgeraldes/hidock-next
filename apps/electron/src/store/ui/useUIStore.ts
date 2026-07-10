@@ -21,6 +21,11 @@ export const useUIStore = create<UIStore>()(
   // Recordings page view preference (persists across navigation)
   recordingsCompactView: true, // Default to list view (compact)
 
+  // Operations dock chrome
+  operationsDockCollapsed: false,
+  operationsOverlayOpen: false,
+  activityLogExpanded: false,
+
   // Playback state (managed by OperationController)
   currentlyPlayingId: null,
   currentlyPlayingPath: null,
@@ -74,6 +79,31 @@ export const useUIStore = create<UIStore>()(
   // Recordings view actions
   setRecordingsCompactView: (compact: boolean) => {
     set({ recordingsCompactView: compact })
+  },
+
+  // Operations dock actions
+  toggleOperationsDock: () => {
+    set((state) => ({ operationsDockCollapsed: !state.operationsDockCollapsed }))
+  },
+
+  setOperationsDockCollapsed: (collapsed: boolean) => {
+    set({ operationsDockCollapsed: collapsed })
+  },
+
+  openOperationsOverlay: () => {
+    set({ operationsOverlayOpen: true })
+  },
+
+  closeOperationsOverlay: () => {
+    set({ operationsOverlayOpen: false })
+  },
+
+  toggleActivityLog: () => {
+    set((state) => ({ activityLogExpanded: !state.activityLogExpanded }))
+  },
+
+  setActivityLogExpanded: (expanded: boolean) => {
+    set({ activityLogExpanded: expanded })
   },
 
   // Playback actions (called by OperationController)
@@ -141,6 +171,9 @@ export const useUIStore = create<UIStore>()(
         sidebarOpen: state.sidebarOpen,
         qaLogsEnabled: state.qaLogsEnabled,
         theme: state.theme, // persisted: user preference (also read pre-paint in main.tsx)
+        operationsDockCollapsed: state.operationsDockCollapsed, // persisted: dock chrome pref
+        activityLogExpanded: state.activityLogExpanded, // persisted: dock chrome pref
+        // operationsOverlayOpen intentionally not persisted — transient overlay
         // recordingsCompactView NOT persisted here - useLibraryStore.viewMode is the single source of truth (LB-13)
         // currentlyPlayingId intentionally not persisted - transient playback
         // currentlyPlayingPath intentionally not persisted - transient playback
@@ -175,6 +208,9 @@ export const useWaveformLoadingId = () => useUIStore((s) => s.waveformLoadingId)
 export const useWaveformLoadedForId = () => useUIStore((s) => s.waveformLoadedForId)
 export const useQaLogsEnabled = () => useUIStore((s) => s.qaLogsEnabled)
 export const useThemePreference = () => useUIStore((s) => s.theme)
+export const useOperationsDockCollapsed = () => useUIStore((s) => s.operationsDockCollapsed)
+export const useOperationsOverlayOpen = () => useUIStore((s) => s.operationsOverlayOpen)
+export const useActivityLogExpanded = () => useUIStore((s) => s.activityLogExpanded)
 
 // ✅ Single reference selectors - no wrapper needed
 export const usePlaybackWaveformData = () => useUIStore((s) => s.playbackWaveformData)
