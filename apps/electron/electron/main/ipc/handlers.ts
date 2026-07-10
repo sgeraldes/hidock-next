@@ -34,6 +34,7 @@ import { registerTranscriptionHandlers } from './transcription-handlers'
 import { registerReDiarizeHandlers } from './re-diarize-handlers'
 import { registerTimelineHandlers } from './timeline-handlers'
 import { registerClipboardCaptureHandlers } from './clipboard-capture-handlers'
+import { registerGitCommitsHandlers } from './git-commits-handlers'
 
 export function registerIpcHandlers(): void {
   // Register all IPC handlers
@@ -76,6 +77,7 @@ export function registerIpcHandlers(): void {
   registerReDiarizeHandlers()
   registerTimelineHandlers()
   registerClipboardCaptureHandlers()
+  registerGitCommitsHandlers()
 
   console.log('All IPC handlers registered')
 }

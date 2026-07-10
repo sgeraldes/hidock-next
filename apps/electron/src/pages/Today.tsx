@@ -29,6 +29,7 @@ import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover
 import { TodayIdentitySuggestions } from '@/components/identity/TodayIdentitySuggestions'
 import { LiveRecordingCard, parseRecordingStart } from '@/components/LiveRecordingCard'
 import { TodayCaptures } from '@/features/today/TodayCaptures'
+import { TodayCommits } from '@/features/today/TodayCommits'
 import { cn } from '@/lib/utils'
 import { pageWide, proseMeasure } from '@/lib/pageLayout'
 import { firstMeaningfulLine } from '@/lib/description-format'
@@ -1208,6 +1209,10 @@ export function Today() {
             </CardContent>
           </Card>
         ) : null}
+
+        {/* Commits today — the day's git commits as CODE moments, grouped per repo.
+            An addition to the agenda; renders nothing when there are no commits today. */}
+        <TodayCommits />
 
         {/* Also captured today — the day's NON-recording knowledge moments (screenshots,
             imported docs/notes). An addition to the agenda; renders nothing when empty. */}

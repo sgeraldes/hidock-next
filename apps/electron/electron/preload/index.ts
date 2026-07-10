@@ -462,6 +462,23 @@ export interface ElectronAPI {
     get: () => Promise<{ success: boolean; data?: any; error?: string }>
   }
 
+  // Today's git commits (CODE moments for the Today agenda) — read-only.
+  commits: {
+    today: (repoPaths?: string[]) => Promise<{
+      success: boolean
+      commits: Array<{
+        repo: string
+        repoPath: string
+        branch: string
+        hash: string
+        shortHash: string
+        subject: string
+        authoredAt: string
+      }>
+      error?: string
+    }>
+  }
+
   // Database - Queue
   queue: {
     getItems: (status?: string) => Promise<any[]>
@@ -1210,6 +1227,10 @@ const electronAPI: ElectronAPI = {
 
   briefing: {
     get: () => callIPC('briefing:get')
+  },
+
+  commits: {
+    today: (repoPaths?: string[]) => callIPC('commits:today', repoPaths)
   },
 
   queue: {
