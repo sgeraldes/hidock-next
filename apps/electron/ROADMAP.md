@@ -55,6 +55,18 @@ INTERACTIVITY_PLAN.md, OVERNIGHT_PLAN.md.*
   noisy — silence via a canvas mock in test setup or install `canvas` dev dep.
 
 ## C-NEW. User-directed roadmap (2026-07-10)
+0a. **Source deletion + "ignore/personal" cascade (IN PROGRESS).** No good way
+    to remove a source + all derived data (privacy: personal recordings w/
+    daughter/father). Two intents: mark-personal (exclude from all AI
+    pipelines, keep file) and full delete cascade (transcript, embeddings,
+    actionables, speaker maps, participant contribution, graph nodes/edges,
+    wiki, audio file) with soft-delete+undo then hard-purge. v38.
+0b. **Merge "Correct" mode + transcript entity-linking (QUEUED, after 0a — same
+    database.ts).** Distinguish ALIAS (valid alternate name) from CORRECTION
+    (ASR error like Noman→Nouman): correction find-replaces the wrong form in
+    transcript text instead of preserving it as an alias. Plus: mentions of
+    known people in transcript BODY become clickable EntityMentions (hover →
+    Contact card), not just speaker labels.
 1. **PixelRAG PDF/image connector (NEXT major feature).** Add PDFs/images as
    knowledge sources. A PDF that is PURELY text (no images/tables) can go
    through normal text extraction; ANY PDF with images/tables/layout →
