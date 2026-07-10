@@ -153,6 +153,8 @@ export class DevicePipelineService extends EventEmitter {
 
   private abortController: AbortController | null = null
   private autoConnectListenersBound = false
+  /** Upper bound on any single native USB connect call before it's treated as failed. */
+  private static readonly CONNECT_TIMEOUT_MS = 12_000
   private connectHandler: ((event: { device: unknown }) => void) | null = null
   private disconnectHandler: ((event: { device: unknown }) => void) | null = null
 
@@ -192,6 +194,25 @@ export class DevicePipelineService extends EventEmitter {
   private setError(message: string): void {
     this.state = { ...this.state, phase: 'error', error: message }
     this.emit('state', this.state)
+  }
+
+  /**
+   * Bound any native USB call so a stuck/locked device (libusb blocking with no
+   * resolution) can never leave the phase machine hung on 'connecting'. Without
+   * this, a blocked `jensen.connect()` never resolves, so neither the success
+   * nor the `setError` branch runs and the status sits on "Connecting…" forever
+   * (the renderer's own 10s countdown can't help if the renderer itself stalls).
+   * On timeout the promise rejects → `safe()` returns null → caller sets 'error'.
+   */
+  private withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+      timer?.unref?.()
+    })
+    return Promise.race([promise, timeout]).finally(() => {
+      if (timer) clearTimeout(timer)
+    }) as Promise<T>
   }
 
   // ==========================================================================
@@ -297,7 +318,9 @@ export class DevicePipelineService extends EventEmitter {
   private async handleInitFailure(): Promise<void> {
     await this.safe(() => this.jensen.reset())
 
-    const reconnected = await this.safe(() => this.jensen.tryConnect())
+    const reconnected = await this.safe(() =>
+      this.withTimeout(Promise.resolve(this.jensen.tryConnect()), DevicePipelineService.CONNECT_TIMEOUT_MS, 'device reconnect')
+    )
     if (reconnected) {
       this.setPhase('initializing')
       const retryOk = await this.initialize()
@@ -491,9 +514,18 @@ export class DevicePipelineService extends EventEmitter {
   async connect(): Promise<boolean> {
     this.abortController = new AbortController()
     this.setPhase('connecting')
-    const ok = await this.safe(() => this.jensen.connect(this.abortController?.signal))
+    const ok = await this.safe(() =>
+      this.withTimeout(
+        Promise.resolve(this.jensen.connect(this.abortController?.signal)),
+        DevicePipelineService.CONNECT_TIMEOUT_MS,
+        'device connect'
+      )
+    )
     if (!ok) {
-      this.setError('Failed to connect to device')
+      this.abortController?.abort()
+      this.setError(
+        'Device found but the connection did not complete — it may be busy or the USB interface is stuck. Unplug and replug the HiDock, then retry.'
+      )
       return false
     }
     await this.runPipeline()
