@@ -1250,20 +1250,17 @@ export function Library() {
                 // @ts-expect-error - Ref callback pattern for multiple refs
                 containerRef.current = el
               }}
-              className="h-full overflow-auto p-2 sm:p-4 lg:p-6 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-inset"
+              className="h-full overflow-y-auto overflow-x-hidden py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-inset"
               onKeyDown={handleKeyDown}
               tabIndex={0}
               role="application"
               aria-label="Recording list navigation. Use arrow keys to navigate, Space to select, Enter to open."
               data-testid="library-list"
             >
-        {/* min-w floor: when a reader/assistant pane is open the list becomes a
-            narrow rail (~18-20% ≈ 220px). Below ~18rem the status chrome + Play
-            button starve the flex-1 content column to 0px and the line-clamp
-            title/date collapse to invisible (the "blank rows" bug). Flooring the
-            list at 18rem keeps every row's title + date readable; the rail scrolls
-            horizontally instead of eating the text. No effect at full width. */}
-        <div className={`w-full min-w-[18rem] transition-opacity ${isFilterPending ? 'opacity-60' : 'opacity-100'}`}>
+        {/* min-w-0 so the list content always shrinks to the pane width and NEVER
+            scrolls horizontally — rows truncate instead. The pane itself has a
+            sensible minimum (TriPaneLayout) so the title/date can't be starved. */}
+        <div className={`w-full min-w-0 transition-opacity ${isFilterPending ? 'opacity-60' : 'opacity-100'}`}>
           {filteredRecordings.length === 0 ? (
             qualityFilter !== null && qualityFilter !== 'unrated' && ratedCount === 0 ? (
               // Honest empty state: the quality filter isn't broken, there's just
@@ -1291,7 +1288,7 @@ export function Library() {
           ) : (
             <div className="animate-rise-in">
               {compactView && (
-                <div className="mb-2 flex items-center justify-between px-1">
+                <div className="mb-2 flex items-center justify-between px-3">
                   <div className="flex items-center gap-3">
                     <span className="text-xs text-muted-foreground">
                       {filteredRecordings.length} shown
@@ -1324,7 +1321,7 @@ export function Library() {
             >
               {compactView ? (
                 // Compact List View - LB-19 fix: Add focus indicator support
-                <div key="compact-view" className="border rounded-lg overflow-hidden">
+                <div key="compact-view">
                   {rowVirtualizer.getVirtualItems().map((virtualRow) => {
                     const recording = filteredRecordings[virtualRow.index]
                     const meeting = recording.meetingId ? meetings.get(recording.meetingId) : undefined

@@ -117,7 +117,7 @@ export const SourceRow = memo(function SourceRow({
     <div
       className={[
         // `group` lets the selection checkbox reveal on row hover/focus.
-        'group @container flex items-center justify-between py-2 px-3 cursor-pointer',
+        'group @container flex items-start justify-between gap-2 py-2.5 px-3 cursor-pointer',
         'transition-[background-color,box-shadow] duration-150',
         // Hover reads as a gentle elevation (bg + inner ring — the row list is
         // overflow-clipped, so an inset ring conveys lift where a drop shadow can't).
@@ -145,7 +145,7 @@ export const SourceRow = memo(function SourceRow({
       aria-selected={isSelected}
       tabIndex={0}
     >
-      <div className="flex items-center gap-2 min-w-0 flex-1">
+      <div className="flex items-start gap-2 min-w-0 flex-1">
         {/* Checkbox is CONDITIONALLY RENDERED: when hidden it is not in the DOM at
             all, so it consumes zero width and no flex gap — the title slides left.
             It reveals on hover/keyboard-focus and stays put while selected or while
@@ -155,13 +155,12 @@ export const SourceRow = memo(function SourceRow({
             checked={isSelected}
             onClick={handleCheckboxClick}
             aria-label={`Select ${recording.filename}`}
-            className="shrink-0"
+            className="shrink-0 mt-0.5"
           />
         )}
-        <StatusIcon recording={recording} />
-        <TranscriptionStatusBadge status={recording.transcriptionStatus} compact />
 
-        {/* Content area — flex-1 to fill remaining space */}
+        {/* Content area — flex-1 to fill remaining space. Status icons moved to the
+            right cluster so the title starts flush-left with no wasted gutter. */}
         <div className="flex-1 min-w-0">
           <div className="flex items-start gap-1.5 min-w-0">
             <p className="font-medium text-sm line-clamp-2 text-foreground leading-tight min-w-0" title={primaryText}>
@@ -180,27 +179,6 @@ export const SourceRow = memo(function SourceRow({
                 Personal
               </span>
             )}
-            {/* Provenance chip: the row is linked to a calendar meeting. Surfaces the
-                connection the system already knows (B1) without repeating the subject. */}
-            {meeting && (
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span
-                      className="mt-[3px] inline-flex shrink-0 text-primary/70"
-                      role="img"
-                      aria-label={`Linked to calendar meeting: ${meeting.subject}`}
-                    >
-                      <Calendar className="h-3 w-3" aria-hidden="true" />
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    <p>Linked to calendar meeting</p>
-                    <p className="text-xs text-muted-foreground mt-0.5">{formatDateTime(meeting.start_time)}</p>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            )}
           </div>
           <p className="flex items-center gap-1 text-xs text-muted-foreground truncate leading-tight mt-0.5">
             <TypeIcon
@@ -214,9 +192,33 @@ export const SourceRow = memo(function SourceRow({
         </div>
       </div>
 
-      {/* Action area — error + overflow menu. Playback lives in the mid-panel
-          player (clicking the row opens it), so there is no per-row Play button. */}
-      <div className="flex items-center gap-1 shrink-0 ml-2">
+      {/* Right cluster — status + meeting link + error + overflow menu, aligned at
+          the row's top line. The two status icons live here (not a left column) so
+          the title starts flush-left. Playback lives in the mid-panel player. */}
+      <div className="flex items-center gap-1.5 shrink-0">
+        {/* Meeting-link (calendar) provenance — the system knows this row maps to a
+            calendar event; the status icons align with it. */}
+        {meeting && (
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span
+                  className="inline-flex shrink-0 text-primary/70"
+                  role="img"
+                  aria-label={`Linked to calendar meeting: ${meeting.subject}`}
+                >
+                  <Calendar className="h-3.5 w-3.5" aria-hidden="true" />
+                </span>
+              </TooltipTrigger>
+              <TooltipContent>
+                <p>Linked to calendar meeting</p>
+                <p className="text-xs text-muted-foreground mt-0.5">{formatDateTime(meeting.start_time)}</p>
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        )}
+        <StatusIcon recording={recording} />
+        <TranscriptionStatusBadge status={recording.transcriptionStatus} compact />
         {/* Error indicator */}
         {error && (
           <TooltipProvider>
