@@ -1,0 +1,24 @@
+# Diarization spike — pinned deps (Windows, Python 3.11, RTX 4090 / CUDA)
+# Install order matters: install the CUDA torch trio FIRST from the pytorch index,
+# THEN whisperx from PyPI, otherwise whisperx pulls the CPU torch wheel and clobbers CUDA.
+#
+#   uv venv --python 3.11 .venv
+#   uv pip install --python .venv/Scripts/python.exe \
+#       torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0 \
+#       --index-url https://download.pytorch.org/whl/cu126
+#   uv pip install --python .venv/Scripts/python.exe whisperx==3.8.6
+#   # If whisperx downgrades torch to +cpu, force it back (uv treats 2.8.0 as satisfied
+#   # regardless of the +cpu/+cu126 local tag):
+#   uv pip install --python .venv/Scripts/python.exe \
+#       --reinstall-package torch --reinstall-package torchaudio --reinstall-package torchvision \
+#       torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0 \
+#       --index-url https://download.pytorch.org/whl/cu126
+#
+# pyannote/speaker-diarization-3.1 is a GATED HF model: you must (a) have an HF token and
+# (b) accept the model + pyannote/segmentation-3.0 user conditions on huggingface.co once.
+# The harness reads the token from HF_TOKEN, or falls back to config.localAsrHfToken.
+
+torch==2.8.0            # +cu126 build from the pytorch index
+torchaudio==2.8.0       # +cu126
+torchvision==0.23.0     # +cu126
+whisperx==3.8.6         # pulls faster-whisper, ctranslate2, pyannote.audio 3.x, transformers
