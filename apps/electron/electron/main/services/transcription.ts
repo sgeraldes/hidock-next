@@ -1586,6 +1586,25 @@ Meeting ${i + 1}: "${m.subject}"
     console.error('[OrgReconciler] Transcript entity extraction failed:', e)
   }
 
+  // Self-identification: bind speaker labels to the names people state for
+  // THEMSELVES in the roll-call ("les habla Pedro", "yo también, Santiago de la
+  // Colina"). Near-certain, so it creates/links the contact and writes the
+  // speaker map. LLM-gated by a cheap lexical prefilter; non-fatal. Runs AFTER
+  // applyTranscriptEntities so its 'self-identification' tier upgrades any
+  // weaker attendee-context resolution just written for the same name.
+  try {
+    const { runSelfIdentificationForRecording } = await import('./self-identification')
+    const selfId = await runSelfIdentificationForRecording(recordingId)
+    if (selfId.bound > 0 || selfId.mergeSuspected > 0) {
+      console.log(
+        `[SelfID] Recording ${recordingId}: +${selfId.bound} speaker(s) named` +
+          (selfId.mergeSuspected > 0 ? `, ${selfId.mergeSuspected} merge-suspected` : '')
+      )
+    }
+  } catch (e) {
+    console.error('[SelfID] Self-identification pass failed:', e)
+  }
+
   // Living knowledge graph (v27): announce the finished transcript so graph-sync
   // can debounce-ingest only the new material. Non-fatal.
   try {

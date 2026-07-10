@@ -332,6 +332,15 @@ export interface ElectronAPI {
     getRecommended: () => Promise<Result<string[]>>
   }
 
+  // Speaker self-identification (bind "Speaker N" to a self-stated name)
+  selfId: {
+    scan: () => Promise<Result<any>>
+    runForRecording: (request: { recordingId: string; force?: boolean }) => Promise<Result<any>>
+    backfill: () => Promise<Result<any>>
+    getStatus: () => Promise<Result<any>>
+    getMergeSuspected: () => Promise<Result<Array<{ label: string; names: string[] }>>>
+  }
+
   // Today briefing (single round-trip payload for the Today page)
   briefing: {
     get: () => Promise<{ success: boolean; data?: any; error?: string }>
@@ -992,6 +1001,14 @@ const electronAPI: ElectronAPI = {
     run: (req) => callIPC('transcript-upgrade:run', req),
     getStatus: (req) => callIPC('transcript-upgrade:getStatus', req),
     getRecommended: () => callIPC('transcript-upgrade:getRecommended')
+  },
+
+  selfId: {
+    scan: () => callIPC('self-id:scan'),
+    runForRecording: (request) => callIPC('self-id:runForRecording', request),
+    backfill: () => callIPC('self-id:backfill'),
+    getStatus: () => callIPC('self-id:getStatus'),
+    getMergeSuspected: () => callIPC('self-id:getMergeSuspected')
   },
 
   briefing: {

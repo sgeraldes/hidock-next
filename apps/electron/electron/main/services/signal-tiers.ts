@@ -10,10 +10,15 @@
  * never the reverse) and to let a re-sweep upgrade resolutions when the M365
  * connector backfills real attendee emails.
  *
- *   TIER 1  connector-email   1.00   connector-confirmed identity (email match from a
- *                                    connector source: M365, Slack, Bamboo…)
- *   TIER 2  attendee-email    0.90   linked-meeting attendee, from CALENDAR data
- *                                    (meetings.attendees / organizer_email present)
+ *   TIER 1  connector-email     1.00   connector-confirmed identity (email match from a
+ *                                      connector source: M365, Slack, Bamboo…)
+ *   TIER 1b self-identification  0.97   a speaker states their OWN name in first person
+ *                                      ("soy Ana", "les habla Pedro", "my name is Tom").
+ *                                      Near-certain — a person naming themselves — so it
+ *                                      sits just below a connector email and ABOVE any
+ *                                      calendar/attendee signal.
+ *   TIER 2  attendee-email      0.90   linked-meeting attendee, from CALENDAR data
+ *                                      (meetings.attendees / organizer_email present)
  *   —       manual            (user) an explicit human pick in the "Resolve per
  *                                    meeting" UI. Sovereign: never auto-overwritten.
  *   TIER 3  speaker-map       0.85   a user-confirmed transcript speaker assignment
@@ -33,6 +38,7 @@
 
 export type ResolutionMethod =
   | 'connector-email'
+  | 'self-identification'
   | 'attendee-email'
   | 'manual'
   | 'speaker-map'
@@ -45,6 +51,9 @@ export type ResolutionMethod =
 export const METHOD_PRIORITY: Record<string, number> = {
   manual: 100,
   'connector-email': 90,
+  // A person naming themselves — just below a connector-confirmed email, above
+  // any calendar/attendee signal.
+  'self-identification': 88,
   'attendee-email': 80,
   'speaker-map': 65,
   'attendee-context': 55,
@@ -66,6 +75,8 @@ export function methodConfidence(method: string | null | undefined): number {
   switch (method) {
     case 'connector-email':
       return 1.0
+    case 'self-identification':
+      return 0.97
     case 'attendee-email':
       return 0.9
     case 'manual':
