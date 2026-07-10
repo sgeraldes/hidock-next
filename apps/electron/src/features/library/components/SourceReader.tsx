@@ -1,12 +1,22 @@
 /**
  * SourceReader Component
  *
- * Displays the selected recording in the center panel with:
- * - Audio playback controls
- * - Transcript viewer with timestamps
- * - Metadata display (editable when knowledgeCaptureId is present)
+ * The Library's center detail panel for a selected recording. Reworked around a
+ * DOCKED header + a single SCROLL body:
  *
- * Shows a placeholder message when no recording is selected.
+ *  Docked (always visible):
+ *    - Title (inline-editable) + transcription status
+ *    - A curated meta strip (date · duration · location)
+ *    - Primary CTAs (Play/Download, Transcribe/Re-transcribe ▾, Ask, overflow)
+ *    - A COMPACT player: a voice-message pill (or a bare scrubber when narrow),
+ *      with an expand toggle to a smaller full waveform that has a clear playhead
+ *    - Participants (who actually spoke) chips — derived from the SAME resolved
+ *      speaker map the transcript uses, so a renamed speaker updates here too
+ *
+ *  Scrolls below:
+ *    - Secondary metadata (size, filename, category, quality)
+ *    - Projects, linked meeting, Invited (calendar attendees, distinct from
+ *      Participants), and the Summary / Action Items / Transcript
  */
 
 import { useState, useEffect, useCallback, useMemo } from 'react'
@@ -14,14 +24,18 @@ import { useNavigate } from 'react-router-dom'
 import { TranscriptViewer, type StoredSegment } from './TranscriptViewer'
 import { TranscriptionStatusBadge } from './TranscriptionStatusBadge'
 import { StatusIcon } from './StatusIcon'
+import { WaveformPlayer } from './WaveformPlayer'
+import { SpeakerAssignPopover, type AssignScope } from './SpeakerAssignPopover'
+import { useReaderPeople, type ParticipantChip } from '../hooks/useReaderPeople'
 import { getDisplayTitle } from '@/features/library/utils/getDisplayTitle'
 import { useUIStore } from '@/store/useUIStore'
-import { AudioPlayer } from '@/components/AudioPlayer'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
-import { Transcript, Meeting, Contact, MeetingAttendee, parseJsonArray, parseAttendees } from '@/types'
-import { Calendar, Download, Trash2, Wand2, RefreshCw, Play, Square, Pencil, Check, Edit2, Link, X, ExternalLink, FolderOpen, MoreHorizontal, Folder, Plus, EyeOff, Eye, Sparkles, ChevronDown, Cloud, Cpu, Users, Mail } from 'lucide-react'
+import { Transcript, Meeting, MeetingAttendee, parseJsonArray } from '@/types'
+import { Calendar, Download, Trash2, Wand2, RefreshCw, Play, Square, Pencil, Check, Edit2, Link, X, ExternalLink, FolderOpen, MoreHorizontal, Folder, Plus, EyeOff, Eye, Sparkles, ChevronDown, Cloud, Cpu, Users, Mail, UserCog } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
+import { HoverCard, HoverCardTrigger, HoverCardContent } from '@/components/ui/hover-card'
+import { PersonHoverCard } from '@/components/entity/EntityHoverCards'
 
 /** Minimal project shape the assignment picker needs (id + name). */
 type PickerProject = { id: string; name: string }
@@ -118,6 +132,10 @@ export function SourceReader({
   // Meeting link dialog state
   const [linkDialogOpen, setLinkDialogOpen] = useState(false)
 
+  // Whether the compact player is expanded to the full waveform (docked, but
+  // collapsed by default so the header stays short).
+  const [playerExpanded, setPlayerExpanded] = useState(false)
+
   // Transcription warning state. `pendingTranscribe` holds the exact action to
   // run once the user confirms past the "may overwrite your edits" dialog — this
   // lets the same warning guard both the primary Transcribe and the explicit
@@ -125,6 +143,10 @@ export function SourceReader({
   const [metadataEdited, setMetadataEdited] = useState(false)
   const [showTranscribeWarning, setShowTranscribeWarning] = useState(false)
   const [pendingTranscribe, setPendingTranscribe] = useState<(() => void) | null>(null)
+
+  // Re-diarize progress (mirrors re-transcribe: a transient "running" flag while
+  // the new pass is queued/running).
+  const [reDiarizing, setReDiarizing] = useState(false)
 
   // Sidebar transcription dock mirror — kept in sync when we queue via the
   // explicit-method picker (same as useOperations does for the default path).
@@ -143,6 +165,8 @@ export function SourceReader({
     setMetadataEdited(false)
     setShowTranscribeWarning(false)
     setPendingTranscribe(null)
+    setPlayerExpanded(false)
+    setReDiarizing(false)
   }, [recording?.id])
 
   // Preload the waveform as soon as a playable recording is opened, so the
@@ -159,6 +183,34 @@ export function SourceReader({
     if (loadedId === recordingId || waveformLoadingId === recordingId) return
     window.__audioControls?.loadWaveformOnly(recordingId, localPath)
   }, [recordingId, localPath])
+
+  // Parse the stored speaker/timestamp segments (Gemini or local ASR write
+  // `speakers` as a JSON array of {speaker, start, end, text}). When present,
+  // the viewer renders structured turns instead of re-parsing the plain text.
+  // MUST stay above the early return: it (and the people hook below) guard on
+  // props, so they run unconditionally and keep hook order stable whether or not
+  // a recording is selected — otherwise selecting one adds a hook and React
+  // throws "Rendered more hooks than during the previous render."
+  const transcriptSegments = useMemo<StoredSegment[] | undefined>(() => {
+    if (!transcript?.speakers) return undefined
+    try {
+      const parsed = JSON.parse(transcript.speakers)
+      return Array.isArray(parsed) && parsed.length > 0 ? (parsed as StoredSegment[]) : undefined
+    } catch {
+      return undefined
+    }
+  }, [transcript?.speakers])
+
+  // People (Participants + Invited), derived from the resolved speaker map so a
+  // renamed speaker updates here immediately. Called unconditionally (no
+  // useNavigate inside) to keep hook order stable across the null→selected
+  // transition; the actual chip UIs (which DO navigate) mount conditionally.
+  const people = useReaderPeople({
+    meetingId: meeting?.id,
+    attendees: meeting?.attendees,
+    recordingId,
+    segments: transcriptSegments,
+  })
 
   const handleSaveTitle = useCallback(async () => {
     if (!recording?.knowledgeCaptureId) return
@@ -267,22 +319,32 @@ export function SourceReader({
     }
   }, [recording, addToQueue])
 
-  // Parse the stored speaker/timestamp segments (Gemini or local ASR write
-  // `speakers` as a JSON array of {speaker, start, end, text}). When present,
-  // the viewer renders structured turns instead of re-parsing the plain text.
-  // MUST stay above the early return: it guards on `transcript` (a prop), so it
-  // runs unconditionally and keeps hook order stable whether or not a recording
-  // is selected — otherwise selecting one adds a hook and React throws
-  // "Rendered more hooks than during the previous render."
-  const transcriptSegments = useMemo<StoredSegment[] | undefined>(() => {
-    if (!transcript?.speakers) return undefined
-    try {
-      const parsed = JSON.parse(transcript.speakers)
-      return Array.isArray(parsed) && parsed.length > 0 ? (parsed as StoredSegment[]) : undefined
-    } catch {
-      return undefined
+  // Re-run speaker diarization for this recording via a dedicated IPC (added by a
+  // sibling change). Degrades gracefully when the IPC isn't present at runtime.
+  const reDiarize = useCallback(async () => {
+    if (!recording || !hasLocalPath(recording)) return
+    const api = window.electronAPI?.recordings as
+      | { reDiarize?: (id: string) => Promise<{ success: boolean; queueItemId?: string; error?: string }> }
+      | undefined
+    if (typeof api?.reDiarize !== 'function') {
+      toast.error('Re-diarize unavailable', 'This build does not support re-diarizing yet.')
+      return
     }
-  }, [transcript?.speakers])
+    setReDiarizing(true)
+    try {
+      const res = await api.reDiarize(recording.id)
+      if (!res?.success) {
+        toast.error('Failed to re-diarize', res?.error || 'Could not start re-diarization')
+        setReDiarizing(false)
+        return
+      }
+      if (res.queueItemId) addToQueue(res.queueItemId, recording.id, recording.filename)
+      toast.success('Re-diarizing speakers', recording.filename)
+    } catch (err) {
+      toast.error('Failed to re-diarize', err instanceof Error ? err.message : undefined)
+      setReDiarizing(false)
+    }
+  }, [recording, addToQueue])
 
   if (!recording) {
     return (
@@ -314,8 +376,11 @@ export function SourceReader({
   const isTranscribeBusy =
     recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing'
 
-  // The two human-named transcription methods offered by the ▾ menu. Shared by
-  // both the "Transcribe ▾" (fresh) and "Re-transcribe ▾" (already-done) forms.
+  const isTranscribed = recording.transcriptionStatus === 'complete'
+
+  // The transcription method menu offered by the ▾ trigger. Shared by both the
+  // "Transcribe ▾" (fresh) and "Re-transcribe ▾" (already-done) forms. The
+  // Re-diarize item only makes sense once a transcript with speakers exists.
   const transcribeMenuItems = (
     <>
       <DropdownMenuItem onClick={() => requestTranscribe(() => transcribeWith('gemini', 'Gemini'))}>
@@ -326,6 +391,15 @@ export function SourceReader({
         <Cpu className="h-4 w-4" aria-hidden="true" />
         Local (on-device)
       </DropdownMenuItem>
+      {isTranscribed && (
+        <>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onClick={reDiarize} disabled={reDiarizing}>
+            <UserCog className="h-4 w-4" aria-hidden="true" />
+            {reDiarizing ? 'Re-diarizing…' : 'Re-diarize this recording'}
+          </DropdownMenuItem>
+        </>
+      )}
     </>
   )
 
@@ -340,79 +414,315 @@ export function SourceReader({
 
   return (
     <div className="@container flex flex-col h-full overflow-hidden">
-      {/* Single scroll container so the transcript is always reachable even when
-          the pane is short; the audio player sticks to the top while scrolling. */}
-      <div className="flex-1 min-h-0 overflow-y-auto">
-      {/* Header with comprehensive metadata */}
-      <div className="p-6 border-b space-y-4">
-        <div>
-          <div className="mb-4">
-            {isEditingTitle ? (
-              <div className="flex items-center gap-2">
-                <Input
-                  value={editedTitle}
-                  onChange={(e) => setEditedTitle(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleSaveTitle()
-                    if (e.key === 'Escape') handleCancelTitle()
+      {/* ===================================================================
+          DOCKED HEADER — stays put while the body scrolls.
+          Title + status + curated meta + primary CTAs + compact player +
+          Participants chips.
+          =================================================================== */}
+      <div className="shrink-0 border-b bg-background">
+        {/* Title row */}
+        <div className="flex items-start gap-2 px-4 pt-4">
+          {isEditingTitle ? (
+            <div className="flex flex-1 items-center gap-2">
+              <Input
+                value={editedTitle}
+                onChange={(e) => setEditedTitle(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleSaveTitle()
+                  if (e.key === 'Escape') handleCancelTitle()
+                }}
+                className="text-lg font-semibold h-auto py-1"
+                autoFocus
+                disabled={isSavingTitle}
+                aria-label="Recording title"
+              />
+              <Button variant="ghost" size="sm" onClick={handleSaveTitle} disabled={isSavingTitle} aria-label="Save title" title="Save (Enter)">
+                <Check className="h-4 w-4" />
+              </Button>
+              <Button variant="ghost" size="sm" onClick={handleCancelTitle} disabled={isSavingTitle} aria-label="Cancel editing" title="Cancel (Escape)">
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+          ) : (
+            <div className="group flex min-w-0 flex-1 items-center gap-2">
+              <h2 className="text-lg font-semibold line-clamp-2 leading-tight" title={displayTitle}>
+                {displayTitle}
+              </h2>
+              {recording.knowledgeCaptureId && (
+                <button
+                  onClick={() => {
+                    setIsEditingTitle(true)
+                    setEditedTitle(recording.title || displayTitle)
                   }}
-                  className="text-xl font-semibold h-auto py-1"
-                  autoFocus
-                  disabled={isSavingTitle}
-                  aria-label="Recording title"
-                />
-                <Button variant="ghost" size="sm" onClick={handleSaveTitle} disabled={isSavingTitle} aria-label="Save title" title="Save (Enter)">
-                  <Check className="h-4 w-4" />
-                </Button>
-                <Button variant="ghost" size="sm" onClick={handleCancelTitle} disabled={isSavingTitle} aria-label="Cancel editing" title="Cancel (Escape)">
-                  <X className="h-4 w-4" />
-                </Button>
-              </div>
+                  className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity p-1 rounded hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 shrink-0"
+                  aria-label="Edit title"
+                  title="Edit title"
+                >
+                  <Pencil className="h-4 w-4 text-muted-foreground" />
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Curated meta strip: date · duration · location · status */}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 pt-2 text-xs text-muted-foreground">
+          <span className="inline-flex items-center gap-1">
+            <Calendar className="h-3.5 w-3.5" aria-hidden="true" />
+            {formatSmartDate(recording.dateRecorded, { fallback: 'Unknown' })}
+            {(() => {
+              const rel = formatRelativeDate(recording.dateRecorded)
+              return rel ? <span className="text-muted-foreground/70">· {rel}</span> : null
+            })()}
+          </span>
+          <span aria-hidden="true" className="text-muted-foreground/40">•</span>
+          <span>{durationSeconds > 0 ? formatDuration(durationSeconds) : 'Unknown'}</span>
+          <span aria-hidden="true" className="text-muted-foreground/40">•</span>
+          <span className="inline-flex items-center gap-1">
+            <StatusIcon recording={recording} />
+          </span>
+          <TranscriptionStatusBadge status={recording.transcriptionStatus} />
+        </div>
+
+        {/* Primary CTAs */}
+        <div className="flex flex-wrap items-center gap-2 px-4 pt-3">
+          {/* Primary action: Play/Stop for local files, Download for device-only */}
+          {canPlay && onPlay ? (
+            isPlaying ? (
+              <Button size="sm" onClick={onStop} className="gap-2" title="Stop playback">
+                <Square className="h-4 w-4" />
+                Stop
+              </Button>
             ) : (
-              <div className="group flex items-center gap-2">
-                <h2 className="text-xl font-semibold line-clamp-2 leading-tight" title={displayTitle}>
-                  {displayTitle}
-                </h2>
-                {recording.knowledgeCaptureId && (
-                  <button
-                    onClick={() => {
-                      setIsEditingTitle(true)
-                      setEditedTitle(recording.title || displayTitle)
-                    }}
-                    className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity p-1 rounded hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
-                    aria-label="Edit title"
-                    title="Edit title"
+              <Button size="sm" onClick={onPlay} className="gap-2" title="Play recording">
+                <Play className="h-4 w-4" />
+                Play
+              </Button>
+            )
+          ) : isDeviceOnly(recording) && onDownload ? (
+            <Button
+              size="sm"
+              onClick={onDownload}
+              disabled={!deviceConnected || isDownloading}
+              className="gap-2"
+              title={!deviceConnected ? 'Device not connected' : 'Download recording from device'}
+            >
+              {isDownloading ? (
+                <>
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                  {downloadProgress !== undefined ? `${downloadProgress}%` : 'Downloading...'}
+                </>
+              ) : (
+                <>
+                  <Download className="h-4 w-4" />
+                  Download
+                </>
+              )}
+            </Button>
+          ) : null}
+
+          {/* Transcription split button (Transcribe / Re-transcribe ▾). */}
+          {hasLocalPath(recording) && (
+            isTranscribed ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="sm" className="gap-1.5" title="Re-transcribe or re-diarize with a chosen method">
+                    <Wand2 className="h-4 w-4" />
+                    Re-transcribe
+                    <ChevronDown className="h-4 w-4 opacity-70" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="w-56">{transcribeMenuItems}</DropdownMenuContent>
+              </DropdownMenu>
+            ) : (
+              <div className="inline-flex items-center">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => requestTranscribe(() => onTranscribe?.())}
+                  disabled={isTranscribeBusy}
+                  className="gap-2 rounded-r-none border-r-0"
+                  title={
+                    recording.transcriptionStatus === 'pending' ? 'Transcription queued' :
+                    recording.transcriptionStatus === 'processing' ? 'Transcription in progress' :
+                    'Start AI transcription (configured default method)'
+                  }
+                >
+                  {recording.transcriptionStatus === 'processing' ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                      In Progress
+                    </>
+                  ) : recording.transcriptionStatus === 'pending' ? (
+                    <>
+                      <RefreshCw className="h-4 w-4" />
+                      Queued
+                    </>
+                  ) : (
+                    <>
+                      <Wand2 className="h-4 w-4" />
+                      Transcribe
+                    </>
+                  )}
+                </Button>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={isTranscribeBusy}
+                      className="rounded-l-none px-2"
+                      aria-label="Choose transcription method"
+                      title="Choose transcription method"
+                    >
+                      <ChevronDown className="h-4 w-4" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start" className="w-56">{transcribeMenuItems}</DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+            )
+          )}
+
+          {/* Source-scoped assistant */}
+          {onAskAboutSource && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onAskAboutSource}
+              className="gap-2"
+              title="Ask the AI assistant about this source"
+            >
+              <Sparkles className="h-4 w-4" />
+              Ask about this source
+            </Button>
+          )}
+
+          {/* Overflow: file operations + destructive delete (behind a separator) */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="sm" aria-label="More actions" title="More actions">
+                <MoreHorizontal className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-52">
+              {hasLocalPath(recording) && (
+                <>
+                  <DropdownMenuItem onClick={() => window.electronAPI?.storage.openFile(recording.localPath)}>
+                    <ExternalLink className="h-4 w-4" aria-hidden="true" />
+                    Open in default app
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => window.electronAPI?.storage.revealInFolder(recording.localPath)}>
+                    <FolderOpen className="h-4 w-4" aria-hidden="true" />
+                    Reveal in folder
+                  </DropdownMenuItem>
+                </>
+              )}
+              {!meeting && !isDeviceOnly(recording) && (
+                <DropdownMenuItem onClick={() => setLinkDialogOpen(true)}>
+                  <Link className="h-4 w-4" aria-hidden="true" />
+                  Link meeting
+                </DropdownMenuItem>
+              )}
+              {onMarkPersonal && !isDeviceOnly(recording) && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={onMarkPersonal}>
+                    {recording.personal
+                      ? <><Eye className="h-4 w-4" aria-hidden="true" />Unmark personal</>
+                      : <><EyeOff className="h-4 w-4" aria-hidden="true" />Mark personal (ignore)</>}
+                  </DropdownMenuItem>
+                </>
+              )}
+              {onDelete && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onClick={onDelete}
+                    disabled={(isDeviceOnly(recording) && !deviceConnected) || isDeleting}
+                    className="text-destructive focus:text-destructive"
                   >
-                    <Pencil className="h-4 w-4 text-muted-foreground" />
-                  </button>
-                )}
+                    {isDeleting ? (
+                      <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <Trash2 className="h-4 w-4" aria-hidden="true" />
+                    )}
+                    {isDeviceOnly(recording) ? 'Delete from device'
+                      : recording.location === 'local-only' ? 'Delete from computer'
+                        : 'Delete everywhere'}
+                  </DropdownMenuItem>
+                  {onDeletePermanent && !isDeviceOnly(recording) && (
+                    <DropdownMenuItem
+                      onClick={onDeletePermanent}
+                      disabled={isDeleting}
+                      className="text-destructive focus:text-destructive"
+                    >
+                      <Trash2 className="h-4 w-4" aria-hidden="true" />
+                      Delete permanently…
+                    </DropdownMenuItem>
+                  )}
+                </>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+
+        {/* Compact player — voice-message pill (wide) or bare scrubber (narrow),
+            with an expand toggle to a smaller full waveform (clear playhead). */}
+        {canPlay && (
+          <div className="px-4 pt-3 pb-3">
+            <div className="flex items-center gap-2">
+              <div className="hidden min-w-0 flex-1 @md:block">
+                <WaveformPlayer mode="pill" recordingId={recording.id} filePath={localPath} />
+              </div>
+              <div className="min-w-0 flex-1 @md:hidden">
+                <WaveformPlayer mode="scrubber" recordingId={recording.id} filePath={localPath} />
+              </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 shrink-0"
+                onClick={() => setPlayerExpanded((v) => !v)}
+                aria-expanded={playerExpanded}
+                aria-label={playerExpanded ? 'Collapse waveform' : 'Expand waveform'}
+                title={playerExpanded ? 'Collapse waveform' : 'Expand waveform'}
+              >
+                <ChevronDown className={cn('h-4 w-4 transition-transform', playerExpanded && 'rotate-180')} />
+              </Button>
+            </div>
+            {playerExpanded && (
+              <div className="mt-2">
+                <WaveformPlayer mode="full" recordingId={recording.id} filePath={localPath} />
               </div>
             )}
           </div>
+        )}
 
-          {/* Comprehensive Metadata Grid - same as SourceRowExpanded */}
+        {/* Participants (who actually spoke) — docked, actionable chips. */}
+        {people.participants.length > 0 && (
+          <div className="px-4 pb-3">
+            <ParticipantsChips
+              participants={people.participants}
+              contacts={people.allContacts}
+              onOpenPicker={people.ensureAllContacts}
+              onAssign={people.assignSpeaker}
+              onUnassign={people.unassignSpeaker}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* ===================================================================
+          SCROLL BODY — everything else.
+          =================================================================== */}
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        <div className="p-6 space-y-4">
+          {/* Secondary metadata grid */}
           <div className="grid grid-cols-2 @md:grid-cols-3 @xl:grid-cols-4 gap-4 text-sm">
-            <div>
-              <p className="text-xs font-medium text-muted-foreground mb-1">Date Recorded</p>
-              {/* Absolute date WITH the year (formatSmartDate) + a relative hint
-                  (formatRelativeDate) so a year-old recording never reads like
-                  this week's. */}
-              <p>{formatSmartDate(recording.dateRecorded, { fallback: 'Unknown' })}</p>
-              {(() => {
-                const rel = formatRelativeDate(recording.dateRecorded)
-                return rel ? <p className="text-xs text-muted-foreground">{rel}</p> : null
-              })()}
-            </div>
-            <div>
-              <p className="text-xs font-medium text-muted-foreground mb-1">Duration</p>
-              <p>{durationSeconds > 0 ? formatDuration(durationSeconds) : 'Unknown'}</p>
-            </div>
             <div>
               <p className="text-xs font-medium text-muted-foreground mb-1">Size</p>
               <p>{recording.size ? formatBytes(recording.size) : 'Unknown'}</p>
             </div>
-            {/* Quality (value rating) — only shown when actually rated; the old
-                'Standard' fallback was a meaningless placeholder. */}
             {recording.quality && recording.quality !== 'unrated' && (
               <div>
                 <p className="text-xs font-medium text-muted-foreground mb-1">Quality</p>
@@ -445,18 +755,7 @@ export function SourceReader({
                 <p className="capitalize">{recording.category}</p>
               </div>
             ) : null}
-            <div>
-              <p className="text-xs font-medium text-muted-foreground mb-1">Location</p>
-              {/* Icon-only (with tooltip/aria) — the verbose text was redundant */}
-              <StatusIcon recording={recording} />
-            </div>
-            <div>
-              {/* No caption: the badge ("Transcribed", "Queued", …) is self-labelling.
-                  Invisible spacer keeps it aligned with the other cells' values. */}
-              <p className="text-xs font-medium mb-1 invisible select-none" aria-hidden="true">Status</p>
-              <TranscriptionStatusBadge status={recording.transcriptionStatus} />
-            </div>
-            <div>
+            <div className="col-span-2">
               <p className="text-xs font-medium text-muted-foreground mb-1">Filename</p>
               <p className="truncate" title={recording.filename}>{recording.filename}</p>
             </div>
@@ -464,7 +763,7 @@ export function SourceReader({
 
           {/* Projects assignment (only for captured recordings) */}
           {recording.knowledgeCaptureId && (
-            <div className="mt-4">
+            <div>
               <p className="text-xs font-medium text-muted-foreground mb-1.5">Projects</p>
               <ProjectAssignmentRow knowledgeCaptureId={recording.knowledgeCaptureId} />
             </div>
@@ -472,7 +771,7 @@ export function SourceReader({
 
           {/* Linked Meeting */}
           {meeting && (
-            <div className="mt-4 flex items-center gap-2 p-3 bg-muted/30 border rounded-lg">
+            <div className="flex items-center gap-2 p-3 bg-muted/30 border rounded-lg">
               <div
                 className="flex items-center gap-2 min-w-0 flex-1 cursor-pointer hover:opacity-80 transition-opacity"
                 onClick={() => onNavigateToMeeting?.(meeting.id)}
@@ -504,264 +803,57 @@ export function SourceReader({
             </div>
           )}
 
-          {/* People: two DISTINCT lists — who actually spoke (Participants) vs.
-              who was calendar-invited (Invited). Only mounted when there's a
-              linked meeting or transcript speaker turns to draw from, so the
-              react-router-dependent PeoplePanel never renders for a bare
-              recording (keeps Router-less unit tests valid). */}
-          {(meeting || (transcriptSegments && transcriptSegments.length > 0)) && (
-            <PeoplePanel meeting={meeting} segments={transcriptSegments} />
+          {/* Invited (calendar attendees) — DISTINCT from Participants. */}
+          {meeting && (
+            <InvitedChips
+              invited={people.invited}
+              resolveAttendee={people.resolveAttendee}
+              spokeKey={people.attendeeSpoke}
+            />
           )}
 
           {/* Device-only notice */}
           {isDeviceOnly(recording) && (
-            <p className="mt-3 text-xs text-muted-foreground italic">
+            <p className="text-xs text-muted-foreground italic">
               Download this capture to play it and generate a transcript.
             </p>
           )}
-        </div>
-      </div>
 
-      {/* Action Buttons Section — one primary action, the rest demoted to
-          secondary or an overflow menu so the row has a clear hierarchy and
-          doesn't duplicate the bulk-actions bar. */}
-      <div className="flex flex-wrap items-center gap-2 px-6 py-3 border-b bg-muted/30">
-        {/* Primary action: Play/Stop for local files, Download for device-only */}
-        {canPlay && onPlay ? (
-          isPlaying ? (
-            <Button size="sm" onClick={onStop} className="gap-2" title="Stop playback">
-              <Square className="h-4 w-4" />
-              Stop
-            </Button>
-          ) : (
-            <Button size="sm" onClick={onPlay} className="gap-2" title="Play recording">
-              <Play className="h-4 w-4" />
-              Play
-            </Button>
-          )
-        ) : isDeviceOnly(recording) && onDownload ? (
-          <Button
-            size="sm"
-            onClick={onDownload}
-            disabled={!deviceConnected || isDownloading}
-            className="gap-2"
-            title={!deviceConnected ? 'Device not connected' : 'Download recording from device'}
-          >
-            {isDownloading ? (
-              <>
-                <RefreshCw className="h-4 w-4 animate-spin" />
-                {downloadProgress !== undefined ? `${downloadProgress}%` : 'Downloading...'}
-              </>
+          {/* Transcript Content */}
+          <div>
+            {transcript ? (
+              <TranscriptViewer
+                transcript={transcript.full_text}
+                segments={transcriptSegments}
+                recordingId={recording.id}
+                currentTimeMs={currentTimeMs}
+                isPlaying={isPlaying}
+                onSeek={onSeek || (() => {})}
+                showSummary={true}
+                showActionItems={true}
+                summary={transcript.summary ?? undefined}
+                actionItems={parseJsonArray<string>(transcript.action_items)}
+              />
+            ) : recording.transcriptionStatus === 'complete' ? (
+              <div className="text-center text-muted-foreground py-8">
+                <p>Transcript not available</p>
+              </div>
+            ) : recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing' ? (
+              <div className="text-center text-muted-foreground py-8">
+                <p>Transcription in progress...</p>
+              </div>
             ) : (
-              <>
-                <Download className="h-4 w-4" />
-                Download
-              </>
-            )}
-          </Button>
-        ) : null}
-
-        {/* Transcription: a "Transcribe ▾" split button. The primary triggers a
-            transcription with the configured default method; the ▾ menu lets the
-            user pick a specific method by human name (Gemini / Local). Replaces
-            the old raw "VibeVoice" button. Shown for local files only. */}
-        {hasLocalPath(recording) && (
-          recording.transcriptionStatus === 'complete' ? (
-            // Already transcribed → offer a re-run by explicit method.
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="outline" size="sm" className="gap-1.5" title="Re-transcribe with a chosen method">
-                  <Wand2 className="h-4 w-4" />
-                  Re-transcribe
-                  <ChevronDown className="h-4 w-4 opacity-70" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-48">{transcribeMenuItems}</DropdownMenuContent>
-            </DropdownMenu>
-          ) : (
-            // Not yet transcribed → primary Transcribe (default) + ▾ method picker.
-            <div className="inline-flex items-center">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => requestTranscribe(() => onTranscribe?.())}
-                disabled={isTranscribeBusy}
-                className="gap-2 rounded-r-none border-r-0"
-                title={
-                  recording.transcriptionStatus === 'pending' ? 'Transcription queued' :
-                  recording.transcriptionStatus === 'processing' ? 'Transcription in progress' :
-                  'Start AI transcription (configured default method)'
-                }
-              >
-                {recording.transcriptionStatus === 'processing' ? (
-                  <>
-                    <RefreshCw className="h-4 w-4 animate-spin" />
-                    In Progress
-                  </>
-                ) : recording.transcriptionStatus === 'pending' ? (
-                  <>
-                    <RefreshCw className="h-4 w-4" />
-                    Queued
-                  </>
-                ) : (
-                  <>
-                    <Wand2 className="h-4 w-4" />
-                    Transcribe
-                  </>
+              <div className="text-center text-muted-foreground py-8">
+                <p>No transcript available</p>
+                {canPlay && (
+                  <p className="text-sm mt-2">
+                    Click &quot;Transcribe&quot; to generate a transcript
+                  </p>
                 )}
-              </Button>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={isTranscribeBusy}
-                    className="rounded-l-none px-2"
-                    aria-label="Choose transcription method"
-                    title="Choose transcription method"
-                  >
-                    <ChevronDown className="h-4 w-4" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" className="w-48">{transcribeMenuItems}</DropdownMenuContent>
-              </DropdownMenu>
-            </div>
-          )
-        )}
-
-        {/* Source-scoped assistant: opens the dockable "Ask about this source"
-            drawer for the selected recording. */}
-        {onAskAboutSource && (
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onAskAboutSource}
-            className="gap-2"
-            title="Ask the AI assistant about this source"
-          >
-            <Sparkles className="h-4 w-4" />
-            Ask about this source
-          </Button>
-        )}
-
-        {/* Overflow: file operations + destructive delete (behind a separator) */}
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="outline" size="sm" aria-label="More actions" title="More actions">
-              <MoreHorizontal className="h-4 w-4" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-52">
-            {hasLocalPath(recording) && (
-              <>
-                <DropdownMenuItem onClick={() => window.electronAPI?.storage.openFile(recording.localPath)}>
-                  <ExternalLink className="h-4 w-4" aria-hidden="true" />
-                  Open in default app
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => window.electronAPI?.storage.revealInFolder(recording.localPath)}>
-                  <FolderOpen className="h-4 w-4" aria-hidden="true" />
-                  Reveal in folder
-                </DropdownMenuItem>
-              </>
+              </div>
             )}
-            {!meeting && !isDeviceOnly(recording) && (
-              <DropdownMenuItem onClick={() => setLinkDialogOpen(true)}>
-                <Link className="h-4 w-4" aria-hidden="true" />
-                Link meeting
-              </DropdownMenuItem>
-            )}
-            {onMarkPersonal && !isDeviceOnly(recording) && (
-              <>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={onMarkPersonal}>
-                  {recording.personal
-                    ? <><Eye className="h-4 w-4" aria-hidden="true" />Unmark personal</>
-                    : <><EyeOff className="h-4 w-4" aria-hidden="true" />Mark personal (ignore)</>}
-                </DropdownMenuItem>
-              </>
-            )}
-            {onDelete && (
-              <>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  onClick={onDelete}
-                  disabled={(isDeviceOnly(recording) && !deviceConnected) || isDeleting}
-                  className="text-destructive focus:text-destructive"
-                >
-                  {isDeleting ? (
-                    <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />
-                  ) : (
-                    <Trash2 className="h-4 w-4" aria-hidden="true" />
-                  )}
-                  {isDeviceOnly(recording) ? 'Delete from device'
-                    : recording.location === 'local-only' ? 'Delete from computer'
-                      : 'Delete everywhere'}
-                </DropdownMenuItem>
-                {onDeletePermanent && !isDeviceOnly(recording) && (
-                  <DropdownMenuItem
-                    onClick={onDeletePermanent}
-                    disabled={isDeleting}
-                    className="text-destructive focus:text-destructive"
-                  >
-                    <Trash2 className="h-4 w-4" aria-hidden="true" />
-                    Delete permanently…
-                  </DropdownMenuItem>
-                )}
-              </>
-            )}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
-
-      {/* Audio Player — shown whenever recording has local file */}
-      {canPlay && (
-        <div className="sticky top-0 bg-background z-10 border-b">
-          {/* No onClose here: the reader's player is always docked, so a
-              "Close" button would mislead (it only stops). The transport's
-              Square control already stops playback. */}
-          <AudioPlayer
-            key={recording.id}
-            recordingId={recording.id}
-            filePath={hasLocalPath(recording) ? recording.localPath : undefined}
-            filename={recording.filename}
-          />
+          </div>
         </div>
-      )}
-
-      {/* Transcript Content */}
-      <div className="p-4">
-        {transcript ? (
-          <TranscriptViewer
-            transcript={transcript.full_text}
-            segments={transcriptSegments}
-            recordingId={recording.id}
-            currentTimeMs={currentTimeMs}
-            isPlaying={isPlaying}
-            onSeek={onSeek || (() => {})}
-            showSummary={true}
-            showActionItems={true}
-            summary={transcript.summary ?? undefined}
-            actionItems={parseJsonArray<string>(transcript.action_items)}
-          />
-        ) : recording.transcriptionStatus === 'complete' ? (
-          <div className="text-center text-muted-foreground py-8">
-            <p>Transcript not available</p>
-          </div>
-        ) : recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing' ? (
-          <div className="text-center text-muted-foreground py-8">
-            <p>Transcription in progress...</p>
-          </div>
-        ) : (
-          <div className="text-center text-muted-foreground py-8">
-            <p>No transcript available</p>
-            {canPlay && (
-              <p className="text-sm mt-2">
-                Click &quot;Transcribe&quot; to generate a transcript
-              </p>
-            )}
-          </div>
-        )}
-      </div>
       </div>
 
       {/* Meeting link dialog */}
@@ -918,177 +1010,155 @@ function ProjectAssignmentRow({ knowledgeCaptureId }: { knowledgeCaptureId: stri
 }
 
 /**
- * PeoplePanel — surfaces two DISTINCT people lists for the selected recording:
+ * ParticipantsChips — "who actually spoke" as actionable chips.
  *
- *  - Participants: who actually spoke / was detected in the meeting. Canonical
- *    contacts come from the meeting_contacts join (contacts.getForMeeting, the
- *    same source MeetingDetail uses), plus any transcript speaker labels that
- *    don't map to a known contact ("who spoke" even before a contact exists).
- *    Canonical contacts are clickable → /person/:id.
- *  - Invited: the calendar-invited attendees on the linked meeting's ICS /
- *    Outlook / M365 event (meeting.attendees JSON). This is who was INVITED,
- *    which is DIFFERENT from who spoke. Resolves to contacts where possible;
- *    shows an honest empty state when the calendar event carried no invite list.
+ * Each chip's affordance follows the recording's resolved speaker map:
+ *  - Resolved to a contact  → the chip is the person's name, links to their page
+ *    (/person/:id), and hovers into a PersonHoverCard.
+ *  - Unresolved diarization label ("Speaker 3") → the chip opens the SAME
+ *    SpeakerAssignPopover the transcript uses, so it can be named/reassigned in
+ *    place. Because names come from the resolved map, a correction made here (or
+ *    in the transcript) shows in both lists.
  *
- * Own component (like ProjectAssignmentRow) so its data-loading hooks and
- * useNavigate stay isolated from SourceReader's conditional early return, and so
- * it only mounts when there's a meeting or transcript to draw people from.
+ * Uses useNavigate, so it is only mounted when there are participants to show —
+ * keeping the reader Router-independent for a bare recording.
  */
-function PeoplePanel({ meeting, segments }: { meeting?: Meeting; segments?: StoredSegment[] }) {
+function ParticipantsChips({
+  participants,
+  contacts,
+  onOpenPicker,
+  onAssign,
+  onUnassign,
+}: {
+  participants: ParticipantChip[]
+  contacts: import('@/types/knowledge').Person[]
+  onOpenPicker: () => void
+  onAssign: (effectiveLabel: string, turnIndex: number, scope: AssignScope, payload: { contactId?: string; newName?: string }) => void
+  onUnassign: (effectiveLabel: string, turnIndex: number) => void
+}) {
   const navigate = useNavigate()
-  const [contacts, setContacts] = useState<Contact[]>([])
-
-  // Canonical contacts for the linked meeting — the meeting_contacts join. Same
-  // IPC MeetingDetail uses; no new read path needed.
-  const meetingId = meeting?.id
-  useEffect(() => {
-    let cancelled = false
-    if (!meetingId) {
-      setContacts([])
-      return
-    }
-    ;(async () => {
-      try {
-        const res = await window.electronAPI.contacts.getForMeeting(meetingId)
-        if (!cancelled) setContacts(res.success ? res.data : [])
-      } catch (err) {
-        console.error('Failed to load meeting contacts:', err)
-        if (!cancelled) setContacts([])
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [meetingId])
-
-  // Distinct speaker labels from the transcript's turns — "who actually spoke".
-  // Keyed lowercase so "Alice"/"alice" collapse; keeps first-seen display form.
-  const speakerNames = useMemo(() => {
-    const map = new Map<string, string>()
-    for (const s of segments ?? []) {
-      const name = s.speaker?.trim()
-      if (name && !map.has(name.toLowerCase())) map.set(name.toLowerCase(), name)
-    }
-    return map
-  }, [segments])
-
-  // A speaker already represented by a canonical contact (by name) shouldn't be
-  // listed twice — surface only the transcript speakers with no contact match.
-  const contactNameKeys = useMemo(
-    () =>
-      new Set(
-        contacts
-          .map((c) => (c.name || c.email || '').trim().toLowerCase())
-          .filter(Boolean)
-      ),
-    [contacts]
-  )
-  const extraSpeakers = useMemo(
-    () =>
-      Array.from(speakerNames.entries())
-        .filter(([key]) => !contactNameKeys.has(key))
-        .map(([, display]) => display),
-    [speakerNames, contactNameKeys]
-  )
-
-  const participantCount = contacts.length + extraSpeakers.length
-
-  // Invited = calendar attendees on the linked meeting. Resolve to a contact by
-  // email (preferred) or name so a chip can deep-link where we know the person.
-  const invited = useMemo(() => parseAttendees(meeting?.attendees), [meeting?.attendees])
-  const resolveAttendee = useCallback(
-    (a: MeetingAttendee): Contact | undefined => {
-      const email = a.email?.trim().toLowerCase()
-      const name = a.name?.trim().toLowerCase()
-      return contacts.find(
-        (c) =>
-          (!!email && c.email?.trim().toLowerCase() === email) ||
-          (!!name && c.name?.trim().toLowerCase() === name)
-      )
-    },
-    [contacts]
-  )
-
-  // Nothing to show at all (no meeting, no speakers) → render nothing.
-  if (!meeting && participantCount === 0) return null
-
   return (
-    <div className="mt-4 space-y-3">
-      {/* Participants — who actually spoke / was detected */}
-      {participantCount > 0 && (
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1.5 flex items-center gap-1.5">
-            <Users className="h-3.5 w-3.5" aria-hidden="true" />
-            Participants ({participantCount})
-            <span className="font-normal text-muted-foreground/70">From transcripts</span>
-          </p>
-          <div className="flex flex-wrap gap-1.5">
-            {contacts.map((c) => (
-              <button
-                key={c.id}
-                type="button"
-                onClick={() => navigate(`/person/${c.id}`)}
-                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-secondary text-secondary-foreground text-xs hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
-                title={`View ${c.name || c.email}`}
-              >
-                {c.name || c.email}
-              </button>
-            ))}
-            {extraSpeakers.map((name) => (
-              <span
-                key={`spk-${name}`}
-                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-secondary/60 text-secondary-foreground text-xs"
-                title={`${name} (from transcript)`}
-              >
-                {name}
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Invited — calendar attendees (distinct from who spoke). Only meaningful
-          when a calendar meeting is linked; when the event carried no invite
-          list we say so plainly rather than fabricate names. */}
-      {meeting && (
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1.5 flex items-center gap-1.5">
-            <Mail className="h-3.5 w-3.5" aria-hidden="true" />
-            Invited ({invited.length})
-            <span className="font-normal text-muted-foreground/70">From calendar</span>
-          </p>
-          {invited.length > 0 ? (
-            <div className="flex flex-wrap gap-1.5">
-              {invited.map((a, i) => {
-                const contact = resolveAttendee(a)
-                const label = a.name || a.email || 'Unknown'
-                return contact ? (
+    <div>
+      <p className="text-xs font-medium text-muted-foreground mb-1.5 flex items-center gap-1.5">
+        <Users className="h-3.5 w-3.5" aria-hidden="true" />
+        Participants ({participants.length})
+        <span className="font-normal text-muted-foreground/70">From transcripts</span>
+      </p>
+      <div className="flex flex-wrap gap-1.5">
+        {participants.map((p) => {
+          const turnHint = p.turnCount > 0 ? ` · ${p.turnCount} turn${p.turnCount === 1 ? '' : 's'}` : ''
+          if (p.contactId) {
+            // Resolved to a known person → link to their page, hover for details.
+            return (
+              <HoverCard key={p.key}>
+                <HoverCardTrigger asChild>
                   <button
-                    key={`inv-${i}`}
                     type="button"
-                    onClick={() => navigate(`/person/${contact.id}`)}
+                    onClick={() => navigate(`/person/${p.contactId}`)}
                     className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-secondary text-secondary-foreground text-xs hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
-                    title={`View ${label}`}
+                    title={`View ${p.name}${turnHint}`}
                   >
-                    {label}
+                    {p.name}
                   </button>
-                ) : (
-                  <span
-                    key={`inv-${i}`}
-                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-secondary text-secondary-foreground text-xs"
-                    title={label}
-                  >
-                    {label}
-                  </span>
-                )
-              })}
-            </div>
-          ) : (
-            <p className="text-xs text-muted-foreground/70 italic">
-              No invite list captured for this meeting.
-            </p>
-          )}
+                </HoverCardTrigger>
+                <HoverCardContent align="start" className="w-64">
+                  <PersonHoverCard id={p.contactId} name={p.name} />
+                </HoverCardContent>
+              </HoverCard>
+            )
+          }
+          // Unresolved diarization label → assign/rename in place.
+          return (
+            <span
+              key={p.key}
+              className="inline-flex items-center rounded-full bg-secondary/60 px-2 py-0.5 text-xs"
+              title={`${p.name}${turnHint} — click to identify`}
+            >
+              <SpeakerAssignPopover
+                label={p.effectiveLabel}
+                turnIndex={p.firstTurnIndex}
+                assignedContactId={undefined}
+                assignedName={undefined}
+                assignmentScope={undefined}
+                contacts={contacts}
+                onOpen={onOpenPicker}
+                onAssign={(scope, payload) => onAssign(p.effectiveLabel, p.firstTurnIndex, scope, payload)}
+                onUnassign={() => onUnassign(p.effectiveLabel, p.firstTurnIndex)}
+                canSplitHere={false}
+                hasSplitHere={false}
+                onSplit={() => {}}
+                onMergeSplit={() => {}}
+                mergeSuspected={p.mergeSuspected}
+              />
+            </span>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * InvitedChips — the calendar-invited attendees (meeting.attendees). This is who
+ * was INVITED, which is DIFFERENT from who spoke; the two lists are shown
+ * separately. Attendees resolve to a contact where possible (deep-linkable), and
+ * a "spoke" tag marks the invited people we can map to a transcript speaker.
+ */
+function InvitedChips({
+  invited,
+  resolveAttendee,
+  spokeKey,
+}: {
+  invited: MeetingAttendee[]
+  resolveAttendee: (a: MeetingAttendee) => import('@/types').Contact | undefined
+  spokeKey: (a: MeetingAttendee, contactId?: string) => boolean
+}) {
+  const navigate = useNavigate()
+  return (
+    <div>
+      <p className="text-xs font-medium text-muted-foreground mb-1.5 flex items-center gap-1.5">
+        <Mail className="h-3.5 w-3.5" aria-hidden="true" />
+        Invited ({invited.length})
+        <span className="font-normal text-muted-foreground/70">From calendar</span>
+      </p>
+      {invited.length > 0 ? (
+        <div className="flex flex-wrap gap-1.5">
+          {invited.map((a, i) => {
+            const contact = resolveAttendee(a)
+            const label = a.name || a.email || 'Unknown'
+            const spoke = spokeKey(a, contact?.id)
+            const spokeTag = spoke ? (
+              <span className="ml-1 rounded bg-primary/15 px-1 text-[10px] font-medium text-primary" title="Mapped to a transcript speaker">
+                spoke
+              </span>
+            ) : null
+            return contact ? (
+              <button
+                key={`inv-${i}`}
+                type="button"
+                onClick={() => navigate(`/person/${contact.id}`)}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-secondary text-secondary-foreground text-xs hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                title={`View ${label}`}
+              >
+                {label}
+                {spokeTag}
+              </button>
+            ) : (
+              <span
+                key={`inv-${i}`}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-secondary text-secondary-foreground text-xs"
+                title={label}
+              >
+                {label}
+                {spokeTag}
+              </span>
+            )
+          })}
         </div>
+      ) : (
+        <p className="text-xs text-muted-foreground/70 italic">
+          No invite list captured for this meeting.
+        </p>
       )}
     </div>
   )

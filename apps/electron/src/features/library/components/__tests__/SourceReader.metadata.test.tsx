@@ -88,9 +88,10 @@ vi.mock('@/components/ConfirmDialog', () => ({
   },
 }))
 
-// Mock AudioPlayer to avoid audio API issues
-vi.mock('@/components/AudioPlayer', () => ({
-  AudioPlayer: () => <div data-testid="audio-player" />,
+// Mock the WaveformPlayer to avoid audio API issues (and so its internal speed
+// Select doesn't collide with the mocked category Select below).
+vi.mock('../WaveformPlayer', () => ({
+  WaveformPlayer: () => <div data-testid="waveform-player" />,
 }))
 
 // Mock TranscriptViewer to keep tests focused

@@ -32,7 +32,7 @@ vi.mock('@/components/ui/toaster', () => ({
 }))
 vi.mock('@/components/RecordingLinkDialog', () => ({ RecordingLinkDialog: () => null }))
 vi.mock('@/components/ConfirmDialog', () => ({ ConfirmDialog: () => null }))
-vi.mock('@/components/AudioPlayer', () => ({ AudioPlayer: () => <div data-testid="audio-player" /> }))
+vi.mock('../WaveformPlayer', () => ({ WaveformPlayer: () => <div data-testid="waveform-player" /> }))
 vi.mock('../TranscriptViewer', () => ({ TranscriptViewer: () => <div data-testid="transcript-viewer" /> }))
 vi.mock('@/components/ui/select', () => ({
   Select: ({ children }: any) => <div>{children}</div>,
@@ -101,13 +101,32 @@ function renderReader(ui: React.ReactElement) {
   return render(<MemoryRouter>{ui}</MemoryRouter>)
 }
 
+const mockGetSpeakerMap = vi.fn()
+const mockAssignSpeaker = vi.fn()
+const mockGetAllContacts = vi.fn()
+
 beforeEach(() => {
   vi.clearAllMocks()
   mockGetForMeeting.mockResolvedValue({ success: true, data: [] })
+  mockGetSpeakerMap.mockResolvedValue({ success: true, data: [] })
+  mockAssignSpeaker.mockResolvedValue({ success: true, data: { id: 'new', name: 'New Person' } })
+  mockGetAllContacts.mockResolvedValue({ success: true, data: { contacts: [] } })
   Object.defineProperty(window, 'electronAPI', {
     value: {
-      contacts: { getForMeeting: mockGetForMeeting },
+      contacts: { getForMeeting: mockGetForMeeting, getAll: mockGetAllContacts },
       recordings: { reprocessWith: vi.fn().mockResolvedValue({ success: true }) },
+      transcripts: {
+        getSpeakerMap: mockGetSpeakerMap,
+        assignSpeaker: mockAssignSpeaker,
+        unassignSpeaker: vi.fn().mockResolvedValue({ success: true }),
+      },
+      turnSpeakers: {
+        getOverrides: vi.fn().mockResolvedValue({ success: true, data: [] }),
+        getSplits: vi.fn().mockResolvedValue({ success: true, data: [] }),
+        getMergeHints: vi.fn().mockResolvedValue({ success: true, data: [] }),
+        setOverride: vi.fn().mockResolvedValue({ success: true, data: { id: 'new', name: 'New Person' } }),
+        clearOverride: vi.fn().mockResolvedValue({ success: true }),
+      },
       projects: {
         getForKnowledge: vi.fn().mockResolvedValue({ success: true, data: [] }),
         getAll: vi.fn().mockResolvedValue({ success: true, data: { projects: [], total: 0 } }),
@@ -161,6 +180,38 @@ describe('SourceReader — Participants list', () => {
     // No meeting → no contacts fetch.
     expect(mockGetForMeeting).not.toHaveBeenCalled()
   })
+
+  // The core product-owner complaint: renaming "Speaker 1" → "Eduardo" in the
+  // transcript (a label→contact binding in the resolved speaker map) MUST show
+  // "Eduardo" in Participants, not the stale "Speaker 1".
+  it('reflects a speaker renamed via the resolved speaker map (Speaker 1 → Eduardo)', async () => {
+    mockGetSpeakerMap.mockResolvedValue({
+      success: true,
+      data: [{ speaker_label: 'Speaker 1', contact_id: 'eduardo', name: 'Eduardo' }],
+    })
+    const transcript = makeTranscript([{ speaker: 'Speaker 1', start: 0, end: 1, text: 'hola' }])
+    renderReader(<SourceReader recording={makeRecording()} transcript={transcript} />)
+
+    // The corrected name shows, and it is a person link — NOT the raw label.
+    const eduardo = await screen.findByRole('button', { name: 'Eduardo' })
+    expect(screen.queryByText('Speaker 1')).not.toBeInTheDocument()
+    fireEvent.click(eduardo)
+    expect(mockNavigate).toHaveBeenCalledWith('/person/eduardo')
+  })
+
+  // An unresolved "Speaker N" chip must be actionable: it opens the SAME
+  // assign/rename popover the transcript uses (search-or-create person).
+  it('opens the assign popover from an unresolved speaker chip', async () => {
+    const transcript = makeTranscript([{ speaker: 'Speaker 3', start: 0, end: 1, text: 'yo' }])
+    renderReader(<SourceReader recording={makeRecording()} transcript={transcript} />)
+
+    const chip = await screen.findByRole('button', { name: /assign speaker Speaker 3/i })
+    fireEvent.click(chip)
+
+    // The picker (with its search-or-create input) opens, and contacts load lazily.
+    expect(await screen.findByPlaceholderText(/search or create person/i)).toBeInTheDocument()
+    await waitFor(() => expect(mockGetAllContacts).toHaveBeenCalled())
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -206,5 +257,19 @@ describe('SourceReader — Invited list', () => {
 
     expect(await screen.findByText(/Participants \(1\)/)).toBeInTheDocument()
     expect(screen.queryByText(/^Invited/)).not.toBeInTheDocument()
+  })
+
+  it('marks an invited attendee who maps to a transcript speaker with a "spoke" tag', async () => {
+    mockGetForMeeting.mockResolvedValue({
+      success: true,
+      data: [makeContact({ id: 'c-1', name: 'Alice Smith', email: 'alice@example.com' })],
+    })
+    const transcript = makeTranscript([{ speaker: 'Alice Smith', start: 0, end: 1, text: 'hi' }])
+    const meeting = makeMeeting([{ name: 'Alice Smith', email: 'alice@example.com' }])
+    renderReader(<SourceReader recording={makeRecording()} meeting={meeting} transcript={transcript} />)
+
+    expect(await screen.findByText(/Invited \(1\)/)).toBeInTheDocument()
+    // Alice was invited AND spoke → the invited chip is tagged.
+    expect(screen.getByText('spoke')).toBeInTheDocument()
   })
 })

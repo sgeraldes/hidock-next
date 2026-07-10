@@ -43,10 +43,10 @@ vi.mock('@/components/ConfirmDialog', () => ({
     ) : null,
 }))
 
-// AudioPlayer is exercised elsewhere; stub it so these tests focus on the
+// The player is exercised elsewhere; stub it so these tests focus on the
 // reader's own preload/duration/transcribe behavior.
-vi.mock('@/components/AudioPlayer', () => ({
-  AudioPlayer: () => <div data-testid="audio-player" />,
+vi.mock('../WaveformPlayer', () => ({
+  WaveformPlayer: () => <div data-testid="waveform-player" />,
 }))
 
 vi.mock('../TranscriptViewer', () => ({
@@ -65,6 +65,7 @@ vi.mock('@/components/ui/select', () => ({
 // Helpers
 // ---------------------------------------------------------------------------
 const mockReprocessWith = vi.fn().mockResolvedValue({ success: true, queueItemId: 'q1' })
+const mockReDiarize = vi.fn().mockResolvedValue({ success: true, queueItemId: 'd1' })
 const mockLoadWaveformOnly = vi.fn()
 
 function makeRecording(overrides: Partial<UnifiedRecording> = {}): UnifiedRecording {
@@ -89,7 +90,7 @@ beforeEach(() => {
   ;(window as any).__audioControls = { loadWaveformOnly: mockLoadWaveformOnly }
   Object.defineProperty(window, 'electronAPI', {
     value: {
-      recordings: { reprocessWith: mockReprocessWith },
+      recordings: { reprocessWith: mockReprocessWith, reDiarize: mockReDiarize },
       projects: {
         getForKnowledge: vi.fn().mockResolvedValue({ success: true, data: [] }),
         getAll: vi.fn().mockResolvedValue({ success: true, data: { projects: [], total: 0 } }),
@@ -192,5 +193,34 @@ describe('SourceReader — Transcribe split/dropdown', () => {
     fireEvent.keyDown(trigger, { key: 'Enter' })
     fireEvent.click(await screen.findByRole('menuitem', { name: /gemini/i }))
     await waitFor(() => expect(mockReprocessWith).toHaveBeenCalledWith('rec-1', 'gemini'))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 6. Re-diarize this recording (item 6)
+// ---------------------------------------------------------------------------
+describe('SourceReader — Re-diarize', () => {
+  it('exposes "Re-diarize this recording" in the Re-transcribe menu for a completed recording and calls the IPC', async () => {
+    render(<SourceReader recording={makeRecording({ transcriptionStatus: 'complete' })} onTranscribe={vi.fn()} />)
+    fireEvent.keyDown(screen.getByRole('button', { name: /re-transcribe/i }), { key: 'Enter' })
+    fireEvent.click(await screen.findByRole('menuitem', { name: /re-diarize this recording/i }))
+    await waitFor(() => expect(mockReDiarize).toHaveBeenCalledWith('rec-1'))
+  })
+
+  it('does NOT offer Re-diarize for a not-yet-transcribed recording', () => {
+    render(<SourceReader recording={makeRecording({ transcriptionStatus: 'none' })} onTranscribe={vi.fn()} />)
+    // The fresh "Transcribe ▾" menu has no re-diarize item until a transcript exists.
+    fireEvent.keyDown(screen.getByRole('button', { name: /choose transcription method/i }), { key: 'Enter' })
+    expect(screen.queryByRole('menuitem', { name: /re-diarize/i })).not.toBeInTheDocument()
+  })
+
+  it('degrades gracefully (error toast) when the reDiarize IPC is absent', async () => {
+    const { toast } = await import('@/components/ui/toaster')
+    // Remove reDiarize from the API surface for this test.
+    ;(window.electronAPI.recordings as any).reDiarize = undefined
+    render(<SourceReader recording={makeRecording({ transcriptionStatus: 'complete' })} onTranscribe={vi.fn()} />)
+    fireEvent.keyDown(screen.getByRole('button', { name: /re-transcribe/i }), { key: 'Enter' })
+    fireEvent.click(await screen.findByRole('menuitem', { name: /re-diarize this recording/i }))
+    await waitFor(() => expect((toast as any).error).toHaveBeenCalledWith('Re-diarize unavailable', expect.any(String)))
   })
 })
