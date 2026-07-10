@@ -381,6 +381,15 @@ export interface ElectronAPI {
     addToQueue: (recordingId: string, priority?: boolean) => Promise<string | false>
     reprocessWith: (recordingId: string, provider: 'gemini' | 'local-asr' | 'vibevoice') => Promise<{ success: boolean; queueItemId?: string; error?: string }>
     reDiarize: (recordingId: string) => Promise<{ success: boolean; queueItemId?: string; cleared?: { clearedLabelBindings: number; clearedMentions: number; clearedMarkers: number }; error?: string }>
+    // Meeting-timeline data (v39): windowed sentiment + action/decision markers.
+    getTimelineAnalysis: (recordingId: string) => Promise<{
+      sentimentSegments: Array<{ startSec: number; endSec: number; score: number }>
+      eventMarkers: Array<{ id: string; kind: 'action' | 'decision'; atSec: number; label: string; refId: string }>
+    }>
+    analyzeTimeline: (recordingId: string) => Promise<{
+      sentimentSegments: Array<{ startSec: number; endSec: number; score: number }>
+      eventMarkers: Array<{ id: string; kind: 'action' | 'decision'; atSec: number; label: string; refId: string }>
+    }>
     processQueue: () => Promise<boolean>
     getTranscriptionStatus: () => Promise<{ isProcessing: boolean; pendingCount: number; processingCount: number }>
     getTranscriptionQueue: () => Promise<any[]>
@@ -1128,6 +1137,8 @@ const electronAPI: ElectronAPI = {
     addToQueue: (recordingId, priority) => callIPC('recordings:addToQueue', recordingId, priority),
     reprocessWith: (recordingId, provider) => callIPC('recordings:reprocessWith', { recordingId, provider }),
     reDiarize: (recordingId) => callIPC('recordings:reDiarize', recordingId),
+    getTimelineAnalysis: (recordingId) => callIPC('recordings:getTimelineAnalysis', recordingId),
+    analyzeTimeline: (recordingId) => callIPC('recordings:analyzeTimeline', recordingId),
     processQueue: () => callIPC('recordings:processQueue'),
     getTranscriptionStatus: () => callIPC('recordings:getTranscriptionStatus'),
     getTranscriptionQueue: () => callIPC('transcription:getQueue'),

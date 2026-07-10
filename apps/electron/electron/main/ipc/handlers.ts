@@ -32,6 +32,7 @@ import { registerTurnSpeakersHandlers } from './turn-speakers-handlers'
 import { registerRecordingDeletionHandlers } from './recording-deletion-handlers'
 import { registerTranscriptionHandlers } from './transcription-handlers'
 import { registerReDiarizeHandlers } from './re-diarize-handlers'
+import { registerTimelineHandlers } from './timeline-handlers'
 
 export function registerIpcHandlers(): void {
   // Register all IPC handlers
@@ -72,6 +73,7 @@ export function registerIpcHandlers(): void {
   registerRecordingDeletionHandlers()
   registerTranscriptionHandlers()
   registerReDiarizeHandlers()
+  registerTimelineHandlers()
 
   console.log('All IPC handlers registered')
 }

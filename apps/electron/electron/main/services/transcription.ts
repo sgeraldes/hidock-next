@@ -1693,6 +1693,22 @@ Meeting ${i + 1}: "${m.subject}"
     // Don't fail the transcription if actionable detection fails
   }
 
+  // Meeting-timeline data (v39): windowed sentiment + action/decision markers.
+  // Runs automatically so a freshly transcribed recording gets timeline data
+  // without a manual analyzeTimeline() call. Dynamic import avoids a static
+  // cycle (timeline-analysis is otherwise a leaf). Non-fatal — the transcript is
+  // already persisted; a timeline failure must not fail the transcription.
+  try {
+    const { analyzeTimeline } = await import('./timeline-analysis')
+    const timeline = await analyzeTimeline(recordingId)
+    console.log(
+      `[Timeline] Recording ${recordingId}: ${timeline.sentimentSegments.length} sentiment segment(s), ` +
+        `${timeline.eventMarkers.length} event marker(s)`
+    )
+  } catch (e) {
+    console.error('[Timeline] Timeline analysis failed (non-fatal):', e instanceof Error ? e.message : e)
+  }
+
   // Persist people + project the analysis extracted from the conversation
   // (the ICS feed has no attendee data — the transcript is the source).
   try {

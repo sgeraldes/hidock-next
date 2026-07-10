@@ -7,7 +7,7 @@ import { DatabaseEngine, getTableColumns, type SqlJsDatabase } from '@hidock/dat
 import { normalizeName, isGenericSpeakerLabel, detectAmbiguousName } from './entity-normalize'
 import { getEventBus } from './event-bus'
 
-const SCHEMA_VERSION = 38
+const SCHEMA_VERSION = 39
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -260,6 +260,11 @@ CREATE TABLE IF NOT EXISTS transcripts (
     transcription_model TEXT,
     title_suggestion TEXT,
     question_suggestions TEXT,
+    -- Meeting-timeline data (v39): windowed sentiment + event markers, both JSON.
+    -- sentiment_segments: [{startSec,endSec,score:-1..1}] time-series across the recording.
+    -- event_markers: [{id,kind,atSec,label,refId}] action/decision markers with audio offsets.
+    sentiment_segments TEXT,
+    event_markers TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (recording_id) REFERENCES recordings(id)
 );
@@ -2039,6 +2044,29 @@ const MIGRATIONS: Record<number, () => void> = {
       console.warn('[Migration v38] deletion_journal failed (non-fatal):', e)
     }
     console.log('Migration v38 complete')
+  },
+  39: () => {
+    // v39: meeting-timeline data. Two JSON columns on transcripts hold the
+    // rich-waveform timeline: `sentiment_segments` (a time-windowed sentiment
+    // series) and `event_markers` (action/decision markers with audio offsets).
+    // Both are (re)computed by timeline-analysis and are safe to leave NULL until
+    // analyzed. Idempotent: guarded ALTERs.
+    console.log('Running migration to schema v39: transcripts.sentiment_segments + event_markers')
+    const database = getDatabase()
+    const cols = getTableColumns(database, 'transcripts')
+    if (cols.length > 0) {
+      if (!cols.includes('sentiment_segments')) {
+        try { database.run('ALTER TABLE transcripts ADD COLUMN sentiment_segments TEXT') } catch (e) {
+          console.warn('[Migration v39] add sentiment_segments failed:', e)
+        }
+      }
+      if (!cols.includes('event_markers')) {
+        try { database.run('ALTER TABLE transcripts ADD COLUMN event_markers TEXT') } catch (e) {
+          console.warn('[Migration v39] add event_markers failed:', e)
+        }
+      }
+    }
+    console.log('Migration v39 complete')
   }
 
 }
@@ -2304,6 +2332,19 @@ function repairPhase(): void {
   if (actionItemCols.length > 0 && !actionItemCols.includes('assignee_contact_id')) {
     console.log('[Database] Repairing action_items: adding assignee_contact_id')
     try { database.run('ALTER TABLE action_items ADD COLUMN assignee_contact_id TEXT') } catch (e) {}
+  }
+
+  // Repair transcripts (v39): force-add the meeting-timeline JSON columns so an
+  // older on-disk schema that skipped the migration still has them before any
+  // timeline-analysis write. Idempotent.
+  const transcriptCols = getTableColumns(database, 'transcripts')
+  if (transcriptCols.length > 0) {
+    for (const col of ['sentiment_segments', 'event_markers']) {
+      if (!transcriptCols.includes(col)) {
+        console.log(`[Database] Repairing transcripts: adding ${col}`)
+        try { database.run(`ALTER TABLE transcripts ADD COLUMN ${col} TEXT`) } catch (e) {}
+      }
+    }
   }
 
   // Repair projects (v29): force-add folder_path/url if missing.
