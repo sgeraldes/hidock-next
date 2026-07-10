@@ -6,6 +6,8 @@ import {
   updateRecordingStatus,
   updateRecordingTranscriptionStatus,
   updateRecordingDuration,
+  backfillRecordingDurations,
+  classifyLowValueCaptures,
   linkRecordingToMeeting,
   getTranscriptByRecordingId,
   getCandidatesForRecordingWithDetails,
@@ -832,6 +834,22 @@ export function registerRecordingHandlers(): void {
       return { success: true }
     } catch (error) {
       console.error('recordings:updateDuration error:', error)
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error occurred' }
+    }
+  })
+
+  // One-time idempotent backfill of duration_seconds for rows the download/import
+  // paths stored as NULL. Uses device-cache + transcript timing already in the DB
+  // so the Library can sort/filter by length offline. Called on Library mount.
+  ipcMain.handle('recordings:backfillDurations', async (): Promise<{ success: boolean; scanned?: number; updated?: number; markedLowValue?: number; error?: string }> => {
+    try {
+      const result = backfillRecordingDurations()
+      // Classify AFTER the duration backfill so the low-value heuristic can use
+      // the freshly-populated duration_seconds.
+      const quality = classifyLowValueCaptures()
+      return { success: true, ...result, markedLowValue: quality.markedLowValue }
+    } catch (error) {
+      console.error('recordings:backfillDurations error:', error)
       return { success: false, error: error instanceof Error ? error.message : 'Unknown error occurred' }
     }
   })

@@ -3620,6 +3620,147 @@ export function updateRecordingDuration(id: string, durationSeconds: number): vo
   run('UPDATE recordings SET duration_seconds = ? WHERE id = ?', [rounded, id])
 }
 
+/** Strip a trailing audio extension so a .wav download matches its .hda source. */
+function durationBaseFilename(filename: string): string {
+  return filename.replace(/\.(hda|wav|mp3|m4a|aac|ogg|flac|webm|opus|wma)$/i, '')
+}
+
+/**
+ * Largest segment end-time (seconds) in a stored `transcripts.speakers` JSON
+ * array of `{ start, end }` turns, used as a lower-bound duration fallback.
+ * Exported for unit testing. Returns 0 when the input has no usable timing.
+ */
+export function maxTranscriptSegmentEnd(speakersJson: string | null | undefined): number {
+  if (!speakersJson) return 0
+  try {
+    const segments = JSON.parse(speakersJson)
+    if (!Array.isArray(segments)) return 0
+    let max = 0
+    for (const seg of segments) {
+      const end = typeof seg?.end === 'number' ? seg.end : typeof seg?.start === 'number' ? seg.start : 0
+      if (Number.isFinite(end) && end > max) max = end
+    }
+    return max
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * One-time (idempotent) backfill of `recordings.duration_seconds` for rows the
+ * download/import paths stored as NULL. Uses the cheapest reliable sources that
+ * already live in the DB — no new dependency, no audio decode, works offline:
+ *
+ *   1. the device-file cache duration (matched by base filename), then
+ *   2. the transcript's last segment end (a lower bound).
+ *
+ * Persisting the value makes client-side sort/filter-by-duration in the Library
+ * work even when the device is disconnected (the UI reads duration_seconds into
+ * UnifiedRecording.duration). Safe to run on every Library mount:
+ * `updateRecordingDuration` no-ops when the value is unchanged.
+ */
+export function backfillRecordingDurations(): { scanned: number; updated: number } {
+  const rows = queryAll<{ id: string; filename: string }>(
+    `SELECT id, filename FROM recordings
+     WHERE (duration_seconds IS NULL OR duration_seconds <= 0) AND deleted_at IS NULL`
+  )
+  if (rows.length === 0) return { scanned: 0, updated: 0 }
+
+  // Index the device cache by base filename so .wav downloads match .hda sources.
+  const cacheRows = queryAll<{ filename: string; duration_seconds: number | null }>(
+    'SELECT filename, duration_seconds FROM device_files_cache WHERE duration_seconds IS NOT NULL AND duration_seconds > 0'
+  )
+  const cacheByBase = new Map<string, number>()
+  for (const c of cacheRows) {
+    if (c.duration_seconds && c.duration_seconds > 0) {
+      cacheByBase.set(durationBaseFilename(c.filename), c.duration_seconds)
+    }
+  }
+
+  let updated = 0
+  for (const row of rows) {
+    let seconds = cacheByBase.get(durationBaseFilename(row.filename)) ?? 0
+
+    if (seconds <= 0) {
+      const t = queryOne<{ speakers: string | null }>(
+        'SELECT speakers FROM transcripts WHERE recording_id = ? LIMIT 1',
+        [row.id]
+      )
+      seconds = maxTranscriptSegmentEnd(t?.speakers)
+    }
+
+    if (seconds > 0) {
+      updateRecordingDuration(row.id, seconds)
+      updated++
+    }
+  }
+
+  if (updated > 0) {
+    console.log(`[duration-backfill] populated duration_seconds for ${updated}/${rows.length} recording(s)`)
+  }
+  return { scanned: rows.length, updated }
+}
+
+/**
+ * Conservative "low-value" classifier so the Library's clean-up filter has data.
+ *
+ * Deliberately narrow to avoid mislabeling anything the user might want: a
+ * capture is marked `low-value` ONLY when its source recording is very short
+ * (< 20s, after the duration backfill) AND it carries no meaningful transcript
+ * (missing, or fewer than 20 words) AND it isn't linked to a calendar meeting.
+ * Everything ambiguous stays `unrated`. Never downgrades a rating the user set
+ * (only touches rows still at the default `unrated`). Idempotent.
+ *
+ * Returns the number of captures newly marked low-value. `valuable` is left to
+ * explicit user/AI action — we don't over-claim value automatically.
+ */
+export function classifyLowValueCaptures(): { scanned: number; markedLowValue: number } {
+  const rows = queryAll<{
+    id: string
+    duration_seconds: number | null
+    meeting_id: string | null
+    word_count: number | null
+    has_transcript: number
+  }>(
+    `SELECT kc.id AS id,
+            r.duration_seconds AS duration_seconds,
+            kc.meeting_id AS meeting_id,
+            t.word_count AS word_count,
+            CASE WHEN t.id IS NULL THEN 0 ELSE 1 END AS has_transcript
+     FROM knowledge_captures kc
+     JOIN recordings r ON r.id = kc.source_recording_id
+     LEFT JOIN transcripts t ON t.recording_id = kc.source_recording_id
+     WHERE kc.quality_rating = 'unrated'
+       AND kc.deleted_at IS NULL
+       AND COALESCE(r.personal, 0) = 0`
+  )
+  if (rows.length === 0) return { scanned: 0, markedLowValue: 0 }
+
+  let marked = 0
+  for (const row of rows) {
+    const duration = row.duration_seconds ?? 0
+    const words = row.word_count ?? 0
+    const isShort = duration > 0 && duration < 20
+    const negligibleTranscript = row.has_transcript === 0 || words < 20
+    const linkedToMeeting = !!row.meeting_id
+
+    if (isShort && negligibleTranscript && !linkedToMeeting) {
+      run(
+        `UPDATE knowledge_captures
+         SET quality_rating = 'low-value', quality_confidence = 0.6, quality_assessed_at = ?
+         WHERE id = ? AND quality_rating = 'unrated'`,
+        [new Date().toISOString(), row.id]
+      )
+      marked++
+    }
+  }
+
+  if (marked > 0) {
+    console.log(`[quality-classify] marked ${marked}/${rows.length} capture(s) low-value (short + no transcript)`)
+  }
+  return { scanned: rows.length, markedLowValue: marked }
+}
+
 export function linkRecordingToMeeting(
   recordingId: string,
   meetingId: string,

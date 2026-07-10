@@ -18,7 +18,7 @@ import { useUIStore } from '@/store/useUIStore'
 import { AudioPlayer } from '@/components/AudioPlayer'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { Transcript, Meeting, parseJsonArray } from '@/types'
-import { Calendar, Download, Trash2, Wand2, RefreshCw, Play, Square, Pencil, Check, Edit2, Link, X, ExternalLink, FolderOpen, AudioLines, MoreHorizontal, Folder, Plus, EyeOff, Eye } from 'lucide-react'
+import { Calendar, Download, Trash2, Wand2, RefreshCw, Play, Square, Pencil, Check, Edit2, Link, X, ExternalLink, FolderOpen, AudioLines, MoreHorizontal, Folder, Plus, EyeOff, Eye, Sparkles } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 
@@ -74,6 +74,8 @@ interface SourceReaderProps {
   onNavigateToMeeting?: (meetingId: string) => void
   // Metadata editing callback
   onMetadataEdited?: () => void
+  // Opens the source-scoped AI assistant drawer/overlay for this recording.
+  onAskAboutSource?: () => void
 }
 
 export function SourceReader({
@@ -96,7 +98,8 @@ export function SourceReader({
   downloadProgress,
   isDeleting = false,
   onNavigateToMeeting,
-  onMetadataEdited
+  onMetadataEdited,
+  onAskAboutSource
 }: SourceReaderProps) {
 
   // Title editing state
@@ -516,6 +519,21 @@ export function SourceReader({
           >
             <AudioLines className="h-4 w-4" />
             VibeVoice
+          </Button>
+        )}
+
+        {/* Source-scoped assistant: opens the dockable "Ask about this source"
+            drawer for the selected recording. */}
+        {onAskAboutSource && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onAskAboutSource}
+            className="gap-2"
+            title="Ask the AI assistant about this source"
+          >
+            <Sparkles className="h-4 w-4" />
+            Ask about this source
           </Button>
         )}
 

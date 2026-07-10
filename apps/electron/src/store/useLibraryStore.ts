@@ -13,11 +13,22 @@ import {
   SemanticLocationFilter,
   ExclusiveLocationFilter
 } from '@/types/unified-recording'
+import type { SourceTypeFilter } from '@/features/library/utils/sourceType'
+import type { DurationPreset } from '@/features/library/utils/durationFilter'
 import { LibraryError } from '@/features/library/utils/errorHandling'
 import { validateId } from '@/lib/utils'
 
 export type SortBy = 'date' | 'duration' | 'name' | 'quality'
 export type SortOrder = 'asc' | 'desc'
+
+/**
+ * How the source-scoped AI assistant is docked in the Library.
+ * - `pinned`: permanent third pane (the classic 3-pane layout).
+ * - `floating`: 2-pane layout with the assistant open as a right-docked overlay.
+ * - `collapsed`: 2-pane layout with the assistant reduced to an icon rail.
+ * Persisted so the choice survives navigation and restart.
+ */
+export type AssistantDock = 'pinned' | 'floating' | 'collapsed'
 
 interface LibraryState {
   // View preferences (persisted)
@@ -32,7 +43,12 @@ interface LibraryState {
   categoryFilter: string | null
   qualityFilter: string | null
   statusFilter: string | null
+  sourceTypeFilter: SourceTypeFilter
+  durationPreset: DurationPreset
   searchQuery: string
+
+  // Source-scoped AI assistant docking (persisted)
+  assistantDock: AssistantDock
 
   // Selection state (transient - not persisted)
   selectedIds: Set<string>
@@ -71,8 +87,13 @@ interface LibraryActions {
   setCategoryFilter: (filter: string | null) => void
   setQualityFilter: (filter: string | null) => void
   setStatusFilter: (filter: string | null) => void
+  setSourceTypeFilter: (filter: SourceTypeFilter) => void
+  setDurationPreset: (preset: DurationPreset) => void
   setSearchQuery: (query: string) => void
   clearFilters: () => void
+
+  // Assistant docking
+  setAssistantDock: (dock: AssistantDock) => void
 
   // Selection
   selectSingle: (id: string) => void
@@ -116,7 +137,11 @@ const initialState: LibraryState = {
   categoryFilter: null,
   qualityFilter: null,
   statusFilter: null,
+  sourceTypeFilter: 'all',
+  durationPreset: 'all',
   searchQuery: '',
+  // Default to the two-pane layout with the assistant collapsed to an icon rail.
+  assistantDock: 'collapsed',
   selectedIds: new Set(),
   expandedRowIds: new Set(),
   expandedTranscripts: new Set(),
@@ -147,6 +172,8 @@ export const useLibraryStore = create<LibraryStore>()(
       setCategoryFilter: (filter) => set({ categoryFilter: filter }),
       setQualityFilter: (filter) => set({ qualityFilter: filter }),
       setStatusFilter: (filter) => set({ statusFilter: filter }),
+      setSourceTypeFilter: (filter) => set({ sourceTypeFilter: filter }),
+      setDurationPreset: (preset) => set({ durationPreset: preset }),
       setSearchQuery: (query) => set({ searchQuery: query }),
       clearFilters: () =>
         set({
@@ -156,10 +183,15 @@ export const useLibraryStore = create<LibraryStore>()(
           categoryFilter: null,
           qualityFilter: null,
           statusFilter: null,
+          sourceTypeFilter: 'all',
+          durationPreset: 'all',
           searchQuery: '',
           // C-005: Clear stale expansion state when filters reset to prevent accumulation
           expandedTranscripts: new Set()
         }),
+
+      // Assistant docking
+      setAssistantDock: (dock) => set({ assistantDock: dock }),
 
       // Selection
       selectSingle: (id) =>
@@ -290,6 +322,9 @@ export const useLibraryStore = create<LibraryStore>()(
         categoryFilter: state.categoryFilter,
         qualityFilter: state.qualityFilter,
         statusFilter: state.statusFilter,
+        sourceTypeFilter: state.sourceTypeFilter,
+        durationPreset: state.durationPreset,
+        assistantDock: state.assistantDock,
         panelSizes: state.panelSizes
         // searchQuery intentionally not persisted - should start fresh
         // selectedIds intentionally not persisted - transient
@@ -309,3 +344,4 @@ export const useLibrarySorting = () =>
     sortBy: state.sortBy,
     sortOrder: state.sortOrder
   })))
+export const useLibraryAssistantDock = () => useLibraryStore((state) => state.assistantDock)

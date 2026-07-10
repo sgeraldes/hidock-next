@@ -63,6 +63,9 @@ vi.mock('@/store/useLibraryStore', () => ({
       categoryFilter: null,
       qualityFilter: null,
       statusFilter: null,
+      sourceTypeFilter: 'all',
+      durationPreset: 'all',
+      assistantDock: 'collapsed',
       searchQuery: '',
       selectedIds: new Set(),
       recordingErrors: new Map(),
@@ -76,6 +79,10 @@ vi.mock('@/store/useLibraryStore', () => ({
       setCategoryFilter: vi.fn(),
       setQualityFilter: vi.fn(),
       setStatusFilter: vi.fn(),
+      setSourceTypeFilter: vi.fn(),
+      setDurationPreset: vi.fn(),
+      setAssistantDock: vi.fn(),
+      clearFilters: vi.fn(),
       setSearchQuery: vi.fn(),
       toggleSelection: vi.fn(),
       selectAll: vi.fn(),
@@ -338,12 +345,13 @@ describe('Library Performance', () => {
 
     const start = performance.now()
 
-    // Trigger filter change
-    const filterButton = screen.getByTestId('location-filter')
-    const deviceButton = filterButton.querySelector('button:nth-child(2)')
-    expect(deviceButton).toBeTruthy()
+    // Trigger a filter change via the always-visible source-type segmented
+    // control (the location filter now lives in the "Filters" popover).
+    const typeGroup = screen.getByTestId('source-type-filter')
+    const audioButton = typeGroup.querySelector('button:nth-child(2)')
+    expect(audioButton).toBeTruthy()
 
-    fireEvent.click(deviceButton!)
+    fireEvent.click(audioButton!)
 
     await waitFor(() => {
       // After filter change, the library list should still be present

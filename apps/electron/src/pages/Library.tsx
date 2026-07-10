@@ -33,6 +33,9 @@ import {
 } from '@/features/library/components'
 import { useSourceSelection, useKeyboardNavigation, useTransitionFilters } from '@/features/library/hooks'
 import { buildSearchCorpus } from '@/features/library/utils/buildSearchCorpus'
+import { getSourceType, matchesSourceTypeFilter } from '@/features/library/utils/sourceType'
+import { matchesDurationPreset } from '@/features/library/utils/durationFilter'
+import type { TypeCounts } from '@/features/library/components/LibraryFilters'
 import { useLibraryStore, useLibrarySorting } from '@/store/useLibraryStore'
 import { useOperations } from '@/hooks/useOperations'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
@@ -94,6 +97,16 @@ export function Library() {
   } = useTransitionFilters()
   const deferredSearchQuery = useDeferredValue(searchQuery)
 
+  // Source-type + duration filters (new) — read/set directly from the store.
+  const sourceTypeFilter = useLibraryStore((state) => state.sourceTypeFilter)
+  const setSourceTypeFilter = useLibraryStore((state) => state.setSourceTypeFilter)
+  const durationPreset = useLibraryStore((state) => state.durationPreset)
+  const setDurationPreset = useLibraryStore((state) => state.setDurationPreset)
+  const clearAllFilters = useLibraryStore((state) => state.clearFilters)
+
+  // Source-scoped AI assistant docking (dockable overlay).
+  const setAssistantDock = useLibraryStore((state) => state.setAssistantDock)
+
   // Sort state
   const { sortBy, sortOrder } = useLibrarySorting()
   const setSortBy = useLibraryStore((state) => state.setSortBy)
@@ -108,7 +121,7 @@ export function Library() {
   useEffect(() => {
     enrichmentAbortController.current.abort()
     enrichmentAbortController.current = new AbortController()
-  }, [filterMode, semanticFilter, exclusiveFilter, categoryFilter, qualityFilter, statusFilter, searchQuery])
+  }, [filterMode, semanticFilter, exclusiveFilter, categoryFilter, qualityFilter, statusFilter, sourceTypeFilter, durationPreset, searchQuery])
 
   // Drag-and-drop state for file import
   const [isDragOver, setIsDragOver] = useState(false)
@@ -265,6 +278,29 @@ export function Library() {
     }
   }, [refresh])
 
+  // One-shot backfill: populate recordings.duration_seconds (NULL on the
+  // download/import paths) from device-cache + transcript timing already in the
+  // DB, and mark clearly-junk captures low-value. Idempotent server-side. Runs
+  // once per mount, after the first data load, then refreshes so the newly
+  // persisted durations/ratings drive sort/filter even when offline.
+  const backfillRanRef = useRef(false)
+  useEffect(() => {
+    if (backfillRanRef.current) return
+    if (loading || recordings.length === 0) return
+    if (!window.electronAPI?.recordings?.backfillDurations) return
+    backfillRanRef.current = true
+    void (async () => {
+      try {
+        const result = await window.electronAPI.recordings.backfillDurations()
+        if (result?.success && ((result.updated ?? 0) > 0 || (result.markedLowValue ?? 0) > 0)) {
+          await refresh(false)
+        }
+      } catch (e) {
+        console.error('[Library] Duration backfill failed:', e)
+      }
+    })()
+  }, [loading, recordings.length, refresh])
+
   // Enrichment: Load transcripts and meetings for recordings
   const [transcripts, setTranscripts] = useState<Map<string, Transcript>>(new Map())
   const [meetings, setMeetings] = useState<Map<string, Meeting>>(new Map())
@@ -372,21 +408,55 @@ export function Library() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enrichmentKey])
 
-  // Filter recordings based on location and search
-  const filteredRecordings = useMemo(() => {
-    const filtered = recordings.filter((rec) => {
-      // Use dual-mode filter matching (semantic or exclusive)
+  // Stage 1: base population — location + personal visibility only. This is the
+  // set the source-type segmented control counts describe.
+  const baseRecordings = useMemo(() => {
+    return recordings.filter((rec) => {
       const locationMatches =
         filterMode === 'semantic'
           ? matchesSemanticFilter(rec.location, semanticFilter)
           : matchesExclusiveFilter(rec.location, exclusiveFilter)
-
       if (!locationMatches) return false
-      // Personal recordings are hidden unless the "Personal" chip is active.
       if (rec.personal && !showPersonal) return false
+      return true
+    })
+  }, [recordings, filterMode, semanticFilter, exclusiveFilter, showPersonal])
+
+  // Per-type counts for the segmented control (over the location-scoped base).
+  const typeCounts = useMemo<TypeCounts>(() => {
+    const counts: TypeCounts = { all: baseRecordings.length, audio: 0, image: 0, pdf: 0, note: 0 }
+    for (const rec of baseRecordings) {
+      const type = getSourceType(rec)
+      if (type === 'audio') counts.audio++
+      else if (type === 'image') counts.image++
+      else if (type === 'pdf') counts.pdf++
+      else if (type === 'note' || type === 'data') counts.note++
+    }
+    return counts
+  }, [baseRecordings])
+
+  // Whether any capture is actually rated — drives the honest Quality empty state.
+  const ratedCount = useMemo(
+    () => recordings.filter((r) => r.quality && r.quality !== 'unrated').length,
+    [recordings]
+  )
+
+  // Stage 2: scoped set — apply source-type, duration, category, quality, status
+  // (everything EXCEPT the list search). filterableCount = this length.
+  const scopedRecordings = useMemo(() => {
+    return baseRecordings.filter((rec) => {
+      if (!matchesSourceTypeFilter(getSourceType(rec), sourceTypeFilter)) return false
+      if (!matchesDurationPreset(rec, durationPreset)) return false
       if (categoryFilter !== null && rec.category !== categoryFilter) return false
       if (qualityFilter !== null && rec.quality !== qualityFilter) return false
       if (statusFilter !== null && rec.status !== statusFilter) return false
+      return true
+    })
+  }, [baseRecordings, sourceTypeFilter, durationPreset, categoryFilter, qualityFilter, statusFilter])
+
+  // Filter recordings based on scoped set + search, then sort.
+  const filteredRecordings = useMemo(() => {
+    const filtered = scopedRecordings.filter((rec) => {
       if (deferredSearchQuery) {
         const tokens = deferredSearchQuery
           .toLowerCase()
@@ -441,7 +511,7 @@ export function Library() {
     })
 
     return filtered
-  }, [recordings, filterMode, semanticFilter, exclusiveFilter, categoryFilter, qualityFilter, statusFilter, deferredSearchQuery, sortBy, sortOrder, showPersonal])
+  }, [scopedRecordings, deferredSearchQuery, meetings, transcripts, sortBy, sortOrder])
 
   // Count of personal ("ignored") recordings, to decide whether to show the chip.
   const personalCount = useMemo(() => recordings.filter((r) => r.personal).length, [recordings])
@@ -1051,12 +1121,17 @@ export function Library() {
         <div className={isFilterPending ? 'opacity-70 pointer-events-none transition-opacity' : 'transition-opacity'}>
           <LibraryFilters
             stats={stats}
+            filterableCount={scopedRecordings.length}
+            typeCounts={typeCounts}
+            hasRatedQuality={ratedCount > 0}
             filterMode={filterMode}
             semanticFilter={semanticFilter}
             exclusiveFilter={exclusiveFilter}
             categoryFilter={categoryFilter ?? 'all'}
             qualityFilter={qualityFilter ?? 'all'}
             statusFilter={statusFilter ?? 'all'}
+            sourceTypeFilter={sourceTypeFilter}
+            durationPreset={durationPreset}
             searchQuery={searchQuery}
             sortBy={sortBy}
             sortOrder={sortOrder}
@@ -1066,9 +1141,12 @@ export function Library() {
             onCategoryFilterChange={(filter) => setCategoryFilter(filter === 'all' ? null : filter)}
             onQualityFilterChange={(filter) => setQualityFilter(filter === 'all' ? null : filter)}
             onStatusFilterChange={(filter) => setStatusFilter(filter === 'all' ? null : filter)}
+            onSourceTypeFilterChange={setSourceTypeFilter}
+            onDurationPresetChange={setDurationPreset}
             onSearchQueryChange={setSearchQuery}
             onSortByChange={setSortBy}
             onSortOrderChange={setSortOrder}
+            onClearFilters={clearAllFilters}
           />
           {personalCount > 0 && (
             <div className="mt-2 flex items-center">
@@ -1141,13 +1219,31 @@ export function Library() {
               aria-label="Recording list navigation. Use arrow keys to navigate, Space to select, Enter to open."
               data-testid="library-list"
             >
-        <div className={`lg:max-w-4xl lg:mx-auto transition-opacity ${isFilterPending ? 'opacity-60' : 'opacity-100'}`}>
+        <div className={`w-full transition-opacity ${isFilterPending ? 'opacity-60' : 'opacity-100'}`}>
           {filteredRecordings.length === 0 ? (
-            <EmptyState
-              hasRecordings={recordings.length > 0}
-              onNavigateToDevice={() => navigate('/device')}
-              onAddRecording={handleAddRecording}
-            />
+            qualityFilter !== null && qualityFilter !== 'unrated' && ratedCount === 0 ? (
+              // Honest empty state: the quality filter isn't broken, there's just
+              // no rated data yet. Say so, rather than a bare "no matches".
+              <div className="text-center py-12 px-6 max-w-md mx-auto" role="status">
+                <p className="text-base font-medium text-foreground">No captures are classified yet</p>
+                <p className="mt-1.5 text-sm text-muted-foreground">
+                  Nothing has a “{qualityFilter.replace('-', ' ')}” rating — every capture is still
+                  “Unrated”. Ratings appear as captures are assessed.
+                </p>
+                <button
+                  onClick={() => setQualityFilter(null)}
+                  className="mt-4 inline-flex items-center rounded-md border border-input bg-background px-3 py-1.5 text-xs font-medium hover:bg-muted transition-colors"
+                >
+                  Clear quality filter
+                </button>
+              </div>
+            ) : (
+              <EmptyState
+                hasRecordings={recordings.length > 0}
+                onNavigateToDevice={() => navigate('/device')}
+                onAddRecording={handleAddRecording}
+              />
+            )
           ) : (
             <div className="animate-rise-in">
               {compactView && (
@@ -1353,6 +1449,8 @@ export function Library() {
               onNavigateToMeeting={handleNavigateToMeeting}
               // Metadata editing
               onMetadataEdited={() => refresh(false)}
+              // Open the source-scoped assistant drawer (dockable overlay)
+              onAskAboutSource={() => setAssistantDock('floating')}
             />
           }
           rightPanel={

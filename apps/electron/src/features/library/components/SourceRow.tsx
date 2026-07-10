@@ -10,7 +10,7 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from '@/components/ui/dropdown-menu'
-import { formatDate, formatTime, formatDuration, formatDateTime } from '@/lib/utils'
+import { formatDateTime } from '@/lib/utils'
 import { Meeting, Transcript } from '@/types'
 import { UnifiedRecording, hasLocalPath } from '@/types/unified-recording'
 import { StatusIcon } from './StatusIcon'
@@ -18,6 +18,8 @@ import { TranscriptionStatusBadge } from './TranscriptionStatusBadge'
 import { useLibraryStore } from '@/store/useLibraryStore'
 import { getDisplayTitle } from '@/features/library/utils/getDisplayTitle'
 import { highlightText } from '@/features/library/utils/highlightText'
+import { getRowMeta } from '@/features/library/utils/rowMeta'
+import { sourceTypeLabel } from '@/features/library/utils/sourceType'
 
 interface SourceRowProps {
   recording: UnifiedRecording
@@ -93,15 +95,11 @@ export const SourceRow = memo(function SourceRow({
     onClick?.()
   }
 
-  // Build secondary line: human date + start time + duration. The start time
-  // (previously buried inside the machine filename, e.g. "190246") is now read
-  // straight from the recording's timestamp \u2014 "Wed, Jul 8 \u00B7 7:02 PM \u00B7 44m 40s".
-  const secondaryParts: string[] = []
-  secondaryParts.push(formatDate(recording.dateRecorded))
-  secondaryParts.push(formatTime(recording.dateRecorded))
-  if (recording.duration) {
-    secondaryParts.push(formatDuration(recording.duration))
-  }
+  // Build the secondary line from the type-aware row metadata. Audio keeps
+  // "date \u00B7 time \u00B7 duration"; non-audio artifacts (image/pdf/note) show their
+  // kind + date and never a bogus duration. The leading glyph (TypeIcon) makes
+  // the list scannable by kind.
+  const { Icon: TypeIcon, parts: secondaryParts, type: sourceType } = getRowMeta(recording)
   const secondaryText = secondaryParts.join(' \u00B7 ')
   // Tooltip on the second line surfaces the raw filename when it isn't already
   // the title, so the machine name stays discoverable without cluttering the row.
@@ -181,8 +179,14 @@ export const SourceRow = memo(function SourceRow({
               </TooltipProvider>
             )}
           </div>
-          <p className="text-xs text-muted-foreground truncate leading-tight mt-0.5" title={secondaryTitle}>
-            {searchQuery ? highlightText(secondaryText, searchQuery) : secondaryText}
+          <p className="flex items-center gap-1 text-xs text-muted-foreground truncate leading-tight mt-0.5">
+            <TypeIcon
+              className="h-3 w-3 shrink-0 text-muted-foreground/70"
+              aria-label={`${sourceTypeLabel(sourceType)} source`}
+            />
+            <span className="truncate" title={secondaryTitle}>
+              {searchQuery ? highlightText(secondaryText, searchQuery) : secondaryText}
+            </span>
           </p>
         </div>
       </div>

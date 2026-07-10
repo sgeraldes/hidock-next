@@ -1,12 +1,27 @@
-import { Filter, Cloud, HardDrive, Check, Search, ArrowUpDown, ChevronUp, ChevronDown, Info } from 'lucide-react'
+import {
+  Filter, Cloud, HardDrive, Check, Search, ArrowUpDown, ChevronUp, ChevronDown, Info,
+  LayoutGrid, AudioLines, Image, FileText, StickyNote, Clock, X
+} from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 import {
   FilterMode,
   SemanticLocationFilter,
   ExclusiveLocationFilter
 } from '@/types/unified-recording'
 import type { SortBy, SortOrder } from '@/store/useLibraryStore'
+import type { SourceTypeFilter } from '@/features/library/utils/sourceType'
+import { DURATION_PRESET_LABELS, type DurationPreset } from '@/features/library/utils/durationFilter'
+import type { LucideIcon } from 'lucide-react'
+
+export interface TypeCounts {
+  all: number
+  audio: number
+  image: number
+  pdf: number
+  note: number
+}
 
 interface LibraryFiltersProps {
   stats: {
@@ -17,12 +32,20 @@ interface LibraryFiltersProps {
     onSource: number
     locallyAvailable: number
   }
+  /** Captures matching every filter EXCEPT the list search — the number the search box filters into. */
+  filterableCount: number
+  /** Per source-type counts for the segmented control (respecting the current location scope). */
+  typeCounts: TypeCounts
+  /** Whether ANY capture carries a non-unrated quality — drives the honest Quality control state. */
+  hasRatedQuality: boolean
   filterMode: FilterMode
   semanticFilter: SemanticLocationFilter
   exclusiveFilter: ExclusiveLocationFilter
   categoryFilter: string
   qualityFilter: string
   statusFilter: string
+  sourceTypeFilter: SourceTypeFilter
+  durationPreset: DurationPreset
   searchQuery: string
   sortBy?: SortBy
   sortOrder?: SortOrder
@@ -32,21 +55,39 @@ interface LibraryFiltersProps {
   onCategoryFilterChange: (filter: string) => void
   onQualityFilterChange: (filter: string) => void
   onStatusFilterChange: (filter: string) => void
+  onSourceTypeFilterChange: (filter: SourceTypeFilter) => void
+  onDurationPresetChange: (preset: DurationPreset) => void
   onSearchQueryChange: (query: string) => void
   onSortByChange?: (sortBy: SortBy) => void
   onSortOrderChange?: (order: SortOrder) => void
+  onClearFilters: () => void
 }
 
 const CATEGORIES = ['all', 'meeting', 'interview', '1:1', 'brainstorm', 'note'] as const
 
+const SOURCE_TYPES: Array<{ value: SourceTypeFilter; label: string; Icon: LucideIcon; countKey: keyof TypeCounts }> = [
+  { value: 'all', label: 'All', Icon: LayoutGrid, countKey: 'all' },
+  { value: 'audio', label: 'Audio', Icon: AudioLines, countKey: 'audio' },
+  { value: 'image', label: 'Images', Icon: Image, countKey: 'image' },
+  { value: 'pdf', label: 'PDFs', Icon: FileText, countKey: 'pdf' },
+  { value: 'note', label: 'Notes', Icon: StickyNote, countKey: 'note' }
+]
+
+const DURATION_PRESETS: DurationPreset[] = ['all', 'under10s', 'under1m', 'under5m', 'over5m']
+
 export function LibraryFilters({
   stats,
+  filterableCount,
+  typeCounts,
+  hasRatedQuality,
   filterMode,
   semanticFilter,
   exclusiveFilter,
   categoryFilter,
   qualityFilter,
   statusFilter,
+  sourceTypeFilter,
+  durationPreset,
   searchQuery,
   sortBy,
   sortOrder,
@@ -56,289 +97,320 @@ export function LibraryFilters({
   onCategoryFilterChange,
   onQualityFilterChange,
   onStatusFilterChange,
+  onSourceTypeFilterChange,
+  onDurationPresetChange,
   onSearchQueryChange,
   onSortByChange,
-  onSortOrderChange
+  onSortOrderChange,
+  onClearFilters
 }: LibraryFiltersProps) {
-  // Determine active filter value based on mode
   const activeFilter = filterMode === 'semantic' ? semanticFilter : exclusiveFilter
-  const handleFilterChange =
-    filterMode === 'semantic' ? onSemanticFilterChange : onExclusiveFilterChange
 
-  // Count active filters for the badge
-  const activeFilterCount = [
+  // Count advanced (popover) filters that are active — the source-type control and
+  // the list search live outside the popover and aren't counted here.
+  const advancedActiveCount = [
     activeFilter !== 'all',
     categoryFilter !== 'all',
     qualityFilter !== 'all',
     statusFilter !== 'all',
-    searchQuery.length > 0
+    durationPreset !== 'all'
   ].filter(Boolean).length
 
-  return (
-    <div className="flex flex-col gap-4 mt-4">
-      <div className="flex flex-wrap items-center gap-4">
-        {/* Active filter count badge */}
-        {activeFilterCount > 0 && (
-          <span
-            className="inline-flex items-center px-2 py-0.5 text-xs font-medium rounded-full bg-primary text-primary-foreground"
-            aria-label={`${activeFilterCount} filter${activeFilterCount !== 1 ? 's' : ''} active`}
-          >
-            {activeFilterCount} active
-          </span>
-        )}
-        {/* Location-filter counting mode */}
-        <div className="flex items-center gap-1.5" role="group" aria-label="Location counting mode">
-          <span className="text-xs font-medium text-muted-foreground">Count as:</span>
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Info className="h-3.5 w-3.5 text-muted-foreground cursor-help" aria-label="What is this?" />
-              </TooltipTrigger>
-              <TooltipContent className="max-w-xs">
-                <p><strong>Inclusive:</strong> a synced recording is counted under Device, Locally available, and Synced.</p>
-                <p className="mt-1"><strong>Exclusive:</strong> each recording counts once, under its exact state (Device = not yet downloaded).</p>
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-          <div className="flex gap-1 p-1 bg-muted rounded-lg ml-0.5">
-            <button
-              onClick={() => onFilterModeChange('semantic')}
-              className={`px-2 py-1 text-xs font-medium rounded transition-colors ${
-                filterMode === 'semantic'
-                  ? 'bg-background shadow-sm'
-                  : 'hover:bg-background/50'
-              }`}
-              title="Inclusive — a synced recording is counted under every location it matches"
-              aria-pressed={filterMode === 'semantic'}
-              aria-label="Inclusive counting"
-            >
-              Inclusive
-            </button>
-            <button
-              onClick={() => onFilterModeChange('exclusive')}
-              className={`px-2 py-1 text-xs font-medium rounded transition-colors ${
-                filterMode === 'exclusive'
-                  ? 'bg-background shadow-sm'
-                  : 'hover:bg-background/50'
-              }`}
-              title="Exclusive — each recording counts once, under its exact state (Device = not yet downloaded)"
-              aria-pressed={filterMode === 'exclusive'}
-              aria-label="Exclusive counting"
-            >
-              Exclusive
-            </button>
-          </div>
-        </div>
+  const anyFilterActive =
+    advancedActiveCount > 0 || sourceTypeFilter !== 'all' || searchQuery.length > 0
 
-        {/* Location filter */}
-        <div className="flex items-center gap-2" role="group" aria-label="Location filter">
-          <Filter className="h-4 w-4 text-muted-foreground" />
-          <div className="flex rounded-lg border overflow-hidden" data-testid="location-filter">
+  return (
+    <div className="flex flex-wrap items-center gap-2 sm:gap-3 mt-4">
+      {/* Source-type segmented control — the primary, always-visible filter */}
+      <div
+        className="flex rounded-lg border overflow-hidden"
+        role="group"
+        aria-label="Filter by source type"
+        data-testid="source-type-filter"
+      >
+        {SOURCE_TYPES.map(({ value, label, Icon, countKey }) => {
+          const count = typeCounts[countKey]
+          const active = sourceTypeFilter === value
+          return (
             <button
-              onClick={() => handleFilterChange('all' as SemanticLocationFilter & ExclusiveLocationFilter)}
-              className={`px-3 py-1.5 text-xs font-medium transition-colors ${
-                activeFilter === 'all'
-                  ? 'bg-primary text-primary-foreground'
-                  : 'hover:bg-muted'
-              }`}
-              aria-pressed={activeFilter === 'all'}
-              aria-label="All locations"
+              key={value}
+              onClick={() => onSourceTypeFilterChange(value)}
+              className={`px-2.5 py-1.5 text-xs font-medium transition-colors inline-flex items-center gap-1.5 ${
+                value !== 'all' ? 'border-l' : ''
+              } ${active ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}`}
+              aria-pressed={active}
+              aria-label={`${label} (${count})`}
+              title={`${label} — ${count}`}
             >
-              All ({stats.total})
+              <Icon className="h-3.5 w-3.5" aria-hidden="true" />
+              <span className="hidden @md:inline sm:inline">{label}</span>
+              <span className={`tabular-nums ${active ? 'text-primary-foreground/80' : 'text-muted-foreground'}`}>
+                {count}
+              </span>
             </button>
-            {filterMode === 'semantic' ? (
-              <>
-                <button
-                  onClick={() => onSemanticFilterChange('on-source')}
-                  className={`px-3 py-1.5 text-xs font-medium transition-colors border-l ${
-                    semanticFilter === 'on-source'
-                      ? 'bg-primary text-primary-foreground'
-                      : 'hover:bg-muted'
-                  }`}
-                  aria-pressed={semanticFilter === 'on-source'}
-                  aria-label="On device"
-                >
-                  <Cloud className="h-3 w-3 inline mr-1" />
-                  Device ({stats.onSource})
-                </button>
-                <button
-                  onClick={() => onSemanticFilterChange('locally-available')}
-                  className={`px-3 py-1.5 text-xs font-medium transition-colors border-l ${
-                    semanticFilter === 'locally-available'
-                      ? 'bg-primary text-primary-foreground'
-                      : 'hover:bg-muted'
-                  }`}
-                  aria-pressed={semanticFilter === 'locally-available'}
-                  aria-label="Locally available"
-                >
-                  <HardDrive className="h-3 w-3 inline mr-1" />
-                  Locally Available ({stats.locallyAvailable})
-                </button>
-                <button
-                  onClick={() => onSemanticFilterChange('synced')}
-                  className={`px-3 py-1.5 text-xs font-medium transition-colors border-l ${
-                    semanticFilter === 'synced'
-                      ? 'bg-primary text-primary-foreground'
-                      : 'hover:bg-muted'
-                  }`}
-                  aria-pressed={semanticFilter === 'synced'}
-                  aria-label="Synced to both"
-                >
-                  <Check className="h-3 w-3 inline mr-1" />
-                  Synced ({stats.both})
-                </button>
-              </>
-            ) : (
-              <>
-                <button
-                  onClick={() => onExclusiveFilterChange('source-only')}
-                  className={`px-3 py-1.5 text-xs font-medium transition-colors border-l ${
-                    exclusiveFilter === 'source-only'
-                      ? 'bg-primary text-primary-foreground'
-                      : 'hover:bg-muted'
-                  }`}
-                  aria-pressed={exclusiveFilter === 'source-only'}
-                  aria-label="Device only"
-                >
-                  <Cloud className="h-3 w-3 inline mr-1" />
-                  Device Only ({stats.deviceOnly})
-                </button>
-                <button
-                  onClick={() => onExclusiveFilterChange('local-only')}
-                  className={`px-3 py-1.5 text-xs font-medium transition-colors border-l ${
-                    exclusiveFilter === 'local-only'
-                      ? 'bg-primary text-primary-foreground'
-                      : 'hover:bg-muted'
-                  }`}
-                  aria-pressed={exclusiveFilter === 'local-only'}
-                  aria-label="Local only"
-                >
-                  <HardDrive className="h-3 w-3 inline mr-1" />
-                  Local Only ({stats.localOnly})
-                </button>
-                <button
-                  onClick={() => onExclusiveFilterChange('synced')}
-                  className={`px-3 py-1.5 text-xs font-medium transition-colors border-l ${
-                    exclusiveFilter === 'synced'
-                      ? 'bg-primary text-primary-foreground'
-                      : 'hover:bg-muted'
-                  }`}
-                  aria-pressed={exclusiveFilter === 'synced'}
-                  aria-label="Synced to both"
-                >
-                  <Check className="h-3 w-3 inline mr-1" />
-                  Synced ({stats.both})
-                </button>
-              </>
+          )
+        })}
+      </div>
+
+      {/* List search — clearly scoped to the current captures (distinct from the
+          global top-bar search). Placeholder names the count it filters into. */}
+      <div className="relative flex-1 min-w-[12rem] max-w-md">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" aria-hidden="true" />
+        <Input
+          placeholder={`Filter ${filterableCount} capture${filterableCount === 1 ? '' : 's'} in this list…`}
+          value={searchQuery}
+          onChange={(e) => onSearchQueryChange(e.target.value)}
+          className="pl-9 pr-8 h-8"
+          aria-label="Filter the captures shown in this list"
+        />
+        {searchQuery && (
+          <button
+            onClick={() => onSearchQueryChange('')}
+            className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            aria-label="Clear list filter"
+          >
+            <X className="h-3.5 w-3.5" aria-hidden="true" />
+          </button>
+        )}
+      </div>
+
+      {/* Advanced filters — everything else, hidden behind a popover by default */}
+      <Popover>
+        <PopoverTrigger asChild>
+          <button
+            className="inline-flex items-center gap-1.5 h-8 rounded-md border border-input bg-background px-3 text-xs font-medium hover:bg-muted transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            aria-label="More filters and sorting"
+          >
+            <Filter className="h-3.5 w-3.5" aria-hidden="true" />
+            Filters
+            {advancedActiveCount > 0 && (
+              <span
+                className="ml-0.5 inline-flex items-center justify-center min-w-4 h-4 px-1 rounded-full bg-primary text-primary-foreground text-[10px] font-semibold tabular-nums"
+                aria-label={`${advancedActiveCount} advanced filter${advancedActiveCount === 1 ? '' : 's'} active`}
+              >
+                {advancedActiveCount}
+              </span>
+            )}
+          </button>
+        </PopoverTrigger>
+        <PopoverContent align="end" className="w-80 p-0">
+          <div className="flex items-center justify-between px-4 py-2.5 border-b">
+            <span className="text-sm font-semibold">Filters &amp; sort</span>
+            {anyFilterActive && (
+              <button
+                onClick={onClearFilters}
+                className="text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:underline"
+              >
+                Clear all
+              </button>
             )}
           </div>
-        </div>
 
-        {/* Category filter */}
-        <div className="flex rounded-lg border overflow-hidden" role="group" aria-label="Category filter">
-          {CATEGORIES.map((cat) => (
-            <button
-              key={cat}
-              onClick={() => onCategoryFilterChange(cat)}
-              className={`px-3 py-1.5 text-xs font-medium transition-colors ${
-                cat !== 'all' ? 'border-l' : ''
-              } ${
-                categoryFilter === cat
-                  ? 'bg-primary text-primary-foreground'
-                  : 'hover:bg-muted'
-              }`}
-              aria-pressed={categoryFilter === cat}
-              aria-label={`Filter by ${cat}`}
-            >
-              {cat.charAt(0).toUpperCase() + cat.slice(1)}
-            </button>
-          ))}
-        </div>
+          <div className="max-h-[70vh] overflow-y-auto p-4 space-y-4">
+            {/* Sort */}
+            {onSortByChange && onSortOrderChange && (
+              <section className="space-y-1.5">
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground/70">
+                  <ArrowUpDown className="h-3.5 w-3.5" aria-hidden="true" /> Sort
+                </div>
+                <div className="flex items-center gap-2">
+                  <select
+                    value={sortBy ?? 'date'}
+                    onChange={(e) => onSortByChange(e.target.value as SortBy)}
+                    className="h-8 flex-1 rounded-md border border-input bg-background px-3 py-1 text-xs"
+                    aria-label="Sort by"
+                  >
+                    <option value="date">Date</option>
+                    <option value="name">Name</option>
+                    <option value="duration">Duration</option>
+                    <option value="quality">Quality</option>
+                  </select>
+                  <button
+                    onClick={() => onSortOrderChange(sortOrder === 'asc' ? 'desc' : 'asc')}
+                    className="h-8 px-2 rounded-md border border-input bg-background text-xs font-medium hover:bg-muted transition-colors inline-flex items-center gap-1"
+                    aria-label={`Sort ${sortOrder === 'asc' ? 'ascending' : 'descending'}`}
+                    title={`Currently ${sortOrder === 'asc' ? 'ascending' : 'descending'} — click to toggle`}
+                  >
+                    {sortOrder === 'asc' ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                    {sortOrder === 'asc' ? 'Asc' : 'Desc'}
+                  </button>
+                </div>
+              </section>
+            )}
 
-        {/* Search */}
-        <div className="relative flex-1 max-w-xs">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <Input
-            placeholder="Search captures..."
-            value={searchQuery}
-            onChange={(e) => onSearchQueryChange(e.target.value)}
-            className="pl-9 h-8"
-            aria-label="Search captures"
-          />
-        </div>
-      </div>
+            {/* Duration (audio only) */}
+            <section className="space-y-1.5">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground/70">
+                <Clock className="h-3.5 w-3.5" aria-hidden="true" /> Duration
+                <span className="font-normal text-muted-foreground/70">(audio)</span>
+              </div>
+              <div className="flex flex-wrap gap-1" role="group" aria-label="Filter by duration">
+                {DURATION_PRESETS.map((preset) => (
+                  <button
+                    key={preset}
+                    onClick={() => onDurationPresetChange(preset)}
+                    className={`px-2 py-1 text-xs font-medium rounded border transition-colors ${
+                      durationPreset === preset
+                        ? 'bg-primary text-primary-foreground border-primary'
+                        : 'border-input hover:bg-muted'
+                    }`}
+                    aria-pressed={durationPreset === preset}
+                  >
+                    {DURATION_PRESET_LABELS[preset]}
+                  </button>
+                ))}
+              </div>
+            </section>
 
-      <div className="flex flex-wrap items-center gap-4">
-        {/* Sort Controls */}
-        {onSortByChange && onSortOrderChange && (
-          <div className="flex items-center gap-2">
-            <ArrowUpDown className="h-4 w-4 text-muted-foreground" />
-            <span className="text-xs font-medium text-muted-foreground">Sort:</span>
-            <select
-              value={sortBy ?? 'date'}
-              onChange={(e) => onSortByChange(e.target.value as SortBy)}
-              className="h-8 rounded-md border border-input bg-background px-3 py-1 text-xs"
-              aria-label="Sort by"
-            >
-              <option value="date">Date</option>
-              <option value="name">Name</option>
-              <option value="duration">Duration</option>
-              <option value="quality">Quality</option>
-            </select>
-            <button
-              onClick={() => onSortOrderChange(sortOrder === 'asc' ? 'desc' : 'asc')}
-              className="h-8 px-2 rounded-md border border-input bg-background text-xs font-medium hover:bg-muted transition-colors inline-flex items-center gap-1"
-              aria-label={`Sort ${sortOrder === 'asc' ? 'ascending' : 'descending'}`}
-              title={`Currently ${sortOrder === 'asc' ? 'ascending' : 'descending'} - click to toggle`}
-            >
-              {sortOrder === 'asc' ? (
-                <>
-                  <ChevronUp className="h-3.5 w-3.5" />
-                  Asc
-                </>
-              ) : (
-                <>
-                  <ChevronDown className="h-3.5 w-3.5" />
-                  Desc
-                </>
+            {/* Quality */}
+            <section className="space-y-1.5">
+              <div className="text-xs font-semibold text-foreground/70">Quality</div>
+              <select
+                value={qualityFilter}
+                onChange={(e) => onQualityFilterChange(e.target.value)}
+                className="h-8 w-full rounded-md border border-input bg-background px-3 py-1 text-xs"
+                aria-label="Filter by quality rating"
+              >
+                <option value="all">All ratings</option>
+                <option value="valuable">Valuable</option>
+                <option value="archived">Archived</option>
+                <option value="low-value">Low-value</option>
+                <option value="unrated">Unrated</option>
+              </select>
+              {!hasRatedQuality && (
+                <p className="text-[11px] leading-snug text-muted-foreground">
+                  Nothing is rated yet — everything is currently “Unrated”.
+                </p>
               )}
-            </button>
+            </section>
+
+            {/* Status */}
+            <section className="space-y-1.5">
+              <div className="text-xs font-semibold text-foreground/70">Status</div>
+              <select
+                value={statusFilter}
+                onChange={(e) => onStatusFilterChange(e.target.value)}
+                className="h-8 w-full rounded-md border border-input bg-background px-3 py-1 text-xs"
+                aria-label="Filter by processing status"
+              >
+                <option value="all">All statuses</option>
+                <option value="processing">Processing</option>
+                <option value="ready">Ready</option>
+                <option value="enriched">Enriched</option>
+              </select>
+            </section>
+
+            {/* Category */}
+            <section className="space-y-1.5">
+              <div className="text-xs font-semibold text-foreground/70">Category</div>
+              <div className="flex flex-wrap gap-1" role="group" aria-label="Filter by category">
+                {CATEGORIES.map((cat) => (
+                  <button
+                    key={cat}
+                    onClick={() => onCategoryFilterChange(cat)}
+                    className={`px-2 py-1 text-xs font-medium rounded border transition-colors ${
+                      categoryFilter === cat
+                        ? 'bg-primary text-primary-foreground border-primary'
+                        : 'border-input hover:bg-muted'
+                    }`}
+                    aria-pressed={categoryFilter === cat}
+                  >
+                    {cat.charAt(0).toUpperCase() + cat.slice(1)}
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            {/* Location */}
+            <section className="space-y-1.5">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground/70">
+                Location
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Info className="h-3 w-3 text-muted-foreground cursor-help" aria-label="What is count-as?" />
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-xs">
+                      <p><strong>Inclusive:</strong> a synced recording is counted under Device, Locally available, and Synced.</p>
+                      <p className="mt-1"><strong>Exclusive:</strong> each recording counts once, under its exact state.</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] text-muted-foreground">Count as</span>
+                <div className="flex gap-1 p-0.5 bg-muted rounded-md">
+                  <button
+                    onClick={() => onFilterModeChange('semantic')}
+                    className={`px-2 py-0.5 text-[11px] font-medium rounded transition-colors ${
+                      filterMode === 'semantic' ? 'bg-background shadow-sm' : 'hover:bg-background/50'
+                    }`}
+                    aria-pressed={filterMode === 'semantic'}
+                  >
+                    Inclusive
+                  </button>
+                  <button
+                    onClick={() => onFilterModeChange('exclusive')}
+                    className={`px-2 py-0.5 text-[11px] font-medium rounded transition-colors ${
+                      filterMode === 'exclusive' ? 'bg-background shadow-sm' : 'hover:bg-background/50'
+                    }`}
+                    aria-pressed={filterMode === 'exclusive'}
+                  >
+                    Exclusive
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-1" role="group" aria-label="Location filter" data-testid="location-filter">
+                <LocationButton
+                  active={activeFilter === 'all'}
+                  onClick={() => (filterMode === 'semantic' ? onSemanticFilterChange('all') : onExclusiveFilterChange('all'))}
+                  label={`All (${stats.total})`}
+                />
+                {filterMode === 'semantic' ? (
+                  <>
+                    <LocationButton Icon={Cloud} active={semanticFilter === 'on-source'} onClick={() => onSemanticFilterChange('on-source')} label={`Device (${stats.onSource})`} />
+                    <LocationButton Icon={HardDrive} active={semanticFilter === 'locally-available'} onClick={() => onSemanticFilterChange('locally-available')} label={`Local (${stats.locallyAvailable})`} />
+                    <LocationButton Icon={Check} active={semanticFilter === 'synced'} onClick={() => onSemanticFilterChange('synced')} label={`Synced (${stats.both})`} />
+                  </>
+                ) : (
+                  <>
+                    <LocationButton Icon={Cloud} active={exclusiveFilter === 'source-only'} onClick={() => onExclusiveFilterChange('source-only')} label={`Device only (${stats.deviceOnly})`} />
+                    <LocationButton Icon={HardDrive} active={exclusiveFilter === 'local-only'} onClick={() => onExclusiveFilterChange('local-only')} label={`Local only (${stats.localOnly})`} />
+                    <LocationButton Icon={Check} active={exclusiveFilter === 'synced'} onClick={() => onExclusiveFilterChange('synced')} label={`Synced (${stats.both})`} />
+                  </>
+                )}
+              </div>
+            </section>
           </div>
-        )}
-
-        {/* Quality Filter */}
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-medium text-muted-foreground">Quality:</span>
-          <select
-            value={qualityFilter}
-            onChange={(e) => onQualityFilterChange(e.target.value)}
-            className="h-8 rounded-md border border-input bg-background px-3 py-1 text-xs"
-            aria-label="Filter by quality rating"
-          >
-            <option value="all">All Ratings</option>
-            <option value="valuable">Valuable</option>
-            <option value="archived">Archived</option>
-            <option value="low-value">Low-Value</option>
-            <option value="unrated">Unrated</option>
-          </select>
-        </div>
-
-        {/* Status Filter */}
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-medium text-muted-foreground">Status:</span>
-          <select
-            value={statusFilter}
-            onChange={(e) => onStatusFilterChange(e.target.value)}
-            className="h-8 rounded-md border border-input bg-background px-3 py-1 text-xs"
-            aria-label="Filter by processing status"
-          >
-            <option value="all">All Statuses</option>
-            <option value="processing">Processing</option>
-            <option value="ready">Ready</option>
-            <option value="enriched">Enriched</option>
-          </select>
-        </div>
-      </div>
+        </PopoverContent>
+      </Popover>
     </div>
+  )
+}
+
+function LocationButton({
+  active,
+  onClick,
+  label,
+  Icon
+}: {
+  active: boolean
+  onClick: () => void
+  label: string
+  Icon?: LucideIcon
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`px-2 py-1 text-xs font-medium rounded border transition-colors inline-flex items-center gap-1 ${
+        active ? 'bg-primary text-primary-foreground border-primary' : 'border-input hover:bg-muted'
+      }`}
+      aria-pressed={active}
+    >
+      {Icon && <Icon className="h-3 w-3" aria-hidden="true" />}
+      {label}
+    </button>
   )
 }

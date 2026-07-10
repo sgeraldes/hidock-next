@@ -47,6 +47,9 @@ beforeEach(() => {
   // Reset errors
   store.clearAllErrors()
 
+  // Reset assistant docking + new filters
+  store.setAssistantDock('collapsed')
+
   // Reset panel state
   store.setPanelSizes([25, 45, 30])
   store.setSelectedSourceId(null)
@@ -751,6 +754,61 @@ describe('useLibraryStore', () => {
       setSelectedSourceId(null)
 
       expect(useLibraryStore.getState().selectedSourceId).toBeNull()
+    })
+  })
+
+  describe('Source-type + duration filters', () => {
+    it('defaults to "all" for both', () => {
+      const state = useLibraryStore.getState()
+      expect(state.sourceTypeFilter).toBe('all')
+      expect(state.durationPreset).toBe('all')
+    })
+
+    it('setSourceTypeFilter changes the value', () => {
+      const { setSourceTypeFilter } = useLibraryStore.getState()
+      setSourceTypeFilter('image')
+      expect(useLibraryStore.getState().sourceTypeFilter).toBe('image')
+      setSourceTypeFilter('pdf')
+      expect(useLibraryStore.getState().sourceTypeFilter).toBe('pdf')
+    })
+
+    it('setDurationPreset changes the value', () => {
+      const { setDurationPreset } = useLibraryStore.getState()
+      setDurationPreset('under1m')
+      expect(useLibraryStore.getState().durationPreset).toBe('under1m')
+    })
+
+    it('clearFilters resets source-type and duration to "all"', () => {
+      const state = useLibraryStore.getState()
+      state.setSourceTypeFilter('pdf')
+      state.setDurationPreset('under10s')
+      useLibraryStore.getState().clearFilters()
+      const cleared = useLibraryStore.getState()
+      expect(cleared.sourceTypeFilter).toBe('all')
+      expect(cleared.durationPreset).toBe('all')
+    })
+  })
+
+  describe('Assistant docking (dockable overlay)', () => {
+    it('defaults to collapsed (two-pane layout)', () => {
+      expect(useLibraryStore.getState().assistantDock).toBe('collapsed')
+    })
+
+    it('pins, floats and collapses via setAssistantDock', () => {
+      const { setAssistantDock } = useLibraryStore.getState()
+      setAssistantDock('pinned')
+      expect(useLibraryStore.getState().assistantDock).toBe('pinned')
+      setAssistantDock('floating')
+      expect(useLibraryStore.getState().assistantDock).toBe('floating')
+      setAssistantDock('collapsed')
+      expect(useLibraryStore.getState().assistantDock).toBe('collapsed')
+    })
+
+    it('is a persisted preference (survives clearFilters — not a filter)', () => {
+      const { setAssistantDock, clearFilters } = useLibraryStore.getState()
+      setAssistantDock('pinned')
+      clearFilters()
+      expect(useLibraryStore.getState().assistantDock).toBe('pinned')
     })
   })
 

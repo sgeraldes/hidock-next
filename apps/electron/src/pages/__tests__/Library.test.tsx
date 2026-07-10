@@ -79,6 +79,9 @@ vi.mock('@/store/useLibraryStore', () => ({
       viewMode: 'card',
       sortBy: 'date',
       sortOrder: 'desc',
+      sourceTypeFilter: 'all',
+      durationPreset: 'all',
+      assistantDock: 'collapsed',
       selectedIds: new Set(),
       recordingErrors: new Map(),
       scrollOffset: 0,
@@ -87,6 +90,10 @@ vi.mock('@/store/useLibraryStore', () => ({
       setSortBy: vi.fn(),
       setSortOrder: vi.fn(),
       toggleSortOrder: vi.fn(),
+      setSourceTypeFilter: vi.fn(),
+      setDurationPreset: vi.fn(),
+      setAssistantDock: vi.fn(),
+      clearFilters: vi.fn(),
       setScrollOffset: vi.fn(),
       setRecordingError: vi.fn(),
       clearRecordingError: vi.fn(),
@@ -348,8 +355,10 @@ describe('Library', () => {
   describe('Filters', () => {
     it('renders filter controls', () => {
       renderLibrary()
-      // Search input should be present in LibraryFilters
-      const searchInput = screen.getByPlaceholderText(/search/i)
+      // The list-scoped filter input should be present in LibraryFilters. It is
+      // deliberately labelled "Filter … captures in this list" (not "Search") to
+      // distinguish it from the global top-bar search.
+      const searchInput = screen.getByPlaceholderText(/filter .* captures in this list/i)
       expect(searchInput).toBeInTheDocument()
     })
   })
