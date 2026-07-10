@@ -88,6 +88,23 @@ const marioProvenance = {
   narrative: 'Mario · Jun 1, 2026 · 1 meeting',
   dateMs: DATE,
 }
+const marioDetail = {
+  node: { id: marioNode.id, type: 'person', label: 'Mario', contactId: 'c-mario' },
+  linked: true,
+  contactId: 'c-mario',
+  pronouns: null,
+  role: 'Engineer',
+  company: null,
+  email: null,
+  meetingCount: 1,
+  firstSeenMs: DATE,
+  lastSeenMs: DATE,
+  peopleCount: 0,
+  projectCount: 0,
+  degree: 3,
+  aliases: [],
+  narrative: 'Mario · Jun 1, 2026 · 1 meeting',
+}
 
 function mockAPI(overrides: Record<string, any> = {}) {
   return {
@@ -102,6 +119,7 @@ function mockAPI(overrides: Record<string, any> = {}) {
         .fn()
         .mockResolvedValue({ success: true, data: { id: marioNode.id, type: 'person', label: 'Mario', contactId: 'c-mario' } }),
       provenance: vi.fn().mockResolvedValue({ success: true, data: marioProvenance }),
+      nodeDetail: vi.fn().mockResolvedValue({ success: true, data: marioDetail }),
       ...overrides.contextGraph,
     },
     graph: {
@@ -145,7 +163,7 @@ describe('ContextGraph page — lens first', () => {
     )
   })
 
-  it('clicking a node opens a provenance panel with narrative + click-through', async () => {
+  it('clicking a node opens the inspector with identity, narrative + click-through', async () => {
     render(
       <MemoryRouter>
         <ContextGraph />
@@ -154,11 +172,14 @@ describe('ContextGraph page — lens first', () => {
     const marioBtn = await screen.findByText('node-Mario')
     fireEvent.click(marioBtn)
 
-    // Provenance derived for the clicked node.
+    // The inspector loads the clicked node's detail + provenance.
+    await waitFor(() => expect(window.electronAPI.contextGraph.nodeDetail).toHaveBeenCalledWith(marioNode.id))
     await waitFor(() => expect(window.electronAPI.contextGraph.provenance).toHaveBeenCalledWith(marioNode.id))
-    // Narrative + click-through appear.
+    // Discoverability + narrative appear.
+    expect(await screen.findByText('Linked contact')).toBeInTheDocument()
     expect(await screen.findByText(/why this is here/i)).toBeInTheDocument()
-    const openBtn = await screen.findByRole('button', { name: /open person page/i })
+    // Click-through to the person page.
+    const openBtn = await screen.findByRole('button', { name: /open page/i })
     fireEvent.click(openBtn)
     expect(mockNavigate).toHaveBeenCalledWith('/person/c-mario')
   })

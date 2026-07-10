@@ -24,6 +24,12 @@ import {
   lensGraph,
   pickDefaultCenter,
   provenance,
+  renameNode,
+  mergeNodes,
+  mergeBlastRadius,
+  deleteNode,
+  setNodeProps,
+  nodeGraphStats,
   DEFAULT_OVERVIEW_NODE_LIMIT,
 } from '@hidock/knowledge-graph'
 import type {
@@ -42,7 +48,20 @@ import type {
 import { complete } from '@hidock/ai-providers'
 import type { ProviderConfig } from '@hidock/ai-providers'
 import { getConfig } from './config'
-import { run, queryAll, queryOne, getContactById } from './database'
+import {
+  run,
+  queryAll,
+  queryOne,
+  getContactById,
+  getContactByName,
+  createContact,
+  updateContact,
+  upsertContactAlias,
+  getContactAliases,
+  mergeContacts,
+  getMergeImpact,
+} from './database'
+import { getEventBus } from './event-bus'
 import { resolveContact } from './entity-resolver'
 
 // ---------------------------------------------------------------------------
@@ -808,4 +827,389 @@ export function queryProvenance(entityId: string): ProvenanceDTO {
     narrative: prov.narrative,
     dateMs: prov.dateMs,
   }
+}
+
+// ===========================================================================
+// Node editing — rename-as-correction, convert/link to a contact, merge, remove
+//
+// The Context Graph's editing affordances. Graph surgery is delegated to the
+// package's mutations; identity policy (routing a linked-person rename through
+// the contact record, binding at the resolver's sovereign 'manual' tier, reusing
+// the contacts merge journal) lives HERE and reuses the existing identity
+// platform (entity-resolver / contact aliases / contacts merge) rather than
+// duplicating it.
+// ===========================================================================
+
+/** The contact id a person node is bound to: explicit prop, or its `contact:<id>` key. */
+function contactIdOfNode(node: GraphNode): string | null {
+  const props = parseProps(node.props)
+  if (typeof props.contactId === 'string' && props.contactId) return props.contactId
+  if (node.type === 'person' && node.norm_key.startsWith('contact:')) {
+    return node.norm_key.slice('contact:'.length)
+  }
+  return null
+}
+
+/** Detail DTO for the node inspector — what a bare label cannot show. */
+export interface NodeDetailDTO {
+  node: LensCenter | null
+  /** True when this person node is bound to a real, saved contact. */
+  linked: boolean
+  contactId: string | null
+  /** Preferred pronouns (from the node's props), when set. */
+  pronouns: string | null
+  role: string | null
+  company: string | null
+  email: string | null
+  meetingCount: number
+  firstSeenMs: number | null
+  lastSeenMs: number | null
+  peopleCount: number
+  projectCount: number
+  degree: number
+  /** Known spellings folded onto this identity (contact aliases). */
+  aliases: string[]
+  /** One-line provenance narrative — where this entity comes from. */
+  narrative: string
+}
+
+/**
+ * Everything the inspector needs to answer "what IS this node?": identity
+ * (linked contact vs. raw extracted name), the contact's role/org/email + known
+ * aliases when linked, pronouns, graph-derived stats (meetings, first/last seen,
+ * neighborhood), and the provenance narrative. Accepts any id form.
+ */
+export function getNodeDetail(entityId: string): NodeDetailDTO {
+  const store = getKnowledgeGraphStore()
+  const empty: NodeDetailDTO = {
+    node: null,
+    linked: false,
+    contactId: null,
+    pronouns: null,
+    role: null,
+    company: null,
+    email: null,
+    meetingCount: 0,
+    firstSeenMs: null,
+    lastSeenMs: null,
+    peopleCount: 0,
+    projectCount: 0,
+    degree: 0,
+    aliases: [],
+    narrative: '',
+  }
+  const nodeId = resolveEntityToNodeId(entityId)
+  if (!nodeId) return empty
+  const node = store.getNode(nodeId)
+  if (!node) return empty
+
+  const projects = projectNameIndex()
+  const dto = nodeToDTO({ ...node, degree: 0 }, projects)
+  const props = parseProps(node.props)
+  const pronouns = typeof props.pronouns === 'string' && props.pronouns ? props.pronouns : null
+
+  const contactId = contactIdOfNode(node)
+  let role: string | null = null
+  let company: string | null = null
+  let email: string | null = null
+  let aliases: string[] = []
+  const linked = node.type === 'person' && !!contactId
+  if (contactId) {
+    const contact = getContactById(contactId)
+    if (contact) {
+      role = contact.role
+      company = contact.company
+      email = contact.email
+      dto.contactId = contactId
+    }
+    try {
+      aliases = getContactAliases(contactId)
+        .filter((a) => a.source !== 'rejected')
+        .map((a) => a.alias)
+    } catch {
+      aliases = []
+    }
+  }
+
+  const stats = nodeGraphStats(store, nodeId)
+  let narrative = ''
+  try {
+    narrative = provenance(store, nodeId).narrative
+  } catch {
+    narrative = ''
+  }
+
+  return {
+    node: { id: dto.id, type: dto.type, label: dto.label, contactId: dto.contactId, meetingId: dto.meetingId, projectId: dto.projectId },
+    linked,
+    contactId: contactId ?? null,
+    pronouns,
+    role,
+    company,
+    email,
+    meetingCount: stats.meetingCount,
+    firstSeenMs: stats.firstSeenMs,
+    lastSeenMs: stats.lastSeenMs,
+    peopleCount: stats.peopleCount,
+    projectCount: stats.projectCount,
+    degree: stats.degree,
+    aliases,
+    narrative,
+  }
+}
+
+export interface RenameEntityResult {
+  outcome: 'noop' | 'renamed' | 'merged'
+  /** 'contact' when the rename propagated through the contact record app-wide;
+   *  'graph' when it was a graph-only correction of a name-only node. */
+  scope: 'contact' | 'graph'
+  nodeId: string | null
+}
+
+/**
+ * Correct an entity's name (Jiarabi → Yaraví). NOT an alias — a canonical rename.
+ * A linked person is renamed through its CONTACT record (updateContact + the
+ * entity:contact-changed event), so the correction propagates everywhere the app
+ * uses that contact. A name-only node is corrected directly in the graph (rename,
+ * or fold into an existing node already under the correct spelling).
+ */
+export function renameGraphEntity(entityId: string, newLabel: string): RenameEntityResult {
+  const store = getKnowledgeGraphStore()
+  const label = (newLabel || '').trim()
+  const nodeId = resolveEntityToNodeId(entityId)
+  if (!nodeId || !label) return { outcome: 'noop', scope: 'graph', nodeId: nodeId ?? null }
+  const node = store.getNode(nodeId)
+  if (!node) return { outcome: 'noop', scope: 'graph', nodeId: null }
+
+  const contactId = contactIdOfNode(node)
+  if (node.type === 'person' && contactId) {
+    const contact = getContactById(contactId)
+    if (contact) {
+      const oldName = contact.name
+      if (normalizeGraphLabel(oldName) === normalizeGraphLabel(label)) {
+        return { outcome: 'noop', scope: 'contact', nodeId }
+      }
+      updateContact(contactId, { name: label })
+      // The contact-keyed graph node's label is display-only (its key stays
+      // contact:<id>); refresh it in place so the graph shows the correction now.
+      run('UPDATE graph_nodes SET label = ?, updated_at = ? WHERE id = ?', [
+        label,
+        new Date().toISOString(),
+        nodeId,
+      ])
+      try {
+        getEventBus().emitDomainEvent({
+          type: 'entity:contact-changed',
+          timestamp: new Date().toISOString(),
+          payload: { contactId, change: 'updated', oldName, newName: label },
+        })
+      } catch (e) {
+        console.warn('[knowledge-graph] rename contact-changed emit failed:', e)
+      }
+      return { outcome: 'renamed', scope: 'contact', nodeId }
+    }
+  }
+
+  const res = renameNode(store, nodeId, label)
+  return { outcome: res.outcome, scope: 'graph', nodeId: res.nodeId }
+}
+
+/** normalizeName lives app-side; a local copy matching the graph key rule. */
+function normalizeGraphLabel(label: string): string {
+  return (label || '').toLowerCase().trim().replace(/\s+/g, ' ')
+}
+
+/**
+ * Bind a graph node to a contact at the resolver's sovereign 'manual' tier: write
+ * a manual alias (so future extractions of this spelling resolve to the contact)
+ * and re-key the node onto the contact identity — folding it into an existing
+ * contact-keyed node when one already exists.
+ */
+function bindNodeToContact(nodeId: string, contactId: string): { outcome: 'linked' | 'merged'; nodeId: string } {
+  const store = getKnowledgeGraphStore()
+  const node = store.getNode(nodeId)
+  if (!node) return { outcome: 'linked', nodeId }
+  const canonicalName = getContactById(contactId)?.name ?? node.label
+
+  // Sovereign manual bind so the resolver links this spelling from now on.
+  try {
+    upsertContactAlias(contactId, node.label, 'manual', 1.0)
+  } catch (e) {
+    console.warn('[knowledge-graph] manual alias write failed:', e)
+  }
+
+  const contactKey = `contact:${contactId}`
+  const keeper = queryOne<{ id: string }>(
+    "SELECT id FROM graph_nodes WHERE type = 'person' AND norm_key = ?",
+    [contactKey]
+  )
+  const now = new Date().toISOString()
+
+  if (keeper && keeper.id !== nodeId) {
+    mergeNodes(store, keeper.id, nodeId)
+    run('UPDATE graph_nodes SET label = ?, updated_at = ? WHERE id = ?', [canonicalName, now, keeper.id])
+    setNodeProps(store, keeper.id, { contactId })
+    return { outcome: 'merged', nodeId: keeper.id }
+  }
+
+  run('UPDATE graph_nodes SET norm_key = ?, label = ?, updated_at = ? WHERE id = ?', [
+    contactKey,
+    canonicalName,
+    now,
+    nodeId,
+  ])
+  setNodeProps(store, nodeId, { contactId })
+  return { outcome: 'linked', nodeId }
+}
+
+export interface LinkContactResult {
+  contactId: string
+  outcome: 'linked' | 'merged'
+  nodeId: string
+  /** True when an existing contact was reused instead of a new one being created. */
+  reusedExisting?: boolean
+}
+
+/**
+ * "This node IS person X." Bind an extracted person node to an existing contact
+ * (manual/sovereign tier). Reuses the contacts identity platform — no new store.
+ */
+export function linkNodeToContact(entityId: string, contactId: string): LinkContactResult {
+  const nodeId = resolveEntityToNodeId(entityId)
+  if (!nodeId) throw new Error('Node not found')
+  const contact = getContactById(contactId)
+  if (!contact) throw new Error('Contact not found')
+  const r = bindNodeToContact(nodeId, contactId)
+  return { contactId, outcome: r.outcome, nodeId: r.nodeId }
+}
+
+/**
+ * Convert a name-only person node into a real contact: create the contact (or
+ * reuse an exact-name match), then bind the node at the sovereign manual tier.
+ * This is the fix for "there is no contact behind Jiarabi today."
+ */
+export function convertNodeToContact(
+  entityId: string,
+  opts?: { role?: string | null; company?: string | null; email?: string | null }
+): LinkContactResult {
+  const store = getKnowledgeGraphStore()
+  const nodeId = resolveEntityToNodeId(entityId)
+  if (!nodeId) throw new Error('Node not found')
+  const node = store.getNode(nodeId)
+  if (!node) throw new Error('Node not found')
+  if (node.type !== 'person') throw new Error('Only person nodes can become contacts')
+
+  const existingContactId = contactIdOfNode(node)
+  if (existingContactId && getContactById(existingContactId)) {
+    // Already a contact — nothing to create; treat as a no-op link.
+    return { contactId: existingContactId, outcome: 'linked', nodeId, reusedExisting: true }
+  }
+
+  // Reuse an exact-name contact rather than minting a twin.
+  const existing = getContactByName(node.label)
+  if (existing) {
+    const r = bindNodeToContact(nodeId, existing.id)
+    return { contactId: existing.id, outcome: r.outcome, nodeId: r.nodeId, reusedExisting: true }
+  }
+
+  // contacts.type is CHECK-constrained: team|candidate|customer|external|unknown.
+  // An extracted person is an 'external' contact.
+  const contact = createContact({
+    name: node.label,
+    type: 'external',
+    role: opts?.role ?? null,
+    company: opts?.company ?? null,
+    email: opts?.email ?? null,
+  })
+  const r = bindNodeToContact(nodeId, contact.id)
+  return { contactId: contact.id, outcome: r.outcome, nodeId: r.nodeId, reusedExisting: false }
+}
+
+/** Set (or clear, with '') a person node's pronouns. Stored on the node props. */
+export function setNodePronouns(entityId: string, pronouns: string): boolean {
+  const store = getKnowledgeGraphStore()
+  const nodeId = resolveEntityToNodeId(entityId)
+  if (!nodeId) return false
+  const value = (pronouns || '').trim()
+  return setNodeProps(store, nodeId, { pronouns: value ? value : null })
+}
+
+export interface MergePreviewDTO {
+  a: { id: string; label: string; type: string; edges: number } | null
+  b: { id: string; label: string; type: string; edges: number } | null
+  shared: number
+  resulting: number
+  /** True when BOTH nodes are linked contacts — the merge folds contacts (undoable). */
+  contactMerge: boolean
+  /** Contact link counts for a contact-merge, so the UI can gate a heavy merge. */
+  contactImpact?: { keeper: number; loser: number }
+}
+
+/** Preview merging two nodes: the blast radius (what collapses) BEFORE committing. */
+export function mergeGraphPreview(keeperEntityId: string, loserEntityId: string): MergePreviewDTO {
+  const store = getKnowledgeGraphStore()
+  const keeperId = resolveEntityToNodeId(keeperEntityId)
+  const loserId = resolveEntityToNodeId(loserEntityId)
+  if (!keeperId || !loserId) {
+    return { a: null, b: null, shared: 0, resulting: 0, contactMerge: false }
+  }
+  const blast = mergeBlastRadius(store, keeperId, loserId)
+  const keeperNode = store.getNode(keeperId)
+  const loserNode = store.getNode(loserId)
+  const keeperContact = keeperNode ? contactIdOfNode(keeperNode) : null
+  const loserContact = loserNode ? contactIdOfNode(loserNode) : null
+  const contactMerge = !!keeperContact && !!loserContact && keeperContact !== loserContact
+  let contactImpact: { keeper: number; loser: number } | undefined
+  if (contactMerge && keeperContact && loserContact) {
+    try {
+      contactImpact = getMergeImpact('contact', keeperContact, loserContact)
+    } catch {
+      contactImpact = undefined
+    }
+  }
+  return { a: blast.a, b: blast.b, shared: blast.shared, resulting: blast.resulting, contactMerge, contactImpact }
+}
+
+export interface MergeNodesResultDTO {
+  keeperId: string
+  movedEdges: number
+  /** 'contact' when the underlying contacts were merged (journaled, undoable);
+   *  'graph' when only the graph nodes were folded. */
+  path: 'contact' | 'graph'
+}
+
+/**
+ * Merge the LOSER node into the KEEPER. When both are linked contacts, the
+ * contacts are merged through the existing journaled contacts flow (undoable),
+ * then their graph nodes are folded. Otherwise the graph nodes are folded directly.
+ */
+export function mergeGraphNodes(keeperEntityId: string, loserEntityId: string): MergeNodesResultDTO {
+  const store = getKnowledgeGraphStore()
+  const keeperId = resolveEntityToNodeId(keeperEntityId)
+  const loserId = resolveEntityToNodeId(loserEntityId)
+  if (!keeperId || !loserId) throw new Error('Node not found')
+  if (keeperId === loserId) throw new Error('Cannot merge a node into itself')
+
+  const keeperNode = store.getNode(keeperId)
+  const loserNode = store.getNode(loserId)
+  const keeperContact = keeperNode ? contactIdOfNode(keeperNode) : null
+  const loserContact = loserNode ? contactIdOfNode(loserNode) : null
+
+  if (keeperContact && loserContact && keeperContact !== loserContact) {
+    // Real, journaled contacts merge (undoable) — then fold the graph nodes.
+    mergeContacts(keeperContact, loserContact)
+    const r = mergeNodes(store, keeperId, loserId)
+    return { keeperId: r.keeperId, movedEdges: r.movedEdges, path: 'contact' }
+  }
+
+  const r = mergeNodes(store, keeperId, loserId)
+  return { keeperId: r.keeperId, movedEdges: r.movedEdges, path: 'graph' }
+}
+
+/** Remove a junk node from the graph (and its edges). Idempotent. */
+export function deleteGraphNode(entityId: string): { removed: boolean; removedEdges: number } {
+  const store = getKnowledgeGraphStore()
+  const nodeId = resolveEntityToNodeId(entityId)
+  if (!nodeId) return { removed: false, removedEdges: 0 }
+  return deleteNode(store, nodeId)
 }

@@ -31,6 +31,14 @@ import {
   queryLens,
   pickLensCenter,
   queryProvenance,
+  getNodeDetail,
+  renameGraphEntity,
+  convertNodeToContact,
+  linkNodeToContact,
+  setNodePronouns,
+  mergeGraphPreview,
+  mergeGraphNodes,
+  deleteGraphNode,
 } from '../services/knowledge-graph-service'
 import { getContactByName } from '../services/database'
 
@@ -252,6 +260,137 @@ export function registerKnowledgeGraphHandlers(): void {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       console.error('[contextGraph:provenance] Error:', e)
+      return { success: false, error: msg }
+    }
+  })
+
+  // -------------------------------------------------------------------------
+  // Node editing — discoverability + rename/convert/link/merge/remove
+  // -------------------------------------------------------------------------
+
+  // Rich detail for the node inspector: identity (linked vs. extracted), contact
+  // facts + aliases, graph stats, and the provenance narrative.
+  ipcMain.handle('contextGraph:nodeDetail', async (_event, entityId: unknown) => {
+    try {
+      if (!entityId || typeof entityId !== 'string') {
+        return { success: false, error: 'entityId must be a non-empty string' }
+      }
+      return { success: true, data: getNodeDetail(entityId) }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('[contextGraph:nodeDetail] Error:', e)
+      return { success: false, error: msg }
+    }
+  })
+
+  // Correct an entity's name (canonical rename, not an alias). Propagates through
+  // the contact record when linked; graph-only for a name-only node.
+  ipcMain.handle('contextGraph:rename', async (_event, entityId: unknown, newLabel: unknown) => {
+    try {
+      if (!entityId || typeof entityId !== 'string') {
+        return { success: false, error: 'entityId must be a non-empty string' }
+      }
+      if (!newLabel || typeof newLabel !== 'string' || !newLabel.trim()) {
+        return { success: false, error: 'newLabel must be a non-empty string' }
+      }
+      return { success: true, data: renameGraphEntity(entityId, newLabel) }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('[contextGraph:rename] Error:', e)
+      return { success: false, error: msg }
+    }
+  })
+
+  // Turn a name-only person node into a real contact (or reuse an exact match),
+  // binding it at the resolver's sovereign manual tier.
+  ipcMain.handle('contextGraph:convertToContact', async (_event, entityId: unknown, opts?: unknown) => {
+    try {
+      if (!entityId || typeof entityId !== 'string') {
+        return { success: false, error: 'entityId must be a non-empty string' }
+      }
+      const o = (opts && typeof opts === 'object' ? opts : {}) as {
+        role?: string | null
+        company?: string | null
+        email?: string | null
+      }
+      return { success: true, data: convertNodeToContact(entityId, o) }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('[contextGraph:convertToContact] Error:', e)
+      return { success: false, error: msg }
+    }
+  })
+
+  // "This node IS person X" — bind an extracted node to an existing contact.
+  ipcMain.handle('contextGraph:linkContact', async (_event, entityId: unknown, contactId: unknown) => {
+    try {
+      if (!entityId || typeof entityId !== 'string') {
+        return { success: false, error: 'entityId must be a non-empty string' }
+      }
+      if (!contactId || typeof contactId !== 'string') {
+        return { success: false, error: 'contactId must be a non-empty string' }
+      }
+      return { success: true, data: linkNodeToContact(entityId, contactId) }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('[contextGraph:linkContact] Error:', e)
+      return { success: false, error: msg }
+    }
+  })
+
+  // Set (or clear) a person node's pronouns.
+  ipcMain.handle('contextGraph:setPronouns', async (_event, entityId: unknown, pronouns: unknown) => {
+    try {
+      if (!entityId || typeof entityId !== 'string') {
+        return { success: false, error: 'entityId must be a non-empty string' }
+      }
+      const p = typeof pronouns === 'string' ? pronouns : ''
+      return { success: true, data: setNodePronouns(entityId, p) }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('[contextGraph:setPronouns] Error:', e)
+      return { success: false, error: msg }
+    }
+  })
+
+  // Preview a two-node merge (blast radius) before committing.
+  ipcMain.handle('contextGraph:mergePreview', async (_event, keeperId: unknown, loserId: unknown) => {
+    try {
+      if (!keeperId || typeof keeperId !== 'string' || !loserId || typeof loserId !== 'string') {
+        return { success: false, error: 'keeperId and loserId must be non-empty strings' }
+      }
+      return { success: true, data: mergeGraphPreview(keeperId, loserId) }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('[contextGraph:mergePreview] Error:', e)
+      return { success: false, error: msg }
+    }
+  })
+
+  // Commit a two-node merge (loser folded into keeper; contacts merge when both linked).
+  ipcMain.handle('contextGraph:mergeNodes', async (_event, keeperId: unknown, loserId: unknown) => {
+    try {
+      if (!keeperId || typeof keeperId !== 'string' || !loserId || typeof loserId !== 'string') {
+        return { success: false, error: 'keeperId and loserId must be non-empty strings' }
+      }
+      return { success: true, data: mergeGraphNodes(keeperId, loserId) }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('[contextGraph:mergeNodes] Error:', e)
+      return { success: false, error: msg }
+    }
+  })
+
+  // Remove a junk node (and its edges) from the graph.
+  ipcMain.handle('contextGraph:deleteNode', async (_event, entityId: unknown) => {
+    try {
+      if (!entityId || typeof entityId !== 'string') {
+        return { success: false, error: 'entityId must be a non-empty string' }
+      }
+      return { success: true, data: deleteGraphNode(entityId) }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('[contextGraph:deleteNode] Error:', e)
       return { success: false, error: msg }
     }
   })

@@ -56,3 +56,20 @@ export type {
   Provenance,
   ProvenanceEntity,
 } from './queries.js'
+
+export {
+  renameNode,
+  mergeNodes,
+  mergeBlastRadius,
+  deleteNode,
+  setNodeProps,
+  nodeGraphStats,
+} from './mutations.js'
+export type {
+  RenameNodeResult,
+  MergeNodesResult,
+  NodeBlast,
+  MergeBlastRadius,
+  DeleteNodeResult,
+  NodeGraphStats,
+} from './mutations.js'

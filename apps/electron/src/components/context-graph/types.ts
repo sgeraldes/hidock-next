@@ -79,3 +79,35 @@ export interface Provenance {
   narrative: string
   dateMs: number | null
 }
+
+/** Rich node detail for the inspector — what a bare label CANNOT show. */
+export interface NodeDetail {
+  node: LensCenter | null
+  /** True when this person node is bound to a real, saved contact. */
+  linked: boolean
+  contactId: string | null
+  pronouns: string | null
+  role: string | null
+  company: string | null
+  email: string | null
+  meetingCount: number
+  firstSeenMs: number | null
+  lastSeenMs: number | null
+  peopleCount: number
+  projectCount: number
+  degree: number
+  /** Known spellings folded onto this identity (contact aliases). */
+  aliases: string[]
+  narrative: string
+}
+
+/** Blast-radius preview for a two-node merge. */
+export interface MergePreview {
+  a: { id: string; label: string; type: string; edges: number } | null
+  b: { id: string; label: string; type: string; edges: number } | null
+  shared: number
+  resulting: number
+  /** True when both nodes are linked contacts (folds contacts, undoable). */
+  contactMerge: boolean
+  contactImpact?: { keeper: number; loser: number }
+}

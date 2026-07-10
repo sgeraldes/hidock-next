@@ -151,6 +151,35 @@ interface ProvenanceDTO {
   dateMs: number | null
 }
 
+/** Rich detail for the node inspector — identity, contact facts, graph stats. */
+interface NodeDetailDTO {
+  node: LensCenter | null
+  linked: boolean
+  contactId: string | null
+  pronouns: string | null
+  role: string | null
+  company: string | null
+  email: string | null
+  meetingCount: number
+  firstSeenMs: number | null
+  lastSeenMs: number | null
+  peopleCount: number
+  projectCount: number
+  degree: number
+  aliases: string[]
+  narrative: string
+}
+
+/** Blast-radius preview for a two-node merge. */
+interface MergePreviewDTO {
+  a: { id: string; label: string; type: string; edges: number } | null
+  b: { id: string; label: string; type: string; edges: number } | null
+  shared: number
+  resulting: number
+  contactMerge: boolean
+  contactImpact?: { keeper: number; loser: number }
+}
+
 /** Project issue / risk / note (v29). */
 interface ProjectNote {
   id: string
@@ -809,6 +838,52 @@ export interface ElectronAPI {
     provenance: (
       entityId: string
     ) => Promise<{ success: boolean; data?: ProvenanceDTO; error?: string }>
+    nodeDetail: (
+      entityId: string
+    ) => Promise<{ success: boolean; data?: NodeDetailDTO; error?: string }>
+    rename: (
+      entityId: string,
+      newLabel: string
+    ) => Promise<{
+      success: boolean
+      data?: { outcome: 'noop' | 'renamed' | 'merged'; scope: 'contact' | 'graph'; nodeId: string | null }
+      error?: string
+    }>
+    convertToContact: (
+      entityId: string,
+      opts?: { role?: string | null; company?: string | null; email?: string | null }
+    ) => Promise<{
+      success: boolean
+      data?: { contactId: string; outcome: 'linked' | 'merged'; nodeId: string; reusedExisting?: boolean }
+      error?: string
+    }>
+    linkContact: (
+      entityId: string,
+      contactId: string
+    ) => Promise<{
+      success: boolean
+      data?: { contactId: string; outcome: 'linked' | 'merged'; nodeId: string; reusedExisting?: boolean }
+      error?: string
+    }>
+    setPronouns: (
+      entityId: string,
+      pronouns: string
+    ) => Promise<{ success: boolean; data?: boolean; error?: string }>
+    mergePreview: (
+      keeperId: string,
+      loserId: string
+    ) => Promise<{ success: boolean; data?: MergePreviewDTO; error?: string }>
+    mergeNodes: (
+      keeperId: string,
+      loserId: string
+    ) => Promise<{
+      success: boolean
+      data?: { keeperId: string; movedEdges: number; path: 'contact' | 'graph' }
+      error?: string
+    }>
+    deleteNode: (
+      entityId: string
+    ) => Promise<{ success: boolean; data?: { removed: boolean; removedEdges: number }; error?: string }>
   }
 
   // Identity suggestions (Round 4a) — the resolver's 0.5–0.8 review queue
@@ -1422,6 +1497,21 @@ const electronAPI: ElectronAPI = {
     defaultCenter: (ownerContactId?: string | null) =>
       callIPC('contextGraph:defaultCenter', ownerContactId),
     provenance: (entityId: string) => callIPC('contextGraph:provenance', entityId),
+    nodeDetail: (entityId: string) => callIPC('contextGraph:nodeDetail', entityId),
+    rename: (entityId: string, newLabel: string) => callIPC('contextGraph:rename', entityId, newLabel),
+    convertToContact: (
+      entityId: string,
+      opts?: { role?: string | null; company?: string | null; email?: string | null }
+    ) => callIPC('contextGraph:convertToContact', entityId, opts),
+    linkContact: (entityId: string, contactId: string) =>
+      callIPC('contextGraph:linkContact', entityId, contactId),
+    setPronouns: (entityId: string, pronouns: string) =>
+      callIPC('contextGraph:setPronouns', entityId, pronouns),
+    mergePreview: (keeperId: string, loserId: string) =>
+      callIPC('contextGraph:mergePreview', keeperId, loserId),
+    mergeNodes: (keeperId: string, loserId: string) =>
+      callIPC('contextGraph:mergeNodes', keeperId, loserId),
+    deleteNode: (entityId: string) => callIPC('contextGraph:deleteNode', entityId),
   },
 
   // Identity suggestions (Round 4a)

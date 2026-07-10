@@ -36,7 +36,7 @@ import { LensPicker, type LensSelection, type LensSearchHit } from '@/components
 // Canvases are heavy (force-graph + canvas) — keep them out of the initial chunk.
 const StratifiedLensCanvas = lazy(() => import('@/components/context-graph/StratifiedLensCanvas'))
 const ContextGraphCanvas = lazy(() => import('@/components/context-graph/ContextGraphCanvas'))
-const ProvenancePanel = lazy(() => import('@/components/context-graph/ProvenancePanel'))
+const NodeInspector = lazy(() => import('@/components/context-graph/NodeInspector'))
 
 interface GraphStats {
   nodes: number
@@ -51,8 +51,6 @@ const EMPTY_LENS: ContextLensData = { center: null, nodes: [], edges: [], refere
 const OVERVIEW_BASE_LIMIT = 150
 const OVERVIEW_MAX_LIMIT = 2000
 const OVERVIEW_STEP = 3
-
-const NAVIGABLE = new Set(['person', 'meeting', 'project'])
 
 function usePrefersReducedMotion(): boolean {
   const [reduced, setReduced] = useState(false)
@@ -200,15 +198,12 @@ export function ContextGraph() {
     if (tab === 'lens' && !loading) loadLens()
   }, [tab, loading, loadLens])
 
-  // ---- Provenance on selection --------------------------------------------
-  const selectNode = useCallback(async (node: ContextLensNode | ProvenanceEntity) => {
+  // ---- Selection -----------------------------------------------------------
+  // Selecting a node opens the inspector; the inspector itself loads the node's
+  // detail + provenance and reports the provenance back (for the evidence-path
+  // highlight), so there's a single fetch path.
+  const selectNode = useCallback((node: ContextLensNode | ProvenanceEntity) => {
     setSelectedId(node.id)
-    try {
-      const res = await window.electronAPI.contextGraph.provenance(node.id)
-      if (res.success && res.data) setProvenance(res.data)
-    } catch {
-      setProvenance(null)
-    }
   }, [])
 
   const clearSelection = useCallback(() => {
@@ -288,6 +283,45 @@ export function ContextGraph() {
     if (tab === 'lens') await loadLens()
   }, [loadStatsAndCenter, loadLens, tab])
 
+  // Reload counts + the active view WITHOUT resetting the chosen perspective —
+  // used after a node edit (rename / convert / merge / remove).
+  const refreshGraphData = useCallback(async () => {
+    try {
+      const statsRes = await window.electronAPI.graph.stats()
+      if (statsRes.success && statsRes.data) setStats(statsRes.data)
+    } catch {
+      /* stats are non-critical here */
+    }
+    if (tab === 'lens') {
+      await loadLens()
+    } else {
+      try {
+        const res = await window.electronAPI.contextGraph.getGraph(overviewLimit)
+        if (res.success && res.data) setOverview(res.data)
+      } catch {
+        /* handled by stats error */
+      }
+    }
+  }, [tab, loadLens, overviewLimit])
+
+  // After a node edit, refresh data and reconcile the selection: clear it on
+  // delete, or follow the surviving keeper on rename/convert/merge.
+  const handleNodeChanged = useCallback(
+    async (info: { keeperId?: string | null; removed?: boolean }) => {
+      await refreshGraphData()
+      if (info.removed) {
+        setSelectedId(null)
+        setProvenance(null)
+        setAtlasSelected(null)
+        setAtlasFocus(null)
+        setAtlasHighlight(new Set())
+      } else if (info.keeperId) {
+        setSelectedId(info.keeperId)
+      }
+    },
+    [refreshGraphData]
+  )
+
   const handleIngest = async () => {
     setIngestLoading(true)
     try {
@@ -362,11 +396,12 @@ export function ContextGraph() {
   }, [tab, loadOverview])
 
   const atlasFocusEntity = useCallback(async (node: ContextGraphNode) => {
+    setAtlasSelected(node)
+    setSelectedId(node.id) // open the inspector on it too
     try {
       const res = await window.electronAPI.contextGraph.getNeighborhood(node.id, 1)
       if (res.success && res.data && res.data.nodes.length > 0) {
         setAtlasFocus(res.data)
-        setAtlasSelected(node)
         setAtlasHighlight(new Set(res.data.nodes.map((n) => n.id)))
       } else {
         toast.info('No connections', 'This entity has no neighbors in the graph yet.')
@@ -375,6 +410,16 @@ export function ContextGraph() {
       toast.error('Focus failed', err instanceof Error ? err.message : 'Unexpected error')
     }
   }, [])
+
+  // Locate/focus a node in the active view: recenter the lens on it, or focus its
+  // neighborhood in the atlas — so a selected node is always findable on the canvas.
+  const handleLocate = useCallback(
+    (n: { id: string; type: string; label: string }) => {
+      if (tab === 'lens') recenter(n)
+      else atlasFocusEntity({ id: n.id, type: n.type, label: n.label, degree: 0 })
+    },
+    [tab, recenter, atlasFocusEntity]
+  )
 
   const clearAtlasFocus = useCallback(() => {
     setAtlasFocus(null)
@@ -688,59 +733,27 @@ export function ContextGraph() {
           )}
         </div>
 
-        {/* Provenance panel (Lens tab) */}
-        {tab === 'lens' && provenance && provenance.node && (
+        {/* Node inspector — identity, provenance, and every edit (both tabs) */}
+        {selectedId && (
           <Suspense fallback={null}>
-            <ProvenancePanel
-              provenance={provenance}
+            <NodeInspector
+              key={selectedId}
+              nodeId={selectedId}
+              fallback={
+                tab === 'atlas' && atlasSelected
+                  ? { type: atlasSelected.type, label: atlasSelected.label }
+                  : null
+              }
               isDark={isDark}
-              onFocus={(e: ProvenanceEntity) => {
-                if (e.id === provenance.node?.id) recenter(e)
-                else selectNode(e)
-              }}
-              onOpen={openEntityPage}
+              onLocate={handleLocate}
+              onOpenEntity={openEntityPage}
               canOpen={canOpen}
+              onFocusEntity={(e) => selectNode(e)}
+              onChanged={handleNodeChanged}
+              onProvenanceLoaded={setProvenance}
               onClose={clearSelection}
             />
           </Suspense>
-        )}
-
-        {/* Atlas detail panel */}
-        {tab === 'atlas' && atlasSelected && (
-          <aside className="w-72 shrink-0 border-l bg-muted/5 flex flex-col overflow-hidden">
-            <div className="flex items-start justify-between gap-2 border-b px-4 py-3">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="h-3 w-3 rounded-full shrink-0" style={{ backgroundColor: isDark ? entityColor(atlasSelected.type).dark : entityColor(atlasSelected.type).light }} />
-                  <span className="text-[10px] uppercase tracking-wider text-muted-foreground">{atlasSelected.type}</span>
-                </div>
-                <h3 className="text-sm font-semibold mt-1 break-words">{atlasSelected.label}</h3>
-              </div>
-            </div>
-            <div className="px-4 py-3 space-y-2 overflow-auto">
-              {canOpen(atlasSelected) && NAVIGABLE.has(atlasSelected.type) && (
-                <Button variant="outline" size="sm" className="w-full gap-2" onClick={() => openEntityPage(atlasSelected)}>
-                  Open {atlasSelected.type} page
-                </Button>
-              )}
-              <Button
-                variant="ghost"
-                size="sm"
-                className="w-full gap-2 text-muted-foreground"
-                onClick={() => {
-                  setTab('lens')
-                  onSelectLens({
-                    kind: atlasSelected.type === 'project' ? 'project' : atlasSelected.type === 'decision' ? 'decision' : 'person',
-                    centerId: atlasSelected.id,
-                    label: atlasSelected.label,
-                  })
-                }}
-              >
-                <Layers className="h-4 w-4" />
-                Open in Lens
-              </Button>
-            </div>
-          </aside>
         )}
       </div>
     </div>
