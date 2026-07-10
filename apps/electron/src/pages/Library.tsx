@@ -1040,6 +1040,26 @@ export function Library() {
     overscan: 5
   })
 
+  // Reveal-on-open: when a source becomes the active/opened one (via row click,
+  // deep-link navigation, search result, or programmatic open), scroll the
+  // virtualized list so that row is in view. Without this, opening an old
+  // recording (e.g. #1500 of 1911) leaves the user scrolling the whole list to
+  // find what they just opened. We scroll once per newly-selected id (tracked in
+  // a ref) so unrelated re-renders and filter changes don't yank the scroll, and
+  // `align: 'auto'` only moves the list when the row isn't already visible.
+  const lastScrolledSourceIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!selectedSourceId) {
+      lastScrolledSourceIdRef.current = null
+      return
+    }
+    if (lastScrolledSourceIdRef.current === selectedSourceId) return
+    const index = filteredRecordings.findIndex((r) => r.id === selectedSourceId)
+    if (index < 0) return // not in the current (possibly filtered) list yet — retry when it appears
+    lastScrolledSourceIdRef.current = selectedSourceId
+    rowVirtualizer.scrollToIndex(index, { align: 'auto' })
+  }, [selectedSourceId, filteredRecordings, rowVirtualizer])
+
   // Loading state — show skeleton layout instead of bare spinner
   if (loading && recordings.length === 0) {
     return (
@@ -1219,7 +1239,13 @@ export function Library() {
               aria-label="Recording list navigation. Use arrow keys to navigate, Space to select, Enter to open."
               data-testid="library-list"
             >
-        <div className={`w-full transition-opacity ${isFilterPending ? 'opacity-60' : 'opacity-100'}`}>
+        {/* min-w floor: when a reader/assistant pane is open the list becomes a
+            narrow rail (~18-20% ≈ 220px). Below ~18rem the status chrome + Play
+            button starve the flex-1 content column to 0px and the line-clamp
+            title/date collapse to invisible (the "blank rows" bug). Flooring the
+            list at 18rem keeps every row's title + date readable; the rail scrolls
+            horizontally instead of eating the text. No effect at full width. */}
+        <div className={`w-full min-w-[18rem] transition-opacity ${isFilterPending ? 'opacity-60' : 'opacity-100'}`}>
           {filteredRecordings.length === 0 ? (
             qualityFilter !== null && qualityFilter !== 'unrated' && ratedCount === 0 ? (
               // Honest empty state: the quality filter isn't broken, there's just

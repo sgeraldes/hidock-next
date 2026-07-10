@@ -3,6 +3,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 import { Library } from '../Library'
 
+// Shared harness for the "reveal opened source" behavior: a STABLE scrollToIndex
+// spy (so we can assert across renders) and a mutable selectedSourceId the store
+// mock reads at call time. Defaults keep existing tests unaffected.
+const scrollHarness = vi.hoisted(() => ({
+  scrollToIndex: vi.fn(),
+  selectedSourceId: null as string | null
+}))
+
 // Mock hooks
 vi.mock('@/hooks/useUnifiedRecordings', () => ({
   useUnifiedRecordings: vi.fn()
@@ -67,7 +75,7 @@ vi.mock('@tanstack/react-virtual', () => ({
       key: String(index)
     })),
     getTotalSize: () => count * 64,
-    scrollToIndex: vi.fn(),
+    scrollToIndex: scrollHarness.scrollToIndex,
     measureElement: vi.fn(),
     measure: vi.fn()
   })
@@ -102,7 +110,7 @@ vi.mock('@/store/useLibraryStore', () => ({
       clearSelection: vi.fn(),
       panelSizes: [25, 45, 30],
       setPanelSizes: vi.fn(),
-      selectedSourceId: null,
+      selectedSourceId: scrollHarness.selectedSourceId,
       setSelectedSourceId: vi.fn(),
       expandedRowIds: new Set(),
       expandedTranscripts: new Set(),
@@ -218,6 +226,8 @@ const mockRecording = {
 describe('Library', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    scrollHarness.scrollToIndex.mockClear()
+    scrollHarness.selectedSourceId = null
     mockRefresh.mockReset()
     transcriptionCompletedListeners.length = 0
     transcriptionFailedListeners.length = 0
@@ -241,6 +251,54 @@ describe('Library', () => {
       </MemoryRouter>
     )
   }
+
+  describe('Reveal opened source (select + scroll into view)', () => {
+    const makeRecs = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({
+        ...mockRecording,
+        id: `rec-${i}`,
+        filename: `rec-${i}.wav`,
+        title: `Recording ${i}`,
+        // Descending dates so the default date-desc sort preserves index order.
+        dateRecorded: new Date(Date.now() - i * 60_000)
+      }))
+
+    it('scrolls the virtualized list to the opened recording', async () => {
+      vi.mocked(useUnifiedRecordings).mockReturnValue({
+        recordings: makeRecs(6) as any,
+        loading: false,
+        error: null,
+        refresh: mockRefresh,
+        deviceConnected: false,
+        stats: { total: 6, deviceOnly: 0, localOnly: 6, both: 0, synced: 6, unsynced: 0, onSource: 0, locallyAvailable: 6 }
+      })
+      // The 4th recording (index 3) is the one being opened.
+      scrollHarness.selectedSourceId = 'rec-3'
+
+      renderLibrary()
+
+      await waitFor(() => {
+        expect(scrollHarness.scrollToIndex).toHaveBeenCalledWith(3, { align: 'auto' })
+      })
+    })
+
+    it('does not scroll when nothing is selected', async () => {
+      vi.mocked(useUnifiedRecordings).mockReturnValue({
+        recordings: makeRecs(4) as any,
+        loading: false,
+        error: null,
+        refresh: mockRefresh,
+        deviceConnected: false,
+        stats: { total: 4, deviceOnly: 0, localOnly: 4, both: 0, synced: 4, unsynced: 0, onSource: 0, locallyAvailable: 4 }
+      })
+      scrollHarness.selectedSourceId = null
+
+      renderLibrary()
+
+      await waitFor(() => expect(screen.getByText('Recording 0')).toBeInTheDocument())
+      expect(scrollHarness.scrollToIndex).not.toHaveBeenCalled()
+    })
+  })
 
   describe('Loading State', () => {
     it('renders loading state initially', () => {

@@ -12,7 +12,8 @@
  */
 
 import { AudioLines, Image, FileText, StickyNote, Braces, File, type LucideIcon } from 'lucide-react'
-import { formatDate, formatTime, formatDuration } from '@/lib/utils'
+import { formatDuration } from '@/lib/utils'
+import { formatSmartDate, formatRelativeDate } from '@/lib/smartDate'
 import type { UnifiedRecording } from '@/types/unified-recording'
 import { getSourceType, sourceTypeLabel, type LibrarySourceType } from './sourceType'
 
@@ -35,16 +36,25 @@ const TYPE_ICON: Record<LibrarySourceType, LucideIcon> = {
 export function getRowMeta(recording: UnifiedRecording): RowMeta {
   const type = getSourceType(recording)
   const Icon = TYPE_ICON[type]
+  // Relative hint ("2 days ago", "3 mo ago", "2 yr ago") complements the absolute
+  // date so recency reads at a glance. Null for missing/invalid dates.
+  const relative = formatRelativeDate(recording.dateRecorded)
 
   if (type === 'audio') {
-    const parts = [formatDate(recording.dateRecorded), formatTime(recording.dateRecorded)]
+    // Absolute date WITH THE YEAR + start time (a year-old capture must not read
+    // like this week's), then the real duration when known, then the relative hint.
+    const parts = [formatSmartDate(recording.dateRecorded, { time: true })]
     if (recording.duration && recording.duration > 0) {
       parts.push(formatDuration(recording.duration))
     }
+    if (relative) parts.push(relative)
     return { type, Icon, parts }
   }
 
   // Non-audio artifacts: no duration. Lead with the human type label, then the
-  // date the item entered the library (dateRecorded doubles as "added" here).
-  return { type, Icon, parts: [sourceTypeLabel(type), formatDate(recording.dateRecorded)] }
+  // date-with-year the item entered the library (dateRecorded doubles as "added"),
+  // then the relative hint.
+  const parts = [sourceTypeLabel(type), formatSmartDate(recording.dateRecorded, { time: false })]
+  if (relative) parts.push(relative)
+  return { type, Icon, parts }
 }
