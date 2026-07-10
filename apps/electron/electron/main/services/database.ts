@@ -1386,9 +1386,13 @@ export async function initializeDatabase(): Promise<void> {
     // --- PHASE 1: CORE TABLES ---
     console.log('[Database] Phase 1: Ensuring core tables exist...')
     for (const sql of statements) {
-      if (sql.toUpperCase().startsWith('CREATE TABLE')) {
+      // Statements split from SCHEMA may carry leading "-- comment" lines; strip them
+      // before detection, otherwise commented CREATE TABLEs are skipped on a fresh DB
+      // and Phase 2's PRAGMA table_info() lookups crash on the missing tables.
+      const executable = sql.replace(/^(\s*--[^\n]*\n?)+/, '').trim()
+      if (executable.toUpperCase().startsWith('CREATE TABLE')) {
         try {
-          database.run(sql)
+          database.run(executable)
         } catch (e) {
           console.warn(`[Database] Table creation warning: ${(e as Error).message}`)
         }
@@ -1399,42 +1403,47 @@ export async function initializeDatabase(): Promise<void> {
     // This runs on EVERY boot to ensure parity between code and disk.
     console.log('[Database] Phase 2: Aligning table structures...')
     
-    // Repair Recordings
+    // Repair Recordings (guarded like transcription_queue below: PRAGMA returns [] when
+    // the table is missing, e.g. first boot on a fresh machine — Phase 4 creates it later)
     const recordingsInfo = database.exec("PRAGMA table_info(recordings)")
-    const recCols = recordingsInfo[0].values.map(col => col[1])
-    const recordingRepairs = [
-      { name: 'migrated_to_capture_id', def: "TEXT" },
-      { name: 'migration_status', def: "TEXT CHECK(migration_status IN ('pending', 'migrated', 'skipped', 'error')) DEFAULT 'pending'" },
-      { name: 'migrated_at', def: "TEXT" }
-    ]
-    for (const col of recordingRepairs) {
-      if (!recCols.includes(col.name)) {
-        console.log(`[Database] Repairing recordings: adding ${col.name}`)
-        try { database.run(`ALTER TABLE recordings ADD COLUMN ${col.name} ${col.def}`) } catch (e) {}
+    if (recordingsInfo.length > 0 && recordingsInfo[0].values) {
+      const recCols = recordingsInfo[0].values.map(col => col[1])
+      const recordingRepairs = [
+        { name: 'migrated_to_capture_id', def: "TEXT" },
+        { name: 'migration_status', def: "TEXT CHECK(migration_status IN ('pending', 'migrated', 'skipped', 'error')) DEFAULT 'pending'" },
+        { name: 'migrated_at', def: "TEXT" }
+      ]
+      for (const col of recordingRepairs) {
+        if (!recCols.includes(col.name)) {
+          console.log(`[Database] Repairing recordings: adding ${col.name}`)
+          try { database.run(`ALTER TABLE recordings ADD COLUMN ${col.name} ${col.def}`) } catch (e) {}
+        }
       }
     }
 
-    // Repair Knowledge Captures
+    // Repair Knowledge Captures (same missing-table guard as above)
     const captureInfo = database.exec("PRAGMA table_info(knowledge_captures)")
-    const capCols = captureInfo[0].values.map(col => col[1])
-    const knowledgeRepairs = [
-      { name: 'category', def: "category TEXT CHECK(category IN ('meeting', 'interview', '1:1', 'brainstorm', 'note', 'other')) DEFAULT 'meeting'" },
-      { name: 'status', def: "status TEXT CHECK(status IN ('processing', 'ready', 'enriched')) DEFAULT 'ready'" },
-      { name: 'quality_rating', def: "quality_rating TEXT CHECK(quality_rating IN ('valuable', 'archived', 'low-value', 'garbage', 'unrated')) DEFAULT 'unrated'" },
-      { name: 'quality_confidence', def: "quality_confidence REAL" },
-      { name: 'quality_assessed_at', def: "quality_assessed_at TEXT" },
-      { name: 'storage_tier', def: "storage_tier TEXT CHECK(storage_tier IN ('hot', 'cold', 'expiring', 'deleted')) DEFAULT 'hot'" },
-      { name: 'retention_days', def: "retention_days INTEGER" },
-      { name: 'expires_at', def: "expires_at TEXT" },
-      { name: 'meeting_id', def: "meeting_id TEXT REFERENCES meetings(id)" },
-      { name: 'correlation_confidence', def: "correlation_confidence REAL" },
-      { name: 'correlation_method', def: "correlation_method TEXT" },
-      { name: 'source_recording_id', def: "source_recording_id TEXT REFERENCES recordings(id)" }
-    ]
-    for (const col of knowledgeRepairs) {
-      if (!capCols.includes(col.name)) {
-        console.log(`[Database] Repairing knowledge_captures: adding ${col.name}`)
-        try { database.run(`ALTER TABLE knowledge_captures ADD COLUMN ${col.def}`) } catch (e) {}
+    if (captureInfo.length > 0 && captureInfo[0].values) {
+      const capCols = captureInfo[0].values.map(col => col[1])
+      const knowledgeRepairs = [
+        { name: 'category', def: "category TEXT CHECK(category IN ('meeting', 'interview', '1:1', 'brainstorm', 'note', 'other')) DEFAULT 'meeting'" },
+        { name: 'status', def: "status TEXT CHECK(status IN ('processing', 'ready', 'enriched')) DEFAULT 'ready'" },
+        { name: 'quality_rating', def: "quality_rating TEXT CHECK(quality_rating IN ('valuable', 'archived', 'low-value', 'garbage', 'unrated')) DEFAULT 'unrated'" },
+        { name: 'quality_confidence', def: "quality_confidence REAL" },
+        { name: 'quality_assessed_at', def: "quality_assessed_at TEXT" },
+        { name: 'storage_tier', def: "storage_tier TEXT CHECK(storage_tier IN ('hot', 'cold', 'expiring', 'deleted')) DEFAULT 'hot'" },
+        { name: 'retention_days', def: "retention_days INTEGER" },
+        { name: 'expires_at', def: "expires_at TEXT" },
+        { name: 'meeting_id', def: "meeting_id TEXT REFERENCES meetings(id)" },
+        { name: 'correlation_confidence', def: "correlation_confidence REAL" },
+        { name: 'correlation_method', def: "correlation_method TEXT" },
+        { name: 'source_recording_id', def: "source_recording_id TEXT REFERENCES recordings(id)" }
+      ]
+      for (const col of knowledgeRepairs) {
+        if (!capCols.includes(col.name)) {
+          console.log(`[Database] Repairing knowledge_captures: adding ${col.name}`)
+          try { database.run(`ALTER TABLE knowledge_captures ADD COLUMN ${col.def}`) } catch (e) {}
+        }
       }
     }
 
