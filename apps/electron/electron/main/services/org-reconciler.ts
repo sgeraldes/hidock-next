@@ -874,7 +874,7 @@ export function mergeDuplicateMeetingOccurrences(): number {
 
   const groups = new Map<string, DuplicateMeetingRow[]>()
   for (const m of meetings) {
-    const key = `${meetingBaseUid(m.id)} ${m.start_time}`
+    const key = `${meetingBaseUid(m.id)}\u0000${m.start_time}`
     const list = groups.get(key)
     if (list) list.push(m)
     else groups.set(key, [m])
