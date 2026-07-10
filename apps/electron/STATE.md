@@ -73,6 +73,16 @@ ELECTRON ABI (the running app holds it). So:
 - Pre-existing flaky `hidock-device.test.ts` EnvironmentTeardownError under
   full-suite parallel load (passes in isolation) — quiet its teardown logging.
 - ~135 eslint warnings; apps/electron has NO eslint config.
+- **knowledge-graph PACKAGE tests broken + ungated** (found 2026-07-10): after
+  the better-sqlite3 migration, `@hidock/database` engine REQUIRES
+  `config.betterSqlite3` (engine.ts throws "betterSqlite3 is required";
+  `initSqlJs` is vestigial). But `packages/knowledge-graph/tests/*.test.ts`
+  (lens/etc.) still build `new DatabaseEngine({ initSqlJs })` → throw. They run
+  via the package's own `vitest run`, and the electron suite only includes
+  `**/__tests__/**`, so they're in NO gate — the 2558-green baseline never runs
+  them. ACTION ITEM: rewire those package tests to inject better-sqlite3 +
+  Electron-ABI runner (or fold into the electron suite) so the graph package is
+  actually gated. Package.json still lists sql.js as the test dep.
 
 ### PENDING USER DECISIONS (on the ops dashboard as clickable items):
 - ASR pipeline direction — awaits WER spike results (keep Gemini / hybrid /
