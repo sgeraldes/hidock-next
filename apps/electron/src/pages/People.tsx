@@ -42,6 +42,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import type { Person, PersonType } from '@/types/knowledge'
 import { cn } from '@/lib/utils'
+import { pageWide } from '@/lib/pageLayout'
 import { toast } from '@/components/ui/toaster'
 
 /** Above this many links on BOTH sides, a merge requires typing the loser's name. */
@@ -422,7 +423,7 @@ export function People() {
 
       {/* Content */}
       <div className="flex-1 overflow-auto p-6">
-        <div className="max-w-5xl mx-auto">
+        <div className={pageWide}>
           {/* Identity suggestions review queue (self-hides when empty) */}
           {!mergeMode && <IdentitySuggestionsSection ref={suggestionsRef} />}
 
@@ -463,7 +464,7 @@ export function People() {
             </Card>
           ) : (
             <div>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
               {sortedPeople.map((person, index) => {
                 const isSelected = selectedForMerge.some((p) => p.id === person.id)
                 const typeLabel = getTypeLabel(person.type)

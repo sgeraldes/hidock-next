@@ -87,6 +87,7 @@ interface ProjectActionable {
   createdAt: string
 }
 import { cn } from '@/lib/utils'
+import { pageContent } from '@/lib/pageLayout'
 import { toast } from '@/components/ui/toaster'
 
 export function Projects() {
@@ -810,7 +811,7 @@ export function Projects() {
 
             {/* Content */}
             <div className="flex-1 overflow-auto p-8">
-              <div className="max-w-4xl mx-auto space-y-8">
+              <div className={cn(pageContent, 'space-y-8')}>
                 {/* Stats Grid */}
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                   <Card className="lift animate-rise-in bg-muted/5" style={{ animationDelay: '0ms' }}>

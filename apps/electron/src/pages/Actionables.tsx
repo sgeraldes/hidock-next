@@ -32,6 +32,7 @@ import {
   DialogTitle
 } from '@/components/ui/dialog'
 import { cn, formatDateTime } from '@/lib/utils'
+import { pageContent } from '@/lib/pageLayout'
 import { toast } from '@/components/ui/toaster'
 import { EntityMention, useContactResolver } from '@/components/entity'
 import { ActionableDetail } from '@/components/actionables/ActionableDetail'
@@ -478,7 +479,7 @@ export function Actionables() {
 
       {/* Content */}
       <div className="flex-1 overflow-auto p-6">
-        <div className="max-w-4xl mx-auto space-y-6">
+        <div className={cn(pageContent, 'space-y-6')}>
           {/* C-ACT-006: Loading skeleton instead of spinner */}
           {loading && actionables.length === 0 ? (
             <ActionableSkeleton />

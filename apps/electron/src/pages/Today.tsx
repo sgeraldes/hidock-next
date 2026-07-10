@@ -29,6 +29,7 @@ import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover
 import { TodayIdentitySuggestions } from '@/components/identity/TodayIdentitySuggestions'
 import { LiveRecordingCard, parseRecordingStart } from '@/components/LiveRecordingCard'
 import { cn } from '@/lib/utils'
+import { pageWide, proseMeasure } from '@/lib/pageLayout'
 import { firstMeaningfulLine } from '@/lib/description-format'
 import { useAppStore } from '@/store'
 import { fetchMeetingParticipants, participantFirstName } from '@/lib/meeting-participants'
@@ -889,7 +890,7 @@ export function Today() {
   /** Detail body reused by expanded digest rows and the fallback card. */
   const FollowUpDetail = (item: BriefingRecentItem) => (
     <div className="space-y-3">
-      {item.summary && <p className="text-sm text-muted-foreground">{item.summary}</p>}
+      {item.summary && <p className={cn('text-sm text-muted-foreground', proseMeasure)}>{item.summary}</p>}
       {item.actionItems.length > 0 && (
         <ul className="space-y-1 text-sm">
           {item.actionItems.slice(0, 4).map((a, i) => (
@@ -965,7 +966,7 @@ export function Today() {
 
   return (
     <div ref={scrollRef} className="h-full overflow-y-auto bg-background">
-      <div className="mx-auto max-w-3xl space-y-6 px-6 py-6">
+      <div className={cn(pageWide, 'space-y-6 px-6 py-6')}>
         {/* Header */}
         <div className="flex items-end justify-between animate-rise-in">
           <div>
@@ -995,6 +996,10 @@ export function Today() {
           </Card>
         )}
 
+        {/* Dashboard body — one column normally, two columns on very wide (2xl) screens. */}
+        <div className="grid grid-cols-1 gap-6 2xl:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)] 2xl:items-start">
+        {/* Primary column — the day's narrative */}
+        <div className="space-y-6 min-w-0">
         {/* The living time ribbon */}
         <Card className="animate-rise-in overflow-hidden">
           <CardHeader className="pb-3">
@@ -1203,10 +1208,14 @@ export function Today() {
           </Card>
         ) : null}
 
+        </div>
+
+        {/* Secondary column — suggestions & follow-up actions */}
+        <div className="space-y-6 min-w-0">
         {/* Identity suggestions (renders only when the queue is non-empty) */}
         <TodayIdentitySuggestions />
 
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2 2xl:grid-cols-1">
           {/* Pending actions */}
           <Card className="animate-rise-in">
             <CardHeader className="pb-3">
@@ -1298,6 +1307,8 @@ export function Today() {
               )}
             </CardContent>
           </Card>
+        </div>
+        </div>
         </div>
       </div>
     </div>

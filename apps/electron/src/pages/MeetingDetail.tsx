@@ -21,6 +21,7 @@ import {
   DialogClose
 } from '@/components/ui/dialog'
 import { formatDateTime, formatDuration, cn } from '@/lib/utils'
+import { pageContent } from '@/lib/pageLayout'
 import { parseAttendees, parseJsonArray } from '@/types'
 import type { Contact } from '@/types'
 import { AudioPlayer } from '@/components/AudioPlayer'
@@ -575,7 +576,7 @@ export function MeetingDetail() {
 
       {/* Content */}
       <div className="flex-1 overflow-auto p-6">
-        <div className="max-w-4xl mx-auto space-y-6">
+        <div className={cn(pageContent, 'space-y-6')}>
           {/* Meeting Info */}
           <Card>
             <CardHeader>
