@@ -107,12 +107,17 @@ export function TitleBar({ sidebarOpen, onToggleSidebar }: TitleBarProps) {
         </div>
 
         {/* App identity — expanded only; hidden with the sidebar labels when collapsed.
-            Kept to the brand mark + wordmark so it sits coherently inside the sidebar
-            column (the earlier "HiDock · Meeting Intelligence" straddled the seam). */}
+            The FULL product wordmark ("Meeting Intelligence" — this app is not the
+            device) is sized to fit inside the sidebar column so it never truncates
+            and never straddles the sidebar/content seam. gap/padding are tightened
+            and the wordmark uses a smaller type + tracking so all 20 chars fit the
+            ~160px cell (w-56 − 64px toggle box). */}
         {sidebarOpen && (
-          <div className="flex min-w-0 items-center gap-2 pr-3">
+          <div className="flex min-w-0 items-center gap-1.5 pr-2">
             <AppMark />
-            <span className="truncate text-sm font-semibold tracking-tight text-white">HiDock</span>
+            <span className="whitespace-nowrap text-[11px] font-semibold leading-none tracking-tight text-white">
+              Meeting Intelligence
+            </span>
           </div>
         )}
       </div>

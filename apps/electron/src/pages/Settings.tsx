@@ -3,8 +3,10 @@ import { Save, FolderOpen, RefreshCw, AlertCircle, Eye, EyeOff } from 'lucide-re
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
+import { Switch } from '@/components/ui/switch'
 import { useAppStore, useCalendarSyncing } from '@/store/useAppStore'
 import { useConfigStore } from '@/store/domain/useConfigStore'
+import { useUIStore } from '@/store/ui/useUIStore'
 import { formatBytes } from '@/lib/utils'
 import { HealthCheck } from '@/components/HealthCheck'
 import { ConnectorsSettings } from '@/components/settings/ConnectorsSettings'
@@ -36,6 +38,9 @@ export function Settings() {
   // SM-09 fix: Use granular selectors
   const syncCalendar = useAppStore((s) => s.syncCalendar)
   const calendarSyncing = useCalendarSyncing()
+  // QA Logs toggle — moved here from the sidebar footer (advanced/dev setting).
+  const qaLogsEnabled = useUIStore((s) => s.qaLogsEnabled)
+  const setQaLogsEnabled = useUIStore((s) => s.setQaLogsEnabled)
   const { config, loadConfig, updateConfig, configLoading } = useConfigStore()
   const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null)
   const [storageError, setStorageError] = useState<string | null>(null) // B-SET-002: Storage error state
@@ -1044,6 +1049,34 @@ export function Settings() {
                   </div>
                 </>
               )}
+            </CardContent>
+          </Card>
+
+          {/* Developer / Advanced — QA logging lives here now (it used to sit in the
+              always-visible sidebar footer, which the product owner flagged). */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Developer</CardTitle>
+              <CardDescription>Advanced diagnostics and logging</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <label htmlFor="qaLogsToggle" className="text-sm font-medium">
+                    QA Logs
+                  </label>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Emit verbose <code>[QA-MONITOR]</code> diagnostics to the console. For
+                    debugging only — leave off for normal use.
+                  </p>
+                </div>
+                <Switch
+                  id="qaLogsToggle"
+                  checked={qaLogsEnabled}
+                  onCheckedChange={setQaLogsEnabled}
+                  aria-label="Enable QA diagnostic logs"
+                />
+              </div>
             </CardContent>
           </Card>
 

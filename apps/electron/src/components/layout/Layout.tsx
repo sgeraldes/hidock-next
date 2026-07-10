@@ -12,9 +12,6 @@ import {
   ListTodo,
   Settings,
   RotateCcw,
-  Terminal,
-  ChevronDown,
-  ChevronUp,
   Network,
   Sun
 } from 'lucide-react'
@@ -24,18 +21,28 @@ import {
   useAppStore,
   useLastCalendarSync,
   useDeviceState,
-  useConnectionStatus,
-  useActivityLog
+  useConnectionStatus
 } from '@/store/useAppStore'
 import { useConfigStore } from '@/store/domain/useConfigStore'
 
 type LucideIcon = typeof FileText
 import { Button } from '@/components/ui/button'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger
+} from '@/components/ui/alert-dialog'
 import { toast } from '@/components/ui/toaster'
 import { OperationController } from '@/components/OperationController'
 import { OperationsPanel } from '@/components/layout/OperationsPanel'
+import { ActivityLogPanel } from '@/components/layout/ActivityLogPanel'
 import { useUIStore } from '@/store/ui/useUIStore'
-import { Switch } from '@/components/ui/switch'
 
 interface LayoutProps {
   children: ReactNode
@@ -131,8 +138,6 @@ export function Layout({ children }: LayoutProps) {
   const { config, loadConfig } = useConfigStore()
   const sidebarOpen = useUIStore((s) => s.sidebarOpen)
   const toggleSidebar = useUIStore((s) => s.toggleSidebar)
-  const qaLogsEnabled = useUIStore((s) => s.qaLogsEnabled)
-  const setQaLogsEnabled = useUIStore((s) => s.setQaLogsEnabled)
 
   // Nav count badges — derived from EXISTING renderer stores (no new IPC channels).
   // Today: meetings whose start is today (useAppStore.meetings, loaded on mount below).
@@ -167,25 +172,6 @@ export function Layout({ children }: LayoutProps) {
     '/actionables': pendingActionables,
     '/sync': unsyncedCount
   }
-
-  // AL-001: Global activity log — visible from all pages
-  const activityLog = useActivityLog()
-  // AL: expand state persisted in the UI store so it survives navigation/restart.
-  const logExpanded = useUIStore((s) => s.activityLogExpanded)
-  const toggleActivityLog = useUIStore((s) => s.toggleActivityLog)
-  const logContainerRef = useRef<HTMLDivElement>(null)
-  const hasErrors = activityLog.some(e => e.type === 'error' || e.type === 'warning')
-
-  // AL-004: Auto-scroll when expanded or new entries arrive
-  useEffect(() => {
-    if (logExpanded && activityLog.length > 0 && logContainerRef.current) {
-      requestAnimationFrame(() => {
-        if (logContainerRef.current) {
-          logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight
-        }
-      })
-    }
-  }, [activityLog.length, logExpanded])
 
   // Track previous state for toast notifications
   const prevConnectedRef = useRef<boolean | null>(null)
@@ -369,102 +355,47 @@ export function Layout({ children }: LayoutProps) {
         {/* Operations Panel - Downloads + Transcriptions */}
         <OperationsPanel sidebarOpen={sidebarOpen} />
 
-        {/* AL-001: Global Activity Log — accessible from all pages */}
-        <div className="border-t border-slate-700">
-          {sidebarOpen ? (
-            <div>
-              <button
-                className="flex w-full items-center justify-between px-3 py-2 text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors"
-                onClick={toggleActivityLog}
-                aria-expanded={logExpanded}
-              >
-                <span className="flex items-center gap-1.5">
-                  <Terminal className="h-3.5 w-3.5" />
-                  Activity Log
-                  {activityLog.length > 0 && (
-                    <span className={cn(
-                      'text-[10px] px-1 rounded',
-                      hasErrors ? 'bg-red-900/50 text-red-400' : 'bg-slate-700 text-slate-400'
-                    )}>
-                      {activityLog.length}
-                    </span>
-                  )}
-                </span>
-                <span className="flex items-center gap-1">
-                  <span
-                    className="text-[10px] hover:text-slate-300"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      useAppStore.getState().clearActivityLog?.()
-                    }}
-                    title="Clear log"
-                  >Clear</span>
-                  {logExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronUp className="h-3 w-3" />}
-                </span>
-              </button>
-              {logExpanded && (
-                <div
-                  ref={logContainerRef}
-                  className="max-h-40 overflow-y-auto bg-slate-950 px-2 py-1 font-mono"
-                >
-                  {activityLog.length === 0 ? (
-                    <p className="text-[10px] text-slate-600 py-1">No activity</p>
-                  ) : (
-                    activityLog.map((entry, i) => (
-                      <div key={`${entry.timestamp.getTime()}-${i}`}
-                        className={cn(
-                          'text-[10px] leading-4 py-0.5',
-                          entry.type === 'error' ? 'text-red-400'
-                          : entry.type === 'success' ? 'text-green-400'
-                          : entry.type === 'warning' ? 'text-amber-400'
-                          : entry.type === 'usb-out' ? 'text-blue-400'
-                          : entry.type === 'usb-in' ? 'text-purple-400'
-                          : 'text-slate-400'
-                        )}>
-                        <span className="text-slate-600 mr-1">
-                          {entry.timestamp.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                        </span>
-                        {entry.message}
-                        {entry.details && <span className="text-slate-600 ml-1">— {entry.details}</span>}
-                      </div>
-                    ))
-                  )}
-                </div>
-              )}
-            </div>
-          ) : hasErrors ? (
-            <div className="flex justify-center py-2" title="Activity log has errors or warnings">
-              <Terminal className="h-4 w-4 text-amber-400" />
-            </div>
-          ) : null}
-        </div>
+        {/* Activity Log — sidebar shows only a compact badge; the full log opens
+            in a dedicated overlay (see ActivityLogPanel), never inline here. */}
+        <ActivityLogPanel sidebarOpen={sidebarOpen} />
 
-        {/* Dev Tools */}
+        {/* Dev Tools — Restart is gated behind a confirm dialog because it does a
+            raw app restart that reconnects the USB device. QA Logs moved to
+            Settings → Developer (no longer in the always-visible sidebar). */}
         {isDevMode && (
-          <div className="border-t border-slate-700 p-3 space-y-2">
-            <Button
-              variant="ghost"
-              size="sm"
-              className={cn(
-                'w-full gap-2 bg-slate-800 text-slate-200 hover:bg-slate-700 hover:text-white',
-                !sidebarOpen && 'px-0 justify-center'
-              )}
-              onClick={() => window.electronAPI?.app?.restart()}
-              title="Restart App"
-            >
-              <RotateCcw className="h-4 w-4" />
-              {sidebarOpen && <span>Restart</span>}
-            </Button>
-            {sidebarOpen && (
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-slate-400">QA Logs</span>
-                <Switch
-                  checked={qaLogsEnabled}
-                  onCheckedChange={setQaLogsEnabled}
-                  className="scale-75"
-                />
-              </div>
-            )}
+          <div className="border-t border-slate-700 p-3">
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className={cn(
+                    'w-full gap-2 bg-slate-800 text-slate-200 hover:bg-slate-700 hover:text-white',
+                    !sidebarOpen && 'px-0 justify-center'
+                  )}
+                  title="Restart App"
+                  aria-label="Restart app"
+                >
+                  <RotateCcw className="h-4 w-4" />
+                  {sidebarOpen && <span>Restart</span>}
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Restart the app?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    This fully restarts the app and reconnects the device. Any in-progress
+                    downloads or transcriptions will be interrupted.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogAction onClick={() => window.electronAPI?.app?.restart()}>
+                    Restart
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
           </div>
         )}
       </aside>
