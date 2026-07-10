@@ -60,6 +60,31 @@ function seedTranscript(recordingId: string, speakersJson: string): void {
   )
 }
 
+/**
+ * Seed a transcript the way a FRESH transcription does: action items + key
+ * points as JSON string arrays on the transcript row, with NO first-class
+ * action_items/decisions rows and (optionally) no knowledge_capture. This is the
+ * real shape a just-transcribed device recording has.
+ */
+function seedFreshTranscript(
+  recordingId: string,
+  speakersJson: string,
+  actionItems: string[],
+  keyPoints: string[]
+): void {
+  run(
+    'INSERT INTO transcripts (id, recording_id, full_text, speakers, action_items, key_points) VALUES (?, ?, ?, ?, ?, ?)',
+    [
+      `trans_${recordingId}`,
+      recordingId,
+      TURNS.map((t) => t.text).join('\n'),
+      speakersJson,
+      JSON.stringify(actionItems),
+      JSON.stringify(keyPoints)
+    ]
+  )
+}
+
 function seedCapture(captureId: string, recordingId: string): void {
   run(
     `INSERT INTO knowledge_captures (id, title, captured_at, source_recording_id)
@@ -235,6 +260,25 @@ describe('deriveEventMarkers (fuzzy match)', () => {
     expect(deriveEventMarkers(items, TURNS)).toEqual([])
   })
 
+  it('anchors an unmatchable item to the turn mentioning its assignee', () => {
+    // Text is unrelated to any turn, but the assignee "Carlos" is mentioned in
+    // the turn starting at 55s ("Carlos will prepare the rollback plan...").
+    const items: TimelineItem[] = [
+      { id: 'as1', kind: 'action', text: 'Follow up on the vendor contract paperwork', assignee: 'Carlos' }
+    ]
+    const markers = deriveEventMarkers(items, TURNS)
+    expect(markers).toHaveLength(1)
+    expect(markers[0].atSec).toBe(55)
+    expect(markers[0].refId).toBe('as1')
+  })
+
+  it('still drops an item whose assignee is never mentioned', () => {
+    const items: TimelineItem[] = [
+      { id: 'as2', kind: 'action', text: 'Completely unrelated gardening budget line item', assignee: 'Wilhelmina' }
+    ]
+    expect(deriveEventMarkers(items, TURNS)).toEqual([])
+  })
+
   it('truncates long labels to <= 80 chars', () => {
     const long = 'Migrate the billing service to the new cluster by Friday and also handle every downstream consumer carefully'
     const markers = deriveEventMarkers([{ id: 'l', kind: 'action', text: long }], TURNS)
@@ -261,6 +305,50 @@ describe('getTimelineItemsForRecording (DB link)', () => {
     expect(items).toHaveLength(2)
     expect(items.filter((i) => i.kind === 'action')).toHaveLength(1)
     expect(items.filter((i) => i.kind === 'decision')).toHaveLength(1)
+  })
+
+  it('collects items from the fresh-transcription JSON columns (no first-class rows, no capture)', () => {
+    // The real device-first shape: transcript with action_items/key_points JSON,
+    // no action_items/decisions rows and no knowledge_capture at all.
+    seedRecording('recFresh')
+    seedFreshTranscript(
+      'recFresh',
+      SPEAKERS_JSON,
+      ['Carlos will prepare the rollback plan before the deploy window'],
+      ['Migrate the billing service to the new cluster by Friday']
+    )
+    const items = getTimelineItemsForRecording('recFresh')
+    expect(items.filter((i) => i.kind === 'action')).toHaveLength(1)
+    expect(items.filter((i) => i.kind === 'decision')).toHaveLength(1)
+    expect(items.find((i) => i.kind === 'action')?.text).toContain('rollback plan')
+    expect(items.find((i) => i.kind === 'decision')?.text).toContain('billing service')
+  })
+
+  it('de-duplicates a first-class row and an identical transcript-JSON entry', () => {
+    seedRecording('recDup')
+    seedFreshTranscript(
+      'recDup',
+      SPEAKERS_JSON,
+      ['Prepare the rollback plan before the deploy window'],
+      []
+    )
+    seedCapture('capDup', 'recDup')
+    // Same text as the transcript JSON action item.
+    run('INSERT INTO action_items (id, knowledge_capture_id, content) VALUES (?, ?, ?)', [
+      'aiDup',
+      'capDup',
+      'Prepare the rollback plan before the deploy window'
+    ])
+    const items = getTimelineItemsForRecording('recDup')
+    const actions = items.filter((i) => i.kind === 'action')
+    expect(actions).toHaveLength(1)
+    // First-class row wins (carries the stable refId).
+    expect(actions[0].id).toBe('aiDup')
+  })
+
+  it('returns [] when the recording has neither captures nor a transcript', () => {
+    seedRecording('recBare')
+    expect(getTimelineItemsForRecording('recBare')).toEqual([])
   })
 })
 
@@ -327,5 +415,36 @@ describe('analyzeTimeline (persist + idempotent)', () => {
     seedRecording('rec4')
     const result = await analyzeTimeline('rec4', undefined, { scoreWindows: fakeScorer })
     expect(result).toEqual({ sentimentSegments: [], eventMarkers: [] })
+  })
+
+  it('populates markers for a FRESH recording (transcript JSON only, no first-class rows)', async () => {
+    // This is the regression the fix targets: before, a freshly-transcribed
+    // recording (action_items/key_points JSON, no migration rows) yielded 0
+    // markers. It must now recover N>0 markers with plausible atSec values.
+    seedRecording('recFresh2')
+    seedFreshTranscript(
+      'recFresh2',
+      SPEAKERS_JSON,
+      ['Carlos will prepare the rollback plan before the deploy window'],
+      ['Migrate the billing service to the new cluster by Friday']
+    )
+
+    const result = await analyzeTimeline('recFresh2', undefined, { scoreWindows: fakeScorer })
+    expect(result.eventMarkers.length).toBe(2)
+
+    const byKind = Object.fromEntries(result.eventMarkers.map((m) => [m.kind, m]))
+    // "rollback plan" turn starts at 55; "billing service" turn starts at 20.
+    expect(byKind.action.atSec).toBe(55)
+    expect(byKind.decision.atSec).toBe(20)
+    for (const m of result.eventMarkers) {
+      expect(m.atSec).toBeGreaterThanOrEqual(0)
+      expect(m.label.length).toBeGreaterThan(0)
+    }
+
+    // Persisted + idempotent.
+    const persisted = getTimelineAnalysis('recFresh2')
+    expect(persisted.eventMarkers.length).toBe(2)
+    const second = await analyzeTimeline('recFresh2', undefined, { scoreWindows: fakeScorer })
+    expect(second.eventMarkers).toEqual(result.eventMarkers)
   })
 })

@@ -11,10 +11,14 @@
  *     window is scored by Gemini (the app's existing analysis provider). Score
  *     runs -1 (tense / negative / conflict) → +1 (positive / collaborative).
  *
- *  2. eventMarkers: {id,kind:'action'|'decision',atSec,label,refId}[] — each
- *     action_items / decisions row for the recording, its text fuzzy-matched
- *     against the timestamped speaker turns to recover the audio offset (atSec).
- *     refId is the source row id so the UI can link a marker to its summary item.
+ *  2. eventMarkers: {id,kind:'action'|'decision',atSec,label,refId}[] — the
+ *     recording's action items + decisions, each fuzzy-matched against the
+ *     timestamped speaker turns to recover the audio offset (atSec). Items are
+ *     gathered from BOTH the first-class action_items/decisions tables (migration
+ *     path) AND the fresh-transcription transcripts.action_items /
+ *     transcripts.key_points JSON arrays — the latter is the only source a
+ *     just-transcribed recording has, so markers now populate for real
+ *     recordings, not only migrated ones. refId links a marker to its item.
  *
  * Design notes:
  *  - Pure, deterministic pieces (windowing + fuzzy matching) are separated from
@@ -72,10 +76,16 @@ export interface SpeakerTurn {
 export interface TimelineItem {
   id: string
   kind: EventMarkerKind
-  /** Primary text (action_items.content / decisions.content). */
+  /** Primary text (action_items.content / decisions.content / transcript JSON entry). */
   text: string
   /** Verbatim source snippet if the extractor captured one — matched first. */
   extractedFrom?: string | null
+  /**
+   * Raw assignee/owner name if known (first-class action_items.assignee). Used as
+   * a last-resort anchor when the item text can't be matched to a turn: we place
+   * the marker at the turn where the assignee is first mentioned.
+   */
+  assignee?: string | null
 }
 
 const EMPTY: TimelineAnalysis = { sentimentSegments: [], eventMarkers: [] }
@@ -84,6 +94,7 @@ const EMPTY: TimelineAnalysis = { sentimentSegments: [], eventMarkers: [] }
 const DEFAULT_WINDOW_SEC = 45 // target duration of one sentiment window
 const MAX_WINDOWS = 40 // cap so the Gemini response stays bounded
 const MATCH_THRESHOLD = 0.34 // min fuzzy score to place an event marker
+const ASSIGNEE_MATCH_THRESHOLD = 0.5 // min token overlap of assignee name vs a turn (last-resort anchor)
 
 // ---------------------------------------------------------------------------
 // Speaker-turn parsing
@@ -304,8 +315,9 @@ export function parseWindowScores(text: string): Map<number, number> {
  * Derive event markers by fuzzy-matching each item's text against the
  * timestamped speaker turns. Deterministic — no network. The `extractedFrom`
  * snippet (verbatim from the transcript) is matched first, then falls back to
- * the item's `content`. Items with no turn above MATCH_THRESHOLD are dropped
- * (we don't fabricate an offset).
+ * the item's `content`. Items whose text can't clear MATCH_THRESHOLD fall back
+ * to anchoring on the turn where their `assignee` is first mentioned; only items
+ * with no recoverable offset at all are dropped (with a logged count).
  */
 export function deriveEventMarkers(items: TimelineItem[], turns: SpeakerTurn[]): EventMarker[] {
   if (items.length === 0 || turns.length === 0) return []
@@ -315,6 +327,7 @@ export function deriveEventMarkers(items: TimelineItem[], turns: SpeakerTurn[]):
   const turnNorm = turns.map((t) => normalize(t.text))
 
   const markers: EventMarker[] = []
+  let dropped = 0
   for (const item of items) {
     const queries = [item.extractedFrom, item.text].filter(
       (q): q is string => typeof q === 'string' && q.trim().length > 0
@@ -332,19 +345,51 @@ export function deriveEventMarkers(items: TimelineItem[], turns: SpeakerTurn[]):
       // A verbatim snippet match is authoritative — stop at a strong hit.
       if (best.score >= 0.95) break
     }
-    if (best.turnIdx >= 0 && best.score >= MATCH_THRESHOLD) {
+
+    let turnIdx = best.turnIdx >= 0 && best.score >= MATCH_THRESHOLD ? best.turnIdx : -1
+
+    // Last-resort anchor: place the marker where the assignee is first mentioned.
+    // Better an approximate offset for a real action item than silently dropping it.
+    if (turnIdx < 0 && item.assignee && item.assignee.trim()) {
+      turnIdx = findAssigneeTurn(item.assignee, turnTokens)
+    }
+
+    if (turnIdx >= 0) {
       markers.push({
         id: `mk_${item.kind}_${item.id}`,
         kind: item.kind,
-        atSec: round2(turns[best.turnIdx].start),
+        atSec: round2(turns[turnIdx].start),
         label: buildLabel(item.text),
         refId: item.id
       })
+    } else {
+      dropped++
     }
+  }
+  if (dropped > 0) {
+    console.log(`[Timeline] deriveEventMarkers: ${markers.length} placed, ${dropped} dropped (no recoverable offset)`)
   }
   // Chronological order is the most useful default for a timeline consumer.
   markers.sort((a, b) => a.atSec - b.atSec)
   return markers
+}
+
+/**
+ * Find the earliest turn whose tokens sufficiently cover the assignee name.
+ * Returns -1 if the assignee is never clearly mentioned. Short single-token
+ * names (e.g. "Ana") still match on an exact token hit.
+ */
+function findAssigneeTurn(assignee: string, turnTokens: Array<Set<string>>): number {
+  const nameTokens = tokenize(assignee)
+  if (nameTokens.length === 0) return -1
+  for (let i = 0; i < turnTokens.length; i++) {
+    let overlap = 0
+    for (const tok of nameTokens) {
+      if (turnTokens[i].has(tok)) overlap++
+    }
+    if (overlap / nameTokens.length >= ASSIGNEE_MATCH_THRESHOLD) return i
+  }
+  return -1
 }
 
 /**
@@ -394,43 +439,108 @@ interface TranscriptRow {
   event_markers: string | null
 }
 
+interface TranscriptItemsRow {
+  action_items: string | null
+  key_points: string | null
+}
+
 /**
- * The action_items + decisions rows for a recording, via its knowledge_capture.
- * Both tables are keyed by knowledge_capture_id; a recording's capture is linked
- * by knowledge_captures.source_recording_id (falling back to
- * recordings.migrated_to_capture_id for older migrated rows).
+ * The action/decision items for a recording, gathered from EVERY source a real
+ * recording actually has:
+ *
+ *  1. First-class `action_items` + `decisions` tables (populated by the
+ *     knowledge-capture migration path) — keyed by knowledge_capture_id.
+ *  2. The freshly-transcribed `transcripts.action_items` and
+ *     `transcripts.key_points` JSON string arrays. This is the ONLY source a
+ *     just-transcribed recording has — the migration tables stay empty on a
+ *     device-first library, which is why markers used to come out empty.
+ *
+ * Items are de-duplicated by (kind + normalized text) so a migrated recording
+ * that has both a first-class row and the same transcript-JSON entry yields a
+ * single marker. First-class rows win (they carry a stable refId + assignee).
+ *
+ * `transcripts.action_items` → action markers; `transcripts.key_points`
+ * ("Key points or decisions made", per the analysis prompt) → decision markers.
  */
 export function getTimelineItemsForRecording(recordingId: string): TimelineItem[] {
+  const canonical = getRecordingById(recordingId) ?? resolveRecordingId(recordingId)
+  const id = canonical?.id ?? recordingId
+
+  const items: TimelineItem[] = []
+  const seen = new Set<string>() // dedupe key: `${kind} ${normalizedText}`
+
+  const add = (item: TimelineItem): void => {
+    const key = `${item.kind} ${normalize(item.text)}`
+    if (!item.text.trim() || seen.has(key)) return
+    seen.add(key)
+    items.push(item)
+  }
+
+  // --- Source 1: first-class action_items / decisions via knowledge_capture ---
   const captureIds = new Set<string>()
   const bySource = queryOne<{ id: string }>(
     'SELECT id FROM knowledge_captures WHERE source_recording_id = ?',
-    [recordingId]
+    [id]
   )
   if (bySource?.id) captureIds.add(bySource.id)
-  const rec = getRecordingById(recordingId)
-  if (rec?.migrated_to_capture_id) captureIds.add(rec.migrated_to_capture_id)
-  if (captureIds.size === 0) return []
+  if (canonical?.migrated_to_capture_id) captureIds.add(canonical.migrated_to_capture_id)
 
-  const placeholders = Array.from(captureIds).map(() => '?').join(', ')
-  const ids = Array.from(captureIds)
+  if (captureIds.size > 0) {
+    const placeholders = Array.from(captureIds).map(() => '?').join(', ')
+    const ids = Array.from(captureIds)
 
-  const actions = queryAll<{ id: string; content: string; extracted_from: string | null }>(
-    `SELECT id, content, extracted_from FROM action_items WHERE knowledge_capture_id IN (${placeholders})`,
-    ids
-  )
-  const decisions = queryAll<{ id: string; content: string; extracted_from: string | null }>(
-    `SELECT id, content, extracted_from FROM decisions WHERE knowledge_capture_id IN (${placeholders})`,
-    ids
-  )
-
-  const items: TimelineItem[] = []
-  for (const a of actions) {
-    items.push({ id: a.id, kind: 'action', text: a.content, extractedFrom: a.extracted_from })
+    const actions = queryAll<{ id: string; content: string; extracted_from: string | null; assignee: string | null }>(
+      `SELECT id, content, extracted_from, assignee FROM action_items WHERE knowledge_capture_id IN (${placeholders})`,
+      ids
+    )
+    const decisions = queryAll<{ id: string; content: string; extracted_from: string | null }>(
+      `SELECT id, content, extracted_from FROM decisions WHERE knowledge_capture_id IN (${placeholders})`,
+      ids
+    )
+    for (const a of actions) {
+      add({ id: a.id, kind: 'action', text: a.content, extractedFrom: a.extracted_from, assignee: a.assignee })
+    }
+    for (const d of decisions) {
+      add({ id: d.id, kind: 'decision', text: d.content, extractedFrom: d.extracted_from })
+    }
   }
-  for (const d of decisions) {
-    items.push({ id: d.id, kind: 'decision', text: d.content, extractedFrom: d.extracted_from })
+
+  // --- Source 2: fresh-transcription JSON arrays on the transcript row ---
+  const trow = queryOne<TranscriptItemsRow>(
+    'SELECT action_items, key_points FROM transcripts WHERE recording_id = ?',
+    [id]
+  )
+  if (trow) {
+    parseStringArray(trow.action_items).forEach((text, i) => {
+      add({ id: `txa_${i}`, kind: 'action', text })
+    })
+    parseStringArray(trow.key_points).forEach((text, i) => {
+      add({ id: `txk_${i}`, kind: 'decision', text })
+    })
   }
+
   return items
+}
+
+/**
+ * Parse a `transcripts.action_items` / `key_points` JSON column into a string[].
+ * Both are persisted as a JSON array of plain strings. Tolerates null/malformed
+ * input (returns []) and coerces non-string entries away.
+ */
+function parseStringArray(json: string | null | undefined): string[] {
+  if (!json) return []
+  let raw: unknown
+  try {
+    raw = JSON.parse(json)
+  } catch {
+    return []
+  }
+  if (!Array.isArray(raw)) return []
+  const out: string[] = []
+  for (const entry of raw) {
+    if (typeof entry === 'string' && entry.trim()) out.push(entry.trim())
+  }
+  return out
 }
 
 export interface AnalyzeProgress {
