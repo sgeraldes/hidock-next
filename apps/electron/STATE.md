@@ -123,7 +123,32 @@ Hurtado) — normal merge-flow candidates.
 - Worktree isolation is now the dispatch norm (2 shared-tree git races on
   07-08 night; zero since).
 
-Backlog: ~1,150 queued, draining. NOTHING in flight. Pushed through 5439e9d0.
+## 2026-07-09 evening — P0 DB EMERGENCY, RESOLVED (29d38e0b, pushed):
+- DB hit 2.0GB (568MB same morning); sql.js collapsed: 10× export-buffer
+  alloc failures, 4s flush freezes, statement-collision "locked" errors,
+  UNCAUGHT main-process crash. App taken down deliberately; 2GB snapshot
+  secured (hidock.db.pre-migration-snapshot-2026-07-09-2010).
+- ROOT CAUSE: vector_embeddings stored as JSON TEXT = 94.8% of the file
+  (46,629 rows × ~39KB). Backlog transcription made it explode.
+- FIX: engine migrated to better-sqlite3 + WAL (sql.js-compatible facade —
+  all 234 raw call sites untouched); migration v36 (schema now 36): dedupe
+  (58 rows) + Float32-BLOB compaction (46,571) + VACUUM. LIVE RESULT:
+  1918.8MB → 673.4MB in 7.1s; app stable; transcriptions completing again.
+- ABI NOTE (dev workflow): vitest needs the Node-ABI better-sqlite3 binary,
+  the app needs the Electron ABI. After any npm install affecting it:
+  `npx @electron/rebuild -f -w better-sqlite3` for the app; check-native.mjs
+  swaps for its test then restores Node ABI. FOLLOW-UP: make dev/test ABI
+  coexistence automatic (e.g. tests via ELECTRON_RUN_AS_NODE).
+- FOLLOW-UPS filed: VectorStore still decodes all embeddings into JS heap
+  (~1.1GB) — lazy/Float32Array retention next; sibling apps (meeting-
+  assistant/recorder) need npm install for better-sqlite3.
+Also today: consumer-grade M365 auth (1861b792 — loopback popup flow,
+shipped-default client id plumbing, multi-account instances) awaiting the
+user's Entra registration (DFX5 tenant; personal-account registration was
+deprecated by Microsoft).
+
+Backlog: ~1,200 queued, draining again post-migration. NOTHING in flight.
+Pushed through 29d38e0b.
 
 ## 2. DEVICE STATE
 
