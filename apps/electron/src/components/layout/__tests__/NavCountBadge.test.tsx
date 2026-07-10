@@ -38,11 +38,14 @@ describe('NavCountBadge (sidebar nav counters)', () => {
     expect(screen.getByLabelText('1 file to sync')).toBeInTheDocument()
   })
 
-  it('caps the display at 99+', () => {
-    render(<NavCountBadge href="/sync" count={150} collapsed={false} active={false} />)
-    expect(screen.getByText('99+')).toBeInTheDocument()
-    // aria-label still reports the true count for screen readers
+  it('shows the exact count (only caps at an absurd width)', () => {
+    const { rerender } = render(<NavCountBadge href="/sync" count={150} collapsed={false} active={false} />)
+    // Exact count now — the pill widens for more digits; no "99+" cap.
+    expect(screen.getByText('150')).toBeInTheDocument()
     expect(screen.getByLabelText('150 files to sync')).toBeInTheDocument()
+    // Only an absurd value caps, to protect the layout.
+    rerender(<NavCountBadge href="/sync" count={12000} collapsed={false} active={false} />)
+    expect(screen.getByText('9999+')).toBeInTheDocument()
   })
 
   it('renders in the collapsed (icon-corner) variant as well', () => {
