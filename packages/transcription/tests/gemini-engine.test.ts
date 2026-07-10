@@ -18,6 +18,7 @@ import {
   splitWavIntoChunks,
   splitMp3IntoChunks,
   parseTurns,
+  detectAudioMimeType,
 } from '../src/engines/gemini-engine.js'
 
 const oneSecond = Buffer.alloc(16000 * 2)
@@ -341,5 +342,104 @@ describe('parseTurns', () => {
     expect(segs).toHaveLength(2)
     expect(segs[0]).toMatchObject({ speaker: 'Speaker 1', text: 'Hola', startTime: 3 })
     expect(segs[1]).toMatchObject({ speaker: 'Speaker 2', text: 'Qué tal', startTime: 7 })
+  })
+
+  // The one-speaker-wall bug: Gemini diarized (Speaker 1/2 labels) but dropped
+  // the [MM:SS] prefix and returned everything as ONE paragraph. Without the
+  // speaker-marker fallback this collapsed into a single first-speaker turn.
+  it('recovers distinct speakers from an inline diarized blob with NO timestamps', () => {
+    const blob = 'Speaker 1: hola qué tal Speaker 2: bien y tú Speaker 1: todo bien gracias'
+    const segs = parseTurns(blob, 0, 'you', 'mic')
+    expect(segs).toHaveLength(3)
+    expect(segs.map((s) => s.speaker)).toEqual(['Speaker 1', 'Speaker 2', 'Speaker 1'])
+    expect(segs.map((s) => s.text)).toEqual(['hola qué tal', 'bien y tú', 'todo bien gracias'])
+    // No per-turn time available → all turns anchored at the chunk start (honest,
+    // not fabricated) while remaining distinct speaker turns.
+    expect(segs.map((s) => s.startTime)).toEqual([0, 0, 0])
+  })
+
+  it('keeps prose before the first bare speaker marker as a leading default turn', () => {
+    const segs = parseTurns('intro sin marca Speaker 1: primero Speaker 2: segundo', 30, 'them', 'system')
+    expect(segs).toHaveLength(3)
+    expect(segs[0]).toMatchObject({ speaker: 'them', text: 'intro sin marca', startTime: 30 })
+    expect(segs[1]).toMatchObject({ speaker: 'Speaker 1', text: 'primero' })
+    expect(segs[2]).toMatchObject({ speaker: 'Speaker 2', text: 'segundo' })
+  })
+
+  it('offsets bare-speaker fallback turns by chunkStartSec', () => {
+    const segs = parseTurns('Speaker 1: uno Speaker 2: dos', 600, 'you', 'mic')
+    expect(segs).toHaveLength(2)
+    expect(segs.every((s) => s.startTime === 600)).toBe(true)
+  })
+
+  it('does NOT over-split a single-speaker wall (one bare marker stays one turn)', () => {
+    const segs = parseTurns('Speaker 1: this is a long single-speaker monologue with no other voices', 0, 'you', 'mic')
+    expect(segs).toHaveLength(1)
+    expect(segs[0]).toMatchObject({ speaker: 'Speaker 1', text: 'this is a long single-speaker monologue with no other voices' })
+  })
+
+  it('does NOT fire the speaker-marker split on the word "speaker" in prose', () => {
+    // Two occurrences of "speaker" but neither is the "Speaker <number>:" label.
+    const segs = parseTurns('the keynote speaker was great and the other speaker agreed', 0, 'them', 'system')
+    expect(segs).toHaveLength(1)
+    expect(segs[0].speaker).toBe('them')
+  })
+})
+
+describe('detectAudioMimeType', () => {
+  const wav = () => {
+    const b = Buffer.alloc(16)
+    b.write('RIFF', 0, 'ascii')
+    b.write('WAVE', 8, 'ascii')
+    return b
+  }
+  it('detects a real PCM WAV by its RIFF/WAVE header', () => {
+    expect(detectAudioMimeType(wav(), '.wav')).toBe('audio/wav')
+  })
+  it('detects an ID3-tagged MP3 as audio/mp3', () => {
+    const b = Buffer.from('ID3  ')
+    expect(detectAudioMimeType(b, '.mp3')).toBe('audio/mp3')
+  })
+  it('detects MP3-in-.wav (MPEG frame sync) as audio/mp3, correcting the extension lie', () => {
+    // HiDock's real case: MP3 frame bytes saved with a .wav extension.
+    const b = Buffer.from([0xff, 0xfb, 0x90, 0x00])
+    expect(detectAudioMimeType(b, '.wav')).toBe('audio/mp3')
+  })
+  it('detects Ogg and FLAC by signature', () => {
+    expect(detectAudioMimeType(Buffer.from('OggS....'), '.ogg')).toBe('audio/ogg')
+    expect(detectAudioMimeType(Buffer.from('fLaC....'), '.flac')).toBe('audio/flac')
+  })
+  it('falls back to the extension map, then audio/wav, for unrecognised content', () => {
+    expect(detectAudioMimeType(Buffer.from('unknown bytes'), '.hda')).toBe('audio/mp3')
+    expect(detectAudioMimeType(Buffer.from('unknown bytes'), '')).toBe('audio/wav')
+  })
+})
+
+describe('GeminiEngine diarization prompt + end-to-end recovery', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('prompt instructs the model to diarize DISTINCT speakers with per-turn timestamps', async () => {
+    let capturedPrompt = ''
+    mockGenerateContentStream.mockImplementation(async (req: any) => {
+      capturedPrompt = req.contents[0].parts.find((p: any) => p.text)?.text ?? ''
+      return streamResponse('[00:00] Speaker 1: hola')
+    })
+    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    await collect(engine.transcribe(oneSecond, { source: 'mic' }))
+    expect(capturedPrompt.toLowerCase()).toContain('distinct')
+    expect(capturedPrompt).toContain('[MM:SS] Speaker N:')
+    expect(capturedPrompt).toContain('NEVER return the whole recording as one line or one speaker block')
+  })
+
+  it('yields multiple distinct speakers when the model returns a no-timestamp diarized blob', async () => {
+    mockGenerateContentStream.mockResolvedValue(
+      streamResponse('Speaker 1: buenos días a todos Speaker 2: gracias, empecemos Speaker 1: perfecto'),
+    )
+    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const segments = await collect(engine.transcribe(oneSecond, { source: 'mic' }))
+    expect(segments).toHaveLength(3)
+    expect(segments.map((s) => s.speaker)).toEqual(['Speaker 1', 'Speaker 2', 'Speaker 1'])
   })
 })

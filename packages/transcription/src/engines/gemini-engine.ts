@@ -18,6 +18,34 @@ const MIME_TYPES: Record<string, string> = {
   '.hda': 'audio/mp3',
 }
 
+/**
+ * Determine the MIME type to send to Gemini from the audio bytes themselves.
+ *
+ * HiDock records MP3 but saves it with a `.wav`/`.hda` extension (saveRecording
+ * only renames the extension, it does not transcode), so trusting the extension
+ * alone sends MP3 bytes labelled `audio/wav` — a container/MIME mismatch that
+ * degrades the model's input and hurts diarization. Sniff the leading magic
+ * bytes (the same signatures the chunk splitters rely on) and emit the correct,
+ * DOCUMENTED Gemini audio MIME type (audio/wav, audio/mp3, audio/ogg,
+ * audio/flac per https://ai.google.dev/gemini-api/docs/audio). Falls back to the
+ * extension map, then `audio/wav`, when the content is unrecognised.
+ */
+export function detectAudioMimeType(audio: Buffer, ext: string): string {
+  if (
+    audio.length >= 12 &&
+    audio.toString('ascii', 0, 4) === 'RIFF' &&
+    audio.toString('ascii', 8, 12) === 'WAVE'
+  ) {
+    return 'audio/wav'
+  }
+  if (audio.length >= 3 && audio.toString('ascii', 0, 3) === 'ID3') return 'audio/mp3'
+  // MPEG audio frame sync (0xFF 0xEx) — HiDock's MP3-in-.wav starts here.
+  if (audio.length >= 2 && audio[0] === 0xff && (audio[1] & 0xe0) === 0xe0) return 'audio/mp3'
+  if (audio.length >= 4 && audio.toString('ascii', 0, 4) === 'OggS') return 'audio/ogg'
+  if (audio.length >= 4 && audio.toString('ascii', 0, 4) === 'fLaC') return 'audio/flac'
+  return MIME_TYPES[ext] ?? 'audio/wav'
+}
+
 /** One transcribable slice of audio plus its position in the whole recording. */
 export interface AudioChunk {
   /** Independent, self-contained audio buffer (a valid WAV or a run of MP3 frames). */
@@ -299,6 +327,57 @@ function parseInlineTurns(
   return segments.length > 0 ? segments : null
 }
 
+/** `Speaker N:` turn marker WITHOUT a leading timestamp, matched anywhere. The
+ * exact "Speaker <number>" label the prompt requests — narrow enough that it
+ * won't fire on the word "speaker" appearing in ordinary prose. */
+const INLINE_SPEAKER_RE = /(Speaker\s*\d+)\s*:/g
+
+/**
+ * Fallback splitter for when Gemini diarized the audio (it labelled the turns
+ * "Speaker 1", "Speaker 2", …) but dropped the `[MM:SS]` prefix the prompt asks
+ * for, returning a run like `Speaker 1: … Speaker 2: … Speaker 1: …`. Without
+ * this, `parseInlineTurns` (which requires the timestamp) skips it and the
+ * line-based parser cannot split markers that sit mid-line, so the whole thing
+ * collapses into a single first-speaker wall — the exact one-speaker-blob
+ * symptom. Split on every bare `Speaker N:` marker so the distinct speakers are
+ * recovered. No per-turn time is available, so all turns share `chunkStartSec`
+ * (nothing is fabricated). Returns null when fewer than two markers are present
+ * (a single `Speaker 1:` wall or unlabelled prose is left to the line parser).
+ */
+function parseInlineSpeakerTurns(
+  text: string,
+  chunkStartSec: number,
+  defaultSpeaker: string,
+  source: 'mic' | 'system'
+): TranscriptSegment[] | null {
+  const markers: Array<{ markerStart: number; contentStart: number; speaker: string }> = []
+  INLINE_SPEAKER_RE.lastIndex = 0
+  let m: RegExpExecArray | null
+  while ((m = INLINE_SPEAKER_RE.exec(text)) !== null) {
+    markers.push({
+      markerStart: m.index,
+      contentStart: m.index + m[0].length,
+      speaker: m[1].replace(/\s+/g, ' ').trim()
+    })
+  }
+  if (markers.length < 2) return null
+
+  const segments: TranscriptSegment[] = []
+  const push = (speaker: string, raw: string) => {
+    const body = raw.replace(/\s+/g, ' ').trim()
+    if (body) {
+      segments.push({ speaker, text: body, startTime: chunkStartSec, endTime: chunkStartSec, confidence: 1, source })
+    }
+  }
+  // Any text before the first marker is a leading turn with the default speaker.
+  push(defaultSpeaker, text.slice(0, markers[0].markerStart))
+  for (let i = 0; i < markers.length; i++) {
+    const contentEnd = i + 1 < markers.length ? markers[i + 1].markerStart : text.length
+    push(markers[i].speaker, text.slice(markers[i].contentStart, contentEnd))
+  }
+  return segments.length > 0 ? segments : null
+}
+
 /**
  * Parse a chunk's transcription text into speaker turns. Recognises turns of the
  * form `[MM:SS] Speaker N: text` (the format the prompt requests), where the
@@ -325,6 +404,12 @@ export function parseTurns(
   // clean line-per-turn case (newlines inside a turn collapse to spaces).
   const inlineSegments = parseInlineTurns(text, chunkStartSec, defaultSpeaker, source)
   if (inlineSegments) return inlineSegments
+
+  // Second fallback: the model diarized with `Speaker N:` labels but omitted the
+  // `[MM:SS]` prefix. Split on the bare speaker markers so a multi-speaker
+  // paragraph doesn't collapse into a single first-speaker wall.
+  const speakerSegments = parseInlineSpeakerTurns(text, chunkStartSec, defaultSpeaker, source)
+  if (speakerSegments) return speakerSegments
 
   const segments: TranscriptSegment[] = []
   const tsRe = /^\[?(\d{1,3}):(\d{2})(?::(\d{2}))?\]?\s+(.*)$/
@@ -480,7 +565,10 @@ export class GeminiEngine implements TranscriptionEngine {
 
     const filePath = (options as { filePath?: string }).filePath ?? ''
     const ext = extname(filePath).toLowerCase()
-    const mimeType = MIME_TYPES[ext] ?? 'audio/wav'
+    // Sniff the actual bytes rather than trusting the extension: HiDock's MP3
+    // recordings are saved as `.wav`/`.hda`, and a wrong MIME degrades Gemini's
+    // input (and thus diarization). See detectAudioMimeType.
+    const mimeType = detectAudioMimeType(audio, ext)
 
     const genAI = new GoogleGenerativeAI(this.apiKey)
     const modelInstance = genAI.getGenerativeModel({ model: this.model })
@@ -507,12 +595,14 @@ export class GeminiEngine implements TranscriptionEngine {
               ? `\nThe previous segment ended with:\n«${previousTail}»\nKeep the Speaker N numbering consistent with it.`
               : '')
           : ''
-      const prompt = `Transcribe this audio recording.
-The audio may be in Spanish or English - transcribe in the original language.
+      const prompt = `Transcribe this audio recording with speaker diarization.
+The audio may be in Spanish or English - transcribe in the original language; do not translate.
+Identify and distinguish the DISTINCT speakers by voice. Most meeting recordings have MORE THAN ONE speaker: listen for changes in voice and label each one. Use a single speaker label ONLY if you are certain there is genuinely just one person talking.
 Format the transcription as one line per speaker turn, using EXACTLY this format:
 [MM:SS] Speaker N: what the speaker said
-- [MM:SS] is the time of the turn relative to the START of THIS audio segment (it starts at 00:00).
-- "Speaker N" is a stable label per distinct voice (Speaker 1, Speaker 2, ...); reuse the same number for the same voice.
+- [MM:SS] is the START time of the turn relative to the START of THIS audio segment (it starts at 00:00). EVERY line MUST begin with this timestamp in square brackets.
+- "Speaker N" is a stable label per distinct voice (Speaker 1, Speaker 2, ...); reuse the same number for the same voice, and the same colon-terminated "Speaker N:" label on every line.
+- Start a NEW timestamped line every time the speaker changes, AND at least every ~30 seconds even when the same speaker keeps talking. NEVER return the whole recording as one line or one speaker block.
 - Put every speaker turn on its own line. Do not merge different speakers onto one line.
 Transcribe ALL speech through to the very end of the audio, including brief closings and goodbyes.${positionNote}${contextSection}
 Return ONLY the transcription lines, no additional commentary.`
