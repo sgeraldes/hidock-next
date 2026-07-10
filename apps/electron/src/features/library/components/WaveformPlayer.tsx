@@ -73,6 +73,12 @@ interface WaveformPlayerProps {
   filePath?: string
   /** Presentation. Defaults to the docked 'pill'. */
   mode?: WaveformPlayerMode
+  /**
+   * Full-width docked bar. When true the 'pill' spans its container (a sticky
+   * player bar across the whole reader pane) instead of a compact left-aligned
+   * chip. No-op for 'scrubber' (already fluid) and 'full'.
+   */
+  fluid?: boolean
   /** Per-speaker colored bars (full mode only; no-op when absent). */
   speakerRanges?: SpeakerRange[]
   /** Distinct speakers for the color legend (full mode only). */
@@ -200,6 +206,7 @@ export function WaveformPlayer({
   recordingId,
   filePath,
   mode = 'pill',
+  fluid = false,
   speakerRanges,
   speakerLegend,
   events,
@@ -268,7 +275,8 @@ export function WaveformPlayer({
     return (
       <div
         className={cn(
-          'inline-flex max-w-full items-center gap-2 rounded-full border bg-muted/50 py-1 pl-1 pr-2 text-foreground',
+          'items-center gap-2 rounded-full border bg-muted/50 py-1 pl-1 pr-2 text-foreground',
+          fluid ? 'flex w-full' : 'inline-flex max-w-full',
           className
         )}
         data-testid="waveform-player-pill"
@@ -284,7 +292,7 @@ export function WaveformPlayer({
         >
           {pb.isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
         </Button>
-        <div className="min-w-0 flex-1 max-w-[280px]">
+        <div className={cn('min-w-0 flex-1', !fluid && 'max-w-[280px]')}>
           {wf.waveformData ? (
             <WaveformCanvas
               audioData={wf.waveformData}

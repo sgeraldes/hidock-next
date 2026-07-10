@@ -19,15 +19,15 @@
  *      Participants), and the Summary / Action Items / Transcript
  */
 
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef, useLayoutEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { TranscriptViewer, type StoredSegment } from './TranscriptViewer'
 import { TranscriptionStatusBadge } from './TranscriptionStatusBadge'
 import { StatusIcon } from './StatusIcon'
-import { WaveformPlayer, type TimelineEvent, type SentimentScorePoint } from './WaveformPlayer'
+import { WaveformPlayer, type TimelineEvent, type SentimentScorePoint, type WaveformPlayerMode } from './WaveformPlayer'
 import { SpeakerAssignPopover, type AssignScope } from './SpeakerAssignPopover'
 import { useReaderPeople, type ParticipantChip } from '../hooks/useReaderPeople'
-import { deriveSpeakerRanges } from '@/features/library/utils/speakerRanges'
+import { deriveSpeakerRanges, type DerivedSpeakerRange, type SpeakerLegendEntry } from '@/features/library/utils/speakerRanges'
 import { getDisplayTitle } from '@/features/library/utils/getDisplayTitle'
 import { useUIStore } from '@/store/useUIStore'
 import { useLibraryStore } from '@/store/useLibraryStore'
@@ -58,6 +58,11 @@ import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { formatDateTime, formatDuration, formatBytes, cn } from '@/lib/utils'
 import { formatSmartDate, formatRelativeDate } from '@/lib/smartDate'
 import { useTranscriptionStore } from '@/store/features/useTranscriptionStore'
+
+/** Body scrollTop (px) past which the big timeline morphs to the docked bar. */
+const COLLAPSE_SCROLL_THRESHOLD = 6
+/** Reader width (px) below which the docked bar drops to the bare scrubber. */
+const NARROW_WIDTH_BREAKPOINT = 420
 
 const CATEGORY_OPTIONS = [
   { value: 'meeting', label: 'Meeting' },
@@ -172,16 +177,27 @@ export function SourceReader({
   // Meeting link dialog state
   const [linkDialogOpen, setLinkDialogOpen] = useState(false)
 
-  // Whether the compact player is expanded to the full waveform (docked, but
-  // collapsed by default so the header stays short). A separate PIN (persisted in
-  // useLibraryStore) keeps the full timeline open across recordings + restarts.
-  const [playerExpanded, setPlayerExpanded] = useState(false)
+  // The reader hosts ONE waveform element. It is the big rich timeline by DEFAULT
+  // (reader scrolled to top) and morphs into a full-width docked bar as the body
+  // scrolls. `waveformPinned` (persisted) is the explicit "keep expanded" pin: it
+  // overrides the scroll-collapse so the big timeline stays open while scrolling.
   const waveformPinned = useLibraryStore((s) => s.waveformPinned)
   const setWaveformPinned = useLibraryStore((s) => s.setWaveformPinned)
+
+  // Scroll-driven collapse: the body scroll container tells the player whether the
+  // reader is scrolled past the top. true → morph big → docked bar (unless pinned).
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const [scrolled, setScrolled] = useState(false)
 
   // Rich timeline analysis (event markers + sentiment) for full mode, fetched
   // from the sibling IPC when a recording opens. Null until (and if) it resolves.
   const [timeline, setTimeline] = useState<TimelineData | null>(null)
+  // True while a one-time analyzeTimeline() backfill is computing sentiment +
+  // markers for an already-transcribed recording (drives the subtle "Analyzing
+  // timeline…" indicator). Preload does not expose the incremental
+  // recordings:timelineProgress event, so the in-flight backfill promise is the
+  // signal we have — shown until it resolves.
+  const [analyzingTimeline, setAnalyzingTimeline] = useState(false)
 
   // Transcription warning state. `pendingTranscribe` holds the exact action to
   // run once the user confirms past the "may overwrite your edits" dialog — this
@@ -212,8 +228,10 @@ export function SourceReader({
     setMetadataEdited(false)
     setShowTranscribeWarning(false)
     setPendingTranscribe(null)
-    setPlayerExpanded(false)
     setReDiarizing(false)
+    // A freshly-opened recording always starts at the top → big timeline.
+    setScrolled(false)
+    if (scrollRef.current) scrollRef.current.scrollTop = 0
   }, [recording?.id])
 
   // Preload the waveform as soon as a playable recording is opened, so the
@@ -288,6 +306,7 @@ export function SourceReader({
   useEffect(() => {
     let cancelled = false
     setTimeline(null)
+    setAnalyzingTimeline(false)
     if (!recordingId) return
     const api = window.electronAPI?.recordings as unknown as {
       getTimelineAnalysis?: (id: string) => Promise<TimelineAnalysisResult>
@@ -299,17 +318,30 @@ export function SourceReader({
         let res = await api.getTimelineAnalysis!(recordingId)
         const isEmpty = (r?: TimelineAnalysisResult) =>
           !r || ((r.eventMarkers?.length ?? 0) === 0 && (r.sentimentSegments?.length ?? 0) === 0)
+        // Already-transcribed recordings return empty until analyzeTimeline runs
+        // once. Backfill it (best-effort) and show the "Analyzing timeline…" hint
+        // meanwhile; per-speaker colors + playhead already render without this.
         if (isEmpty(res) && typeof api.analyzeTimeline === 'function') {
+          if (!cancelled) setAnalyzingTimeline(true)
           try {
             await api.analyzeTimeline(recordingId)
             res = await api.getTimelineAnalysis!(recordingId)
           } catch { /* backfill best-effort */ }
+          finally { if (!cancelled) setAnalyzingTimeline(false) }
         }
         if (!cancelled && res) setTimeline(mapTimelineAnalysis(res))
       } catch { /* non-fatal: colors + seek still work without it */ }
+      finally { if (!cancelled) setAnalyzingTimeline(false) }
     })()
     return () => { cancelled = true }
   }, [recordingId])
+
+  // Scroll-driven collapse: once the body is scrolled a few px past the top, the
+  // player morphs from the big timeline to the docked bar (unless pinned). Read
+  // synchronously in onScroll (below) — no rAF so it stays deterministic in tests.
+  const handleBodyScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    setScrolled(e.currentTarget.scrollTop > COLLAPSE_SCROLL_THRESHOLD)
+  }, [])
 
   const handleSaveTitle = useCallback(async () => {
     if (!recording?.knowledgeCaptureId) return
@@ -762,60 +794,24 @@ export function SourceReader({
           </DropdownMenu>
         </div>
 
-        {/* Compact player — voice-message pill (wide) or bare scrubber (narrow),
-            with an expand toggle to a smaller full waveform (clear playhead). */}
+        {/* THE waveform — a SINGLE element. Big rich timeline by default (reader
+            at top); morphs to a full-width docked bar as the body scrolls; the
+            pin keeps it big while scrolling. Never renders a second copy. */}
         {canPlay && (
           <div className="px-4 pt-3 pb-3">
-            <div className="flex items-center gap-2">
-              <div className="hidden min-w-0 flex-1 @md:block">
-                <WaveformPlayer mode="pill" recordingId={recording.id} filePath={localPath} />
-              </div>
-              <div className="min-w-0 flex-1 @md:hidden">
-                <WaveformPlayer mode="scrubber" recordingId={recording.id} filePath={localPath} />
-              </div>
-              {/* Pin keeps the full timeline open across recordings + restarts. */}
-              <Button
-                variant="ghost"
-                size="icon"
-                className={cn('h-8 w-8 shrink-0', waveformPinned && 'text-primary')}
-                onClick={() => setWaveformPinned(!waveformPinned)}
-                aria-pressed={waveformPinned}
-                aria-label={waveformPinned ? 'Unpin timeline' : 'Pin timeline open'}
-                title={waveformPinned ? 'Unpin the expanded timeline' : 'Pin the expanded timeline (stays open)'}
-              >
-                <Pin className={cn('h-4 w-4', waveformPinned && 'fill-current')} />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8 shrink-0"
-                onClick={() => {
-                  // Collapsing a pinned timeline unpins it too, so the chevron is
-                  // always an intuitive expand/collapse.
-                  if (waveformPinned) { setWaveformPinned(false); setPlayerExpanded(false) }
-                  else setPlayerExpanded((v) => !v)
-                }}
-                aria-expanded={playerExpanded || waveformPinned}
-                aria-label={playerExpanded || waveformPinned ? 'Collapse waveform' : 'Expand waveform'}
-                title={playerExpanded || waveformPinned ? 'Collapse waveform' : 'Expand waveform'}
-              >
-                <ChevronDown className={cn('h-4 w-4 transition-transform', (playerExpanded || waveformPinned) && 'rotate-180')} />
-              </Button>
-            </div>
-            {(playerExpanded || waveformPinned) && (
-              <div className="mt-2">
-                <WaveformPlayer
-                  mode="full"
-                  recordingId={recording.id}
-                  filePath={localPath}
-                  speakerRanges={speakerTimeline.ranges}
-                  speakerLegend={speakerTimeline.legend}
-                  events={timeline?.events}
-                  sentiment={timeline?.sentiment}
-                  onSeek={(sec) => onSeek?.(Math.round(sec * 1000))}
-                />
-              </div>
-            )}
+            <ReaderPlayer
+              recordingId={recording.id}
+              filePath={localPath}
+              speakerRanges={speakerTimeline.ranges}
+              speakerLegend={speakerTimeline.legend}
+              events={timeline?.events}
+              sentiment={timeline?.sentiment}
+              analyzing={analyzingTimeline}
+              scrolled={scrolled}
+              pinned={waveformPinned}
+              onTogglePin={() => setWaveformPinned(!waveformPinned)}
+              onSeek={(sec) => onSeek?.(Math.round(sec * 1000))}
+            />
           </div>
         )}
 
@@ -832,28 +828,24 @@ export function SourceReader({
             />
           </div>
         )}
-      </div>
 
-      {/* ===================================================================
-          SCROLL BODY — everything else.
-          =================================================================== */}
-      <div className="flex-1 min-h-0 overflow-y-auto">
-        <div className="p-6 space-y-4">
-          {/* Secondary metadata grid */}
-          <div className="grid grid-cols-2 @md:grid-cols-3 @xl:grid-cols-4 gap-4 text-sm">
+        {/* Essentials — Size · Category · Filename · Projects stay DOCKED (visible
+            while the body scrolls); only Summary / Action Items / Transcript scroll. */}
+        <div className="border-t px-4 py-3 space-y-3">
+          <div className="grid grid-cols-2 @md:grid-cols-3 @xl:grid-cols-4 gap-x-4 gap-y-2 text-sm">
             <div>
-              <p className="text-xs font-medium text-muted-foreground mb-1">Size</p>
+              <p className="text-xs font-medium text-muted-foreground mb-0.5">Size</p>
               <p>{recording.size ? formatBytes(recording.size) : 'Unknown'}</p>
             </div>
             {recording.quality && recording.quality !== 'unrated' && (
               <div>
-                <p className="text-xs font-medium text-muted-foreground mb-1">Quality</p>
+                <p className="text-xs font-medium text-muted-foreground mb-0.5">Quality</p>
                 <p className="capitalize">{recording.quality.replace('-', ' ')}</p>
               </div>
             )}
             {recording.knowledgeCaptureId ? (
               <div>
-                <p className="text-xs font-medium text-muted-foreground mb-1">Category</p>
+                <p className="text-xs font-medium text-muted-foreground mb-0.5">Category</p>
                 <Select
                   value={recording.category || ''}
                   onValueChange={handleCategoryChange}
@@ -873,24 +865,36 @@ export function SourceReader({
               </div>
             ) : recording.category ? (
               <div>
-                <p className="text-xs font-medium text-muted-foreground mb-1">Category</p>
+                <p className="text-xs font-medium text-muted-foreground mb-0.5">Category</p>
                 <p className="capitalize">{recording.category}</p>
               </div>
             ) : null}
             <div className="col-span-2">
-              <p className="text-xs font-medium text-muted-foreground mb-1">Filename</p>
+              <p className="text-xs font-medium text-muted-foreground mb-0.5">Filename</p>
               <p className="truncate" title={recording.filename}>{recording.filename}</p>
             </div>
           </div>
 
-          {/* Projects assignment (only for captured recordings) */}
           {recording.knowledgeCaptureId && (
             <div>
               <p className="text-xs font-medium text-muted-foreground mb-1.5">Projects</p>
               <ProjectAssignmentRow knowledgeCaptureId={recording.knowledgeCaptureId} />
             </div>
           )}
+        </div>
+      </div>
 
+      {/* ===================================================================
+          SCROLL BODY — Summary / Action Items / Transcript (+ meeting context).
+          Its scroll position drives the docked player's collapse.
+          =================================================================== */}
+      <div
+        ref={scrollRef}
+        onScroll={handleBodyScroll}
+        className="flex-1 min-h-0 overflow-y-auto"
+        data-testid="reader-scroll-body"
+      >
+        <div className="p-6 space-y-4">
           {/* Linked Meeting */}
           {meeting && (
             <div className="flex items-center gap-2 p-3 bg-muted/30 border rounded-lg">
@@ -1011,6 +1015,141 @@ export function SourceReader({
           setShowTranscribeWarning(false)
         }}
       />
+    </div>
+  )
+}
+
+/**
+ * ReaderPlayer — the SINGLE waveform element for the reader.
+ *
+ * There is never a second copy: this one element is the big rich meeting timeline
+ * by DEFAULT (reader scrolled to top) and MORPHS into a full-width docked player
+ * bar as the body scrolls. State is driven by:
+ *   - `scrolled` (body scroll position): big at top → docked bar once scrolled.
+ *   - `pinned`  (explicit "keep expanded", persisted): overrides the scroll
+ *     collapse so the big timeline stays open even while scrolling.
+ *   - measured width: the docked bar drops to the bare scrubber below a breakpoint.
+ *
+ * The morph is animated (max-height + opacity), honoring prefers-reduced-motion
+ * via Tailwind's `motion-safe:` variants (instant swap when reduced).
+ */
+interface ReaderPlayerProps {
+  recordingId: string
+  filePath?: string
+  speakerRanges: DerivedSpeakerRange[]
+  speakerLegend: SpeakerLegendEntry[]
+  events?: TimelineEvent[]
+  sentiment?: SentimentScorePoint[]
+  analyzing: boolean
+  scrolled: boolean
+  pinned: boolean
+  onTogglePin: () => void
+  onSeek: (sec: number) => void
+}
+
+function ReaderPlayer({
+  recordingId,
+  filePath,
+  speakerRanges,
+  speakerLegend,
+  events,
+  sentiment,
+  analyzing,
+  scrolled,
+  pinned,
+  onTogglePin,
+  onSeek,
+}: ReaderPlayerProps) {
+  const regionRef = useRef<HTMLDivElement>(null)
+  const innerRef = useRef<HTMLDivElement>(null)
+  const [width, setWidth] = useState<number | null>(null)
+  const [maxHeight, setMaxHeight] = useState<number | undefined>(undefined)
+
+  // Big (rich timeline) unless the body is scrolled — and the pin forces it big.
+  const big = pinned || !scrolled
+  const narrow = width != null && width < NARROW_WIDTH_BREAKPOINT
+  const mode: WaveformPlayerMode = big ? 'full' : narrow ? 'scrubber' : 'pill'
+
+  // Track the reader pane width to choose the docked bar vs. the bare scrubber.
+  useLayoutEffect(() => {
+    const el = regionRef.current
+    if (!el) return
+    const measure = () => setWidth(el.getBoundingClientRect().width)
+    measure()
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(measure)
+      ro.observe(el)
+      return () => ro.disconnect()
+    }
+    window.addEventListener('resize', measure)
+    return () => window.removeEventListener('resize', measure)
+  }, [])
+
+  // Animate height between big and docked by measuring the live content height.
+  // Only cap when we have a real measurement, so the player is never clipped to 0
+  // (jsdom/SSR report scrollHeight 0 → leave it uncapped and fully visible).
+  useLayoutEffect(() => {
+    const el = innerRef.current
+    if (!el) return
+    const sync = () => {
+      const h = el.scrollHeight
+      if (h > 0) setMaxHeight(h)
+    }
+    sync()
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(sync)
+      ro.observe(el)
+      return () => ro.disconnect()
+    }
+    return
+  }, [mode, big, narrow])
+
+  return (
+    <div ref={regionRef} className="relative flex items-start gap-1" data-testid="reader-player-region">
+      <div
+        className="relative min-w-0 flex-1 overflow-hidden rounded-lg motion-safe:transition-[max-height] motion-safe:duration-300 motion-safe:ease-out"
+        style={{ maxHeight }}
+      >
+        <div ref={innerRef} className="motion-safe:transition-opacity motion-safe:duration-200">
+          <WaveformPlayer
+            mode={mode}
+            fluid
+            recordingId={recordingId}
+            filePath={filePath}
+            speakerRanges={big ? speakerRanges : undefined}
+            speakerLegend={big ? speakerLegend : undefined}
+            events={big ? events : undefined}
+            sentiment={big ? sentiment : undefined}
+            onSeek={onSeek}
+          />
+        </div>
+
+        {/* Subtle backfill indicator — sentiment + markers are still computing.
+            Colored bars + playhead already render; this just explains the wait. */}
+        {big && analyzing && (
+          <div
+            className="pointer-events-none absolute left-2 top-2 z-10 inline-flex items-center gap-1.5 rounded-full border bg-background/90 px-2 py-0.5 text-[11px] text-muted-foreground shadow-sm backdrop-blur"
+            data-testid="timeline-analyzing"
+            role="status"
+          >
+            <RefreshCw className="h-3 w-3 animate-spin" aria-hidden="true" />
+            Analyzing timeline…
+          </div>
+        )}
+      </div>
+
+      {/* Keep-expanded pin — overrides the scroll-collapse; persisted per user. */}
+      <Button
+        variant="ghost"
+        size="icon"
+        className={cn('h-8 w-8 shrink-0', pinned && 'text-primary')}
+        onClick={onTogglePin}
+        aria-pressed={pinned}
+        aria-label={pinned ? 'Allow timeline to collapse on scroll' : 'Keep timeline expanded'}
+        title={pinned ? 'Pinned open — click to let it collapse when you scroll' : 'Keep the timeline expanded while scrolling'}
+      >
+        <Pin className={cn('h-4 w-4', pinned && 'fill-current')} />
+      </Button>
     </div>
   )
 }

@@ -64,6 +64,13 @@ describe('WaveformPlayer', () => {
     expect(pause).toHaveBeenCalled()
   })
 
+  it('renders a FULL-WIDTH docked pill when `fluid` is set (spans the pane, not a left chip)', () => {
+    render(<WaveformPlayer mode="pill" fluid recordingId="rec-1" filePath="/a.wav" />)
+    const pill = screen.getByTestId('waveform-player-pill')
+    expect(pill.className).toContain('w-full')
+    expect(pill.className).not.toContain('inline-flex')
+  })
+
   it('renders the scrubber mode with a seek slider', () => {
     render(<WaveformPlayer mode="scrubber" recordingId="rec-1" filePath="/a.wav" />)
     expect(screen.getByTestId('waveform-player-scrubber')).toBeInTheDocument()
