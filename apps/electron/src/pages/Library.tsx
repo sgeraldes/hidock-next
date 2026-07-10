@@ -1157,7 +1157,7 @@ export function Library() {
       />
 
       {/* Filters */}
-      <div className="px-2 sm:px-4 lg:px-6 relative">
+      <div className="px-2 sm:px-4 lg:px-6 pb-3 border-b border-border relative">
         <div className={isFilterPending ? 'opacity-70 pointer-events-none transition-opacity' : 'transition-opacity'}>
           <LibraryFilters
             stats={stats}
