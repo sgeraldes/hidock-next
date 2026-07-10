@@ -46,11 +46,18 @@ ELECTRON ABI (the running app holds it). So:
   reorder/queueState IPC + push. OperationsPanel Pause button enabled + reflects
   state. Optional deferred: persist paused flag/rank across restart (intentionally
   in-memory now).
-- **wer-part2-run** (a640469be104202fc, base f1e1eaee): run the empirical WER
-  experiment (Gemini-only vs hybrid VAD-chunk vs full-local) using the committed
-  harness scripts/experiments/wer/ on real audio (F:/HiDock-Next-Audios, RTX
-  4090); fill Part 2 + Q2 verdict in docs/experiments/wer-hybrid-spike.md. On
-  land: cherry-pick doc + SEND THE Q2 VERDICT + numbers TO USER (they asked).
+- ~~**wer-part2-run**~~ **DONE — landed `0903fd80`** (561d1e43; docs-only; all 4
+  clips × 5 approaches ran clean on the 4090, zero failures). Q2 VERDICT:
+  hybrid (VAD silence-cut → Gemini) does NOT beat whole-clip Gemini on SHORT
+  clips (<10min; ties/marginal, even HURT the roll-call), so keep whole-clip
+  Gemini for short. BUT silence-cut DECISIVELY beats arbitrary-cut — and
+  arbitrary-cut is what the app does on LONG files today; it made Gemini
+  hallucinate 181 fake words on a mostly-silent clip (WER ~7.0, highest cost).
+  Local whisper-large-v3 drops 13-19s speech/clip + no speaker labels → not a
+  Gemini replacement. ► ACTIONABLE FOLLOW-UP (await user OK): replace the app's
+  arbitrary long-file MPEG-frame chunking with VAD/silence-cut chunking (same
+  accuracy, far less hallucination, lower cost). Full numbers in
+  docs/experiments/wer-hybrid-spike.md Part 2.
 - ~~wer-hybrid-spike (aced5f54d46abb8af)~~ DIED after Part 1 (budget exhaustion,
   0-byte harness output). RECOVERED its work → committed `f1e1eaee`: Part 1
   (Spanish-ASR landscape) DONE — whisper-large-v3 best MIT Spanish (2.81%
