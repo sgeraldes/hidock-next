@@ -13,6 +13,7 @@ import {
   ArrowUp,
   ArrowDown,
   Pause,
+  Play,
   CornerUpRight
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -28,6 +29,7 @@ import { getHiDockDeviceService } from '@/services/hidock-device'
 import {
   useTranscriptionStore,
   useTranscriptionStats,
+  useTranscriptionPaused,
   type TranscriptionItem,
   type TranscriptionStatus
 } from '@/store/features/useTranscriptionStore'
@@ -88,6 +90,14 @@ export function OperationsPanel({ sidebarOpen }: OperationsPanelProps) {
   const prioritize = useTranscriptionStore((s) => s.prioritize)
   const deprioritize = useTranscriptionStore((s) => s.deprioritize)
   const retryItem = useTranscriptionStore((s) => s.retry)
+  const queuePaused = useTranscriptionPaused()
+  const pauseQueue = useTranscriptionStore((s) => s.pauseQueue)
+  const resumeQueue = useTranscriptionStore((s) => s.resumeQueue)
+  const applyQueueState = useTranscriptionStore((s) => s.applyQueueState)
+  const toggleQueuePaused = useCallback(() => {
+    if (queuePaused) resumeQueue()
+    else pauseQueue()
+  }, [queuePaused, pauseQueue, resumeQueue])
   const recordings = useUnifiedRecordings()
   const { cancelAllDownloads, cancelAllTranscriptions, cancelTranscription } = useOperations()
 
@@ -115,6 +125,18 @@ export function OperationsPanel({ sidebarOpen }: OperationsPanelProps) {
     })
     return unsub
   }, [])
+
+  // Mirror the main-process transcription queue state (paused? which id is live?):
+  // pull once on mount, then reflect every push. Main owns the truth.
+  useEffect(() => {
+    const api = window.electronAPI?.recordings
+    if (!api) return
+    api.getTranscriptionQueueState?.().then((state) => {
+      if (state) applyQueueState(state)
+    }).catch(() => {})
+    const unsub = window.electronAPI.onTranscriptionQueueState?.((state) => applyQueueState(state))
+    return unsub
+  }, [applyQueueState])
 
   const handleRetryFailed = useCallback(async () => {
     try {
@@ -188,6 +210,8 @@ export function OperationsPanel({ sidebarOpen }: OperationsPanelProps) {
           onClose={closeOverlay}
           items={orderedTranscriptions}
           recordings={recordings}
+          paused={queuePaused}
+          onTogglePause={toggleQueuePaused}
           onGoTo={goToSource}
           onPrioritize={prioritize}
           onDeprioritize={deprioritize}
@@ -230,6 +254,8 @@ export function OperationsPanel({ sidebarOpen }: OperationsPanelProps) {
           onClose={closeOverlay}
           items={orderedTranscriptions}
           recordings={recordings}
+          paused={queuePaused}
+          onTogglePause={toggleQueuePaused}
           onGoTo={goToSource}
           onPrioritize={prioritize}
           onDeprioritize={deprioritize}
@@ -388,24 +414,49 @@ export function OperationsPanel({ sidebarOpen }: OperationsPanelProps) {
                   Transcriptions ({activeTranscriptions}
                   {transcriptionStats.failed > 0 && `, ${transcriptionStats.failed} failed`})
                 </span>
+                {queuePaused && (
+                  <span className="rounded bg-amber-500/20 px-1 text-[9px] font-medium uppercase tracking-wide text-amber-300">
+                    Paused
+                  </span>
+                )}
               </div>
               {activeTranscriptions > 0 && (
-                <TooltipProvider>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-5 w-5 text-slate-400 hover:text-red-400"
-                        onClick={cancelAllTranscriptions}
-                        aria-label="Cancel all transcriptions"
-                      >
-                        <X className="h-3 w-3" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>Cancel all transcriptions</TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
+                <div className="flex items-center gap-0.5">
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-5 w-5 text-slate-400 hover:text-slate-100"
+                          onClick={toggleQueuePaused}
+                          aria-label={queuePaused ? 'Resume transcription queue' : 'Pause transcription queue'}
+                        >
+                          {queuePaused ? <Play className="h-3 w-3" /> : <Pause className="h-3 w-3" />}
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        {queuePaused ? 'Resume queue' : 'Pause queue (current item finishes)'}
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-5 w-5 text-slate-400 hover:text-red-400"
+                          onClick={cancelAllTranscriptions}
+                          aria-label="Cancel all transcriptions"
+                        >
+                          <X className="h-3 w-3" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>Cancel all transcriptions</TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </div>
               )}
             </div>
 
@@ -455,6 +506,8 @@ export function OperationsPanel({ sidebarOpen }: OperationsPanelProps) {
         onClose={closeOverlay}
         items={orderedTranscriptions}
         recordings={recordings}
+        paused={queuePaused}
+        onTogglePause={toggleQueuePaused}
         onGoTo={goToSource}
         onPrioritize={prioritize}
         onDeprioritize={deprioritize}
@@ -592,6 +645,8 @@ interface OperationsOverlayProps {
   onClose: () => void
   items: TranscriptionItem[]
   recordings: UnifiedRecording[]
+  paused: boolean
+  onTogglePause: () => void
   onGoTo: (item: TranscriptionItem) => void
   onPrioritize: (id: string) => void
   onDeprioritize: (id: string) => void
@@ -604,6 +659,8 @@ function OperationsOverlay({
   onClose,
   items,
   recordings,
+  paused,
+  onTogglePause,
   onGoTo,
   onPrioritize,
   onDeprioritize,
@@ -628,10 +685,29 @@ function OperationsOverlay({
             <Sparkles className="h-4 w-4 text-purple-400" />
             <h2 className="text-sm font-semibold">Transcription queue</h2>
             <span className="rounded-full bg-slate-700 px-1.5 text-[10px] text-slate-300">{items.length}</span>
+            {paused && (
+              <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-300">
+                Paused
+              </span>
+            )}
           </div>
-          <Button variant="ghost" size="icon" className="h-7 w-7 text-slate-400 hover:text-slate-100" onClick={onClose} aria-label="Close">
-            <X className="h-4 w-4" />
-          </Button>
+          <div className="flex items-center gap-1">
+            {items.some((i) => i.status === 'pending' || i.status === 'processing') && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 gap-1.5 px-2 text-xs text-slate-300 hover:text-slate-100"
+                onClick={onTogglePause}
+                aria-label={paused ? 'Resume transcription queue' : 'Pause transcription queue'}
+              >
+                {paused ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
+                {paused ? 'Resume' : 'Pause'}
+              </Button>
+            )}
+            <Button variant="ghost" size="icon" className="h-7 w-7 text-slate-400 hover:text-slate-100" onClick={onClose} aria-label="Close">
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto p-3">
@@ -677,20 +753,6 @@ function OperationsOverlay({
                           </IconBtn>
                         </>
                       )}
-                      {/* Pause requires the main-process transcription service (owned elsewhere).
-                          Rendered disabled with an honest tooltip until that backend lands. */}
-                      <TooltipProvider>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <span tabIndex={0} aria-label="Pause (unavailable)">
-                              <Button variant="ghost" size="icon" className="h-6 w-6 text-slate-600" disabled aria-disabled>
-                                <Pause className="h-4 w-4" />
-                              </Button>
-                            </span>
-                          </TooltipTrigger>
-                          <TooltipContent>Pause needs a backend update — coming soon</TooltipContent>
-                        </Tooltip>
-                      </TooltipProvider>
                       {isFailed ? (
                         <IconBtn label="Retry" onClick={() => onRetry(item.id)}>
                           <RotateCcw className="h-4 w-4" />

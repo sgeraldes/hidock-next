@@ -238,6 +238,15 @@ interface MergeJournalEntry {
   linkCount: number
 }
 
+/** Snapshot of the main-process transcription queue processor (dock reflects this). */
+export interface TranscriptionQueueState {
+  paused: boolean
+  isProcessing: boolean
+  processingId: string | null
+  pendingCount: number
+  processingCount: number
+}
+
 // Type definitions for the API
 export interface ElectronAPI {
   // App
@@ -376,6 +385,13 @@ export interface ElectronAPI {
     cancelTranscription: (recordingId: string) => Promise<{ success: boolean }>
     cancelAllTranscriptions: () => Promise<{ success: boolean; count: number }>
     updateQueueItem: (id: string, status: string, errorMessage?: string) => Promise<boolean>
+    // Queue-level control (main-process queue processor). Pause stops dequeuing
+    // new items (an in-flight item finishes); reorder applies a prioritize (up) /
+    // deprioritize (down) intent. All return the fresh queue state.
+    pauseTranscriptionQueue: () => Promise<TranscriptionQueueState>
+    resumeTranscriptionQueue: () => Promise<TranscriptionQueueState>
+    reorderTranscription: (recordingId: string, direction: 'up' | 'down') => Promise<TranscriptionQueueState>
+    getTranscriptionQueueState: () => Promise<TranscriptionQueueState>
   }
 
   // Database - Transcripts
@@ -1012,6 +1028,7 @@ export interface ElectronAPI {
   onTranscriptionFailed: (callback: (data: { queueItemId?: string; recordingId: string; error: string }) => void) => () => void
   onTranscriptionCancelled: (callback: (data: { recordingId: string }) => void) => () => void
   onTranscriptionAllCancelled: (callback: (data: { count: number }) => void) => () => void
+  onTranscriptionQueueState: (callback: (state: TranscriptionQueueState) => void) => () => void
 
   // Security Warning Events
   onSecurityWarning: (callback: (data: { type: string; message: string }) => void) => () => void
@@ -1113,6 +1130,10 @@ const electronAPI: ElectronAPI = {
     cancelTranscription: (recordingId: string) => callIPC('transcription:cancel', recordingId),
     cancelAllTranscriptions: () => callIPC('transcription:cancelAll'),
     updateQueueItem: (id: string, status: string, errorMessage?: string) => callIPC('transcription:updateQueueItem', id, status, errorMessage),
+    pauseTranscriptionQueue: () => callIPC('transcription:pause'),
+    resumeTranscriptionQueue: () => callIPC('transcription:resume'),
+    reorderTranscription: (recordingId: string, direction: 'up' | 'down') => callIPC('transcription:reorder', { recordingId, direction }),
+    getTranscriptionQueueState: () => callIPC('transcription:queueState'),
   },
 
   transcripts: {
@@ -1599,6 +1620,14 @@ const electronAPI: ElectronAPI = {
     ipcRenderer.on('transcription:all-cancelled', handler)
     return () => {
       ipcRenderer.removeListener('transcription:all-cancelled', handler)
+    }
+  },
+
+  onTranscriptionQueueState: (callback: (state: TranscriptionQueueState) => void) => {
+    const handler = (_event: any, state: TranscriptionQueueState) => callback(state)
+    ipcRenderer.on('transcription:queueState', handler)
+    return () => {
+      ipcRenderer.removeListener('transcription:queueState', handler)
     }
   },
 

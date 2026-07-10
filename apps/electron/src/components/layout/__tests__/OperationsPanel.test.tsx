@@ -4,7 +4,7 @@ import { OperationsPanel } from '../OperationsPanel'
 
 // Mock stores
 import { useAppStore, useDownloadQueue, useUnifiedRecordings } from '@/store/useAppStore'
-import { useTranscriptionStore, useTranscriptionStats } from '@/store/features/useTranscriptionStore'
+import { useTranscriptionStore, useTranscriptionStats, useTranscriptionPaused } from '@/store/features/useTranscriptionStore'
 import { useUIStore } from '@/store/ui/useUIStore'
 
 // Spy on navigation without needing a Router.
@@ -25,12 +25,16 @@ vi.mock('@/store/useAppStore', () => ({
 vi.mock('@/store/features/useTranscriptionStore', async (orig) => ({
   ...(await orig<typeof import('@/store/features/useTranscriptionStore')>()),
   useTranscriptionStore: vi.fn(),
-  useTranscriptionStats: vi.fn()
+  useTranscriptionStats: vi.fn(),
+  useTranscriptionPaused: vi.fn()
 }))
 
 const mockPrioritize = vi.fn()
 const mockDeprioritize = vi.fn()
 const mockRetry = vi.fn()
+const mockPauseQueue = vi.fn()
+const mockResumeQueue = vi.fn()
+const mockApplyQueueState = vi.fn()
 
 vi.mock('@/hooks/useOperations', () => ({
   useOperations: () => ({
@@ -45,7 +49,10 @@ function makeTranscriptionState(queue: Map<string, unknown>) {
     queue,
     prioritize: mockPrioritize,
     deprioritize: mockDeprioritize,
-    retry: mockRetry
+    retry: mockRetry,
+    pauseQueue: mockPauseQueue,
+    resumeQueue: mockResumeQueue,
+    applyQueueState: mockApplyQueueState
   }
 }
 
@@ -63,6 +70,8 @@ function setupDefaultMocks() {
     const state = makeTranscriptionState(new Map())
     return typeof selector === 'function' ? selector(state) : state
   })
+
+  vi.mocked(useTranscriptionPaused).mockReturnValue(false)
 }
 
 describe('OperationsPanel', () => {
@@ -188,6 +197,53 @@ describe('OperationsPanel', () => {
 
       fireEvent.click(screen.getByLabelText('Prioritize'))
       expect(mockPrioritize).toHaveBeenCalledWith('t1')
+    })
+  })
+
+  describe('queue pause/resume control', () => {
+    function setupActiveQueue() {
+      vi.mocked(useTranscriptionStats).mockReturnValue({
+        total: 2, completed: 0, failed: 0, processing: 1, pending: 1, aggregateProgress: 25
+      })
+      const queue = new Map<string, unknown>([
+        ['t1', { id: 't1', recordingId: 'rec-1', filename: 'REC_1.wav', status: 'processing', progress: 30, retryCount: 0, attempts: 1, priority: 0 }]
+      ])
+      vi.mocked(useTranscriptionStore).mockImplementation((selector: any) => {
+        const state = makeTranscriptionState(queue)
+        return typeof selector === 'function' ? selector(state) : state
+      })
+    }
+
+    it('shows an enabled Pause control (no "coming soon" placeholder) and calls pauseQueue', () => {
+      setupActiveQueue()
+      render(<OperationsPanel sidebarOpen={true} />)
+
+      const pauseBtn = screen.getByLabelText('Pause transcription queue')
+      expect(pauseBtn).not.toBeDisabled()
+      fireEvent.click(pauseBtn)
+      expect(mockPauseQueue).toHaveBeenCalled()
+    })
+
+    it('flips to a Resume control and shows a Paused badge when paused', () => {
+      setupActiveQueue()
+      vi.mocked(useTranscriptionPaused).mockReturnValue(true)
+      render(<OperationsPanel sidebarOpen={true} />)
+
+      const resumeBtn = screen.getByLabelText('Resume transcription queue')
+      expect(resumeBtn).not.toBeDisabled()
+      expect(screen.getByText(/Paused/)).toBeInTheDocument()
+
+      fireEvent.click(resumeBtn)
+      expect(mockResumeQueue).toHaveBeenCalled()
+      expect(mockPauseQueue).not.toHaveBeenCalled()
+    })
+
+    it('never renders the old disabled "coming soon" pause placeholder', () => {
+      setupActiveQueue()
+      render(<OperationsPanel sidebarOpen={true} />)
+
+      expect(screen.queryByText(/coming soon/i)).not.toBeInTheDocument()
+      expect(screen.queryByLabelText(/Pause \(unavailable\)/)).not.toBeInTheDocument()
     })
   })
 })

@@ -123,6 +123,16 @@ let isProcessing = false
 let processingInterval: ReturnType<typeof setInterval> | null = null
 let lastSkipLogAt = 0 // Throttle "skipping" spam to once per 60s
 
+// Queue-level pause: when true the processor stops DEQUEUING new items. An item
+// already in-flight finishes normally (a live Gemini/model request cannot be
+// aborted mid-call). In-memory by design — a restart resumes a stopped backlog,
+// which is the correct fallback. Resume continues from where it left off.
+let queuePaused = false
+
+// recording_id currently being transcribed (null when idle). Surfaced in queue
+// state so the renderer can show which item is live.
+let currentProcessingId: string | null = null
+
 // Force a synchronous DB flush (saveDatabase() is the engine's flushNow escape
 // hatch) only every Nth completed transcript. A full sql.js export on EVERY
 // completion is what freezes the app once the DB is large and the backlog runs
@@ -188,6 +198,95 @@ export function clearUserPriority(recordingId: string): void {
   userPriorityIds.delete(recordingId)
 }
 
+/**
+ * Explicit numeric processing-order override, keyed by recording_id. This is the
+ * MAIN-PROCESS SOURCE OF TRUTH for the user's dock prioritize/deprioritize
+ * actions: the renderer sends an up/down intent (transcription:reorder) and main
+ * records a rank here, which the picker honours on every dequeue. Default 0;
+ * higher = processed sooner, lower = later. Mirrors the renderer's optimistic
+ * max+1 / min-1 view sort so the visible order and the real order agree.
+ *
+ * In-memory (never persisted): a restart drops manual reordering and the queue
+ * falls back to recency ordering, the correct default. Keyed by recording_id so
+ * it survives a queue row being deleted and re-added on retry.
+ */
+const queuePriorityRank = new Map<string, number>()
+
+/** Clear all ordering hints for a recording once it leaves the active queue. */
+function clearQueueHints(recordingId: string): void {
+  userPriorityIds.delete(recordingId)
+  queuePriorityRank.delete(recordingId)
+}
+
+/**
+ * Apply a user reorder intent from the dock. Computes the new rank the same way
+ * the renderer's optimistic view does — one above the current max (up) or one
+ * below the current min (down) across the pending set — so main's authoritative
+ * order matches what the user sees. Emits queue state so every renderer reflects
+ * the change.
+ */
+export function reorderQueueItem(recordingId: string, direction: 'up' | 'down'): void {
+  const pending = getQueueItems('pending')
+  let max = 0
+  let min = 0
+  for (const it of pending) {
+    const r = queuePriorityRank.get(it.recording_id) ?? 0
+    if (r > max) max = r
+    if (r < min) min = r
+  }
+  queuePriorityRank.set(recordingId, direction === 'up' ? max + 1 : min - 1)
+  emitQueueState()
+}
+
+/** Queue-level pause: stop dequeuing new items (in-flight item finishes). */
+export function pauseQueue(): TranscriptionQueueState {
+  if (!queuePaused) {
+    queuePaused = true
+    console.log('Transcription queue paused (in-flight item, if any, will finish)')
+  }
+  emitQueueState()
+  return getQueueState()
+}
+
+/** Resume dequeuing and kick the processor to pick up where it left off. */
+export function resumeQueue(): TranscriptionQueueState {
+  if (queuePaused) {
+    queuePaused = false
+    console.log('Transcription queue resumed')
+  }
+  emitQueueState()
+  // Fire-and-forget: continue from where we left off (no-op if nothing pending).
+  processQueueManually().catch((e) => console.error('[Transcription] resume kick failed:', e))
+  return getQueueState()
+}
+
+export function isQueuePaused(): boolean {
+  return queuePaused
+}
+
+export interface TranscriptionQueueState {
+  paused: boolean
+  isProcessing: boolean
+  processingId: string | null
+  pendingCount: number
+  processingCount: number
+}
+
+/** Snapshot of the queue processor for the renderer (dock) to reflect. */
+export function getQueueState(): TranscriptionQueueState {
+  return {
+    paused: queuePaused,
+    isProcessing,
+    processingId: currentProcessingId,
+    pendingCount: getQueueItems('pending').length,
+    processingCount: getQueueItems('processing').length
+  }
+}
+
+function emitQueueState(): void {
+  notifyRenderer('transcription:queueState', getQueueState())
+}
+
 type OrderableQueueItem = {
   recording_id: string
   created_at: string
@@ -195,9 +294,11 @@ type OrderableQueueItem = {
 }
 
 /**
- * Order pending queue items for processing (recency-first). Pure + deterministic
- * so the picker can re-run it on every dequeue:
+ * Order pending queue items for processing. Pure + deterministic so the picker
+ * can re-run it on every dequeue:
  *
+ *   0. Explicit manual reorder rank (queuePriorityRank) DESC — the user's dock
+ *      prioritize/deprioritize. Default 0, so an untouched queue skips this rule.
  *   1. User-explicit requests first, FIFO among themselves (queue created_at ASC).
  *   2. Everything else by the recording's content date (date_recorded) DESC, so
  *      yesterday's meeting beats last month's regardless of when it was enqueued.
@@ -205,13 +306,17 @@ type OrderableQueueItem = {
  *
  * Because it re-runs per dequeue, an item enqueued later with a newer
  * date_recorded (e.g. a recording detected mid-backlog) preempts older waiting
- * items automatically.
+ * items automatically — and a manual reorder always wins over recency.
  */
 export function orderPendingForProcessing<T extends OrderableQueueItem>(items: T[]): T[] {
   const cmpCreatedAsc = (a: T, b: T) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0)
   // NULL/empty date → '' → smallest → sorts last under DESC.
   const dateVal = (v?: string | null) => v ?? ''
+  const rankOf = (id: string) => queuePriorityRank.get(id) ?? 0
   return [...items].sort((a, b) => {
+    const ra = rankOf(a.recording_id)
+    const rb = rankOf(b.recording_id)
+    if (ra !== rb) return rb - ra // explicit reorder rank DESC (higher = sooner)
     const aPri = userPriorityIds.has(a.recording_id) ? 0 : 1
     const bPri = userPriorityIds.has(b.recording_id) ? 0 : 1
     if (aPri !== bPri) return aPri - bPri
@@ -225,16 +330,19 @@ export function orderPendingForProcessing<T extends OrderableQueueItem>(items: T
 
 export function cancelTranscription(recordingId: string): void {
   removeFromQueueByRecordingId(recordingId)
-  clearUserPriority(recordingId)
+  clearQueueHints(recordingId)
   updateRecordingTranscriptionStatus(recordingId, 'none')
   notifyRenderer('transcription:cancelled', { recordingId })
+  emitQueueState()
 }
 
 export function cancelAllTranscriptions(): number {
   cancelRequested = true
   const count = cancelPendingTranscriptions()
   userPriorityIds.clear()
+  queuePriorityRank.clear()
   notifyRenderer('transcription:all-cancelled', { count })
+  emitQueueState()
   // cancelRequested is reset at the end of processQueue (after the loop breaks)
   // rather than on a timer, to avoid the race where the flag resets before
   // processQueue has a chance to observe it.
@@ -260,6 +368,11 @@ async function processQueue(): Promise<void> {
   }
 
   try {
+    // Queue-level pause: do not dequeue new work. An item already in-flight is
+    // handled by the active run's loop (which breaks after the current item);
+    // every subsequent tick no-ops here until resume.
+    if (queuePaused) return
+
     const config = getConfig()
     const provider = config.transcription.provider || 'gemini'
     if (provider === 'gemini' && !config.transcription.geminiApiKey) {
@@ -377,12 +490,16 @@ async function processQueue(): Promise<void> {
     // a failed write in prod), while a newly-enqueued row (new id) is still
     // eligible to preempt.
     const processedThisRun = new Set<string>()
-    while (!cancelRequested) {
+    // `!queuePaused`: if the user pauses mid-run, the current item (already being
+    // awaited below) finishes, then the loop condition stops further dequeues.
+    while (!cancelRequested && !queuePaused) {
       const item = orderPendingForProcessing(getQueueItems('pending')).find(
         (i) => !processedThisRun.has(i.id)
       )
       if (!item) break
       processedThisRun.add(item.id)
+      currentProcessingId = item.recording_id
+      emitQueueState()
 
       try {
         updateQueueItem(item.id, 'processing')
@@ -430,7 +547,7 @@ async function processQueue(): Promise<void> {
 
         updateQueueProgress(item.id, 100) // spec-014: mark complete
         updateQueueItem(item.id, 'completed')
-        clearUserPriority(item.recording_id) // request satisfied — drop priority hint
+        clearQueueHints(item.recording_id) // request satisfied — drop priority hints
         notifyRenderer('transcription:completed', { queueItemId: item.id, recordingId: item.recording_id })
         const { emitActivityLog: emitDone } = await import('./activity-log')
         const recDone = getRecordingById(item.recording_id)
@@ -442,10 +559,10 @@ async function processQueue(): Promise<void> {
         updateQueueItem(item.id, 'failed', errorMessage)
         // AI-13: Use standard enum value 'error' (not 'failed')
         updateRecordingTranscriptionStatus(item.recording_id, 'error')
-        // Drop the priority hint: a subsequent auto-retry is background work and
+        // Drop the priority hints: a subsequent auto-retry is background work and
         // should sort by recency. An explicit user retry re-marks it (see the
         // transcription:retry IPC handler).
-        clearUserPriority(item.recording_id)
+        clearQueueHints(item.recording_id)
         notifyRenderer('transcription:failed', {
           queueItemId: item.id,
           recordingId: item.recording_id,
@@ -460,6 +577,10 @@ async function processQueue(): Promise<void> {
         if (retryCount >= MAX_RETRY_ATTEMPTS) {
           console.log(`Recording ${item.recording_id} failed after ${retryCount} retries (max: ${MAX_RETRY_ATTEMPTS})`)
         }
+      } finally {
+        // This item is no longer in flight — clear before the next dequeue.
+        currentProcessingId = null
+        emitQueueState()
       }
     }
 

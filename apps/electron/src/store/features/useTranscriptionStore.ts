@@ -35,11 +35,28 @@ export interface TranscriptionItem {
   priority: number
 }
 
+/** Queue-processor state mirrored from the main process (source of truth). */
+export interface QueueProcessorState {
+  paused: boolean
+  isProcessing: boolean
+  processingId: string | null
+  pendingCount: number
+  processingCount: number
+}
+
 export interface TranscriptionQueueStore {
   // State
   queue: Map<string, TranscriptionItem>
   processing: Set<string>
   maxConcurrent: number
+  /**
+   * Whether the MAIN-PROCESS queue processor is paused. Mirrored from main via
+   * getTranscriptionQueueState() + the transcription:queueState push event —
+   * main owns the truth; this is a reflection so the dock can flip Pause↔Resume.
+   */
+  paused: boolean
+  /** recording_id currently being transcribed in main (null when idle). */
+  processingId: string | null
 
   // Actions
   addToQueue: (id: string, recordingId: string, filename: string) => void
@@ -47,12 +64,20 @@ export interface TranscriptionQueueStore {
   markCompleted: (id: string, provider: string) => void
   markFailed: (id: string, error: string) => void
   retry: (id: string) => void
-  /** Bump a pending item to the front of the renderer queue view. */
+  /**
+   * Bump a pending item sooner. Updates the local view optimistically AND sends
+   * the reorder intent to main (which owns the authoritative processing order).
+   */
   prioritize: (id: string) => void
-  /** Push a pending item to the back of the renderer queue view. */
+  /** Push a pending item later (local view + main reorder intent). */
   deprioritize: (id: string) => void
   remove: (id: string) => void
   clear: () => void
+  /** Pause/resume the main-process queue (stops/continues dequeuing new items). */
+  pauseQueue: () => void
+  resumeQueue: () => void
+  /** Reflect a queue-processor snapshot pushed/pulled from main. */
+  applyQueueState: (state: QueueProcessorState) => void
 
   // Queries
   isProcessing: (recordingId: string) => boolean
@@ -66,6 +91,8 @@ export const useTranscriptionStore = create<TranscriptionQueueStore>()(
     queue: new Map(),
     processing: new Set(),
     maxConcurrent: 2,
+    paused: false,
+    processingId: null,
 
     // Actions
     addToQueue: (id, recordingId, filename) => {
@@ -194,6 +221,7 @@ export const useTranscriptionStore = create<TranscriptionQueueStore>()(
     },
 
     prioritize: (id) => {
+      const recordingId = get().queue.get(id)?.recordingId
       set((state) => {
         const item = state.queue.get(id)
         if (!item) return state
@@ -203,9 +231,16 @@ export const useTranscriptionStore = create<TranscriptionQueueStore>()(
         queue.set(id, { ...item, priority: max + 1 })
         return { queue }
       })
+      // Tell main to honor this in the ACTUAL processing order (not just the view).
+      if (recordingId) {
+        window.electronAPI?.recordings?.reorderTranscription?.(recordingId, 'up').catch((e) => {
+          console.error('[TranscriptionStore] reorder up IPC failed:', e)
+        })
+      }
     },
 
     deprioritize: (id) => {
+      const recordingId = get().queue.get(id)?.recordingId
       set((state) => {
         const item = state.queue.get(id)
         if (!item) return state
@@ -215,6 +250,11 @@ export const useTranscriptionStore = create<TranscriptionQueueStore>()(
         queue.set(id, { ...item, priority: min - 1 })
         return { queue }
       })
+      if (recordingId) {
+        window.electronAPI?.recordings?.reorderTranscription?.(recordingId, 'down').catch((e) => {
+          console.error('[TranscriptionStore] reorder down IPC failed:', e)
+        })
+      }
     },
 
     remove: (id) => {
@@ -234,6 +274,31 @@ export const useTranscriptionStore = create<TranscriptionQueueStore>()(
 
     clear: () => {
       set({ queue: new Map(), processing: new Set() })
+    },
+
+    pauseQueue: () => {
+      // Optimistic flip; the queueState echo from main confirms/corrects it.
+      set({ paused: true })
+      window.electronAPI?.recordings?.pauseTranscriptionQueue?.()
+        .then((state) => { if (state) get().applyQueueState(state) })
+        .catch((e) => {
+          console.error('[TranscriptionStore] pause IPC failed:', e)
+          set({ paused: false }) // revert optimistic flip on failure
+        })
+    },
+
+    resumeQueue: () => {
+      set({ paused: false })
+      window.electronAPI?.recordings?.resumeTranscriptionQueue?.()
+        .then((state) => { if (state) get().applyQueueState(state) })
+        .catch((e) => {
+          console.error('[TranscriptionStore] resume IPC failed:', e)
+          set({ paused: true }) // revert optimistic flip on failure
+        })
+    },
+
+    applyQueueState: (state) => {
+      set({ paused: state.paused, processingId: state.processingId })
     },
 
     // Queries
@@ -314,6 +379,9 @@ export const useFailedTranscriptions = () => {
     return failed
   }))
 }
+
+/** Whether the main-process queue processor is currently paused. */
+export const useTranscriptionPaused = () => useTranscriptionStore((s) => s.paused)
 
 /**
  * Get queue statistics with aggregate progress

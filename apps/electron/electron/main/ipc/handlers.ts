@@ -30,6 +30,7 @@ import { registerConnectorsHandlers } from './connectors-handlers'
 import { registerSelfIdentificationHandlers } from './self-identification-handlers'
 import { registerTurnSpeakersHandlers } from './turn-speakers-handlers'
 import { registerRecordingDeletionHandlers } from './recording-deletion-handlers'
+import { registerTranscriptionHandlers } from './transcription-handlers'
 
 export function registerIpcHandlers(): void {
   // Register all IPC handlers
@@ -68,6 +69,7 @@ export function registerIpcHandlers(): void {
   registerSelfIdentificationHandlers()
   registerTurnSpeakersHandlers()
   registerRecordingDeletionHandlers()
+  registerTranscriptionHandlers()
 
   console.log('All IPC handlers registered')
 }
