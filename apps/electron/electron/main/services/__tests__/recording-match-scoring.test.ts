@@ -81,7 +81,8 @@ describe('scoreMeetingCandidates — overlap scoring', () => {
     const full = scored.find((s) => s.meetingId === 'full')!
     const near = scored.find((s) => s.meetingId === 'near')!
     expect(full.hasOverlap).toBe(true)
-    expect(full.matchReason).toMatch(/entire recording/i)
+    // Identical windows are a perfect fit (IoU 1) → "aligned", the strongest reason.
+    expect(full.matchReason).toMatch(/matches the meeting length/i)
     expect(full.confidenceScore).toBeGreaterThan(0.9)
     // Overlapping always sorts first and scores above a non-overlap.
     expect(scored[0].meetingId).toBe('full')
@@ -104,6 +105,95 @@ describe('scoreMeetingCandidates — overlap scoring', () => {
     ])
     // Even though nearContent could match content, the overlap wins the top slot.
     expect(scored[0].meetingId).toBe('overlap')
+  })
+})
+
+describe('scoreMeetingCandidates — all-day / bridge over-attribution (War Room case)', () => {
+  // A 20-min Emmanuel call at 2:00–2:20 PM that really belongs to a tight parallel
+  // meeting, but is fully contained in a 9h all-day "War Room" event.
+  const rec = { dateRecorded: '2026-06-04T14:00:00-05:00', durationSeconds: 20 * 60, contentText: null }
+
+  const WAR_ROOM: MatchCandidateInput = {
+    meetingId: 'warroom',
+    subject: 'War Room WTS',
+    startTime: '2026-06-04T10:00:00-05:00',
+    endTime: '2026-06-04T19:00:00-05:00',
+    isAllDay: true
+  }
+  const API_GW: MatchCandidateInput = {
+    meetingId: 'apigw',
+    subject: 'Migración de API Gateway en producción',
+    startTime: '2026-06-04T14:00:00-05:00',
+    endTime: '2026-06-04T14:25:00-05:00'
+  }
+
+  it('does NOT score a 20-min recording inside a 9h all-day event as a strong/100% match', () => {
+    const scored = scoreMeetingCandidates(rec, [WAR_ROOM])
+    const warroom = scored.find((s) => s.meetingId === 'warroom')!
+    expect(warroom.hasOverlap).toBe(false) // containment in a bridge is never a real overlap
+    expect(warroom.confidenceScore).toBeLessThan(0.35)
+    expect(warroom.matchReason).toMatch(/all-day event .*weak|weak/i)
+  })
+
+  it('ranks the tightly-fitting parallel meeting above the containing all-day bridge', () => {
+    const scored = scoreMeetingCandidates(rec, [WAR_ROOM, API_GW])
+    expect(scored[0].meetingId).toBe('apigw')
+    const apigw = scored.find((s) => s.meetingId === 'apigw')!
+    const warroom = scored.find((s) => s.meetingId === 'warroom')!
+    expect(apigw.hasOverlap).toBe(true)
+    expect(apigw.isBestMatch).toBe(true)
+    expect(warroom.isBestMatch).toBe(false)
+    expect(apigw.confidenceScore).toBeGreaterThan(warroom.confidenceScore + 0.2)
+  })
+
+  it('lets an all-day bridge rank only with content corroboration, still capped below a real overlap', () => {
+    const recWithTopic = {
+      dateRecorded: '2026-06-04T14:00:00-05:00',
+      durationSeconds: 20 * 60,
+      contentText: 'War Room incident coordination'
+    }
+    const scored = scoreMeetingCandidates(recWithTopic, [WAR_ROOM])
+    const warroom = scored.find((s) => s.meetingId === 'warroom')!
+    // Content lifts it, but it never reads as a genuine overlap and stays ≤ the cap.
+    expect(warroom.hasOverlap).toBe(false)
+    expect(warroom.confidenceScore).toBeGreaterThan(0.35)
+    expect(warroom.confidenceScore).toBeLessThanOrEqual(0.65)
+    expect(warroom.matchReason).toMatch(/Title mentions/)
+  })
+
+  it('treats a plain (non-all-day) ≥4h meeting as a bridge too', () => {
+    const longMeeting: MatchCandidateInput = {
+      meetingId: 'long',
+      subject: 'Offsite',
+      startTime: '2026-06-04T09:00:00-05:00',
+      endTime: '2026-06-04T15:00:00-05:00' // 6h, no is_all_day flag
+    }
+    const scored = scoreMeetingCandidates(rec, [longMeeting])
+    expect(scored[0].hasOverlap).toBe(false)
+    expect(scored[0].confidenceScore).toBeLessThan(0.35)
+    expect(scored[0].matchReason).toMatch(/6h event .*weak|weak/i)
+  })
+
+  it('de-rates a loose containment even for a non-bridge meeting (symmetric fit)', () => {
+    // 20-min recording fully inside a 90-min (non-bridge) meeting: full recCoverage
+    // but only a 22% union fit — must score well below a perfectly aligned meeting.
+    const loose: MatchCandidateInput = {
+      meetingId: 'loose',
+      subject: 'Long sync',
+      startTime: '2026-06-04T14:00:00-05:00',
+      endTime: '2026-06-04T15:30:00-05:00'
+    }
+    const tight: MatchCandidateInput = {
+      meetingId: 'tight',
+      subject: 'Tight call',
+      startTime: '2026-06-04T14:00:00-05:00',
+      endTime: '2026-06-04T14:20:00-05:00'
+    }
+    const scored = scoreMeetingCandidates(rec, [loose, tight])
+    const looseS = scored.find((s) => s.meetingId === 'loose')!
+    const tightS = scored.find((s) => s.meetingId === 'tight')!
+    expect(tightS.confidenceScore).toBeGreaterThan(looseS.confidenceScore)
+    expect(looseS.matchReason).toMatch(/entire recording/i) // still honest: recording is contained
   })
 })
 

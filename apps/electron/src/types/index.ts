@@ -50,6 +50,10 @@ export interface Meeting {
   meeting_url: string | null
   created_at: string
   updated_at: string
+  /** 1 for an all-day calendar-DATE event (v32); a WEAK recording-match signal. */
+  is_all_day?: number
+  /** Named calendar day (YYYY-MM-DD) for all-day events; timezone-independent (v32). */
+  all_day_date?: string | null
 }
 
 export interface MeetingAttendee {

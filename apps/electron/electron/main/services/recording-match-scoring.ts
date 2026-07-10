@@ -6,10 +6,15 @@
  * "Verify Recording Match" dialog zero decidability. This module recomputes an
  * honest, discriminating score at fetch time from two cheap, explainable signals:
  *
- *   1. TIME — the actual overlap fraction of the recording window against each
- *      meeting window. Zero-overlap candidates never read as an overlap match;
+ *   1. TIME — a symmetric fit of the recording window against each meeting window
+ *      (intersection-over-union, IoU), NOT the one-sided "how much of the recording
+ *      is covered" fraction. Pure containment no longer reads as a perfect match: a
+ *      30-min recording swallowed by a 9h all-day event fills a sliver of that window
+ *      and scores accordingly. Zero-overlap candidates never read as an overlap match;
  *      near-misses contribute a decaying proximity score; far same-day meetings
- *      score minimally and sort last.
+ *      score minimally and sort last. All-day / multi-hour "bridge" meetings are a
+ *      WEAK signal — a recording contained in one is never a strong overlap and needs
+ *      content corroboration (below) to rank at all.
  *   2. CONTENT — LLM-free lexical overlap between the transcript-derived title /
  *      topics and the meeting subject (accent/case-normalized, conservative
  *      prefix stemming so "Retrospectiva" matches "Retro").
@@ -36,15 +41,38 @@ const STOPWORDS = new Set([
 // Scoring weights. Tuned so a single distinctive content match can lift a
 // near-miss candidate clearly above a closer-in-time candidate that shares no
 // vocabulary (the reported Rec46 / "Retro Belcorp" case).
-const OVERLAP_BASE = 0.5 // an overlapping meeting starts here, before its fraction bonus
+const OVERLAP_BASE = 0.5 // an overlapping meeting starts here, before its IoU-fit bonus
+const IOU_ALIGNED_MIN = 0.85 // IoU at/above which the recording ≈ the meeting (aligned + same length)
 const POINT_OVERLAP_SCORE = 0.75 // recording start falls inside meeting (duration unknown)
 const NEAR_MISS_MINUTES = 30 // gap window that still earns proximity credit
 const NEAR_MISS_MAX_SCORE = 0.25 // proximity score at zero gap, decaying to 0 at the window edge
 const FAR_SAME_DAY_SCORE = 0.05 // no overlap, beyond the near-miss window
+// Bridge (all-day / ≥4h) containment is a WEAK time signal: it scales with how much
+// of the bridge window the recording actually fills — tiny for a real all-day event —
+// and is NEVER flagged as a true overlap, so any tightly-fitting meeting outranks it.
+const BRIDGE_TIME_MIN = 0.1 // floor for a recording contained in a bridge window
+const BRIDGE_TIME_MAX = 0.3 // cap when the recording fills the whole bridge (unusual)
 const CONTENT_PER_TOKEN = 0.4 // score per distinct matched subject token
 const CONTENT_MAX = 0.6 // cap so content can't fully dominate time
 const NON_OVERLAP_CAP = 0.65 // keep zero-overlap candidates visibly below overlaps
 const BEST_MATCH_GAP = 0.2 // lead over the runner-up required to flag "Best match"
+
+/**
+ * A meeting this long (or flagged all-day) is a low-precision "bridge" window — a
+ * recording contained in it must NOT read as a tight time match (see BRIDGE_TIME_*).
+ * 4h is deliberately well below a real all-day event (≈9–24h) yet above any normal
+ * timed meeting, so a genuine 3h workshop still scores on its fit.
+ */
+export const LONG_MEETING_MS = 4 * 60 * 60 * 1000
+
+/** True for an all-day event or any meeting spanning ≥ {@link LONG_MEETING_MS}. */
+export function isBridgeMeeting(m: { startTime: string; endTime: string; isAllDay?: boolean | null }): boolean {
+  if (m.isAllDay) return true
+  const start = Date.parse(m.startTime)
+  const end = Date.parse(m.endTime)
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return false
+  return end - start >= LONG_MEETING_MS
+}
 
 export interface MatchRecordingContext {
   /** ISO timestamp the recording started (recordings.date_recorded). */
@@ -60,6 +88,8 @@ export interface MatchCandidateInput {
   subject: string
   startTime: string
   endTime: string
+  /** True for an all-day calendar-DATE event (meetings.is_all_day); a WEAK time signal. */
+  isAllDay?: boolean | null
 }
 
 export interface ScoredCandidate {
@@ -129,16 +159,47 @@ export function scoreMeetingCandidates(
 
     if (recValid && Number.isFinite(mStart) && Number.isFinite(mEnd) && mEnd >= mStart) {
       const overlapMs = Math.min(recEnd, mEnd) - Math.max(recStart, mStart)
+      const meetingDurationMs = mEnd - mStart
+      const bridge = isBridgeMeeting({
+        startTime: candidate.startTime,
+        endTime: candidate.endTime,
+        isAllDay: candidate.isAllDay
+      })
+      const timedOverlap = durationMs > 0 && overlapMs > 0
+      const pointInside = durationMs === 0 && recStart >= mStart && recStart <= mEnd
 
-      if (durationMs > 0 && overlapMs > 0) {
-        hasOverlap = true
-        const fraction = clamp(overlapMs / durationMs, 0, 1)
-        timeScore = OVERLAP_BASE + (1 - OVERLAP_BASE) * fraction
+      if (bridge && (timedOverlap || pointInside)) {
+        // All-day / multi-hour bridge: containment is a WEAK signal. Score by the
+        // fraction of the (huge) window the recording fills — tiny in practice — and
+        // NEVER flag it as a real overlap, so any tightly-fitting meeting outranks it.
+        // It only surfaces when content corroborates (below) and nothing tighter fits.
+        hasOverlap = false
+        const fillFraction = meetingDurationMs > 0 ? clamp(durationMs / meetingDurationMs, 0, 1) : 0
+        timeScore = BRIDGE_TIME_MIN + (BRIDGE_TIME_MAX - BRIDGE_TIME_MIN) * fillFraction
+        const hours = Math.max(1, Math.round(meetingDurationMs / 3_600_000))
+        const kind = candidate.isAllDay ? `${hours}h all-day event` : `${hours}h event`
         timeReason =
-          fraction >= 0.9
-            ? 'Overlaps the entire recording'
-            : `Overlaps ${Math.round(fraction * 100)}% of the recording`
-      } else if (durationMs === 0 && recStart >= mStart && recStart <= mEnd) {
+          durationMs > 0
+            ? `Fills ${Math.max(1, Math.round(fillFraction * 100))}% of a ${kind} — weak`
+            : `Falls inside a ${kind} — weak`
+      } else if (timedOverlap) {
+        hasOverlap = true
+        const recCoverage = clamp(overlapMs / durationMs, 0, 1)
+        // Symmetric fit: intersection over union of the two windows. A recording that
+        // fills a meeting (aligned start, matching length) scores ~1; one merely
+        // contained in a much longer meeting scores far lower even at recCoverage 1.
+        const unionMs = Math.max(recEnd, mEnd) - Math.min(recStart, mStart)
+        const iou = unionMs > 0 ? clamp(overlapMs / unionMs, 0, 1) : 0
+        timeScore = OVERLAP_BASE + (1 - OVERLAP_BASE) * iou
+        if (recCoverage >= 0.9) {
+          timeReason =
+            iou >= IOU_ALIGNED_MIN
+              ? 'Aligned start · matches the meeting length'
+              : 'Overlaps the entire recording'
+        } else {
+          timeReason = `Overlaps ${Math.round(recCoverage * 100)}% of the recording`
+        }
+      } else if (pointInside) {
         hasOverlap = true
         timeScore = POINT_OVERLAP_SCORE
         timeReason = 'Recording started during this meeting'

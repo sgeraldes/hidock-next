@@ -289,6 +289,35 @@ describe('buildCalendarRecordings', () => {
   })
 })
 
+describe('all-day / bridge over-attribution', () => {
+  // A 9h all-day "War Room" event that a 20-min recording is fully contained in.
+  const allDayBridge: Meeting = {
+    ...makeMeetingEntity('warroom', 'War Room WTS', 10, 19),
+    is_all_day: 1
+  }
+  const tightMeeting = makeMeetingEntity('apigw', 'API Gateway', 14, 15)
+
+  it('does not pick an all-day bridge as a recording best match by containment alone', () => {
+    const rec = makeUnifiedRecording('r1', 14, 20) // 2:00–2:20 PM, inside the 9h event
+    const { calendarRecordings } = buildCalendarRecordings([rec], [allDayBridge])
+    // No tight meeting exists → the recording is left UNLINKED, not attributed to the bridge.
+    expect(calendarRecordings[0].linkedMeeting).toBeUndefined()
+  })
+
+  it('links a contained recording to the tightly-fitting meeting, not the all-day bridge', () => {
+    const rec = makeUnifiedRecording('r1', 14, 20)
+    const { calendarRecordings } = buildCalendarRecordings([rec], [allDayBridge, tightMeeting])
+    expect(calendarRecordings[0].linkedMeeting?.id).toBe('apigw')
+  })
+
+  it('treats a plain ≥4h meeting as a bridge (no containment-only match)', () => {
+    const longMeeting = makeMeetingEntity('offsite', 'Offsite', 9, 15) // 6h, no flag
+    const rec = makeUnifiedRecording('r1', 13, 20)
+    const { calendarRecordings } = buildCalendarRecordings([rec], [longMeeting])
+    expect(calendarRecordings[0].linkedMeeting).toBeUndefined()
+  })
+})
+
 describe('createPlaceholderMeetings', () => {
   it('should create placeholder meetings from orphan recordings', () => {
     const orphans = [makeUnifiedRecording('r1', 14, 30)]

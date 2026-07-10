@@ -30,6 +30,7 @@ import {
 import { resolveContact, resolveProject } from './entity-resolver'
 import { isGenericSpeakerLabel, cleanRole } from './entity-normalize'
 import { canUpgrade, methodConfidence } from './signal-tiers'
+import { LONG_MEETING_MS } from './recording-match-scoring'
 import { randomUUID } from 'crypto'
 
 /** Resolver thresholds (INTELLIGENCE.md §2): ≥0.8 auto-link, 0.5–0.8 suggest, <0.5 create. */
@@ -41,6 +42,7 @@ interface MeetingRow {
   subject: string
   start_time: string
   end_time: string
+  is_all_day?: number
   attendees?: string
   organizer_name?: string
   organizer_email?: string
@@ -71,8 +73,70 @@ const DEFAULT_RECORDING_DURATION = 30 * 60
 /** Allow a recording to start this many ms before the meeting does. */
 const EARLY_START_TOLERANCE_MS = 15 * 60 * 1000
 
-function overlapMs(aStart: number, aEnd: number, bStart: number, bEnd: number): number {
-  return Math.max(0, Math.min(aEnd, bEnd) - Math.max(aStart, bStart))
+/**
+ * Minimum symmetric fit (intersection-over-union of the two windows) an auto-link
+ * winner must clear. Blocks a sliver overlap from silently attributing a recording,
+ * and — with the bridge exclusion below — guarantees a tightly-fitting meeting is
+ * preferred over a containing all-day event.
+ */
+export const MIN_AUTO_LINK_FIT = 0.1
+
+export interface AutoLinkWindow {
+  id: string
+  start: number
+  end: number
+  isAllDay?: boolean
+}
+
+export type AutoLinkDecision =
+  | { id: string; fit: number }
+  | { id: null; declinedBridge: boolean }
+
+/**
+ * Choose the meeting to auto-link a recording to — or decline. Pure so the policy is
+ * unit-testable without a database. Rules:
+ *   - Score each overlapping meeting by symmetric fit (IoU), NOT raw overlap, so a
+ *     tightly-fitting parallel meeting beats a longer one that merely contains the
+ *     recording.
+ *   - NEVER auto-link to an all-day / ≥4h "bridge" meeting: containment there is a
+ *     weak signal with no corroboration available at link time. Such recordings are
+ *     left UNLINKED for the dialog / user to place, rather than dumped on the bridge.
+ *   - The winner must clear {@link MIN_AUTO_LINK_FIT}.
+ * Returns `{ id }` for a link, or `{ id: null, declinedBridge }` when nothing linkable
+ * was found (declinedBridge = the only overlaps were bridges we refused to auto-attach).
+ */
+export function selectAutoLinkMeeting(
+  recStart: number,
+  recEnd: number,
+  windows: AutoLinkWindow[],
+  earlyStartToleranceMs = EARLY_START_TOLERANCE_MS
+): AutoLinkDecision {
+  let best: { id: string; fit: number; overlap: number } | null = null
+  let declinedBridge = false
+
+  for (const m of windows) {
+    if (!Number.isFinite(m.start) || !Number.isFinite(m.end) || m.end < m.start) continue
+    const mStartTol = m.start - earlyStartToleranceMs
+    const overlap = Math.max(0, Math.min(recEnd, m.end) - Math.max(recStart, mStartTol))
+    if (overlap <= 0) continue
+
+    // Bridge detection uses the REAL duration, not the tolerance-extended window.
+    const bridge = m.isAllDay === true || m.end - m.start >= LONG_MEETING_MS
+    if (bridge) {
+      declinedBridge = true
+      continue
+    }
+
+    const unionMs = Math.max(recEnd, m.end) - Math.min(recStart, mStartTol)
+    const fit = unionMs > 0 ? overlap / unionMs : 0
+    if (!best || fit > best.fit || (fit === best.fit && overlap > best.overlap)) {
+      best = { id: m.id, fit, overlap }
+    }
+  }
+
+  if (best && best.fit >= MIN_AUTO_LINK_FIT) return { id: best.id, fit: best.fit }
+  // declinedBridge is only meaningful when we found no linkable winner at all.
+  return { id: null, declinedBridge: declinedBridge && !best }
 }
 
 /**
@@ -103,14 +167,15 @@ export function autoLinkRecordingsToMeetings(): number {
   }
 
   const meetings = queryAll<MeetingRow>(
-    `SELECT id, subject, start_time, end_time FROM meetings`
+    `SELECT id, subject, start_time, end_time, is_all_day FROM meetings`
   )
   const meetingIds = new Set(meetings.map((m) => m.id))
-  const meetingWindows = meetings
+  const meetingWindows: AutoLinkWindow[] = meetings
     .map((m) => ({
       id: m.id,
       start: new Date(m.start_time).getTime(),
-      end: new Date(m.end_time).getTime()
+      end: new Date(m.end_time).getTime(),
+      isAllDay: (m.is_all_day ?? 0) === 1
     }))
     .filter((m) => Number.isFinite(m.start) && Number.isFinite(m.end))
 
@@ -120,6 +185,7 @@ export function autoLinkRecordingsToMeetings(): number {
   const preassignUpdates: Array<{ recordingId: string; meetingId: string }> = []
   const standaloneMarks: string[] = []
   const consumedFilenames = new Set<string>()
+  let declinedBridgeCount = 0
 
   for (const rec of recordings) {
     // Pre-assignment first — it overrides time-overlap for this recording.
@@ -144,14 +210,14 @@ export function autoLinkRecordingsToMeetings(): number {
     if (!Number.isFinite(recStart)) continue
     const recEnd = recStart + (rec.duration_seconds || DEFAULT_RECORDING_DURATION) * 1000
 
-    let best: { id: string; overlap: number } | null = null
-    for (const m of meetingWindows) {
-      const o = overlapMs(recStart, recEnd, m.start - EARLY_START_TOLERANCE_MS, m.end)
-      if (o > 0 && (!best || o > best.overlap)) {
-        best = { id: m.id, overlap: o }
-      }
+    // Fit-based, bridge-excluding selection: a tightly-fitting meeting wins over a
+    // containing all-day event, and an all-day/≥4h bridge is never auto-attached.
+    const decision = selectAutoLinkMeeting(recStart, recEnd, meetingWindows)
+    if (decision.id === null) {
+      if (decision.declinedBridge) declinedBridgeCount++
+    } else {
+      overlapUpdates.push({ recordingId: rec.id, meetingId: decision.id })
     }
-    if (best) overlapUpdates.push({ recordingId: rec.id, meetingId: best.id })
   }
 
   const hasWork =
@@ -159,7 +225,15 @@ export function autoLinkRecordingsToMeetings(): number {
     preassignUpdates.length > 0 ||
     standaloneMarks.length > 0 ||
     consumedFilenames.size > 0
-  if (!hasWork) return 0
+  if (!hasWork) {
+    if (declinedBridgeCount > 0) {
+      console.log(
+        `[OrgReconciler] Left ${declinedBridgeCount} recording(s) unlinked — only ` +
+        `all-day/long "bridge" meetings overlapped (need user/content corroboration)`
+      )
+    }
+    return 0
+  }
 
   let linked = 0
   runInTransaction(() => {
@@ -192,11 +266,11 @@ export function autoLinkRecordingsToMeetings(): number {
     }
   })
 
-  if (linked > 0 || standaloneMarks.length > 0) {
+  if (linked > 0 || standaloneMarks.length > 0 || declinedBridgeCount > 0) {
     console.log(
       `[OrgReconciler] Auto-linked ${linked} recordings ` +
       `(${preassignUpdates.length} pre-assigned, ${overlapUpdates.length} time-overlap, ` +
-      `${standaloneMarks.length} forced standalone)`
+      `${standaloneMarks.length} forced standalone, ${declinedBridgeCount} declined-to-bridge)`
     )
   }
   return linked

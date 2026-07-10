@@ -5925,6 +5925,8 @@ export interface MeetingCandidateWithDetails {
   matchReason: string | null
   isAiSelected: boolean
   isUserConfirmed: boolean
+  /** True for an all-day meeting — a WEAK time signal in match scoring. */
+  isAllDay: boolean
 }
 
 export function getCandidatesForRecordingWithDetails(recordingId: string): MeetingCandidateWithDetails[] {
@@ -5932,7 +5934,7 @@ export function getCandidatesForRecordingWithDetails(recordingId: string): Meeti
 
   const sql = `
     SELECT c.id, c.recording_id, c.meeting_id, c.confidence_score, c.match_reason,
-      c.is_ai_selected, c.is_user_confirmed, m.subject, m.start_time, m.end_time
+      c.is_ai_selected, c.is_user_confirmed, m.subject, m.start_time, m.end_time, m.is_all_day
     FROM recording_meeting_candidates c
     JOIN meetings m ON m.id = c.meeting_id
     WHERE c.recording_id = ?
@@ -5943,14 +5945,15 @@ export function getCandidatesForRecordingWithDetails(recordingId: string): Meeti
     const rows = queryAll<{
       id: string; recording_id: string; meeting_id: string; confidence_score: number
       match_reason: string | null; is_ai_selected: number; is_user_confirmed: number
-      subject: string; start_time: string; end_time: string
+      subject: string; start_time: string; end_time: string; is_all_day: number | null
     }>(sql, [recordingId])
 
     return rows.map(r => ({
       id: r.id, recordingId: r.recording_id, meetingId: r.meeting_id,
       subject: r.subject, startTime: r.start_time, endTime: r.end_time,
       confidenceScore: r.confidence_score, matchReason: r.match_reason,
-      isAiSelected: r.is_ai_selected === 1, isUserConfirmed: r.is_user_confirmed === 1
+      isAiSelected: r.is_ai_selected === 1, isUserConfirmed: r.is_user_confirmed === 1,
+      isAllDay: (r.is_all_day ?? 0) === 1
     }))
   } catch (error) {
     console.error('Failed to get candidates for recording:', error)

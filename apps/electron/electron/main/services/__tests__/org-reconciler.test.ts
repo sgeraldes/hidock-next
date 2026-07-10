@@ -19,7 +19,7 @@ vi.mock('../database', () => ({
   runInTransaction: vi.fn((fn: () => unknown) => fn())
 }))
 
-import { pickKeeperRecording } from '../org-reconciler'
+import { pickKeeperRecording, selectAutoLinkMeeting, MIN_AUTO_LINK_FIT, type AutoLinkWindow } from '../org-reconciler'
 
 describe('pickKeeperRecording', () => {
   it('keeps the row with a transcript even over a .wav without one', () => {
@@ -61,5 +61,79 @@ describe('pickKeeperRecording', () => {
     ]
     pickKeeperRecording(rows)
     expect(rows.map((r) => r.id)).toEqual(['wav', 'hda'])
+  })
+})
+
+/**
+ * selectAutoLinkMeeting is the pure auto-link policy: fit-based, bridge-excluding.
+ * These pin the anti-over-attribution rules without a database.
+ */
+describe('selectAutoLinkMeeting', () => {
+  const ms = (iso: string) => Date.parse(iso)
+  // A 20-min recording, 2:00–2:20 PM UTC.
+  const recStart = ms('2026-06-04T14:00:00Z')
+  const recEnd = ms('2026-06-04T14:20:00Z')
+
+  const bridgeAllDay: AutoLinkWindow = {
+    id: 'warroom',
+    start: ms('2026-06-04T10:00:00Z'),
+    end: ms('2026-06-04T19:00:00Z'),
+    isAllDay: true
+  }
+  const bridgeLong: AutoLinkWindow = {
+    id: 'offsite',
+    start: ms('2026-06-04T09:00:00Z'),
+    end: ms('2026-06-04T15:00:00Z') // 6h, no flag — still a bridge by duration
+  }
+  const tightParallel: AutoLinkWindow = {
+    id: 'apigw',
+    start: ms('2026-06-04T14:00:00Z'),
+    end: ms('2026-06-04T14:25:00Z')
+  }
+
+  it('declines to auto-link when the only overlap is an all-day bridge', () => {
+    const d = selectAutoLinkMeeting(recStart, recEnd, [bridgeAllDay])
+    expect(d.id).toBeNull()
+    expect(d).toMatchObject({ id: null, declinedBridge: true })
+  })
+
+  it('declines to auto-link to a plain ≥4h bridge as well', () => {
+    const d = selectAutoLinkMeeting(recStart, recEnd, [bridgeLong])
+    expect(d.id).toBeNull()
+    expect(d).toMatchObject({ id: null, declinedBridge: true })
+  })
+
+  it('picks the tightly-fitting parallel meeting over a containing all-day bridge', () => {
+    const d = selectAutoLinkMeeting(recStart, recEnd, [bridgeAllDay, tightParallel])
+    expect(d.id).toBe('apigw')
+  })
+
+  it('prefers the higher-fit meeting among two non-bridge overlaps', () => {
+    const loose: AutoLinkWindow = {
+      id: 'loose',
+      start: ms('2026-06-04T14:00:00Z'),
+      end: ms('2026-06-04T15:30:00Z') // 90-min, non-bridge
+    }
+    const d = selectAutoLinkMeeting(recStart, recEnd, [loose, tightParallel])
+    expect(d.id).toBe('apigw') // union fit 0.8 beats loose's ~0.22
+  })
+
+  it('declines a sliver overlap that does not clear the minimum fit', () => {
+    // Recording overlaps only the tail of a 3h meeting → fit well under the floor.
+    const tail: AutoLinkWindow = {
+      id: 'tail',
+      start: ms('2026-06-04T16:00:00Z'),
+      end: ms('2026-06-04T17:00:00Z')
+    }
+    const rStart = ms('2026-06-04T16:50:00Z')
+    const rEnd = ms('2026-06-04T18:50:00Z') // 2h recording, only 10 min inside
+    const d = selectAutoLinkMeeting(rStart, rEnd, [tail])
+    expect(d.id).toBeNull()
+    expect(d).toMatchObject({ declinedBridge: false })
+  })
+
+  it('exposes a sane minimum-fit constant', () => {
+    expect(MIN_AUTO_LINK_FIT).toBeGreaterThan(0)
+    expect(MIN_AUTO_LINK_FIT).toBeLessThan(1)
   })
 })

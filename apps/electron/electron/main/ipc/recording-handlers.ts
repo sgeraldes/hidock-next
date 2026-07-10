@@ -412,7 +412,8 @@ export function registerRecordingHandlers(): void {
               confidenceScore: 0,
               matchReason: null,
               isAiSelected: false,
-              isUserConfirmed: false
+              isUserConfirmed: false,
+              isAllDay: (meeting.is_all_day ?? 0) === 1
             })
           }
         }
@@ -432,7 +433,8 @@ export function registerRecordingHandlers(): void {
           meetingId: c.meetingId,
           subject: c.subject,
           startTime: c.startTime,
-          endTime: c.endTime
+          endTime: c.endTime,
+          isAllDay: c.isAllDay
         }))
       )
       const scoreByMeeting = new Map(scored.map((s) => [s.meetingId, s]))
