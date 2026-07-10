@@ -91,6 +91,7 @@ import {
   getRecordingById,
   resolveRecordingId,
   updateRecordingTranscriptionStatus,
+  updateRecordingStatus,
   insertTranscript,
   getQueueItems,
   updateQueueItem,
@@ -1494,6 +1495,14 @@ Meeting ${i + 1}: "${m.subject}"
   }
   // AI-13: Use standard enum value 'complete' (not 'transcribed')
   updateRecordingTranscriptionStatus(recordingId, 'complete')
+  // BUG B (status drift): the transcript row and transcription_status are written
+  // under the RESOLVED canonical id (recordingId, above) — but recordings.status
+  // (a separate column the meeting-detail badge reads) is only ever advanced by
+  // renderer IPC / deletion, never by this pipeline. It therefore stayed at its
+  // insert-time default ('none' from the recording-watcher) even with a fully
+  // joined transcript, so the badge showed "Not transcribed" over a real
+  // transcript. Advance status on the SAME row the transcript is attached to.
+  updateRecordingStatus(recordingId, 'complete')
   // Durability: a completed transcript is an expensive artifact (API cost + time),
   // so we force a synchronous flush to guarantee it survives a crash. But a full
   // sql.js export on EVERY completion blocks the main thread for seconds once the

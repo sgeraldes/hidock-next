@@ -1190,6 +1190,8 @@ const electronAPI: ElectronAPI = {
     runV11: () => callIPC('migration:runV11'),
     rollbackV11: () => callIPC('migration:rollbackV11'),
     getStatus: () => callIPC('migration:getStatus'),
+    previewMisbundledRecordings: () => callIPC('repair:previewMisbundled'),
+    applyMisbundledRecordings: () => callIPC('repair:applyMisbundled'),
     onProgress: (callback) => {
       const handler = (_event: any, progress: any) => callback(progress)
       ipcRenderer.on('migration:progress', handler)

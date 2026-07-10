@@ -3604,6 +3604,50 @@ export function updateRecordingTranscriptionStatus(id: string, transcriptionStat
 }
 
 /**
+ * BUG B self-heal (idempotent): advance recordings.status to 'complete' for any
+ * recording that already has a joined transcript with non-empty full_text but
+ * whose status drifted (stuck at its insert-time default because the pipeline
+ * historically only wrote transcription_status). The meeting-detail badge reads
+ * recordings.status, so a drifted row showed "Not transcribed" over a real
+ * transcript. Runs at boot (reconcileOrganization) and is exposed via IPC.
+ *
+ * Safe + idempotent: never touches deleted rows (status 'deleted' / deleted_at),
+ * never re-touches rows already 'complete', and a second run heals nothing.
+ * Returns the number of rows healed.
+ */
+export function healRecordingStatusFromTranscripts(): number {
+  const before = queryOne<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM recordings r
+       WHERE r.status IS NOT 'complete'
+         AND r.status IS NOT 'deleted'
+         AND r.deleted_at IS NULL
+         AND EXISTS (
+           SELECT 1 FROM transcripts t
+            WHERE t.recording_id = r.id
+              AND t.full_text IS NOT NULL
+              AND TRIM(t.full_text) != ''
+         )`
+  )
+  const count = before?.n ?? 0
+  if (count === 0) return 0
+
+  run(
+    `UPDATE recordings SET status = 'complete'
+       WHERE status IS NOT 'complete'
+         AND status IS NOT 'deleted'
+         AND deleted_at IS NULL
+         AND EXISTS (
+           SELECT 1 FROM transcripts t
+            WHERE t.recording_id = recordings.id
+              AND t.full_text IS NOT NULL
+              AND TRIM(t.full_text) != ''
+         )`
+  )
+  console.log(`[DB] healRecordingStatusFromTranscripts: advanced ${count} recording(s) to status='complete'`)
+  return count
+}
+
+/**
  * Persist a recording's duration (seconds). Imported/watched local files are
  * stored with duration_seconds = NULL; the renderer decodes the audio for the
  * waveform and backfills the real duration here. Only writes when the value is

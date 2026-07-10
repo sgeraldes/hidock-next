@@ -25,6 +25,7 @@ import {
   recordMentionResolutionNoSave,
   getAmbiguousBuckets,
   getBucketResolution,
+  healRecordingStatusFromTranscripts,
   type RecordingPreassignment
 } from './database'
 import { resolveContact, resolveProject } from './entity-resolver'
@@ -958,6 +959,189 @@ export function mergeDuplicateMeetingOccurrences(): number {
   return mergedGroups
 }
 
+// ---------------------------------------------------------------------------
+// BUG A — misbundled-recording repair (gated, idempotent stale-data cleanup)
+// ---------------------------------------------------------------------------
+//
+// The live auto-correlation/occurrence-resolution code (selectAutoLinkMeeting +
+// mergeDuplicateMeetingOccurrences) binds a recording to the occurrence whose
+// window actually matches its timestamp and never forces it onto a far anchor
+// (proven by recording-occurrence-binding.test.ts). But rows written BEFORE that
+// policy landed can still point a recording at a meeting weeks away — e.g. a
+// July-1 recording bundled onto the May-27 anchor of a recurring series.
+//
+// This is a STALE-DATA repair, so it is GATED: findMisbundledRecordings() /
+// repairMisbundledRecordings({confirm:false}) only REPORT (count + sample); the
+// rewrite runs only with confirm:true. It re-points a misbundled recording onto
+// the better-matching sibling occurrence of the SAME series (using the exact
+// selectAutoLinkMeeting policy) or, when no sibling matches, unlinks it so it
+// returns to the candidate pool — never leaving it on a window weeks away.
+
+/** A recording this far outside its linked meeting's window is clearly misbundled. */
+export const MISBUNDLE_GAP_MS = 12 * 60 * 60 * 1000
+/** Cap the returned sample (never the actual rewrite). */
+const MISBUNDLE_SAMPLE_CAP = 25
+
+export interface MisbundledRecording {
+  recordingId: string
+  filename: string | null
+  dateRecorded: string
+  currentMeetingId: string
+  currentMeetingSubject: string | null
+  currentMeetingStart: string
+  currentMeetingEnd: string
+  /** How far (hours) the recording sits outside its linked meeting's window. */
+  gapHours: number
+  action: 'rebundle' | 'unlink'
+  /** Sibling occurrence to re-point onto (null when unlinking). */
+  targetMeetingId: string | null
+  targetMeetingStart: string | null
+}
+
+export interface MisbundleRepairReport {
+  /** true = report only (no rewrite happened). */
+  dryRun: boolean
+  /** Total affected recordings (never truncated). */
+  totalCount: number
+  /** How many rows were rewritten (0 on a dry run). */
+  applied: number
+  /** First {@link MISBUNDLE_SAMPLE_CAP} affected bundles for review. */
+  sample: MisbundledRecording[]
+  /** true when totalCount exceeded the sample cap. */
+  sampleTruncated: boolean
+}
+
+/** 0 when the two windows overlap; otherwise the gap to the nearest edge (ms). */
+function windowGapMs(recStart: number, recEnd: number, mStart: number, mEnd: number): number {
+  if (recEnd >= mStart && recStart <= mEnd) return 0
+  return recEnd < mStart ? mStart - recEnd : recStart - mEnd
+}
+
+/**
+ * Find recordings whose date_recorded sits far outside their linked meeting's
+ * window (> gapThresholdMs). For each, resolve the intended target: the
+ * better-matching sibling occurrence of the same series (selectAutoLinkMeeting
+ * policy) → 'rebundle'; otherwise 'unlink'. Pure read — never mutates.
+ */
+export function findMisbundledRecordings(gapThresholdMs = MISBUNDLE_GAP_MS): MisbundledRecording[] {
+  const recordings = queryAll<RecordingRow>(
+    `SELECT id, filename, date_recorded, duration_seconds, meeting_id
+       FROM recordings
+      WHERE meeting_id IS NOT NULL AND date_recorded IS NOT NULL AND deleted_at IS NULL`
+  )
+  if (recordings.length === 0) return []
+
+  const meetings = queryAll<MeetingRow>(`SELECT id, subject, start_time, end_time, is_all_day FROM meetings`)
+  const byId = new Map(meetings.map((m) => [m.id, m]))
+
+  // Group occurrences by base uid so a misbundled recording can be re-pointed onto
+  // a sibling occurrence of the SAME recurring series (never a different series).
+  const siblingsByBase = new Map<string, AutoLinkWindow[]>()
+  for (const m of meetings) {
+    const start = new Date(m.start_time).getTime()
+    const end = new Date(m.end_time).getTime()
+    if (!Number.isFinite(start) || !Number.isFinite(end)) continue
+    const base = meetingBaseUid(m.id)
+    const list = siblingsByBase.get(base) ?? []
+    list.push({ id: m.id, start, end, isAllDay: (m.is_all_day ?? 0) === 1 })
+    siblingsByBase.set(base, list)
+  }
+
+  const out: MisbundledRecording[] = []
+  for (const rec of recordings) {
+    const m = rec.meeting_id ? byId.get(rec.meeting_id) : undefined
+    if (!m) continue // dangling FK — handled by pre-migration cleanup, not here
+    const recStart = new Date(rec.date_recorded).getTime()
+    const mStart = new Date(m.start_time).getTime()
+    const mEnd = new Date(m.end_time).getTime()
+    if (!Number.isFinite(recStart) || !Number.isFinite(mStart) || !Number.isFinite(mEnd)) continue
+    const recEnd = recStart + (rec.duration_seconds || DEFAULT_RECORDING_DURATION) * 1000
+
+    const gap = windowGapMs(recStart, recEnd, mStart, mEnd)
+    if (gap <= gapThresholdMs) continue // within tolerance — leave it alone
+
+    // Re-point only onto a sibling occurrence of the same series, chosen by the
+    // exact live auto-link policy (fit-based, bridge-excluding). No sibling → unlink.
+    const base = meetingBaseUid(m.id)
+    const siblings = (siblingsByBase.get(base) ?? []).filter((w) => w.id !== m.id)
+    const decision = siblings.length > 0 ? selectAutoLinkMeeting(recStart, recEnd, siblings) : { id: null }
+    const target = decision.id ? byId.get(decision.id) : undefined
+
+    out.push({
+      recordingId: rec.id,
+      filename: rec.filename ?? null,
+      dateRecorded: rec.date_recorded,
+      currentMeetingId: m.id,
+      currentMeetingSubject: m.subject ?? null,
+      currentMeetingStart: m.start_time,
+      currentMeetingEnd: m.end_time,
+      gapHours: Math.round((gap / 3_600_000) * 10) / 10,
+      action: target ? 'rebundle' : 'unlink',
+      targetMeetingId: target?.id ?? null,
+      targetMeetingStart: target?.start_time ?? null
+    })
+  }
+  return out
+}
+
+/**
+ * Gated repair for BUG A. With `confirm` falsy (default), returns a dry-run report
+ * (totalCount + a capped sample) and rewrites NOTHING. With `confirm: true`, applies
+ * the rewrite in one transaction: rebundle onto the matching sibling occurrence, or
+ * unlink when none matches. Every change is logged (the merge-path journaling
+ * pattern). Idempotent — a second confirmed run finds nothing.
+ */
+export function repairMisbundledRecordings(
+  opts: { confirm?: boolean; gapThresholdMs?: number } = {}
+): MisbundleRepairReport {
+  const confirm = opts.confirm === true
+  const found = findMisbundledRecordings(opts.gapThresholdMs)
+  const totalCount = found.length
+  const sample = found.slice(0, MISBUNDLE_SAMPLE_CAP)
+  const sampleTruncated = totalCount > sample.length
+  if (sampleTruncated) {
+    console.log(
+      `[OrgReconciler] Misbundle repair: ${totalCount} affected; sample capped at ${sample.length} ` +
+      `(the confirmed rewrite still processes all ${totalCount}).`
+    )
+  }
+
+  if (!confirm || totalCount === 0) {
+    return { dryRun: true, totalCount, applied: 0, sample, sampleTruncated }
+  }
+
+  let applied = 0
+  runInTransaction(() => {
+    for (const item of found) {
+      if (item.action === 'rebundle' && item.targetMeetingId) {
+        run(
+          `UPDATE recordings SET meeting_id = ?, correlation_confidence = 0.7, correlation_method = 'repair_rebundle'
+             WHERE id = ? AND meeting_id = ?`,
+          [item.targetMeetingId, item.recordingId, item.currentMeetingId]
+        )
+        console.log(
+          `[OrgReconciler] Misbundle repair: rebundled ${item.recordingId} (${item.filename ?? '?'}) ` +
+          `${item.currentMeetingId} → ${item.targetMeetingId} (was ${item.gapHours}h outside window)`
+        )
+      } else {
+        run(
+          `UPDATE recordings SET meeting_id = NULL, correlation_confidence = NULL, correlation_method = 'repair_unbundled'
+             WHERE id = ? AND meeting_id = ?`,
+          [item.recordingId, item.currentMeetingId]
+        )
+        console.log(
+          `[OrgReconciler] Misbundle repair: unlinked ${item.recordingId} (${item.filename ?? '?'}) ` +
+          `from ${item.currentMeetingId} (was ${item.gapHours}h outside; no sibling occurrence matched)`
+        )
+      }
+      applied++
+    }
+  })
+
+  console.log(`[OrgReconciler] Misbundle repair applied: ${applied}/${totalCount} recording(s) re-pointed or unlinked.`)
+  return { dryRun: false, totalCount, applied, sample, sampleTruncated }
+}
+
 /**
  * Auto-split ambiguous mention buckets: for each bucket ("Sergio" = several real
  * people), walk its recordings and, where the signal is unambiguous — the transcript
@@ -1032,5 +1216,12 @@ export function reconcileOrganization(): void {
     autoSplitAmbiguousBuckets()
   } catch (e) {
     console.error('[OrgReconciler] ambiguous-bucket auto-split failed:', e)
+  }
+  try {
+    // BUG B self-heal: advance recordings.status for rows with a joined transcript
+    // whose status drifted (never advanced past its insert-time default).
+    healRecordingStatusFromTranscripts()
+  } catch (e) {
+    console.error('[OrgReconciler] recording status self-heal failed:', e)
   }
 }

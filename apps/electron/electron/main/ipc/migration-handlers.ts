@@ -1,5 +1,6 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import { getDatabase, runInTransaction } from '../services/database'
+import { repairMisbundledRecordings } from '../services/org-reconciler'
 import { readFileSync } from 'fs'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
@@ -951,6 +952,26 @@ export function registerMigrationHandlers(): void {
         success: false,
         errors: [sanitizeError(error as Error)]
       }
+    }
+  })
+
+  // BUG A — preview misbundled recordings (dry run: count + sample, no rewrite).
+  ipcMain.handle('repair:previewMisbundled', async () => {
+    try {
+      return repairMisbundledRecordings({ confirm: false })
+    } catch (error) {
+      console.error('Failed to preview misbundled recordings:', error)
+      return { dryRun: true, totalCount: 0, applied: 0, sample: [], sampleTruncated: false, error: sanitizeError(error as Error) }
+    }
+  })
+
+  // BUG A — apply the misbundled-recording repair (rewrites only with confirm).
+  ipcMain.handle('repair:applyMisbundled', async () => {
+    try {
+      return repairMisbundledRecordings({ confirm: true })
+    } catch (error) {
+      console.error('Failed to apply misbundled-recording repair:', error)
+      return { dryRun: false, totalCount: 0, applied: 0, sample: [], sampleTruncated: false, error: sanitizeError(error as Error) }
     }
   })
 
