@@ -77,6 +77,56 @@ describe('WaveformPlayer', () => {
     expect(screen.getByRole('slider', { name: /seek/i })).toBeInTheDocument()
   })
 
+  describe('scrubber keyboard seeking', () => {
+    // liveDuration/liveTime are only "live" when this recording is the loaded one.
+    const loadScrubber = () => {
+      const seek = vi.fn()
+      ;(window as any).__audioControls.seek = seek
+      useUIStore.setState({
+        currentlyPlayingId: 'rec-1',
+        playbackDuration: 100,
+        playbackCurrentTime: 50,
+      })
+      render(<WaveformPlayer mode="scrubber" recordingId="rec-1" filePath="/a.wav" />)
+      return { seek, slider: screen.getByRole('slider', { name: /seek/i }) }
+    }
+
+    it('ArrowRight seeks forward ~5s (and does not start playback)', () => {
+      const { seek, slider } = loadScrubber()
+      fireEvent.keyDown(slider, { key: 'ArrowRight' })
+      expect(seek).toHaveBeenCalledWith(55)
+      expect(play).not.toHaveBeenCalled()
+    })
+
+    it('ArrowLeft seeks back ~5s', () => {
+      const { seek, slider } = loadScrubber()
+      fireEvent.keyDown(slider, { key: 'ArrowLeft' })
+      expect(seek).toHaveBeenCalledWith(45)
+    })
+
+    it('Home seeks to the start and End seeks to the duration', () => {
+      const { seek, slider } = loadScrubber()
+      fireEvent.keyDown(slider, { key: 'Home' })
+      expect(seek).toHaveBeenCalledWith(0)
+      fireEvent.keyDown(slider, { key: 'End' })
+      expect(seek).toHaveBeenCalledWith(100)
+    })
+
+    it('clamps to aria-valuemin/max (never seeks past the ends)', () => {
+      const seek = vi.fn()
+      ;(window as any).__audioControls.seek = seek
+      useUIStore.setState({
+        currentlyPlayingId: 'rec-1',
+        playbackDuration: 100,
+        playbackCurrentTime: 2, // < step
+      })
+      render(<WaveformPlayer mode="scrubber" recordingId="rec-1" filePath="/a.wav" />)
+      const slider = screen.getByRole('slider', { name: /seek/i })
+      fireEvent.keyDown(slider, { key: 'ArrowLeft' })
+      expect(seek).toHaveBeenCalledWith(0) // 2 - 5 clamped to 0
+    })
+  })
+
   it('shows a "Loading waveform…" state (never "Press play…") while peaks decode', () => {
     render(<WaveformPlayer mode="full" recordingId="rec-1" filePath="/a.wav" />)
     expect(screen.getByTestId('waveform-player-full')).toBeInTheDocument()

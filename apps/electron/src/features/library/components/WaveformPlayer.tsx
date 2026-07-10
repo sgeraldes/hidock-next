@@ -295,6 +295,38 @@ export function WaveformPlayer({
     [pb.liveDuration, seekTo]
   )
 
+  // Keyboard-seek for the scrubber slider (role="slider" + tabIndex). Arrows step
+  // ±5s, Home/End jump to the ends — clamped to aria-valuemin/max (0…liveDuration).
+  // Seeks only; never toggles playback.
+  const trackKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      if (pb.liveDuration <= 0) return
+      const STEP = 5
+      let next: number | null = null
+      switch (e.key) {
+        case 'ArrowLeft':
+        case 'ArrowDown':
+          next = pb.liveTime - STEP
+          break
+        case 'ArrowRight':
+        case 'ArrowUp':
+          next = pb.liveTime + STEP
+          break
+        case 'Home':
+          next = 0
+          break
+        case 'End':
+          next = pb.liveDuration
+          break
+        default:
+          return
+      }
+      e.preventDefault()
+      seekTo(Math.min(pb.liveDuration, Math.max(0, next)))
+    },
+    [pb.liveDuration, pb.liveTime, seekTo]
+  )
+
   // ---- 'pill' -------------------------------------------------------------
   if (mode === 'pill') {
     return (
@@ -354,8 +386,9 @@ export function WaveformPlayer({
           {pb.isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
         </Button>
         <div
-          className="group relative h-6 min-w-0 flex-1 cursor-pointer"
+          className="group relative h-6 min-w-0 flex-1 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-full"
           onClick={trackSeek}
+          onKeyDown={trackKeyDown}
           role="slider"
           aria-label="Seek"
           aria-valuemin={0}

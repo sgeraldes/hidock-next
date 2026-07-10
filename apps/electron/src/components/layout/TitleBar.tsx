@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Search, CheckCircle2, Loader2, Usb, ChevronDown, LogOut, ArrowRight, AlertTriangle, RotateCcw } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -175,15 +175,20 @@ interface ConnectionControlProps {
 }
 
 /**
- * Four-state device pill:
+ * Four-state device pill. In EVERY state a "more options" caret opens a dropdown
+ * that always exposes "Restart app" (plus the state's primary action) — so the
+ * app can be restarted to recover a stuck device even while disconnected,
+ * connecting, or failed (previously the menu, and thus Restart, only existed in
+ * the connected state):
  *  - disconnected → button labelled "Connect device"; click = one connect attempt.
- *  - connecting   → disabled pill with a spinner (no click).
+ *                   Caret menu: Connect device / Restart app.
+ *  - connecting   → disabled pill with a spinner. Caret menu: Restart app.
  *  - failed       → amber "Connection failed — retry"; click = one retry. Honest
  *                   after a failed auto/manual connect instead of reverting to the
- *                   neutral "Connect device".
+ *                   neutral "Connect device". Caret menu: Retry connection / Restart app.
  *  - connected    → dropdown trigger (model + connected styling); a bare click
- *                   opens a menu (Go to Sync / Disconnect) rather than
- *                   disconnecting, so it can't be hit by accident.
+ *                   opens a menu (Go to Sync / Disconnect / Restart app) rather
+ *                   than disconnecting, so it can't be hit by accident.
  */
 function ConnectionControl({ status, label, failedHint, recording, onConnect, onDisconnect, onGoToSync }: ConnectionControlProps) {
   // Restart confirm dialog is driven by state (rather than nesting an
@@ -191,52 +196,78 @@ function ConnectionControl({ status, label, failedHint, recording, onConnect, on
   // opens it, and the AlertDialog is rendered controlled, outside the menu.
   const [restartOpen, setRestartOpen] = useState(false)
 
+  const restartMenuItem = (
+    <DropdownMenuItem onSelect={() => setRestartOpen(true)}>
+      <RotateCcw className="mr-2 h-4 w-4" />
+      Restart app
+    </DropdownMenuItem>
+  )
+
+  let control: ReactNode
+
   if (status === 'connecting') {
-    return (
-      <button
-        type="button"
-        disabled
-        title="Connecting to device…"
-        className={cn(PILL_BASE, 'cursor-wait border-amber-700/50 bg-amber-900/40 text-amber-300')}
-      >
-        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        <span className="hidden md:inline">{label}</span>
-      </button>
+    control = (
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          disabled
+          title="Connecting to device…"
+          className={cn(PILL_BASE, 'cursor-wait border-amber-700/50 bg-amber-900/40 text-amber-300')}
+        >
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          <span className="hidden md:inline">{label}</span>
+        </button>
+        <MoreMenu>{restartMenuItem}</MoreMenu>
+      </div>
     )
-  }
-
-  if (status === 'disconnected') {
-    return (
-      <button
-        type="button"
-        onClick={onConnect}
-        title="Connect device"
-        className={cn(PILL_BASE, 'border-slate-700 bg-slate-800/70 text-slate-400 hover:bg-slate-700 hover:text-slate-200')}
-      >
-        <Usb className="h-3.5 w-3.5" />
-        <span className="hidden md:inline">{label}</span>
-      </button>
+  } else if (status === 'disconnected') {
+    control = (
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          onClick={onConnect}
+          title="Connect device"
+          className={cn(PILL_BASE, 'border-slate-700 bg-slate-800/70 text-slate-400 hover:bg-slate-700 hover:text-slate-200')}
+        >
+          <Usb className="h-3.5 w-3.5" />
+          <span className="hidden md:inline">{label}</span>
+        </button>
+        <MoreMenu>
+          <DropdownMenuItem onSelect={onConnect}>
+            <Usb className="mr-2 h-4 w-4" />
+            Connect device
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          {restartMenuItem}
+        </MoreMenu>
+      </div>
     )
-  }
-
-  if (status === 'failed') {
-    return (
-      <button
-        type="button"
-        onClick={onConnect}
-        title={failedHint ? `${failedHint} — click to retry` : 'Connection failed — click to retry'}
-        className={cn(PILL_BASE, 'border-amber-700/50 bg-amber-900/40 text-amber-300 hover:bg-amber-900/60')}
-      >
-        <AlertTriangle className="h-3.5 w-3.5" />
-        <span className="hidden md:inline">{label}</span>
-      </button>
+  } else if (status === 'failed') {
+    control = (
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          onClick={onConnect}
+          title={failedHint ? `${failedHint} — click to retry` : 'Connection failed — click to retry'}
+          className={cn(PILL_BASE, 'border-amber-700/50 bg-amber-900/40 text-amber-300 hover:bg-amber-900/60')}
+        >
+          <AlertTriangle className="h-3.5 w-3.5" />
+          <span className="hidden md:inline">{label}</span>
+        </button>
+        <MoreMenu>
+          <DropdownMenuItem onSelect={onConnect}>
+            <RotateCcw className="mr-2 h-4 w-4" />
+            Retry connection
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          {restartMenuItem}
+        </MoreMenu>
+      </div>
     )
-  }
-
-  // Connected — dropdown. DropdownMenuContent renders through a Radix portal, so
-  // the menu is never clipped by the titlebar's overflow.
-  return (
-    <>
+  } else {
+    // Connected — dropdown. DropdownMenuContent renders through a Radix portal, so
+    // the menu is never clipped by the titlebar's overflow.
+    control = (
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <button
@@ -277,12 +308,15 @@ function ConnectionControl({ status, label, failedHint, recording, onConnect, on
           <DropdownMenuSeparator />
           {/* Restart lives here now (moved out of the sidebar). onSelect just flips
               the controlled AlertDialog open — see the note on restartOpen. */}
-          <DropdownMenuItem onSelect={() => setRestartOpen(true)}>
-            <RotateCcw className="mr-2 h-4 w-4" />
-            Restart app
-          </DropdownMenuItem>
+          {restartMenuItem}
         </DropdownMenuContent>
       </DropdownMenu>
+    )
+  }
+
+  return (
+    <>
+      {control}
 
       <AlertDialog open={restartOpen} onOpenChange={setRestartOpen}>
         <AlertDialogContent>
@@ -302,6 +336,34 @@ function ConnectionControl({ status, label, failedHint, recording, onConnect, on
         </AlertDialogContent>
       </AlertDialog>
     </>
+  )
+}
+
+/**
+ * "More options" caret trigger + dropdown, used by the non-connected device-pill
+ * states so Restart (and each state's primary action) is always reachable. The
+ * menu content is passed as children.
+ */
+function MoreMenu({ children }: { children: ReactNode }) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          aria-label="Device options"
+          title="Device options"
+          className={cn(
+            PILL_BASE,
+            'px-1.5 border-slate-700 bg-slate-800/70 text-slate-400 hover:bg-slate-700 hover:text-slate-200 data-[state=open]:bg-slate-700'
+          )}
+        >
+          <ChevronDown className="h-3 w-3 opacity-70" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="titlebar-no-drag w-44">
+        {children}
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }
 
