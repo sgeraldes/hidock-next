@@ -48,7 +48,7 @@ import {
   getQueueItems
 } from './database'
 import { resolveContact } from './entity-resolver'
-import { isGenericSpeakerLabel, normalizeName } from './entity-normalize'
+import { isGenericSpeakerLabel, normalizeName, accentFoldedKey } from './entity-normalize'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -118,42 +118,69 @@ const SCANNED_KEY_PREFIX = 'self_id:scanned:'
  */
 const NAME_TOKEN = "\\p{Lu}[\\p{L}\\p{M}'’.\\-]+"
 
-/** A two-token capitalized full name ("Óscar Pereda") — the roll-call form. */
-const FULL_NAME = `${NAME_TOKEN}\\s+${NAME_TOKEN}`
-
 /** Unicode-safe LEFT boundary. JS `\b` is ASCII-only, so it fails before an
  *  accented capital ("Óscar" at a turn start), which is exactly the roll-call
  *  case we need — a lookbehind for "no preceding letter" handles it. */
 const LEFT_BOUNDARY = '(?<![\\p{L}\\p{M}\\d])'
 
 /**
- * First-person self-introduction cues (Spanish + English). Each requires a
- * capitalized name token right after the cue so the prefilter stays cheap and
- * specific — it only decides WHETHER to consult the LLM, which then makes the
- * careful first-person / third-party judgement.
+ * First-person self-introduction cue TEMPLATES (Spanish + English). `%N%` marks
+ * the self-name position — the capitalized name token the cue must be followed by.
+ * One template list is compiled two ways: a NON-capturing prefilter (cheap "should
+ * we call the LLM?" gate) and a CAPTURING variant used to corroborate the LLM's
+ * answer against the words actually spoken (see corroborateSelfIds).
+ *
+ * The cue WORD may be turn-initial (capitalized) or mid-sentence (lowercase), so
+ * its leading letter is matched either-case explicitly. The regex is NOT
+ * case-insensitive overall, which is what keeps NAME_TOKEN's required capital
+ * meaningful (an `i` flag would let "soy consciente" match).
  */
-// The cue WORD may be turn-initial (capitalized) or mid-sentence (lowercase), so
-// its leading letter is matched either-case explicitly. The regex is NOT
-// case-insensitive overall, which is what keeps NAME_TOKEN's required capital
-// meaningful (an `i` flag would let "soy consciente" match).
-const SELF_ID_CUE_PATTERNS: RegExp[] = [
+const CUE_TEMPLATES: string[] = [
   // Spanish
-  new RegExp(`\\b[Ss]oy\\s+(?:el\\s+|la\\s+)?${NAME_TOKEN}`, 'u'),
-  new RegExp(`\\b[Mm]e\\s+llamo\\s+${NAME_TOKEN}`, 'u'),
-  new RegExp(`\\b[Mm]i\\s+nombre\\s+es\\s+${NAME_TOKEN}`, 'u'),
-  new RegExp(`\\b(?:[Ll]es|[Ll]e|[Tt]e|[Oo]s)\\s+habla\\s+${NAME_TOKEN}`, 'u'),
-  new RegExp(`\\b[Aa]qu[ií]\\s+${NAME_TOKEN}`, 'u'),
-  new RegExp(`\\b[Yy]o\\s+(?:tambi[eé]n\\s+)?,?\\s*${NAME_TOKEN}`, 'u'),
+  `\\b[Ss]oy\\s+(?:el\\s+|la\\s+)?%N%`,
+  `\\b[Mm]e\\s+llamo\\s+%N%`,
+  `\\b[Mm]i\\s+nombre\\s+es\\s+%N%`,
+  `\\b(?:[Ll]es|[Ll]e|[Tt]e|[Oo]s)\\s+habla\\s+%N%`,
+  `\\b[Aa]qu[ií]\\s+%N%`,
+  `\\b[Yy]o\\s+(?:tambi[eé]n\\s+)?,?\\s*%N%`,
   // English
-  new RegExp(`\\b[Ii]['’]?m\\s+${NAME_TOKEN}`, 'u'),
-  new RegExp(`\\b[Ii]\\s+am\\s+${NAME_TOKEN}`, 'u'),
-  new RegExp(`\\b[Mm]y\\s+name\\s+is\\s+${NAME_TOKEN}`, 'u'),
-  new RegExp(`\\b[Tt]his\\s+is\\s+${NAME_TOKEN}`, 'u'),
-  new RegExp(`${LEFT_BOUNDARY}${NAME_TOKEN}\\s+here\\b`, 'u'),
+  `\\b[Ii]['’]?m\\s+%N%`,
+  `\\b[Ii]\\s+am\\s+%N%`,
+  `\\b[Mm]y\\s+name\\s+is\\s+%N%`,
+  `\\b[Tt]his\\s+is\\s+%N%`,
+  `${LEFT_BOUNDARY}%N%\\s+here\\b`,
   // Roll-call "add me too": a full name (first + last) followed by "también"/"too".
   // Requires TWO capitalized tokens, so "Dile a Óscar…" (single token) never matches.
-  new RegExp(`${LEFT_BOUNDARY}${FULL_NAME}\\s*,?\\s+(?:tambi[eé]n|too)\\b`, 'u')
+  `${LEFT_BOUNDARY}%N%\\s+${NAME_TOKEN}\\s*,?\\s+(?:tambi[eé]n|too)\\b`
 ]
+
+/**
+ * Templates whose captured token is RELIABLY the speaker's own name — an explicit
+ * first-person predicate ("soy X", "me llamo X", "my name is X", "X here", the
+ * roll-call full name). Used to detect a CONTRADICTING self-name on a label (a
+ * label that clearly states one name must never be bound to a different one).
+ * Excludes the two loose cues ("Yo también <addressee>, … <name>" and "Aquí X"),
+ * whose adjacent token is often an ADDRESSEE, not the self-name — capturing those
+ * would risk blocking a legitimate binding, so they gate the prefilter/LLM only.
+ */
+const RELIABLE_CUE_TEMPLATES: Set<string> = new Set(
+  CUE_TEMPLATES.filter((t) => !t.includes('[Yy]o') && !t.includes('[Aa]qu'))
+)
+
+const compileCue = (template: string, name: string): RegExp =>
+  new RegExp(template.replace('%N%', name), 'u')
+
+/** Prefilter: non-capturing, identical match semantics to the original cues. */
+const SELF_ID_CUE_PATTERNS: RegExp[] = CUE_TEMPLATES.map((t) => compileCue(t, `(?:${NAME_TOKEN})`))
+
+/** Capturing variant of only the RELIABLE cues — for contradiction detection. */
+const RELIABLE_NAME_CAPTURE_PATTERNS: RegExp[] = CUE_TEMPLATES.filter((t) => RELIABLE_CUE_TEMPLATES.has(t)).map(
+  (t) => compileCue(t, `(${NAME_TOKEN})`)
+)
+
+/** Any capitalized (possibly accented) name token — used to check a name was
+ *  actually SPOKEN somewhere in a label's own turns (not necessarily after a cue). */
+const ANY_NAME_TOKEN_RE = new RegExp(NAME_TOKEN, 'gu')
 
 /** Whether a turn's text contains any first-person self-introduction cue.
  *  Text is NFC-normalized first so combining-accent forms ("O"+U+0301) match the
@@ -292,6 +319,146 @@ export function analyzeSelfId(entries: SelfIdEntry[]): {
 }
 
 // ---------------------------------------------------------------------------
+// Pure: corroboration — Gemini gives NO voice fingerprint, so a "Speaker N" →
+// name mapping is only ever an inference. Before we trust it enough to write a
+// real name over a turn, we require the speaker's OWN words to back it. A wrong
+// confident name (a different real person, often the opposite gender) is far
+// worse than an honest "Speaker N", so anything not corroborated stays neutral.
+// ---------------------------------------------------------------------------
+
+/** Accent-fold a single token and strip edge punctuation the name char-class keeps
+ *  (a trailing "." / "-" / apostrophe) so "Ana." and "Ana" key the same. */
+function nameTokenKey(token: string): string {
+  return accentFoldedKey(token).replace(/^[.'’-]+|[.'’-]+$/g, '')
+}
+
+/** Accent-folded first token of a name — the identity key we corroborate against
+ *  the words spoken in a label's turns ("Óscar Pereda" and "oscar" collapse). */
+function selfNameKey(name: string): string {
+  const first = (name || '').trim().split(/\s+/)[0] || ''
+  return nameTokenKey(first)
+}
+
+/** Self-name(s) captured by a RELIABLE first-person cue in one turn's text. Used
+ *  to detect a label that clearly states a DIFFERENT name than the one proposed. */
+export function reliableSelfNames(text: string): string[] {
+  const t = (text || '').normalize('NFC').trim()
+  if (!t) return []
+  const out: string[] = []
+  for (const re of RELIABLE_NAME_CAPTURE_PATTERNS) {
+    const m = re.exec(t)
+    if (m && m[1]) out.push(m[1].trim())
+  }
+  return out
+}
+
+/** Every capitalized name token spoken in one turn's text (accent-folded keys). */
+function spokenNameKeys(text: string): Set<string> {
+  const t = (text || '').normalize('NFC')
+  const keys = new Set<string>()
+  for (const m of t.matchAll(ANY_NAME_TOKEN_RE)) {
+    const k = nameTokenKey(m[0])
+    if (k) keys.add(k)
+  }
+  return keys
+}
+
+/** Per-label evidence gathered from that label's OWN turns. */
+interface LabelEvidence {
+  /** Keys of every capitalized name token spoken in the label's CUE-BEARING turns
+   *  (the exact turns the LLM was shown). Restricting to cue turns means a third-
+   *  party address in an ordinary turn ("Gracias, Mariana") is NOT taken as this
+   *  speaker's own name. */
+  spoken: Set<string>
+  /** Keys of names the label stated for itself via a RELIABLE first-person cue. */
+  reliable: Set<string>
+}
+
+function gatherLabelEvidence(turns: SpeakerTurn[]): Map<string, LabelEvidence> {
+  const byLabel = new Map<string, LabelEvidence>()
+  for (const turn of turns) {
+    const label = (turn.speaker || '').trim()
+    if (!label) continue
+    if (!hasSelfIdCue(turn.text)) continue
+    let ev = byLabel.get(label)
+    if (!ev) {
+      ev = { spoken: new Set<string>(), reliable: new Set<string>() }
+      byLabel.set(label, ev)
+    }
+    for (const k of spokenNameKeys(turn.text)) ev.spoken.add(k)
+    for (const n of reliableSelfNames(turn.text)) {
+      const k = selfNameKey(n)
+      if (k) ev.reliable.add(k)
+    }
+  }
+  return byLabel
+}
+
+/** Outcome of corroborating the LLM's self-IDs against per-label spoken evidence. */
+export interface CorroborationResult {
+  identifications: SelfIdentification[]
+  mergeSuspected: MergeSuspected[]
+  /** Self-IDs the LLM proposed but the label's own words did NOT support — dropped
+   *  so the turns keep their neutral "Speaker N" label instead of a wrong name. */
+  uncorroborated: SelfIdentification[]
+}
+
+/**
+ * Gate the LLM's self-identifications against the deterministic evidence in each
+ * label's OWN turns. A proposed name is KEPT only when:
+ *   (1) the name was actually spoken somewhere under that label (blocks a name
+ *       attributed to the wrong speaker label, or invented outright); AND
+ *   (2) the label does not RELIABLY state a DIFFERENT name (blocks a confident
+ *       cross-identity mislabel — e.g. a turn that says "soy Sebastián" being
+ *       bound to "Mariana"), and does not state two distinct names at once.
+ * Everything else is dropped to `uncorroborated`, leaving the turns as "Speaker N".
+ */
+export function corroborateSelfIds(
+  analyzed: { identifications: SelfIdentification[]; mergeSuspected: MergeSuspected[] },
+  turns: SpeakerTurn[]
+): CorroborationResult {
+  const evidence = gatherLabelEvidence(turns)
+  const identifications: SelfIdentification[] = []
+  const uncorroborated: SelfIdentification[] = []
+  const mergeSuspected: MergeSuspected[] = [...analyzed.mergeSuspected]
+  const merged = new Set(mergeSuspected.map((m) => m.label))
+
+  for (const id of analyzed.identifications) {
+    const ev = evidence.get(id.label) ?? { spoken: new Set<string>(), reliable: new Set<string>() }
+    const key = selfNameKey(id.name)
+
+    // A label that reliably states two or more distinct self-names is a merge —
+    // two people shared one diarization label; never bind, and flag it.
+    if (ev.reliable.size >= 2) {
+      if (!merged.has(id.label)) {
+        merged.add(id.label)
+        mergeSuspected.push({ label: id.label, names: [...ev.reliable] })
+      }
+      uncorroborated.push(id)
+      continue
+    }
+
+    // (2) The label reliably states a name, but a DIFFERENT one than proposed —
+    // an identity contradiction. Keep the honest "Speaker N".
+    if (ev.reliable.size === 1 && !ev.reliable.has(key)) {
+      uncorroborated.push(id)
+      continue
+    }
+
+    // (1) The proposed name was never spoken under this label — a wrong-label
+    // attribution or an LLM invention. Keep "Speaker N".
+    if (!ev.spoken.has(key)) {
+      uncorroborated.push(id)
+      continue
+    }
+
+    identifications.push(id)
+  }
+
+  return { identifications, mergeSuspected, uncorroborated }
+}
+
+// ---------------------------------------------------------------------------
 // Pure: end-to-end extractor (LLM injectable)
 // ---------------------------------------------------------------------------
 
@@ -308,8 +475,11 @@ async function defaultLLM(prompt: string, systemPrompt: string): Promise<string 
  * Extract confident self-identifications from diarized turns. Cheap lexical
  * prefilter first — when no turn carries a self-intro cue, the LLM is NEVER
  * called and the result is empty (usedLLM:false). Otherwise the narrowly-prompted
- * model reports first-person self-names, which are parsed and split into bindings
- * vs. merge suspicions. Deterministic + testable with `deps.llm` mocked.
+ * model reports first-person self-names, which are parsed, split into bindings vs.
+ * merge suspicions, and then CORROBORATED against the words each label actually
+ * spoke (corroborateSelfIds) — a name the speaker's own turns do not support, or
+ * that contradicts a name they clearly stated, is dropped rather than bound.
+ * Deterministic + testable with `deps.llm` mocked.
  */
 export async function extractSelfIdentifications(
   turns: SpeakerTurn[],
@@ -329,7 +499,14 @@ export async function extractSelfIdentifications(
   }
   const entries = parseSelfIdResponse(raw)
   const analyzed = analyzeSelfId(entries)
-  return { ...analyzed, usedLLM: true }
+  // Corroborate the LLM's guesses against the words each label actually spoke —
+  // uncorroborated / contradicted names are dropped so those turns stay "Speaker N".
+  const corroborated = corroborateSelfIds(analyzed, turns)
+  return {
+    identifications: corroborated.identifications,
+    mergeSuspected: corroborated.mergeSuspected,
+    usedLLM: true
+  }
 }
 
 // ---------------------------------------------------------------------------

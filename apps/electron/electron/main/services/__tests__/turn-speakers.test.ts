@@ -125,6 +125,21 @@ describe('per-turn overrides', () => {
     expect(map).toEqual([{ speaker_label: 'Speaker 1', contact_id: 'memo', name: 'Memo' }])
     expect(getTurnOverrides('rec1')).toEqual([{ turn_index: 5, contact_id: 'seba', name: 'Sebastian' }])
   })
+
+  it('a user correction of a wrong auto-name PERSISTS and PROPAGATES to the reader', () => {
+    // A label was auto-bound to the WRONG person (Memo). The Library reader lets
+    // the user reassign it; the correction must survive a re-read and be what the
+    // reader resolves for that label thereafter.
+    assignSpeaker('rec1', 'Speaker 2', { contactId: 'memo' }) // wrong auto-name
+    expect(getSpeakerMap('rec1').find((m) => m.speaker_label === 'Speaker 2')?.name).toBe('Memo')
+
+    // User corrects the whole label to Sebastian (the "everywhere" scope).
+    assignSpeaker('rec1', 'Speaker 2', { contactId: 'seba' })
+
+    // Persists across a fresh read of the map, and propagates as the label's name.
+    const reread = getSpeakerMap('rec1').find((m) => m.speaker_label === 'Speaker 2')
+    expect(reread).toEqual({ speaker_label: 'Speaker 2', contact_id: 'seba', name: 'Sebastian' })
+  })
 })
 
 describe('speaker splits', () => {
