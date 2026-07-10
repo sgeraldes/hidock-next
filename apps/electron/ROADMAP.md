@@ -54,6 +54,30 @@ INTERACTIVITY_PLAN.md, OVERNIGHT_PLAN.md.*
   lacks canvas; waveform components render in tests). Harmless-looking but
   noisy — silence via a canvas mock in test setup or install `canvas` dev dep.
 
+## C-NEW. User-directed roadmap (2026-07-10)
+1. **PixelRAG PDF/image connector (NEXT major feature).** Add PDFs/images as
+   knowledge sources. A PDF that is PURELY text (no images/tables) can go
+   through normal text extraction; ANY PDF with images/tables/layout →
+   render pages to images, store as images, and build a searchable VISUAL
+   index with PixelRAG (https://github.com/StarTrail-org/PixelRAG). Retrieval
+   returns the page-images (or the info in them) so tables/diagrams stay
+   intact instead of being flattened to bad OCR text. Wire into the
+   connector/artifact + RAG layers (artifacts registry already handles
+   pdf/image import; this replaces text-only extraction for visual PDFs).
+2. **ASR pipeline decision** — pending the WER+hybrid+model spike
+   (docs/experiments/wer-hybrid-spike.md). Options under test: keep Gemini,
+   adopt a LOCAL VAD/turn pre-processor that feeds clean chunks to Gemini
+   (hybrid, for better WER than the current MPEG-frame chunking), and/or a
+   better Spanish-first local model (Canary-Qwen 2.5B / ARK-ASR-3B / whisper
+   variants). Diarization already proven better locally (2:31 boundary).
+3. **Mac local transcription** — a macOS build with on-device ASR
+   (whisper.cpp+CoreML or Apple Speech). Parked; revisit after the ASR
+   decision so the provider abstraction covers it.
+4. **Speaker-intelligence Wave C/D** — unlink cascade (provenance reset +
+   dirty rebuild), recording split tool (one .wav → N logical segments),
+   re-attribution post-process; then Memo repair + bulk re-attribution
+   re-run. Best folded into whatever reprocess the ASR decision triggers.
+
 ## C. Forward map (priority order)
 1. **Merge journal + unmerge (v30)** — explicit user ask, only designed. NEXT.
 2. **Participants visibility** — agent in flight (hover/Today/calendar/detail).
