@@ -61,6 +61,16 @@ interface LibraryState {
 
   // Panel state (persisted)
   panelSizes: number[]
+  // The list/left-column width (percent of the desktop pane group). Persisted on
+  // its own so the resizable split the user sets is REMEMBERED across navigation
+  // and restart, independent of the assistant dock mode (which reshapes the
+  // pane group). This is the single source of truth for "the list column width".
+  listPaneSize: number
+  // Whether the list pane is collapsed to a thin icon rail (like the dockable
+  // assistant). Lets the reader reclaim the full width when the list is a narrow
+  // rail; one click on the rail brings the list back. Persisted so the choice
+  // survives navigation and restart.
+  listCollapsed: boolean
   selectedSourceId: string | null
 
   // Error state (transient - not persisted)
@@ -119,6 +129,9 @@ interface LibraryActions {
 
   // Panel state
   setPanelSizes: (sizes: number[]) => void
+  setListPaneSize: (size: number) => void
+  setListCollapsed: (collapsed: boolean) => void
+  toggleListCollapsed: () => void
   setSelectedSourceId: (id: string | null) => void
 
   // Scroll
@@ -146,6 +159,8 @@ const initialState: LibraryState = {
   expandedRowIds: new Set(),
   expandedTranscripts: new Set(),
   panelSizes: [25, 45, 30],
+  listPaneSize: 25,
+  listCollapsed: false,
   selectedSourceId: null,
   recordingErrors: new Map(),
   scrollOffset: 0
@@ -303,6 +318,9 @@ export const useLibraryStore = create<LibraryStore>()(
 
       // Panel state
       setPanelSizes: (sizes) => set({ panelSizes: sizes }),
+      setListPaneSize: (size) => set({ listPaneSize: size }),
+      setListCollapsed: (collapsed) => set({ listCollapsed: collapsed }),
+      toggleListCollapsed: () => set((state) => ({ listCollapsed: !state.listCollapsed })),
       setSelectedSourceId: (id) => set({ selectedSourceId: id }),
 
       // Scroll
@@ -325,7 +343,9 @@ export const useLibraryStore = create<LibraryStore>()(
         sourceTypeFilter: state.sourceTypeFilter,
         durationPreset: state.durationPreset,
         assistantDock: state.assistantDock,
-        panelSizes: state.panelSizes
+        panelSizes: state.panelSizes,
+        listPaneSize: state.listPaneSize,
+        listCollapsed: state.listCollapsed
         // searchQuery intentionally not persisted - should start fresh
         // selectedIds intentionally not persisted - transient
         // expandedRowIds intentionally not persisted - transient

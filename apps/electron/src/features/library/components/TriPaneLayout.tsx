@@ -19,7 +19,7 @@
  */
 
 import { useState, useEffect } from 'react'
-import { Sparkles, Pin, PinOff, PanelRightClose, X } from 'lucide-react'
+import { Sparkles, Pin, PinOff, PanelRightClose, PanelLeftClose, PanelLeftOpen, List, X } from 'lucide-react'
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable'
 import { useLibraryStore, type AssistantDock } from '@/store/useLibraryStore'
 import { useIsMobile, useIsTablet } from '@/hooks/useMediaQuery'
@@ -98,11 +98,75 @@ function AssistantRail({ onExpand }: { onExpand: () => void }) {
   )
 }
 
+/**
+ * Chrome around the source list: a slim title bar (giving the otherwise-untitled
+ * list pane a name — a discoverability win) plus a Collapse control. Collapsing
+ * lets the reader reclaim the full width when the list has become a narrow rail,
+ * mirroring the dockable assistant. The list content scrolls below the bar.
+ */
+function ListPaneChrome({
+  onCollapse,
+  children
+}: {
+  onCollapse: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex items-center justify-between px-3 py-1.5 border-b border-border bg-muted/40 shrink-0">
+        <div className="flex items-center gap-2 min-w-0">
+          <List className="h-4 w-4 text-muted-foreground shrink-0" aria-hidden="true" />
+          <h3 className="font-semibold text-sm text-foreground truncate">Sources</h3>
+        </div>
+        <button
+          onClick={onCollapse}
+          className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          aria-label="Collapse the source list"
+          title="Collapse the list — give the reader more room"
+        >
+          <PanelLeftClose className="h-4 w-4" aria-hidden="true" />
+        </button>
+      </div>
+      <div role="region" aria-label="Recording list" className="flex-1 overflow-auto">
+        {children}
+      </div>
+    </div>
+  )
+}
+
+/** Thin left rail shown when the list is collapsed — one click reopens it. */
+function ListRail({ onExpand }: { onExpand: () => void }) {
+  return (
+    <div className="flex flex-col items-center border-r border-border bg-card/60 py-3 px-1 shrink-0">
+      <button
+        onClick={onExpand}
+        className="flex flex-col items-center gap-2 rounded-md p-1.5 text-muted-foreground hover:text-primary hover:bg-muted transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        aria-label="Open the source list"
+        title="Show sources"
+      >
+        <PanelLeftOpen className="h-5 w-5" aria-hidden="true" />
+        <span className="[writing-mode:vertical-rl] rotate-180 text-[11px] font-medium tracking-wide">Sources</span>
+      </button>
+    </div>
+  )
+}
+
+/** Clamp a persisted list-pane percentage into a layout's allowed [18, max] band. */
+function clampListSize(size: number, max: number): number {
+  if (!Number.isFinite(size)) return Math.min(max, 25)
+  return Math.max(18, Math.min(max, size))
+}
+
 export function TriPaneLayout({ leftPanel, centerPanel, rightPanel }: TriPaneLayoutProps) {
   const panelSizes = useLibraryStore((state) => state.panelSizes)
   const setPanelSizes = useLibraryStore((state) => state.setPanelSizes)
   const assistantDock = useLibraryStore((state) => state.assistantDock)
   const setAssistantDock = useLibraryStore((state) => state.setAssistantDock)
+  // Persisted list-column width + collapse state (remembered across nav/restart).
+  const listPaneSize = useLibraryStore((state) => state.listPaneSize)
+  const setListPaneSize = useLibraryStore((state) => state.setListPaneSize)
+  const listCollapsed = useLibraryStore((state) => state.listCollapsed)
+  const setListCollapsed = useLibraryStore((state) => state.setListCollapsed)
 
   // Normalize panel sizes to ensure they total 100% and respect constraints
   const normalizeDesktopPanelSizes = (sizes: number[]): [number, number, number] => {
@@ -306,19 +370,50 @@ export function TriPaneLayout({ leftPanel, centerPanel, rightPanel }: TriPaneLay
     )
   }
 
+  // The pinned assistant pane (title chrome + assistant), shared by the pinned
+  // layout whether or not the list is collapsed.
+  const pinnedAssistantPane = (
+    <div role="region" aria-label="AI Assistant" className="h-full overflow-hidden flex flex-col">
+      <AssistantChrome dock="pinned" onDockChange={setAssistantDock} />
+      <div className="flex-1 overflow-hidden">{rightPanel}</div>
+    </div>
+  )
+
   // Desktop Layout — dockable assistant.
-  // PINNED: three resizable panes (classic layout).
+  // PINNED: three resizable panes (classic layout). When the list is collapsed,
+  // it becomes a thin rail and the reader + assistant share the freed width.
   if (assistantDock === 'pinned') {
+    if (listCollapsed) {
+      return (
+        <div className="flex h-full">
+          <ListRail onExpand={() => setListCollapsed(false)} />
+          <ResizablePanelGroup direction="horizontal" className="h-full flex-1 min-w-0">
+            <ResizablePanel defaultSize={65} minSize={30} id="center-panel-pinned-lc">
+              <div role="region" aria-label="Recording content viewer" className="h-full overflow-hidden">
+                {centerPanel}
+              </div>
+            </ResizablePanel>
+            <ResizableHandle withHandle />
+            <ResizablePanel defaultSize={35} minSize={20} maxSize={45} id="right-panel-pinned-lc">
+              {pinnedAssistantPane}
+            </ResizablePanel>
+          </ResizablePanelGroup>
+        </div>
+      )
+    }
     return (
       <ResizablePanelGroup
         direction="horizontal"
-        onLayout={(sizes) => setPanelSizes(sizes)}
+        // Persist the split: store the full 3-tuple AND mirror the list width into
+        // listPaneSize so the two-pane layout inherits it when the assistant unpins.
+        onLayout={(sizes) => {
+          setPanelSizes(sizes)
+          if (typeof sizes[0] === 'number') setListPaneSize(sizes[0])
+        }}
         className="h-full"
       >
         <ResizablePanel defaultSize={desktopPanelSizes[0]} minSize={18} maxSize={35} id="left-panel">
-          <div role="region" aria-label="Recording list" className="h-full overflow-auto">
-            {leftPanel}
-          </div>
+          <ListPaneChrome onCollapse={() => setListCollapsed(true)}>{leftPanel}</ListPaneChrome>
         </ResizablePanel>
 
         <ResizableHandle withHandle />
@@ -332,10 +427,7 @@ export function TriPaneLayout({ leftPanel, centerPanel, rightPanel }: TriPaneLay
         <ResizableHandle withHandle />
 
         <ResizablePanel defaultSize={desktopPanelSizes[2]} minSize={20} maxSize={40} id="right-panel">
-          <div role="region" aria-label="AI Assistant" className="h-full overflow-hidden flex flex-col">
-            <AssistantChrome dock="pinned" onDockChange={setAssistantDock} />
-            <div className="flex-1 overflow-hidden">{rightPanel}</div>
-          </div>
+          {pinnedAssistantPane}
         </ResizablePanel>
       </ResizablePanelGroup>
     )
@@ -345,32 +437,49 @@ export function TriPaneLayout({ leftPanel, centerPanel, rightPanel }: TriPaneLay
   // whole width, plus either a right-docked overlay drawer (floating) or a thin
   // icon rail (collapsed). The reader reclaims the width the assistant used to
   // occupy, so wide windows have no dead gutters.
+  // Left width for the two-pane layout comes from the persisted listPaneSize so a
+  // resize the user makes is REMEMBERED across navigation and restart. It is NOT
+  // written back into the 3-tuple panelSizes (whose semantics only fit the pinned
+  // layout), which is what previously mangled the width on remount.
+  const twoPaneListSize = clampListSize(listPaneSize, 45)
+
   return (
     <div className="flex h-full relative overflow-hidden">
-      <ResizablePanelGroup
-        direction="horizontal"
-        onLayout={(sizes) => setPanelSizes([sizes[0] ?? desktopPanelSizes[0], sizes[1] ?? 100 - (sizes[0] ?? 30), panelSizes[2] ?? 26])}
-        className="flex-1 min-w-0"
-      >
-        <ResizablePanel
-          defaultSize={Math.min(35, desktopPanelSizes[0])}
-          minSize={18}
-          maxSize={45}
-          id="left-panel-2pane"
-        >
-          <div role="region" aria-label="Recording list" className="h-full overflow-auto">
-            {leftPanel}
-          </div>
-        </ResizablePanel>
-
-        <ResizableHandle withHandle />
-
-        <ResizablePanel defaultSize={100 - Math.min(35, desktopPanelSizes[0])} minSize={40} id="center-panel-2pane">
-          <div role="region" aria-label="Recording content viewer" className="h-full overflow-hidden">
+      {listCollapsed ? (
+        // Collapsed: the list is a thin rail and the reader takes the whole width
+        // (minus the assistant), so the user is never stuck with a crushed list.
+        <>
+          <ListRail onExpand={() => setListCollapsed(false)} />
+          <div role="region" aria-label="Recording content viewer" className="flex-1 min-w-0 overflow-hidden">
             {centerPanel}
           </div>
-        </ResizablePanel>
-      </ResizablePanelGroup>
+        </>
+      ) : (
+        <ResizablePanelGroup
+          direction="horizontal"
+          onLayout={(sizes) => {
+            if (typeof sizes[0] === 'number') setListPaneSize(sizes[0])
+          }}
+          className="flex-1 min-w-0"
+        >
+          <ResizablePanel
+            defaultSize={twoPaneListSize}
+            minSize={18}
+            maxSize={45}
+            id="left-panel-2pane"
+          >
+            <ListPaneChrome onCollapse={() => setListCollapsed(true)}>{leftPanel}</ListPaneChrome>
+          </ResizablePanel>
+
+          <ResizableHandle withHandle />
+
+          <ResizablePanel defaultSize={100 - twoPaneListSize} minSize={40} id="center-panel-2pane">
+            <div role="region" aria-label="Recording content viewer" className="h-full overflow-hidden">
+              {centerPanel}
+            </div>
+          </ResizablePanel>
+        </ResizablePanelGroup>
+      )}
 
       {assistantDock === 'floating' ? (
         <div

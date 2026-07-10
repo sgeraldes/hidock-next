@@ -48,7 +48,6 @@ export function Library() {
   // Selected source for center panel
   const selectedSourceId = useLibraryStore((state) => state.selectedSourceId)
   const setSelectedSourceId = useLibraryStore((state) => state.setSelectedSourceId)
-  const selectSingle = useLibraryStore((state) => state.selectSingle)
 
   // Centralized operations (downloads + transcriptions)
   const {
@@ -1015,16 +1014,21 @@ export function Library() {
     [toggleTranscript]
   )
 
-  // Handle row click for tri-pane layout
+  // Handle row click for tri-pane layout.
+  // Clicking a row OPENS/VIEWS it — it sets the ACTIVE source only. It must NOT
+  // enter bulk-selection mode. Bulk selection (the checkboxes) is a separate
+  // action toggled by clicking a row's checkbox. Keeping "active/viewing source"
+  // decoupled from "selected for bulk" is what stops a plain view-click from
+  // revealing every row's checkbox (the "annoying selection checkbox" bug).
   const handleRowClick = useCallback((recording: UnifiedRecording) => {
     audioControls.stop()
-    selectSingle(recording.id)
+    setSelectedSourceId(recording.id)
 
     const { waveformLoadedForId } = useUIStore.getState()
     if (hasLocalPath(recording) && waveformLoadedForId !== recording.id) {
       audioControls.loadWaveformOnly(recording.id, recording.localPath)
     }
-  }, [selectSingle, audioControls])
+  }, [setSelectedSourceId, audioControls])
 
   // C-005: Keep openDetailRef in sync with handleRowClick + filteredRecordings
   openDetailRef.current = (id: string) => {

@@ -1,4 +1,4 @@
-import { memo } from 'react'
+import { memo, useState } from 'react'
 import { AlertCircle, Download, Trash2, Wand2, Sparkles, FileText, RefreshCw, AudioLines, MoreHorizontal, Calendar, EyeOff, Eye } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -72,6 +72,17 @@ export const SourceRow = memo(function SourceRow({
 }: SourceRowProps) {
   const error = useLibraryStore((state) => state.recordingErrors.get(recording.id))
 
+  // Reveal-on-interaction state for the bulk-selection checkbox. Tracked locally
+  // so the checkbox can be CONDITIONALLY RENDERED (not just faded): when hidden it
+  // is absent from the DOM entirely, taking ZERO layout width — the title/content
+  // then shifts left into the freed space instead of leaving a permanent gap.
+  const [isHovering, setIsHovering] = useState(false)
+  const [isFocusWithin, setIsFocusWithin] = useState(false)
+  // The checkbox is shown ONLY when: this row is checked, selection mode is active
+  // (≥1 row selected anywhere), or the user is hovering/keyboard-focusing this row.
+  // Merely VIEWING a row (isActiveSource) never shows it — viewing ≠ selecting.
+  const showCheckbox = Boolean(onSelectionChange) && (isSelected || anySelected || isHovering || isFocusWithin)
+
   // Smart title
   const { primaryText, source: titleSource } = getDisplayTitle(recording, meeting, transcript)
   // The machine filename is noise in the prime space — it lives in the row's
@@ -121,24 +132,30 @@ export const SourceRow = memo(function SourceRow({
       ].filter(Boolean).join(' ')}
       role="option"
       onClick={handleRowClick}
+      onMouseEnter={() => setIsHovering(true)}
+      onMouseLeave={() => setIsHovering(false)}
+      onFocus={() => setIsFocusWithin(true)}
+      onBlur={(e) => {
+        // Only drop focus-reveal when focus leaves the row entirely (not when it
+        // moves between the row and its checkbox/menu children).
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+          setIsFocusWithin(false)
+        }
+      }}
       aria-selected={isSelected}
       tabIndex={0}
     >
       <div className="flex items-center gap-2 min-w-0 flex-1">
-        {onSelectionChange && (
+        {/* Checkbox is CONDITIONALLY RENDERED: when hidden it is not in the DOM at
+            all, so it consumes zero width and no flex gap — the title slides left.
+            It reveals on hover/keyboard-focus and stays put while selected or while
+            selection mode is active. */}
+        {onSelectionChange && showCheckbox && (
           <Checkbox
             checked={isSelected}
             onClick={handleCheckboxClick}
             aria-label={`Select ${recording.filename}`}
-            // The checkbox is not permanent chrome: it reveals on row hover/focus,
-            // stays visible once this row is selected, and stays visible for every
-            // row while selection mode is active (≥1 selected anywhere).
-            className={[
-              'shrink-0 transition-opacity',
-              isSelected || anySelected
-                ? 'opacity-100'
-                : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100'
-            ].join(' ')}
+            className="shrink-0"
           />
         )}
         <StatusIcon recording={recording} />

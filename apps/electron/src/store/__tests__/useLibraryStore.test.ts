@@ -52,6 +52,8 @@ beforeEach(() => {
 
   // Reset panel state
   store.setPanelSizes([25, 45, 30])
+  store.setListPaneSize(25)
+  store.setListCollapsed(false)
   store.setSelectedSourceId(null)
 
   // Reset scroll
@@ -76,6 +78,8 @@ describe('useLibraryStore', () => {
       expect(state.selectedIds.size).toBe(0)
       expect(state.expandedRowIds.size).toBe(0)
       expect(state.panelSizes).toEqual([25, 45, 30])
+      expect(state.listPaneSize).toBe(25)
+      expect(state.listCollapsed).toBe(false)
       expect(state.selectedSourceId).toBeNull()
       expect(state.recordingErrors.size).toBe(0)
       expect(state.scrollOffset).toBe(0)
@@ -754,6 +758,62 @@ describe('useLibraryStore', () => {
       setSelectedSourceId(null)
 
       expect(useLibraryStore.getState().selectedSourceId).toBeNull()
+    })
+  })
+
+  describe('List column width (persisted) + collapse', () => {
+    it('setListPaneSize updates the list column width', () => {
+      const { setListPaneSize } = useLibraryStore.getState()
+
+      setListPaneSize(40)
+      expect(useLibraryStore.getState().listPaneSize).toBe(40)
+    })
+
+    it('remembers the list width across a filter reset (it is a layout pref, not a filter)', () => {
+      const { setListPaneSize, clearFilters } = useLibraryStore.getState()
+
+      setListPaneSize(38)
+      clearFilters()
+      expect(useLibraryStore.getState().listPaneSize).toBe(38)
+    })
+
+    it('PERSISTS the list width to localStorage so it survives a restart', () => {
+      const { setListPaneSize } = useLibraryStore.getState()
+
+      setListPaneSize(41)
+
+      const raw = window.localStorage.getItem('hidock-library-store')
+      expect(raw).toBeTruthy()
+      const persisted = JSON.parse(raw as string)
+      expect(persisted.state.listPaneSize).toBe(41)
+    })
+
+    it('setListCollapsed and toggleListCollapsed control + persist the collapse state', () => {
+      const { setListCollapsed, toggleListCollapsed } = useLibraryStore.getState()
+
+      setListCollapsed(true)
+      expect(useLibraryStore.getState().listCollapsed).toBe(true)
+
+      toggleListCollapsed()
+      expect(useLibraryStore.getState().listCollapsed).toBe(false)
+
+      setListCollapsed(true)
+      const persisted = JSON.parse(window.localStorage.getItem('hidock-library-store') as string)
+      expect(persisted.state.listCollapsed).toBe(true)
+    })
+  })
+
+  describe('Viewing a source is decoupled from bulk selection (BUG: view-click entered selection mode)', () => {
+    it('setSelectedSourceId (opening/viewing a row) does NOT populate the bulk-selection set', () => {
+      const { setSelectedSourceId } = useLibraryStore.getState()
+
+      setSelectedSourceId('rec-42')
+
+      const state = useLibraryStore.getState()
+      // The row is the ACTIVE/viewed source...
+      expect(state.selectedSourceId).toBe('rec-42')
+      // ...but selection mode must stay OFF — no checkboxes revealed on other rows.
+      expect(state.selectedIds.size).toBe(0)
     })
   })
 
