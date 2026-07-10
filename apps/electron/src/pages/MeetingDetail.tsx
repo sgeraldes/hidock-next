@@ -46,9 +46,16 @@ const JOIN_GRACE_MS = 15 * 60 * 1000
 const RECORDING_STATUS_LABELS: Record<string, string> = {
   none: 'Not transcribed',
   pending: 'Queued',
+  queued: 'Queued',
+  // Support both the standard enum ('processing'/'complete') and the legacy
+  // vocabulary ('transcribing'/'transcribed') — the pipeline writes 'complete'
+  // (transcription.ts AI-13) while older rows use 'transcribed'.
+  processing: 'Transcribing',
   transcribing: 'Transcribing',
+  complete: 'Transcribed',
   transcribed: 'Transcribed',
-  error: 'Failed'
+  error: 'Failed',
+  failed: 'Failed'
 }
 
 /** Parse a transcript's stored `speakers` JSON into timestamped turns for the
@@ -888,10 +895,26 @@ export function MeetingDetail() {
                         </div>
                         <div className="flex items-center gap-2">
                           {(() => {
-                            const statusLabel = RECORDING_STATUS_LABELS[recording.status] ?? recording.status
+                            // Ground truth beats the stored flag: if a transcript is
+                            // actually joined (full_text present), the recording IS
+                            // transcribed even when `status` never advanced past its
+                            // default — the transcription pipeline can write the
+                            // transcript row under a resolved id while the recording's
+                            // own `status` column drifts. Never show "Not transcribed"
+                            // over a visible transcript.
+                            const isTranscribed = !!recording.transcript?.full_text?.trim()
+                            const effectiveStatus = isTranscribed ? 'transcribed' : recording.status
+                            const statusLabel = RECORDING_STATUS_LABELS[effectiveStatus] ?? effectiveStatus
+                            const statusStyle = effectiveStatus === 'transcribed'
+                              ? 'bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300'
+                              : effectiveStatus === 'error'
+                                ? 'bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300'
+                                : effectiveStatus === 'transcribing' || effectiveStatus === 'pending'
+                                  ? 'bg-yellow-100 dark:bg-yellow-900 text-yellow-700 dark:text-yellow-300'
+                                  : 'bg-secondary text-secondary-foreground'
                             return (
                               <span
-                                className="text-xs px-2 py-1 rounded-full bg-secondary text-secondary-foreground"
+                                className={`text-xs px-2 py-1 rounded-full ${statusStyle}`}
                                 title={`Transcription status: ${statusLabel}`}
                               >
                                 {statusLabel}
