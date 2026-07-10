@@ -9,8 +9,9 @@
 import { useCallback, useEffect, useRef, useMemo, useState } from 'react'
 import { TimeAnchor } from './TimeAnchor'
 import { SpeakerAssignPopover } from './SpeakerAssignPopover'
-import { ChevronDown, ChevronRight } from 'lucide-react'
+import { ChevronDown, ChevronRight, ArrowDownToLine } from 'lucide-react'
 import { expandInlineStoredSegments } from '../utils/splitInlineTurns'
+import { useMediaQuery } from '@/hooks/useMediaQuery'
 import { toast } from '@/components/ui/toaster'
 import type { Person } from '@/types/knowledge'
 
@@ -159,7 +160,7 @@ function parseSpeakerSegments(transcript: string): TranscriptSegment[] {
  */
 function parseTimestamp(timestampStr: string): number | null {
   // Remove brackets if present
-  const cleaned = timestampStr.replace(/[\[\]]/g, '').trim()
+  const cleaned = timestampStr.replace(/[[\]]/g, '').trim()
 
   // Split by colons
   const parts = cleaned.split(':').map(part => parseInt(part, 10))
@@ -244,6 +245,13 @@ export function TranscriptViewer({
   const [summaryExpanded, setSummaryExpanded] = useState(true)
   const [actionItemsExpanded, setActionItemsExpanded] = useState(true)
   const [transcriptExpanded, setTranscriptExpanded] = useState(true)
+
+  // Auto-follow: while audio plays, keep the current turn in view. We must not
+  // fight the user — a manual scroll pauses following until the next play or an
+  // explicit "Follow" tap. Reduced-motion users get instant (non-smooth) jumps.
+  const [autoFollow, setAutoFollow] = useState(true)
+  const prefersReducedMotion = useMediaQuery('(prefers-reduced-motion: reduce)')
+  const prevTimeMsRef = useRef<number | undefined>(undefined)
 
   // Speaker → contact assignment. Only active when a recordingId is supplied.
   // speakerMap resolves a raw label ("Speaker 2") to the assigned contact; the
@@ -346,15 +354,37 @@ export function TranscriptViewer({
     })
   }, [segments, currentTimeMs, hasTimestamps])
 
-  // Auto-scroll to current segment during playback
+  // A (re)start of playback re-enables following: undefined→defined means this
+  // transcript's audio just started (e.g. MeetingDetail, where currentTimeMs is
+  // undefined unless this recording is the one playing), and a jump back to the
+  // very start means a stop→play restart (position resets toward 0).
   useEffect(() => {
+    const prev = prevTimeMsRef.current
+    prevTimeMsRef.current = currentTimeMs
+    if (currentTimeMs === undefined) return
+    const started =
+      prev === undefined || (currentTimeMs < 1200 && prev - currentTimeMs > 400)
+    if (started) setAutoFollow(true)
+  }, [currentTimeMs])
+
+  // Auto-scroll to current segment during playback, unless the user paused
+  // following by scrolling manually. Reduced motion → instant (WCAG 2.3.3).
+  useEffect(() => {
+    if (!autoFollow) return
     if (currentSegmentIndex >= 0 && activeSegmentRef.current) {
       activeSegmentRef.current.scrollIntoView({
-        behavior: 'smooth',
+        behavior: prefersReducedMotion ? 'auto' : 'smooth',
         block: 'center'
       })
     }
-  }, [currentSegmentIndex])
+  }, [currentSegmentIndex, autoFollow, prefersReducedMotion])
+
+  // A manual scroll intent (wheel / touch drag) over the transcript pauses
+  // auto-follow so we don't yank the view back while the user is reading. Only
+  // meaningful once we have timestamps to follow.
+  const pauseFollowOnManualScroll = useCallback(() => {
+    if (hasTimestamps) setAutoFollow(false)
+  }, [hasTimestamps])
 
   // Render structured turns when we have timestamps or detected speakers; else plain text
   const hasStructure = hasTimestamps || segments.some((seg) => seg.speaker)
@@ -409,20 +439,39 @@ export function TranscriptViewer({
 
       {/* Full Transcript Section */}
       <section className="py-3 first:pt-0 last:pb-0">
-        <button
-          onClick={() => setTranscriptExpanded(!transcriptExpanded)}
-          className="flex items-center justify-between w-full text-left hover:text-foreground/70 transition-colors"
-          aria-expanded={transcriptExpanded}
-        >
-          <span className="text-sm font-semibold">Full Transcript</span>
-          {transcriptExpanded ? (
-            <ChevronDown className="h-4 w-4 text-muted-foreground" />
-          ) : (
-            <ChevronRight className="h-4 w-4 text-muted-foreground" />
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setTranscriptExpanded(!transcriptExpanded)}
+            className="flex items-center justify-between flex-1 text-left hover:text-foreground/70 transition-colors"
+            aria-expanded={transcriptExpanded}
+          >
+            <span className="text-sm font-semibold">Full Transcript</span>
+            {transcriptExpanded ? (
+              <ChevronDown className="h-4 w-4 text-muted-foreground" />
+            ) : (
+              <ChevronRight className="h-4 w-4 text-muted-foreground" />
+            )}
+          </button>
+          {/* Resume auto-follow after a manual scroll paused it (only relevant
+              for timestamped transcripts that can follow playback). */}
+          {hasTimestamps && !autoFollow && (
+            <button
+              onClick={() => setAutoFollow(true)}
+              className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium text-primary hover:bg-accent transition-colors"
+              title="Resume auto-scroll to follow playback"
+            >
+              <ArrowDownToLine className="h-3.5 w-3.5" />
+              Follow
+            </button>
           )}
-        </button>
+        </div>
         {transcriptExpanded && (
-          <div ref={containerRef} className="mt-2 pr-1">
+          <div
+            ref={containerRef}
+            className="mt-2 pr-1"
+            onWheel={pauseFollowOnManualScroll}
+            onTouchMove={pauseFollowOnManualScroll}
+          >
             {hasStructure ? (
               <div className="space-y-1">
                 {segments.map((segment, i) => (

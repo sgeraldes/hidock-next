@@ -24,6 +24,7 @@ import { formatDateTime, formatDuration, cn } from '@/lib/utils'
 import { parseAttendees, parseJsonArray } from '@/types'
 import type { Contact } from '@/types'
 import { AudioPlayer } from '@/components/AudioPlayer'
+import { TranscriptViewer, type StoredSegment } from '@/features/library/components/TranscriptViewer'
 import { MeetingActionables } from '@/components/MeetingActionables'
 import { useAudioControls } from '@/components/OperationController'
 import { useUIStore } from '@/store/useUIStore'
@@ -32,6 +33,34 @@ import { EntityMention } from '@/components/entity'
 import type { MeetingDetails } from '@/types'
 
 const ATTENDEES_COLLAPSED_LIMIT = 8
+
+// Grace window after a meeting ends during which "Join" is still offered (people
+// run over). Past this, a meeting is history and the Join button is hidden.
+const JOIN_GRACE_MS = 15 * 60 * 1000
+
+// The recording row badge shows the recording's processing/transcription
+// lifecycle `status`. Device captures default to the literal string 'none',
+// which is meaningless to a user — map every value to a plain-language label
+// (and a title tooltip that names what the badge represents).
+const RECORDING_STATUS_LABELS: Record<string, string> = {
+  none: 'Not transcribed',
+  pending: 'Queued',
+  transcribing: 'Transcribing',
+  transcribed: 'Transcribed',
+  error: 'Failed'
+}
+
+/** Parse a transcript's stored `speakers` JSON into timestamped turns for the
+ * TranscriptViewer (same shape the Library reader uses). */
+function parseStoredSegments(speakers: string | null | undefined): StoredSegment[] | undefined {
+  if (!speakers) return undefined
+  try {
+    const parsed = JSON.parse(speakers)
+    return Array.isArray(parsed) && parsed.length > 0 ? (parsed as StoredSegment[]) : undefined
+  } catch {
+    return undefined
+  }
+}
 
 /**
  * C-MTG-005: Safe date formatting that returns a fallback for invalid dates.
@@ -127,8 +156,10 @@ export function MeetingDetail() {
   // C-MTG-006: Ref to track playback loading timeout for cleanup on unmount
   const playbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // Global playback state
+  // Global playback state. playbackCurrentTime (seconds) drives the embedded
+  // transcript's auto-scroll for whichever recording is currently playing.
   const currentlyPlayingId = useUIStore((state) => state.currentlyPlayingId)
+  const playbackCurrentTime = useUIStore((state) => state.playbackCurrentTime)
   const audioControls = useAudioControls()
 
   // C-MTG-006: Clean up playback timeout on unmount
@@ -483,6 +514,10 @@ export function MeetingDetail() {
   const durationMins = Number.isFinite(rawDuration) ? Math.round(rawDuration) : 0
   const isValidDate = !isNaN(startDate.getTime()) && !isNaN(endDate.getTime())
 
+  // A meeting is "past" once it ended more than the grace window ago. Join is
+  // only useful for current/upcoming meetings, so we hide it for past ones.
+  const isPastMeeting = isValidDate && endDate.getTime() < Date.now() - JOIN_GRACE_MS
+
   // B-MTG-005: Control visible attendees
   const visibleAttendees = showAllAttendees ? attendees : attendees.slice(0, ATTENDEES_COLLAPSED_LIMIT)
   const hasMoreAttendees = attendees.length > ATTENDEES_COLLAPSED_LIMIT
@@ -507,7 +542,7 @@ export function MeetingDetail() {
           <p className="text-sm text-muted-foreground">{formatDateTime(meeting.start_time)}</p>
         </div>
         <div className="flex items-center gap-2">
-          {!isEditing && joinUrl && (
+          {!isEditing && joinUrl && !isPastMeeting && (
             <a
               href={joinUrl}
               target="_blank"
@@ -851,9 +886,17 @@ export function MeetingDetail() {
                           <span className="font-medium">{recording.filename}</span>
                         </div>
                         <div className="flex items-center gap-2">
-                          <span className="text-xs px-2 py-1 rounded-full bg-secondary">
-                            {recording.status}
-                          </span>
+                          {(() => {
+                            const statusLabel = RECORDING_STATUS_LABELS[recording.status] ?? recording.status
+                            return (
+                              <span
+                                className="text-xs px-2 py-1 rounded-full bg-secondary text-secondary-foreground"
+                                title={`Transcription status: ${statusLabel}`}
+                              >
+                                {statusLabel}
+                              </span>
+                            )
+                          })()}
                           {/* B-MTG-002: Unlink recording button */}
                           <Button
                             variant="ghost"
@@ -913,44 +956,30 @@ export function MeetingDetail() {
                         </p>
                       )}
 
-                      {/* Transcript */}
+                      {/* Transcript — same interactive component the Library reader
+                          uses, so speaker labels are clickable→assignable, per-turn
+                          timestamps show, and the view auto-scrolls with playback. */}
                       {recording.transcript && (
                         <div className="mt-4 pt-4 border-t">
                           <div className="flex items-center gap-2 mb-2">
                             <FileText className="h-4 w-4" />
                             <span className="font-medium text-sm">Transcript</span>
                           </div>
-
-                          {recording.transcript.summary && (
-                            <div className="mb-3 p-3 bg-muted rounded-lg">
-                              <p className="text-xs font-medium text-muted-foreground mb-1">Summary</p>
-                              <p className="text-sm">{recording.transcript.summary}</p>
-                            </div>
-                          )}
-
-                          {recording.transcript.action_items && (
-                            <div className="mb-3">
-                              <p className="text-xs font-medium text-muted-foreground mb-1">
-                                Action Items
-                              </p>
-                              <ul className="list-disc list-inside text-sm space-y-1">
-                                {parseJsonArray<string>(recording.transcript.action_items).map(
-                                  (item, i) => (
-                                    <li key={i}>{item}</li>
-                                  )
-                                )}
-                              </ul>
-                            </div>
-                          )}
-
-                          <details className="mt-2">
-                            <summary className="text-sm text-primary cursor-pointer hover:underline">
-                              View full transcript
-                            </summary>
-                            <p className="mt-2 text-sm whitespace-pre-wrap bg-muted p-3 rounded-lg max-h-64 overflow-auto">
-                              {recording.transcript.full_text}
-                            </p>
-                          </details>
+                          <TranscriptViewer
+                            transcript={recording.transcript.full_text}
+                            segments={parseStoredSegments(recording.transcript.speakers)}
+                            recordingId={recording.id}
+                            currentTimeMs={
+                              currentlyPlayingId === recording.id
+                                ? Math.round(playbackCurrentTime * 1000)
+                                : undefined
+                            }
+                            onSeek={(startMs) => audioControls.seek(startMs / 1000)}
+                            showSummary={true}
+                            showActionItems={true}
+                            summary={recording.transcript.summary ?? undefined}
+                            actionItems={parseJsonArray<string>(recording.transcript.action_items)}
+                          />
                         </div>
                       )}
                     </div>

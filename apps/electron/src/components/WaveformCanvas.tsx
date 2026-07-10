@@ -35,14 +35,44 @@ export interface WaveformCanvasProps {
 }
 
 /**
+ * Resolve theme-aware, high-contrast colors from CSS custom properties on the
+ * canvas element. Values in index.css are HSL triplets ("205 90% 36%"), so we
+ * wrap them in hsl(); when unavailable (e.g. jsdom) we fall back to fixed hexes
+ * that still meet ≥4.5:1 against the player's muted background in both themes.
+ */
+function resolveWaveformColors(el: HTMLElement): {
+  played: string
+  unplayed: string
+  playhead: string
+} {
+  const cs = typeof getComputedStyle === 'function' ? getComputedStyle(el) : null
+  const read = (name: string, fallback: string): string => {
+    const raw = cs?.getPropertyValue(name).trim()
+    return raw ? `hsl(${raw})` : fallback
+  }
+  return {
+    // Played progress uses the committed primary (azure) — a clear, saturated
+    // fill that reads as "how far you are" at a glance.
+    played: read('--primary', '#1666a8'),
+    // Unplayed uses muted-foreground (mid-contrast in both themes) instead of
+    // the old slate-400 (#94A3B8), which washed out on the light lavender panel.
+    unplayed: read('--muted-foreground', '#556070'),
+    // Playhead uses the full-strength foreground so it's unmistakable on either
+    // theme (the old rgba(0,0,0,0.3) vanished in dark mode).
+    playhead: read('--foreground', '#0f172a')
+  }
+}
+
+/**
  * WaveformCanvas - Renders simple vertical bar waveform
  *
  * Features:
  * - Vertical bars (3px wide, 1px gap) based on audio amplitude
- * - Monochromatic gray/blue by default (#94A3B8)
- * - Sentiment coloring: Red (negative), Green (positive), Gray (neutral)
+ * - Played/unplayed split: played bars use the primary color, unplayed use
+ *   muted-foreground — a high-contrast (≥4.5:1) seek affordance in both themes
+ * - Sentiment coloring: Red (negative), Green (positive) override the split
  * - Click-to-seek functionality
- * - Optional playhead indicator
+ * - Strong 2px playhead indicator
  */
 export function WaveformCanvas({
   audioData,
@@ -71,8 +101,12 @@ export function WaveformCanvas({
     // Clear canvas
     ctx.clearRect(0, 0, width, height)
 
-    // Default monochrome color (Tailwind slate-400)
-    const defaultColor = '#94A3B8'
+    // Theme-aware, high-contrast colors (played/unplayed/playhead)
+    const colors = resolveWaveformColors(canvas)
+    const playedFraction =
+      currentTime !== undefined && currentTime > 0 && duration > 0
+        ? currentTime / duration
+        : 0
 
     // Draw bars
     for (let i = 0; i < barCount; i++) {
@@ -83,9 +117,12 @@ export function WaveformCanvas({
       const x = i * (barWidth + barGap)
       const y = (height - barHeight) / 2 // Center vertically
 
-      // Determine bar color based on sentiment (if available)
-      let barColor = defaultColor
+      // Base color = played/unplayed split (the seek affordance). Bars up to the
+      // playhead are filled with the primary color; the rest stay muted.
+      const isPlayed = i / barCount <= playedFraction
+      let barColor = isPlayed ? colors.played : colors.unplayed
 
+      // Sentiment (when present) overrides the split for pos/neg segments.
       if (sentimentData && sentimentData.length > 0) {
         const timeForBar = (i / barCount) * duration
         const segment = sentimentData.find(
@@ -94,11 +131,11 @@ export function WaveformCanvas({
 
         if (segment) {
           if (segment.sentiment === 'positive') {
-            barColor = '#22C55E' // Tailwind green-500
+            barColor = '#16A34A' // green-600 (AA on light + dark)
           } else if (segment.sentiment === 'negative') {
-            barColor = '#EF4444' // Tailwind red-500
+            barColor = '#DC2626' // red-600 (AA on light + dark)
           }
-          // neutral stays default color
+          // neutral keeps the played/unplayed split color
         }
       }
 
@@ -107,11 +144,11 @@ export function WaveformCanvas({
       ctx.fillRect(x, y, barWidth, barHeight)
     }
 
-    // Draw subtle playhead if currentTime provided
+    // Draw a strong, high-contrast playhead if currentTime provided
     if (currentTime !== undefined && currentTime > 0 && duration > 0) {
       const playheadX = (currentTime / duration) * width
-      ctx.strokeStyle = 'rgba(0, 0, 0, 0.3)' // Subtle dark line
-      ctx.lineWidth = 1
+      ctx.strokeStyle = colors.playhead
+      ctx.lineWidth = 2
       ctx.beginPath()
       ctx.moveTo(playheadX, 0)
       ctx.lineTo(playheadX, height)

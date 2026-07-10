@@ -326,3 +326,83 @@ describe('TranscriptViewer speaker assignment (recordingId)', () => {
     expect(screen.queryByRole('button', { name: /Assign speaker/i })).not.toBeInTheDocument()
   })
 })
+
+describe('TranscriptViewer auto-scroll (follow playback)', () => {
+  // Two timestamped turns so currentTimeMs can select which one is "current".
+  const timedSegments = [
+    { speaker: 'Speaker 1', start: 0, end: 10, text: 'First turn near the start.' },
+    { speaker: 'Speaker 2', start: 10, end: 20, text: 'Second turn later on.' }
+  ]
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    // scrollIntoView is mocked in test/setup.ts; reset its call history.
+    ;(window.HTMLElement.prototype.scrollIntoView as ReturnType<typeof vi.fn>).mockClear()
+  })
+
+  it('scrolls the active turn into view as currentTimeMs advances', () => {
+    const scrollSpy = window.HTMLElement.prototype.scrollIntoView as ReturnType<typeof vi.fn>
+    const { rerender } = render(
+      <TranscriptViewer transcript="x" segments={timedSegments} currentTimeMs={1000} onSeek={noop} />
+    )
+    // Initial active segment (turn 1) scrolls into view.
+    expect(scrollSpy).toHaveBeenCalled()
+
+    scrollSpy.mockClear()
+    // Advance playback into the second turn → it becomes active and scrolls.
+    rerender(
+      <TranscriptViewer transcript="x" segments={timedSegments} currentTimeMs={12000} onSeek={noop} />
+    )
+    expect(scrollSpy).toHaveBeenCalled()
+  })
+
+  it('stops following after a manual scroll, then resumes when the "Follow" button is clicked', () => {
+    const scrollSpy = window.HTMLElement.prototype.scrollIntoView as ReturnType<typeof vi.fn>
+    const { container, rerender } = render(
+      <TranscriptViewer transcript="x" segments={timedSegments} currentTimeMs={1000} onSeek={noop} />
+    )
+    expect(scrollSpy).toHaveBeenCalled()
+
+    // User scrolls the transcript manually (wheel) → auto-follow pauses.
+    const scrollContainer = container.querySelector('.mt-2.pr-1') as HTMLElement
+    expect(scrollContainer).toBeTruthy()
+    fireEvent.wheel(scrollContainer)
+
+    // A "Follow" affordance appears once following is paused.
+    const followBtn = screen.getByRole('button', { name: /Follow/i })
+    expect(followBtn).toBeInTheDocument()
+
+    scrollSpy.mockClear()
+    // Advancing playback must NOT yank the view while following is paused.
+    rerender(
+      <TranscriptViewer transcript="x" segments={timedSegments} currentTimeMs={12000} onSeek={noop} />
+    )
+    expect(scrollSpy).not.toHaveBeenCalled()
+
+    // Clicking "Follow" resumes auto-scroll immediately.
+    fireEvent.click(followBtn)
+    expect(scrollSpy).toHaveBeenCalled()
+    // The button disappears once following is active again.
+    expect(screen.queryByRole('button', { name: /Follow/i })).not.toBeInTheDocument()
+  })
+
+  it('resumes following on the next play (currentTimeMs restart) after a manual scroll', () => {
+    const scrollSpy = window.HTMLElement.prototype.scrollIntoView as ReturnType<typeof vi.fn>
+    const { container, rerender } = render(
+      <TranscriptViewer transcript="x" segments={timedSegments} currentTimeMs={12000} onSeek={noop} />
+    )
+
+    // Pause following via manual scroll.
+    const scrollContainer = container.querySelector('.mt-2.pr-1') as HTMLElement
+    fireEvent.wheel(scrollContainer)
+    expect(screen.getByRole('button', { name: /Follow/i })).toBeInTheDocument()
+
+    scrollSpy.mockClear()
+    // Next play: position resets toward the start → following resumes automatically.
+    rerender(
+      <TranscriptViewer transcript="x" segments={timedSegments} currentTimeMs={200} onSeek={noop} />
+    )
+    expect(scrollSpy).toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: /Follow/i })).not.toBeInTheDocument()
+  })
+})
