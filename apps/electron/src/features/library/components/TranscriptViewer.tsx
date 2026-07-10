@@ -44,6 +44,15 @@ interface TranscriptViewerProps {
    * person's name. Omit to render labels as plain, non-interactive text.
    */
   recordingId?: string
+  /**
+   * Whether the audio for this transcript is currently playing. When explicitly
+   * `false`, there is no live playback position to follow, so:
+   *  - auto-scroll does not yank the view to a stale/last segment, and
+   *  - clicking "Follow" jumps to the TOP of the transcript (position 0)
+   *    instead of the current (often end-of-file) segment.
+   * Left `undefined` (e.g. MeetingDetail) preserves the legacy follow behavior.
+   */
+  isPlaying?: boolean
 }
 
 interface TranscriptSegment {
@@ -259,7 +268,8 @@ export function TranscriptViewer({
   summary,
   actionItems,
   segments: storedSegments,
-  recordingId
+  recordingId,
+  isPlaying
 }: TranscriptViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const activeSegmentRef = useRef<HTMLDivElement>(null)
@@ -505,17 +515,31 @@ export function TranscriptViewer({
     if (started) setAutoFollow(true)
   }, [currentTimeMs])
 
+  // Scroll the transcript to its very top (position 0). Used when "Follow" is
+  // tapped while nothing is playing — there is no live position to center on, so
+  // we return the reader to the start of the transcript instead of a stale turn.
+  const scrollToTop = useCallback(() => {
+    containerRef.current?.scrollIntoView({
+      behavior: prefersReducedMotion ? 'auto' : 'smooth',
+      block: 'start'
+    })
+  }, [prefersReducedMotion])
+
   // Auto-scroll to current segment during playback, unless the user paused
   // following by scrolling manually. Reduced motion → instant (WCAG 2.3.3).
   useEffect(() => {
     if (!autoFollow) return
+    // Nothing is playing → don't chase a stale currentTimeMs (which, when it
+    // holds a value past this transcript, resolves to the LAST segment and would
+    // yank the view to the end). The explicit "Follow" tap handles this case.
+    if (isPlaying === false) return
     if (currentSegmentIndex >= 0 && activeSegmentRef.current) {
       activeSegmentRef.current.scrollIntoView({
         behavior: prefersReducedMotion ? 'auto' : 'smooth',
         block: 'center'
       })
     }
-  }, [currentSegmentIndex, autoFollow, prefersReducedMotion])
+  }, [currentSegmentIndex, autoFollow, prefersReducedMotion, isPlaying])
 
   // A manual scroll intent (wheel / touch drag) over the transcript pauses
   // auto-follow so we don't yank the view back while the user is reading. Only
@@ -594,9 +618,14 @@ export function TranscriptViewer({
               for timestamped transcripts that can follow playback). */}
           {hasTimestamps && !autoFollow && (
             <button
-              onClick={() => setAutoFollow(true)}
+              onClick={() => {
+                setAutoFollow(true)
+                // Not playing: jump to the top of the transcript (position 0)
+                // rather than the current (stale/last) segment.
+                if (isPlaying === false) scrollToTop()
+              }}
               className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium text-primary hover:bg-accent transition-colors"
-              title="Resume auto-scroll to follow playback"
+              title={isPlaying === false ? 'Jump to the top of the transcript' : 'Resume auto-scroll to follow playback'}
             >
               <ArrowDownToLine className="h-3.5 w-3.5" />
               Follow

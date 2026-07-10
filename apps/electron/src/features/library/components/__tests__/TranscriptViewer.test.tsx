@@ -533,3 +533,44 @@ describe('TranscriptViewer auto-scroll (follow playback)', () => {
     expect(screen.queryByRole('button', { name: /Follow/i })).not.toBeInTheDocument()
   })
 })
+
+describe('TranscriptViewer follow-when-not-playing (isPlaying=false)', () => {
+  const timedSegments = [
+    { speaker: 'Speaker 1', start: 0, end: 10, text: 'First turn near the start.' },
+    { speaker: 'Speaker 2', start: 10, end: 20, text: 'Second turn later on.' }
+  ]
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    ;(window.HTMLElement.prototype.scrollIntoView as ReturnType<typeof vi.fn>).mockClear()
+  })
+
+  it('does NOT auto-scroll to a stale segment while nothing is playing', () => {
+    const scrollSpy = window.HTMLElement.prototype.scrollIntoView as ReturnType<typeof vi.fn>
+    // currentTimeMs sits past the whole transcript (would resolve to the LAST
+    // segment) — but isPlaying=false must suppress the auto-scroll entirely.
+    render(
+      <TranscriptViewer transcript="x" segments={timedSegments} currentTimeMs={999999} isPlaying={false} onSeek={noop} />
+    )
+    expect(scrollSpy).not.toHaveBeenCalled()
+  })
+
+  it('"Follow" jumps to the TOP of the transcript (position 0) when not playing', () => {
+    const scrollSpy = window.HTMLElement.prototype.scrollIntoView as ReturnType<typeof vi.fn>
+    const { container } = render(
+      <TranscriptViewer transcript="x" segments={timedSegments} currentTimeMs={999999} isPlaying={false} onSeek={noop} />
+    )
+
+    // Reveal the "Follow" affordance by pausing follow with a manual scroll.
+    const scrollContainer = container.querySelector('.mt-2.pr-1') as HTMLElement
+    fireEvent.wheel(scrollContainer)
+    const followBtn = screen.getByRole('button', { name: /Follow/i })
+
+    scrollSpy.mockClear()
+    fireEvent.click(followBtn)
+
+    // Jump to top ⇒ scrollIntoView called with block:'start' (not 'center',
+    // which is how a live "current segment" would be centered).
+    expect(scrollSpy).toHaveBeenCalledWith(expect.objectContaining({ block: 'start' }))
+  })
+})

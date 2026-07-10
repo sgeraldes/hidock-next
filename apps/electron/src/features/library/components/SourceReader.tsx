@@ -18,7 +18,7 @@ import { useUIStore } from '@/store/useUIStore'
 import { AudioPlayer } from '@/components/AudioPlayer'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { Transcript, Meeting, parseJsonArray } from '@/types'
-import { Calendar, Download, Trash2, Wand2, RefreshCw, Play, Square, Pencil, Check, Edit2, Link, X, ExternalLink, FolderOpen, AudioLines, MoreHorizontal, Folder, Plus, EyeOff, Eye, Sparkles } from 'lucide-react'
+import { Calendar, Download, Trash2, Wand2, RefreshCw, Play, Square, Pencil, Check, Edit2, Link, X, ExternalLink, FolderOpen, MoreHorizontal, Folder, Plus, EyeOff, Eye, Sparkles, ChevronDown, Cloud, Cpu } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 
@@ -39,6 +39,8 @@ import { toast } from '@/components/ui/toaster'
 import { RecordingLinkDialog } from '@/components/RecordingLinkDialog'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { formatDateTime, formatDuration, formatBytes, cn } from '@/lib/utils'
+import { formatSmartDate, formatRelativeDate } from '@/lib/smartDate'
+import { useTranscriptionStore } from '@/store/features/useTranscriptionStore'
 
 const CATEGORY_OPTIONS = [
   { value: 'meeting', label: 'Meeting' },
@@ -89,7 +91,9 @@ export function SourceReader({
   onSeek,
   onDownload,
   onTranscribe,
-  onReprocessVibeVoice,
+  // onReprocessVibeVoice is intentionally not consumed: the raw "VibeVoice"
+  // button was replaced by the "Transcribe ▾" method picker below. The prop
+  // remains in the interface so existing callers (Library) still type-check.
   onDelete,
   onDeletePermanent,
   onMarkPersonal,
@@ -113,9 +117,17 @@ export function SourceReader({
   // Meeting link dialog state
   const [linkDialogOpen, setLinkDialogOpen] = useState(false)
 
-  // Transcription warning state
+  // Transcription warning state. `pendingTranscribe` holds the exact action to
+  // run once the user confirms past the "may overwrite your edits" dialog — this
+  // lets the same warning guard both the primary Transcribe and the explicit
+  // per-method (Gemini / Local) choices.
   const [metadataEdited, setMetadataEdited] = useState(false)
   const [showTranscribeWarning, setShowTranscribeWarning] = useState(false)
+  const [pendingTranscribe, setPendingTranscribe] = useState<(() => void) | null>(null)
+
+  // Sidebar transcription dock mirror — kept in sync when we queue via the
+  // explicit-method picker (same as useOperations does for the default path).
+  const addToQueue = useTranscriptionStore((s) => s.addToQueue)
 
   // Live duration: imported/watched files have no stored duration until the
   // waveform decode backfills it; show the freshly-decoded value meanwhile.
@@ -129,7 +141,23 @@ export function SourceReader({
     setLinkDialogOpen(false)
     setMetadataEdited(false)
     setShowTranscribeWarning(false)
+    setPendingTranscribe(null)
   }, [recording?.id])
+
+  // Preload the waveform as soon as a playable recording is opened, so the
+  // reader shows the visualization immediately instead of "Press Play to load
+  // the waveform". The same decode backfills+persists the real duration, which
+  // is why an imported file's header stops reading "Unknown". No-op when the
+  // waveform for this recording is already loaded or currently loading, and a
+  // safe no-op in tests where window.__audioControls is undefined.
+  const recordingId = recording?.id
+  const localPath = recording && hasLocalPath(recording) ? recording.localPath : undefined
+  useEffect(() => {
+    if (!recordingId || !localPath) return
+    const { waveformLoadedForId: loadedId, waveformLoadingId } = useUIStore.getState()
+    if (loadedId === recordingId || waveformLoadingId === recordingId) return
+    window.__audioControls?.loadWaveformOnly(recordingId, localPath)
+  }, [recordingId, localPath])
 
   const handleSaveTitle = useCallback(async () => {
     if (!recording?.knowledgeCaptureId) return
@@ -206,13 +234,37 @@ export function SourceReader({
     }
   }, [recording, onMetadataEdited])
 
-  const handleTranscribeClick = useCallback(() => {
+  // Run a transcription action, but first warn if the user edited metadata the
+  // AI pass could overwrite. The chosen action is stashed and executed on
+  // confirm (see the ConfirmDialog below), so the same guard covers both the
+  // primary Transcribe and the explicit Gemini/Local method choices.
+  const requestTranscribe = useCallback((action: () => void) => {
     if (metadataEdited) {
+      setPendingTranscribe(() => action)
       setShowTranscribeWarning(true)
     } else {
-      onTranscribe?.()
+      action()
     }
-  }, [metadataEdited, onTranscribe])
+  }, [metadataEdited])
+
+  // Queue a transcription with an explicit method — "Gemini" (cloud) or "Local"
+  // (on-device) — reusing the existing recordings:reprocessWith IPC. This does
+  // NOT touch the transcription service; it mirrors useOperations' toast + the
+  // sidebar dock-queue update so the run is observable there too.
+  const transcribeWith = useCallback(async (provider: 'gemini' | 'local-asr', label: string) => {
+    if (!recording || !hasLocalPath(recording)) return
+    try {
+      const res = await window.electronAPI.recordings.reprocessWith(recording.id, provider)
+      if (!res?.success) {
+        toast.error('Failed to transcribe', res?.error || `Could not start ${label} transcription`)
+        return
+      }
+      if (res.queueItemId) addToQueue(res.queueItemId, recording.id, recording.filename)
+      toast.success(`Transcribing with ${label}`, recording.filename)
+    } catch (err) {
+      toast.error('Failed to transcribe', err instanceof Error ? err.message : undefined)
+    }
+  }, [recording, addToQueue])
 
   // Parse the stored speaker/timestamp segments (Gemini or local ASR write
   // `speakers` as a JSON array of {speaker, start, end, text}). When present,
@@ -255,6 +307,26 @@ export function SourceReader({
     : waveformLoadedForId === recording.id && livePlaybackDuration > 0
       ? livePlaybackDuration
       : 0
+
+  // Transcription is "busy" while queued or running — the primary Transcribe
+  // control and its ▾ trigger are disabled in that window.
+  const isTranscribeBusy =
+    recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing'
+
+  // The two human-named transcription methods offered by the ▾ menu. Shared by
+  // both the "Transcribe ▾" (fresh) and "Re-transcribe ▾" (already-done) forms.
+  const transcribeMenuItems = (
+    <>
+      <DropdownMenuItem onClick={() => requestTranscribe(() => transcribeWith('gemini', 'Gemini'))}>
+        <Cloud className="h-4 w-4" aria-hidden="true" />
+        Gemini (cloud)
+      </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => requestTranscribe(() => transcribeWith('local-asr', 'Local'))}>
+        <Cpu className="h-4 w-4" aria-hidden="true" />
+        Local (on-device)
+      </DropdownMenuItem>
+    </>
+  )
 
   const linkDialogRecording = {
     id: recording.id,
@@ -321,10 +393,14 @@ export function SourceReader({
           <div className="grid grid-cols-2 @md:grid-cols-3 @xl:grid-cols-4 gap-4 text-sm">
             <div>
               <p className="text-xs font-medium text-muted-foreground mb-1">Date Recorded</p>
-              <p>{(() => {
-                const date = new Date(recording.dateRecorded)
-                return !isNaN(date.getTime()) ? formatDateTime(date.toISOString()) : 'Unknown'
-              })()}</p>
+              {/* Absolute date WITH the year (formatSmartDate) + a relative hint
+                  (formatRelativeDate) so a year-old recording never reads like
+                  this week's. */}
+              <p>{formatSmartDate(recording.dateRecorded, { fallback: 'Unknown' })}</p>
+              {(() => {
+                const rel = formatRelativeDate(recording.dateRecorded)
+                return rel ? <p className="text-xs text-muted-foreground">{rel}</p> : null
+              })()}
             </div>
             <div>
               <p className="text-xs font-medium text-muted-foreground mb-1">Duration</p>
@@ -475,51 +551,72 @@ export function SourceReader({
           </Button>
         ) : null}
 
-        {/* Secondary: transcription actions stay visible for local files */}
-        {hasLocalPath(recording) && recording.transcriptionStatus !== 'complete' && onTranscribe && (
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleTranscribeClick}
-            disabled={recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing'}
-            className="gap-2"
-            title={
-              recording.transcriptionStatus === 'pending' ? 'Transcription queued' :
-              recording.transcriptionStatus === 'processing' ? 'Transcription in progress' :
-              'Start AI transcription'
-            }
-          >
-            {recording.transcriptionStatus === 'processing' ? (
-              <>
-                <RefreshCw className="h-4 w-4 animate-spin" />
-                In Progress
-              </>
-            ) : recording.transcriptionStatus === 'pending' ? (
-              <>
-                <RefreshCw className="h-4 w-4" />
-                Queued
-              </>
-            ) : (
-              <>
-                <Wand2 className="h-4 w-4" />
-                Transcribe
-              </>
-            )}
-          </Button>
-        )}
-
-        {hasLocalPath(recording) && onReprocessVibeVoice && (
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onReprocessVibeVoice}
-            disabled={recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing'}
-            className="gap-2"
-            title="Re-transcribe with VibeVoice (local, speaker-diarized)"
-          >
-            <AudioLines className="h-4 w-4" />
-            VibeVoice
-          </Button>
+        {/* Transcription: a "Transcribe ▾" split button. The primary triggers a
+            transcription with the configured default method; the ▾ menu lets the
+            user pick a specific method by human name (Gemini / Local). Replaces
+            the old raw "VibeVoice" button. Shown for local files only. */}
+        {hasLocalPath(recording) && (
+          recording.transcriptionStatus === 'complete' ? (
+            // Already transcribed → offer a re-run by explicit method.
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" size="sm" className="gap-1.5" title="Re-transcribe with a chosen method">
+                  <Wand2 className="h-4 w-4" />
+                  Re-transcribe
+                  <ChevronDown className="h-4 w-4 opacity-70" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-48">{transcribeMenuItems}</DropdownMenuContent>
+            </DropdownMenu>
+          ) : (
+            // Not yet transcribed → primary Transcribe (default) + ▾ method picker.
+            <div className="inline-flex items-center">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => requestTranscribe(() => onTranscribe?.())}
+                disabled={isTranscribeBusy}
+                className="gap-2 rounded-r-none border-r-0"
+                title={
+                  recording.transcriptionStatus === 'pending' ? 'Transcription queued' :
+                  recording.transcriptionStatus === 'processing' ? 'Transcription in progress' :
+                  'Start AI transcription (configured default method)'
+                }
+              >
+                {recording.transcriptionStatus === 'processing' ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                    In Progress
+                  </>
+                ) : recording.transcriptionStatus === 'pending' ? (
+                  <>
+                    <RefreshCw className="h-4 w-4" />
+                    Queued
+                  </>
+                ) : (
+                  <>
+                    <Wand2 className="h-4 w-4" />
+                    Transcribe
+                  </>
+                )}
+              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={isTranscribeBusy}
+                    className="rounded-l-none px-2"
+                    aria-label="Choose transcription method"
+                    title="Choose transcription method"
+                  >
+                    <ChevronDown className="h-4 w-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="w-48">{transcribeMenuItems}</DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+          )
         )}
 
         {/* Source-scoped assistant: opens the dockable "Ask about this source"
@@ -629,6 +726,7 @@ export function SourceReader({
             segments={transcriptSegments}
             recordingId={recording.id}
             currentTimeMs={currentTimeMs}
+            isPlaying={isPlaying}
             onSeek={onSeek || (() => {})}
             showSummary={true}
             showActionItems={true}
@@ -673,14 +771,18 @@ export function SourceReader({
       {/* Transcription overwrite warning */}
       <ConfirmDialog
         open={showTranscribeWarning}
-        onOpenChange={(open) => setShowTranscribeWarning(open)}
+        onOpenChange={(open) => {
+          setShowTranscribeWarning(open)
+          if (!open) setPendingTranscribe(null)
+        }}
         title="Transcription may overwrite your edits"
         description="You've manually edited this recording's metadata. The AI transcription process may overwrite your title, category, and summary changes. Do you want to continue?"
         actionLabel="Continue"
         cancelLabel="Cancel"
         variant="default"
         onConfirm={() => {
-          onTranscribe?.()
+          pendingTranscribe?.()
+          setPendingTranscribe(null)
           setMetadataEdited(false)
           setShowTranscribeWarning(false)
         }}
@@ -724,7 +826,9 @@ function ProjectAssignmentRow({ knowledgeCaptureId }: { knowledgeCaptureId: stri
     }
   }, [])
 
-  const assignedIds = new Set(assigned.map((p) => p.id))
+  // Memoized so it doesn't rebuild every render (which would churn the
+  // toggleProject callback's deps).
+  const assignedIds = useMemo(() => new Set(assigned.map((p) => p.id)), [assigned])
 
   const toggleProject = useCallback(async (projectId: string) => {
     const nextIds = new Set(assignedIds)
