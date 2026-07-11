@@ -28,7 +28,6 @@ import type { StoredSegment } from '../components/TranscriptViewer'
 import type { AssignScope } from '../components/SpeakerAssignPopover'
 import {
   resolveParticipants,
-  effectiveLabelFor,
   isRawSpeakerLabel,
   type SpeakerSplit,
   type SpeakerAssignment,
@@ -223,6 +222,30 @@ export function useReaderPeople({ meetingId, attendees, recordingId, segments }:
     return [...contactChips, ...speakerChips]
   }, [contacts, resolved, contactKeys])
 
+  // Precomputed lookup structures for the per-turn range-key resolver, built
+  // ONCE per splits/contacts change (not per turn): split boundaries grouped by
+  // base label and sorted by fromIndex (→ binary search per turn), and a
+  // name/email → contact map (→ O(1) meeting-contact fold instead of a linear
+  // scan over contacts for every turn).
+  const rangeKeyIndex = useMemo(() => {
+    const splitsByBase = new Map<string, SpeakerSplit[]>()
+    for (const s of splits) {
+      const arr = splitsByBase.get(s.baseLabel)
+      if (arr) arr.push(s)
+      else splitsByBase.set(s.baseLabel, [s])
+    }
+    for (const arr of splitsByBase.values()) arr.sort((a, b) => a.fromIndex - b.fromIndex)
+
+    const contactByNameKey = new Map<string, Contact>()
+    for (const c of contacts) {
+      const n = (c.name || '').trim().toLowerCase()
+      if (n && !contactByNameKey.has(n)) contactByNameKey.set(n, c)
+      const e = (c.email || '').trim().toLowerCase()
+      if (e && !contactByNameKey.has(e)) contactByNameKey.set(e, c)
+    }
+    return { splitsByBase, contactByNameKey }
+  }, [splits, contacts])
+
   // Per-TURN color-key resolver for the waveform ranges. It replays the exact
   // identity resolution resolveParticipants applies to each turn — effective
   // (possibly split-derived) label, then per-turn override ?? label binding —
@@ -233,11 +256,34 @@ export function useReaderPeople({ meetingId, attendees, recordingId, segments }:
   // DIFFERENT bindings and therefore different keys/colors — matching their
   // distinct chips. deriveSpeakerRanges passes turn indices computed over the
   // SAME expanded, text-filtered turn list, so boundaries line up exactly.
+  // Per-turn cost is O(log splits) + O(1) map lookups via rangeKeyIndex, so a
+  // 1000+-turn transcript resolves all its ranges in a few milliseconds.
   const resolveRangeKey = useCallback(
     (baseLabel: string, turnIndex: number): { key: string; name: string } | undefined => {
       const base = baseLabel.trim()
       if (!base) return undefined
-      const effective = effectiveLabelFor(base, turnIndex, splits)
+
+      // Effective label: the latest split boundary at/before this turn, via
+      // binary search over this base's sorted boundaries (same result as
+      // resolveParticipants' effectiveLabelFor, without the per-turn scan).
+      let effective = base
+      const bounds = rangeKeyIndex.splitsByBase.get(base)
+      if (bounds && bounds.length > 0) {
+        let lo = 0
+        let hi = bounds.length - 1
+        let found = -1
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1
+          if (bounds[mid].fromIndex <= turnIndex) {
+            found = mid
+            lo = mid + 1
+          } else {
+            hi = mid - 1
+          }
+        }
+        if (found >= 0) effective = bounds[found].derivedLabel
+      }
+
       const assigned = turnOverrides.get(turnIndex) ?? speakerMap.get(effective)
       const contactId = assigned?.contactId
       const name = assigned?.name ?? effective
@@ -246,16 +292,11 @@ export function useReaderPeople({ meetingId, attendees, recordingId, segments }:
       if (contactId && contactKeys.ids.has(contactId)) {
         return { key: `mc:${contactId}`, name }
       }
-      const nameKey = name.trim().toLowerCase()
-      if (nameKey && contactKeys.names.has(nameKey)) {
-        const byName = contacts.find(
-          (c) => (c.name || '').trim().toLowerCase() === nameKey || (c.email || '').trim().toLowerCase() === nameKey
-        )
-        if (byName) return { key: `mc:${byName.id}`, name: byName.name || byName.email || name }
-      }
+      const byName = rangeKeyIndex.contactByNameKey.get(name.trim().toLowerCase())
+      if (byName) return { key: `mc:${byName.id}`, name: byName.name || byName.email || name }
       return { key: contactId ? `c:${contactId}` : `l:${effective}`, name }
     },
-    [splits, turnOverrides, speakerMap, contacts, contactKeys]
+    [rangeKeyIndex, turnOverrides, speakerMap, contactKeys]
   )
 
   // Keys of people who actually spoke — to flag invited attendees who spoke.

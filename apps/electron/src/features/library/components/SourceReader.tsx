@@ -111,6 +111,37 @@ function mapTimelineAnalysis(res: TimelineAnalysisResult): TimelineData {
   return { events, sentiment }
 }
 
+/**
+ * Cheap deterministic content hash (djb2-xor) for the timeline backfill's
+ * revision key. Content-derived on purpose: the persisted transcript id is
+ * STABLE (`trans_<recordingId>` via INSERT OR REPLACE) and created_at has only
+ * second precision, so neither reliably changes across a retranscription — the
+ * timeline-relevant CONTENT does.
+ */
+function contentHash(s: string | null | undefined): string {
+  if (!s) return '0'
+  let h = 5381
+  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) | 0
+  return (h >>> 0).toString(36)
+}
+
+/** Backfill guard entry: succeeded (possibly empty) vs failed-with-policy. */
+type BackfillState = 'done' | { permanent: boolean; at: number }
+
+/** Transient analysis failures may auto-retry only after this cooldown. */
+const TRANSIENT_RETRY_COOLDOWN_MS = 5 * 60 * 1000
+
+/**
+ * Classify an analyzeTimeline failure. Permanent (auth / quota / 4xx-class —
+ * retrying would just re-bill the same rejection) is guarded until the user
+ * explicitly retries; anything else (network, timeout) is transient and may
+ * auto-retry after TRANSIENT_RETRY_COOLDOWN_MS.
+ */
+function isPermanentAnalysisError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err)
+  return /\b(quota|credential|unauthoriz\w*|forbidden|permission|invalid|api.?key|4\d\d)\b/i.test(msg)
+}
+
 interface SourceReaderProps {
   recording: UnifiedRecording | null
   transcript?: Transcript
@@ -205,15 +236,17 @@ export function SourceReader({
   const [transcriptHighlight, setTranscriptHighlight] = useState<{ atMs: number; nonce: number } | null>(null)
   const highlightNonceRef = useRef(0)
 
-  // B3 backfill guard: transcript REVISIONS (recordingId + transcript id +
-  // created_at) whose one-time timeline analysis already SUCCEEDED while this
-  // reader stays mounted — so a recording that legitimately yields no
-  // markers/sentiment is not re-analyzed on every reopen (no loop, no repeated
-  // Gemini work), while a RE-TRANSCRIPTION (new transcript id / created_at)
-  // produces a new key and re-analyzes. A FAILED backfill removes its key, so
-  // the next open may retry — success-empty and failure are distinguished. A
-  // ref (not module state) so it scopes to the mounted reader session.
-  const backfillAttemptedRef = useRef<Set<string>>(new Set())
+  // B3 backfill guard, keyed by CONTENT-derived transcript revision (see
+  // transcriptRevisionKey below). 'done' = analysis succeeded (even if empty) —
+  // never auto-repeated for that revision. A failure records {permanent, at}:
+  // permanent failures (auth/quota/4xx) stay guarded until the user's explicit
+  // Retry; transient ones may auto-retry after a cooldown. A ref (not module
+  // state) so it scopes to the mounted reader session.
+  const backfillStateRef = useRef<Map<string, BackfillState>>(new Map())
+  // Surfaces the failed state (drives the "Retry" affordance on the player).
+  const [timelineAnalysisFailed, setTimelineAnalysisFailed] = useState(false)
+  // Bumped by the explicit Retry — re-runs the analysis effect for the same key.
+  const [analysisRetryNonce, setAnalysisRetryNonce] = useState(0)
 
   // Transcription warning state. `pendingTranscribe` holds the exact action to
   // run once the user confirms past the "may overwrite your edits" dialog — this
@@ -370,11 +403,25 @@ export function SourceReader({
     })
   }, [timeline?.events, actionItems, timelineDurationSec])
 
-  // The transcript REVISION this reader is looking at. Re-transcription writes a
-  // fresh transcript row (new id and/or created_at via INSERT OR REPLACE), so
-  // this key changes — invalidating the backfill guard below and re-running the
-  // analysis fetch when a transcription completes in-session.
-  const transcriptRevisionKey = `${recordingId ?? ''}:${effectiveTranscript?.id ?? ''}:${effectiveTranscript?.created_at ?? ''}`
+  // The transcript REVISION this reader is looking at, derived from the
+  // timeline-relevant CONTENT: speakers (sentiment windows), action_items +
+  // key_points (event markers) and the full text. NOT from id/created_at — the
+  // persisted id is stable (`trans_<recordingId>`, INSERT OR REPLACE) and
+  // created_at has second precision, so two retranscriptions could share both
+  // while their content (and therefore the correct analysis) differs. A
+  // retranscription changes the content → new key → the backfill guard below is
+  // invalidated and the analysis re-runs.
+  const transcriptRevisionKey = useMemo(() => {
+    const t = effectiveTranscript
+    return [
+      recordingId ?? '',
+      t?.full_text?.length ?? 0,
+      contentHash(t?.full_text),
+      contentHash(t?.speakers),
+      contentHash(t?.action_items),
+      contentHash(t?.key_points)
+    ].join(':')
+  }, [recordingId, effectiveTranscript])
 
   // Fetch the sibling agent's timeline analysis when a recording opens (and again
   // when its transcript revision changes — e.g. a retranscription completed).
@@ -385,6 +432,7 @@ export function SourceReader({
     let cancelled = false
     setTimeline(null)
     setAnalyzingTimeline(false)
+    setTimelineAnalysisFailed(false)
     if (!recordingId) return
     const api = window.electronAPI?.recordings as unknown as {
       getTimelineAnalysis?: (id: string) => Promise<TimelineAnalysisResult>
@@ -399,34 +447,43 @@ export function SourceReader({
         // Already-transcribed recordings return empty until analyzeTimeline runs
         // once. Backfill it (best-effort) and show the "Analyzing timeline…" hint
         // meanwhile; per-speaker colors + playhead already render without this.
-        // Guarded to run AT MOST ONCE per TRANSCRIPT REVISION per reader session:
-        // a recording that genuinely has no markers/sentiment (e.g. Gemini not
-        // configured, no action items) is not re-analyzed every time it's
-        // reopened, but a NEW transcript revision (retranscription) gets a fresh
-        // attempt. Only a SUCCESSFUL analysis keeps the guard: a failed backfill
-        // removes its key so the next open may retry.
-        if (
-          isEmpty(res) &&
-          typeof api.analyzeTimeline === 'function' &&
-          !backfillAttemptedRef.current.has(transcriptRevisionKey)
-        ) {
-          backfillAttemptedRef.current.add(transcriptRevisionKey)
-          if (!cancelled) setAnalyzingTimeline(true)
-          try {
-            await api.analyzeTimeline(recordingId)
-            res = await api.getTimelineAnalysis!(recordingId)
-          } catch {
-            // Failed (not successful-empty) → allow a retry on a later open.
-            backfillAttemptedRef.current.delete(transcriptRevisionKey)
+        // Guarded PER TRANSCRIPT REVISION (content-derived key): success — even
+        // an honestly-empty result — is never auto-repeated; a PERMANENT failure
+        // (auth/quota/4xx) waits for the explicit Retry affordance; a TRANSIENT
+        // failure may auto-retry only after a cooldown. A retranscription
+        // changes the key and always gets a fresh attempt.
+        if (isEmpty(res) && typeof api.analyzeTimeline === 'function') {
+          const prior = backfillStateRef.current.get(transcriptRevisionKey)
+          const canAttempt =
+            prior === undefined ||
+            (typeof prior === 'object' && !prior.permanent && Date.now() - prior.at >= TRANSIENT_RETRY_COOLDOWN_MS)
+          if (canAttempt) {
+            // Provisional 'done' — replaced with the failure record on error.
+            backfillStateRef.current.set(transcriptRevisionKey, 'done')
+            if (!cancelled) setAnalyzingTimeline(true)
+            try {
+              await api.analyzeTimeline(recordingId)
+              res = await api.getTimelineAnalysis!(recordingId)
+            } catch (err) {
+              backfillStateRef.current.set(transcriptRevisionKey, {
+                permanent: isPermanentAnalysisError(err),
+                at: Date.now()
+              })
+              if (!cancelled) setTimelineAnalysisFailed(true)
+            }
+            finally { if (!cancelled) setAnalyzingTimeline(false) }
+          } else if (typeof prior === 'object') {
+            // Still under the failure policy (permanent, or cooling down) —
+            // surface the failed state so the Retry affordance shows.
+            if (!cancelled) setTimelineAnalysisFailed(true)
           }
-          finally { if (!cancelled) setAnalyzingTimeline(false) }
         }
         if (!cancelled && res) setTimeline(mapTimelineAnalysis(res))
       } catch { /* non-fatal: colors + seek still work without it */ }
       finally { if (!cancelled) setAnalyzingTimeline(false) }
     })()
     return () => { cancelled = true }
-  }, [recordingId, transcriptRevisionKey])
+  }, [recordingId, transcriptRevisionKey, analysisRetryNonce])
 
   // Scroll-driven collapse: once the body is scrolled a few px past the top, the
   // player morphs from the big timeline to the docked bar (unless pinned). Read
@@ -442,6 +499,14 @@ export function SourceReader({
     highlightNonceRef.current += 1
     setTranscriptHighlight({ atMs: Math.round(event.timeSec * 1000), nonce: highlightNonceRef.current })
   }, [])
+
+  // Explicit user retry for a failed timeline analysis: clears the failure
+  // record for THIS revision (the only escape for a permanent failure) and
+  // re-runs the analysis effect.
+  const retryTimelineAnalysis = useCallback(() => {
+    backfillStateRef.current.delete(transcriptRevisionKey)
+    setAnalysisRetryNonce((n) => n + 1)
+  }, [transcriptRevisionKey])
 
   const handleSaveTitle = useCallback(async () => {
     if (!recording?.knowledgeCaptureId) return
@@ -907,6 +972,8 @@ export function SourceReader({
               events={timelineEvents}
               sentiment={timeline?.sentiment}
               analyzing={analyzingTimeline}
+              analysisFailed={timelineAnalysisFailed}
+              onRetryAnalysis={retryTimelineAnalysis}
               scrolled={scrolled}
               pinned={waveformPinned}
               onTogglePin={() => setWaveformPinned(!waveformPinned)}
@@ -1146,6 +1213,10 @@ interface ReaderPlayerProps {
   events?: TimelineEvent[]
   sentiment?: SentimentScorePoint[]
   analyzing: boolean
+  /** The timeline backfill failed (permanent or cooling down) — offer Retry. */
+  analysisFailed?: boolean
+  /** Explicit user retry for a failed timeline analysis. */
+  onRetryAnalysis?: () => void
   scrolled: boolean
   pinned: boolean
   onTogglePin: () => void
@@ -1162,6 +1233,8 @@ function ReaderPlayer({
   events,
   sentiment,
   analyzing,
+  analysisFailed = false,
+  onRetryAnalysis,
   scrolled,
   pinned,
   onTogglePin,
@@ -1243,6 +1316,26 @@ function ReaderPlayer({
           >
             <RefreshCw className="h-3 w-3 animate-spin" aria-hidden="true" />
             Analyzing timeline…
+          </div>
+        )}
+
+        {/* Failed backfill — honest state + the explicit Retry that is the only
+            path past a PERMANENT (auth/quota) failure. */}
+        {big && !analyzing && analysisFailed && (
+          <div
+            className="absolute left-2 top-2 z-10 inline-flex items-center gap-1.5 rounded-full border bg-background/90 px-2 py-0.5 text-[11px] text-muted-foreground shadow-sm backdrop-blur"
+            data-testid="timeline-analysis-failed"
+            role="status"
+          >
+            Timeline analysis failed
+            <button
+              type="button"
+              onClick={onRetryAnalysis}
+              className="rounded font-medium text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+              data-testid="timeline-analysis-retry"
+            >
+              Retry
+            </button>
           </div>
         )}
       </div>

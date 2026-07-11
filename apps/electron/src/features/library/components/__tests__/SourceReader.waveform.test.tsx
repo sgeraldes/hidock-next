@@ -251,8 +251,36 @@ describe('SourceReader — timeline backfill', () => {
     expect(analyzeTimeline).toHaveBeenCalledTimes(2)
   })
 
-  // Adversarial finding 3a: the guard is keyed to the TRANSCRIPT REVISION, so a
-  // recording retranscribed in-session (new transcript id/created_at) gets a
+  // Round-3 finding 1: the guard key is CONTENT-derived. The persisted transcript
+  // id is stable (trans_<recordingId>, INSERT OR REPLACE) and created_at has only
+  // second precision — so a retranscription with the SAME id + SAME created_at
+  // but CHANGED content must still invalidate the guard and re-analyze.
+  it('re-analyzes when transcript CONTENT changes even with identical id + created_at', async () => {
+    const getTimelineAnalysis = vi.fn().mockResolvedValue(emptyTimeline)
+    const analyzeTimeline = vi.fn().mockResolvedValue(emptyTimeline)
+    installElectronAPI({ getTimelineAnalysis, analyzeTimeline })
+
+    const recA = makeRecording({ id: 'rec-A', transcriptionStatus: 'complete' })
+    const sameStamp = '2026-07-11 09:00:00' // second precision — identical across both
+    const transcriptV1 = { id: 'trans_rec-A', recording_id: 'rec-A', full_text: 'first pass text', created_at: sameStamp } as any
+    const transcriptV2 = { id: 'trans_rec-A', recording_id: 'rec-A', full_text: 'second pass CHANGED text', created_at: sameStamp } as any
+
+    const { rerender } = render(<SourceReader recording={recA} transcript={transcriptV1} />)
+    await waitFor(() => expect(analyzeTimeline).toHaveBeenCalledTimes(1))
+
+    // Same id, same created_at, DIFFERENT content → new revision → re-analyzed.
+    rerender(<SourceReader recording={recA} transcript={transcriptV2} />)
+    await waitFor(() => expect(analyzeTimeline).toHaveBeenCalledTimes(2))
+
+    // Unchanged content (a fresh but identical object) does NOT re-analyze.
+    rerender(<SourceReader recording={recA} transcript={{ ...transcriptV2 }} />)
+    await waitFor(() => expect(getTimelineAnalysis).toHaveBeenCalled())
+    await Promise.resolve()
+    expect(analyzeTimeline).toHaveBeenCalledTimes(2)
+  })
+
+  // Round-2 finding: the guard is keyed to the TRANSCRIPT REVISION, so a
+  // recording retranscribed in-session (new transcript id/content) gets a
   // fresh backfill instead of staying marker-less all session.
   it('re-analyzes a reopened recording whose transcript was RETRANSCRIBED in-session', async () => {
     const getTimelineAnalysis = vi.fn().mockResolvedValue(emptyTimeline)
@@ -279,34 +307,76 @@ describe('SourceReader — timeline backfill', () => {
     expect(analyzeTimeline).toHaveBeenLastCalledWith('rec-A')
   })
 
-  // Adversarial finding 3b: a FAILED backfill is not a successful-empty result —
-  // it releases the guard so the next open of the same revision retries.
-  it('retries the backfill on a later open after a FAILED analysis (success-empty stays guarded)', async () => {
+  // Round-3 finding 2a: PERMANENT failures (auth/quota/4xx-class) never
+  // auto-retry — exactly one billable call across any number of reopens — and
+  // only the explicit Retry affordance runs the analysis again.
+  it('a PERMANENT failure analyzes exactly once across N reopens, until the explicit Retry', async () => {
     const getTimelineAnalysis = vi.fn().mockResolvedValue(emptyTimeline)
-    const analyzeTimeline = vi.fn().mockRejectedValueOnce(new Error('gemini down')).mockResolvedValue(emptyTimeline)
+    const analyzeTimeline = vi.fn().mockRejectedValue(new Error('403 quota exceeded for this API key'))
     installElectronAPI({ getTimelineAnalysis, analyzeTimeline })
 
     const recA = makeRecording({ id: 'rec-A', transcriptionStatus: 'complete' })
     const recB = makeRecording({ id: 'rec-B', transcriptionStatus: 'complete' })
 
-    // Open A → attempt FAILS → guard released.
     const { rerender } = render(<SourceReader recording={recA} />)
     await waitFor(() => expect(analyzeTimeline).toHaveBeenCalledWith('rec-A'))
-    expect(analyzeTimeline).toHaveBeenCalledTimes(1)
+    expect(analyzeTimeline.mock.calls.filter((c) => c[0] === 'rec-A')).toHaveLength(1)
 
-    // Away and back → the failed revision is retried (this time success-empty)…
-    rerender(<SourceReader recording={recB} />)
-    await waitFor(() => expect(analyzeTimeline).toHaveBeenCalledWith('rec-B'))
-    rerender(<SourceReader recording={recA} />)
-    await waitFor(() => expect(analyzeTimeline).toHaveBeenCalledTimes(3))
-
-    // …and a THIRD open stays guarded (success-empty is remembered).
-    rerender(<SourceReader recording={recB} />)
-    await waitFor(() => expect(getTimelineAnalysis).toHaveBeenCalledWith('rec-B'))
-    rerender(<SourceReader recording={recA} />)
-    await waitFor(() => expect(getTimelineAnalysis).toHaveBeenCalledWith('rec-A'))
+    // Reopen A several times — never re-billed.
+    for (let i = 0; i < 3; i++) {
+      rerender(<SourceReader recording={recB} />)
+      await waitFor(() => expect(getTimelineAnalysis).toHaveBeenCalledWith('rec-B'))
+      rerender(<SourceReader recording={recA} />)
+      await waitFor(() => expect(getTimelineAnalysis).toHaveBeenCalledWith('rec-A'))
+    }
     await Promise.resolve()
-    expect(analyzeTimeline).toHaveBeenCalledTimes(3)
+    expect(analyzeTimeline.mock.calls.filter((c) => c[0] === 'rec-A')).toHaveLength(1)
+
+    // The failed state surfaces a Retry affordance; clicking it re-analyzes.
+    const retry = await screen.findByTestId('timeline-analysis-retry')
+    fireEvent.click(retry)
+    await waitFor(() =>
+      expect(analyzeTimeline.mock.calls.filter((c) => c[0] === 'rec-A')).toHaveLength(2)
+    )
+  })
+
+  // Round-3 finding 2b: TRANSIENT failures (network/timeout) auto-retry only
+  // after the cooldown — not on an immediate reopen.
+  it('a TRANSIENT failure retries only after the cooldown elapses', async () => {
+    const T0 = 1_752_000_000_000
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(T0)
+    try {
+      const getTimelineAnalysis = vi.fn().mockResolvedValue(emptyTimeline)
+      const analyzeTimeline = vi.fn().mockRejectedValueOnce(new Error('network timeout')).mockResolvedValue(emptyTimeline)
+      installElectronAPI({ getTimelineAnalysis, analyzeTimeline })
+
+      const recA = makeRecording({ id: 'rec-A', transcriptionStatus: 'complete' })
+      const recB = makeRecording({ id: 'rec-B', transcriptionStatus: 'complete' })
+
+      // Open A → transient failure recorded at T0.
+      const { rerender } = render(<SourceReader recording={recA} />)
+      await waitFor(() => expect(analyzeTimeline).toHaveBeenCalledWith('rec-A'))
+      expect(analyzeTimeline.mock.calls.filter((c) => c[0] === 'rec-A')).toHaveLength(1)
+
+      // Reopen BEFORE the cooldown → no retry (still under the failure policy).
+      rerender(<SourceReader recording={recB} />)
+      await waitFor(() => expect(getTimelineAnalysis).toHaveBeenCalledWith('rec-B'))
+      rerender(<SourceReader recording={recA} />)
+      await waitFor(() => expect(getTimelineAnalysis).toHaveBeenCalledWith('rec-A'))
+      await Promise.resolve()
+      expect(analyzeTimeline.mock.calls.filter((c) => c[0] === 'rec-A')).toHaveLength(1)
+
+      // Past the 5-minute cooldown → the next open retries.
+      nowSpy.mockReturnValue(T0 + 5 * 60 * 1000 + 1)
+      rerender(<SourceReader recording={recB} />)
+      await waitFor(() => expect(getTimelineAnalysis).toHaveBeenCalledWith('rec-B'))
+      rerender(<SourceReader recording={recA} />)
+      await waitFor(() =>
+        expect(analyzeTimeline.mock.calls.filter((c) => c[0] === 'rec-A')).toHaveLength(2)
+      )
+    } finally {
+      nowSpy.mockRestore()
+    }
   })
 
   it('does NOT call analyzeTimeline when getTimelineAnalysis already has data', async () => {
