@@ -36,6 +36,7 @@ import { registerTimelineHandlers } from './timeline-handlers'
 import { registerClipboardCaptureHandlers } from './clipboard-capture-handlers'
 import { registerGitCommitsHandlers } from './git-commits-handlers'
 import { registerWaveformCacheHandlers } from './waveform-cache-handlers'
+import { registerBrainsHandlers } from './brains-handlers'
 
 export function registerIpcHandlers(): void {
   // Register all IPC handlers
@@ -80,6 +81,7 @@ export function registerIpcHandlers(): void {
   registerClipboardCaptureHandlers()
   registerGitCommitsHandlers()
   registerWaveformCacheHandlers()
+  registerBrainsHandlers()
 
   console.log('All IPC handlers registered')
 }

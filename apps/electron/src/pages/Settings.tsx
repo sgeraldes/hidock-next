@@ -22,6 +22,7 @@ import { useUIStore } from '@/store/ui/useUIStore'
 import { formatBytes, cn } from '@/lib/utils'
 import { HealthCheck } from '@/components/HealthCheck'
 import { ConnectorsSettings } from '@/components/settings/ConnectorsSettings'
+import { AIBrainsSettings } from '@/components/settings/AIBrainsSettings'
 import { toast } from '@/components/ui/toaster'
 import type { StorageInfo, AppConfig } from '@/types'
 
@@ -758,6 +759,9 @@ export function Settings() {
 
           {/* Connectors (Layer 2): external-system integrations */}
           <ConnectorsSettings />
+
+          {/* AI Brains (H10): pick which AI provider powers analysis/chat/outputs */}
+          <AIBrainsSettings />
 
           {/* Transcription Settings */}
           <Card>

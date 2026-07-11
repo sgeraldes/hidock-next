@@ -6,6 +6,31 @@ import type {
   IngestionOutcome,
   SourceContainer,
 } from '@hidock/connectors'
+/**
+ * AI Brains renderer-facing types (H10). Mirror of the main-process contract in
+ * `electron/main/services/brains/types.ts` + `ipc/brains-handlers.ts`, declared
+ * inline here because the web/renderer tsconfig program only lists
+ * `electron/preload/*` + `electron/main/types/*` — importing from
+ * `main/services/brains` would either fall outside that file list or drag the
+ * handler's Node-only transitive imports (fs/os) into the renderer build.
+ * The handler's `BrainListItem` is kept structurally identical.
+ */
+export type BrainId = 'gemini-api' | 'ollama' | 'claude-code' | 'codex' | 'gemini-cli'
+export type BrainCapability = 'generate' | 'chat' | 'analyzeAudio' | 'embed' | 'agentic'
+export type BrainTask = 'transcribeAnalyze' | 'chat' | 'outputs' | 'handover' | 'embed' | 'suggestions'
+export interface BrainAuthStatus {
+  configured: boolean
+  method: 'api-key' | 'cli-login' | 'oauth' | 'none'
+  detail?: string
+}
+export interface BrainListItem {
+  id: BrainId
+  label: string
+  capabilities: BrainCapability[]
+  enabled: boolean
+  isDefault: boolean
+  auth: BrainAuthStatus
+}
 
 /**
  * B-SET-004 / QAM-002: QA logging check via localStorage bridge.
@@ -810,6 +835,17 @@ export interface ElectronAPI {
     onStatusChanged: (callback: (payload: { id: string; status: ConnectorStatus }) => void) => () => void
   }
 
+  // AI Brains (H10) — pluggable AI provider settings surface. Reads the brain
+  // registry (labels, capabilities, live auth status) and persists user choices
+  // into config.brains + the encrypted per-brain credential store.
+  brains: {
+    list: () => Promise<BrainListItem[]>
+    setEnabled: (args: { id: BrainId; enabled: boolean }) => Promise<{ success: boolean }>
+    setDefault: (args: { id: BrainId }) => Promise<{ success: boolean }>
+    setTaskRouting: (args: { task: BrainTask; id: BrainId | null }) => Promise<{ success: boolean }>
+    setCredential: (args: { id: BrainId; field: string; value: string | null }) => Promise<{ success: boolean }>
+  }
+
   // Migration - Database schema migration to V11 (Knowledge Captures)
   migration: MigrationAPI
 
@@ -1364,6 +1400,14 @@ const electronAPI: ElectronAPI = {
       ipcRenderer.on('connectors:status-changed', handler)
       return () => ipcRenderer.removeListener('connectors:status-changed', handler)
     }
+  },
+
+  brains: {
+    list: () => callIPC('brains:list'),
+    setEnabled: (args) => callIPC('brains:setEnabled', args),
+    setDefault: (args) => callIPC('brains:setDefault', args),
+    setTaskRouting: (args) => callIPC('brains:setTaskRouting', args),
+    setCredential: (args) => callIPC('brains:setCredential', args)
   },
 
   migration: {
