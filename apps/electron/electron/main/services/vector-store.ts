@@ -109,6 +109,67 @@ function chunkText(text: string, chunkSize = 500, overlap = 50): string[] {
   return chunks
 }
 
+/** Diversity reranking knobs (F5 PixelRAG — see {@link diversifyResults}). */
+const DIVERSITY_CANDIDATE_MIN = 20
+const DIVERSITY_CANDIDATE_FACTOR = 4
+const MAX_CHUNKS_PER_CAPTURE = 2
+
+/**
+ * Light, deterministic diversity reranking over a score-sorted result list
+ * (no LLM, O(candidates)). Raw cosine top-K over the shared corpus lets a few
+ * near-duplicate screenshot descriptions consume the whole context window, so:
+ *
+ *  - a larger candidate set is considered (topK*4, min 20);
+ *  - image-capture chunks are capped at {@link MAX_CHUNKS_PER_CAPTURE} per
+ *    capture (near-identical chunks of one screenshot never stack);
+ *  - when BOTH modalities are among the candidates, ceil(topK/2) slots are
+ *    reserved for transcript chunks (images take at most topK - ceil(topK/2));
+ *  - if the caps leave slots unfilled (e.g. transcripts are scarce), the
+ *    best-scoring skipped chunks fill them, so topK results still come back.
+ *
+ * Pure-transcript queries are unchanged: with no image chunks in the candidate
+ * set every cap is a no-op and the raw top-K order is returned.
+ */
+function diversifyResults(sorted: SearchResult[], topK: number): SearchResult[] {
+  const candidates = sorted.slice(0, Math.max(topK * DIVERSITY_CANDIDATE_FACTOR, DIVERSITY_CANDIDATE_MIN))
+  const hasTranscript = candidates.some((r) => r.document.metadata.sourceType !== 'image')
+  const hasImage = candidates.some((r) => r.document.metadata.sourceType === 'image')
+  if (!hasImage) return candidates.slice(0, topK)
+
+  const maxImageSlots = hasTranscript ? Math.max(1, topK - Math.ceil(topK / 2)) : topK
+
+  const selected: SearchResult[] = []
+  const skipped: SearchResult[] = []
+  const perCapture = new Map<string, number>()
+  let imageCount = 0
+
+  for (const result of candidates) {
+    if (selected.length >= topK) break
+    const meta = result.document.metadata
+    if (meta.sourceType === 'image') {
+      const captureKey = meta.captureId ?? meta.recordingId ?? result.document.id
+      const captureCount = perCapture.get(captureKey) ?? 0
+      if (imageCount >= maxImageSlots || captureCount >= MAX_CHUNKS_PER_CAPTURE) {
+        skipped.push(result)
+        continue
+      }
+      perCapture.set(captureKey, captureCount + 1)
+      imageCount++
+    }
+    selected.push(result)
+  }
+
+  // Fill any slots the caps left open with the best skipped candidates so the
+  // caller still receives topK results when the corpus allows.
+  for (const result of skipped) {
+    if (selected.length >= topK) break
+    selected.push(result)
+  }
+
+  selected.sort((a, b) => b.score - a.score)
+  return selected
+}
+
 class VectorStore {
   private documents: Map<string, VectorDocument> = new Map()
   private initialized = false
@@ -137,9 +198,13 @@ class VectorStore {
 
     // Add F5 (PixelRAG) columns to a pre-existing table. This table is owned here
     // (CREATE TABLE IF NOT EXISTS, NOT the database.ts migration runner), so the
-    // ALTER is guarded by a PRAGMA check and stays idempotent on every boot.
-    this.ensureColumn(db, 'source_type')
-    this.ensureColumn(db, 'capture_id')
+    // ALTERs are guarded by a PRAGMA check and stay idempotent on every boot.
+    // FAIL-CLOSED: throws when any column is still missing afterwards, so
+    // `initialized` is never set on a half-upgraded table (every later INSERT
+    // references these columns — a swallowed ALTER failure would silently break
+    // ALL indexing for the whole process). A throw here leaves `initialized`
+    // false, so the next initialize() call retries the repair.
+    this.ensureColumns(db, ['source_type', 'capture_id'])
 
     // Create index for faster lookups
     db.run(`CREATE INDEX IF NOT EXISTS idx_vector_embeddings_meeting ON vector_embeddings(meeting_id)`)
@@ -153,20 +218,41 @@ class VectorStore {
   }
 
   /**
-   * Idempotently add a nullable TEXT column to vector_embeddings if it does not
-   * already exist. Checks PRAGMA table_info first so a re-run (or a DB that was
-   * created with the column already present) is a no-op — matches the
-   * database-migrations rule for guarded ALTERs.
+   * Idempotently add nullable TEXT columns to vector_embeddings, FAIL-CLOSED.
+   *
+   * Each ALTER is guarded by a PRAGMA check (a re-run or a DB created with the
+   * column already present is a no-op — matches the database-migrations rule for
+   * guarded ALTERs). After the repairs the column list is RE-READ and, if any
+   * required column is still absent, this THROWS so initialize() fails before
+   * setting `initialized` and can retry later. Per-column idempotence also makes
+   * a partial upgrade (one of two ALTERs failed) recoverable: the next attempt
+   * only adds the column that is still missing.
    */
-  private ensureColumn(db: ReturnType<typeof getDatabase>, column: string): void {
-    try {
+  private ensureColumns(db: ReturnType<typeof getDatabase>, columns: string[]): void {
+    const readColumns = (): string[] => {
       const info = db.exec('PRAGMA table_info(vector_embeddings)')
-      const existing = info.length > 0 ? info[0].values.map((row) => row[1] as string) : []
-      if (!existing.includes(column)) {
+      return info.length > 0 ? info[0].values.map((row) => row[1] as string) : []
+    }
+
+    const existing = readColumns()
+    for (const column of columns.filter((c) => !existing.includes(c))) {
+      try {
         db.run(`ALTER TABLE vector_embeddings ADD COLUMN ${column} TEXT`)
+      } catch (e) {
+        // Logged for diagnosis; the verification below decides pass/fail so a
+        // transient error on one column cannot leave a silent partial upgrade.
+        console.error(`[VectorStore] ALTER ADD COLUMN ${column} failed:`, e)
       }
-    } catch (e) {
-      console.warn(`[VectorStore] ensureColumn(${column}) skipped:`, e)
+    }
+
+    // Verification — fail closed if the table still lacks a required column.
+    const after = readColumns()
+    const stillMissing = columns.filter((c) => !after.includes(c))
+    if (stillMissing.length > 0) {
+      throw new Error(
+        `[VectorStore] vector_embeddings is missing required column(s) after repair: ${stillMissing.join(', ')}. ` +
+          'Initialization aborted so it can be retried; indexing would otherwise fail on every insert.'
+      )
     }
   }
 
@@ -341,9 +427,10 @@ class VectorStore {
       results.push({ document: doc, score })
     }
 
-    // Sort by score descending and take top K
+    // Sort by score descending, then apply light diversity reranking so a few
+    // near-duplicate screenshot descriptions cannot evict all meeting evidence.
     results.sort((a, b) => b.score - a.score)
-    return results.slice(0, topK)
+    return diversifyResults(results, topK)
   }
 
   /**
@@ -478,5 +565,5 @@ export function getVectorStore(): VectorStore {
   return vectorStoreInstance
 }
 
-export { VectorStore, chunkText, cosineSimilarity }
+export { VectorStore, chunkText, cosineSimilarity, diversifyResults }
 export type { VectorDocument, SearchResult }

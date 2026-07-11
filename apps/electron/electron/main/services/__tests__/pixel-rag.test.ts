@@ -27,7 +27,11 @@ const h = vi.hoisted(() => ({
   visionResponse: JSON.stringify({
     description: 'A login screen showing a red "invalid password" error dialog',
     tags: ['error', 'login', 'dialog']
-  })
+  }),
+  /** When true, the fake vision call throws (simulates quota/network failure). */
+  visionFails: false,
+  /** Billable vision invocations — asserts the backfill's re-billing bound. */
+  visionCalls: 0
 }))
 
 // database.ts reads getDatabasePath from file-storage.
@@ -42,12 +46,17 @@ vi.mock('../config', () => ({
 // The image artifact type resolves its key via the brain credential store.
 vi.mock('../brains', () => ({ resolveGeminiApiKey: () => h.geminiKey }))
 
-// Fake Gemini vision: returns whatever h.visionResponse holds.
+// Fake Gemini vision: counts billable calls; throws when h.visionFails; else
+// returns whatever h.visionResponse holds.
 vi.mock('@google/generative-ai', () => ({
   GoogleGenerativeAI: class {
     getGenerativeModel() {
       return {
-        generateContent: async () => ({ response: { text: () => h.visionResponse } })
+        generateContent: async () => {
+          h.visionCalls++
+          if (h.visionFails) throw new Error('quota exceeded (simulated)')
+          return { response: { text: () => h.visionResponse } }
+        }
       }
     }
   }
@@ -61,7 +70,7 @@ vi.mock('../embeddings', () => ({
   })
 }))
 
-import { initializeDatabase, closeDatabase, queryOne, queryAll } from '../database'
+import { initializeDatabase, closeDatabase, queryOne, queryAll, run } from '../database'
 import { importArtifact, backfillImageCaptureIndex } from '../artifact-service'
 import { VectorStore } from '../vector-store'
 
@@ -96,6 +105,8 @@ describe('F5 PixelRAG — image captures as RAG sources', () => {
       description: 'A login screen showing a red "invalid password" error dialog',
       tags: ['error', 'login', 'dialog']
     })
+    h.visionFails = false
+    h.visionCalls = 0
   })
 
   it('vision-extracts on capture, stores the description on the capture row, and indexes tagged chunks', async () => {
@@ -218,5 +229,139 @@ describe('F5 PixelRAG — image captures as RAG sources', () => {
     const res = await backfillImageCaptureIndex(0)
     expect(res.scanned).toBe(0)
     expect(res.indexed).toBe(0)
+  })
+
+  // --- Backfill hardening: durable attempt state / starvation / billing bound ---
+  // These tests share fixture rows created in the first test below (same DB).
+
+  const fixtures: { healthyIds: string[]; poisonIds: string[] } = { healthyIds: [], poisonIds: [] }
+
+  it('poison captures cool down after a failed attempt — older healthy captures still progress, vision bounded', async () => {
+    // Healthy OLDER captures: imported with no key → no vision, no text, no state.
+    h.geminiKey = ''
+    for (const tag of ['h1', 'h2']) {
+      const r = await importArtifact(writePng(`bf-${tag}.png`, `bf-${tag}`), { title: `Healthy-${tag}.png` })
+      fixtures.healthyIds.push(r.artifact.id)
+    }
+    // Poison NEWER captures: also imported with no key (import bills no vision).
+    for (const tag of ['p1', 'p2', 'p3']) {
+      const r = await importArtifact(writePng(`bf-${tag}.png`, `bf-${tag}`), { title: `Poison-${tag}.png` })
+      fixtures.poisonIds.push(r.artifact.id)
+    }
+    // Deterministic recency: healthy strictly older than poison.
+    fixtures.healthyIds.forEach((id, i) =>
+      run('UPDATE artifacts SET created_at = ? WHERE id = ?', [`2026-01-01T00:00:0${i}.000Z`, id])
+    )
+    fixtures.poisonIds.forEach((id, i) =>
+      run('UPDATE artifacts SET created_at = ? WHERE id = ?', [`2026-06-01T00:00:0${i}.000Z`, id])
+    )
+
+    // Run 1: key present but vision failing. The batch (limit 3) is exactly the
+    // 3 newest eligible rows — the poison captures — and every attempt fails.
+    h.geminiKey = 'test-key'
+    h.visionFails = true
+    h.visionCalls = 0
+    const run1 = await backfillImageCaptureIndex(3)
+    expect(run1.scanned).toBe(3)
+    expect(run1.indexed).toBe(0)
+    expect(h.visionCalls).toBe(3)
+
+    // Each poison row now carries durable attempt state on its metadata JSON.
+    for (const id of fixtures.poisonIds) {
+      const row = queryOne<{ metadata: string }>('SELECT metadata FROM artifacts WHERE id = ?', [id])
+      const state = JSON.parse(row!.metadata).pixelRagBackfill
+      expect(state.attempts).toBe(1)
+      expect(state.errorKind).toBe('VISION_FAILED')
+    }
+
+    // Run 2: vision healthy again. Poison rows are cooling down → EXCLUDED from
+    // the batch; the OLDER healthy rows progress and vision bills ONLY for them.
+    h.visionFails = false
+    h.visionCalls = 0
+    const run2 = await backfillImageCaptureIndex(3)
+    expect(run2.scanned).toBe(2)
+    expect(run2.indexed).toBe(2)
+    expect(h.visionCalls).toBe(2)
+    for (const id of fixtures.healthyIds) {
+      const chunks = queryAll<{ id: string }>('SELECT id FROM vector_embeddings WHERE recording_id = ?', [id])
+      expect(chunks.length).toBeGreaterThan(0)
+    }
+  })
+
+  it('terminal rows are never re-billed', async () => {
+    // Mark one poison row terminal (as if it exhausted its attempts).
+    const terminalId = fixtures.poisonIds[0]
+    const row = queryOne<{ metadata: string }>('SELECT metadata FROM artifacts WHERE id = ?', [terminalId])
+    const meta = JSON.parse(row!.metadata)
+    meta.pixelRagBackfill = {
+      attempts: 3,
+      lastAttemptAt: new Date().toISOString(),
+      errorKind: 'VISION_FAILED',
+      terminal: true
+    }
+    run('UPDATE artifacts SET metadata = ? WHERE id = ?', [JSON.stringify(meta), terminalId])
+
+    // The remaining poison rows are still in cooldown, healthy rows are indexed
+    // → NOTHING is eligible, and zero vision calls are billed.
+    h.visionCalls = 0
+    const res = await backfillImageCaptureIndex(10)
+    expect(res.scanned).toBe(0)
+    expect(h.visionCalls).toBe(0)
+    const chunks = queryAll<{ id: string }>('SELECT id FROM vector_embeddings WHERE recording_id = ?', [terminalId])
+    expect(chunks.length).toBe(0)
+  })
+
+  it('transient failures retry after the cooldown elapses — and success clears the state', async () => {
+    // Age one poison row's attempt past the 24h cooldown.
+    const retryId = fixtures.poisonIds[1]
+    const row = queryOne<{ metadata: string }>('SELECT metadata FROM artifacts WHERE id = ?', [retryId])
+    const meta = JSON.parse(row!.metadata)
+    meta.pixelRagBackfill = {
+      attempts: 1,
+      lastAttemptAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+      errorKind: 'VISION_FAILED'
+    }
+    run('UPDATE artifacts SET metadata = ? WHERE id = ?', [JSON.stringify(meta), retryId])
+
+    h.visionCalls = 0
+    const res = await backfillImageCaptureIndex(10)
+    // Only the cooled-down row is eligible (the others are terminal/cooling).
+    expect(res.scanned).toBe(1)
+    expect(res.indexed).toBe(1)
+    expect(h.visionCalls).toBe(1)
+
+    // Success persisted the text and CLEARED the failure state.
+    const after = queryOne<{ metadata: string; extracted_text: string }>(
+      'SELECT metadata, extracted_text FROM artifacts WHERE id = ?',
+      [retryId]
+    )
+    expect(after!.extracted_text).toContain('invalid password')
+    expect(JSON.parse(after!.metadata).pixelRagBackfill).toBeUndefined()
+  })
+
+  it('a clean vision result with no extractable text goes terminal (billed once, never again)', async () => {
+    // Import a fresh no-key capture, then age nothing — it has no state yet.
+    h.geminiKey = ''
+    const r = await importArtifact(writePng('bf-empty.png', 'bf-empty'), { title: 'Empty.png' })
+    run('UPDATE artifacts SET created_at = ? WHERE id = ?', ['2026-06-02T00:00:00.000Z', r.artifact.id])
+
+    // Vision succeeds but the image yields nothing.
+    h.geminiKey = 'test-key'
+    h.visionResponse = JSON.stringify({ description: '', tags: [] })
+    h.visionCalls = 0
+    const first = await backfillImageCaptureIndex(10)
+    expect(first.scanned).toBe(1)
+    expect(h.visionCalls).toBe(1)
+
+    const row = queryOne<{ metadata: string }>('SELECT metadata FROM artifacts WHERE id = ?', [r.artifact.id])
+    const state = JSON.parse(row!.metadata).pixelRagBackfill
+    expect(state.errorKind).toBe('EMPTY_EXTRACTION')
+    expect(state.terminal).toBe(true)
+
+    // Re-running never re-bills the terminal row.
+    h.visionCalls = 0
+    const second = await backfillImageCaptureIndex(10)
+    expect(second.scanned).toBe(0)
+    expect(h.visionCalls).toBe(0)
   })
 })
