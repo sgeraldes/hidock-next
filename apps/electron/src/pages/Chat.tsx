@@ -22,7 +22,8 @@ import {
   RotateCcw,
   Search,
   Download,
-  GripVertical
+  GripVertical,
+  Image as ImageIcon
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -89,6 +90,10 @@ interface Source {
   subject?: string
   timestamp?: string
   score: number
+  /** 'image' for a screenshot capture chunk; absent for meeting transcripts. */
+  sourceType?: string
+  /** knowledge_capture id backing a non-meeting source (F5 PixelRAG citations). */
+  captureId?: string
 }
 
 // Human-readable label for the active chat backend shown in the status badge.
@@ -1426,10 +1431,20 @@ export function Chat() {
                       {message.role === 'assistant' && msgSources.length > 0 && (
                         <div className="flex flex-wrap gap-2 mt-1">
                           {msgSources.slice(0, 3).map((source, idx) => {
+                            // F5 (PixelRAG): screenshot captures cite with an image icon
+                            // and a "Screenshot:" prefix so the origin is unmistakable.
+                            const isImage = source.sourceType === 'image'
+                            const chipLabel = isImage
+                              ? `Screenshot: ${source.subject || 'Screenshot'}`
+                              : source.subject || 'Reference'
                             const chipInner = (
                               <>
-                                <FileText className="h-3 w-3 text-muted-foreground" />
-                                <span className="max-w-[120px] truncate">{source.subject || 'Reference'}</span>
+                                {isImage ? (
+                                  <ImageIcon className="h-3 w-3 text-muted-foreground" />
+                                ) : (
+                                  <FileText className="h-3 w-3 text-muted-foreground" />
+                                )}
+                                <span className="max-w-[140px] truncate">{chipLabel}</span>
                               </>
                             )
                             // Sources with a meeting id deep-link to the meeting + show a
@@ -1456,6 +1471,9 @@ export function Chat() {
                             return (
                               <div
                                 key={idx}
+                                title={isImage ? chipLabel : undefined}
+                                aria-label={isImage ? chipLabel : undefined}
+                                data-capture-id={isImage ? source.captureId : undefined}
                                 className="flex items-center gap-1.5 text-[10px] px-2 py-1 bg-muted rounded-full border border-border/50 transition-colors"
                               >
                                 {chipInner}

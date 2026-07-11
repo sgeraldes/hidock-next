@@ -128,6 +128,10 @@ export interface RAGSource {
   subject?: string
   timestamp?: string
   score: number
+  /** Non-transcript origin of the chunk, e.g. 'image' for a screenshot capture. */
+  sourceType?: string
+  /** knowledge_capture id backing a non-meeting source, so the renderer can link it. */
+  captureId?: string
 }
 
 // =============================================================================

@@ -426,6 +426,19 @@ app.whenReady().then(async () => {
         .catch((e) => console.error('[VectorStore] Backfill error:', e))
   })
 
+  // 5b. F5 (PixelRAG): index EXISTING image captures (screenshots) that have no
+  //     embeddings yet — e.g. pasted before a Gemini key existed. Bounded per boot
+  //     tick; re-runs vision extraction only when text is missing. Degrades
+  //     silently without a Gemini/embedding backend (rows retried on a later boot).
+  registerBootTask({
+    name: 'image-capture-backfill',
+    run: () =>
+      import('./services/artifact-service')
+        .then(({ backfillImageCaptureIndex }) => backfillImageCaptureIndex())
+        .then(() => undefined)
+        .catch((e) => console.error('[ArtifactService] Image-capture backfill error:', e))
+  })
+
   // 6. Self-heal transcripts whose Gemini analysis failed (or was never run on an
   //    older build) by re-analysing the stored full_text. Bounded per run.
   registerBootTask({

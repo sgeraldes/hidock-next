@@ -25,6 +25,10 @@ interface RAGResponse {
     subject?: string
     timestamp?: string
     score: number
+    /** 'image' for a screenshot capture chunk; absent for meeting transcripts. */
+    sourceType?: string
+    /** knowledge_capture id backing a non-meeting source, for renderer linking. */
+    captureId?: string
   }>
   error?: string
 }
@@ -609,15 +613,33 @@ class RAGService {
       if (result.score < 0.3) continue // Skip low-relevance results
 
       const { document: doc, score } = result
+
+      const dateInfo = doc.metadata.timestamp
+        ? ` (${new Date(doc.metadata.timestamp).toLocaleDateString()})`
+        : ''
+
+      // F5 (PixelRAG): an image capture surfaces as a Screenshot excerpt (its
+      // description is the chunk's subject) and carries the capture id so the
+      // renderer can cite/link the source image. Everything else stays a meeting.
+      if (doc.metadata.sourceType === 'image') {
+        const desc = doc.metadata.subject || 'Screenshot'
+        contextParts.push(`[Screenshot: ${desc}${dateInfo}]\n${doc.content}`)
+        sources.push({
+          content: doc.content.substring(0, 200) + (doc.content.length > 200 ? '...' : ''),
+          subject: doc.metadata.subject,
+          timestamp: doc.metadata.timestamp,
+          score,
+          sourceType: 'image',
+          captureId: doc.metadata.captureId
+        })
+        continue
+      }
+
       const meetingInfo = doc.metadata.subject
         ? `Meeting: ${doc.metadata.subject}`
         : doc.metadata.meetingId
           ? `Meeting ID: ${doc.metadata.meetingId}`
           : 'Unknown meeting'
-
-      const dateInfo = doc.metadata.timestamp
-        ? ` (${new Date(doc.metadata.timestamp).toLocaleDateString()})`
-        : ''
 
       contextParts.push(`[${meetingInfo}${dateInfo}]\n${doc.content}`)
       sources.push({

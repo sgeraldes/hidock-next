@@ -63,6 +63,18 @@ export function getArtifactsPath(): string {
 }
 
 /**
+ * The human caption for an image artifact — the vision model's `description`
+ * (set by the `image` artifact type). Returns null for non-image kinds or when
+ * no description was produced (e.g. extraction skipped for a missing Gemini key),
+ * so callers fall back to the filename.
+ */
+function imageCaption(kind: string, metadata: Record<string, unknown>): string | null {
+  if (kind !== 'image') return null
+  const desc = metadata.description
+  return typeof desc === 'string' && desc.trim() ? desc.trim() : null
+}
+
+/**
  * Import a file as an artifact. Idempotent by content: a file whose bytes were
  * already imported returns the existing artifact (deduped: true) without copying,
  * re-extracting, or re-indexing.
@@ -167,8 +179,27 @@ export async function importArtifact(
     )
   })
 
+  // F5 (PixelRAG): persist a screenshot/image's vision description onto the
+  // capture row so the capture is searchable and citations have concise text
+  // without re-reading the artifact. Reuses the existing knowledge_captures.summary
+  // column (no schema bump); never overwrites a summary a user/enricher already set.
+  const captionText = imageCaption(kind, metadata)
+  if (captionText && knowledgeCaptureId) {
+    try {
+      run(
+        `UPDATE knowledge_captures SET summary = ?, updated_at = ?
+         WHERE id = ? AND (summary IS NULL OR TRIM(summary) = '')`,
+        [captionText, now, knowledgeCaptureId]
+      )
+    } catch (e) {
+      console.error('[ArtifactService] Failed to set capture summary:', e)
+    }
+  }
+
   // Index extracted text into embeddings by reusing the transcript indexer
-  // (generic: keyed by the artifact id, subject = filename). No-op without text.
+  // (generic: keyed by the artifact id). Chunks are tagged with the artifact kind
+  // (sourceType) and owning capture id so RAG can label + cite them — e.g. an
+  // image capture surfaces as "[Screenshot: <description>]". No-op without text.
   let indexedChunks = 0
   if (extractedText && extractedText.trim().length > 0) {
     try {
@@ -177,7 +208,9 @@ export async function importArtifact(
       indexedChunks = await store.indexTranscript(extractedText, {
         recordingId: id,
         timestamp: now,
-        subject: filename
+        subject: captionText || filename,
+        sourceType: kind,
+        captureId: knowledgeCaptureId
       })
     } catch (e) {
       console.error('[ArtifactService] Failed to index artifact embeddings:', e)
@@ -209,6 +242,133 @@ export function getArtifactsForCapture(knowledgeCaptureId: string): ArtifactRow[
 
 export function getArtifactById(id: string): ArtifactRow | undefined {
   return queryOne<ArtifactRow>('SELECT * FROM artifacts WHERE id = ?', [id])
+}
+
+export interface ImageCaptureBackfillResult {
+  /** Image artifacts examined this run (bounded by `limit`). */
+  scanned: number
+  /** Artifacts that got at least one chunk embedded. */
+  indexed: number
+  /** Artifacts whose vision text was (re)produced from the stored image this run. */
+  extracted: number
+  /** Artifacts left for a later boot (no text / no embedding backend). */
+  skipped: number
+}
+
+interface ImageBackfillRow {
+  artifact_id: string
+  knowledge_capture_id: string | null
+  storage_path: string | null
+  extracted_text: string | null
+  metadata: string | null
+  title: string | null
+  summary: string | null
+  captured_at: string | null
+}
+
+/**
+ * F5 (PixelRAG) backfill: index EXISTING image captures that have no vector
+ * embeddings yet — including screenshots imported before a Gemini key existed,
+ * whose vision extraction is (re)run here and persisted back onto the artifact +
+ * capture. Batched (`limit`) so a single boot tick stays cheap, and guarded like
+ * {@link VectorStore.backfillMissingTranscripts}. Degrades silently with no
+ * embedding/vision backend (empty text → the row is skipped and retried next boot).
+ */
+export async function backfillImageCaptureIndex(limit = 10): Promise<ImageCaptureBackfillResult> {
+  const result: ImageCaptureBackfillResult = { scanned: 0, indexed: 0, extracted: 0, skipped: 0 }
+
+  const store = getVectorStore()
+  await store.initialize() // ensures vector_embeddings exists for the NOT EXISTS check
+
+  let rows: ImageBackfillRow[]
+  try {
+    rows = queryAll<ImageBackfillRow>(
+      `SELECT a.id AS artifact_id, a.knowledge_capture_id, a.storage_path,
+              a.extracted_text, a.metadata, k.title, k.summary, k.captured_at
+         FROM artifacts a
+         LEFT JOIN knowledge_captures k ON k.id = a.knowledge_capture_id
+        WHERE a.kind = 'image'
+          AND NOT EXISTS (SELECT 1 FROM vector_embeddings v WHERE v.recording_id = a.id)
+        ORDER BY a.created_at DESC
+        LIMIT ?`,
+      [limit]
+    )
+  } catch (e) {
+    console.error('[ArtifactService] image-capture backfill query failed:', e)
+    return result
+  }
+
+  const imageType = getArtifactType('image')
+
+  for (const row of rows) {
+    result.scanned++
+    try {
+      let text = row.extracted_text && row.extracted_text.trim() ? row.extracted_text : ''
+      let caption: string | null = null
+
+      // Re-run vision extraction only when we have no stored text yet (e.g. the
+      // capture predates the Gemini key). Single attempt; reuses the registered
+      // image type's Gemini brain path — no duplicate vision code here.
+      if (!text && imageType && row.storage_path && existsSync(row.storage_path)) {
+        const extraction = await imageType.extractText(row.storage_path)
+        text = extraction.text ?? ''
+        caption = imageCaption('image', extraction.metadata ?? {})
+        if (text.trim()) {
+          result.extracted++
+          try {
+            run('UPDATE artifacts SET extracted_text = ?, metadata = ? WHERE id = ?', [
+              text,
+              JSON.stringify(extraction.metadata ?? {}),
+              row.artifact_id
+            ])
+          } catch (e) {
+            console.error('[ArtifactService] backfill artifact update failed:', e)
+          }
+        }
+      }
+
+      if (!text.trim()) {
+        result.skipped++
+        continue
+      }
+
+      const now = new Date().toISOString()
+      if (caption && row.knowledge_capture_id) {
+        try {
+          run(
+            `UPDATE knowledge_captures SET summary = ?, updated_at = ?
+             WHERE id = ? AND (summary IS NULL OR TRIM(summary) = '')`,
+            [caption, now, row.knowledge_capture_id]
+          )
+        } catch {
+          /* best-effort summary backfill */
+        }
+      }
+
+      const subject =
+        caption || (row.summary && row.summary.trim() ? row.summary : row.title) || 'Screenshot'
+      const count = await store.indexTranscript(text, {
+        recordingId: row.artifact_id,
+        timestamp: row.captured_at ?? now,
+        subject,
+        sourceType: 'image',
+        captureId: row.knowledge_capture_id ?? undefined
+      })
+      if (count > 0) result.indexed++
+      else result.skipped++ // no embedding backend — retried on a later boot
+    } catch (e) {
+      result.skipped++
+      console.error(`[ArtifactService] image-capture backfill failed for ${row.artifact_id}:`, e)
+    }
+  }
+
+  if (result.scanned > 0) {
+    console.log(
+      `[ArtifactService] image-capture backfill: ${result.indexed} indexed, ` +
+        `${result.extracted} re-extracted, ${result.skipped} skipped (of ${result.scanned})`
+    )
+  }
+  return result
 }
 
 /** Re-export so IPC/tests can resolve types without importing the registry directly. */

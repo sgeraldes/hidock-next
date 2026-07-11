@@ -16,6 +16,14 @@ interface VectorDocument {
     chunkIndex: number
     timestamp?: string
     subject?: string
+    /**
+     * Non-transcript origin of the chunk (e.g. 'image' for a screenshot capture).
+     * Absent/undefined for the legacy meeting-transcript chunks. Lets RAG label
+     * an image-capture excerpt as "[Screenshot: …]" instead of "[Meeting: …]".
+     */
+    sourceType?: string
+    /** knowledge_capture id backing this chunk, so a citation can link the source. */
+    captureId?: string
   }
 }
 
@@ -121,9 +129,17 @@ class VectorStore {
         chunk_index INTEGER,
         timestamp TEXT,
         subject TEXT,
+        source_type TEXT,
+        capture_id TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
       )
     `)
+
+    // Add F5 (PixelRAG) columns to a pre-existing table. This table is owned here
+    // (CREATE TABLE IF NOT EXISTS, NOT the database.ts migration runner), so the
+    // ALTER is guarded by a PRAGMA check and stays idempotent on every boot.
+    this.ensureColumn(db, 'source_type')
+    this.ensureColumn(db, 'capture_id')
 
     // Create index for faster lookups
     db.run(`CREATE INDEX IF NOT EXISTS idx_vector_embeddings_meeting ON vector_embeddings(meeting_id)`)
@@ -134,6 +150,24 @@ class VectorStore {
 
     this.initialized = true
     console.log(`Vector store initialized with ${this.documents.size} documents`)
+  }
+
+  /**
+   * Idempotently add a nullable TEXT column to vector_embeddings if it does not
+   * already exist. Checks PRAGMA table_info first so a re-run (or a DB that was
+   * created with the column already present) is a no-op — matches the
+   * database-migrations rule for guarded ALTERs.
+   */
+  private ensureColumn(db: ReturnType<typeof getDatabase>, column: string): void {
+    try {
+      const info = db.exec('PRAGMA table_info(vector_embeddings)')
+      const existing = info.length > 0 ? info[0].values.map((row) => row[1] as string) : []
+      if (!existing.includes(column)) {
+        db.run(`ALTER TABLE vector_embeddings ADD COLUMN ${column} TEXT`)
+      }
+    } catch (e) {
+      console.warn(`[VectorStore] ensureColumn(${column}) skipped:`, e)
+    }
   }
 
   private async loadFromDatabase(): Promise<void> {
@@ -158,7 +192,9 @@ class VectorStore {
           recordingId: doc['recording_id'] as string | undefined,
           chunkIndex: doc['chunk_index'] as number,
           timestamp: doc['timestamp'] as string | undefined,
-          subject: doc['subject'] as string | undefined
+          subject: doc['subject'] as string | undefined,
+          sourceType: (doc['source_type'] as string | undefined) || undefined,
+          captureId: (doc['capture_id'] as string | undefined) || undefined
         }
       }
 
@@ -192,8 +228,8 @@ class VectorStore {
     const db = getDatabase()
     db.run(
       `INSERT OR REPLACE INTO vector_embeddings
-       (id, content, embedding, meeting_id, recording_id, chunk_index, timestamp, subject)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, content, embedding, meeting_id, recording_id, chunk_index, timestamp, subject, source_type, capture_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         content,
@@ -202,7 +238,9 @@ class VectorStore {
         metadata.recordingId || null,
         metadata.chunkIndex,
         metadata.timestamp || null,
-        metadata.subject || null
+        metadata.subject || null,
+        metadata.sourceType || null,
+        metadata.captureId || null
       ]
     )
 
@@ -216,6 +254,10 @@ class VectorStore {
       recordingId?: string
       timestamp?: string
       subject?: string
+      /** Tags every chunk with a non-transcript origin (e.g. 'image' for a screenshot). */
+      sourceType?: string
+      /** knowledge_capture id backing the source, carried onto every chunk. */
+      captureId?: string
     }
   ): Promise<number> {
     // Check if already indexed
@@ -249,8 +291,8 @@ class VectorStore {
       this.documents.set(id, doc)
       db.run(
         `INSERT OR REPLACE INTO vector_embeddings
-         (id, content, embedding, meeting_id, recording_id, chunk_index, timestamp, subject)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, content, embedding, meeting_id, recording_id, chunk_index, timestamp, subject, source_type, capture_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id,
           chunks[i],
@@ -259,7 +301,9 @@ class VectorStore {
           metadata.recordingId || null,
           i,
           metadata.timestamp || null,
-          metadata.subject || null
+          metadata.subject || null,
+          metadata.sourceType || null,
+          metadata.captureId || null
         ]
       )
       indexed++
