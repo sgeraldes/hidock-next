@@ -27,6 +27,7 @@ const ALL_TASK_NAMES = [
   'start-transcription-processor',
   'embeddings-backfill',
   'reanalyze-failed-transcripts',
+  'image-capture-backfill',
 ]
 
 /** Resolver-backed enable check for a given preset. */

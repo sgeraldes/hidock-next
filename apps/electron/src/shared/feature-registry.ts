@@ -137,7 +137,7 @@ export const FEATURES: Record<FeatureId, FeatureDefinition> = {
     id: 'assistant',
     label: 'Assistant',
     description: 'Chat over your knowledge with retrieval-augmented answers.',
-    backgroundTasks: ['embeddings-backfill'],
+    backgroundTasks: ['embeddings-backfill', 'image-capture-backfill'],
     routes: ['/assistant'],
     navItems: ['/assistant'],
     ipcNamespaces: ['assistant:', 'rag:'],
