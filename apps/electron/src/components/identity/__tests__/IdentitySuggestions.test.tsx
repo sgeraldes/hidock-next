@@ -33,6 +33,17 @@ const mergeSuggestion = {
   created_at: '2026-07-08T10:00:00Z'
 }
 
+const projectSuggestion = {
+  id: 'p1',
+  kind: 'project' as const,
+  candidate_name: 'HeyGen Localization',
+  target_id: 'proj-1',
+  confidence: 0.61,
+  evidence: JSON.stringify({ method: 'fuzzy', keeperName: 'HeyGen', coOccurring: [], rarity: 'rare' }),
+  status: 'pending' as const,
+  created_at: '2026-07-08T10:00:00Z'
+}
+
 const mockGetSuggestions = vi.fn()
 const mockAccept = vi.fn()
 const mockReject = vi.fn()
@@ -72,11 +83,11 @@ global.window.electronAPI = {
   }
 } as any
 
-const renderSection = () =>
+const renderSection = (kind?: 'person' | 'project') =>
   render(
     <ToastProvider>
       <MemoryRouter>
-        <IdentitySuggestionsSection />
+        <IdentitySuggestionsSection kind={kind} />
       </MemoryRouter>
     </ToastProvider>
   )
@@ -412,6 +423,95 @@ describe('IdentitySuggestionsSection', () => {
     // The candidate/duplicate panel resolves — never stuck on "checking transcripts…".
     expect((await screen.findAllByText(/extracted from meeting analysis/i)).length).toBeGreaterThan(0)
     expect(screen.queryByText(/checking transcripts/i)).not.toBeInTheDocument()
+  })
+})
+
+// F1: on the Projects page every KEEPS/ALIAS card showed an amber "Couldn't check
+// transcripts" warning. Root cause: the hook fanned out one transcript-evidence lookup
+// per pending suggestion (of EVERY kind) in a single Promise.all against the main
+// process's serial sql.js queue; low-confidence project suggestions, sorted to the tail,
+// always blew their per-call timeout and were cached as errors. The fix scopes the fetch
+// to the rendered kind and bounds its concurrency so a lookup's timer reflects real
+// service time, not queue backlog.
+describe('IdentitySuggestionsSection — project transcript evidence (F1)', () => {
+  it('shows the neutral no-verbatim note for a project with no transcript matches, never the error', async () => {
+    mockGetSuggestions.mockResolvedValue({ success: true, data: [projectSuggestion] })
+    mockGetMentionSnippets.mockResolvedValue({ success: true, data: { snippets: [], recordingIds: [] } })
+
+    renderSection('project')
+
+    expect((await screen.findAllByText(/extracted from meeting analysis/i)).length).toBeGreaterThan(0)
+    await waitFor(() => expect(screen.queryByText(/checking transcripts/i)).not.toBeInTheDocument())
+    expect(screen.queryByText(/Couldn't check transcripts/i)).not.toBeInTheDocument()
+  })
+
+  it('shows real transcript evidence for a project that IS mentioned in recordings', async () => {
+    mockGetSuggestions.mockResolvedValue({ success: true, data: [projectSuggestion] })
+    mockGetMentionSnippets.mockImplementation((name: string) =>
+      /HeyGen/i.test(name)
+        ? Promise.resolve({ success: true, data: { snippets: [], recordingIds: ['rec1', 'rec2'] } })
+        : Promise.resolve({ success: true, data: { snippets: [], recordingIds: [] } })
+    )
+
+    renderSection('project')
+
+    expect(await screen.findByText(/appears in 2 recordings/)).toBeInTheDocument()
+    expect(screen.queryByText(/Couldn't check transcripts/i)).not.toBeInTheDocument()
+  })
+
+  it('scopes the transcript fan-out to the rendered kind — never fetches off-screen person names', async () => {
+    // A person suggestion (high confidence, would sort first) alongside a project one.
+    // On the Projects page only the project card is rendered, so its evidence must NOT be
+    // queued behind the person lookups (the starvation that produced the blanket error).
+    mockGetSuggestions.mockResolvedValue({ success: true, data: [suggestion, projectSuggestion] })
+    mockContactGetById.mockResolvedValue({ success: true, data: { contact: { name: 'Sebastián' } } })
+    mockGetMentionSnippets.mockResolvedValue({ success: true, data: { snippets: [], recordingIds: [] } })
+
+    renderSection('project')
+
+    expect((await screen.findAllByText(/extracted from meeting analysis/i)).length).toBeGreaterThan(0)
+    // Give any (incorrectly) scheduled person lookups a chance to fire.
+    await waitFor(() => expect(mockGetMentionSnippets).toHaveBeenCalled())
+    const namesFetched = mockGetMentionSnippets.mock.calls.map((c) => String(c[0]))
+    expect(namesFetched).not.toContain('Sebas')
+    expect(namesFetched).not.toContain('Sebastián')
+    expect(namesFetched.some((n) => /HeyGen/i.test(n))).toBe(true)
+  })
+
+  it('bounds the transcript fan-out concurrency so tail lookups never starve past their timeout', async () => {
+    // 10 project suggestions → at most 6 (MENTION_FETCH_CONCURRENCY) lookups may be
+    // in flight at once. The keeper name matches the resolved profile name so no extra
+    // lookup is introduced when the profile streams in.
+    const many = Array.from({ length: 10 }, (_, i) => ({
+      ...projectSuggestion,
+      id: `pm${i}`,
+      target_id: `proj-${i}`,
+      candidate_name: `Proj Alias ${i}`,
+      evidence: JSON.stringify({ method: 'fuzzy', keeperName: 'Proj', coOccurring: [], rarity: 'rare' })
+    }))
+    mockGetSuggestions.mockResolvedValue({ success: true, data: many })
+    ;(global.window.electronAPI as any).projects.getById = vi
+      .fn()
+      .mockResolvedValue({ success: true, data: { project: { name: 'Proj' } } })
+
+    const releases: Array<(v: unknown) => void> = []
+    mockGetMentionSnippets.mockImplementation(() => new Promise((res) => releases.push(res)))
+
+    renderSection('project')
+
+    // The batch caps in-flight lookups at 6; the 7th only dispatches once one settles.
+    await waitFor(() => expect(releases.length).toBe(6))
+    await new Promise((r) => setTimeout(r, 30))
+    expect(releases.length).toBe(6)
+
+    // Drain the queue: releasing settled lookups lets the next batch dispatch.
+    for (let guard = 0; guard < 50 && releases.length > 0; guard++) {
+      await act(async () => {
+        const batch = releases.splice(0, releases.length)
+        batch.forEach((r) => r({ success: true, data: { snippets: [], recordingIds: [] } }))
+      })
+    }
+    await waitFor(() => expect(screen.queryByText(/checking transcripts/i)).not.toBeInTheDocument())
   })
 })
 

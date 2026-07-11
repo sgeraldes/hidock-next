@@ -49,6 +49,19 @@ function idsFor(s: IdentitySuggestion): Array<{ id: string; kind: 'person' | 'pr
   return out
 }
 
+/**
+ * Concurrency cap for the transcript-mention fan-out. The main process serves every
+ * `identity:getMentionSnippets` call from a SINGLE serial sql.js queue, each doing a
+ * `LIKE` full-text scan (~150–200ms). Firing every suggestion's lookup at once (a bare
+ * `Promise.all`) queues hundreds of scans behind one another, so any lookup past the
+ * first few seconds of queue blows its per-call timeout and is (permanently) cached as
+ * an error — the root cause of F1, where every low-confidence project card, sorted to
+ * the tail of the queue, showed "Couldn't check transcripts". Bounding concurrency
+ * means each dispatched call only ever waits behind a handful of others, so its timer
+ * (started at dispatch) reflects real service time, never queue backlog.
+ */
+const MENTION_FETCH_CONCURRENCY = 6
+
 /** Reject after `ms` if the promise hasn't settled — guards a hung/never-resolving IPC lookup. */
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -104,7 +117,7 @@ async function fetchProfile(id: string, kind: 'person' | 'project'): Promise<Min
  * the success toast offers a time-boxed Undo, and the queue is refetched because the
  * merge may have superseded sibling suggestions in the backend.
  */
-export function useIdentitySuggestions() {
+export function useIdentitySuggestions(kind?: 'person' | 'project') {
   const [suggestions, setSuggestions] = useState<IdentitySuggestion[]>([])
   const [loading, setLoading] = useState(true)
   const [profiles, setProfiles] = useState<Record<string, MiniProfile>>({})
@@ -131,6 +144,18 @@ export function useIdentitySuggestions() {
     }
   }, [])
 
+  // The lazy-resolve effects below (profiles, mentions, impacts, contexts) all issue
+  // IPC that shares the main process's single serial queue. When the host view is
+  // scoped to one kind (e.g. the Projects page passes 'project'), resolving the OTHER
+  // kind's — usually far more numerous — suggestions would queue their lookups ahead
+  // of the ones actually on screen, starving them past the mention timeout. So the
+  // effects work only over the suggestions this view will render; the full list is
+  // still returned for the section's own filtering, accept/reject, and merge handlers.
+  const scoped = useMemo(
+    () => (kind ? suggestions.filter((s) => s.kind === kind) : suggestions),
+    [suggestions, kind]
+  )
+
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
     try {
@@ -151,7 +176,7 @@ export function useIdentitySuggestions() {
   // Lazily resolve keeper + loser profiles (once per id).
   useEffect(() => {
     const wanted = new Map<string, 'person' | 'project'>()
-    for (const s of suggestions) {
+    for (const s of scoped) {
       for (const { id, kind } of idsFor(s)) {
         if (!(id in profiles) && !resolving.current.has(id)) wanted.set(id, kind)
       }
@@ -170,7 +195,7 @@ export function useIdentitySuggestions() {
         setProfiles((prev) => ({ ...prev, ...updates }))
       }
     })()
-  }, [suggestions, profiles])
+  }, [scoped, profiles])
 
   // Lazily fetch primary-source mention evidence for each distinct name — the
   // candidate (loser) name and its keeper's display name — so the card can show
@@ -183,41 +208,56 @@ export function useIdentitySuggestions() {
       const key = mentionKey(raw)
       if (!(key in mentions) && !resolvingMentions.current.has(key)) names.set(key, raw)
     }
-    for (const s of suggestions) {
+    for (const s of scoped) {
       want(s.candidate_name)
       want(profiles[s.target_id]?.name || parseEvidence(s.evidence).keeperName)
     }
     if (names.size === 0) return
     for (const key of names.keys()) resolvingMentions.current.add(key)
     ;(async () => {
-      const updates: Record<string, MentionResult> = {}
-      await Promise.all(
-        [...names].map(async ([key, raw]) => {
-          try {
-            // 5s guard: a hung transcript lookup must not leave the card stuck on
-            // "checking transcripts…" forever — surface a distinct error state instead.
-            const res = await withTimeout(window.electronAPI.identity.getMentionSnippets(raw, 2), 5000)
-            updates[key] = res.success
-              ? res.data
-                ? { ...res.data, error: false }
-                : { snippets: [], recordingIds: [], error: false }
-              : { snippets: [], recordingIds: [], error: true }
-          } catch {
-            updates[key] = { snippets: [], recordingIds: [], error: true }
-          }
-        })
-      )
-      // Commit whenever still mounted — never gate on a per-run flag (see mountedRef).
-      if (mountedRef.current && Object.keys(updates).length > 0) {
-        setMentions((prev) => ({ ...prev, ...updates }))
+      const lookup = async (raw: string): Promise<MentionResult> => {
+        try {
+          // 5s guard: a hung transcript lookup must not leave the card stuck on
+          // "checking transcripts…" forever — surface a distinct error state instead.
+          // The timer starts when THIS call is dispatched (concurrency is bounded
+          // below), so it measures real service time, not queue backlog (see F1).
+          const res = await withTimeout(window.electronAPI.identity.getMentionSnippets(raw, 2), 5000)
+          return res.success
+            ? res.data
+              ? { ...res.data, error: false }
+              : { snippets: [], recordingIds: [], error: false }
+            : { snippets: [], recordingIds: [], error: true }
+        } catch {
+          return { snippets: [], recordingIds: [], error: true }
+        }
+      }
+
+      // Bounded fan-out: process names in fixed-size batches so at most
+      // MENTION_FETCH_CONCURRENCY transcript scans are ever queued at once. Each batch
+      // commits as it settles, so cards fill in progressively instead of after every
+      // lookup finishes. Commit whenever still mounted — never gate on a per-run flag
+      // (see mountedRef).
+      const pending = [...names]
+      for (let i = 0; i < pending.length; i += MENTION_FETCH_CONCURRENCY) {
+        if (!mountedRef.current) return
+        const batch = pending.slice(i, i + MENTION_FETCH_CONCURRENCY)
+        const updates: Record<string, MentionResult> = {}
+        await Promise.all(
+          batch.map(async ([key, raw]) => {
+            updates[key] = await lookup(raw)
+          })
+        )
+        if (mountedRef.current && Object.keys(updates).length > 0) {
+          setMentions((prev) => ({ ...prev, ...updates }))
+        }
       }
     })()
-  }, [suggestions, profiles, mentions])
+  }, [scoped, profiles, mentions])
 
   // Lazily fetch the pre-merge blast radius for each discovery suggestion (one that
   // pairs two existing entities). Keyed by suggestion id.
   useEffect(() => {
-    const pending = suggestions.filter((s) => {
+    const pending = scoped.filter((s) => {
       if (s.id in impacts || resolvingImpacts.current.has(s.id)) return false
       const ev = parseEvidence(s.evidence)
       return !!ev.loserId && ev.loserId !== s.target_id
@@ -245,7 +285,7 @@ export function useIdentitySuggestions() {
         setImpacts((prev) => ({ ...prev, ...updates }))
       }
     })()
-  }, [suggestions, impacts])
+  }, [scoped, impacts])
 
   // Lazily fetch graph-neighborhood context for each PERSON side of a suggestion —
   // the keeper (by target id) and the candidate (by loser id, else its name) — so the
@@ -253,7 +293,7 @@ export function useIdentitySuggestions() {
   // Cached per key so each person hits the graph once.
   useEffect(() => {
     const wanted = new Set<string>()
-    for (const s of suggestions) {
+    for (const s of scoped) {
       if (s.kind !== 'person') continue
       const ev = parseEvidence(s.evidence)
       for (const k of [s.target_id, ev.loserId || s.candidate_name]) {
@@ -279,7 +319,7 @@ export function useIdentitySuggestions() {
         setContexts((prev) => ({ ...prev, ...updates }))
       }
     })()
-  }, [suggestions, contexts])
+  }, [scoped, contexts])
 
   // Backward-compatible map of target_id → display name (used by the Today card).
   const targetNames = useMemo(() => {

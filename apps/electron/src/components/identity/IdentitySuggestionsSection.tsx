@@ -648,7 +648,7 @@ export const IdentitySuggestionsSection = forwardRef<
     mergeInto,
     swapMerge,
     mergeGroup
-  } = useIdentitySuggestions()
+  } = useIdentitySuggestions(kind)
   const [expanded, setExpanded] = useState(true)
   const navigate = useNavigate()
 
