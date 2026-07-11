@@ -199,6 +199,19 @@ export function SourceReader({
   // signal we have — shown until it resolves.
   const [analyzingTimeline, setAnalyzingTimeline] = useState(false)
 
+  // B1 cross-highlight: clicking a numbered timeline marker (or its event-list
+  // row) asks the transcript to scroll to + pulse the matching turn. The nonce
+  // re-fires the pulse when the same marker is clicked twice. Reset per recording.
+  const [transcriptHighlight, setTranscriptHighlight] = useState<{ atMs: number; nonce: number } | null>(null)
+  const highlightNonceRef = useRef(0)
+
+  // B3 backfill guard: recording ids whose one-time timeline analysis has already
+  // been attempted while this reader stays mounted — so an already-transcribed
+  // recording that legitimately yields no markers/sentiment is NOT re-analyzed on
+  // every open (no loop, no repeated Gemini work). A ref (not module state) so it
+  // scopes to the mounted reader session and resets cleanly between test renders.
+  const backfillAttemptedRef = useRef<Set<string>>(new Set())
+
   // Transcription warning state. `pendingTranscribe` holds the exact action to
   // run once the user confirms past the "may overwrite your edits" dialog — this
   // lets the same warning guard both the primary Transcribe and the explicit
@@ -238,6 +251,7 @@ export function SourceReader({
     setPendingTranscribe(null)
     setReDiarizing(false)
     setFallbackTranscript(undefined)
+    setTranscriptHighlight(null)
     // A freshly-opened recording always starts at the top → big timeline.
     setScrolled(false)
     if (scrollRef.current) scrollRef.current.scrollTop = 0
@@ -314,18 +328,15 @@ export function SourceReader({
     return 0
   }, [recording?.duration, recording?.id, waveformLoadedForId, livePlaybackDuration])
 
-  // Resolve a raw diarization label ("Speaker 2") to the SAME {key, name} the
-  // Participants chips use, so bar colors and chip swatches share one color key.
-  const labelResolution = useMemo(() => {
-    const m = new Map<string, { key: string; name: string }>()
-    for (const p of people.participants) m.set(p.effectiveLabel, { key: p.key, name: p.name })
-    return m
-  }, [people.participants])
-
   // Per-speaker colored bars + legend, derived CLIENT-SIDE from the transcript.
+  // Resolve each raw diarization label to the SAME chip key the Participants list
+  // uses (`people.labelColorKey` — which maps a label that resolves to a linked
+  // meeting contact onto that contact's `mc:` chip key, not a fallback label key),
+  // so a speaker who is ALSO a meeting contact gets ONE shared color: the chip
+  // swatch and the waveform bars always match.
   const speakerTimeline = useMemo(
-    () => deriveSpeakerRanges(transcriptSegments, timelineDurationSec, (base) => labelResolution.get(base)),
-    [transcriptSegments, timelineDurationSec, labelResolution]
+    () => deriveSpeakerRanges(transcriptSegments, timelineDurationSec, (base) => people.labelColorKey.get(base)),
+    [transcriptSegments, timelineDurationSec, people.labelColorKey]
   )
 
   // The recording's action items (parsed once) — the single home for these is the
@@ -376,7 +387,12 @@ export function SourceReader({
         // Already-transcribed recordings return empty until analyzeTimeline runs
         // once. Backfill it (best-effort) and show the "Analyzing timeline…" hint
         // meanwhile; per-speaker colors + playhead already render without this.
-        if (isEmpty(res) && typeof api.analyzeTimeline === 'function') {
+        // Guarded to run AT MOST ONCE per recording per reader session: a
+        // recording that genuinely has no markers/sentiment (e.g. Gemini not
+        // configured, no action items) must not re-trigger a full analysis every
+        // time it's reopened.
+        if (isEmpty(res) && typeof api.analyzeTimeline === 'function' && !backfillAttemptedRef.current.has(recordingId)) {
+          backfillAttemptedRef.current.add(recordingId)
           if (!cancelled) setAnalyzingTimeline(true)
           try {
             await api.analyzeTimeline(recordingId)
@@ -396,6 +412,14 @@ export function SourceReader({
   // synchronously in onScroll (below) — no rAF so it stays deterministic in tests.
   const handleBodyScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     setScrolled(e.currentTarget.scrollTop > COLLAPSE_SCROLL_THRESHOLD)
+  }, [])
+
+  // B1: a timeline marker (or event-list row) was activated — ask the transcript
+  // to scroll to + pulse the turn at this marker's time. A bumped nonce re-fires
+  // the pulse for a repeat click on the same marker.
+  const handleTimelineEventClick = useCallback((event: TimelineEvent) => {
+    highlightNonceRef.current += 1
+    setTranscriptHighlight({ atMs: Math.round(event.timeSec * 1000), nonce: highlightNonceRef.current })
   }, [])
 
   const handleSaveTitle = useCallback(async () => {
@@ -866,6 +890,7 @@ export function SourceReader({
               pinned={waveformPinned}
               onTogglePin={() => setWaveformPinned(!waveformPinned)}
               onSeek={(sec) => onSeek?.(Math.round(sec * 1000))}
+              onEventClick={handleTimelineEventClick}
             />
           </div>
         )}
@@ -1009,6 +1034,7 @@ export function SourceReader({
                 recordingId={recording.id}
                 currentTimeMs={currentTimeMs}
                 isPlaying={isPlaying}
+                highlightRequest={transcriptHighlight}
                 onSeek={onSeek || (() => {})}
                 showSummary={true}
                 /* H3: action items live in ONE home — the timeline event-list above.
@@ -1103,6 +1129,8 @@ interface ReaderPlayerProps {
   pinned: boolean
   onTogglePin: () => void
   onSeek: (sec: number) => void
+  /** A numbered marker / event-list row was activated (B1 cross-highlight). */
+  onEventClick?: (event: TimelineEvent) => void
 }
 
 function ReaderPlayer({
@@ -1117,6 +1145,7 @@ function ReaderPlayer({
   pinned,
   onTogglePin,
   onSeek,
+  onEventClick,
 }: ReaderPlayerProps) {
   const regionRef = useRef<HTMLDivElement>(null)
   const innerRef = useRef<HTMLDivElement>(null)
@@ -1179,6 +1208,7 @@ function ReaderPlayer({
             events={big ? events : undefined}
             sentiment={big ? sentiment : undefined}
             onSeek={onSeek}
+            onEventClick={onEventClick}
           />
         </div>
 

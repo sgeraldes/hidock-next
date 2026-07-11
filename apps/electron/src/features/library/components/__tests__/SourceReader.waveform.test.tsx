@@ -225,6 +225,32 @@ describe('SourceReader — timeline backfill', () => {
     await waitFor(() => expect(screen.queryByTestId('timeline-analyzing')).not.toBeInTheDocument())
   })
 
+  it('backfills a still-empty recording at most ONCE per reader session (no re-analysis on reopen)', async () => {
+    // Both recordings legitimately yield nothing (e.g. Gemini off, no items).
+    const getTimelineAnalysis = vi.fn().mockResolvedValue(emptyTimeline)
+    const analyzeTimeline = vi.fn().mockResolvedValue(emptyTimeline)
+    installElectronAPI({ getTimelineAnalysis, analyzeTimeline })
+
+    const recA = makeRecording({ id: 'rec-A', transcriptionStatus: 'complete' })
+    const recB = makeRecording({ id: 'rec-B', transcriptionStatus: 'complete' })
+
+    // Open A → one backfill attempt for A.
+    const { rerender } = render(<SourceReader recording={recA} />)
+    await waitFor(() => expect(analyzeTimeline).toHaveBeenCalledWith('rec-A'))
+    expect(analyzeTimeline).toHaveBeenCalledTimes(1)
+
+    // Switch to B (reader stays mounted) → one backfill for B.
+    rerender(<SourceReader recording={recB} />)
+    await waitFor(() => expect(analyzeTimeline).toHaveBeenCalledWith('rec-B'))
+    expect(analyzeTimeline).toHaveBeenCalledTimes(2)
+
+    // Reopen A: it stayed empty, but must NOT be re-analyzed — still 2 total.
+    rerender(<SourceReader recording={recA} />)
+    await waitFor(() => expect(getTimelineAnalysis).toHaveBeenCalledWith('rec-A'))
+    await Promise.resolve()
+    expect(analyzeTimeline).toHaveBeenCalledTimes(2)
+  })
+
   it('does NOT call analyzeTimeline when getTimelineAnalysis already has data', async () => {
     const populated = {
       sentimentSegments: [{ startSec: 0, endSec: 60, score: 0.5 }],

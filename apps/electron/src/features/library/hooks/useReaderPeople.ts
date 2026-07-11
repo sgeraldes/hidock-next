@@ -65,6 +65,15 @@ interface UseReaderPeopleArgs {
 interface ReaderPeople {
   participants: ParticipantChip[]
   invited: MeetingAttendee[]
+  /**
+   * Maps a raw diarization label (base OR split-derived effective label) to the
+   * SAME participant chip key that represents it — crucially, a label resolved to
+   * a linked meeting contact maps to that contact's `mc:` chip key, not a
+   * fallback `l:`/`c:` label key. Feeds `deriveSpeakerRanges` so a speaker who is
+   * ALSO a meeting contact paints its bars under the contact's key, and the chip
+   * swatch (keyed the same) always matches the bar color.
+   */
+  labelColorKey: Map<string, { key: string; name: string }>
   /** All contacts, for the assign popover's picker (loaded lazily). */
   allContacts: Person[]
   /** Resolve a calendar attendee to a linked meeting contact, if known. */
@@ -211,6 +220,40 @@ export function useReaderPeople({ meetingId, attendees, recordingId, segments }:
     return [...contactChips, ...speakerChips]
   }, [contacts, resolved, contactKeys])
 
+  // label → representing chip key + name. Mirrors the exact merge logic of the
+  // `participants` memo (a resolved speaker whose contact is a meeting contact is
+  // folded into that `mc:` chip), so the waveform's per-speaker bar color keys
+  // line up with the chip swatches for the SAME person. Both the raw base label
+  // and the split-derived effective label are mapped, because deriveSpeakerRanges
+  // resolves by the raw base label while other views key on the effective one.
+  const labelColorKey = useMemo(() => {
+    const contactByName = new Map<string, Contact>()
+    for (const c of contacts) {
+      const n = (c.name || '').trim().toLowerCase()
+      if (n && !contactByName.has(n)) contactByName.set(n, c)
+      const e = (c.email || '').trim().toLowerCase()
+      if (e && !contactByName.has(e)) contactByName.set(e, c)
+    }
+    const m = new Map<string, { key: string; name: string }>()
+    for (const r of resolved) {
+      let key = r.key
+      let name = r.name
+      if (r.contactId && contactKeys.ids.has(r.contactId)) {
+        key = `mc:${r.contactId}`
+      } else {
+        const byName = contactByName.get(r.name.trim().toLowerCase())
+        if (byName) {
+          key = `mc:${byName.id}`
+          name = byName.name || byName.email || r.name
+        }
+      }
+      for (const lbl of new Set([r.baseLabel, r.effectiveLabel])) {
+        if (lbl) m.set(lbl, { key, name })
+      }
+    }
+    return m
+  }, [resolved, contacts, contactKeys])
+
   // Keys of people who actually spoke — to flag invited attendees who spoke.
   const spoke = useMemo(() => {
     const ids = new Set<string>()
@@ -337,6 +380,7 @@ export function useReaderPeople({ meetingId, attendees, recordingId, segments }:
   return {
     participants,
     invited,
+    labelColorKey,
     allContacts,
     resolveAttendee,
     attendeeSpoke,
