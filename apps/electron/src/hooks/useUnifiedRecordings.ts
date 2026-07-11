@@ -74,8 +74,20 @@ function parseDateFromFilename(filename: string): Date | null {
   return null
 }
 
+/**
+ * Sentinel "date unknown" value for recordings whose date we genuinely cannot
+ * determine (unparseable filename AND no valid device/db date). We MUST NOT fall
+ * back to `new Date()` (render-time now) here: doing so stamps every undated item
+ * with the current instant, so months-apart recordings all collapse to "today",
+ * cluster at the TOP of the newest-first list, and visually bundle together (the
+ * #58 "months-apart bundling" bug). Using the Unix epoch instead makes undated
+ * items sort to the BOTTOM (they are not "newest") and — via smartDate treating
+ * epoch as unknown — render an honest "Unknown date" instead of a fake today.
+ */
+export const UNKNOWN_DATE = new Date(0)
+
 // Get the best date for a recording - parse from filename first (most reliable), then fallback
-function getBestDate(filename: string, deviceDate: Date | null | undefined, fallback: Date): Date {
+export function getBestDate(filename: string, deviceDate: Date | null | undefined, fallback: Date = UNKNOWN_DATE): Date {
   // Always try to parse from filename first - HiDock filenames contain accurate timestamps
   const parsed = parseDateFromFilename(filename)
   if (parsed && !isNaN(parsed.getTime())) {
@@ -132,7 +144,7 @@ function findMatchByDateTime(
 }
 
 // Build unified recordings from multiple sources
-function buildRecordingMap(
+export function buildRecordingMap(
   deviceRecs: HiDockRecording[],
   dbRecs: DatabaseRecording[],
   syncedFiles: SyncedFile[],
@@ -190,7 +202,7 @@ function buildRecordingMap(
       }
     }
 
-    const dateRecorded = getBestDate(deviceRec.filename, deviceRec.dateCreated, new Date())
+    const dateRecorded = getBestDate(deviceRec.filename, deviceRec.dateCreated, UNKNOWN_DATE)
 
     if (synced || dbRec) {
       const dbId = dbRec?.id || synced!.id
@@ -249,7 +261,7 @@ function buildRecordingMap(
       // IMPORTANT: Use original_filename (device filename) for date parsing if available
       // The local filename may have been saved with the wrong date (download date instead of recording date)
       const filenameForDate = synced?.original_filename || dbRec.filename
-      const dateRecorded = getBestDate(filenameForDate, dbDate, new Date())
+      const dateRecorded = getBestDate(filenameForDate, dbDate, UNKNOWN_DATE)
       const capture = captureMapBySourceId.get(dbRec.id)
 
       const recording: LocalOnlyRecording = {
