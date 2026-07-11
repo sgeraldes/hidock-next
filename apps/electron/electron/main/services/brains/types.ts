@@ -57,6 +57,14 @@ export interface GenerateOptions {
    * its structured-JSON Gemini calls (detectActionables, analysis, vision).
    */
   disableThinking?: boolean
+  /**
+   * Working directory for CLI-spawned brains — the agentic adapters pass this
+   * through to their child process (runCli cwd). Used by the handover run so the
+   * agent operates in the validated target repo, not Electron's cwd. API-only
+   * brains (gemini-api, ollama) ignore it; they are never resolved for agentic
+   * tasks by the router.
+   */
+  cwd?: string
   signal?: AbortSignal
 }
 

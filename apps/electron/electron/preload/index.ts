@@ -54,6 +54,8 @@ export interface HandoverManifest {
 export interface HandoverCreateBundleResult {
   created: boolean
   needsFolder?: boolean
+  /** Opaque main-process registry id — the ONLY token runAgent accepts. */
+  bundleId?: string
   bundleDir?: string
   handoverPath?: string
   targetDir?: string
@@ -895,8 +897,8 @@ export interface ElectronAPI {
       brain?: { id: string; label: string } | null
     }) => Promise<Result<HandoverCreateBundleResult>>
     runAgent: (args: {
-      bundleDir: string
-      targetDir: string
+      /** Opaque id from createBundle — paths are never passed back for execution. */
+      bundleId: string
       brainId?: string
     }) => Promise<Result<HandoverRunAgentResult>>
   }

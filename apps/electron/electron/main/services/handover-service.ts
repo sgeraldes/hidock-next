@@ -24,8 +24,9 @@
  * contract (a null result is a SURFACED failure, not silence). No adapter internals
  * are touched here; this service only consumes the public brains seam.
  */
-import { mkdirSync, writeFileSync, existsSync, appendFileSync } from 'fs'
-import { join } from 'path'
+import { mkdirSync, writeFileSync, appendFileSync, realpathSync, lstatSync } from 'fs'
+import { join, parse, resolve, sep } from 'path'
+import { randomBytes, randomUUID } from 'crypto'
 import {
   getTranscriptByRecordingId,
   getMeetingById,
@@ -69,17 +70,29 @@ export interface AssembleBundleParams {
   source: HandoverSourceRef
   /** The brain that will run (or ran) the handover, recorded in the manifest. */
   brain?: { id: string; label: string } | null
+  /**
+   * Additional canonical paths (app install dir, userData, …) the caller wants
+   * refused as targets, on top of the built-in OS-protected list. The IPC handler
+   * passes the Electron app paths here (this module stays Electron-free).
+   */
+  extraProtectedPaths?: string[]
   /** Injected for tests. Defaults to a live clock. */
   now?: () => Date
   /** Injected for tests. Defaults to DB-backed readers. */
   data?: Partial<HandoverDataDeps>
-  /** Injected for tests. Defaults to fs.existsSync. */
-  pathExists?: (p: string) => boolean
 }
 
 export interface AssembleBundleResult {
+  /**
+   * Opaque id for this bundle in the main-process registry. The ONLY token the
+   * renderer may pass back to run the agent — paths from the renderer are never
+   * trusted for execution.
+   */
+  bundleId: string
   bundleDir: string
   handoverPath: string
+  /** The canonicalized (realpath) target directory the bundle was written under. */
+  targetDir: string
   manifest: HandoverManifest
 }
 
@@ -153,24 +166,110 @@ function timestampSlug(now: Date): string {
   return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`
 }
 
-/**
- * Pick a bundle directory that does not already exist. On collision (same slug in
- * the same second) append `-2`, `-3`, … — never overwrite an existing bundle.
- * `pathExists` is injected for hermetic tests.
- */
-export function resolveUniqueBundleDir(
-  parentDir: string,
-  slug: string,
-  pathExists: (p: string) => boolean = existsSync
-): string {
-  const base = join(parentDir, slug)
-  if (!pathExists(base)) return base
-  for (let i = 2; i < 1000; i++) {
-    const candidate = join(parentDir, `${slug}-${i}`)
-    if (!pathExists(candidate)) return candidate
+// ── Target validation, bundle registry, atomic reservation (security) ─────────
+
+/** Normalize a path for comparison: canonical form, lowercased on Windows. */
+function comparable(p: string): string {
+  const r = resolve(p)
+  return process.platform === 'win32' ? r.toLowerCase() : r
+}
+
+/** OS-protected roots the handover must never write into (built-in list). */
+function builtinProtectedPaths(env: NodeJS.ProcessEnv = process.env): string[] {
+  const list: string[] = []
+  for (const v of [env.SystemRoot, env.windir, env.ProgramFiles, env['ProgramFiles(x86)'], env.ProgramData]) {
+    if (v && v.trim()) list.push(v)
   }
-  // Extremely unlikely; fall back to a random-ish suffix.
-  return join(parentDir, `${slug}-${Date.now()}`)
+  if (process.platform !== 'win32') list.push('/etc', '/usr', '/bin', '/sbin', '/boot', '/System', '/Library')
+  return list
+}
+
+/**
+ * Canonicalize and vet a renderer-supplied target directory. Throws with a
+ * user-facing message when the target is unusable:
+ *   - does not exist / not a directory (realpath resolves symlinks — the
+ *     CANONICAL location is what gets vetted and used from here on);
+ *   - is a filesystem root (C:\, /);
+ *   - is (or is inside) a protected OS location or a caller-supplied protected
+ *     path (app install dir, userData — passed by the IPC handler).
+ * Returns the canonical real path.
+ */
+export function validateTargetDir(
+  targetDir: string,
+  extraProtectedPaths: string[] = [],
+  env: NodeJS.ProcessEnv = process.env
+): string {
+  let canonical: string
+  try {
+    canonical = realpathSync(targetDir)
+  } catch {
+    throw new Error(`The handover folder does not exist: ${targetDir}`)
+  }
+  if (!lstatSync(canonical).isDirectory()) {
+    throw new Error(`The handover target is not a directory: ${targetDir}`)
+  }
+
+  const c = comparable(canonical)
+  const root = parse(canonical).root
+  if (c === comparable(root)) {
+    throw new Error('The handover target cannot be a filesystem root. Pick a project folder.')
+  }
+
+  for (const protectedPath of [...builtinProtectedPaths(env), ...extraProtectedPaths]) {
+    const p = comparable(protectedPath)
+    if (c === p || c.startsWith(p + sep)) {
+      throw new Error(`The handover target is inside a protected location (${protectedPath}). Pick a project folder.`)
+    }
+  }
+  return canonical
+}
+
+/**
+ * Main-process bundle registry. `handover:runAgent` accepts ONLY an opaque
+ * bundleId minted here — a renderer can never point the runner at an arbitrary
+ * path. In-memory by design: a bundle is runnable in the session that created it.
+ */
+export interface BundleRecord {
+  bundleDir: string
+  targetDir: string
+  createdAt: string
+}
+
+const bundleRegistry = new Map<string, BundleRecord>()
+/** BundleIds with an agent run currently in flight (concurrency guard). */
+const activeRuns = new Set<string>()
+
+export function getRegisteredBundle(bundleId: string): BundleRecord | undefined {
+  return bundleRegistry.get(bundleId)
+}
+
+/** Test helper: clear the registry + active-run tracking. */
+export function resetHandoverRegistry(): void {
+  bundleRegistry.clear()
+  activeRuns.clear()
+}
+
+/**
+ * Atomically reserve a fresh bundle directory: `mkdirSync(..., recursive: false)`
+ * either creates it or throws EEXIST — no check-then-use window. On collision
+ * (same slug in the same second, or a concurrent create) retry with a random
+ * suffix. Never reuses or overwrites an existing directory.
+ */
+function reserveBundleDir(parentDir: string, slug: string): string {
+  const candidates = [join(parentDir, slug)]
+  for (let i = 0; i < 8; i++) {
+    candidates.push(join(parentDir, `${slug}-${randomBytes(3).toString('hex')}`))
+  }
+  for (const candidate of candidates) {
+    try {
+      mkdirSync(candidate, { recursive: false })
+      return candidate
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'EEXIST') continue
+      throw e
+    }
+  }
+  throw new Error('Could not reserve a handover bundle directory (too many collisions).')
 }
 
 /** Parse the transcript's stored action_items (JSON array or plain text) to markdown. */
@@ -309,20 +408,53 @@ progress and result are appended to \`RUN.log\`.
 
 /**
  * Assemble the handover bundle on disk. Pure filesystem + DB reads — no LLM calls,
- * no network. Returns the bundle path, the HANDOVER.md path, and the manifest.
+ * no network. The target directory is canonicalized and vetted (protected paths
+ * rejected), the `handover` parent must not be a symlink/junction, the bundle dir
+ * is reserved ATOMICALLY, and its real path is verified to be contained under the
+ * canonical target — then the bundle is registered under an opaque bundleId which
+ * is the only token `runAgent` accepts.
  */
 export function assembleHandoverBundle(params: AssembleBundleParams): AssembleBundleResult {
   const now = (params.now ?? (() => new Date()))()
   const deps: HandoverDataDeps = { ...defaultDataDeps, ...(params.data ?? {}) }
-  const pathExists = params.pathExists ?? existsSync
+
+  // 1. Canonicalize + vet the target (throws a user-facing error when refused).
+  const canonicalTarget = validateTargetDir(params.targetDir, params.extraProtectedPaths ?? [])
+
+  // 2. The `handover` parent must be a REAL directory directly under the target —
+  //    a symlink/junction here would let bundle writes escape the vetted target.
+  const parentDir = join(canonicalTarget, 'handover')
+  try {
+    const st = lstatSync(parentDir)
+    if (st.isSymbolicLink() || !st.isDirectory()) {
+      throw new Error('The "handover" folder inside the target is a link or not a directory. Remove it and retry.')
+    }
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+      mkdirSync(parentDir) // non-recursive: canonicalTarget is known to exist
+    } else {
+      throw e
+    }
+  }
 
   const resolved = resolveSource(params.source, deps)
+  // Slug = timestamp + slugify output: strictly [a-z0-9-], so no separators,
+  // no dot segments, and (with the timestamp prefix) no Windows reserved names —
+  // the transcript-derived title is untrusted input.
   const slug = `${timestampSlug(now)}-${slugify(resolved.title)}`
-  const parentDir = join(params.targetDir, 'handover')
-  const bundleDir = resolveUniqueBundleDir(parentDir, slug, pathExists)
-  const contextDir = join(bundleDir, 'context')
 
-  mkdirSync(contextDir, { recursive: true })
+  // 3. Reserve the bundle directory atomically (no check-then-use window).
+  const bundleDir = reserveBundleDir(parentDir, slug)
+
+  // 4. Containment post-check: the REAL bundle path must live under the canonical
+  //    target (belt-and-suspenders against reparse-point tricks between checks).
+  const realBundle = comparable(realpathSync(bundleDir))
+  if (realBundle !== comparable(bundleDir) || !realBundle.startsWith(comparable(canonicalTarget) + sep)) {
+    throw new Error('Handover bundle path escaped the target directory — aborting.')
+  }
+
+  const contextDir = join(bundleDir, 'context')
+  mkdirSync(contextDir)
 
   const files: Array<{ rel: string; content: string }> = [
     { rel: 'HANDOVER.md', content: params.handoverContent },
@@ -351,15 +483,22 @@ export function assembleHandoverBundle(params: AssembleBundleParams): AssembleBu
   for (const f of files) writeFileSync(join(bundleDir, f.rel), f.content, 'utf-8')
   writeFileSync(join(bundleDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf-8')
 
-  return { bundleDir, handoverPath: join(bundleDir, 'HANDOVER.md'), manifest }
+  // 5. Register under an opaque id — the only token runAgent accepts back.
+  const bundleId = randomUUID()
+  bundleRegistry.set(bundleId, { bundleDir, targetDir: canonicalTarget, createdAt: now.toISOString() })
+
+  return { bundleId, bundleDir, handoverPath: join(bundleDir, 'HANDOVER.md'), targetDir: canonicalTarget, manifest }
 }
 
 // ── Agentic run ────────────────────────────────────────────────────────────────
 
 export interface RunHandoverAgentParams {
-  bundleDir: string
-  /** Working directory for the agent (the target repo). */
-  targetDir: string
+  /**
+   * Opaque bundle id minted by assembleHandoverBundle. The bundle/target paths
+   * are looked up in the main-process registry — renderer-supplied paths are
+   * NEVER accepted for execution.
+   */
+  bundleId: string
   /** Explicit brain to use; when absent the router resolves the 'handover' task. */
   brainId?: string
   signal?: AbortSignal
@@ -369,6 +508,8 @@ export interface RunHandoverAgentParams {
   resolveBrain?: (brainId?: string) => Promise<AIBrain | null>
   /** Injected for tests. */
   emit?: (type: string, payload: Record<string, unknown>) => void
+  /** Injected for tests. Defaults to the main-process bundle registry. */
+  lookupBundle?: (bundleId: string) => BundleRecord | undefined
 }
 
 export interface RunHandoverAgentResult {
@@ -420,19 +561,42 @@ function buildRunPrompt(bundleDir: string, targetDir: string): string {
 }
 
 /**
- * Run the handover through an agentic brain, in-app. Writes a RUN.log alongside the
- * bundle and emits event-bus events so the Activity Log can surface progress. Uses
- * the brain's `generate()` as the invocation surface and honours its never-throw /
- * null contract: a null result is a surfaced failure written to RUN.log, not silence.
+ * Run the handover through an agentic brain, in-app. The bundle/target paths come
+ * ONLY from the main-process registry (opaque bundleId); one run per bundle at a
+ * time. Writes a RUN.log alongside the bundle and emits event-bus events so the
+ * Activity Log can surface progress. Uses the brain's `generate()` as the
+ * invocation surface — the validated target directory is passed as the child
+ * process cwd (GenerateOptions.cwd) — and honours the never-throw / null
+ * contract: a null result is a surfaced failure written to RUN.log, not silence.
  */
 export async function runHandoverAgent(params: RunHandoverAgentParams): Promise<RunHandoverAgentResult> {
   const now = params.now ?? (() => new Date())
   const resolveBrain = params.resolveBrain ?? defaultResolveBrain
+  const lookupBundle = params.lookupBundle ?? getRegisteredBundle
   const emit =
     params.emit ??
     ((type: string, payload: Record<string, unknown>) =>
       getEventBus().emitDomainEvent({ type, timestamp: now().toISOString(), payload }))
-  const runLogPath = join(params.bundleDir, 'RUN.log')
+
+  // Only bundles minted by this process are runnable — a forged/unknown id (or a
+  // path smuggled in as an id) resolves to nothing and is refused.
+  const record = lookupBundle(params.bundleId)
+  if (!record) {
+    const error = 'Unknown handover bundle. Write the bundle again and retry.'
+    emit('handover:run-failed', { bundleId: params.bundleId, brainId: params.brainId ?? null, error })
+    return { ok: false, brainId: params.brainId ?? null, brainLabel: null, finalResponse: null, runLogPath: '', error }
+  }
+  const { bundleDir, targetDir } = record
+  const runLogPath = join(bundleDir, 'RUN.log')
+
+  // One run per bundle: a second concurrent run would interleave RUN.log lines
+  // indistinguishably and double-execute the same work.
+  if (activeRuns.has(params.bundleId)) {
+    const error = 'This handover bundle already has an agent run in progress.'
+    emit('handover:run-failed', { bundleId: params.bundleId, brainId: params.brainId ?? null, error })
+    return { ok: false, brainId: params.brainId ?? null, brainLabel: null, finalResponse: null, runLogPath, error }
+  }
+  activeRuns.add(params.bundleId)
 
   const appendLog = (line: string) => {
     try {
@@ -442,47 +606,65 @@ export async function runHandoverAgent(params: RunHandoverAgentParams): Promise<
     }
   }
 
-  const brain = await resolveBrain(params.brainId)
-  if (!brain) {
-    const error =
-      'No agentic AI brain is available. Enable and sign in to Claude Code, Codex, or Gemini CLI in Settings → AI Brains.'
-    appendLog(`[${now().toISOString()}] HANDOVER RUN FAILED — ${error}`)
-    emit('handover:run-failed', { bundleDir: params.bundleDir, brainId: params.brainId ?? null, error })
-    return { ok: false, brainId: params.brainId ?? null, brainLabel: null, finalResponse: null, runLogPath, error }
-  }
-
-  const started = now().toISOString()
-  appendLog(`[${started}] HANDOVER RUN STARTED`)
-  appendLog(`  brain: ${brain.label} (${brain.id})`)
-  appendLog(`  target: ${params.targetDir}`)
-  appendLog(`  bundle: ${params.bundleDir}`)
-  appendLog('')
-  emit('handover:run-started', { bundleDir: params.bundleDir, brainId: brain.id, targetDir: params.targetDir })
-
-  const prompt = buildRunPrompt(params.bundleDir, params.targetDir)
-
-  let finalResponse: string | null = null
   try {
-    // `generate()` NEVER throws by contract — it returns null on failure/cancel.
-    finalResponse = await brain.generate([{ role: 'user', content: prompt }], { signal: params.signal })
-  } catch (e) {
-    // Defensive: even though the contract forbids it, never let a throw escape.
-    console.error('[handover] brain.generate threw (contract violation):', e)
-    finalResponse = null
-  }
+    const brain = await resolveBrain(params.brainId)
+    if (!brain) {
+      const error =
+        'No agentic AI brain is available. Enable and sign in to Claude Code, Codex, or Gemini CLI in Settings → AI Brains.'
+      appendLog(`[${now().toISOString()}] HANDOVER RUN FAILED — ${error}`)
+      emit('handover:run-failed', { bundleDir, brainId: params.brainId ?? null, error })
+      return { ok: false, brainId: params.brainId ?? null, brainLabel: null, finalResponse: null, runLogPath, error }
+    }
 
-  const ended = now().toISOString()
-  if (finalResponse && finalResponse.trim()) {
-    appendLog(finalResponse.trim())
+    // Fail closed on cwd: only brains advertising 'agentic' honour
+    // GenerateOptions.cwd (they spawn a CLI via runCli). Refuse anything else
+    // rather than silently running in Electron's cwd.
+    if (!brain.capabilities().has('agentic')) {
+      const error = `The selected brain (${brain.label}) cannot run in a working directory. Pick an agentic brain.`
+      appendLog(`[${now().toISOString()}] HANDOVER RUN FAILED — ${error}`)
+      emit('handover:run-failed', { bundleDir, brainId: brain.id, error })
+      return { ok: false, brainId: brain.id, brainLabel: brain.label, finalResponse: null, runLogPath, error }
+    }
+
+    const started = now().toISOString()
+    appendLog(`[${started}] HANDOVER RUN STARTED`)
+    appendLog(`  brain: ${brain.label} (${brain.id})`)
+    appendLog(`  target: ${targetDir}`)
+    appendLog(`  bundle: ${bundleDir}`)
     appendLog('')
-    appendLog(`[${ended}] HANDOVER RUN COMPLETED`)
-    emit('handover:run-completed', { bundleDir: params.bundleDir, brainId: brain.id, ok: true })
-    return { ok: true, brainId: brain.id, brainLabel: brain.label, finalResponse: finalResponse.trim(), runLogPath }
-  }
+    emit('handover:run-started', { bundleDir, brainId: brain.id, targetDir })
 
-  const error =
-    'The agent returned no output — it may have failed, been cancelled, timed out, or not be authenticated. Check Settings → AI Brains.'
-  appendLog(`[${ended}] HANDOVER RUN FAILED — ${error}`)
-  emit('handover:run-failed', { bundleDir: params.bundleDir, brainId: brain.id, error })
-  return { ok: false, brainId: brain.id, brainLabel: brain.label, finalResponse: null, runLogPath, error }
+    const prompt = buildRunPrompt(bundleDir, targetDir)
+
+    let finalResponse: string | null = null
+    try {
+      // `generate()` NEVER throws by contract — it returns null on failure/cancel.
+      // cwd = the validated target: the CLI child process actually runs there.
+      finalResponse = await brain.generate([{ role: 'user', content: prompt }], {
+        signal: params.signal,
+        cwd: targetDir,
+      })
+    } catch (e) {
+      // Defensive: even though the contract forbids it, never let a throw escape.
+      console.error('[handover] brain.generate threw (contract violation):', e)
+      finalResponse = null
+    }
+
+    const ended = now().toISOString()
+    if (finalResponse && finalResponse.trim()) {
+      appendLog(finalResponse.trim())
+      appendLog('')
+      appendLog(`[${ended}] HANDOVER RUN COMPLETED`)
+      emit('handover:run-completed', { bundleDir, brainId: brain.id, ok: true })
+      return { ok: true, brainId: brain.id, brainLabel: brain.label, finalResponse: finalResponse.trim(), runLogPath }
+    }
+
+    const error =
+      'The agent returned no output — it may have failed, been cancelled, timed out, or not be authenticated. Check Settings → AI Brains.'
+    appendLog(`[${ended}] HANDOVER RUN FAILED — ${error}`)
+    emit('handover:run-failed', { bundleDir, brainId: brain.id, error })
+    return { ok: false, brainId: brain.id, brainLabel: brain.label, finalResponse: null, runLogPath, error }
+  } finally {
+    activeRuns.delete(params.bundleId)
+  }
 }

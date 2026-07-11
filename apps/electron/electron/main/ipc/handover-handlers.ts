@@ -2,26 +2,30 @@
  * Handover IPC handlers (H9 — "proper" Claude Code handover). Namespace: `handover:*`.
  *
  * Bridges the renderer Handover dialog to the main-process handover service:
- *   - `handover:createBundle` — resolve a target directory, then assemble the
- *     handover BUNDLE (HANDOVER.md + context/ + manifest.json) into
- *     `<targetDir>/handover/<timestamped-slug>/`.
+ *   - `handover:createBundle` — resolve + VALIDATE a target directory (canonical
+ *     realpath, protected OS/app locations refused), then assemble the handover
+ *     BUNDLE (HANDOVER.md + context/ + manifest.json) into
+ *     `<targetDir>/handover/<timestamped-slug>/`. Returns an OPAQUE `bundleId`.
  *   - `handover:runAgent` — optionally run the handover in-app through an AGENTIC
- *     brain resolved via the BrainRouter (task 'handover'), streaming a RUN.log
- *     into the bundle and surfacing completion/failure via the event bus.
+ *     brain resolved via the BrainRouter (task 'handover'). Accepts ONLY a
+ *     `bundleId` previously minted by createBundle — bundle/target paths are
+ *     looked up in the main-process registry, never taken from the renderer.
  *
  * Fallbacks (clipboard copy, open-in-terminal) stay on the existing
  * `outputs:copyToClipboard` / `outputs:launchClaudeCode` channels — this file adds
  * the bundle + in-app run only. Follows the 3-file IPC pattern in
  * `.claude/rules/electron-ipc.md`.
  */
-import { ipcMain } from 'electron'
-import { existsSync } from 'fs'
+import { ipcMain, app } from 'electron'
+import { dirname } from 'path'
 import { getConfig, updateConfig } from '../services/config'
 import { success, error, Result } from '../types/api'
 import { resolveProjectFolderForActionable } from './outputs-handlers'
 import {
   assembleHandoverBundle,
   runHandoverAgent,
+  getRegisteredBundle,
+  validateTargetDir,
   type HandoverManifest,
   type HandoverSourceRef,
   type RunHandoverAgentResult,
@@ -32,6 +36,8 @@ export interface CreateBundleResult {
   created: boolean
   /** Set when no target directory could be resolved — renderer should pick one. */
   needsFolder?: boolean
+  /** Opaque registry id — the ONLY token runAgent accepts. */
+  bundleId?: string
   bundleDir?: string
   handoverPath?: string
   targetDir?: string
@@ -39,26 +45,68 @@ export interface CreateBundleResult {
 }
 
 /**
+ * App-specific locations the handover must never target, on top of the built-in
+ * OS-protected list in the service. Computed lazily and defensively — in unit
+ * tests `app` is not available and the list is simply empty.
+ */
+function appProtectedPaths(): string[] {
+  const paths: string[] = []
+  try {
+    paths.push(app.getAppPath())
+  } catch {
+    /* not available (tests) */
+  }
+  try {
+    paths.push(app.getPath('userData'))
+  } catch {
+    /* ignore */
+  }
+  try {
+    paths.push(dirname(app.getPath('exe')))
+  } catch {
+    /* ignore */
+  }
+  return paths
+}
+
+/**
  * Resolve the working directory for a handover, mirroring the legacy
  * `outputs:launchClaudeCode` order: explicit pick → source project folder →
- * configured handoffDirectory → none (renderer prompts). An explicit pick is
- * persisted as the new default handoffDirectory (non-fatal on failure).
+ * configured handoffDirectory → none (renderer prompts). Every candidate is
+ * canonicalized + vetted BEFORE use; an explicit pick is persisted as the new
+ * default handoffDirectory only after it validates.
  */
 async function resolveTargetDir(explicit: string | undefined, actionableId: string | undefined): Promise<string | null> {
+  const protectedPaths = appProtectedPaths()
+
   if (explicit && explicit.trim()) {
+    // Throws a user-facing message when refused — surfaced by the handler.
+    const canonical = validateTargetDir(explicit, protectedPaths)
     try {
-      await updateConfig('integrations', { handoffDirectory: explicit })
+      await updateConfig('integrations', { handoffDirectory: canonical })
     } catch (cfgErr) {
       console.warn('handover:createBundle — failed to persist handoffDirectory:', cfgErr)
     }
-    return explicit
+    return canonical
   }
   if (actionableId) {
     const viaProject = resolveProjectFolderForActionable(actionableId)
-    if (viaProject) return viaProject
+    if (viaProject) {
+      try {
+        return validateTargetDir(viaProject, protectedPaths)
+      } catch {
+        /* stale/invalid project folder — fall through */
+      }
+    }
   }
   const configured = getConfig().integrations?.handoffDirectory
-  if (configured && existsSync(configured)) return configured
+  if (configured) {
+    try {
+      return validateTargetDir(configured, protectedPaths)
+    } catch {
+      /* stale/invalid configured folder — renderer will prompt */
+    }
+  }
   return null
 }
 
@@ -87,12 +135,14 @@ export function registerHandoverHandlers(): void {
       const actionableId = typeof args.actionableId === 'string' ? args.actionableId : undefined
       const explicit = typeof args.targetDir === 'string' && args.targetDir.trim() ? args.targetDir : undefined
 
-      const targetDir = await resolveTargetDir(explicit, actionableId)
+      let targetDir: string | null
+      try {
+        targetDir = await resolveTargetDir(explicit, actionableId)
+      } catch (validationErr) {
+        return error('VALIDATION_ERROR', (validationErr as Error).message)
+      }
       if (!targetDir) {
         return success({ created: false, needsFolder: true })
-      }
-      if (!existsSync(targetDir)) {
-        return error('NOT_FOUND', `The handover folder does not exist: ${targetDir}`)
       }
 
       const source: HandoverSourceRef = {
@@ -106,43 +156,39 @@ export function registerHandoverHandlers(): void {
           ? (args.brain as { id: string; label: string })
           : null
 
-      const { bundleDir, handoverPath, manifest } = assembleHandoverBundle({
+      const { bundleId, bundleDir, handoverPath, targetDir: canonicalTarget, manifest } = assembleHandoverBundle({
         targetDir,
         handoverContent: content,
         source,
         brain,
+        extraProtectedPaths: appProtectedPaths(),
       })
 
-      return success({ created: true, bundleDir, handoverPath, targetDir, manifest })
+      return success({ created: true, bundleId, bundleDir, handoverPath, targetDir: canonicalTarget, manifest })
     } catch (err) {
       console.error('handover:createBundle error:', err)
-      return error('INTERNAL_ERROR', 'Failed to write the handover bundle', err)
+      return error('INTERNAL_ERROR', (err as Error)?.message || 'Failed to write the handover bundle', err)
     }
   })
 
   /**
-   * Run a previously-written bundle through an agentic brain, in-app. Resolves the
-   * brain via the router (or an explicit brainId) and honours its null contract.
+   * Run a previously-written bundle through an agentic brain, in-app. Accepts
+   * ONLY an opaque bundleId minted by createBundle in this session; the bundle
+   * and target paths are read from the main-process registry.
    */
   ipcMain.handle('handover:runAgent', async (_e, rawArgs: unknown): Promise<Result<RunHandoverAgentResult>> => {
     try {
       const args = (rawArgs && typeof rawArgs === 'object' ? rawArgs : {}) as {
-        bundleDir?: unknown
-        targetDir?: unknown
+        bundleId?: unknown
         brainId?: unknown
       }
-      const bundleDir = typeof args.bundleDir === 'string' ? args.bundleDir : ''
-      const targetDir = typeof args.targetDir === 'string' ? args.targetDir : ''
-      if (!bundleDir || !existsSync(bundleDir)) {
-        return error('NOT_FOUND', 'The handover bundle could not be found. Write it again and retry.')
-      }
-      if (!targetDir || !existsSync(targetDir)) {
-        return error('NOT_FOUND', `The handover working directory does not exist: ${targetDir}`)
+      const bundleId = typeof args.bundleId === 'string' ? args.bundleId : ''
+      if (!bundleId || !getRegisteredBundle(bundleId)) {
+        return error('NOT_FOUND', 'Unknown handover bundle. Write the bundle again and retry.')
       }
 
       const result = await runHandoverAgent({
-        bundleDir,
-        targetDir,
+        bundleId,
         brainId: typeof args.brainId === 'string' && args.brainId ? args.brainId : undefined,
       })
       // A never-throw null run is a real failure the renderer surfaces — but the IPC

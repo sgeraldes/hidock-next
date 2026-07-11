@@ -182,12 +182,12 @@ export function HandoverDialog({ open, onOpenChange, output }: HandoverDialogPro
     setRunOk(null)
     try {
       const bundle = await createBundle()
-      if (!bundle?.bundleDir || !bundle.targetDir) return
-      logActivity('info', 'Handover agent started', `${brainId} · ${bundle.bundleDir}`)
+      // Only the opaque bundleId is passed back — the main process refuses paths.
+      if (!bundle?.bundleId) return
+      logActivity('info', 'Handover agent started', `${brainId} · ${bundle.bundleDir ?? bundle.bundleId}`)
       setRunLog('Running the agent… this can take a while.')
       const res = await window.electronAPI.handover.runAgent({
-        bundleDir: bundle.bundleDir,
-        targetDir: bundle.targetDir,
+        bundleId: bundle.bundleId,
         brainId: brainId || undefined,
       })
       if (!res.success) {
@@ -324,6 +324,10 @@ export function HandoverDialog({ open, onOpenChange, output }: HandoverDialogPro
             </div>
           )}
         </div>
+
+        <p className="text-xs text-muted-foreground">
+          &ldquo;Write + run agent&rdquo; lets an autonomous AI agent read and modify files in the chosen folder.
+        </p>
 
         <DialogFooter className="flex-col-reverse gap-2 sm:flex-row sm:justify-between">
           <div className="flex gap-2">

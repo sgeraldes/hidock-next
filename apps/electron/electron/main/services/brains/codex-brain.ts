@@ -152,7 +152,7 @@ export class CodexBrain implements AIBrain {
       const res = await runCli(
         'codex',
         args,
-        { timeoutMs: GENERATE_TIMEOUT_MS, signal: opts.signal, input: prompt, env: this.env },
+        { timeoutMs: GENERATE_TIMEOUT_MS, signal: opts.signal, input: prompt, env: this.env, cwd: opts.cwd },
         this.spawn
       )
       if (res.aborted || res.timedOut || res.spawnError || res.outputLimitExceeded) {

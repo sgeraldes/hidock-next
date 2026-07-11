@@ -204,7 +204,7 @@ export class ClaudeCodeBrain implements AIBrain {
       let res = await runCli(
         await this.claudeCommand(),
         args,
-        { timeoutMs: GENERATE_TIMEOUT_MS, signal: opts.signal, input: prompt, env: this.env },
+        { timeoutMs: GENERATE_TIMEOUT_MS, signal: opts.signal, input: prompt, env: this.env, cwd: opts.cwd },
         this.spawn
       )
       if (res.spawnError) {
@@ -214,7 +214,7 @@ export class ClaudeCodeBrain implements AIBrain {
         res = await runCli(
           await this.claudeCommand(),
           args,
-          { timeoutMs: GENERATE_TIMEOUT_MS, signal: opts.signal, input: prompt, env: this.env },
+          { timeoutMs: GENERATE_TIMEOUT_MS, signal: opts.signal, input: prompt, env: this.env, cwd: opts.cwd },
           this.spawn
         )
       }

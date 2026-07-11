@@ -165,7 +165,7 @@ export class KiroCliBrain implements AIBrain {
       const res = await runCli(
         KIRO_CLI,
         args,
-        { timeoutMs: GENERATE_TIMEOUT_MS, signal: opts.signal, input: prompt, env },
+        { timeoutMs: GENERATE_TIMEOUT_MS, signal: opts.signal, input: prompt, env, cwd: opts.cwd },
         this.spawn
       )
       if (res.aborted || res.timedOut || res.spawnError || res.outputLimitExceeded) {

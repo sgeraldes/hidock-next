@@ -33,7 +33,13 @@ function setApi(brains: unknown[]) {
   brainsList.mockResolvedValue(brains)
   createBundle.mockResolvedValue({
     success: true,
-    data: { created: true, bundleDir: 'C:\\repo\\handover\\x', handoverPath: 'C:\\repo\\handover\\x\\HANDOVER.md', targetDir: 'C:\\repo' },
+    data: {
+      created: true,
+      bundleId: 'bundle-uuid-1',
+      bundleDir: 'C:\\repo\\handover\\x',
+      handoverPath: 'C:\\repo\\handover\\x\\HANDOVER.md',
+      targetDir: 'C:\\repo',
+    },
   })
   runAgent.mockResolvedValue({ success: true, data: { ok: true, brainId: 'claude-code', brainLabel: 'Claude Code', finalResponse: 'done', runLogPath: 'r' } })
   copyToClipboard.mockResolvedValue({ success: true })
@@ -73,18 +79,23 @@ describe('HandoverDialog', () => {
     expect(runAgent).not.toHaveBeenCalled()
   })
 
-  it('"Write + run agent" writes the bundle then runs the selected brain', async () => {
+  it('"Write + run agent" writes the bundle then runs via the OPAQUE bundleId (no paths passed back)', async () => {
     render(<HandoverDialog open onOpenChange={vi.fn()} output={OUTPUT} />)
     await waitFor(() => expect(brainsList).toHaveBeenCalled())
     fireEvent.click(screen.getByRole('button', { name: /write \+ run agent/i }))
     await waitFor(() => expect(createBundle).toHaveBeenCalled())
     await waitFor(() =>
-      expect(runAgent).toHaveBeenCalledWith(
-        expect.objectContaining({ bundleDir: 'C:\\repo\\handover\\x', targetDir: 'C:\\repo', brainId: 'claude-code' })
-      )
+      expect(runAgent).toHaveBeenCalledWith({ bundleId: 'bundle-uuid-1', brainId: 'claude-code' })
     )
     // Completion is surfaced to the Activity Log.
     await waitFor(() => expect(addActivityLogEntry).toHaveBeenCalled())
+  })
+
+  it('shows the plain-language autonomous-agent disclosure', async () => {
+    render(<HandoverDialog open onOpenChange={vi.fn()} output={OUTPUT} />)
+    expect(
+      screen.getByText(/lets an autonomous AI agent read and modify files in the chosen folder/i)
+    ).toBeInTheDocument()
   })
 
   it('"Copy prompt" copies via the outputs channel', async () => {

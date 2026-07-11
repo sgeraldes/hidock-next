@@ -3,11 +3,13 @@
  *
  * Handover service tests (H9). Bundle assembly is exercised against a REAL temp
  * directory with injected DB readers (no database, no fs mocking) so the folder
- * contents can be snapshot-checked. The agentic run is tested against a mock brain
- * that honours the never-throw / null contract.
+ * contents — and the path-security behaviour (protected targets, symlinked
+ * handover dirs, atomic reservation, opaque bundle ids) — are checked for real.
+ * The agentic run is tested against a mock brain that honours the never-throw /
+ * null contract.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { mkdtempSync, rmSync, readFileSync, existsSync } from 'fs'
+import { mkdtempSync, rmSync, readFileSync, existsSync, mkdirSync, symlinkSync } from 'fs'
 
 // All DB/brains/event-bus dependencies are INJECTED in these tests, so mock the
 // modules to keep the suite hermetic (the real ones pull in electron `app`).
@@ -27,14 +29,18 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import {
   assembleHandoverBundle,
-  resolveUniqueBundleDir,
+  validateTargetDir,
+  getRegisteredBundle,
+  resetHandoverRegistry,
   slugify,
   runHandoverAgent,
   type HandoverDataDeps,
+  type BundleRecord,
 } from '../handover-service'
 
 const FIXED = new Date('2026-07-11T09:30:00.000Z')
-const at = (h: number, m: number, s: number) => new Date(`2026-07-11T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.000Z`)
+const at = (h: number, m: number, s: number) =>
+  new Date(`2026-07-11T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.000Z`)
 
 function makeDeps(over: Partial<HandoverDataDeps> = {}): HandoverDataDeps {
   return {
@@ -59,28 +65,67 @@ function makeDeps(over: Partial<HandoverDataDeps> = {}): HandoverDataDeps {
   }
 }
 
-describe('slugify', () => {
+describe('slugify (untrusted transcript-derived titles)', () => {
   it('lowercases, hyphenates, and bounds length', () => {
     expect(slugify('Acme SDD Kickoff!')).toBe('acme-sdd-kickoff')
     expect(slugify('   ')).toBe('handover')
     expect(slugify('x'.repeat(80)).length).toBe(60)
   })
-})
 
-describe('resolveUniqueBundleDir', () => {
-  it('returns the base path when it does not exist', () => {
-    expect(resolveUniqueBundleDir('/p', 'slug', () => false)).toBe(join('/p', 'slug'))
+  it('strips path traversal and separators (adversarial titles)', () => {
+    expect(slugify('../../etc/passwd')).toBe('etc-passwd')
+    expect(slugify('..\\..\\windows\\system32')).toBe('windows-system32')
+    expect(slugify('a/b\\c:d')).toBe('a-b-c-d')
+    expect(slugify('....')).toBe('handover')
   })
 
-  it('appends a numeric suffix on collision (idempotent slug collision)', () => {
-    const taken = new Set([join('/p', 'slug'), join('/p', 'slug-2')])
-    expect(resolveUniqueBundleDir('/p', 'slug', (x) => taken.has(x))).toBe(join('/p', 'slug-3'))
+  it('neutralizes reserved characters and device-name shapes', () => {
+    expect(slugify('CON')).toBe('con') // always prefixed by the timestamp in a slug
+    expect(slugify('a<b>|c?*"')).toBe('a-b-c')
+    expect(slugify('%USERPROFILE%')).toBe('userprofile')
+  })
+})
+
+describe('validateTargetDir', () => {
+  let root: string
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'handover-vt-'))
+  })
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  it('returns the canonical path for a valid directory', () => {
+    expect(validateTargetDir(root).toLowerCase()).toBe(root.toLowerCase())
+  })
+
+  it('rejects a missing directory', () => {
+    expect(() => validateTargetDir(join(root, 'nope'))).toThrow(/does not exist/i)
+  })
+
+  it('rejects a filesystem root', () => {
+    const fsRoot = process.platform === 'win32' ? 'C:\\' : '/'
+    expect(() => validateTargetDir(fsRoot)).toThrow(/filesystem root/i)
+  })
+
+  it('rejects protected OS locations (and children of them)', () => {
+    // Point the "protected" env at our temp dir so the test is hermetic.
+    const env = { SystemRoot: root } as NodeJS.ProcessEnv
+    const child = join(root, 'child')
+    mkdirSync(child)
+    expect(() => validateTargetDir(root, [], env)).toThrow(/protected location/i)
+    expect(() => validateTargetDir(child, [], env)).toThrow(/protected location/i)
+  })
+
+  it('rejects caller-supplied protected paths (app install / userData)', () => {
+    expect(() => validateTargetDir(root, [root], {} as NodeJS.ProcessEnv)).toThrow(/protected location/i)
   })
 })
 
 describe('assembleHandoverBundle', () => {
   let root: string
   beforeEach(() => {
+    resetHandoverRegistry()
     root = mkdtempSync(join(tmpdir(), 'handover-test-'))
   })
   afterEach(() => {
@@ -101,13 +146,11 @@ describe('assembleHandoverBundle', () => {
     expect(readFileSync(res.handoverPath, 'utf-8')).toContain('Do the work.')
     expect(existsSync(join(res.bundleDir, 'README.md'))).toBe(true)
     expect(existsSync(join(res.bundleDir, 'manifest.json'))).toBe(true)
-    // context files
     for (const f of ['transcript.md', 'summary.md', 'action-items.md', 'decisions.md', 'meeting.json']) {
       expect(existsSync(join(res.bundleDir, 'context', f))).toBe(true)
     }
     expect(readFileSync(join(res.bundleDir, 'context', 'transcript.md'), 'utf-8')).toContain('Full transcript body.')
     expect(readFileSync(join(res.bundleDir, 'context', 'decisions.md'), 'utf-8')).toContain('Decided to use TypeScript.')
-    // action items: transcript items + detected actionables
     const ai = readFileSync(join(res.bundleDir, 'context', 'action-items.md'), 'utf-8')
     expect(ai).toContain('Draft SDD')
     expect(ai).toContain('Ship the repo scaffold')
@@ -138,7 +181,7 @@ describe('assembleHandoverBundle', () => {
     expect(manifest.slug).toMatch(/^2026-07-11-\d{6}-acme-sdd-kickoff$/)
   })
 
-  it('places the bundle under handover/<slug> in the target dir', () => {
+  it('places the bundle under handover/<slug> in the CANONICAL target dir and registers an opaque id', () => {
     const res = assembleHandoverBundle({
       targetDir: root,
       handoverContent: 'x',
@@ -146,17 +189,55 @@ describe('assembleHandoverBundle', () => {
       now: () => FIXED,
       data: makeDeps(),
     })
-    expect(res.bundleDir.startsWith(join(root, 'handover'))).toBe(true)
+    expect(res.bundleDir.toLowerCase().startsWith(join(res.targetDir, 'handover').toLowerCase())).toBe(true)
+    expect(res.bundleId).toMatch(/^[0-9a-f-]{36}$/)
+    const record = getRegisteredBundle(res.bundleId)
+    expect(record).toBeDefined()
+    expect(record!.bundleDir).toBe(res.bundleDir)
+    expect(record!.targetDir).toBe(res.targetDir)
   })
 
-  it('gives a fresh directory on a same-second slug collision (idempotent)', () => {
+  it('reserves ATOMICALLY: same-second same-title bundles get distinct directories', () => {
     const opts = { targetDir: root, handoverContent: 'x', source: { actionableId: 'act-1' }, now: () => FIXED, data: makeDeps() }
     const a = assembleHandoverBundle(opts)
     const b = assembleHandoverBundle(opts)
     expect(a.bundleDir).not.toBe(b.bundleDir)
-    expect(b.bundleDir).toMatch(/-2$/)
+    expect(b.bundleDir).toMatch(/-[0-9a-f]{6}$/) // random-suffix retry, no overwrite
     expect(existsSync(a.handoverPath)).toBe(true)
     expect(existsSync(b.handoverPath)).toBe(true)
+    expect(a.bundleId).not.toBe(b.bundleId)
+  })
+
+  it('rejects a protected target directory', () => {
+    expect(() =>
+      assembleHandoverBundle({
+        targetDir: root,
+        handoverContent: 'x',
+        source: {},
+        now: () => FIXED,
+        data: makeDeps(),
+        extraProtectedPaths: [root],
+      })
+    ).toThrow(/protected location/i)
+  })
+
+  it('rejects a symlinked/junction "handover" directory (no write-through escape)', () => {
+    const outside = mkdtempSync(join(tmpdir(), 'handover-outside-'))
+    try {
+      // <target>/handover → junction to a directory OUTSIDE the target.
+      symlinkSync(outside, join(root, 'handover'), 'junction')
+      expect(() =>
+        assembleHandoverBundle({
+          targetDir: root,
+          handoverContent: 'x',
+          source: { actionableId: 'act-1' },
+          now: () => FIXED,
+          data: makeDeps(),
+        })
+      ).toThrow(/link or not a directory/i)
+    } finally {
+      rmSync(outside, { recursive: true, force: true })
+    }
   })
 
   it('degrades gracefully when the source has no transcript/meeting', () => {
@@ -174,8 +255,13 @@ describe('assembleHandoverBundle', () => {
 
 describe('runHandoverAgent', () => {
   let bundleDir: string
+  let record: BundleRecord
+  const lookup = (id: string) => (id === 'bundle-1' ? record : undefined)
+
   beforeEach(() => {
+    resetHandoverRegistry()
     bundleDir = mkdtempSync(join(tmpdir(), 'handover-run-'))
+    record = { bundleDir, targetDir: bundleDir, createdAt: FIXED.toISOString() }
   })
   afterEach(() => {
     rmSync(bundleDir, { recursive: true, force: true })
@@ -186,18 +272,19 @@ describe('runHandoverAgent', () => {
     label: 'Claude Code',
     capabilities: () => new Set(['generate', 'chat', 'agentic'] as any),
     authStatus: async () => ({ configured: true, method: 'cli-login' as const }),
-    generate: async () => result,
-    chat: async () => result,
+    generate: vi.fn(async () => result),
+    chat: vi.fn(async () => result),
   })
 
   it('runs the agent, writes RUN.log, and emits started+completed on success', async () => {
     const events: string[] = []
+    const brain = mockBrain('Did the work.')
     const res = await runHandoverAgent({
-      bundleDir,
-      targetDir: bundleDir,
+      bundleId: 'bundle-1',
       now: () => at(9, 30, 0),
-      resolveBrain: async () => mockBrain('Did the work.') as any,
+      resolveBrain: async () => brain as any,
       emit: (type) => events.push(type),
+      lookupBundle: lookup,
     })
     expect(res.ok).toBe(true)
     expect(res.brainId).toBe('claude-code')
@@ -209,14 +296,81 @@ describe('runHandoverAgent', () => {
     expect(log).toContain('HANDOVER RUN COMPLETED')
   })
 
+  it('passes the validated targetDir as the generation cwd (agent runs in the repo)', async () => {
+    const brain = mockBrain('ok')
+    await runHandoverAgent({
+      bundleId: 'bundle-1',
+      resolveBrain: async () => brain as any,
+      emit: () => {},
+      lookupBundle: lookup,
+    })
+    expect(brain.generate).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ cwd: bundleDir }))
+  })
+
+  it('rejects a forged/unknown bundle id (never accepts renderer paths)', async () => {
+    const events: string[] = []
+    const brain = mockBrain('should not run')
+    const res = await runHandoverAgent({
+      bundleId: 'C:\\anywhere\\i\\want', // a path smuggled as an id resolves to nothing
+      resolveBrain: async () => brain as any,
+      emit: (type) => events.push(type),
+      lookupBundle: lookup,
+    })
+    expect(res.ok).toBe(false)
+    expect(res.error).toMatch(/unknown handover bundle/i)
+    expect(brain.generate).not.toHaveBeenCalled()
+    expect(events).toEqual(['handover:run-failed'])
+  })
+
+  it('rejects a second concurrent run on the same bundle', async () => {
+    let release!: (v: string | null) => void
+    const gate = new Promise<string | null>((r) => (release = r))
+    const brain = { ...mockBrain('x'), generate: vi.fn(() => gate) }
+
+    const first = runHandoverAgent({
+      bundleId: 'bundle-1',
+      resolveBrain: async () => brain as any,
+      emit: () => {},
+      lookupBundle: lookup,
+    })
+    // Give the first run a tick to acquire the active-run slot.
+    await new Promise((r) => setTimeout(r, 10))
+    const second = await runHandoverAgent({
+      bundleId: 'bundle-1',
+      resolveBrain: async () => brain as any,
+      emit: () => {},
+      lookupBundle: lookup,
+    })
+    expect(second.ok).toBe(false)
+    expect(second.error).toMatch(/already has an agent run in progress/i)
+
+    release('done')
+    const firstRes = await first
+    expect(firstRes.ok).toBe(true)
+    expect(brain.generate).toHaveBeenCalledTimes(1)
+  })
+
+  it('fails closed when the resolved brain is not agentic (no silent wrong-dir run)', async () => {
+    const nonAgentic = { ...mockBrain('x'), capabilities: () => new Set(['generate', 'chat'] as any) }
+    const res = await runHandoverAgent({
+      bundleId: 'bundle-1',
+      resolveBrain: async () => nonAgentic as any,
+      emit: () => {},
+      lookupBundle: lookup,
+    })
+    expect(res.ok).toBe(false)
+    expect(res.error).toMatch(/cannot run in a working directory/i)
+    expect(nonAgentic.generate).not.toHaveBeenCalled()
+  })
+
   it('treats a null generate() as a surfaced failure (never silence)', async () => {
     const events: string[] = []
     const res = await runHandoverAgent({
-      bundleDir,
-      targetDir: bundleDir,
+      bundleId: 'bundle-1',
       now: () => at(9, 30, 0),
       resolveBrain: async () => mockBrain(null) as any,
       emit: (type) => events.push(type),
+      lookupBundle: lookup,
     })
     expect(res.ok).toBe(false)
     expect(res.error).toMatch(/no output/i)
@@ -227,11 +381,11 @@ describe('runHandoverAgent', () => {
   it('fails cleanly when no agentic brain is available', async () => {
     const events: string[] = []
     const res = await runHandoverAgent({
-      bundleDir,
-      targetDir: bundleDir,
+      bundleId: 'bundle-1',
       now: () => at(9, 30, 0),
       resolveBrain: async () => null,
       emit: (type) => events.push(type),
+      lookupBundle: lookup,
     })
     expect(res.ok).toBe(false)
     expect(res.brainId).toBe(null)
@@ -242,12 +396,19 @@ describe('runHandoverAgent', () => {
   it('never rethrows even if generate() violates its contract and throws', async () => {
     const throwing = { ...mockBrain('x'), generate: async () => { throw new Error('boom') } }
     const res = await runHandoverAgent({
-      bundleDir,
-      targetDir: bundleDir,
+      bundleId: 'bundle-1',
       now: () => at(9, 30, 0),
       resolveBrain: async () => throwing as any,
       emit: () => {},
+      lookupBundle: lookup,
     })
     expect(res.ok).toBe(false)
+  })
+
+  it('releases the active-run slot after a run finishes (a later run is allowed)', async () => {
+    const brain = mockBrain('first')
+    await runHandoverAgent({ bundleId: 'bundle-1', resolveBrain: async () => brain as any, emit: () => {}, lookupBundle: lookup })
+    const again = await runHandoverAgent({ bundleId: 'bundle-1', resolveBrain: async () => brain as any, emit: () => {}, lookupBundle: lookup })
+    expect(again.ok).toBe(true)
   })
 })
