@@ -601,10 +601,23 @@ export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> 
     // Yield before heavy database work
     await yieldToEventLoop()
 
-    // Upsert all meetings atomically in a single transaction
-    // This ensures all-or-nothing behavior - if any meeting fails, all are rolled back
+    // CS/H7 FIX: Write meetings in chunks, yielding to the event loop between
+    // chunks, so the sync never blocks the main process for a long stretch.
+    // A single transaction over ~1800 meetings held the main thread long enough
+    // that ALL IPC (recordings list, meeting lookups, refresh) stalled — the
+    // renderer appeared frozen, row chrome vanished and Refresh spun. Chunking
+    // keeps each transaction short and lets pending IPC run in between.
+    // Trade-off: per-chunk transactions instead of one all-or-nothing transaction;
+    // a mid-sync failure can leave earlier chunks committed, which is acceptable
+    // because the next sync re-upserts every meeting idempotently.
+    const DB_CHUNK_SIZE = 200
     try {
-      upsertMeetingsBatch(meetings)
+      for (let i = 0; i < meetings.length; i += DB_CHUNK_SIZE) {
+        upsertMeetingsBatch(meetings.slice(i, i + DB_CHUNK_SIZE))
+        if (i + DB_CHUNK_SIZE < meetings.length) {
+          await yieldToEventLoop()
+        }
+      }
     } catch (dbError) {
       console.error('Failed to save meetings to database:', dbError)
       throw new Error(`Database error: ${dbError instanceof Error ? dbError.message : 'Unknown database error'}`)

@@ -391,8 +391,22 @@ export function Library() {
         const newTranscripts = new Map<string, Transcript>(Object.entries(transcriptsObj) as [string, Transcript][])
         const newMeetings = new Map<string, Meeting>(Object.entries(meetingsObj) as [string, Meeting][])
 
-        setTranscripts(newTranscripts)
-        setMeetings(newMeetings)
+        // H7 FIX: Merge into the previous maps instead of replacing them wholesale.
+        // A refresh (or a background calendar sync that momentarily starves the main
+        // process) can return a transient subset — or briefly empty — enrichment
+        // result. Replacing the map on every load made the calendar/meeting chip and
+        // other meeting-derived chrome flicker or vanish mid-refresh. Merging keeps
+        // last-known meeting/transcript data on the rows so the chrome stays stable.
+        setTranscripts((prev) => {
+          const merged = new Map(prev)
+          for (const [id, t] of newTranscripts) merged.set(id, t)
+          return merged
+        })
+        setMeetings((prev) => {
+          const merged = new Map(prev)
+          for (const [id, m] of newMeetings) merged.set(id, m)
+          return merged
+        })
       } catch (e) {
         if (signal.aborted) return
         console.error('[Library] Failed to load enrichment data:', e)

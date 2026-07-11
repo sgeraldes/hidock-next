@@ -11,6 +11,7 @@ import { NavigationLogger, initInteractionLogger, initErrorLogger, cleanupQAMoni
 import { lazyWithRetry } from '@/lib/lazyWithRetry'
 import { useTheme } from '@/hooks/useTheme'
 import { ClipboardCapture } from '@/hooks/useClipboardCapture'
+import { persistRoute, getInitialRoute } from '@/lib/routePersistence'
 
 // Lazy load all page components for code splitting
 // Each page becomes a separate chunk, reducing initial bundle size
@@ -53,6 +54,30 @@ export function GlobalAssistant(): React.ReactElement | null {
       </Suspense>
     </FloatingAssistant>
   )
+}
+
+/**
+ * H8 FIX: Preserve the user's current route across background-triggered reloads.
+ * Records the active route to sessionStorage on every change so `RootRedirect`
+ * can restore it after a reload instead of snapping back to the default page.
+ * See src/lib/routePersistence.ts for the root-cause rationale.
+ */
+function RoutePersistence(): null {
+  const location = useLocation()
+
+  useEffect(() => {
+    persistRoute(location.pathname + location.search)
+  }, [location.pathname, location.search])
+
+  return null
+}
+
+/**
+ * H8 FIX: Redirect the root path to the last active route (if any) rather than
+ * always forcing the default page. Falls back to the default on a fresh session.
+ */
+function RootRedirect(): React.ReactElement {
+  return <Navigate to={getInitialRoute()} replace />
 }
 
 function App(): React.ReactElement {
@@ -111,8 +136,9 @@ function App(): React.ReactElement {
       <SecurityWarningBanner />
       <Layout>
         <NavigationLogger />
+        <RoutePersistence />
         <Routes>
-          <Route path="/" element={<Navigate to="/today" replace />} />
+          <Route path="/" element={<RootRedirect />} />
           <Route
             path="/today"
             element={

@@ -506,10 +506,26 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
       let deviceRecs: HiDockRecording[] = memoryCachedDeviceRecs
       if (needsDeviceFetch) {
         try {
-          deviceRecs = await deviceService.listRecordings(undefined, forceRefresh)
+          // H7 FIX: Race the device fetch against a timeout so a hung USB read
+          // (e.g. while the main process is briefly starved by a heavy background
+          // task like a calendar sync) can NEVER leave the loading counter elevated
+          // forever. Without this, a never-resolving listRecordings() promise would
+          // skip the catch block, keep `loadingRef` locked, and spin the Refresh
+          // indicator indefinitely. On timeout we fall back to the cached data.
+          const DEVICE_FETCH_TIMEOUT_MS = 60000
+          deviceRecs = await Promise.race([
+            deviceService.listRecordings(undefined, forceRefresh),
+            new Promise<HiDockRecording[]>((_, reject) =>
+              setTimeout(
+                () => reject(new Error('Device recording fetch timed out')),
+                DEVICE_FETCH_TIMEOUT_MS
+              )
+            )
+          ])
         } catch (deviceError) {
           console.warn('[useUnifiedRecordings] Failed to get device recordings:', deviceError)
-          // Continue with cached data
+          // Continue with cached data — deviceRecs stays as the in-memory cache
+          deviceRecs = memoryCachedDeviceRecs
         }
       }
 
