@@ -96,7 +96,22 @@ function scheduleIngest(): void {
     ingestTimer = null
     ingestFromDbTranscripts()
       .then((r) => {
-        if (r.ingested > 0) console.log(`[GraphSync] Auto-ingested ${r.ingested} new transcript(s) into the graph`)
+        if (r.ingested > 0) {
+          console.log(`[GraphSync] Auto-ingested ${r.ingested} new transcript(s) into the graph`)
+          // Announce that the graph ACTUALLY changed — consumers caching graph
+          // lookups (e.g. rag.ts's entity-detection index) invalidate on THIS,
+          // not on entity:transcript-ready, which fires ~60s BEFORE the ingest
+          // commits and would re-cache the old graph.
+          try {
+            getEventBus().emitDomainEvent({
+              type: 'graph:ingested',
+              timestamp: new Date().toISOString(),
+              payload: { ingested: r.ingested },
+            })
+          } catch (e) {
+            console.warn('[GraphSync] graph:ingested emit failed:', e)
+          }
+        }
       })
       .catch((e) => {
         // No provider configured (or a transient LLM error) — never fatal.

@@ -8,7 +8,8 @@ import { getOllamaService, OllamaChatMessage } from './ollama'
 import { getChatLLMService } from './chat-llm'
 import { getEmbeddingsService } from './embeddings'
 import { getDatabase, queryOne, queryAll, escapeLikePattern } from './database'
-import { accentFoldedKey } from './entity-normalize'
+import { stripDiacritics } from './entity-normalize'
+import type { BrainId } from './brains/types'
 import { Result, success, error } from '../types/api'
 
 interface ChatContext {
@@ -78,7 +79,7 @@ export function trimHistoryByTokens(
  * Expressed in the same estimated tokens as {@link trimHistoryByTokens} so graph
  * facts are trimmed within the overall token budget for the turn.
  */
-const GRAPH_FACT_TOKEN_BUDGET: Record<string, number> = {
+const GRAPH_FACT_TOKEN_BUDGET: Partial<Record<BrainId, number>> = {
   'gemini-api': 1500,
   'gemini-cli': 1500,
   'claude-code': 1500,
@@ -90,85 +91,100 @@ const DEFAULT_GRAPH_FACT_TOKEN_BUDGET = 1000
 
 /**
  * The graph-fact token budget for the brain that will actually serve this chat.
- * Preferred source: BrainRouter.resolvePrimaryChatBrainId() — the router's own
- * primary-selection logic, kept in sync with what BrainRouter.chat actually does
- * (feature-detected: the helper ships with the chat-routing fix and may not be
- * present yet). Fallback: the same config read the router's default resolution
- * uses (taskRouting.chat → defaultBrain → gemini-api). Lazy + defensive: both
- * paths pull in electron, so any failure degrades to the default budget.
+ * Source of truth: BrainRouter.resolvePrimaryChatBrainId('chat') — the router's
+ * OWN primary-selection logic, so the budget always keys off the brain that
+ * really answers (taskRouting.chat → defaultBrain → capability chain), never a
+ * diverging config read. The helper is ASYNC — it must be awaited, or the key
+ * would be a Promise and every call would silently get the default budget.
+ * Lazy + defensive: the brains module pulls in electron, so any failure
+ * degrades to the default budget.
  */
 async function graphFactTokenBudget(): Promise<number> {
   try {
     const { getBrainRouter } = await import('./brains')
-    const router = getBrainRouter() as unknown as {
-      resolvePrimaryChatBrainId?: () => string | null | undefined
-    }
-    if (typeof router?.resolvePrimaryChatBrainId === 'function') {
-      const id = router.resolvePrimaryChatBrainId()
-      if (id) return GRAPH_FACT_TOKEN_BUDGET[id] ?? DEFAULT_GRAPH_FACT_TOKEN_BUDGET
-    }
+    const id: BrainId = await getBrainRouter().resolvePrimaryChatBrainId('chat')
+    if (id) return GRAPH_FACT_TOKEN_BUDGET[id] ?? DEFAULT_GRAPH_FACT_TOKEN_BUDGET
   } catch {
-    /* fall through to the config read */
+    /* router unavailable — degrade to the default budget */
   }
-  // TODO(brains): remove this config-read fallback once
-  // BrainRouter.resolvePrimaryChatBrainId() has landed with the chat-routing fix.
-  try {
-    const { getConfig } = await import('./config')
-    const brains = getConfig().brains
-    const brainId = (brains?.taskRouting?.chat ?? brains?.defaultBrain ?? 'gemini-api') as string
-    return GRAPH_FACT_TOKEN_BUDGET[brainId] ?? DEFAULT_GRAPH_FACT_TOKEN_BUDGET
-  } catch {
-    return DEFAULT_GRAPH_FACT_TOKEN_BUDGET
-  }
+  return DEFAULT_GRAPH_FACT_TOKEN_BUDGET
 }
 
 /**
- * Tokenized normalization key: accent-fold (entity-resolver tier), then reduce
- * every non-letter/number run to a single space. Matching on these keys is
- * whole-token by construction — "ana" can never match inside "banana", and
- * punctuation adjacent to a name ("ping Yara,") does not break the match.
+ * Exact tokenized key: NFC-normalize, lowercase, and reduce every
+ * non-letter/number run to a single space — diacritics are KEPT ('peña' stays
+ * 'peña'). Matching on these keys is whole-token by construction — "ana" can
+ * never match inside "banana", and punctuation adjacent to a name ("ping
+ * Yara,") does not break the match.
  */
-function tokenizedKey(text: string): string {
-  return accentFoldedKey(text)
+function tokenizedExactKey(text: string): string {
+  return (text || '')
+    .normalize('NFC')
+    .toLowerCase()
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim()
 }
 
-/** Longest entity name (in tokens) the n-gram extraction can match. */
-const MAX_ENTITY_TOKENS = 4
+/** Hard cap on the n-gram window, whatever the longest indexed label is. */
+const MAX_ENTITY_TOKENS_CAP = 8
 /** Minimum key length considered an entity mention (guards "Al"/"Jo"). */
 const MIN_ENTITY_KEY = 3
 
+/** A candidate mention: the accent-folded lookup key + the exact spelling. */
+interface CandidateGram {
+  folded: string
+  exact: string
+}
+
 /**
- * Candidate entity keys in a message: every 1..{@link MAX_ENTITY_TOKENS}-token
- * n-gram of the tokenized message. Bounded by the message length (not by the
- * size of the graph/alias corpus), so entity detection is O(message) lookups.
+ * Candidate entity keys in a message: every 1..maxTokens-token n-gram of the
+ * tokenized message, carried in BOTH forms — accent-folded (the index lookup
+ * key) and exact (to disambiguate fold collisions like Peña vs Pena). Bounded
+ * by the message length (not by the size of the graph/alias corpus), so entity
+ * detection is O(message) lookups.
  */
-function candidateNgrams(message: string): Set<string> {
-  const tokens = tokenizedKey(message).split(' ').filter(Boolean)
-  const grams = new Set<string>()
+function candidateNgrams(message: string, maxTokens: number): CandidateGram[] {
+  const tokens = tokenizedExactKey(message).split(' ').filter(Boolean)
+  const seen = new Set<string>()
+  const grams: CandidateGram[] = []
   for (let i = 0; i < tokens.length; i++) {
-    let gram = ''
-    for (let n = 0; n < MAX_ENTITY_TOKENS && i + n < tokens.length; n++) {
-      gram = gram ? `${gram} ${tokens[i + n]}` : tokens[i + n]
-      if (gram.length >= MIN_ENTITY_KEY) grams.add(gram)
+    let exact = ''
+    for (let n = 0; n < maxTokens && i + n < tokens.length; n++) {
+      exact = exact ? `${exact} ${tokens[i + n]}` : tokens[i + n]
+      if (exact.length < MIN_ENTITY_KEY) continue
+      if (seen.has(exact)) continue
+      seen.add(exact)
+      grams.push({ folded: stripDiacritics(exact), exact })
     }
   }
   return grams
 }
 
 /**
- * Prebuilt lookup index for entity detection: tokenized person/project node
- * labels → node ids, and tokenized (non-rejected) contact-alias spellings →
- * contact ids. Built once and cached — NOT rebuilt per message — so each chat
- * turn costs O(message n-grams) map lookups instead of an O(nodes + aliases)
- * scan on the main process.
+ * Index entries under one accent-folded key, grouped by EXACT spelling — so a
+ * fold collision (Peña and Pena are different people but share the folded key
+ * 'pena') is visible at match time instead of silently injecting both.
+ */
+interface EntityIndexEntry {
+  exact: string
+  ids: string[]
+}
+
+/**
+ * Prebuilt lookup index for entity detection: accent-folded person/project node
+ * labels → node ids and (non-rejected) contact-alias spellings → contact ids,
+ * grouped by exact spelling under each folded key. Built once and cached — NOT
+ * rebuilt per message — so each chat turn costs O(message n-grams) map lookups
+ * instead of an O(nodes + aliases) scan on the main process. `maxLabelTokens`
+ * is the longest indexed name in tokens (capped) — the n-gram window is derived
+ * from it, so a 6-token project name is still matchable.
  */
 interface EntityDetectionIndex {
   builtAt: number
-  labelToNodes: Map<string, string[]>
-  aliasToContacts: Map<string, string[]>
+  labelToNodes: Map<string, EntityIndexEntry[]>
+  aliasToContacts: Map<string, EntityIndexEntry[]>
+  maxLabelTokens: number
 }
 
 let entityIndex: EntityDetectionIndex | null = null
@@ -182,9 +198,14 @@ export function resetEntityDetectionIndex(): void {
 }
 
 /**
- * Invalidate the cached index when entities change: contact identity edits and
- * new transcripts (graph ingest) both reshape names/aliases. Best-effort and
- * lazy (event-bus pulls in electron); the TTL above covers anything unwired.
+ * Invalidate the cached index when entities change:
+ *  - entity:contact-changed — contact renames/merges (graph-sync's node surgery
+ *    on this event is synchronous, so a rebuild after it sees the new graph);
+ *  - graph:ingested — emitted by graph-sync AFTER a debounced transcript ingest
+ *    COMMITS. (Deliberately NOT entity:transcript-ready: that fires ~60s BEFORE
+ *    the graph actually changes, so invalidating on it re-caches the old graph.)
+ * Best-effort and lazy (event-bus pulls in electron); the TTL above covers
+ * anything unwired.
  */
 function wireEntityIndexInvalidation(): void {
   if (entityIndexInvalidationWired) return
@@ -192,7 +213,7 @@ function wireEntityIndexInvalidation(): void {
   import('./event-bus')
     .then(({ getEventBus }) => {
       const bus = getEventBus()
-      for (const type of ['entity:contact-changed', 'entity:transcript-ready']) {
+      for (const type of ['entity:contact-changed', 'graph:ingested']) {
         bus.onDomainEvent(type, () => {
           entityIndex = null
         })
@@ -203,6 +224,19 @@ function wireEntityIndexInvalidation(): void {
     })
 }
 
+/** Add one spelling→ids mapping to a folded-key bucket, grouped by exact form. */
+function addIndexEntry(map: Map<string, EntityIndexEntry[]>, exact: string, id: string): void {
+  const folded = stripDiacritics(exact)
+  const entries = map.get(folded)
+  if (!entries) {
+    map.set(folded, [{ exact, ids: [id] }])
+    return
+  }
+  const entry = entries.find((e) => e.exact === exact)
+  if (entry) entry.ids.push(id)
+  else entries.push({ exact, ids: [id] })
+}
+
 function getEntityDetectionIndex(
   kg: typeof import('./knowledge-graph-service')
 ): EntityDetectionIndex {
@@ -211,38 +245,57 @@ function getEntityDetectionIndex(
     return entityIndex
   }
 
-  const labelToNodes = new Map<string, string[]>()
+  let maxLabelTokens = 1
+  const trackTokens = (exact: string): void => {
+    const count = exact.split(' ').length
+    if (count > maxLabelTokens) maxLabelTokens = Math.min(count, MAX_ENTITY_TOKENS_CAP)
+  }
+
+  const labelToNodes = new Map<string, EntityIndexEntry[]>()
   try {
     for (const n of [...kg.queryListNodes('person'), ...kg.queryListNodes('project')]) {
-      const key = tokenizedKey(n.label || '')
-      if (key.length < MIN_ENTITY_KEY) continue
-      const ids = labelToNodes.get(key)
-      if (ids) ids.push(n.id)
-      else labelToNodes.set(key, [n.id])
+      const exact = tokenizedExactKey(n.label || '')
+      if (exact.length < MIN_ENTITY_KEY) continue
+      addIndexEntry(labelToNodes, exact, n.id)
+      trackTokens(exact)
     }
   } catch (e) {
     console.warn('[RAG] graph label index skipped:', e)
   }
 
-  const aliasToContacts = new Map<string, string[]>()
+  const aliasToContacts = new Map<string, EntityIndexEntry[]>()
   try {
     const aliases = queryAll<{ alias: string; contact_id: string; source: string | null }>(
       'SELECT alias, contact_id, source FROM contact_aliases'
     )
     for (const a of aliases) {
       if (a.source === 'rejected') continue
-      const key = tokenizedKey(a.alias || '')
-      if (key.length < MIN_ENTITY_KEY) continue
-      const ids = aliasToContacts.get(key)
-      if (ids) ids.push(a.contact_id)
-      else aliasToContacts.set(key, [a.contact_id])
+      const exact = tokenizedExactKey(a.alias || '')
+      if (exact.length < MIN_ENTITY_KEY) continue
+      addIndexEntry(aliasToContacts, exact, a.contact_id)
+      trackTokens(exact)
     }
   } catch (e) {
     console.warn('[RAG] alias index skipped:', e)
   }
 
-  entityIndex = { builtAt: Date.now(), labelToNodes, aliasToContacts }
+  entityIndex = { builtAt: Date.now(), labelToNodes, aliasToContacts, maxLabelTokens }
   return entityIndex
+}
+
+/**
+ * Resolve one folded-key bucket against the mention's exact spelling. A single
+ * spelling in the bucket → that entry (this IS the accent-fold tier: "Yaravi"
+ * finds "Yaraví"). Multiple distinct spellings (fold collision — Peña vs Pena
+ * are different people) → prefer the entry whose exact spelling matches the
+ * message; with no exact match the mention is AMBIGUOUS and nothing is injected
+ * (never silently both).
+ */
+function pickEntryIds(entries: EntityIndexEntry[] | undefined, exactGram: string): string[] {
+  if (!entries || entries.length === 0) return []
+  if (entries.length === 1) return entries[0].ids
+  const exactHit = entries.find((e) => e.exact === exactGram)
+  return exactHit ? exactHit.ids : []
 }
 
 /**
@@ -251,31 +304,27 @@ function getEntityDetectionIndex(
  *   • accent/diacritic-folded person/project node labels (question "Yaravi" → node "Yaraví")
  *   • accent-folded known contact-alias spellings → that contact's graph node
  * Matching is whole-token n-gram lookup against the cached index — bounded by
- * the message, not the corpus. Dedup is handled by the caller. Fully defensive:
- * any store/DB failure yields [].
+ * the message, not the corpus — with fold-collision ambiguity resolved by exact
+ * spelling (see {@link pickEntryIds}). Dedup is handled by the caller. Fully
+ * defensive: any store/DB failure yields [].
  */
 function detectNormalizedEntities(
   message: string,
   kg: typeof import('./knowledge-graph-service')
 ): string[] {
   const ids: string[] = []
-  const grams = candidateNgrams(message)
-  if (grams.size === 0) return ids
   const index = getEntityDetectionIndex(kg)
+  const grams = candidateNgrams(message, index.maxLabelTokens)
 
   for (const gram of grams) {
-    const nodeIds = index.labelToNodes.get(gram)
-    if (nodeIds) ids.push(...nodeIds)
+    ids.push(...pickEntryIds(index.labelToNodes.get(gram.folded), gram.exact))
 
-    const contactIds = index.aliasToContacts.get(gram)
-    if (contactIds) {
-      for (const contactId of contactIds) {
-        try {
-          const nodeId = kg.resolveEntityToNodeId(contactId)
-          if (nodeId) ids.push(nodeId)
-        } catch (e) {
-          console.warn('[RAG] alias contact→node resolve skipped:', e)
-        }
+    for (const contactId of pickEntryIds(index.aliasToContacts.get(gram.folded), gram.exact)) {
+      try {
+        const nodeId = kg.resolveEntityToNodeId(contactId)
+        if (nodeId) ids.push(nodeId)
+      } catch (e) {
+        console.warn('[RAG] alias contact→node resolve skipped:', e)
       }
     }
   }

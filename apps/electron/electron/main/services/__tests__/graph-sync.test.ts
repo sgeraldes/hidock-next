@@ -11,14 +11,28 @@ import initSqlJs from 'sql.js'
 import { KnowledgeGraphStore } from '@hidock/knowledge-graph'
 
 // graph-sync pulls the graph service + event bus at import; stub them so the
-// pure surgery function can be tested in isolation.
+// pure surgery function can be tested in isolation. The event-bus mock records
+// subscriptions and emissions so the debounced-ingest emission can be verified.
 vi.mock('../knowledge-graph-service', () => ({
   getKnowledgeGraphStore: vi.fn(),
   ingestFromDbTranscripts: vi.fn()
 }))
-vi.mock('../event-bus', () => ({ getEventBus: vi.fn(() => ({ onDomainEvent: vi.fn() })) }))
+const busHandlers = new Map<string, Array<(event: unknown) => void>>()
+const mockEmitDomainEvent = vi.fn()
+vi.mock('../event-bus', () => ({
+  getEventBus: () => ({
+    onDomainEvent: (type: string, handler: (event: unknown) => void) => {
+      const arr = busHandlers.get(type) ?? []
+      arr.push(handler)
+      busHandlers.set(type, arr)
+      return () => {}
+    },
+    emitDomainEvent: mockEmitDomainEvent
+  })
+}))
 
-import { renameOrMergePersonNode } from '../graph-sync'
+import { renameOrMergePersonNode, startGraphSync } from '../graph-sync'
+import { ingestFromDbTranscripts } from '../knowledge-graph-service'
 
 function rowsFrom(result: any[]): any[] {
   if (!result || result.length === 0) return []
@@ -97,5 +111,58 @@ describe('renameOrMergePersonNode', () => {
     expect(renameOrMergePersonNode(store, 'Ghost', 'Phantom')).toBe('noop')
     store.upsertNode({ type: 'person', label: 'Alice' })
     expect(renameOrMergePersonNode(store, 'Alice', 'ALICE')).toBe('noop') // same norm key
+  })
+})
+
+describe('startGraphSync — graph:ingested emission (post-commit invalidation signal)', () => {
+  const fireTranscriptReady = (): void => {
+    for (const h of busHandlers.get('entity:transcript-ready') ?? []) {
+      h({ type: 'entity:transcript-ready', timestamp: new Date().toISOString(), payload: {} })
+    }
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    mockEmitDomainEvent.mockClear()
+    vi.mocked(ingestFromDbTranscripts).mockReset()
+    startGraphSync() // idempotent; handlers persist across tests
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('emits graph:ingested AFTER the debounced ingest commits — never on transcript-ready itself', async () => {
+    vi.mocked(ingestFromDbTranscripts).mockResolvedValue({ ingested: 2, skipped: 0, errors: [] })
+
+    fireTranscriptReady()
+    // Before the debounce elapses the graph has NOT changed — no emission.
+    expect(mockEmitDomainEvent).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    expect(ingestFromDbTranscripts).toHaveBeenCalledTimes(1)
+    expect(mockEmitDomainEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'graph:ingested', payload: { ingested: 2 } })
+    )
+  })
+
+  it('does NOT emit when the ingest found nothing new', async () => {
+    vi.mocked(ingestFromDbTranscripts).mockResolvedValue({ ingested: 0, skipped: 3, errors: [] })
+
+    fireTranscriptReady()
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    expect(ingestFromDbTranscripts).toHaveBeenCalledTimes(1)
+    expect(mockEmitDomainEvent).not.toHaveBeenCalled()
+  })
+
+  it('does NOT emit when the ingest fails (missing provider)', async () => {
+    vi.mocked(ingestFromDbTranscripts).mockRejectedValue(new Error('No AI provider configured'))
+
+    fireTranscriptReady()
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    expect(mockEmitDomainEvent).not.toHaveBeenCalled()
   })
 })

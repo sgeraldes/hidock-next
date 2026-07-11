@@ -7,9 +7,14 @@
  *       with WHOLE-TOKEN matching (no substring false positives: Ana≠banana, Ann≠annual),
  *   (c) injects a meeting's graph neighborhood when the chat is scoped to a meeting,
  *       resolving the app meeting id to its GRAPH NODE id first (distinct id spaces),
- *   (d) trims graph facts to a per-brain token budget, preferring the router's
- *       resolvePrimaryChatBrainId() when present and falling back to config,
- *   (e) does bounded work per message: cached entity index, not a per-message corpus scan.
+ *   (d) trims graph facts to a per-brain token budget keyed off the AWAITED
+ *       BrainRouter.resolvePrimaryChatBrainId('chat') (the contract is async —
+ *       a sync consumption would key on '[object Promise]' and always default),
+ *   (e) does bounded work per message: cached entity index (invalidated on
+ *       graph:ingested — post-commit — NOT on entity:transcript-ready), and
+ *   (f) resolves accent-fold collisions (Peña vs Pena) by exact spelling,
+ *       injecting neither when the mention is ambiguous, with the n-gram window
+ *       derived from the longest indexed label (6-token project names match).
  *
  * @vitest-environment node
  */
@@ -25,20 +30,23 @@ const kgMock = {
 }
 vi.mock('../knowledge-graph-service', () => kgMock)
 
-// --- config (per-brain budget lookup fallback) ---
-const mockBrains: { taskRouting: Record<string, string>; defaultBrain: string } = {
-  taskRouting: {},
-  defaultBrain: 'gemini-api',
-}
-vi.mock('../config', () => ({ getConfig: () => ({ brains: mockBrains }) }))
+// --- config (imported by the real chat-llm; rag.ts itself no longer reads it) ---
+vi.mock('../config', () => ({
+  getConfig: () => ({
+    brains: { taskRouting: {}, defaultBrain: 'gemini-api' },
+    transcription: { geminiApiKey: '' },
+    chat: { geminiModel: 'gemini-3.5-flash' },
+  }),
+}))
 
 // --- brains: the seam chat-llm.generate() forwards to (BrainRouter.chat), plus
-// the (feature-detected) resolvePrimaryChatBrainId budget source. The router
-// object is mutable so tests can add/remove the helper.
+// the ASYNC resolvePrimaryChatBrainId budget source — the REAL contract returns
+// Promise<BrainId>, so tests must mock it async to catch a sync consumption.
+// The router object is mutable so tests can swap/remove the resolver.
 const mockBrainChat = vi.fn().mockResolvedValue('AI Response')
 const mockRouter: {
   chat: typeof mockBrainChat
-  resolvePrimaryChatBrainId?: () => string | null | undefined
+  resolvePrimaryChatBrainId?: (task?: string) => Promise<string>
 } = { chat: mockBrainChat }
 vi.mock('../brains', () => ({ getBrainRouter: () => mockRouter }))
 
@@ -115,9 +123,8 @@ beforeEach(() => {
   resetRAGService()
   resetEntityDetectionIndex()
   aliasRows = []
-  mockBrains.taskRouting = {}
-  mockBrains.defaultBrain = 'gemini-api'
-  delete mockRouter.resolvePrimaryChatBrainId
+  // Default resolver: the async contract, answering gemini-api (budget 1500).
+  mockRouter.resolvePrimaryChatBrainId = vi.fn(async () => 'gemini-api')
 
   // Sensible defaults: nothing detected, empty facts, no nodes/aliases.
   kgMock.findMentionedEntity.mockReturnValue(null)
@@ -231,6 +238,84 @@ describe('buildGraphContext — whole-token matching (no substring false positiv
   })
 })
 
+describe('buildGraphContext — fold collisions + long labels (f)', () => {
+  it('a 6-token label matches: the n-gram window derives from the longest indexed label', async () => {
+    kgMock.queryListNodes.mockImplementation((type: string) =>
+      type === 'project'
+        ? [{ id: 'prjSur', label: 'Programa de Investigación Peña del Sur', type: 'project' }]
+        : []
+    )
+    kgMock.neighborhoodFacts.mockImplementation((id: string) => (id === 'prjSur' ? 'FACT-SUR' : ''))
+
+    // Unaccented query spelling — accent-fold still applies across all 6 tokens.
+    const parts = await buildGraphContext('any update on programa de investigacion pena del sur?')
+    expect(parts).toContain('FACT-SUR')
+  })
+
+  it('fold collision (Peña vs Pena are DIFFERENT people): the exact spelling wins', async () => {
+    kgMock.queryListNodes.mockImplementation((type: string) =>
+      type === 'person'
+        ? [
+            { id: 'pPenya', label: 'Peña', type: 'person' },
+            { id: 'pPena', label: 'Pena', type: 'person' },
+          ]
+        : []
+    )
+    kgMock.neighborhoodFacts.mockImplementation((id: string) =>
+      id === 'pPenya' ? 'FACT-PENYA' : id === 'pPena' ? 'FACT-PENA' : ''
+    )
+
+    const penya = await buildGraphContext('talk to Peña today')
+    expect(penya).toEqual(['FACT-PENYA']) // never both
+
+    const pena = await buildGraphContext('talk to Pena today')
+    expect(pena).toEqual(['FACT-PENA']) // never both
+  })
+
+  it('fold collision with NO exact spelling match injects neither (ambiguity declined)', async () => {
+    kgMock.queryListNodes.mockImplementation((type: string) =>
+      type === 'person'
+        ? [
+            { id: 'pPenya', label: 'Peña', type: 'person' },
+            { id: 'pPena', label: 'Pena', type: 'person' },
+          ]
+        : []
+    )
+    kgMock.neighborhoodFacts.mockReturnValue('SHOULD-NOT-APPEAR')
+
+    // 'Pèna' (grave accent) folds to the same key but exactly matches neither.
+    const parts = await buildGraphContext('talk to Pèna today')
+    expect(parts).toEqual([])
+  })
+
+  it('a fold collision among ALIASES is also resolved by exact spelling', async () => {
+    aliasRows = [
+      { alias: 'Peña', contact_id: 'cPenya', source: null },
+      { alias: 'Pena', contact_id: 'cPena', source: null },
+    ]
+    kgMock.resolveEntityToNodeId.mockImplementation((id: string) =>
+      id === 'cPenya' ? 'pPenya' : id === 'cPena' ? 'pPena' : null
+    )
+    kgMock.neighborhoodFacts.mockImplementation((id: string) =>
+      id === 'pPenya' ? 'FACT-PENYA' : id === 'pPena' ? 'FACT-PENA' : ''
+    )
+
+    expect(await buildGraphContext('ping Peña now')).toEqual(['FACT-PENYA'])
+    expect(await buildGraphContext('ping Pena now')).toEqual(['FACT-PENA'])
+  })
+
+  it('an accent-only mention still matches a single indexed spelling (no false ambiguity)', async () => {
+    // Only ONE spelling indexed — the fold tier must keep working: 'Yaravi'
+    // (message) → 'Yaraví' (node) is a single-entry bucket, not a collision.
+    kgMock.queryListNodes.mockImplementation((type: string) =>
+      type === 'person' ? [{ id: 'p2', label: 'Yaraví', type: 'person' }] : []
+    )
+    kgMock.neighborhoodFacts.mockImplementation((id: string) => (id === 'p2' ? 'FACT-YARAVI' : ''))
+
+    expect(await buildGraphContext('did Yaravi approve?')).toEqual(['FACT-YARAVI'])
+  })
+})
+
 describe('buildGraphContext — meeting scope resolves app id → graph node id', () => {
   it('resolves the meeting id to its node id before fetching facts', async () => {
     // Distinct id spaces: app meeting id 'meeting-123' vs graph node 'node-m1'.
@@ -274,9 +359,13 @@ describe('buildGraphContext — meeting scope resolves app id → graph node id'
   })
 })
 
-describe('buildGraphContext — per-brain token budget (d)', () => {
-  // Three matched person nodes, each ~300 estimated tokens (1200 chars).
-  const bigFact = 'x'.repeat(1200)
+describe('buildGraphContext — per-brain token budget from the AWAITED router (d)', () => {
+  // Three matched person nodes, each ~400 estimated tokens (1600 chars) — the
+  // fact size distinguishes ALL budget levels by count: ollama 500 → 1 fact,
+  // default 1000 → 2 facts, gemini-api 1500 → 3 facts. A sync consumption of
+  // the async resolver would key on '[object Promise]' → default (2 facts) and
+  // fail the ollama/gemini expectations below.
+  const bigFact = 'x'.repeat(1600)
   beforeEach(() => {
     kgMock.queryListNodes.mockImplementation((type: string) =>
       type === 'person'
@@ -290,39 +379,32 @@ describe('buildGraphContext — per-brain token budget (d)', () => {
     kgMock.neighborhoodFacts.mockReturnValue(bigFact)
   })
 
-  it('ollama (small budget=500 tok) admits only the first fact', async () => {
-    mockBrains.defaultBrain = 'ollama'
+  it("async resolver → 'ollama': budget 500 admits exactly ONE 400-token fact", async () => {
+    mockRouter.resolvePrimaryChatBrainId = vi.fn(async () => 'ollama')
     const parts = await buildGraphContext('Alpha Bravo Charlie all spoke')
     expect(parts).toHaveLength(1)
+    // The router is asked about the CHAT task, and its answer is awaited.
+    expect(mockRouter.resolvePrimaryChatBrainId).toHaveBeenCalledWith('chat')
   })
 
-  it('gemini-api (large budget=1500 tok) admits all three facts', async () => {
-    mockBrains.defaultBrain = 'gemini-api'
+  it("async resolver → 'gemini-api': budget 1500 admits all THREE facts", async () => {
+    mockRouter.resolvePrimaryChatBrainId = vi.fn(async () => 'gemini-api')
     const parts = await buildGraphContext('Alpha Bravo Charlie all spoke')
     expect(parts).toHaveLength(3)
   })
 
-  it('honours a per-task chat route over the default brain (config fallback path)', async () => {
-    mockBrains.defaultBrain = 'gemini-api'
-    mockBrains.taskRouting = { chat: 'ollama' }
+  it('degrades to the DEFAULT budget (1000 → two facts) when the router is unavailable', async () => {
+    delete mockRouter.resolvePrimaryChatBrainId
     const parts = await buildGraphContext('Alpha Bravo Charlie all spoke')
-    expect(parts).toHaveLength(1) // routed to ollama's small budget
+    expect(parts).toHaveLength(2)
   })
 
-  it('prefers BrainRouter.resolvePrimaryChatBrainId() over the config read when present', async () => {
-    // Config says gemini (budget 1500 → 3 facts) but the router — the source of
-    // truth for what actually serves the chat — says ollama (budget 500 → 1).
-    mockBrains.defaultBrain = 'gemini-api'
-    mockRouter.resolvePrimaryChatBrainId = () => 'ollama'
+  it('degrades to the DEFAULT budget when the resolver rejects', async () => {
+    mockRouter.resolvePrimaryChatBrainId = vi.fn(async () => {
+      throw new Error('router exploded')
+    })
     const parts = await buildGraphContext('Alpha Bravo Charlie all spoke')
-    expect(parts).toHaveLength(1)
-  })
-
-  it('falls back to the config read when the router helper returns nothing', async () => {
-    mockBrains.defaultBrain = 'gemini-api'
-    mockRouter.resolvePrimaryChatBrainId = () => null
-    const parts = await buildGraphContext('Alpha Bravo Charlie all spoke')
-    expect(parts).toHaveLength(3) // config path: gemini budget
+    expect(parts).toHaveLength(2)
   })
 })
 
@@ -358,6 +440,41 @@ describe('buildGraphContext — bounded work (cached entity index)', () => {
     for (const h of domainHandlers.get('entity:contact-changed') ?? []) h()
     await buildGraphContext('two')
     expect(kgMock.queryListNodes).toHaveBeenCalledTimes(4) // rebuilt after event
+  })
+
+  it('invalidates on graph:ingested (post-commit), NOT on entity:transcript-ready (pre-ingest)', async () => {
+    // Old graph: only Alice.
+    kgMock.queryListNodes.mockImplementation((type: string) =>
+      type === 'person' ? [{ id: 'pAlice', label: 'Alice', type: 'person' }] : []
+    )
+    kgMock.neighborhoodFacts.mockImplementation((id: string) =>
+      id === 'pAlice' ? 'FACT-ALICE' : id === 'pBob' ? 'FACT-BOB' : ''
+    )
+    expect(await buildGraphContext('about Alice')).toContain('FACT-ALICE')
+    await new Promise((r) => setTimeout(r, 0)) // lazy event-bus wire settles
+
+    // rag must NOT subscribe to transcript-ready — it fires ~60s BEFORE the
+    // debounced graph ingest commits; invalidating there re-caches the OLD graph.
+    expect(domainHandlers.has('entity:transcript-ready')).toBe(false)
+    expect(domainHandlers.get('graph:ingested')?.length).toBeGreaterThan(0)
+
+    // The graph now ALSO has Bob (as if the ingest just committed)…
+    kgMock.queryListNodes.mockImplementation((type: string) =>
+      type === 'person'
+        ? [
+            { id: 'pAlice', label: 'Alice', type: 'person' },
+            { id: 'pBob', label: 'Bob', type: 'person' },
+          ]
+        : []
+    )
+
+    // …but a chat BEFORE the post-commit signal still sees the cached old index.
+    expect(await buildGraphContext('about Bob')).toEqual([])
+
+    // graph:ingested (emitted by graph-sync AFTER the ingest commits) → rebuild:
+    // the next chat sees the new entity.
+    for (const h of domainHandlers.get('graph:ingested') ?? []) h()
+    expect(await buildGraphContext('about Bob')).toContain('FACT-BOB')
   })
 
   it('scale: hundreds of nodes/aliases, repeated messages stay ms-bounded', async () => {
