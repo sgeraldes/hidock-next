@@ -16,8 +16,8 @@ Legend: **P0** blocking · **P1** quality/noise · **P2** polish/nice-to-have.
 - [x] **H4 (P1)** **REMOVE the on-hover checkbox** from library rows entirely (no reveal-on-hover). — DONE (`f1db2204`): `SourceRow` renders no checkbox in any state; props kept for caller compat; tests rewritten (15/15).
 - [x] **H5 (P0)** Kill the ugly **"Loading waveform…" overlay**. Generate peaks ONCE, **CACHE ON DISK**, load instantly. — DONE (`e5c6807d`): new `waveform-cache.ts` (+IPC+preload) stores one JSON per recording at `<userData>/cache/waveform/<id>.json`; `useAudioPlayback` loads from cache first (no loading state), computes+persists on miss; half-drawn overlay replaced by a clean "Preparing waveform…" placeholder. ⚠️ cache/IPC is main-process — needs app restart to activate.
 - [x] **H6 (P0)** **"Transcript not available" + no-color waveform** when selecting via sidebar Library nav. — DONE (`e5c6807d`): SourceReader fetches the transcript directly (`transcripts.getByRecordingId`) as a fallback → feeds speaker-range colors AND the viewer, so both render on first paint regardless of selection path.
-- [ ] **H7 (P0)** Meeting/calendar row icons randomly disappear; lists take forever / never load; **Refresh spins with no activity**. Investigate the data-loading / re-render (was likely main-process saturation from transcription — now cancelled; verify + harden).
-- [ ] **H8 (P0)** App **randomly auto-navigates to Today** with no input (looks like a full reload resetting the route). Find + stop the unwanted navigation/reload.
+- [x] **H7 (P0)** Meeting/calendar row icons randomly disappear; lists take forever / never load; **Refresh spins with no activity**. — DONE (`eeed308d`): the P0 root cause was a synchronous ~1878-meeting calendar-sync upsert blocking the main event loop; now chunked (200/txn) with `yieldToEventLoop()`, plus a 60s device-fetch timeout so a hung read can't leave Refresh spinning. Verified live: list icons render, no phantom spin.
+- [x] **H8 (P0)** App **randomly auto-navigates to Today** with no input (full reload resetting the route). — DONE (`eeed308d`): `routePersistence` records the active route to sessionStorage and `RootRedirect` restores it after a background reload instead of snapping to Today. Verified live: the app held `#/library` through a full dev-server restart.
 - [ ] **H9 (P1 feature)** **Claude Code handover** currently only copies to clipboard / writes a file — build it PROPERLY (a real, usable handoff).
 - [ ] **H10 (P1 feature)** **Pluggable AI "brains"**: add official **Claude Code SDK**, **Codex SDK**, **Gemini CLI SDK** as toggleable provider options/add-ons alongside the current Gemini-API-key path, for all in-app LLM work (transcription analysis, summaries, RAG, handover). A provider abstraction + Settings toggle.
 
@@ -40,10 +40,10 @@ Owner's four complaints (images #119–121) — all confirmed fixed via live DOM
 TRIPWIRE: the sources list must never horizontally scroll and its row separators must span the full panel width (no left/right inset). Verify with a DOM measure, not eyeballing, if re-touched.
 
 ## Track A — Titlebar / chrome polish (agent-flagged gaps)
-- [ ] **A1 (P1)** Wire **⌘K** to focus/open the titlebar search (placeholder only today).
-- [ ] **A2 (P1)** Notifications 🔔: idle click is a no-op + duplicates the sidebar Operations badge — give it a real popover (recent ops/notifications) and reconcile with the sidebar badge.
-- [ ] **A3 (P2)** Activity ⚡: unify open-state with the still-mounted sidebar `ActivityLogPanel` (two entry points, one state).
-- [ ] **A4 (P2)** User menu: **About** → a real dialog (version, repo/links); make the **Brand** a clickable "home" affordance (→ Today).
+- [x] **A1 (P1)** Wire **⌘K** to focus/open the titlebar search. — DONE (`022de7a7`): ⌘K/Ctrl+K keydown focuses+selects the titlebar search (guards against stealing focus from other fields/modals).
+- [x] **A2 (P1)** Notifications 🔔 real popover. — DONE (`022de7a7`): NotificationsButton with a recent-ops popover.
+- [x] **A3 (P2)** Activity ⚡ unify open-state. — DONE (`022de7a7` + `a5132b5a`/H15): the titlebar ⚡ owns the single overlay; the sidebar ActivityLogPanel was removed entirely, so there is one entry point + one state.
+- [x] **A4 (P2)** User menu **About** dialog + **Brand** = home affordance. — DONE (`022de7a7`): About dialog in the UserMenu; Brand has an `onHome` → navigate('/today').
 - [ ] **A5 (P2)** Titlebar responsive pass: verify brand/search/cluster at narrow widths + collapsed rail; both themes.
 
 ## Track B — Waveform / meeting-timeline follow-ups
