@@ -204,10 +204,10 @@ describe('resolveClaudeCommand (trusted-root, identity-verified resolution)', ()
     ).toBe('claude')
   })
 
-  it('config override WINS outright when the file exists (explicit user consent, no auto-discovery)', async () => {
+  it('a VALID config override is identity-VERIFIED first, then wins over trusted roots', async () => {
     const CUSTOM = 'D:\\my-tools\\claude-custom.exe'
     const fileExists = (p: string) => p === CUSTOM || p === REAL
-    const verify = vi.fn(async () => true)
+    const verify = vi.fn(async (p: string) => p === CUSTOM || p === REAL)
     const out = await resolveClaudeCommand(env, {
       platform: 'win32',
       fileExists,
@@ -215,8 +215,91 @@ describe('resolveClaudeCommand (trusted-root, identity-verified resolution)', ()
       getConfiguredPath: () => CUSTOM,
       trustedRoots: [TRUSTED],
     })
-    expect(out).toBe(CUSTOM) // beats the trusted-root candidate
-    expect(verify).not.toHaveBeenCalled() // no discovery probing needed
+    expect(out).toBe(CUSTOM) // beats the trusted-root candidate…
+    expect(verify).toHaveBeenCalledWith(CUSTOM) // …but only AFTER identity verification
+  })
+
+  it('an override pointing at a NON-Claude exe is rejected (verify called, never selected)', async () => {
+    // The renderer-exposed setCredential channel can store any path — the
+    // signature check is the trust boundary, not "user consent".
+    const EVIL = 'D:\\payload\\claude.exe'
+    const fileExists = (p: string) => p === EVIL || p === REAL
+    const verify = vi.fn(async (p: string) => p === REAL) // EVIL fails the signature
+    const out = await resolveClaudeCommand(env, {
+      platform: 'win32',
+      fileExists,
+      verify,
+      getConfiguredPath: () => EVIL,
+      trustedRoots: [TRUSTED],
+    })
+    expect(verify).toHaveBeenCalledWith(EVIL) // bounded identity probe ran…
+    expect(out).toBe(REAL) // …failed → fell through to the trusted root
+  })
+
+  it('rejects a RELATIVE override without any filesystem or execution contact', async () => {
+    const fileExists = vi.fn((p: string) => p === REAL)
+    const verify = vi.fn(async (p: string) => p === REAL)
+    const out = await resolveClaudeCommand(env, {
+      platform: 'win32',
+      fileExists,
+      verify,
+      getConfiguredPath: () => 'tools\\claude.exe',
+      trustedRoots: [TRUSTED],
+    })
+    expect(out).toBe(REAL) // fell through to trusted roots
+    expect(verify).not.toHaveBeenCalledWith('tools\\claude.exe')
+    expect(fileExists).not.toHaveBeenCalledWith('tools\\claude.exe')
+  })
+
+  it('rejects a UNC/network override without any filesystem or execution contact', async () => {
+    const UNC = '\\\\evil-server\\share\\claude.exe'
+    const fileExists = vi.fn(() => false)
+    const verify = vi.fn(async () => true)
+    const out = await resolveClaudeCommand(env, {
+      platform: 'win32',
+      fileExists,
+      verify,
+      getConfiguredPath: () => UNC,
+      trustedRoots: [TRUSTED],
+    })
+    expect(out).toBe('claude')
+    expect(verify).not.toHaveBeenCalled()
+    expect(fileExists).not.toHaveBeenCalledWith(UNC)
+  })
+
+  it('rejects a non-.exe/.com override on win32 (wrapper shims can smuggle anything)', async () => {
+    const SHIM = 'C:\\tools\\claude.cmd'
+    const fileExists = vi.fn(() => false)
+    const verify = vi.fn(async () => true)
+    const out = await resolveClaudeCommand(env, {
+      platform: 'win32',
+      fileExists,
+      verify,
+      getConfiguredPath: () => SHIM,
+      trustedRoots: [TRUSTED],
+    })
+    expect(out).toBe('claude')
+    expect(verify).not.toHaveBeenCalled()
+    expect(fileExists).not.toHaveBeenCalledWith(SHIM)
+  })
+
+  it('generate never spawns a rejected override (end-to-end through the brain)', async () => {
+    const EVIL = 'D:\\payload\\claude.exe'
+    // Wire the brain to the REAL resolver with a failing-override scenario.
+    const resolveCommand = () =>
+      resolveClaudeCommand(env, {
+        platform: 'win32',
+        fileExists: (p: string) => p === EVIL,
+        verify: async () => false, // the payload fails the signature
+        getConfiguredPath: () => EVIL,
+        trustedRoots: [TRUSTED],
+      })
+    const spawn = makeFakeSpawn({ stdout: 'answer', code: 0 })
+    const brain = new ClaudeCodeBrain({ spawn: asSpawn(spawn.fn), env: {}, resolveCommand })
+    expect(await brain.generate([{ role: 'user', content: 'q' }])).toBe('answer')
+    expect(spawn.calls.length).toBeGreaterThan(0)
+    expect(spawn.calls.every((c) => c.command === 'claude')).toBe(true)
+    expect(spawn.calls.some((c) => c.command === EVIL)).toBe(false)
   })
 
   it('ignores a configured override whose file does not exist (falls through to trusted roots)', async () => {
@@ -262,7 +345,7 @@ describe('resolveClaudeCommand (trusted-root, identity-verified resolution)', ()
     ).toBe('claude')
   })
 
-  it('is a no-op off win32 (POSIX resolves natively) — but the explicit override still wins', async () => {
+  it('is a no-op off win32 (POSIX resolves natively) — a VERIFIED override still wins', async () => {
     const fileExists = () => true
     const verify = vi.fn(async () => true)
     expect(
@@ -275,7 +358,7 @@ describe('resolveClaudeCommand (trusted-root, identity-verified resolution)', ()
       })
     ).toBe('claude')
     expect(verify).not.toHaveBeenCalled()
-    // The explicit user override applies on any platform.
+    // The explicit user override applies on any platform — after verification.
     expect(
       await resolveClaudeCommand(env, {
         platform: 'linux',
@@ -285,6 +368,7 @@ describe('resolveClaudeCommand (trusted-root, identity-verified resolution)', ()
         trustedRoots: [TRUSTED],
       })
     ).toBe('/opt/claude/claude')
+    expect(verify).toHaveBeenCalledWith('/opt/claude/claude')
   })
 })
 

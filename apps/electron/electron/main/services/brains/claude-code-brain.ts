@@ -35,14 +35,16 @@
  * arbitrary PATH directories (executing a discovered binary to identity-probe it
  * would grant code execution to any malicious exe on PATH). Discovery order:
  * explicit user-configured path (credential store 'claude-code'/'claudePath' —
- * the escape hatch) → TRUSTED install roots only (the official installer dir
- * %USERPROFILE%\.local\bin), where a candidate must additionally pass the
+ * the escape hatch; shape-validated AND identity-verified before trust, since
+ * the renderer-exposed setCredential channel can write it) → TRUSTED install
+ * roots only (the official installer dir %USERPROFILE%\.local\bin) → bare
+ * command. EVERY discovered/configured candidate must pass the bounded
  * `--version` signature (`<semver> (Claude Code)`, verified live: `2.1.207
- * (Claude Code)`) → bare command. The resolution is cached per brain instance
+ * (Claude Code)`) before selection. The resolution is cached per brain instance
  * and re-resolved ONCE after a spawn error / unusable probe (stale-cache
  * recovery without retry loops).
  */
-import { existsSync } from 'fs'
+import { statSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import { runCli, foldMessagesToPrompt, type SpawnFn, type CliRunResult } from './cli-runner'
@@ -273,7 +275,7 @@ const IDENTITY_PROBE_TIMEOUT_MS = 8_000
 export interface ClaudeCommandResolveOpts {
   /** Override the platform gate (default: process.platform). */
   platform?: NodeJS.Platform
-  /** Override candidate existence checks (default: fs.existsSync). */
+  /** Override the candidate check (default: is an existing REGULAR file). */
   fileExists?: (p: string) => boolean
   /**
    * Override the identity verifier (default: run `<candidate> --version` via
@@ -302,8 +304,14 @@ export interface ClaudeCommandResolveOpts {
  * by the identity probe itself (the signature check runs AFTER execution, so it
  * cannot establish trust). Discovery is restricted to:
  *   1. The EXPLICIT user-configured path (credential store 'claude-code' →
- *      'claudePath') — user consent, wins outright when the file exists. This is
- *      the escape hatch for nonstandard installs.
+ *      'claudePath') — the escape hatch for nonstandard installs. This value is
+ *      NOT blindly trusted: the generic renderer-exposed brains:setCredential
+ *      channel can write it, so "user consent" is not guaranteed by this code
+ *      path. The override must be an ABSOLUTE path to an existing REGULAR file
+ *      (UNC/network paths rejected; on win32 it must end in .exe/.com — never a
+ *      wrapper shim), and must pass the SAME bounded `--version` identity
+ *      signature as trusted-root candidates BEFORE being accepted. A failing
+ *      override is logged and falls through — it is never executed for real work.
  *   2. TRUSTED INSTALL ROOTS only (the official native-installer dir
  *      `%USERPROFILE%\.local\bin`, where the real claude.exe lives) — a candidate
  *      found there must ADDITIONALLY pass the `--version` identity signature
@@ -317,19 +325,37 @@ export async function resolveClaudeCommand(
   env: NodeJS.ProcessEnv,
   opts: ClaudeCommandResolveOpts = {}
 ): Promise<string> {
-  const fileExists = opts.fileExists ?? existsSync
-  // 1. Explicit user override — an intentional setting, not an auto-discovery.
+  const platform = opts.platform ?? process.platform
+  const fileExists = opts.fileExists ?? isRegularFileSync
+  const verify = opts.verify ?? ((candidate: string) => verifyClaudeIdentity(candidate, env))
+
+  // 1. Explicit configured override — validated and identity-verified, never
+  //    blindly executed (verify-before-trust; see the SECURITY note above).
   try {
     const configured = (opts.getConfiguredPath ?? defaultGetConfiguredClaudePath)()
-    if (configured && fileExists(configured)) return configured
+    if (configured) {
+      if (!isAcceptableClaudePathOverride(configured, platform)) {
+        console.warn(
+          '[ClaudeCodeBrain] configured claudePath rejected without execution ' +
+            `(must be an absolute, non-UNC path${platform === 'win32' ? ' ending in .exe/.com' : ''}): ${configured}`
+        )
+      } else if (!fileExists(configured)) {
+        console.warn(`[ClaudeCodeBrain] configured claudePath is not an existing regular file: ${configured}`)
+      } else if (await verify(configured)) {
+        return configured
+      } else {
+        console.warn(
+          '[ClaudeCodeBrain] configured claudePath failed the Claude Code identity check ' +
+            `(--version signature); ignoring it: ${configured}`
+        )
+      }
+    }
   } catch {
-    /* misbehaving override source — ignore and continue */
+    /* misbehaving override source/verifier — ignore and continue */
   }
 
-  const platform = opts.platform ?? process.platform
   if (platform !== 'win32') return 'claude'
 
-  const verify = opts.verify ?? ((candidate: string) => verifyClaudeIdentity(candidate, env))
   // 2. Trusted install roots only — never arbitrary PATH directories. Only
   //    extensions that execute DIRECTLY (never .cmd/.bat/.ps1 wrapper shims);
   //    lowercase is fine, Windows' filesystem match is case-insensitive.
@@ -348,6 +374,32 @@ export async function resolveClaudeCommand(
   }
   // 3. Whatever Windows would normally select.
   return 'claude'
+}
+
+/**
+ * Shape-validate a configured claudePath BEFORE any filesystem or execution
+ * contact: absolute only (no relative segments resolved against a hostile cwd),
+ * no UNC/network paths (`\\server\share`, `//host/share`), and on win32 only a
+ * directly-executable native extension (.exe/.com — never .cmd/.bat/.ps1 shims).
+ * Deliberately platform-parameterized (not host `path.isAbsolute`) so the rule
+ * matches the platform being resolved for, deterministically on any test host.
+ */
+function isAcceptableClaudePathOverride(p: string, platform: NodeJS.Platform): boolean {
+  if (/^[\\/]{2}/.test(p)) return false // UNC / network path
+  if (platform === 'win32') {
+    if (!/^[A-Za-z]:[\\/]/.test(p)) return false // absolute drive-letter path only
+    return /\.(exe|com)$/i.test(p)
+  }
+  return p.startsWith('/')
+}
+
+/** True when the path exists AND is a regular file (not a dir/junction target trick). */
+function isRegularFileSync(p: string): boolean {
+  try {
+    return statSync(p).isFile()
+  } catch {
+    return false
+  }
 }
 
 /** Official Claude Code native-installer location(s). Never throws. */
