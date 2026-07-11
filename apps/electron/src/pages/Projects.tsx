@@ -127,6 +127,11 @@ export function Projects() {
 
   // Linked knowledge items — resolved so the count card becomes a clickable list.
   const [knowledgeItems, setKnowledgeItems] = useState<KnowledgeCapture[]>([])
+
+  // Provenance: the meeting(s) this project was discovered FROM (via
+  // meeting_projects). getById already returns them; the detail surfaces them so a
+  // discovered project links back to its source instead of being a dead end.
+  const [sourceMeetings, setSourceMeetings] = useState<{ id: string; subject: string }[]>([])
   const [newIssue, setNewIssue] = useState('')
   const [newRisk, setNewRisk] = useState('')
 
@@ -318,6 +323,7 @@ export function Projects() {
     setNotes([])
     setActionables([])
     setKnowledgeItems([])
+    setSourceMeetings([])
     setDetailLoading(true)
     setIsEditingDescription(false)
     setIsEditingName(false)
@@ -341,6 +347,16 @@ export function Projects() {
         setActiveProject(detailed)
         setEditFolder(detailed.folderPath || '')
         setEditUrl(detailed.url || '')
+
+        // Provenance: meetings linked to this project (the source it was discovered
+        // from). Present for auto-discovered projects; empty for hand-created ones.
+        const rawMeetings = Array.isArray((result.data as any).meetings) ? (result.data as any).meetings : []
+        setSourceMeetings(
+          rawMeetings
+            .filter((m: any) => m && m.id)
+            .map((m: any) => ({ id: String(m.id), subject: (m.subject || m.title || 'Untitled meeting') as string }))
+        )
+
         void loadProjectExtras(detailed.id)
 
         // Resolve linked knowledge items so the count becomes a clickable list.
@@ -812,6 +828,95 @@ export function Projects() {
             {/* Content */}
             <div className="flex-1 overflow-auto p-8">
               <div className={cn(pageContent, 'space-y-8')}>
+                {/* Provenance / discovered-project honest state.
+                    An auto-discovered project links back to the meeting(s) it was
+                    inferred from. When it ALSO has zero knowledge items and zero
+                    people it is a thin (possibly spurious) discovery, so we show an
+                    explicit review state — source · merge · dismiss — instead of a
+                    bare "0 Items / 0 Involved" dead end. */}
+                {(() => {
+                  const knowledgeCount = activeProject.knowledgeIds?.length ?? 0
+                  const peopleCount = activeProject.personIds?.length ?? 0
+                  const sourceChips = sourceMeetings.map((m) => (
+                    <EntityMention key={m.id} type="meeting" id={m.id} name={m.subject} showIcon />
+                  ))
+
+                  if (knowledgeCount === 0 && peopleCount === 0) {
+                    return (
+                      <Card className="animate-rise-in border-amber-500/30 bg-amber-500/[0.06]">
+                        <CardContent className="p-6 space-y-4">
+                          <div className="flex items-start gap-3">
+                            <span title="Automatically discovered from a transcript">
+                              <Sparkles className="h-5 w-5 text-amber-500 shrink-0 mt-0.5" aria-hidden="true" />
+                            </span>
+                            <div className="min-w-0 space-y-1">
+                              <h3 className="text-sm font-bold">Discovered automatically</h3>
+                              <p className="text-sm text-muted-foreground">
+                                No knowledge items or people are linked yet — this project was inferred from a
+                                mention in a transcript. Review its source, merge it into an existing project, or
+                                dismiss it.
+                              </p>
+                            </div>
+                          </div>
+
+                          {sourceMeetings.length > 0 && (
+                            <div className="space-y-1.5">
+                              <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+                                Discovered from
+                              </p>
+                              <div className="flex flex-wrap gap-1.5">{sourceChips}</div>
+                            </div>
+                          )}
+
+                          <div className="flex flex-wrap items-center gap-2 pt-1">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-8 gap-1.5"
+                              onClick={handleDiscover}
+                              disabled={discovering}
+                              title="Scan projects for a likely duplicate to merge this into"
+                            >
+                              <Sparkles className={cn('h-3.5 w-3.5', discovering && 'animate-pulse')} />
+                              {discovering ? 'Finding duplicates…' : 'Merge into another project'}
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-8 gap-1.5 text-muted-foreground hover:text-destructive"
+                              onClick={() => setDeleteDialogOpen(true)}
+                              title="Dismiss this discovered project (deletes it)"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                              Dismiss
+                            </Button>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    )
+                  }
+
+                  if (sourceMeetings.length > 0) {
+                    return (
+                      <Card className="animate-rise-in bg-muted/5">
+                        <CardContent className="p-4">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span title="Automatically discovered from a transcript">
+                              <Sparkles className="h-4 w-4 text-primary shrink-0" aria-hidden="true" />
+                            </span>
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+                              Discovered from
+                            </span>
+                            <div className="flex flex-wrap gap-1.5">{sourceChips}</div>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    )
+                  }
+
+                  return null
+                })()}
+
                 {/* Stats Grid */}
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                   <Card className="lift animate-rise-in bg-muted/5" style={{ animationDelay: '0ms' }}>

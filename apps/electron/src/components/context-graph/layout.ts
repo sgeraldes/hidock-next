@@ -84,13 +84,31 @@ export function computeStratifiedLayout(
   const positions = new Map<string, { x: number; y: number }>()
 
   // Shared time scale across ALL bands so equal dates align vertically.
-  const dated = nodes.filter((n) => n.dateMs != null).map((n) => n.dateMs as number)
-  const minMs = dated.length ? Math.min(...dated) : 0
-  const maxMs = dated.length ? Math.max(...dated) : 0
-  const span = maxMs - minMs
+  //
+  // We use an ORDINAL (rank) time axis, not a raw-linear one. Real context data
+  // clusters hard in time — a person's recent 2-hop subgraph inherits a handful
+  // of recent meeting dates, so ~90% of nodes land in the newest ~5% of the
+  // linear range and pile against the right edge, leaving most of the canvas (and
+  // the labelled bands) visibly empty. Mapping each DISTINCT timestamp to an
+  // evenly-spaced rank spreads that cluster across the full width while keeping
+  // the two properties the layout actually promises: equal dates share an x
+  // (vertical cross-band alignment) and older sorts left. Padding the domain
+  // keeps the newest slice off the exact edge so it never clips.
+  const EDGE_PAD = Math.min(48, width * 0.05)
+  const usableW = Math.max(1, width - EDGE_PAD * 2)
+  const uniqueSorted = Array.from(
+    new Set(nodes.filter((n) => n.dateMs != null).map((n) => n.dateMs as number))
+  ).sort((a, b) => a - b)
+  const rankOf = new Map<number, number>()
+  uniqueSorted.forEach((ms, i) => rankOf.set(ms, i))
+  const distinctDates = uniqueSorted.length
   const scaleX = (ms: number | null): number => {
-    if (ms == null) return 0 // undated → far left (oldest)
-    return span > 0 ? ((ms - minMs) / span) * width : width / 2
+    if (ms == null) return 0 // undated → far left (oldest), left of the padded domain
+    // All timestamps equal (or a single dated node): center them — a degenerate
+    // time axis carries no ordering signal, so a shared midpoint reads honestly.
+    if (distinctDates <= 1) return width / 2
+    const rank = rankOf.get(ms) ?? 0
+    return EDGE_PAD + (rank / (distinctDates - 1)) * usableW
   }
 
   // Only bands that actually hold nodes get a rect (so the picture isn't padded

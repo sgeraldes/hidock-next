@@ -446,6 +446,79 @@ describe('Projects Page', () => {
     expect(screen.queryByText(/ProjectCandidate/)).not.toBeInTheDocument()
   })
 
+  // F9(a): a project carries a link back to the meeting(s) it was discovered from.
+  it('shows a "Discovered from" provenance chip linking to the source meeting', async () => {
+    ;(global.window.electronAPI as any).projects.getById = vi.fn().mockResolvedValue({
+      success: true,
+      data: {
+        project: {
+          id: 'pr1',
+          name: 'Project Alpha',
+          status: 'active',
+          createdAt: new Date().toISOString(),
+          description: 'First project',
+          knowledgeIds: ['k1', 'k2'],
+          personIds: ['p1']
+        },
+        meetings: [{ id: 'm1', subject: 'Weekly Sync' }],
+        topics: []
+      }
+    })
+
+    render(
+      <MemoryRouter>
+        <Projects />
+      </MemoryRouter>
+    )
+
+    await screen.findByText('Project Alpha')
+    fireEvent.click(screen.getByText('Project Alpha'))
+
+    expect(await screen.findByText('Discovered from')).toBeInTheDocument()
+    const chip = await screen.findByText('Weekly Sync')
+    fireEvent.click(chip)
+    expect(mockNavigate).toHaveBeenCalledWith('/meeting/m1')
+  })
+
+  // F9(b): a zero-items / zero-people discovery is an honest review state, not a
+  // bare "0 Items / 0 Involved" dead end — with source, merge, and dismiss actions.
+  it('renders an honest review state for an empty discovered project', async () => {
+    ;(global.window.electronAPI as any).projects.getById = vi.fn().mockResolvedValue({
+      success: true,
+      data: {
+        project: {
+          id: 'pr1',
+          name: 'Project Alpha',
+          status: 'active',
+          createdAt: new Date().toISOString(),
+          description: null,
+          knowledgeIds: [],
+          personIds: []
+        },
+        meetings: [{ id: 'm1', subject: 'Weekly Sync' }],
+        topics: []
+      }
+    })
+
+    render(
+      <MemoryRouter>
+        <Projects />
+      </MemoryRouter>
+    )
+
+    await screen.findByText('Project Alpha')
+    fireEvent.click(screen.getByText('Project Alpha'))
+
+    // Honest state + source link back to the meeting it was inferred from.
+    expect(await screen.findByText('Discovered automatically')).toBeInTheDocument()
+    expect(screen.getByText('Weekly Sync')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Merge into another project/i })).toBeInTheDocument()
+
+    // Dismiss routes through the existing delete path (confirmation dialog).
+    fireEvent.click(screen.getByRole('button', { name: /^Dismiss$/i }))
+    expect(await screen.findByRole('alertdialog')).toHaveTextContent(/Delete Project/i)
+  })
+
   it('offers a "View all in Library" affordance on the knowledge card', async () => {
     ;(global.window.electronAPI as any).projects.getById = mockGetById
 

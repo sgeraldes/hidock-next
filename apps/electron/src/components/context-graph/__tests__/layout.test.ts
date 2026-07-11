@@ -118,6 +118,58 @@ describe('computeStratifiedLayout: time ordering (x axis)', () => {
     }
   })
 
+  it('spreads clustered-recent timestamps across the width (no far-right pile)', () => {
+    // Real data clusters: one old node + a tight burst of recent distinct dates.
+    // A raw-linear time axis crams the burst into the rightmost ~8% of the range
+    // (everything piles against the right edge, most of the band reads empty).
+    // The ordinal axis must spread the distinct dates across the full width.
+    const width = 1100
+    const nodes: LayoutInputNode[] = [
+      n('old', 'strategic', 0),
+      ...Array.from({ length: 10 }, (_, i) => n(`recent${i}`, 'strategic', 100 + i)),
+    ]
+    const { positions, minX, maxX } = computeStratifiedLayout(nodes, { width, nodeGap: 46 })
+    const xs = nodes.map((nd) => positions.get(nd.id)!.x)
+    // The used extent fills most of the width — not a sliver at the right edge.
+    expect(maxX - minX).toBeGreaterThan(width * 0.7)
+    // Nodes actually populate the MIDDLE of the band (empty under a linear axis,
+    // where the whole recent burst would sit beyond ~0.9·width).
+    const inMiddle = xs.filter((x) => x > width * 0.3 && x < width * 0.7)
+    expect(inMiddle.length).toBeGreaterThan(0)
+    // Oldest still anchors the left.
+    expect(Math.min(...xs)).toBeLessThanOrEqual(width * 0.1)
+  })
+
+  it('all-equal timestamps fall back to a centered spread, not the right edge', () => {
+    const width = 1100
+    const nodes = Array.from({ length: 6 }, (_, i) => n(`d${i}`, 'operational', 12))
+    const { positions } = computeStratifiedLayout(nodes, { width, nodeGap: 46 })
+    const xs = nodes.map((nd) => positions.get(nd.id)!.x)
+    // A degenerate time axis centers the cluster (min-gap fans it out around mid),
+    // rather than gluing every node to x=width.
+    expect(Math.min(...xs)).toBeLessThanOrEqual(width / 2 + 1e-6)
+    expect(Math.max(...xs)).toBeLessThan(width) // never pinned to the exact right edge
+  })
+
+  it('populates every labelled band across the width under clustered dates', () => {
+    // Legend counts nodes in DECISIONS/WORK/People/Meetings — each band must be
+    // visibly filled, not silently truncated into an off-canvas right column.
+    const width = 1100
+    const strata: LayoutInputNode['stratum'][] = ['strategic', 'operational', 'people', 'evidence']
+    const nodes: LayoutInputNode[] = []
+    for (const s of strata) {
+      // 8 distinct recent dates per band (the clustered case).
+      for (let i = 0; i < 8; i++) nodes.push(n(`${s}-${i}`, s, 90 + i))
+    }
+    const { positions, bands } = computeStratifiedLayout(nodes, { width, nodeGap: 46 })
+    expect(bands.map((b) => b.stratum)).toEqual(strata)
+    for (const s of strata) {
+      const xs = nodes.filter((nd) => nd.stratum === s).map((nd) => positions.get(nd.id)!.x)
+      // Each band spreads across a wide swath — proof its nodes aren't jammed right.
+      expect(Math.max(...xs) - Math.min(...xs)).toBeGreaterThan(width * 0.5)
+    }
+  })
+
   it('undated nodes sort to the far left (oldest)', () => {
     const nodes = [n('dated', 'operational', 30), n('undated', 'operational', null)]
     const { positions } = computeStratifiedLayout(nodes)
