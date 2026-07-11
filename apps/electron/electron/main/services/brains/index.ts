@@ -7,6 +7,7 @@
  */
 export * from './types'
 export { BrainRouter, getBrainRouter, resetBrainRouter } from './brain-router'
+export type { ChatFailure } from './brain-router'
 export { BrainRegistry, getBrainRegistry, resetBrainRegistry } from './brain-registry'
 export {
   BrainCredentialStore,

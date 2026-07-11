@@ -5,7 +5,7 @@
  *
  * @vitest-environment node
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, expectTypeOf, vi, beforeEach } from 'vitest'
 import type { AIBrain, BrainCapability, BrainId, BrainRegistry } from '../index'
 
 let mockBrainsConfig: unknown
@@ -445,5 +445,124 @@ describe('BrainRouter.resolvePrimaryChatBrainId', () => {
     for (const [bid, brain] of Object.entries(registry)) {
       if (bid !== expected) expect(brain.chat).not.toHaveBeenCalled()
     }
+  })
+
+  // Async contract: the helper returns Promise<BrainId>, NOT BrainId. Consumers
+  // MUST await — an un-awaited return used as a Record key silently indexes by
+  // "[object Promise]". Pinned at the type level AND at runtime.
+  it('returns a Promise that must be awaited (type-level + runtime contract)', async () => {
+    const router = new BrainRouter(
+      makeRegistry({
+        'gemini-api': makeBrain('gemini-api', ['generate', 'chat', 'embed'], true),
+      })
+    )
+
+    // Type-level: the return type is a Promise; the awaited value is a BrainId.
+    expectTypeOf(router.resolvePrimaryChatBrainId).returns.toEqualTypeOf<Promise<BrainId>>()
+    expectTypeOf(router.resolvePrimaryChatBrainId).returns.resolves.toEqualTypeOf<BrainId>()
+    // @ts-expect-error — the un-awaited return is NOT a BrainId; using it as one must not compile.
+    const _misuse: BrainId = router.resolvePrimaryChatBrainId()
+    void _misuse
+
+    // Runtime: un-awaited is a Promise (would stringify to "[object Promise]",
+    // never a valid budget key); awaited usage yields the real brain id.
+    const unawaited = router.resolvePrimaryChatBrainId()
+    expect(unawaited).toBeInstanceOf(Promise)
+    expect(await unawaited).toBe('gemini-api')
+  })
+})
+
+describe('BrainRouter.chat (multi-hop fallback chain)', () => {
+  beforeEach(() => {
+    mockBrainsConfig = undefined
+  })
+
+  const enableAll = { 'gemini-api': true, ollama: true, 'claude-code': true }
+
+  // The chain must survive BOTH failure shapes back-to-back: a primary that
+  // throws AND a fallback that answers null (unreachable Ollama) must still
+  // reach a configured agentic brain later in the chain.
+  it('continues past a throw AND a null: gemini throws → ollama null → claude answers', async () => {
+    mockBrainsConfig = { defaultBrain: 'gemini-api', enabled: enableAll }
+    const gemini = makeBrain('gemini-api', ['generate', 'chat', 'embed'], true)
+    ;(gemini.chat as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('rate limit'))
+    const ollama = makeBrain('ollama', ['generate', 'chat', 'embed'], true)
+    ;(ollama.chat as ReturnType<typeof vi.fn>).mockResolvedValue(null)
+    const claude = makeBrain('claude-code', ['generate', 'chat', 'agentic'], true)
+    const router = new BrainRouter(makeRegistry({ 'gemini-api': gemini, ollama, 'claude-code': claude }))
+
+    expect(await router.chat('chat', [{ role: 'user', content: 'hi' }])).toBe('claude-code:chat')
+    expect(gemini.chat).toHaveBeenCalledTimes(1)
+    expect(ollama.chat).toHaveBeenCalledTimes(1)
+    expect(claude.chat).toHaveBeenCalledTimes(1)
+    expect(router.getLastChatFailure()).toBeNull() // success clears the record
+  })
+
+  it('returns null when every candidate fails, exposing the TERMINAL attempt', async () => {
+    mockBrainsConfig = { defaultBrain: 'gemini-api', enabled: enableAll }
+    const gemini = makeBrain('gemini-api', ['generate', 'chat', 'embed'], true)
+    ;(gemini.chat as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('rate limit'))
+    const ollama = makeBrain('ollama', ['generate', 'chat', 'embed'], true)
+    ;(ollama.chat as ReturnType<typeof vi.fn>).mockResolvedValue(null)
+    const claude = makeBrain('claude-code', ['generate', 'chat', 'agentic'], true)
+    ;(claude.chat as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('cli crashed'))
+    const router = new BrainRouter(makeRegistry({ 'gemini-api': gemini, ollama, 'claude-code': claude }))
+
+    expect(await router.chat('chat', [{ role: 'user', content: 'hi' }])).toBeNull()
+    expect(gemini.chat).toHaveBeenCalledTimes(1)
+    expect(ollama.chat).toHaveBeenCalledTimes(1)
+    expect(claude.chat).toHaveBeenCalledTimes(1)
+    // The record names the LAST brain tried, not the primary.
+    expect(router.getLastChatFailure()).toEqual({ brainId: 'claude-code', kind: 'threw' })
+  })
+
+  // The rag.ts error-message contract: Gemini-throw → Ollama-null must blame
+  // OLLAMA (terminal, kind 'null'), never the primary Gemini.
+  it('names the terminal null-returning brain, not the throwing primary', async () => {
+    const gemini = makeBrain('gemini-api', ['generate', 'chat', 'embed'], true)
+    ;(gemini.chat as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('quota'))
+    const ollama = makeBrain('ollama', ['generate', 'chat', 'embed'], true)
+    ;(ollama.chat as ReturnType<typeof vi.fn>).mockResolvedValue(null)
+    const router = new BrainRouter(makeRegistry({ 'gemini-api': gemini, ollama }))
+
+    expect(await router.chat('chat', [{ role: 'user', content: 'hi' }])).toBeNull()
+    expect(router.getLastChatFailure()).toEqual({ brainId: 'ollama', kind: 'null' })
+  })
+
+  it('abort mid-chain terminates immediately: null, later brains not tried, no failure record', async () => {
+    mockBrainsConfig = { defaultBrain: 'gemini-api', enabled: enableAll }
+    const gemini = makeBrain('gemini-api', ['generate', 'chat', 'embed'], true)
+    ;(gemini.chat as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('rate limit'))
+    const ollama = makeBrain('ollama', ['generate', 'chat', 'embed'], true)
+    ;(ollama.chat as ReturnType<typeof vi.fn>).mockRejectedValue(new DOMException('cancelled', 'AbortError'))
+    const claude = makeBrain('claude-code', ['generate', 'chat', 'agentic'], true)
+    const router = new BrainRouter(makeRegistry({ 'gemini-api': gemini, ollama, 'claude-code': claude }))
+
+    expect(await router.chat('chat', [{ role: 'user', content: 'hi' }])).toBeNull()
+    expect(claude.chat).not.toHaveBeenCalled()
+    // User cancel is not a brain failure — the error surface stays generic.
+    expect(router.getLastChatFailure()).toBeNull()
+  })
+
+  it('records no failure when no brain is usable at all', async () => {
+    mockBrainsConfig = { defaultBrain: 'gemini-api', enabled: { 'gemini-api': false, ollama: false } }
+    const gemini = makeBrain('gemini-api', ['generate', 'chat', 'embed'], true)
+    const ollama = makeBrain('ollama', ['generate', 'chat', 'embed'], true)
+    const router = new BrainRouter(makeRegistry({ 'gemini-api': gemini, ollama }))
+
+    expect(await router.chat('chat', [{ role: 'user', content: 'hi' }])).toBeNull()
+    expect(router.getLastChatFailure()).toBeNull()
+  })
+
+  it('a later successful chat clears a previous failure record', async () => {
+    const gemini = makeBrain('gemini-api', ['generate', 'chat', 'embed'], true)
+    ;(gemini.chat as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('quota'))
+    const router = new BrainRouter(makeRegistry({ 'gemini-api': gemini }))
+
+    expect(await router.chat('chat', [{ role: 'user', content: 'hi' }])).toBeNull()
+    expect(router.getLastChatFailure()).toEqual({ brainId: 'gemini-api', kind: 'threw' })
+
+    expect(await router.chat('chat', [{ role: 'user', content: 'hi' }])).toBe('gemini-api:chat')
+    expect(router.getLastChatFailure()).toBeNull()
   })
 })

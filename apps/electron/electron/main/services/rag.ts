@@ -619,16 +619,18 @@ class RAGService {
     })
 
     if (!answer) {
-      // A null answer means the enabled chat brain failed (no cloud key, CLI not
-      // logged in, rate-limited, or offline). Name the brain that was actually
-      // asked so the surfaced error is actionable rather than blaming the generic
-      // "response". Fully defensive — resolving the brain must never mask the
-      // original failure or throw.
+      // A null answer means the chat brain chain failed (no cloud key, CLI not
+      // logged in, rate-limited, or offline). Name the brain that TERMINALLY
+      // failed — getLastChatFailure() records the last brain the router actually
+      // tried (primary OR fallback), so a Gemini-throw → Ollama-null chain blames
+      // Ollama, not Gemini. No re-resolution (re-resolving names the primary).
+      // Null failure info (user abort, or nothing enabled/configured) keeps the
+      // generic message. Fully defensive — must never mask the original failure.
       let brainLabel = ''
       try {
         const { getBrainRouter, getBrainRegistry } = await import('./brains')
-        const brainId = await getBrainRouter().resolvePrimaryChatBrainId('chat')
-        brainLabel = getBrainRegistry().get(brainId)?.label ?? brainId
+        const failure = getBrainRouter().getLastChatFailure()
+        if (failure) brainLabel = getBrainRegistry().get(failure.brainId)?.label ?? failure.brainId
       } catch {
         /* keep the generic message */
       }
