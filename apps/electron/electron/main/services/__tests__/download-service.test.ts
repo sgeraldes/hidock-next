@@ -145,6 +145,60 @@ describe('DownloadService', () => {
     })
   })
 
+  describe('HIGH-3: cancel origin gates the reconnect auto-retry', () => {
+    // Build one disconnect-interrupted cancel and one deliberate user cancel.
+    const setupMixedCancels = (): void => {
+      service.queueDownloads([
+        { filename: 'interrupted.hda', size: 1024 },
+        { filename: 'usercancel.hda', size: 2048 }
+      ])
+      // Move both to 'downloading' so the cancel paths act on them.
+      service.updateProgress('interrupted.hda', 100)
+      service.updateProgress('usercancel.hda', 100)
+      // User deliberately cancels one (origin 'user').
+      service.cancelDownload('usercancel.hda')
+      // A disconnect interrupts the rest (default origin 'interrupted').
+      service.cancelActiveDownloads('Device disconnected')
+    }
+
+    it('records cancelReason: user cancel = "user", disconnect = "interrupted"', () => {
+      setupMixedCancels()
+      const q = service.getState().queue
+      const user = q.find((i: DownloadQueueItem) => i.filename === 'usercancel.hda')
+      const intr = q.find((i: DownloadQueueItem) => i.filename === 'interrupted.hda')
+      expect(user?.status).toBe('cancelled')
+      expect(user?.cancelReason).toBe('user')
+      expect(intr?.status).toBe('cancelled')
+      expect(intr?.cancelReason).toBe('interrupted')
+    })
+
+    it('reconnect retry (interruptedOnly) re-queues ONLY the interrupted item', () => {
+      setupMixedCancels()
+      const result = service.retryFailed(true, true)
+      expect(result.count).toBe(1)
+      const q = service.getState().queue
+      expect(q.find((i: DownloadQueueItem) => i.filename === 'interrupted.hda')?.status).toBe('pending')
+      // The user-cancelled download stays terminal.
+      expect(q.find((i: DownloadQueueItem) => i.filename === 'usercancel.hda')?.status).toBe('cancelled')
+    })
+
+    it('manual retry (interruptedOnly=false) re-queues the user-cancelled item too', () => {
+      setupMixedCancels()
+      const result = service.retryFailed(true, false)
+      expect(result.count).toBe(2)
+      const q = service.getState().queue
+      expect(q.find((i: DownloadQueueItem) => i.filename === 'usercancel.hda')?.status).toBe('pending')
+      expect(q.find((i: DownloadQueueItem) => i.filename === 'interrupted.hda')?.status).toBe('pending')
+    })
+
+    it('re-queueing clears cancelReason so a later re-fail is tagged fresh', () => {
+      setupMixedCancels()
+      service.retryFailed(true, false)
+      const q = service.getState().queue
+      expect(q.every((i: DownloadQueueItem) => i.cancelReason === undefined)).toBe(true)
+    })
+  })
+
   describe('BUG-DS-002: cancelAll() does not cancel in-progress downloads', () => {
     it('cancelAll should also cancel downloading items, not just pending', () => {
       // Queue and simulate one actively downloading

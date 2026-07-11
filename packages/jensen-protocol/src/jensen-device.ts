@@ -362,6 +362,19 @@ export class JensenDevice {
   private pollErrorHandler: PollErrorHandler | null = null
   private totalBytesReceived = 0
 
+  // Inactivity threshold for the downloadFile stall watchdog (see downloadFile).
+  // Configurable because real HiDock devices exhibit multi-second inter-packet
+  // pauses on large files; 120s of TOTAL silence is far beyond any legitimate gap
+  // while still bounding a truly dead transfer. Owner evidence: device pauses are
+  // real, so this must never be short enough to trip a healthy-but-slow stream.
+  private transferStallTimeoutMs = 120_000
+
+  // Set when a transfer settlement could not safely release the serialized command
+  // slot (a stall, or a drain that never proved the IN FIFO quiescent). A poisoned
+  // session is torn down (disconnect) and must NOT advance the command queue — the
+  // only safe recovery is a clean reconnect (drain-recovery pattern). Reset on setup.
+  private poisoned = false
+
   // Carry buffer for partial Jensen messages between processBufferedData() calls
   private carryBuffer: Uint8Array = new Uint8Array(0)
   private carryLen: number = 0
@@ -557,6 +570,7 @@ export class JensenDevice {
     this.receiveChunks.length = 0
     this.carryLen = 0
     this.totalBytesReceived = 0
+    this.poisoned = false
     this.serialNumber = null
     this.data = {}
 
@@ -619,15 +633,24 @@ export class JensenDevice {
    * isn't mid-operation).
    */
   /**
-   * Wait for the device to stop streaming (its IN FIFO drained) before teardown.
-   * Watches the raw byte counter: while data keeps arriving the device is still
-   * sending; ~500ms of silence means it's idle. Bounded by maxMs so an
-   * interrupted huge transfer can't hang disconnect forever (it falls through to
-   * teardown, accepting a small wedge risk only in that rare case). Returns
-   * immediately when not actively reading (idle disconnect).
+   * Wait for the device to stop streaming (its IN FIFO drained) before teardown or
+   * before advancing the serialized command queue. Watches the raw byte counter:
+   * while data keeps arriving the device is still sending; ~500ms of silence means
+   * it's idle. Bounded by maxMs.
+   *
+   * Returns an EXPLICIT outcome instead of a bare void, because the caller uses it
+   * to decide whether it may safely release the command slot:
+   *   - `{ drained: true }`  — the stream reached a proven-quiet boundary (or was
+   *                            never streaming): the IN FIFO is empty, so sending
+   *                            the next command cannot overlap inbound packets.
+   *   - `{ timedOut: true }` — the maxMs bound elapsed with bytes still (recently)
+   *                            flowing: quiescence could NOT be proven, so the
+   *                            caller must NOT advance — the resumed stream would
+   *                            overlap the next command and wedge the firmware.
+   * (Teardown callers may ignore the outcome — they drain best-effort then close.)
    */
-  private async drainUntilIdle(maxMs = 20000): Promise<void> {
-    if (!this.readLoopRunning) return
+  private async drainUntilIdle(maxMs = 20000): Promise<{ drained: true } | { timedOut: true }> {
+    if (!this.readLoopRunning) return { drained: true } // nothing streaming → already quiescent
     const deadline = Date.now() + maxMs
     let lastBytes = this.totalBytesReceived
     let idleMs = 0
@@ -638,9 +661,59 @@ export class JensenDevice {
         idleMs = 0
       } else {
         idleMs += 50
-        if (idleMs >= 500) return // device quiet → FIFO drained
+        if (idleMs >= 500) return { drained: true } // device quiet → FIFO drained
       }
     }
+    return { timedOut: true } // hit the bound with data still flowing — NOT provably quiescent
+  }
+
+  // ================================================================
+  // Transfer settlement — the SINGLE path a downloadFile leaves by
+  // ================================================================
+  //
+  // A file transfer holds the one serialized command slot for its whole duration.
+  // It can end four ways: normal completion, user cancel, disconnect, or a stall.
+  // The dangerous ones all share one rule — the next command must NEVER be sent
+  // while transfer packets can still arrive, or it overlaps the device IN FIFO and
+  // wedges the firmware (the #1 forbidden failure mode). These helpers give every
+  // abnormal exit ONE quiescence discipline instead of per-case shortcuts.
+
+  /** Resolve the in-flight download's own promise with `value` (does NOT advance). */
+  private resolveActiveDownload(value: boolean): void {
+    if (!this.currentCommandTag) return
+    const pending = this.pendingPromises.get(this.currentCommandTag)
+    if (pending) {
+      if (pending.timeout) clearTimeout(pending.timeout)
+      pending.resolve(value)
+      this.pendingPromises.delete(this.currentCommandTag)
+    }
+  }
+
+  /**
+   * Release the serialized slot and run the next queued command. ONLY legal after
+   * the bus has been proven quiescent (drainUntilIdle → drained) or on normal
+   * completion — never speculatively mid-stream.
+   */
+  private releaseSlotAndAdvance(): void {
+    this.currentCommandTag = null
+    this.currentOperationName = null
+    this.sendNextCommand()
+  }
+
+  /**
+   * Quarantine the connection after a settlement that could not safely release the
+   * slot (a stall, or a drain that never proved the FIFO quiescent). A stalled
+   * transfer is unrecoverable, and a stream we cannot prove quiet must not be raced
+   * by a new command — so the ONLY safe move is to tear down and require a clean
+   * reconnect (exactly the drain-recovery pattern). Marks the session poisoned,
+   * then runs the normal disconnect/close path, which drains best-effort, stops the
+   * poll, resolves every pending/queued command with null, and fires ondisconnect
+   * so the renderer can reconnect. Never advances the queue.
+   */
+  private async quarantineConnection(reason: string): Promise<void> {
+    this.poisoned = true
+    console.warn(`[Jensen] quarantining connection — ${reason}; disconnecting, clean reconnect required`)
+    await this.disconnect()
   }
 
   private async gracefulCloseDevice(): Promise<void> {
@@ -1456,6 +1529,15 @@ export class JensenDevice {
     return this.currentCommandTag !== null
   }
 
+  /**
+   * True after a transfer settlement had to quarantine the connection (a stall, or a
+   * cancel that couldn't prove the stream quiesced). The session was torn down and a
+   * clean reconnect is required; reset on the next setup().
+   */
+  isPoisoned(): boolean {
+    return this.poisoned
+  }
+
   getLockHolder(): string | null {
     return this.currentOperationName
   }
@@ -2100,78 +2182,84 @@ export class JensenDevice {
     // transfer, so the next command would be sent while transfer packets are still
     // arriving — overlapping the device's IN FIFO and wedging the firmware (the #1
     // forbidden failure mode). Instead we watch for prolonged silence (refreshed by
-    // every inbound byte) and, on a genuine stall, DRAIN the device's IN FIFO to a
-    // quiet boundary BEFORE releasing the slot. 60s of zero packets is far beyond any
-    // inter-packet gap of a live download while still bounding a truly dead transfer.
-    const TRANSFER_STALL_TIMEOUT_MS = 60_000
+    // every inbound byte). See settleTransfer for what a genuine stall does.
+    const TRANSFER_STALL_TIMEOUT_MS = this.transferStallTimeoutMs
     let stallTimerId: ReturnType<typeof setTimeout> | null = null
 
     const clearStall = (): void => {
       if (stallTimerId) { clearTimeout(stallTimerId); stallTimerId = null }
     }
 
-    // Abort handling (disconnect / user cancel). Proven synchronous path: absorb
-    // remaining packets, resolve false, advance the queue. The disconnect IPC path
-    // additionally drains via gracefulCloseDevice, so this need not drain here.
-    const abortHandler = (): void => {
+    // ------------------------------------------------------------------
+    // The SINGLE settlement path for every abnormal end of this transfer
+    // ------------------------------------------------------------------
+    // reason:
+    //   'disconnect'  — the disconnect IPC fired the abort. Teardown (disconnect →
+    //                   gracefulCloseDevice) OWNS the FIFO drain + close, so this
+    //                   must NOT drain OR advance the queue — advancing would send a
+    //                   command into a still-streaming device before the close path
+    //                   drains it. Just resolve false and stand down.
+    //   'user-cancel' — user cancelled one download; the connection stays healthy.
+    //                   Quiesce the bus (drainUntilIdle) and, ONLY if that proves the
+    //                   IN FIFO quiet, release the slot and run the next command. If
+    //                   quiescence can't be proven (stream still active at the bound),
+    //                   quarantine — a resumed stream must never overlap a new command.
+    //   'stall'       — prolonged silence → the transfer is dead and unrecoverable.
+    //                   Quarantine unconditionally (drain best-effort, then tear down
+    //                   for a clean reconnect). NEVER advance on a stall: silence is
+    //                   not proof of quiescence, and a stalled transfer can't resume
+    //                   safely — the drain-recovery pattern prescribes reconnect.
+    // Guarded by `settled` so stall/abort/completion can only settle once (no double
+    // resolve, no double advance).
+    const settleTransfer = async (reason: 'disconnect' | 'user-cancel' | 'stall'): Promise<void> => {
       if (settled) return
       settled = true
-      aborted = true
+      aborted = true // makes the TRANSFER_FILE handler absorb any late/in-flight packets
       clearStall()
-      // Replace handler with no-op absorber for remaining data
-      this.handlers.set(CMD.TRANSFER_FILE, () => undefined)
-      this.onreceive = null
-      // Force-resolve the pending promise with false
-      if (this.currentCommandTag) {
-        const pending = this.pendingPromises.get(this.currentCommandTag)
-        if (pending) {
-          if (pending.timeout) clearTimeout(pending.timeout)
-          pending.resolve(false)
-          this.pendingPromises.delete(this.currentCommandTag)
-          this.currentCommandTag = null
-          this.currentOperationName = null
-          this.sendNextCommand()
-        }
-      }
-    }
-    signal?.addEventListener('abort', abortHandler, { once: true })
-
-    // Stall settle: quiesce the stream, THEN release the serialized slot. Mirrors the
-    // listFiles stall watchdog and the disconnect-during-download drain fix. Crucially
-    // it drains to an idle boundary BEFORE sendNextCommand() so a late transfer packet
-    // can never overlap the next command.
-    const settleStalledTransfer = async (): Promise<void> => {
-      if (settled) return
-      settled = true
-      aborted = true
-      clearStall()
-      // Absorb any late packets so they cannot re-trigger onChunk or a resolve.
-      this.handlers.set(CMD.TRANSFER_FILE, () => undefined)
+      this.handlers.set(CMD.TRANSFER_FILE, () => undefined) // no-op absorber
       this.onreceive = null
       signal?.removeEventListener('abort', abortHandler)
+
+      // The download's own promise settles false in every abnormal path so the
+      // awaiting caller returns immediately (synchronously, before any drain).
+      this.resolveActiveDownload(false)
+
+      if (reason === 'disconnect') {
+        // Disconnect teardown owns the drain + close; suppress queue advancement.
+        return
+      }
+
+      if (reason === 'user-cancel') {
+        const drain = await this.drainUntilIdle()
+        if ('drained' in drain) {
+          this.releaseSlotAndAdvance() // bus proven quiet → safe to send the next command
+        } else {
+          await this.quarantineConnection('cancel could not quiesce the transfer stream')
+        }
+        return
+      }
+
+      // reason === 'stall'
       console.warn(
         `[Jensen] downloadFile stalled for ${TRANSFER_STALL_TIMEOUT_MS / 1000}s ` +
-        `(${received}/${fileSize} bytes) — draining IN FIFO before releasing command slot`)
-      // Let the poll consume whatever remains in the device IN FIFO until it goes
-      // idle. Only after the stream is quiesced is it safe to advance the queue.
-      await this.drainUntilIdle()
-      if (this.currentCommandTag) {
-        const pending = this.pendingPromises.get(this.currentCommandTag)
-        if (pending) {
-          if (pending.timeout) clearTimeout(pending.timeout)
-          pending.resolve(false)
-          this.pendingPromises.delete(this.currentCommandTag)
-        }
-        this.currentCommandTag = null
-        this.currentOperationName = null
-        this.sendNextCommand()
-      }
+        `(${received}/${fileSize} bytes) — draining IN FIFO, then quarantining for reconnect`)
+      await this.drainUntilIdle() // best-effort drain so teardown closes on a quiet-ish bus
+      await this.quarantineConnection(`download stalled (${received}/${fileSize} bytes)`)
     }
+
+    // Abort handling (disconnect / user cancel). The AbortController's reason string
+    // distinguishes them: the disconnect IPC aborts with 'disconnect' (see
+    // jensen-handlers); anything else is treated as a user cancel.
+    const abortHandler = (): void => {
+      const reason = signal?.reason === 'disconnect' ? 'disconnect' : 'user-cancel'
+      void settleTransfer(reason)
+    }
+    signal?.addEventListener('abort', abortHandler, { once: true })
 
     const armStall = (): void => {
       if (settled) return
       if (stallTimerId) clearTimeout(stallTimerId)
-      stallTimerId = setTimeout(() => { void settleStalledTransfer() }, TRANSFER_STALL_TIMEOUT_MS)
+      stallTimerId = setTimeout(() => { void settleTransfer('stall') }, TRANSFER_STALL_TIMEOUT_MS)
     }
 
     // Set real-time progress callback (jensen.js: this.onreceive = r). Report the
@@ -2198,6 +2286,7 @@ export class JensenDevice {
       // null msg = transfer fail (jensen.js: if (b == null) ... return "fail")
       if (!msg) {
         if (shouldLog()) console.log('[Jensen] downloadFile: transfer fail (null msg)')
+        settled = true // completion-class exit → block any late stall/abort settlement
         clearStall()
         signal?.removeEventListener('abort', abortHandler)
         this.onreceive = null
@@ -2208,9 +2297,13 @@ export class JensenDevice {
       received += msg.body.length
       onChunk(new Uint8Array(msg.body))
 
-      // Check if complete (jensen.js: if (h >= t) return "OK")
+      // Check if complete (jensen.js: if (h >= t) return "OK"). The device finished
+      // sending, so the bus is already quiet — the normal handler→triggerResolve→
+      // sendNextCommand machinery advances the queue with no drain needed. Mark
+      // settled so a disconnect/stall racing the final packet becomes a no-op.
       if (received >= fileSize) {
         if (shouldLog()) console.log(`[Jensen] downloadFile: complete, ${received}/${fileSize}`)
+        settled = true
         clearStall()
         signal?.removeEventListener('abort', abortHandler)
         this.onreceive = null

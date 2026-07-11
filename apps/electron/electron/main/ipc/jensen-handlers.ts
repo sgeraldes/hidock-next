@@ -229,8 +229,10 @@ export function registerJensenHandlers(): void {
     try {
       // Abort an in-flight download so it stops being saved. The device keeps
       // streaming the rest of the file regardless; gracefulCloseDevice then drains
-      // that out of the IN FIFO before closing (see below).
-      if (currentDownloadAbort) currentDownloadAbort.abort()
+      // that out of the IN FIFO before closing (see below). The 'disconnect' reason
+      // tells downloadFile's settlement that TEARDOWN owns the drain — so it resolves
+      // false and stands down instead of advancing the command queue mid-stream.
+      if (currentDownloadAbort) currentDownloadAbort.abort('disconnect')
 
       // Do NOT preempt an in-flight scan: disconnect is serialized, so it waits
       // for the running listFiles/getFileCount to finish first. That lets the
@@ -424,7 +426,10 @@ export function registerJensenHandlers(): void {
   ipcMain.handle('jensen:cancelDownload', async () => {
     try {
       if (currentDownloadAbort) {
-        currentDownloadAbort.abort()
+        // 'user-cancel' reason: downloadFile's settlement drains to quiescence and,
+        // only once the bus is proven quiet, releases the slot so the connection
+        // stays usable (unlike the 'disconnect' reason, which stands down for teardown).
+        currentDownloadAbort.abort('user-cancel')
       }
       return null
     } catch {

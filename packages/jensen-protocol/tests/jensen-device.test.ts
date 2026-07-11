@@ -86,35 +86,49 @@ describe('JensenDevice (transport-agnostic core)', () => {
     expect(new JensenDevice(makeFakeUsb()).getModel()).toBe('unknown')
   })
 
-  it('bounds a stalled download and releases the serialized command slot', async () => {
+  it('bounds a stalled download, resolves false, and quarantines the connection', async () => {
     vi.useFakeTimers()
     try {
       const transferOut = vi.fn(async () => ({ bytesWritten: 0 }))
       const transferIn = vi.fn(() => new Promise<USBInTransferResult>(() => {}))
+      const reset = vi.fn(async () => {})
+      const close = vi.fn(async () => {})
       const device = new JensenDevice(makeFakeUsb())
       ;(device as unknown as { device: USBDevice }).device = {
         opened: true,
         transferOut,
         transferIn,
+        reset,
+        close,
       } as unknown as USBDevice
 
       const resultPromise = device.downloadFile('stalled.hda', 1024, vi.fn())
+      // 120s inactivity window (raised from 60s: real devices pause on big files),
+      // then drain + quarantine teardown.
       await vi.advanceTimersByTimeAsync(300_000)
 
       await expect(resultPromise).resolves.toBe(false)
+      // Stall settlement NEVER advances the queue: it tears the session down so the
+      // slot is cleared via disconnect, and the session is left poisoned for reconnect.
       expect((device as unknown as { currentCommandTag: string | null }).currentCommandTag).toBeNull()
+      expect(device.isPoisoned()).toBe(true)
+      expect(device.isConnected()).toBe(false)
     } finally {
       vi.useRealTimers()
     }
   })
 
-  it('a stalled transfer drains to quiescence before advancing the queue — late transfer packets never overlap the next command', async () => {
-    // CRITICAL regression: the stall path must NOT release the serialized command slot
-    // (send the next command) while transfer packets are still streaming. Doing so
-    // overlaps the device's IN FIFO with a new command and wedges the firmware.
+  it('a stalled transfer quarantines instead of advancing — late packets never overlap a next command', async () => {
+    // CRITICAL regression: a stall must NEVER send the next command. Silence is not
+    // proof of quiescence and a stalled transfer is unrecoverable, so the ONLY safe
+    // move is to tear the session down (drain best-effort → disconnect) and require a
+    // clean reconnect. A late transfer packet during the drain must be absorbed and
+    // must not resolve the download as complete or release the slot.
     const ep = makePollEndpoint()
+    const reset = vi.fn(async () => {})
+    const close = vi.fn(async () => {})
     const device = new JensenDevice(makeFakeUsb())
-    const dev = makePollDevice(ep, vi.fn(async () => {}), vi.fn(async () => {}))
+    const dev = makePollDevice(ep, reset, close)
     const transferOut = dev.transferOut as unknown as ReturnType<typeof vi.fn>
     await device.tryConnect(dev) // real timers (300ms stabilization delay)
     ;(device as unknown as { startReadLoop: () => void }).startReadLoop()
@@ -137,9 +151,9 @@ describe('JensenDevice (transport-agnostic core)', () => {
       await vi.advanceTimersByTimeAsync(1000) // let the throttled (1s) parse dispatch the handler
       expect(onChunk).toHaveBeenCalledTimes(1)
 
-      // Device then goes silent for the full inactivity window → watchdog fires and
-      // begins settling (swaps in a no-op absorber, starts draining the IN FIFO).
-      await vi.advanceTimersByTimeAsync(60_000)
+      // Device then goes silent for the full 120s inactivity window → watchdog fires
+      // and begins settling (swaps in a no-op absorber, starts draining the IN FIFO).
+      await vi.advanceTimersByTimeAsync(120_000)
       // Still holding the slot — nothing new sent yet.
       expect(transferOut).toHaveBeenCalledTimes(1)
 
@@ -151,23 +165,181 @@ describe('JensenDevice (transport-agnostic core)', () => {
       }
       // INVARIANT: the next command has NOT been sent while packets were still arriving.
       expect(transferOut).toHaveBeenCalledTimes(1)
-      // The late packets did not resolve the download as complete.
-      expect((device as unknown as { currentCommandTag: string | null }).currentCommandTag)
-        .not.toBeNull()
 
-      // Stream goes quiet → drain reaches its idle boundary (~500ms) → slot released.
-      await vi.advanceTimersByTimeAsync(700)
+      // Stream goes quiet → drain reaches its idle boundary (~500ms) → quarantine
+      // teardown (stopPoll + close) runs.
+      await vi.advanceTimersByTimeAsync(3000)
 
       await expect(dl).resolves.toBe(false) // stalled transfer fails, not completes
-      // NOW — and only now — the next command is sent, on a quiesced bus.
+      // The queue was NEVER advanced — quarantine tore the session down instead.
+      expect(transferOut).toHaveBeenCalledTimes(1)
+      expect(ep.stopPoll).toHaveBeenCalled() // poll stopped on the way down
+      expect(device.isPoisoned()).toBe(true)
+      expect(device.isConnected()).toBe(false)
+      // The command queued behind the transfer was failed by teardown (resolved null),
+      // NOT sent onto a poisoned bus.
+      await expect(info).resolves.toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('user-cancel drains to quiescence BEFORE sending the next command (no overlap)', async () => {
+    // A user cancel keeps the connection healthy: it must quiesce the IN FIFO, then —
+    // only once the bus is proven quiet — release the slot and run the next command.
+    const ep = makePollEndpoint()
+    const device = new JensenDevice(makeFakeUsb())
+    const dev = makePollDevice(ep, vi.fn(async () => {}), vi.fn(async () => {}))
+    const transferOut = dev.transferOut as unknown as ReturnType<typeof vi.fn>
+    await device.tryConnect(dev)
+    ;(device as unknown as { startReadLoop: () => void }).startReadLoop()
+
+    vi.useFakeTimers()
+    try {
+      const controller = new AbortController()
+      const dl = device.downloadFile('big.hda', 100_000, vi.fn(), undefined, controller.signal)
+      const info = device.getDeviceInfo(5)
+
+      await vi.advanceTimersByTimeAsync(1)
+      expect(transferOut).toHaveBeenCalledTimes(1)
+
+      // Some data has arrived; the device is still streaming when the user cancels.
+      ep.emit('data', makeResponsePacket(CMD.TRANSFER_FILE, 0, new Uint8Array(4096)))
+      await vi.advanceTimersByTimeAsync(1)
+
+      controller.abort('user-cancel')
+      // The download resolves false immediately, but the next command must NOT be
+      // sent yet — the drain is still in progress.
+      await expect(dl).resolves.toBe(false)
+      expect(transferOut).toHaveBeenCalledTimes(1)
+
+      // A couple of late packets keep the drain busy — still no next command.
+      for (let i = 0; i < 3; i++) {
+        ep.emit('data', makeResponsePacket(CMD.TRANSFER_FILE, 0, new Uint8Array(2048)))
+        await vi.advanceTimersByTimeAsync(100)
+      }
+      expect(transferOut).toHaveBeenCalledTimes(1)
+
+      // Bus goes quiet → drain proves quiescence → NOW the next command is sent.
+      await vi.advanceTimersByTimeAsync(700)
       expect(transferOut).toHaveBeenCalledTimes(2)
       const secondSend = transferOut.mock.calls[1][1] as Uint8Array
       expect((secondSend[2] << 8) | secondSend[3]).toBe(CMD.GET_DEVICE_INFO)
+      // Connection stays healthy after a user cancel — not poisoned.
+      expect(device.isPoisoned()).toBe(false)
+      expect(device.isConnected()).toBe(true)
 
-      // The device-info command resolves against its OWN response (no desync).
       ep.emit('data', makeResponsePacket(CMD.GET_DEVICE_INFO, 1, new Uint8Array(20)))
       await vi.advanceTimersByTimeAsync(20)
       await expect(info).resolves.not.toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a user-cancel whose stream never quiesces (data past the drain bound) quarantines', async () => {
+    // If the drain hits its 20s bound with bytes still flowing, quiescence could NOT
+    // be proven — advancing would overlap a resumed stream. The safe move is to
+    // quarantine (tear down), never to send the next command.
+    const ep = makePollEndpoint()
+    const device = new JensenDevice(makeFakeUsb())
+    const dev = makePollDevice(ep, vi.fn(async () => {}), vi.fn(async () => {}))
+    const transferOut = dev.transferOut as unknown as ReturnType<typeof vi.fn>
+    await device.tryConnect(dev)
+    ;(device as unknown as { startReadLoop: () => void }).startReadLoop()
+
+    vi.useFakeTimers()
+    try {
+      const controller = new AbortController()
+      const dl = device.downloadFile('big.hda', 100_000, vi.fn(), undefined, controller.signal)
+      device.getDeviceInfo(5)
+
+      await vi.advanceTimersByTimeAsync(1)
+      expect(transferOut).toHaveBeenCalledTimes(1)
+
+      controller.abort('user-cancel')
+      await expect(dl).resolves.toBe(false)
+
+      // Keep bytes flowing continuously (every 100ms) for well past the 20s drain
+      // bound so idle never reaches 500ms → drainUntilIdle returns timedOut.
+      for (let i = 0; i < 205; i++) {
+        ep.emit('data', makeResponsePacket(CMD.TRANSFER_FILE, 0, new Uint8Array(1024)))
+        await vi.advanceTimersByTimeAsync(100)
+      }
+      // Let the quarantine teardown finish.
+      await vi.advanceTimersByTimeAsync(3000)
+
+      // Never advanced; quarantined instead (poll stopped, session poisoned).
+      expect(transferOut).toHaveBeenCalledTimes(1)
+      expect(ep.stopPoll).toHaveBeenCalled()
+      expect(device.isPoisoned()).toBe(true)
+      expect(device.isConnected()).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('disconnect during a download never advances the queue (teardown owns the FIFO)', async () => {
+    // The disconnect IPC aborts with reason 'disconnect'. Settlement must resolve the
+    // download false and STAND DOWN — the disconnect/close path owns the drain, so no
+    // next command may be sent (synchronously or after any drain).
+    const ep = makePollEndpoint()
+    const reset = vi.fn(async () => {})
+    const close = vi.fn(async () => {})
+    const device = new JensenDevice(makeFakeUsb())
+    const dev = makePollDevice(ep, reset, close)
+    const transferOut = dev.transferOut as unknown as ReturnType<typeof vi.fn>
+    await device.tryConnect(dev)
+    ;(device as unknown as { startReadLoop: () => void }).startReadLoop()
+
+    const controller = new AbortController()
+    const dl = device.downloadFile('big.hda', 100_000, vi.fn(), undefined, controller.signal)
+    const info = device.getDeviceInfo(5)
+    await new Promise((r) => setTimeout(r, 0))
+    expect(transferOut).toHaveBeenCalledTimes(1)
+
+    // Mirror jensen-handlers: abort('disconnect') then run the real teardown.
+    controller.abort('disconnect')
+    await expect(dl).resolves.toBe(false)
+    // No second command was sent synchronously by the abort (the classic race).
+    expect(transferOut).toHaveBeenCalledTimes(1)
+
+    await device.disconnect()
+    // Teardown completed WITHOUT ever advancing the queue.
+    expect(transferOut).toHaveBeenCalledTimes(1)
+    expect(ep.stopPoll).toHaveBeenCalled()
+    expect(device.isConnected()).toBe(false)
+    // The queued command was failed (resolved null) by teardown, not sent.
+    await expect(info).resolves.toBeNull()
+  })
+
+  it('double-settle guard: an abort after normal completion is a no-op', async () => {
+    // Completion settles the transfer (bus already quiet, queue advanced normally). A
+    // late abort/disconnect racing the final packet must NOT re-settle — no second
+    // resolution, no quarantine, no extra teardown.
+    const ep = makePollEndpoint()
+    const device = new JensenDevice(makeFakeUsb())
+    const dev = makePollDevice(ep, vi.fn(async () => {}), vi.fn(async () => {}))
+    const transferOut = dev.transferOut as unknown as ReturnType<typeof vi.fn>
+    await device.tryConnect(dev)
+    ;(device as unknown as { startReadLoop: () => void }).startReadLoop()
+
+    vi.useFakeTimers()
+    try {
+      const controller = new AbortController()
+      const dl = device.downloadFile('small.hda', 4096, vi.fn(), undefined, controller.signal)
+      await vi.advanceTimersByTimeAsync(1)
+
+      // A single packet completes the file.
+      ep.emit('data', makeResponsePacket(CMD.TRANSFER_FILE, 0, new Uint8Array(4096)))
+      await vi.advanceTimersByTimeAsync(1000)
+      await expect(dl).resolves.toBe(true)
+
+      // A late abort now must do nothing — session stays healthy, not poisoned.
+      controller.abort('disconnect')
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(device.isPoisoned()).toBe(false)
+      expect(device.isConnected()).toBe(true)
     } finally {
       vi.useRealTimers()
     }
@@ -451,13 +623,13 @@ describe('JensenDevice (transport-agnostic core)', () => {
     }
   })
 
-  it('drainUntilIdle returns immediately when not actively reading (idle disconnect)', async () => {
+  it('drainUntilIdle returns { drained: true } immediately when not actively reading (idle disconnect)', async () => {
     const device = new JensenDevice(makeFakeUsb()) as unknown as {
       readLoopRunning: boolean
-      drainUntilIdle: () => Promise<void>
+      drainUntilIdle: () => Promise<{ drained: true } | { timedOut: true }>
     }
     device.readLoopRunning = false
-    await expect(device.drainUntilIdle()).resolves.toBeUndefined()
+    await expect(device.drainUntilIdle()).resolves.toEqual({ drained: true })
   })
 
   it('disconnect() closes without reset when the read loop is idle (no pending transfer)', async () => {

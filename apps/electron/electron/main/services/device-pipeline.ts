@@ -110,7 +110,7 @@ export interface PipelineDownloadService {
     filename: string,
     data: Buffer
   ): Promise<{ success: boolean; filePath?: string; error?: string }>
-  cancelActiveDownloads(reason?: string): number
+  cancelActiveDownloads(reason?: string, origin?: 'user' | 'interrupted'): number
 }
 
 /** Minimal WebUSB-like event target for the hot-plug listeners. */
@@ -561,7 +561,8 @@ export class DevicePipelineService extends EventEmitter {
   /** Cancel downloads only — return to IDLE without disconnecting. */
   async cancelDownloads(): Promise<void> {
     this.abortController?.abort()
-    this.downloadService.cancelActiveDownloads('Cancelled by user')
+    // HIGH-3: an explicit user cancel stays terminal until a MANUAL retry.
+    this.downloadService.cancelActiveDownloads('Cancelled by user', 'user')
     this.patchState({ downloadProgress: null })
     this.setPhase('idle')
   }

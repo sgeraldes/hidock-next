@@ -634,7 +634,8 @@ describe('DevicePipelineService', () => {
 
       await svc.cancelDownloads()
 
-      expect(dl.cancelActiveDownloads).toHaveBeenCalledWith('Cancelled by user')
+      // HIGH-3: a deliberate user cancel is tagged origin 'user' so reconnect will NOT auto-retry it.
+      expect(dl.cancelActiveDownloads).toHaveBeenCalledWith('Cancelled by user', 'user')
       expect(jensen.disconnect).not.toHaveBeenCalled()
       expect(svc.getState().phase).toBe('idle')
       expect(svc.getState().downloadProgress).toBeNull()

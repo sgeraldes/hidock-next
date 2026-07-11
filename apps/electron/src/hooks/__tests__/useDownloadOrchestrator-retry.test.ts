@@ -1,11 +1,12 @@
 /**
- * MEDIUM-4 (Codex): the reconnect ('ready') retry must re-queue not only 'failed'
- * downloads but also 'cancelled' ones. cancelActiveDownloads (called on disconnect,
- * re-sync, or user cancel) persists an interrupted transfer as 'cancelled', not
- * 'failed'. The reconnect handler previously looked only for 'failed', so a
- * disconnect-during-download stranded the file until a manual retry. The shared
- * predicate keeps the reconnect selection and the operations badge consistent with
- * the main-process retryFailed(), which already re-queues both statuses.
+ * HIGH-3 (Codex): the reconnect ('ready') retry must re-queue disconnect-INTERRUPTED
+ * downloads (status 'failed', or 'cancelled' with a non-user origin) but must NEVER
+ * resurrect a USER-cancelled download — a deliberate cancel stays terminal until a
+ * manual Retry. The shared origin-aware predicate keeps the reconnect selection and
+ * the operations badge consistent with the main-process retryFailed(_, interruptedOnly).
+ *
+ * (Supersedes MEDIUM-4, which treated every 'cancelled' as retryable and therefore
+ * resurrected user cancels on reconnect.)
  */
 import { describe, it, expect, vi } from 'vitest'
 
@@ -21,33 +22,58 @@ vi.mock('@/features/library/utils/errorHandling', () => ({
 }))
 vi.mock('@/services/qa-monitor', () => ({ shouldLogQa: vi.fn(() => false) }))
 
-import { isRetryableDownloadStatus } from '../useDownloadOrchestrator'
+import { isRetryableDownloadItem } from '../useDownloadOrchestrator'
 
-type QueueItem = { filename: string; status: string }
+type QueueItem = { filename: string; status: string; cancelReason?: 'user' | 'interrupted' }
 
 // Mirrors the reconnect retry-selection predicate in useDownloadOrchestrator's
-// onStatusChange('ready') handler: retry when ANY item is retryable.
+// onStatusChange('ready') handler: retry when ANY item is auto-retryable.
 const reconnectShouldRetry = (queue: QueueItem[]): boolean =>
-  queue.some((i) => isRetryableDownloadStatus(i.status))
+  queue.some((i) => isRetryableDownloadItem(i))
 
-describe('MEDIUM-4: reconnect retry includes disconnect-cancelled downloads', () => {
-  it('treats failed and cancelled as retryable, and nothing else', () => {
-    expect(isRetryableDownloadStatus('failed')).toBe(true)
-    expect(isRetryableDownloadStatus('cancelled')).toBe(true)
-    expect(isRetryableDownloadStatus('pending')).toBe(false)
-    expect(isRetryableDownloadStatus('downloading')).toBe(false)
-    expect(isRetryableDownloadStatus('completed')).toBe(false)
+describe('HIGH-3: reconnect retry includes interrupted but NOT user-cancelled downloads', () => {
+  it('classifies each status/origin correctly', () => {
+    expect(isRetryableDownloadItem({ status: 'failed' })).toBe(true)
+    // A disconnect/re-sync interruption is retryable (explicit or defaulted origin).
+    expect(isRetryableDownloadItem({ status: 'cancelled', cancelReason: 'interrupted' })).toBe(true)
+    expect(isRetryableDownloadItem({ status: 'cancelled' })).toBe(true)
+    // A deliberate user cancel is NOT auto-retryable.
+    expect(isRetryableDownloadItem({ status: 'cancelled', cancelReason: 'user' })).toBe(false)
+    // Non-terminal / done statuses never retry.
+    expect(isRetryableDownloadItem({ status: 'pending' })).toBe(false)
+    expect(isRetryableDownloadItem({ status: 'downloading' })).toBe(false)
+    expect(isRetryableDownloadItem({ status: 'completed' })).toBe(false)
   })
 
-  it('disconnect-during-download → reconnect retries the cancelled item', () => {
+  it('disconnect-during-download → reconnect retries the interrupted item', () => {
     const queue: QueueItem[] = [
-      { filename: 'meeting-1.hda', status: 'cancelled' }, // interrupted by disconnect
+      { filename: 'meeting-1.hda', status: 'cancelled', cancelReason: 'interrupted' },
       { filename: 'meeting-2.hda', status: 'completed' }
     ]
-    // Regression: the OLD predicate only matched 'failed' → would NOT retry, stranding it.
-    expect(queue.some((i) => i.status === 'failed')).toBe(false)
-    // Fixed: the shared retryable predicate catches the disconnect-cancelled item.
     expect(reconnectShouldRetry(queue)).toBe(true)
+  })
+
+  it('user-cancelled download does NOT trigger a reconnect retry (stays terminal)', () => {
+    const queue: QueueItem[] = [
+      { filename: 'meeting-1.hda', status: 'cancelled', cancelReason: 'user' },
+      { filename: 'meeting-2.hda', status: 'completed' }
+    ]
+    // Regression guard: the OLD status-only predicate treated this as retryable and
+    // resurrected the deliberately-cancelled download on reconnect.
+    expect(reconnectShouldRetry(queue)).toBe(false)
+  })
+
+  it('a mix retries only when an interrupted/failed item is present', () => {
+    expect(reconnectShouldRetry([
+      { filename: 'a', status: 'cancelled', cancelReason: 'user' },
+      { filename: 'b', status: 'failed' } // failed still forces a retry pass
+    ])).toBe(true)
+
+    expect(reconnectShouldRetry([
+      { filename: 'a', status: 'cancelled', cancelReason: 'user' },
+      { filename: 'b', status: 'completed' },
+      { filename: 'c', status: 'pending' }
+    ])).toBe(false)
   })
 
   it('does not trigger a retry when nothing is retryable', () => {

@@ -43,6 +43,13 @@ export interface DownloadQueueItem {
   completedAt?: Date
   recordingDate?: Date // Original recording date from device
   lastProgressAt?: Date // C-004: Track last progress update for smarter stall detection
+  // HIGH-3 (Codex): origin of a 'cancelled' status. 'user' = the user deliberately
+  // cancelled and it must stay terminal until a MANUAL retry; 'interrupted' =
+  // disconnect/re-sync aborted it mid-flight and reconnect should auto-retry it.
+  // In-memory only: cancelled items are never reloaded from the DB (loadQueue reads
+  // only pending/downloading), so no schema column is needed — the distinction is
+  // consulted only within a running session.
+  cancelReason?: 'user' | 'interrupted'
 }
 
 // Sync session state
@@ -563,6 +570,7 @@ class DownloadService {
 
     item.status = 'cancelled'
     item.error = 'Cancelled by user'
+    item.cancelReason = 'user' // HIGH-3: deliberate cancel — no auto-retry on reconnect
     this.persistQueueItem(item) // spec-007: persist cancellation
     emitActivityLog('info', `Download cancelled: ${filename}`)
     console.log(`[DownloadService] Cancelled download: ${filename}`)
@@ -716,13 +724,16 @@ class DownloadService {
    * Only marks 'downloading' items as cancelled — 'pending' items are preserved
    * so they can be retried when the device reconnects.
    */
-  cancelActiveDownloads(reason: string = 'Cancelled'): number {
+  cancelActiveDownloads(reason: string = 'Cancelled', origin: 'user' | 'interrupted' = 'interrupted'): number {
     let cancelledCount = 0
 
     for (const item of this.state.queue.values()) {
       if (item.status === 'downloading') {
         item.status = 'cancelled'
         item.error = reason
+        // HIGH-3: record WHY. Disconnect/re-sync = 'interrupted' (reconnect auto-retries);
+        // an explicit user cancel routed through here passes origin 'user' (stays terminal).
+        item.cancelReason = origin
         this.persistQueueItem(item)
 
         cancelledCount++
@@ -746,7 +757,7 @@ class DownloadService {
    * B-DWN-007: Checks if file is already synced before retrying.
    * C-004: Also retries cancelled items, not just failed.
    */
-  retryFailed(deviceConnected: boolean = true): { count: number; error?: string } {
+  retryFailed(deviceConnected: boolean = true, interruptedOnly: boolean = false): { count: number; error?: string } {
     // AUD4-016: Check if device is connected before retrying
     if (!deviceConnected) {
       console.warn('[DownloadService] retryFailed called but device is not connected')
@@ -758,6 +769,13 @@ class DownloadService {
 
     for (const [key, item] of this.state.queue) {
       if (item.status === 'failed' || item.status === 'cancelled') {
+        // HIGH-3: the automatic reconnect retry passes interruptedOnly — it must
+        // re-queue ONLY disconnect-interrupted work, never a deliberate user cancel
+        // (which stays terminal until a MANUAL retry, where interruptedOnly is false).
+        if (interruptedOnly && item.status === 'cancelled' && item.cancelReason === 'user') {
+          continue
+        }
+
         // B-DWN-007: Check if file was synced in the meantime
         const { synced, reason } = this.isFileAlreadySynced(item.filename)
         if (synced) {
@@ -769,6 +787,7 @@ class DownloadService {
         item.status = 'pending'
         item.progress = 0
         item.error = undefined
+        item.cancelReason = undefined // cleared on re-queue; a re-fail is re-tagged fresh
         item.startedAt = undefined
         item.completedAt = undefined
         item.lastProgressAt = undefined
@@ -873,6 +892,7 @@ class DownloadService {
         if (item.status === 'pending' || item.status === 'downloading') {
           item.status = 'cancelled'
           item.error = 'Cancelled by user'
+          item.cancelReason = 'user' // HIGH-3: deliberate cancel — terminal until manual retry
           itemsToCancel.push(item)
         }
       }
@@ -1095,8 +1115,10 @@ export function registerDownloadServiceHandlers(): void {
 
   // Retry failed downloads
   // AUD4-016: Accepts deviceConnected flag from renderer to prevent retrying while disconnected
-  ipcMain.handle('download-service:retry-failed', (_, deviceConnected?: boolean) => {
-    return service.retryFailed(deviceConnected ?? true)
+  // HIGH-3: interruptedOnly (reconnect auto-retry) re-queues ONLY disconnect-interrupted
+  // items; user-cancelled stays terminal. Manual retry omits it (retries everything).
+  ipcMain.handle('download-service:retry-failed', (_, deviceConnected?: boolean, interruptedOnly?: boolean) => {
+    return service.retryFailed(deviceConnected ?? true, interruptedOnly ?? false)
   })
 
   // Get sync stats

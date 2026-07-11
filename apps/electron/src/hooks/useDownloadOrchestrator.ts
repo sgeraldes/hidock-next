@@ -23,22 +23,30 @@ interface DownloadQueueItem {
   progress: number
   status: 'pending' | 'downloading' | 'completed' | 'failed' | 'cancelled'
   error?: string
+  // HIGH-3 (Codex): origin of a 'cancelled' status (see download-service). 'user' =
+  // deliberate cancel → terminal until manual retry; 'interrupted' = disconnect/re-sync.
+  cancelReason?: 'user' | 'interrupted'
   // Original recording date (from the device), used for recency-first ordering.
   // Arrives over IPC as a Date (structured clone) or an ISO string.
   recordingDate?: Date | string | null
 }
 
 /**
- * MEDIUM-4 (Codex): a download that was INTERRUPTED and should be re-attempted.
- * 'failed'    — errored (USB/save failure, stall marked by the main process).
- * 'cancelled' — cancelActiveDownloads persisted it (disconnect / re-sync / user cancel).
- * Both are retryable: the main-process retryFailed() re-queues both, so the reconnect
- * trigger (and any "needs attention" count) must treat them consistently — otherwise a
- * disconnect-cancelled transfer strands, since the reconnect handler would only look
- * for 'failed' and never call retryFailed at all. Exported for reuse + unit tests.
+ * HIGH-3 (Codex): a download that was INTERRUPTED and should be AUTO-retried on
+ * reconnect. Split from status alone because a 'cancelled' status now carries an
+ * origin:
+ *   'failed'                        — errored (USB/save failure, stall). Always retryable.
+ *   'cancelled' + interrupted/none  — disconnect/re-sync aborted it mid-flight. Retryable.
+ *   'cancelled' + 'user'            — the user deliberately cancelled. NOT auto-retryable;
+ *                                     it stays terminal until a manual Retry.
+ * Used consistently by the reconnect retry AND the operations badge so a user cancel
+ * never resurrects on reconnect (and never inflates the "needs attention" count).
+ * Exported for reuse + unit tests.
  */
-export function isRetryableDownloadStatus(status: string): boolean {
-  return status === 'failed' || status === 'cancelled'
+export function isRetryableDownloadItem(item: { status: string; cancelReason?: string }): boolean {
+  if (item.status === 'failed') return true
+  if (item.status === 'cancelled') return item.cancelReason !== 'user'
+  return false
 }
 
 // DL-14: Module-level abort controller ref so cancelDownloads can be called from outside the hook
@@ -577,14 +585,16 @@ export function useDownloadOrchestrator() {
       if (status.step === 'ready' && isElectron && !isProcessingDownloads.current) {
         // Only retry INTERRUPTED items on reconnect — don't process the full pending queue.
         // Pending items will be processed when auto-sync calls startSession.
-        // MEDIUM-4: include 'cancelled' (disconnect-during-download persists items as
-        // 'cancelled' via cancelActiveDownloads); retrying only 'failed' stranded them.
-        // retryFailed() already re-queues both statuses — we just have to CALL it.
+        // MEDIUM-4: include disconnect-'cancelled' (cancelActiveDownloads persists an
+        // interrupted transfer as 'cancelled'); retrying only 'failed' stranded them.
+        // HIGH-3: but a USER-cancelled download must NOT resurrect here — isRetryable*
+        // excludes cancelReason==='user', and retryFailed(_, interruptedOnly=true) skips
+        // it too, so a deliberate cancel stays terminal until a manual Retry.
         window.electronAPI.downloadService.getState().then((state) => {
-          const hasRetryable = state.queue.some((item: DownloadQueueItem) => isRetryableDownloadStatus(item.status))
+          const hasRetryable = state.queue.some((item: DownloadQueueItem) => isRetryableDownloadItem(item))
           if (hasRetryable) {
-            if (shouldLogQa()) console.log('[useDownloadOrchestrator] Device ready, retrying failed/cancelled downloads')
-            window.electronAPI.downloadService.retryFailed(true)
+            if (shouldLogQa()) console.log('[useDownloadOrchestrator] Device ready, retrying interrupted downloads')
+            window.electronAPI.downloadService.retryFailed(true, true) // deviceConnected, interruptedOnly
           }
         })
       } else if (status.step === 'idle' && !deviceService.isConnected()) {

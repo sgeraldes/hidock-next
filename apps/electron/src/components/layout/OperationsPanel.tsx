@@ -33,7 +33,7 @@ import {
   useOperationsOverlayOpen
 } from '@/store/ui/useUIStore'
 import { useOperations } from '@/hooks/useOperations'
-import { isRetryableDownloadStatus } from '@/hooks/useDownloadOrchestrator'
+import { isRetryableDownloadItem } from '@/hooks/useDownloadOrchestrator'
 import type { UnifiedRecording } from '@/types/unified-recording'
 
 interface OperationsPanelProps {
@@ -107,13 +107,14 @@ export function OperationsPanel({ sidebarOpen }: OperationsPanelProps) {
   useEffect(() => {
     if (!window.electronAPI?.downloadService) return
     window.electronAPI.downloadService.getState().then((state) => {
-      // MEDIUM-4: count interrupted downloads (failed OR disconnect-cancelled) so the
-      // badge stays consistent with the reconnect retry, which re-queues both.
-      const failedCount = state?.queue?.filter((item: { status: string }) => isRetryableDownloadStatus(item.status)).length ?? 0
+      // HIGH-3: count AUTO-retryable downloads (failed OR disconnect-cancelled) so the
+      // badge stays consistent with the reconnect retry. A USER-cancelled download is
+      // excluded — it is a deliberate terminal state, not "needs attention".
+      const failedCount = state?.queue?.filter((item: { status: string; cancelReason?: string }) => isRetryableDownloadItem(item)).length ?? 0
       setFailedDownloadCount(failedCount)
     }).catch(() => {})
-    const unsub = window.electronAPI.downloadService.onStateUpdate((state: { queue: Array<{ status: string }> }) => {
-      setFailedDownloadCount(state.queue.filter((item) => isRetryableDownloadStatus(item.status)).length)
+    const unsub = window.electronAPI.downloadService.onStateUpdate((state: { queue: Array<{ status: string; cancelReason?: string }> }) => {
+      setFailedDownloadCount(state.queue.filter((item) => isRetryableDownloadItem(item)).length)
     })
     return unsub
   }, [])
