@@ -12,11 +12,10 @@ import {
   ListTodo,
   Settings,
   Network,
-  Sun,
-  PanelLeftClose,
-  PanelLeftOpen
+  Sun
 } from 'lucide-react'
 import { TitleBar } from '@/components/layout/TitleBar'
+import { showBrandHorizontalDivider } from '@/components/layout/Brand'
 import { cn } from '@/lib/utils'
 import {
   useAppStore,
@@ -115,27 +114,6 @@ export function NavCountBadge({ href, count, collapsed, active }: { href: string
     >
       {display}
     </span>
-  )
-}
-
-/**
- * Sidebar collapse/expand toggle. Uses the SAME unified Panel affordance as the
- * Library's list/assistant panes (PanelLeftClose to collapse, PanelLeftOpen to
- * expand), so every collapse control in the app reads identically.
- */
-function SidebarCollapseToggle({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
-  const Icon = collapsed ? PanelLeftOpen : PanelLeftClose
-  return (
-    <button
-      type="button"
-      onClick={onToggle}
-      aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-      aria-pressed={!collapsed}
-      title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-      className="flex h-7 w-7 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
-    >
-      <Icon className="h-4 w-4" />
-    </button>
   )
 }
 
@@ -259,14 +237,26 @@ export function Layout({ children }: LayoutProps) {
       {/* Background operations controller - never unmounts, handles ALL operations */}
       <OperationController />
 
-      {/* Office-365-style unified titlebar (window chrome merged with the app) */}
-      <TitleBar sidebarOpen={sidebarOpen} />
+      {/* Office-365-style unified titlebar (window chrome merged with the app). The
+          edge-handle on the brand/content divider drives the sidebar collapse. */}
+      <TitleBar sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
 
-      {/* A1: full-window-width divider under the titlebar. Rendered as its own row
-          BELOW the 40px titlebar band so the Windows native-controls overlay (which
-          occupies the top-right of the titlebar) can't paint over its right end —
-          it now spans edge to edge. */}
-      <div className="h-px w-full shrink-0 bg-slate-700" />
+      {/* Divider row under the titlebar. Rendered as its own row BELOW the 40px
+          titlebar band so the Windows native-controls overlay can't paint over its
+          right end. Split into two segments so the corner-cell "horizontal line
+          below the brand" can be dropped ('sidebar' mode) while the line under the
+          titlebar CONTENT stays — letting the brand flow straight into the nav rail.
+          The left segment tracks the brand-cell width (w-56 / w-16). */}
+      <div className="flex h-px w-full shrink-0">
+        <div
+          className={cn(
+            'h-px shrink-0 transition-all duration-300',
+            sidebarOpen ? 'w-56' : 'w-16',
+            showBrandHorizontalDivider() ? 'bg-slate-700' : 'bg-transparent'
+          )}
+        />
+        <div className="h-px flex-1 bg-slate-700" />
+      </div>
 
       {/* Sidebar + content row (sits below the titlebar) */}
       <div className="flex min-h-0 flex-1">
@@ -280,32 +270,16 @@ export function Layout({ children }: LayoutProps) {
         {/* Navigation — nav px-2.5 (10px) + item px-3 (12px) + half-icon (10px)
             lands every icon centre on the shared 32px rail axis (see TitleBar). */}
         <nav className="flex-1 px-2.5 pt-3 pb-2 space-y-4 overflow-y-auto">
-          {/* Collapsed rail: the sidebar-collapse toggle has no header row to sit
-              on, so show it centred on the rail axis above the nav icons. Uses the
-              SAME unified Panel collapse affordance as the list/assistant panes. */}
-          {!sidebarOpen && (
-            <div className="flex justify-center">
-              <SidebarCollapseToggle collapsed={!sidebarOpen} onToggle={toggleSidebar} />
-            </div>
-          )}
+          {/* The sidebar-collapse control now lives as an edge-handle on the
+              brand/content divider in the titlebar (see TitleBar), so the nav rail
+              starts directly with the KNOWLEDGE section in both states. */}
           {navigationSections.map((section, sectionIdx) => (
             <div key={section.title}>
-              {/* Section Header. The FIRST group ("KNOWLEDGE") also hosts the
-                  sidebar-collapse toggle on its right — un-gluing it from the app
-                  brand mark (which now aligns with the nav-icon column). */}
+              {/* Section Header. */}
               {sidebarOpen && (
-                sectionIdx === 0 ? (
-                  <div className="flex items-center justify-between pl-3 pr-1 mb-2">
-                    <span className="text-[10px] font-semibold text-slate-500 tracking-wider">
-                      {section.title}
-                    </span>
-                    <SidebarCollapseToggle collapsed={!sidebarOpen} onToggle={toggleSidebar} />
-                  </div>
-                ) : (
-                  <div className="px-3 mb-2 text-[10px] font-semibold text-slate-500 tracking-wider">
-                    {section.title}
-                  </div>
-                )
+                <div className="px-3 mb-2 text-[10px] font-semibold text-slate-500 tracking-wider">
+                  {section.title}
+                </div>
               )}
               {/* Section Items */}
               <div className="space-y-1">

@@ -1,10 +1,26 @@
 import { useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Search, CheckCircle2, Loader2, Usb, ChevronDown, LogOut, ArrowRight, AlertTriangle, RotateCcw } from 'lucide-react'
+import {
+  Search,
+  CheckCircle2,
+  Loader2,
+  Usb,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  LogOut,
+  ArrowRight,
+  AlertTriangle,
+  RotateCcw,
+  Settings as SettingsIcon
+} from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useDeviceConnection } from '@/hooks/useDeviceConnection'
 import { useAppStore } from '@/store'
-import { ThemeToggle } from '@/components/ThemeToggle'
+import { Brand, BRAND_DIVIDER_MODE, showBrandVerticalDivider, type BrandDividerMode } from '@/components/layout/Brand'
+import { NotificationsButton } from '@/components/layout/NotificationsButton'
+import { ActivityLogButton } from '@/components/layout/ActivityLogButton'
+import { UserMenu } from '@/components/layout/UserMenu'
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -24,17 +40,26 @@ import {
 } from '@/components/ui/alert-dialog'
 
 /**
- * Office-365-style unified titlebar.
+ * Office-365-style unified titlebar — ONE integrated frameless bar that carries
+ * the whole app chrome (brand, sidebar-collapse handle, global search, the right
+ * cluster of controls) with the native window controls drawn INSIDE its right
+ * edge by Electron's `titleBarOverlay`.
  *
- * Rendered as the top strip of the app shell (above the sidebar + content row).
+ * Layout (left → right):
+ *  1. Brand cell — width == the sidebar width, so the app mark sits directly
+ *     above the nav rail (see <Brand>). Swappable placement via the Brand prop.
+ *  2. Edge-handle collapse — a chevron ON the divider between the brand cell and
+ *     the content area; toggles the sidebar (replaces the old KNOWLEDGE-header
+ *     toggle). Works in both expanded and collapsed (rail) states.
+ *  3. Centred global search (⌘K-style) — routes to Explore.
+ *  4. Right cluster — 🔔 notifications, ⚡ activity, ⚙ settings, the device
+ *     status pill (all-states, incl. Restart), then the avatar → app menu.
+ *  5. Native window controls (— ▢ ✕) — drawn by Electron in the reserved
+ *     NATIVE_CONTROLS_WIDTH gutter at the far right (inside this bar).
+ *
  * The whole bar is a drag region (`titlebar-drag-region`); every interactive
- * child opts out with `titlebar-no-drag` so clicks/typing work. Native window
- * controls (min/max/close) are drawn by Electron's `titleBarOverlay` in the
- * top-right on Windows, so we reserve NATIVE_CONTROLS_WIDTH there. On macOS the
- * traffic lights sit top-left, so we reserve a smaller left inset instead.
- *
- * Height MUST stay in sync with the `titleBarOverlay.height` set in
- * electron/main/index.ts (40px).
+ * child opts out with `titlebar-no-drag`. Height MUST stay in sync with the
+ * `titleBarOverlay.height` set in electron/main/index.ts (40px).
  */
 
 const isMac =
@@ -48,28 +73,25 @@ const isMac =
 // Windows native-controls overlay is ~138px wide; reserve it so nothing hides under it.
 const NATIVE_CONTROLS_WIDTH = 138
 
-// macOS traffic-light inset — reserve the top-left so the toggle box clears the
-// window controls. Windows draws its controls top-right (see NATIVE_CONTROLS_WIDTH),
-// so on Windows the left cell starts flush at x=0 and the grid is pixel-exact.
+// macOS traffic-light inset — reserve the top-left so the brand clears the window
+// controls. Windows draws its controls top-right (see NATIVE_CONTROLS_WIDTH), so on
+// Windows the brand cell starts flush at x=0 and the grid is pixel-exact.
 const MAC_TRAFFIC_LIGHT_INSET = 72
 
-/**
- * Shared shell grid (documented for the sidebar to mirror):
- *  - The titlebar LEFT CELL width == the sidebar width (w-56 open / w-16 collapsed),
- *    and carries the same `border-r` so the sidebar's vertical divider continues
- *    up through the titlebar (Office-365 unified chrome).
- *  - RAIL_AXIS: the collapsed rail is 64px (w-16) wide, so its centre — and the
- *    centre of every nav icon in BOTH states, and the titlebar toggle icon — sits
- *    at x = 32px from the window's left edge. The sidebar keeps this by using
- *    nav `px-2.5` (10px) + item `px-3` (12px) + half-icon (10px) = 32px expanded,
- *    and `justify-center` in the 64px rail = 32px collapsed.
- */
+// Brand-cell width == sidebar width (w-56 open / w-16 collapsed). The edge-handle
+// collapse control is centred on the divider at this x, so it animates with the cell.
+const CELL_WIDTH_OPEN = 224 // w-56
+const CELL_WIDTH_COLLAPSED = 64 // w-16
 
 interface TitleBarProps {
   sidebarOpen: boolean
+  /** Toggles the sidebar — driven by the edge-handle on the brand/content divider. */
+  onToggleSidebar?: () => void
+  /** Corner-cell divider treatment (owner preview). Defaults to BRAND_DIVIDER_MODE. */
+  dividerMode?: BrandDividerMode
 }
 
-export function TitleBar({ sidebarOpen }: TitleBarProps) {
+export function TitleBar({ sidebarOpen, onToggleSidebar, dividerMode = BRAND_DIVIDER_MODE }: TitleBarProps) {
   const navigate = useNavigate()
   // Shared with the Device Sync page — same status source, same connect action.
   const { status, label: connectionLabel, failedHint, connect, disconnect } = useDeviceConnection()
@@ -86,47 +108,51 @@ export function TitleBar({ sidebarOpen }: TitleBarProps) {
     setSearch('')
   }
 
+  const cellWidth = sidebarOpen ? CELL_WIDTH_OPEN : CELL_WIDTH_COLLAPSED
+
   return (
     <header
       className="titlebar-drag-region relative z-30 flex h-10 shrink-0 items-center bg-slate-900 text-slate-100 select-none"
       style={{ paddingRight: isMac ? 12 : NATIVE_CONTROLS_WIDTH }}
     >
-      {/* LEFT CELL — mirrors the sidebar column (same width + border-r), so the
-          sidebar divider continues up through the titlebar. Identity lives here,
-          bounded by the column, instead of straddling the sidebar/content seam. */}
+      {/* BRAND CELL — mirrors the sidebar column (same width + border-r) so the
+          sidebar divider continues up through the titlebar. The app identity is
+          bounded by the column; the mark aligns with the nav-icon rail below. */}
       <div
         className={cn(
-          'flex h-full shrink-0 items-center border-r border-slate-700 transition-all duration-300',
+          'flex h-full shrink-0 items-center transition-all duration-300',
+          // Vertical divider (brand cell right border) — dropped in 'titlebar' mode
+          // so the brand flows into the bar as one continuous strip.
+          showBrandVerticalDivider(dividerMode) && 'border-r border-slate-700',
           sidebarOpen ? 'w-56' : 'w-16'
         )}
         style={{ paddingLeft: isMac ? MAC_TRAFFIC_LIGHT_INSET : undefined }}
       >
-        {/* Brand mark box: 64px wide, mark centred on the 32px rail axis so the
-            app logo lines up vertically with the collapsed rail + every nav icon
-            in the sidebar column below. The sidebar-collapse toggle now lives on
-            the sidebar's "KNOWLEDGE" header row (see Layout.tsx), so the mark is
-            no longer glued to a toggle. */}
-        <div className="flex h-full w-16 shrink-0 items-center justify-center">
-          <AppMark />
-        </div>
-
-        {/* App identity wordmark — expanded only; hidden with the sidebar labels
-            when collapsed. The FULL product wordmark ("Meeting Intelligence" — this
-            app is not the device) is sized to fit the ~160px cell (w-56 − 64px mark
-            box) so it never truncates or straddles the sidebar/content seam. */}
-        {sidebarOpen && (
-          <div className="flex min-w-0 items-center pr-2">
-            <span className="whitespace-nowrap text-[11px] font-semibold leading-none tracking-tight text-white">
-              Meeting Intelligence
-            </span>
-          </div>
-        )}
+        <Brand placement="titlebar" collapsed={!sidebarOpen} />
       </div>
 
-      {/* RIGHT CELL — content column: search (centred) + theme + connection. */}
-      <div className="flex h-full min-w-0 flex-1 items-center gap-3 px-3">
-        {/* Global search — routes to Explore */}
-        <form onSubmit={submitSearch} className="titlebar-no-drag mx-auto w-full max-w-md">
+      {/* EDGE-HANDLE COLLAPSE — a small chevron sitting ON the brand/content
+          divider (concept 04). Toggles the sidebar in BOTH states; replaces the
+          old collapse toggle on the KNOWLEDGE header. Centred on the divider x
+          (translateX -50%) and vertically centred; animates with the cell width. */}
+      {onToggleSidebar && (
+        <button
+          type="button"
+          onClick={onToggleSidebar}
+          aria-label={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
+          aria-pressed={sidebarOpen}
+          title={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
+          className="titlebar-no-drag absolute top-1/2 z-40 flex h-5 w-5 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-slate-600 bg-slate-800 text-slate-300 shadow-sm transition-colors duration-300 hover:bg-slate-700 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+          style={{ left: cellWidth }}
+        >
+          {sidebarOpen ? <ChevronLeft className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+        </button>
+      )}
+
+      {/* CONTENT COLUMN — centred search + right cluster. */}
+      <div className="flex h-full min-w-0 flex-1 items-center gap-2 pl-4 pr-3">
+        {/* Global search — routes to Explore. Shrinks first at narrow widths. */}
+        <form onSubmit={submitSearch} className="titlebar-no-drag mx-auto w-full max-w-md min-w-0">
           <div className="relative">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
             <input
@@ -140,20 +166,35 @@ export function TitleBar({ sidebarOpen }: TitleBarProps) {
           </div>
         </form>
 
-        {/* Theme toggle — sun/moon morph, sits just before the connection pill. */}
-        <ThemeToggle />
+        {/* RIGHT CLUSTER — notifications, activity, settings, device pill, user menu. */}
+        <div className="flex shrink-0 items-center gap-1">
+          <NotificationsButton />
+          <ActivityLogButton />
+          <button
+            type="button"
+            onClick={() => navigate('/settings')}
+            aria-label="Settings"
+            title="Settings"
+            className="titlebar-no-drag flex h-7 w-7 items-center justify-center rounded-md text-slate-300 transition-colors hover:bg-slate-700 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+          >
+            <SettingsIcon className="h-4 w-4" />
+          </button>
 
-        {/* Device connection control — same status + connect/disconnect action as
-            the Device Sync page (via useDeviceConnection). */}
-        <ConnectionControl
-          status={status}
-          label={connectionLabel}
-          failedHint={failedHint}
-          recording={deviceRecording}
-          onConnect={() => void connect()}
-          onDisconnect={() => void disconnect()}
-          onGoToSync={() => navigate('/sync')}
-        />
+          {/* Device connection control — same status + connect/disconnect action as
+              the Device Sync page (via useDeviceConnection). Keeps its all-states
+              dropdown, including Restart. */}
+          <ConnectionControl
+            status={status}
+            label={connectionLabel}
+            failedHint={failedHint}
+            recording={deviceRecording}
+            onConnect={() => void connect()}
+            onDisconnect={() => void disconnect()}
+            onGoToSync={() => navigate('/sync')}
+          />
+
+          <UserMenu />
+        </div>
       </div>
     </header>
   )
@@ -364,24 +405,5 @@ function MoreMenu({ children }: { children: ReactNode }) {
         {children}
       </DropdownMenuContent>
     </DropdownMenu>
-  )
-}
-
-/** Inline "knowledge nexus" mark — a central node with orbiting sources (per branding). */
-function AppMark() {
-  return (
-    <span className="flex h-6 w-6 items-center justify-center rounded-md bg-gradient-to-br from-sky-500 to-indigo-600 shadow-sm">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-        <circle cx="12" cy="12" r="3.2" fill="white" />
-        <circle cx="4.5" cy="6" r="1.6" fill="white" fillOpacity="0.85" />
-        <circle cx="19.5" cy="7.5" r="1.6" fill="white" fillOpacity="0.85" />
-        <circle cx="18" cy="18.5" r="1.6" fill="white" fillOpacity="0.85" />
-        <g stroke="white" strokeOpacity="0.6" strokeWidth="1.1">
-          <line x1="10" y1="10.5" x2="5.5" y2="7" />
-          <line x1="14" y1="10.3" x2="18.7" y2="8.4" />
-          <line x1="13.6" y1="14" x2="17.3" y2="17.6" />
-        </g>
-      </svg>
-    </span>
   )
 }
