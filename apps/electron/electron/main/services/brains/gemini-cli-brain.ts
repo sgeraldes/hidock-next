@@ -7,13 +7,21 @@
  * Capabilities: generate, chat, agentic. NOT analyzeAudio, NOT embed — the CLI has
  * no embed command, so embeddings still route to gemini-api/ollama (spec §B.4).
  *
- *   generate → `gemini -p "<prompt>" --output-format json`  → parse .response
+ *   generate → `gemini -p "" --output-format json`  (PROMPT PIPED VIA STDIN) → parse .response
  *   chat     → same, with history folded into the prompt (CLI is stateless)
+ *
+ * Confidentiality: the prompt/transcript is written to the child's STDIN, never
+ * argv. `gemini -p ""` is the headless trigger (an empty `--prompt` value); the
+ * piped stdin becomes the actual prompt (verified: stdin content reaches the
+ * model). Only fixed flags (`-p ""`, `--output-format json`, `--model <id>`) live
+ * in argv.
  *
  * Auth: configured when the `gemini` CLI is present AND a key is available —
  * GEMINI_API_KEY in the env, or the app's existing Gemini key (credential store /
- * config.transcription.geminiApiKey via resolveGeminiApiKey). authStatus()/
- * generate() NEVER throw.
+ * config.transcription.geminiApiKey via resolveGeminiApiKey). The key is NOT
+ * exercised against the API here (that would be a paid call in a "cheap, cached"
+ * probe), so the status honestly reports "present" rather than "verified".
+ * authStatus()/generate() NEVER throw.
  */
 import { runCli, foldMessagesToPrompt, type SpawnFn } from './cli-runner'
 import { resolveGeminiApiKey } from './gemini-api-brain'
@@ -83,7 +91,8 @@ export class GeminiCliBrain implements AIBrain {
       return { configured: false, method: 'none', detail: 'gemini not on PATH' }
     }
     if (key) {
-      return { configured: true, method: 'api-key', detail: `API key + gemini ${version}` }
+      // Presence, not verification — the key isn't exercised against the API here.
+      return { configured: true, method: 'api-key', detail: `API key present + gemini ${version}` }
     }
     // CLI present but no key — may still be OAuth-logged-in; report as not
     // configured (the router won't auto-select it) but keep the reason clear.
@@ -94,7 +103,9 @@ export class GeminiCliBrain implements AIBrain {
     const prompt = foldMessagesToPrompt(messages, opts.systemPrompt)
     if (!prompt.trim()) return null
 
-    const args = ['-p', prompt, '--output-format', 'json']
+    // `-p ""` is the headless trigger; the prompt is piped via stdin (kept OUT of
+    // argv). Only fixed flags live in argv.
+    const args = ['-p', '', '--output-format', 'json']
     if (opts.model) args.push('--model', opts.model)
 
     // Make the app's Gemini key available to the CLI when the env lacks one.
@@ -106,10 +117,13 @@ export class GeminiCliBrain implements AIBrain {
       const res = await runCli(
         'gemini',
         args,
-        { timeoutMs: GENERATE_TIMEOUT_MS, signal: opts.signal, env },
+        { timeoutMs: GENERATE_TIMEOUT_MS, signal: opts.signal, input: prompt, env },
         this.spawn
       )
-      if (res.aborted || res.timedOut || res.spawnError) return null
+      if (res.aborted || res.timedOut || res.spawnError || res.outputLimitExceeded) {
+        if (res.outputLimitExceeded) console.error('[GeminiCliBrain] generate aborted: output cap exceeded')
+        return null
+      }
       if (res.code !== 0) {
         console.error('[GeminiCliBrain] generate failed:', res.stderr.trim() || `exit ${res.code}`)
         return null

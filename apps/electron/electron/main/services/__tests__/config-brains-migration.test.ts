@@ -160,58 +160,76 @@ describe('Gemini key ↔ credential-store sync (updateConfig)', () => {
 })
 
 /**
- * Failure-injection — the whole point of the fix. A store write that fails to
- * persist must leave a RECONCILABLE state (never silently-successful-yet-stale),
- * and later saves / boot must self-heal it.
+ * HIGH-4 — failure injection. The whole point of the fix: a credential-store
+ * write that fails during a KEY CHANGE must NOT be reported as a successful save
+ * while the stale key stays active (resolveGeminiApiKey prefers the store). The
+ * save must FAIL and the geminiApiKey change must be ROLLED BACK so plaintext and
+ * store stay consistent (config never ahead of the store). Unrelated saves are
+ * never blocked by a background reconcile.
  */
-describe('Gemini key ↔ credential-store sync — failure injection (self-healing)', () => {
-  beforeEach(resetStore)
+describe('Gemini key ↔ credential-store sync — failure injection (HIGH-4 rollback)', () => {
+  // Establish a known baseline each test: config's in-memory geminiApiKey is
+  // cleared to '' and the store emptied, so rollback assertions are absolute
+  // (the module-level config persists across tests otherwise).
+  beforeEach(async () => {
+    setSecretShouldFail = false
+    storeState = {}
+    vi.clearAllMocks()
+    await updateConfig('transcription', { geminiApiKey: '' })
+    storeState = {}
+    vi.clearAllMocks()
+  })
 
-  // (a) A failed store write during a key change is reconcilable: the store stays
-  //     mismatched and the NEXT save re-attempts (even for an unrelated field).
-  it('re-attempts the sync on the next save after a failed store write', async () => {
+  it('rejects the save and rolls the key back when the store write fails on a key change', async () => {
     setSecretShouldFail = true
-    await updateConfig('transcription', { geminiApiKey: 'sk-a' }) // pragma: allowlist secret
+    await expect(updateConfig('transcription', { geminiApiKey: 'sk-a' })).rejects.toThrow(/credential store/i) // pragma: allowlist secret
+    // The store write was attempted but the change did NOT take effect anywhere:
     expect(mockSetSecret).toHaveBeenCalledWith('gemini-api', 'apiKey', 'sk-a')
-    expect(storeState.apiKey).toBeUndefined() // write failed → store still empty
+    expect(storeState.apiKey).toBeUndefined() // store unchanged
+    expect(getConfig().transcription.geminiApiKey).toBe('') // plaintext rolled back → no stale key active
+  })
+
+  it('takes effect once the store is writable again (retry after a failed key change)', async () => {
+    setSecretShouldFail = true
+    await expect(updateConfig('transcription', { geminiApiKey: 'sk-b' })).rejects.toThrow() // pragma: allowlist secret
+    expect(getConfig().transcription.geminiApiKey).toBe('') // rolled back
 
     setSecretShouldFail = false
     mockSetSecret.mockClear()
-    await updateConfig('ui', { theme: 'dark' }) // unrelated save
-    expect(mockSetSecret).toHaveBeenCalledWith('gemini-api', 'apiKey', 'sk-a')
-    expect(storeState.apiKey).toBe('sk-a') // self-healed
+    await updateConfig('transcription', { geminiApiKey: 'sk-b' }) // pragma: allowlist secret — now succeeds
+    expect(storeState.apiKey).toBe('sk-b')
+    expect(getConfig().transcription.geminiApiKey).toBe('sk-b')
   })
 
-  // (b) Retrying the SAME key after a failed sync actually re-attempts. The old
-  //     diff-gated code skipped this because the in-memory config already matched.
-  it('re-attempts when the SAME key is saved again after a failed sync', async () => {
-    setSecretShouldFail = true
-    await updateConfig('transcription', { geminiApiKey: 'sk-same' }) // pragma: allowlist secret
-    expect(storeState.apiKey).toBeUndefined()
-
-    setSecretShouldFail = false
-    mockSetSecret.mockClear()
-    await updateConfig('transcription', { geminiApiKey: 'sk-same' }) // pragma: allowlist secret
-    expect(mockSetSecret).toHaveBeenCalledWith('gemini-api', 'apiKey', 'sk-same')
-    expect(storeState.apiKey).toBe('sk-same')
-  })
-
-  // (d) A failed clear does not leave the old key authoritative forever: a later
-  //     successful save reconciles the store to the desired (empty) state.
-  it('a failed clear does not leave the old key authoritative after a later successful save', async () => {
+  it('a failed key CLEAR rejects and leaves the old key consistent in both config and store', async () => {
     await updateConfig('transcription', { geminiApiKey: 'sk-old' }) // pragma: allowlist secret
     expect(storeState.apiKey).toBe('sk-old')
 
     setSecretShouldFail = true
-    mockSetSecret.mockClear()
-    await updateConfig('transcription', { geminiApiKey: '' })
+    await expect(updateConfig('transcription', { geminiApiKey: '' })).rejects.toThrow()
     expect(mockSetSecret).toHaveBeenCalledWith('gemini-api', 'apiKey', null)
-    expect(storeState.apiKey).toBe('sk-old') // stale — clear did not persist
+    expect(storeState.apiKey).toBe('sk-old') // store unchanged
+    expect(getConfig().transcription.geminiApiKey).toBe('sk-old') // rolled back → consistent with store
 
     setSecretShouldFail = false
     mockSetSecret.mockClear()
-    await updateConfig('ui', { theme: 'light' }) // later successful save
-    expect(mockSetSecret).toHaveBeenCalledWith('gemini-api', 'apiKey', null)
-    expect(storeState.apiKey).toBeUndefined() // reconciled → no longer authoritative
+    await updateConfig('transcription', { geminiApiKey: '' }) // real clear
+    expect(storeState.apiKey).toBeUndefined()
+    expect(getConfig().transcription.geminiApiKey).toBe('')
+  })
+
+  it('does NOT block an unrelated save when a background reconcile write fails (no key change)', async () => {
+    await updateConfig('transcription', { geminiApiKey: 'sk-x' }) // pragma: allowlist secret — config + store = sk-x
+    expect(storeState.apiKey).toBe('sk-x')
+
+    // Store drifts behind out-of-band; a later UNRELATED save reconciles it and
+    // the reconcile write fails — but since the KEY did not change in this save,
+    // the unrelated save must still succeed (rollback is scoped to key changes).
+    storeState.apiKey = 'sk-drift' // pragma: allowlist secret
+    setSecretShouldFail = true
+    mockSetSecret.mockClear()
+    await expect(updateConfig('ui', { theme: 'dark' })).resolves.toBeUndefined()
+    expect(mockSetSecret).toHaveBeenCalledWith('gemini-api', 'apiKey', 'sk-x') // reconcile attempted
+    expect(getConfig().transcription.geminiApiKey).toBe('sk-x') // key unchanged, not rolled back
   })
 })

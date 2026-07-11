@@ -6,14 +6,18 @@
  *
  * Capabilities: generate, chat, agentic. NOT analyzeAudio, NOT embed.
  *
- *   generate → `codex exec "<prompt>"`   (non-interactive; capture stdout)
+ *   generate → `codex exec`   (non-interactive; PROMPT PIPED VIA STDIN, capture stdout)
  *   chat     → same, with history folded into the prompt
+ *
+ * Confidentiality: the prompt/transcript is written to the child's STDIN, never
+ * argv (`codex exec` with no positional reads instructions from stdin). Only fixed
+ * flags (`exec`, `--model <id>`) live in argv.
  *
  * Auth detection prefers the codex-companion probe when present
  * (`codex-companion.mjs setup --json` → { codex.available, auth.loggedIn }); if
- * that companion isn't found or fails to parse, it falls back to a direct
- * `codex --version` probe (exit 0 ⇒ present), plus OPENAI_API_KEY in the env.
- * authStatus()/generate() NEVER throw.
+ * that companion isn't found or fails to parse, it falls back to the CLI's own
+ * `codex login status` (structured/exit-coded auth check), NOT a version-only
+ * probe — plus OPENAI_API_KEY in the env. authStatus()/generate() NEVER throw.
  */
 import { runCli, foldMessagesToPrompt, type SpawnFn } from './cli-runner'
 import type {
@@ -30,7 +34,7 @@ const CAPABILITIES: ReadonlySet<BrainCapability> = new Set<BrainCapability>([
   'agentic',
 ])
 
-const VERSION_TIMEOUT_MS = 8_000
+const AUTH_TIMEOUT_MS = 8_000
 const COMPANION_TIMEOUT_MS = 15_000
 const GENERATE_TIMEOUT_MS = 180_000
 
@@ -71,19 +75,33 @@ export class CodexBrain implements AIBrain {
       if (viaCompanion) return viaCompanion
     }
 
-    // 2. Fallback: a direct `codex --version` presence probe.
+    // 2. Fallback: the CLI's own `codex login status`. This exercises the real
+    //    login (unlike a version-only probe): it RAN ⇒ codex is installed; its
+    //    exit code + text tell us whether a credential is actually present.
     try {
-      const res = await runCli('codex', ['--version'], { timeoutMs: VERSION_TIMEOUT_MS, env: this.env }, this.spawn)
-      if (res.code === 0) {
-        const version = res.stdout.trim().split(/\r?\n/)[0] || 'installed'
+      const res = await runCli(
+        'codex',
+        ['login', 'status'],
+        { timeoutMs: AUTH_TIMEOUT_MS, env: this.env },
+        this.spawn
+      )
+      if (res.spawnError) {
+        return hasApiKey
+          ? { configured: true, method: 'api-key', detail: 'OPENAI_API_KEY set' }
+          : { configured: false, method: 'none', detail: 'codex not on PATH' }
+      }
+      const loggedIn = res.code === 0 && /logged in/i.test(res.stdout)
+      if (loggedIn) {
+        const detail = res.stdout.trim().split(/\r?\n/)[0] || 'ChatGPT login active'
         return {
           configured: true,
           method: hasApiKey ? 'api-key' : 'cli-login',
-          detail: hasApiKey ? `API key + ${version}` : `logged in (${version})`,
+          detail: hasApiKey ? 'OPENAI_API_KEY set' : detail,
         }
       }
+      // codex installed but not logged in.
       if (hasApiKey) return { configured: true, method: 'api-key', detail: 'OPENAI_API_KEY set' }
-      return { configured: false, method: 'none', detail: 'codex not on PATH' }
+      return { configured: false, method: 'none', detail: 'codex installed, not logged in' }
     } catch {
       return hasApiKey
         ? { configured: true, method: 'api-key', detail: 'OPENAI_API_KEY set' }
@@ -125,18 +143,22 @@ export class CodexBrain implements AIBrain {
     const prompt = foldMessagesToPrompt(messages, opts.systemPrompt)
     if (!prompt.trim()) return null
 
+    // `codex exec` with no positional prompt reads instructions from stdin — keep
+    // the prompt OUT of argv (confidentiality). Only fixed flags go in argv.
     const args = ['exec']
     if (opts.model) args.push('--model', opts.model)
-    args.push(prompt)
 
     try {
       const res = await runCli(
         'codex',
         args,
-        { timeoutMs: GENERATE_TIMEOUT_MS, signal: opts.signal, env: this.env },
+        { timeoutMs: GENERATE_TIMEOUT_MS, signal: opts.signal, input: prompt, env: this.env },
         this.spawn
       )
-      if (res.aborted || res.timedOut || res.spawnError) return null
+      if (res.aborted || res.timedOut || res.spawnError || res.outputLimitExceeded) {
+        if (res.outputLimitExceeded) console.error('[CodexBrain] generate aborted: output cap exceeded')
+        return null
+      }
       if (res.code !== 0) {
         console.error('[CodexBrain] generate failed:', res.stderr.trim() || `exit ${res.code}`)
         return null

@@ -20,10 +20,36 @@
 import { app, safeStorage } from 'electron'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'fs'
+import {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  renameSync,
+  unlinkSync,
+  openSync,
+  fsyncSync,
+  closeSync,
+} from 'fs'
 import type { BrainId } from './types'
 
 const ENC_PREFIX = '__enc__'
+
+/** Best-effort fsync of a path (file or directory). Silently skips where the FS
+ *  or platform doesn't support it (e.g. directory fsync on Windows) — durability
+ *  is a hardening, never a correctness dependency. */
+function fsyncPath(path: string, mode: string): void {
+  try {
+    const fd = openSync(path, mode)
+    try {
+      fsyncSync(fd)
+    } finally {
+      closeSync(fd)
+    }
+  } catch {
+    /* fsync unsupported / unavailable — ignore */
+  }
+}
 
 function encryptSecret(value: string): string {
   try {
@@ -97,20 +123,41 @@ export class BrainCredentialStore {
   }
 
   /**
-   * Atomically persist the store: write a sibling `brains.json.tmp` and rename it
-   * over `brains.json`. An interrupted/partial write therefore lands in the temp
-   * file and can NEVER corrupt the real file (rename is atomic on the same
-   * filesystem). Unlike the previous implementation this THROWS on failure — the
-   * caller (setSecret) surfaces it instead of silently swallowing, which is what
-   * let a failed key rotation leave brains.json and config.json split-brained.
+   * Atomically persist the store: write a UNIQUELY-named sibling temp file, fsync
+   * it, then rename it over `brains.json` (and fsync the directory where the OS
+   * supports it). An interrupted/partial write lands in the temp file and can
+   * NEVER corrupt the real file (rename is atomic on the same filesystem).
+   *
+   * The temp name is unique per write (`brains.json.<pid>.<ts>.<rand>.tmp`) — a
+   * FIXED shared `brains.json.tmp` let two processes/instances clobber each
+   * other's in-flight temp or commit a stale full-file snapshot (lost updates,
+   * MEDIUM-7). Distinct temp names mean concurrent writers never share a scratch
+   * file; the rename is still the single atomic commit point.
+   *
+   * Unlike the pre-fix implementation this THROWS on failure — the caller
+   * (setSecret) surfaces it instead of silently swallowing, which is what let a
+   * failed key rotation leave brains.json and config.json split-brained.
    */
   private persist(): void {
     const path = this.resolvePath()
     const dir = join(path, '..')
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-    const tmp = `${path}.tmp`
-    writeFileSync(tmp, JSON.stringify(this.data, null, 2))
-    renameSync(tmp, path)
+    const unique = `${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`
+    const tmp = `${path}.${unique}.tmp`
+    try {
+      writeFileSync(tmp, JSON.stringify(this.data, null, 2))
+      fsyncPath(tmp, 'r+') // durably flush the temp bytes before the rename commits
+      renameSync(tmp, path)
+      fsyncPath(dir, 'r') // durably flush the rename (best-effort; no-op on Windows)
+    } catch (err) {
+      // Clean up our unique temp so a failed write doesn't leak scratch files.
+      try {
+        if (existsSync(tmp)) unlinkSync(tmp)
+      } catch {
+        /* ignore cleanup failure */
+      }
+      throw err
+    }
   }
 
   private ensure(id: BrainId): PersistedBrainState {

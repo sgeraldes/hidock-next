@@ -332,7 +332,14 @@ export function getConfig(): AppConfig {
 }
 
 export async function saveConfig(newConfig: Partial<AppConfig>): Promise<void> {
+  // Capture the previous plaintext key BEFORE merging so we can roll back a
+  // failed change (HIGH-4) and detect whether the key actually changed.
+  const prevGeminiKey = config.transcription?.geminiApiKey ?? ''
+
   config = deepMerge(config, newConfig)
+
+  const desiredGeminiKey = config.transcription?.geminiApiKey ?? ''
+  const geminiKeyChanged = prevGeminiKey.trim() !== desiredGeminiKey.trim()
 
   // H10 FIX: keep the encrypted credential store in sync with the plaintext
   // `transcription.geminiApiKey`. resolveGeminiApiKey() prefers the store, so
@@ -341,15 +348,27 @@ export async function saveConfig(newConfig: Partial<AppConfig>): Promise<void> {
   //
   // This is reconcile-based, NOT diff-gated: we compare the store's CURRENT
   // value against the desired one on EVERY save and write only on a real
-  // mismatch. That makes it idempotent AND self-healing — a save whose store
-  // write previously failed re-attempts here because the store still won't
-  // match (the old diff-gated version skipped the retry once the in-memory
-  // config had already changed, so a failed rotate/clear stayed broken forever).
+  // mismatch. That makes it idempotent AND self-healing — a reconcile whose
+  // store write fails for a NON-key-change save re-attempts on the next save
+  // (defence in depth), while boot migration repairs a store that fell behind.
+  //
+  // HIGH-4: if the store write fails for THIS save's key CHANGE, the change must
+  // NOT be reported as a success while the stale key stays active
+  // (resolveGeminiApiKey prefers the store). We roll the geminiApiKey field back
+  // to its previous value — in memory AND in what we write to config.json — so
+  // plaintext and store stay CONSISTENT (config is never ahead of the store),
+  // and we surface the failure to the caller (throw) so the UI can react. The
+  // rollback is scoped to geminiApiKey; unrelated fields in this save still
+  // persist, and unrelated saves are never blocked by a background reconcile.
   //
   // Done BEFORE writing config.json so a store-write failure never leaves
-  // config.json ahead of brains.json unnoticed; on failure the sync logs loudly
-  // and leaves a reconcilable state that the next save / boot migration repairs.
-  syncGeminiKeyToCredentialStore(config.transcription?.geminiApiKey ?? '')
+  // config.json ahead of brains.json.
+  const syncOk = syncGeminiKeyToCredentialStore(desiredGeminiKey)
+  let keyChangeFailed = false
+  if (!syncOk && geminiKeyChanged) {
+    config.transcription.geminiApiKey = prevGeminiKey
+    keyChangeFailed = true
+  }
 
   const configPath = getConfigPath()
   const configDir = join(configPath, '..')
@@ -367,6 +386,13 @@ export async function saveConfig(newConfig: Partial<AppConfig>): Promise<void> {
     }
   }
   writeFileSync(configPath, JSON.stringify(toWrite, null, 2))
+
+  if (keyChangeFailed) {
+    throw new Error(
+      'Failed to persist the Gemini API key to the secure credential store; the key change was ' +
+        'rolled back (previous key still in effect). Other settings were saved.'
+    )
+  }
 }
 
 export async function updateConfig<K extends keyof AppConfig>(

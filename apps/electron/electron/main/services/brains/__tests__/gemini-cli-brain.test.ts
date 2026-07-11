@@ -76,19 +76,21 @@ describe('GeminiCliBrain', () => {
   })
 
   describe('generate', () => {
-    it('builds `gemini -p <prompt> --output-format json` and parses .response', async () => {
+    it('builds `gemini -p "" --output-format json` with the prompt on STDIN (not argv), parses .response', async () => {
       const spawn = makeFakeSpawn({ stdout: JSON.stringify({ response: 'answer' }), code: 0 })
       const brain = new GeminiCliBrain({ spawn: asSpawn(spawn.fn), env: { GEMINI_API_KEY: 'k' } })
       const out = await brain.generate([{ role: 'user', content: 'q' }])
       expect(out).toBe('answer')
-      expect(spawn.calls[0].args).toEqual(['-p', 'User: q', '--output-format', 'json'])
+      expect(spawn.calls[0].args).toEqual(['-p', '', '--output-format', 'json']) // prompt NOT in argv
+      expect(spawn.lastChild?.stdin.write).toHaveBeenCalledWith('User: q') // prompt on stdin
     })
 
-    it('appends --model when set', async () => {
+    it('appends --model when set (prompt still on stdin)', async () => {
       const spawn = makeFakeSpawn({ stdout: JSON.stringify({ response: 'x' }), code: 0 })
       const brain = new GeminiCliBrain({ spawn: asSpawn(spawn.fn), env: { GEMINI_API_KEY: 'k' } })
       await brain.generate([{ role: 'user', content: 'q' }], { model: 'gemini-3-pro' })
-      expect(spawn.calls[0].args).toEqual(['-p', 'User: q', '--output-format', 'json', '--model', 'gemini-3-pro'])
+      expect(spawn.calls[0].args).toEqual(['-p', '', '--output-format', 'json', '--model', 'gemini-3-pro'])
+      expect(spawn.lastChild?.stdin.write).toHaveBeenCalledWith('User: q')
     })
 
     it('injects the app stored key into the child env when env lacks one', async () => {

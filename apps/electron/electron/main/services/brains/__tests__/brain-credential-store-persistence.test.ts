@@ -16,9 +16,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { tmpdir } from 'os'
 
-const { files, flags } = vi.hoisted(() => ({
+const { files, flags, writes } = vi.hoisted(() => ({
   files: new Map<string, string>(),
   flags: { writeThrows: false, renameThrows: false },
+  writes: [] as string[],
 }))
 
 vi.mock('fs', () => ({
@@ -30,6 +31,7 @@ vi.mock('fs', () => ({
   mkdirSync: () => undefined,
   writeFileSync: (p: string, data: string) => {
     if (flags.writeThrows) throw new Error('EROFS: read-only file system')
+    writes.push(p)
     files.set(p, data)
   },
   renameSync: (from: string, to: string) => {
@@ -38,6 +40,13 @@ vi.mock('fs', () => ({
     files.set(to, files.get(from)!)
     files.delete(from)
   },
+  unlinkSync: (p: string) => {
+    files.delete(p)
+  },
+  // Durability fsync helpers — best-effort in prod, no-ops in this in-memory FS.
+  openSync: () => 1,
+  fsyncSync: () => undefined,
+  closeSync: () => undefined,
 }))
 
 vi.mock('electron', () => ({
@@ -48,7 +57,7 @@ vi.mock('electron', () => ({
 import { BrainCredentialStore } from '../brain-credential-store'
 
 const FILE = `${tmpdir()}/brains-persist-test.json`
-const TMP = `${FILE}.tmp`
+const FIXED_TMP = `${FILE}.tmp` // the OLD fixed shared temp name (must NOT be used now)
 
 function freshStore(): BrainCredentialStore {
   const store = new BrainCredentialStore(FILE)
@@ -65,6 +74,7 @@ function storedKey(): string | undefined {
 describe('BrainCredentialStore persistence robustness', () => {
   beforeEach(() => {
     files.clear()
+    writes.length = 0
     flags.writeThrows = false
     flags.renameThrows = false
     vi.clearAllMocks()
@@ -74,8 +84,23 @@ describe('BrainCredentialStore persistence robustness', () => {
     const store = freshStore()
     expect(store.setSecret('gemini-api', 'apiKey', 'sk-1')).toBe(true)
     expect(storedKey()).toBe('sk-1')
-    // Temp file is renamed away — no leftover on success.
-    expect(files.has(TMP)).toBe(false)
+    // Temp file is renamed away — no `.tmp` leftover on success.
+    expect([...files.keys()].some((k) => k.endsWith('.tmp'))).toBe(false)
+  })
+
+  // MEDIUM-7: a fixed shared temp name lets concurrent writers clobber each other.
+  it('uses a UNIQUELY-named temp file per write (never the fixed brains.json.tmp)', () => {
+    const store = freshStore()
+    store.setSecret('gemini-api', 'apiKey', 'k1')
+    store.setSecret('gemini-api', 'apiKey', 'k2')
+    const temps = writes.filter((p) => p !== FILE)
+    expect(temps.length).toBeGreaterThanOrEqual(2)
+    expect(new Set(temps).size).toBe(temps.length) // all unique
+    for (const t of temps) {
+      expect(t).not.toBe(FIXED_TMP) // not the fixed shared name
+      expect(t).toContain(String(process.pid)) // per-process uniqueness
+      expect(t.endsWith('.tmp')).toBe(true)
+    }
   })
 
   it('writes atomically via temp file + rename (target never left partial)', () => {

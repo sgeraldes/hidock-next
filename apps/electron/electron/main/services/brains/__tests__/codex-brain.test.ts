@@ -1,7 +1,8 @@
 /**
- * CodexBrain tests — verifies capabilities, auth detection via the codex-companion
- * JSON probe (with fallback to `codex --version` + OPENAI_API_KEY), argv for
- * `codex exec`, stdout parsing, and no-throw failure modes. Fake spawn only.
+ * CodexBrain tests — verifies capabilities, HONEST auth detection via the
+ * codex-companion JSON probe (fallback to `codex login status`, NOT a version
+ * probe), argv for `codex exec` with the PROMPT PIPED VIA STDIN (never argv),
+ * stdout parsing, and no-throw failure modes. Fake spawn only.
  *
  * @vitest-environment node
  */
@@ -45,25 +46,34 @@ describe('CodexBrain', () => {
       expect(status.configured).toBe(false)
     })
 
-    it('falls back to version probe when the companion cannot be spawned', async () => {
-      // node (companion) errors → fall through to `codex --version`.
+    it('falls back to `codex login status` when the companion cannot be spawned', async () => {
+      // node (companion) errors → fall through to `codex login status`.
       const spawn = makeFakeSpawn((cmd) =>
-        cmd === 'node' ? { emitError: true } : ({ stdout: 'codex-cli 0.144.1', code: 0 } as FakeSpawnScript)
+        cmd === 'node' ? { emitError: true } : ({ stdout: 'Logged in using ChatGPT', code: 0 } as FakeSpawnScript)
       )
       const brain = new CodexBrain({ spawn: asSpawn(spawn.fn), env: {}, companionPath: COMPANION })
       const status = await brain.authStatus()
       expect(status.configured).toBe(true)
-      expect(spawn.calls.some((c) => c.command === 'codex' && c.args[0] === '--version')).toBe(true)
+      expect(spawn.calls.some((c) => c.command === 'codex' && c.args[0] === 'login' && c.args[1] === 'status')).toBe(true)
     })
   })
 
   describe('authStatus without companion', () => {
-    it('uses `codex --version` presence probe', async () => {
-      const spawn = makeFakeSpawn({ stdout: 'codex-cli 0.144.1', code: 0 })
+    it('uses `codex login status` and reports cli-login when logged in', async () => {
+      const spawn = makeFakeSpawn({ stdout: 'Logged in using ChatGPT', code: 0 })
       const brain = new CodexBrain({ spawn: asSpawn(spawn.fn), env: {} })
       const status = await brain.authStatus()
       expect(status.configured).toBe(true)
-      expect(spawn.calls[0]).toMatchObject({ command: 'codex', args: ['--version'] })
+      expect(status.method).toBe('cli-login')
+      expect(spawn.calls[0]).toMatchObject({ command: 'codex', args: ['login', 'status'] })
+    })
+
+    it('NOT configured when installed but not logged in (status ran, no "logged in", no key)', async () => {
+      const spawn = makeFakeSpawn({ stdout: 'Not logged in', code: 1 })
+      const brain = new CodexBrain({ spawn: asSpawn(spawn.fn), env: {} })
+      const status = await brain.authStatus()
+      expect(status.configured).toBe(false)
+      expect(status.detail).toMatch(/not logged in/i)
     })
 
     it('reports api-key when OPENAI_API_KEY is set and CLI absent', async () => {
@@ -82,19 +92,21 @@ describe('CodexBrain', () => {
   })
 
   describe('generate', () => {
-    it('builds `codex exec <prompt>` and returns trimmed stdout', async () => {
+    it('builds `codex exec` with the prompt on STDIN (not argv) and returns trimmed stdout', async () => {
       const spawn = makeFakeSpawn({ stdout: '  result text  ', code: 0 })
       const brain = new CodexBrain({ spawn: asSpawn(spawn.fn), env: {} })
       const out = await brain.generate([{ role: 'user', content: 'do it' }])
       expect(out).toBe('result text')
-      expect(spawn.calls[0]).toMatchObject({ command: 'codex', args: ['exec', 'User: do it'] })
+      expect(spawn.calls[0]).toMatchObject({ command: 'codex', args: ['exec'] }) // prompt NOT in argv
+      expect(spawn.lastChild?.stdin.write).toHaveBeenCalledWith('User: do it')
     })
 
-    it('inserts --model between exec and the prompt when set', async () => {
+    it('inserts --model after exec (prompt still on stdin)', async () => {
       const spawn = makeFakeSpawn({ stdout: 'ok', code: 0 })
       const brain = new CodexBrain({ spawn: asSpawn(spawn.fn), env: {} })
       await brain.generate([{ role: 'user', content: 'q' }], { model: 'gpt-x' })
-      expect(spawn.calls[0].args).toEqual(['exec', '--model', 'gpt-x', 'User: q'])
+      expect(spawn.calls[0].args).toEqual(['exec', '--model', 'gpt-x'])
+      expect(spawn.lastChild?.stdin.write).toHaveBeenCalledWith('User: q')
     })
 
     it('returns null on non-zero exit', async () => {

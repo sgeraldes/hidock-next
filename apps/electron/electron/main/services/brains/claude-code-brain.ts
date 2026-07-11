@@ -7,11 +7,16 @@
  * Capabilities: generate, chat, agentic. NOT analyzeAudio, NOT embed — audio and
  * embeddings never route here (the BrainRouter enforces that, spec §B.4).
  *
- *   generate → `claude -p "<prompt>"`   (print mode; capture stdout)
+ *   generate → `claude -p`   (print mode; PROMPT PIPED VIA STDIN, capture stdout)
  *   chat     → same, with history folded into the prompt
  *
- * Auth: `claude --version` exiting 0 (CLI present + usable) — or an
- * ANTHROPIC_API_KEY in the environment — is treated as configured, per the brief.
+ * Confidentiality: the (potentially sensitive) prompt/transcript is written to the
+ * child's STDIN, never argv — so it can't be read from another process's command
+ * line. Only fixed flags (`-p`, `--model <id>`) live in argv.
+ *
+ * Auth: probed HONESTLY via `claude auth status --json` (structured `loggedIn`),
+ * NOT a bare `--version` (which only proves the binary exists, not that it's
+ * usable). An ANTHROPIC_API_KEY in the env also counts as configured.
  * authStatus()/generate() NEVER throw; they resolve to a not-configured status /
  * null on any failure.
  */
@@ -30,8 +35,8 @@ const CAPABILITIES: ReadonlySet<BrainCapability> = new Set<BrainCapability>([
   'agentic',
 ])
 
-/** Cheap version probe. */
-const VERSION_TIMEOUT_MS = 8_000
+/** Cheap, local auth-status probe (reads credential files; no model call). */
+const AUTH_TIMEOUT_MS = 8_000
 /** One-shot generation upper bound. */
 const GENERATE_TIMEOUT_MS = 120_000
 
@@ -61,20 +66,41 @@ export class ClaudeCodeBrain implements AIBrain {
   async authStatus(): Promise<BrainAuthStatus> {
     const hasApiKey = !!this.env.ANTHROPIC_API_KEY?.trim()
     try {
-      const res = await runCli('claude', ['--version'], { timeoutMs: VERSION_TIMEOUT_MS, env: this.env }, this.spawn)
-      if (res.code === 0) {
-        const version = res.stdout.trim().split(/\r?\n/)[0] || 'installed'
+      // `claude auth status --json` → { loggedIn, authMethod, email, ... }. This
+      // exercises the real credential store, so a logged-out/expired CLI is not
+      // advertised as usable (unlike a version-only probe).
+      const res = await runCli(
+        'claude',
+        ['auth', 'status', '--json'],
+        { timeoutMs: AUTH_TIMEOUT_MS, env: this.env },
+        this.spawn
+      )
+
+      if (res.spawnError) {
+        return hasApiKey
+          ? { configured: true, method: 'api-key', detail: 'ANTHROPIC_API_KEY set' }
+          : { configured: false, method: 'none', detail: 'claude not on PATH' }
+      }
+
+      const status = res.code === 0 ? parseAuthJson(res.stdout) : null
+      if (status?.loggedIn) {
+        const who = typeof status.email === 'string' && status.email ? ` as ${status.email}` : ''
         return {
           configured: true,
           method: hasApiKey ? 'api-key' : 'cli-login',
-          detail: hasApiKey ? `API key + claude ${version}` : `logged in (claude ${version})`,
+          detail: hasApiKey ? `API key + claude login${who}` : `logged in${who}`,
         }
       }
-      // CLI present but errored: still usable if an API key is set.
+
+      // CLI present but NOT logged in (status said so, or the probe errored).
       if (hasApiKey) {
         return { configured: true, method: 'api-key', detail: 'ANTHROPIC_API_KEY set' }
       }
-      return { configured: false, method: 'none', detail: 'claude not on PATH' }
+      return {
+        configured: false,
+        method: 'none',
+        detail: status ? 'claude installed, not logged in' : 'claude installed, auth status unavailable',
+      }
     } catch {
       return hasApiKey
         ? { configured: true, method: 'api-key', detail: 'ANTHROPIC_API_KEY set' }
@@ -86,17 +112,22 @@ export class ClaudeCodeBrain implements AIBrain {
     const prompt = foldMessagesToPrompt(messages, opts.systemPrompt)
     if (!prompt.trim()) return null
 
-    const args = ['-p', prompt]
+    // `claude -p` with a piped stdin reads the prompt from stdin — keep the prompt
+    // OUT of argv (confidentiality). Only fixed flags go in argv.
+    const args = ['-p']
     if (opts.model) args.push('--model', opts.model)
 
     try {
       const res = await runCli(
         'claude',
         args,
-        { timeoutMs: GENERATE_TIMEOUT_MS, signal: opts.signal, env: this.env },
+        { timeoutMs: GENERATE_TIMEOUT_MS, signal: opts.signal, input: prompt, env: this.env },
         this.spawn
       )
-      if (res.aborted || res.timedOut || res.spawnError) return null
+      if (res.aborted || res.timedOut || res.spawnError || res.outputLimitExceeded) {
+        if (res.outputLimitExceeded) console.error('[ClaudeCodeBrain] generate aborted: output cap exceeded')
+        return null
+      }
       if (res.code !== 0) {
         console.error('[ClaudeCodeBrain] generate failed:', res.stderr.trim() || `exit ${res.code}`)
         return null
@@ -112,5 +143,25 @@ export class ClaudeCodeBrain implements AIBrain {
   async chat(messages: BrainMessage[], opts: GenerateOptions = {}): Promise<string | null> {
     // The claude CLI print mode is stateless — fold history into one prompt.
     return this.generate(messages, opts)
+  }
+}
+
+/** Parse `claude auth status --json`. Returns null on any non-JSON / parse failure. */
+function parseAuthJson(stdout: string): { loggedIn?: boolean; email?: unknown } | null {
+  const trimmed = stdout.trim()
+  if (!trimmed) return null
+  try {
+    return JSON.parse(trimmed) as { loggedIn?: boolean; email?: unknown }
+  } catch {
+    const start = trimmed.indexOf('{')
+    const end = trimmed.lastIndexOf('}')
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(trimmed.slice(start, end + 1)) as { loggedIn?: boolean; email?: unknown }
+      } catch {
+        return null
+      }
+    }
+    return null
   }
 }
