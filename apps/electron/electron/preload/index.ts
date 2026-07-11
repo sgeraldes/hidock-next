@@ -485,6 +485,7 @@ export interface ElectronAPI {
     getByRecordingId: (recordingId: string) => Promise<any>
     getByRecordingIds: (recordingIds: string[]) => Promise<Record<string, any>>
     search: (query: string) => Promise<any[]>
+    getRecurringTopics: () => Promise<Array<{ topic: string; recordingCount: number }>>
     assignSpeaker: (request: { recordingId: string; speakerLabel: string; contactId?: string; newName?: string }) => Promise<Result<Contact>>
     getSpeakerMap: (request: { recordingId: string }) => Promise<Result<Array<{ speaker_label: string; contact_id: string; name: string }>>>
     unassignSpeaker: (request: { recordingId: string; speakerLabel: string }) => Promise<Result<void>>
@@ -1303,6 +1304,7 @@ const electronAPI: ElectronAPI = {
     getByRecordingId: (recordingId) => callIPC('db:get-transcript', recordingId),
     getByRecordingIds: (recordingIds) => callIPC('db:get-transcripts-by-recording-ids', recordingIds),
     search: (query) => callIPC('db:search-transcripts', query),
+    getRecurringTopics: () => callIPC('db:get-recurring-topics'),
     assignSpeaker: (request) => callIPC('transcripts:assignSpeaker', request),
     getSpeakerMap: (request) => callIPC('transcripts:getSpeakerMap', request),
     unassignSpeaker: (request) => callIPC('transcripts:unassignSpeaker', request)

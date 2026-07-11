@@ -59,6 +59,11 @@ function SearchResultSkeleton() {
 // C-EXP-003: Pagination constants
 const SEARCH_PAGE_SIZE = 20
 
+interface RecurringTopic {
+  topic: string
+  recordingCount: number
+}
+
 export function Explore() {
   const navigate = useNavigate()
   const location = useLocation()
@@ -69,6 +74,8 @@ export function Explore() {
   const [loading, setLoading] = useState(false)
   const [searchError, setSearchError] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<'all' | 'knowledge' | 'people' | 'projects'>('all')
+  const [recurringTopics, setRecurringTopics] = useState<RecurringTopic[]>([])
+  const [topicsLoading, setTopicsLoading] = useState(true)
 
   // C-EXP-004: Ref for autofocus on the search input
   const searchInputRef = useRef<HTMLInputElement>(null)
@@ -83,6 +90,27 @@ export function Explore() {
   const abortControllerRef = useRef<AbortController | null>(null)
   // B-EXP-005: Cancelled ref for unmount detection (AbortController may not be supported by IPC)
   const cancelledRef = useRef(false)
+
+  useEffect(() => {
+    let cancelled = false
+
+    const loadRecurringTopics = async () => {
+      try {
+        const topics = await window.electronAPI.transcripts.getRecurringTopics()
+        if (!cancelled) setRecurringTopics(topics)
+      } catch (error) {
+        console.error('Failed to load recurring topics:', error)
+        if (!cancelled) setRecurringTopics([])
+      } finally {
+        if (!cancelled) setTopicsLoading(false)
+      }
+    }
+
+    void loadRecurringTopics()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   // B-EXP-004: Wrap handleSearch in useCallback with proper deps
   const handleSearch = useCallback(async () => {
@@ -242,11 +270,23 @@ export function Explore() {
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <p className="text-sm text-muted-foreground">Topics frequently mentioned in your recent meetings.</p>
-                  <div className="flex flex-wrap gap-2">
-                    {['Amazon Connect', 'API Design', 'Migration', 'Q1 Planning', 'Security'].map(t => (
-                      <button key={t} onClick={() => setQuery(t)} className="px-3 py-1 bg-background border rounded-full text-xs hover:border-primary transition-colors">{t}</button>
-                    ))}
-                  </div>
+                  {topicsLoading ? (
+                    <p className="text-sm text-muted-foreground animate-pulse">Loading recurring topics...</p>
+                  ) : recurringTopics.length > 0 ? (
+                    <div className="flex flex-wrap gap-2">
+                      {recurringTopics.map(({ topic }) => (
+                        <button
+                          key={topic.toLowerCase()}
+                          onClick={() => setQuery(topic)}
+                          className="px-3 py-1 bg-background border rounded-full text-xs hover:border-primary transition-colors"
+                        >
+                          {topic}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">Topics appear as your meetings are analyzed</p>
+                  )}
                 </CardContent>
               </Card>
 

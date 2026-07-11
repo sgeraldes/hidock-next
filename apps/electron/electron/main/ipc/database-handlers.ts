@@ -23,6 +23,7 @@ import {
   updateRecordingTranscriptionStatus,
   linkRecordingToMeeting
 } from '../services/database'
+import { getRecurringTopics } from '../services/recurring-topics'
 
 export function registerDatabaseHandlers(): void {
   // Meetings
@@ -81,6 +82,10 @@ export function registerDatabaseHandlers(): void {
 
   ipcMain.handle('db:search-transcripts', async (_, query: string) => {
     return searchTranscripts(query)
+  })
+
+  ipcMain.handle('db:get-recurring-topics', async () => {
+    return getRecurringTopics()
   })
 
   ipcMain.handle('db:get-transcripts-by-recording-ids', async (_, recordingIds: string[]) => {
