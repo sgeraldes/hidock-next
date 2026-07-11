@@ -283,9 +283,6 @@ interface PixelRagBackfillState {
 const BACKFILL_STATE_KEY = 'pixelRagBackfill'
 const BACKFILL_MAX_ATTEMPTS = 3
 const BACKFILL_COOLDOWN_MS = 24 * 60 * 60 * 1000 // one boot-tick-per-day retry cadence
-/** Selection page size and the hard cap on rows examined per run (keeps a boot tick cheap). */
-const BACKFILL_PAGE_SIZE = 50
-const BACKFILL_MAX_SCAN = 500
 
 function parseMetadata(json: string | null): Record<string, unknown> {
   if (!json) return {}
@@ -344,51 +341,50 @@ function recordBackfillAttempt(
 }
 
 /**
- * Select up to `limit` ELIGIBLE image artifacts lacking embeddings, paging
- * through candidates (newest first) and filtering by the metadata-persisted
- * attempt state in JS (the state lives inside a JSON column). Because failed
- * rows are excluded by eligibility — not by position — a cluster of recent
- * poison captures cannot permanently occupy the batch: after their first
- * failed attempt they cool down / go terminal and the pages walk past them to
- * older healthy rows. Total rows examined per run is capped by
- * {@link BACKFILL_MAX_SCAN}.
+ * Select up to `limit` ELIGIBLE image artifacts lacking embeddings.
+ *
+ * Eligibility (terminal / max-attempts / cooldown) is enforced IN SQL via JSON
+ * predicates on the metadata column, so ineligible rows are never retrieved at
+ * all — there is no scan window that terminal/cooling rows can occupy. Any
+ * number of terminal rows ahead of an older healthy capture therefore cannot
+ * hide it: the query walks straight past them and the LIMIT applies to
+ * eligible rows only. (A previous revision filtered eligibility in JS after an
+ * OFFSET-paged retrieval capped at 500 rows, which restarted at offset 0 every
+ * run — 500+ terminal rows ahead of a healthy row starved it forever.)
+ *
+ * The CASE expression guarantees evaluation order, so json_extract only runs
+ * on rows whose metadata passed json_valid — a single row with garbage
+ * metadata can never make the whole query throw (it is treated as eligible,
+ * matching {@link parseMetadata}'s lenient JS behavior). Retrieved rows are
+ * re-checked with {@link isBackfillEligible} as belt-and-suspenders.
  */
-function selectEligibleBackfillRows(limit: number): ImageBackfillRow[] {
-  const eligible: ImageBackfillRow[] = []
-  const nowMs = Date.now()
-  let offset = 0
-
-  while (eligible.length < limit && offset < BACKFILL_MAX_SCAN) {
-    let page: ImageBackfillRow[]
-    try {
-      page = queryAll<ImageBackfillRow>(
-        `SELECT a.id AS artifact_id, a.knowledge_capture_id, a.storage_path,
-                a.extracted_text, a.metadata, k.title, k.summary, k.captured_at
-           FROM artifacts a
-           LEFT JOIN knowledge_captures k ON k.id = a.knowledge_capture_id
-          WHERE a.kind = 'image'
-            AND NOT EXISTS (SELECT 1 FROM vector_embeddings v WHERE v.recording_id = a.id)
-          ORDER BY a.created_at DESC, a.id DESC
-          LIMIT ? OFFSET ?`,
-        [BACKFILL_PAGE_SIZE, offset]
-      )
-    } catch (e) {
-      console.error('[ArtifactService] image-capture backfill query failed:', e)
-      break
-    }
-
-    for (const row of page) {
-      if (eligible.length >= limit) break
-      if (isBackfillEligible(readBackfillState(parseMetadata(row.metadata)), nowMs)) {
-        eligible.push(row)
-      }
-    }
-
-    if (page.length < BACKFILL_PAGE_SIZE) break // no more candidates
-    offset += BACKFILL_PAGE_SIZE
+function selectEligibleBackfillRows(limit: number, nowMs: number): ImageBackfillRow[] {
+  const cooldownCutoffIso = new Date(nowMs - BACKFILL_COOLDOWN_MS).toISOString()
+  try {
+    const rows = queryAll<ImageBackfillRow>(
+      `SELECT a.id AS artifact_id, a.knowledge_capture_id, a.storage_path,
+              a.extracted_text, a.metadata, k.title, k.summary, k.captured_at
+         FROM artifacts a
+         LEFT JOIN knowledge_captures k ON k.id = a.knowledge_capture_id
+        WHERE a.kind = 'image'
+          AND NOT EXISTS (SELECT 1 FROM vector_embeddings v WHERE v.recording_id = a.id)
+          AND CASE
+                WHEN a.metadata IS NULL OR json_valid(a.metadata) = 0 THEN 1
+                WHEN COALESCE(json_extract(a.metadata, '$.pixelRagBackfill.terminal'), 0) = 1 THEN 0
+                WHEN COALESCE(json_extract(a.metadata, '$.pixelRagBackfill.attempts'), 0) >= ? THEN 0
+                WHEN json_extract(a.metadata, '$.pixelRagBackfill.lastAttemptAt') IS NULL THEN 1
+                WHEN datetime(json_extract(a.metadata, '$.pixelRagBackfill.lastAttemptAt')) <= datetime(?) THEN 1
+                ELSE 0
+              END = 1
+        ORDER BY a.created_at DESC, a.id DESC
+        LIMIT ?`,
+      [BACKFILL_MAX_ATTEMPTS, cooldownCutoffIso, limit]
+    )
+    return rows.filter((row) => isBackfillEligible(readBackfillState(parseMetadata(row.metadata)), nowMs))
+  } catch (e) {
+    console.error('[ArtifactService] image-capture backfill query failed:', e)
+    return []
   }
-
-  return eligible
 }
 
 /**
@@ -415,7 +411,7 @@ export async function backfillImageCaptureIndex(limit = 10): Promise<ImageCaptur
   const store = getVectorStore()
   await store.initialize() // ensures vector_embeddings exists for the NOT EXISTS check
 
-  const rows = selectEligibleBackfillRows(limit)
+  const rows = selectEligibleBackfillRows(limit, Date.now())
   const imageType = getArtifactType('image')
 
   let visionKeyAvailable: boolean

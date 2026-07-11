@@ -364,4 +364,59 @@ describe('F5 PixelRAG — image captures as RAG sources', () => {
     expect(second.scanned).toBe(0)
     expect(h.visionCalls).toBe(0)
   })
+
+  it('SQL-side eligibility: 500+ terminal rows ahead cannot hide an older eligible capture', async () => {
+    // 520 NEWER terminal rows — more than any scan window. Inserted directly
+    // (they need no files: SQL eligibility must exclude them before retrieval).
+    const terminalMeta = JSON.stringify({
+      pixelRagBackfill: {
+        attempts: 3,
+        lastAttemptAt: new Date().toISOString(),
+        errorKind: 'VISION_FAILED',
+        terminal: true
+      }
+    })
+    const wallBase = Date.UTC(2026, 5, 20, 0, 0, 0)
+    for (let i = 0; i < 520; i++) {
+      run(
+        `INSERT INTO artifacts (id, knowledge_capture_id, kind, mime, storage_path, size,
+                                content_hash, extracted_text, metadata, created_at)
+         VALUES (?, NULL, 'image', 'image/png', NULL, 0, ?, NULL, ?, ?)`,
+        [`term-wall-${i}`, `hash-term-wall-${i}`, terminalMeta, new Date(wallBase + i * 1000).toISOString()]
+      )
+    }
+
+    // One OLDER eligible capture behind the wall. It already has extracted text,
+    // so indexing it requires zero vision calls — billing must stay at 0.
+    run(
+      `INSERT INTO artifacts (id, knowledge_capture_id, kind, mime, storage_path, size,
+                              content_hash, extracted_text, metadata, created_at)
+       VALUES ('eligible-behind-wall', NULL, 'image', 'image/png', NULL, 0,
+               'hash-eligible-behind-wall', 'Dashboard screenshot showing Q3 revenue by region', '{}',
+               '2026-01-02T00:00:00.000Z')`,
+      []
+    )
+
+    h.visionCalls = 0
+    const res = await backfillImageCaptureIndex(5)
+
+    // The single run walks straight past the 520 terminal rows: only the
+    // eligible row is retrieved and it gets indexed — no starvation, no billing.
+    expect(res.scanned).toBe(1)
+    expect(res.indexed).toBe(1)
+    expect(h.visionCalls).toBe(0)
+
+    const chunks = queryAll<{ source_type: string }>(
+      'SELECT source_type FROM vector_embeddings WHERE recording_id = ?',
+      ['eligible-behind-wall']
+    )
+    expect(chunks.length).toBeGreaterThan(0)
+    expect(chunks[0].source_type).toBe('image')
+
+    // And the terminal wall is still never re-scanned on subsequent runs.
+    h.visionCalls = 0
+    const again = await backfillImageCaptureIndex(5)
+    expect(again.scanned).toBe(0)
+    expect(h.visionCalls).toBe(0)
+  })
 })
