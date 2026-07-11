@@ -4,6 +4,8 @@ import { initializeFileStorage } from '../services/file-storage'
 import { listGeminiTranscriptionModels } from '../services/gemini-models'
 import { success, error as errorResult } from '../types/api'
 import { emitActivityLog } from '../services/activity-log'
+import { getResolvedFeatures } from '../services/feature-gate'
+import { reconcileFeatures } from '../services/feature-lifecycle'
 
 export function registerConfigHandlers(): void {
   // Get full config
@@ -42,9 +44,16 @@ export function registerConfigHandlers(): void {
     'config:update-section',
     async <K extends keyof AppConfig>(_, section: K, values: Partial<AppConfig[K]>) => {
       try {
+        // Track I: capture the resolved feature state BEFORE the write so the
+        // lifecycle reconciler can diff old→new and start/stop the right loops.
+        const prevFeatures = section === 'features' ? getResolvedFeatures() : null
         await updateConfig(section, values)
         if (section === 'storage') {
           await initializeFileStorage()
+        }
+        if (section === 'features' && prevFeatures) {
+          // Runtime start/stop of toggled features + broadcast to the renderer.
+          await reconcileFeatures(prevFeatures)
         }
         emitActivityLog('info', `Settings updated: ${String(section)}`)
         return success(getConfig())

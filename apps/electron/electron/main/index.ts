@@ -29,7 +29,6 @@ import {
   setMainWindow as setWatcherMainWindow
 } from './services/recording-watcher'
 import {
-  startTranscriptionProcessor,
   stopTranscriptionProcessor,
   setMainWindowForTranscription
 } from './services/transcription'
@@ -40,7 +39,9 @@ import { getStoragePolicyService } from './services/storage-policy'
 import { setMainWindowForMigration } from './ipc/migration-handlers'
 import { getIntegrityService } from './services/integrity-service'
 import { acquireSingleInstanceLock } from './single-instance'
-import { registerBootTask, startBootScheduler } from './services/boot-scheduler'
+import { startBootScheduler } from './services/boot-scheduler'
+import { registerGatedBootTasks } from './services/boot-tasks'
+import { isFeatureEnabled } from './services/feature-gate'
 
 let mainWindow: BrowserWindow | null = null
 let splashWindow: BrowserWindow | null = null
@@ -190,17 +191,27 @@ async function initializeServices(): Promise<void> {
   // Living knowledge graph (v27): subscribe graph-sync to entity events now, so
   // renames/merges and finished transcripts keep the graph in step. DB-only +
   // debounced ingest; guarded so it can never break the pipeline.
-  import('./services/graph-sync')
-    .then(({ startGraphSync }) => startGraphSync())
-    .catch((e) => console.error('[GraphSync] startup wiring failed:', e))
+  // Track I: gated on the Context Graph feature (skipped under library-only).
+  if (isFeatureEnabled('context-graph')) {
+    import('./services/graph-sync')
+      .then(({ startGraphSync }) => startGraphSync())
+      .catch((e) => console.error('[GraphSync] startup wiring failed:', e))
+  }
 
   // Gate USB hot-plug auto-connect on the user's "Auto-connect on startup"
   // preference. Without this the device reconnects on every power-on / plug-in
   // regardless of the toggle. Manual "Connect Device" is unaffected.
-  setAutoConnectChecker(() => getConfig().device.autoConnect === true)
+  // Track I: additionally requires the Device Sync feature — with it disabled the
+  // app must not initiate USB connections at all (checked live, no restart).
+  setAutoConnectChecker(
+    () => getConfig().device.autoConnect === true && isFeatureEnabled('device-sync')
+  )
 
-  // CS-010: Initialize calendar auto-sync after IPC handlers and DB are ready
-  initializeCalendarAutoSync()
+  // CS-010: Initialize calendar auto-sync after IPC handlers and DB are ready.
+  // Track I: gated on the Calendar feature (skipped under library-only).
+  if (isFeatureEnabled('calendar')) {
+    initializeCalendarAutoSync()
+  }
 
   // Connectors (Layer 2): build the host + attempt silent (non-interactive)
   // resume for connectors that already have credentials. Never launches an
@@ -367,88 +378,14 @@ app.whenReady().then(async () => {
   // initial library load are not competing for the event loop.
   // ---------------------------------------------------------------------------
 
-  // 1. Reconcile organization data (meeting↔recording links, People from
-  //    attendees, ICS text repair, ~1,521-row status self-heal). DB-only, idempotent.
-  registerBootTask({
-    name: 'org-reconcile',
-    run: async () => {
-      await import('./services/org-reconciler')
-        .then(({ reconcileOrganization }) => reconcileOrganization())
-        .catch((e) => console.error('[OrgReconciler] error:', e))
-    }
-  })
-
-  // 2. Self-heal the Knowledge Library: create a knowledge_capture for any
-  //    transcript that lacks one. Cheap, DB-only, idempotent.
-  registerBootTask({
-    name: 'knowledge-capture-backfill',
-    run: async () => {
-      await import('./services/knowledge-capture-backfill')
-        .then(({ backfillKnowledgeCaptures }) => backfillKnowledgeCaptures())
-        .catch((e) => console.error('[KnowledgeCaptureBackfill] error:', e))
-    }
-  })
-
-  // 3. Backfill the plain-markdown meeting wiki (no API calls — DB → files).
-  registerBootTask({
-    name: 'meeting-wiki-backfill',
-    run: async () => {
-      await import('./services/meeting-wiki')
-        .then(({ backfillMeetingWiki }) => backfillMeetingWiki())
-        .catch((e) => console.error('[MeetingWiki] Backfill error:', e))
-    }
-  })
-
-  // 4. Start the transcription processor. This returns promptly (it arms the
-  //    10s interval and kicks a first pass); the backlog drain then runs in the
-  //    background, mutex-gated to one item at a time. Deferred to here so the
-  //    240-item drain does not compete with first paint + the library load.
-  //    NOTE: correctness and the queue's newest-first order are unchanged — only
-  //    WHEN the processor starts moved.
-  registerBootTask({
-    name: 'start-transcription-processor',
-    run: () => {
-      startTranscriptionProcessor()
-    }
-  })
-
-  // 5. Backfill vector embeddings for transcripts indexed before embeddings
-  //    worked (or added while the app was closed). Network-bound, per-item.
-  registerBootTask({
-    name: 'embeddings-backfill',
-    run: () =>
-      import('./services/vector-store')
-        .then(async ({ getVectorStore }) => {
-          const store = getVectorStore()
-          await store.initialize()
-          await store.backfillMissingTranscripts()
-        })
-        .catch((e) => console.error('[VectorStore] Backfill error:', e))
-  })
-
-  // 5b. F5 (PixelRAG): index EXISTING image captures (screenshots) that have no
-  //     embeddings yet — e.g. pasted before a Gemini key existed. Bounded per boot
-  //     tick; re-runs vision extraction only when text is missing. Degrades
-  //     silently without a Gemini/embedding backend (rows retried on a later boot).
-  registerBootTask({
-    name: 'image-capture-backfill',
-    run: () =>
-      import('./services/artifact-service')
-        .then(({ backfillImageCaptureIndex }) => backfillImageCaptureIndex())
-        .then(() => undefined)
-        .catch((e) => console.error('[ArtifactService] Image-capture backfill error:', e))
-  })
-
-  // 6. Self-heal transcripts whose Gemini analysis failed (or was never run on an
-  //    older build) by re-analysing the stored full_text. Bounded per run.
-  registerBootTask({
-    name: 'reanalyze-failed-transcripts',
-    run: async () => {
-      await import('./services/transcription')
-        .then(({ reanalyzeFailedTranscripts }) => reanalyzeFailedTranscripts())
-        .catch((e) => console.error('[Reanalyze] Backfill error:', e))
-    }
-  })
+  // Register the deferred heavy boot tasks, GATED by feature (Track I): a task
+  // whose owning feature is disabled by the active preset is simply never queued.
+  // Under the default `full` preset all six register exactly as before. The
+  // definitions + gating live in services/boot-tasks.ts (unit-tested there):
+  //   org-reconcile (calendar), knowledge-capture-backfill (library floor),
+  //   meeting-wiki-backfill (meeting-intelligence), start-transcription-processor
+  //   + reanalyze-failed-transcripts (transcription), embeddings-backfill (assistant).
+  registerGatedBootTasks()
 
   // Kick the scheduler once the renderer has painted its first frame, so heavy
   // work never competes with first paint / the initial library IPC. A fallback

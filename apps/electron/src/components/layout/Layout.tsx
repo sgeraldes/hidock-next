@@ -33,6 +33,7 @@ import { OperationController } from '@/components/OperationController'
 import { OperationsPanel } from '@/components/layout/OperationsPanel'
 import { useUIStore } from '@/store/ui/useUIStore'
 import { useActionablesPendingCount, useActionablesStore } from '@/store'
+import { useFeatureStore, describeDisableReason, featureForPath } from '@/store/useFeatureStore'
 
 interface LayoutProps {
   children: ReactNode
@@ -118,8 +119,35 @@ export function NavCountBadge({ href, count, collapsed, active }: { href: string
   )
 }
 
+/**
+ * Track I (Gate 4): per-item nav visibility from the resolved feature state.
+ *  - 'visible'  — feature enabled (or the item is floor/unowned, e.g. Library).
+ *  - 'grayed'   — feature soft-disabled by a hard-dependency cascade
+ *                 (`requires:X`): shown grayed + non-navigating with a
+ *                 "Requires X" hint, per the owner's "cascade must surface,
+ *                 not silently remove" rule.
+ *  - 'hidden'   — feature disabled directly (user flag or preset): removed.
+ */
+export type NavItemVisibility = 'visible' | 'grayed' | 'hidden'
+
+export function navItemVisibility(
+  resolved: ReturnType<typeof useFeatureStore.getState>['resolved'],
+  href: string
+): { visibility: NavItemVisibility; hint: string | null } {
+  const feature = featureForPath(href)
+  if (!feature) return { visibility: 'visible', hint: null } // floor (Library, Settings)
+  const state = resolved[feature]
+  if (!state || state.enabled) return { visibility: 'visible', hint: null }
+  if (state.reason?.startsWith('requires:')) {
+    return { visibility: 'grayed', hint: describeDisableReason(state.reason) }
+  }
+  return { visibility: 'hidden', hint: null }
+}
+
 export function Layout({ children }: LayoutProps) {
   const location = useLocation()
+  // Track I: resolved feature state drives nav filtering/graying below.
+  const resolvedFeatures = useFeatureStore((s) => s.resolved)
   // SM-02 fix: Use granular selectors instead of destructuring entire store
   const loadMeetings = useAppStore((s) => s.loadMeetings)
   const syncCalendar = useAppStore((s) => s.syncCalendar)
@@ -154,6 +182,17 @@ export function Layout({ children }: LayoutProps) {
     '/actionables': pendingActionables,
     '/sync': unsyncedCount
   }
+
+  // Track I (Gate 4): apply feature visibility — drop 'hidden' items, keep
+  // 'grayed' (cascade) items with their "Requires X" hint, drop empty sections.
+  const visibleSections = navigationSections
+    .map((section) => ({
+      title: section.title,
+      items: section.items
+        .map((item) => ({ ...item, ...navItemVisibility(resolvedFeatures, item.href) }))
+        .filter((item) => item.visibility !== 'hidden')
+    }))
+    .filter((section) => section.items.length > 0)
 
   // Track previous state for toast notifications
   const prevConnectedRef = useRef<boolean | null>(null)
@@ -295,7 +334,7 @@ export function Layout({ children }: LayoutProps) {
           {/* The sidebar-collapse control now lives as an edge-handle on the
               brand/content divider in the titlebar (see TitleBar), so the nav rail
               starts directly with the KNOWLEDGE section in both states. */}
-          {navigationSections.map((section, sectionIdx) => (
+          {visibleSections.map((section, sectionIdx) => (
             <div key={section.title}>
               {/* Section Header. */}
               {sidebarOpen && (
@@ -306,6 +345,33 @@ export function Layout({ children }: LayoutProps) {
               {/* Section Items */}
               <div className="space-y-1">
                 {section.items.map((item) => {
+                  // Track I: cascade-disabled items render grayed + non-navigating
+                  // with a "Requires X" hint (the cascade must SURFACE, not vanish).
+                  if (item.visibility === 'grayed') {
+                    return (
+                      <div
+                        key={item.href}
+                        role="link"
+                        aria-disabled="true"
+                        title={item.hint ?? undefined}
+                        data-testid={`nav-grayed-${item.href.replace(/\//g, '')}`}
+                        className={cn(
+                          'relative flex items-center gap-3 rounded-lg px-3 py-2 text-sm cursor-not-allowed select-none text-slate-600',
+                          !sidebarOpen && 'justify-center'
+                        )}
+                      >
+                        <item.icon className="h-5 w-5 flex-shrink-0" />
+                        {sidebarOpen && (
+                          <span className="flex min-w-0 flex-col leading-tight">
+                            <span>{item.name}</span>
+                            {item.hint && (
+                              <span className="truncate text-[10px] text-slate-600">{item.hint}</span>
+                            )}
+                          </span>
+                        )}
+                      </div>
+                    )
+                  }
                   const isActive = location.pathname.startsWith(item.href)
                   return (
                     <Link
@@ -333,7 +399,7 @@ export function Layout({ children }: LayoutProps) {
                 })}
               </div>
               {/* Section Divider (except for last section) */}
-              {sectionIdx < navigationSections.length - 1 && (
+              {sectionIdx < visibleSections.length - 1 && (
                 <div className="mt-3 border-t border-slate-800" />
               )}
             </div>

@@ -88,6 +88,8 @@ export function renameOrMergePersonNode(
 const INGEST_DEBOUNCE_MS = 60_000
 let ingestTimer: ReturnType<typeof setTimeout> | null = null
 let started = false
+/** Event-bus unsubscribe handles, so the feature can be stopped at runtime. */
+let unsubscribers: Array<() => void> = []
 
 /** Debounced auto-ingest of new transcripts; swallows a missing-provider error. */
 function scheduleIngest(): void {
@@ -129,33 +131,60 @@ export function startGraphSync(): void {
   started = true
   const bus = getEventBus()
 
-  bus.onDomainEvent<ContactChangedEvent>(
-    'entity:contact-changed',
-    (event) => {
-      try {
-        const { oldName, newName } = event.payload || {}
-        if (!oldName || !newName) return
-        const store = getKnowledgeGraphStore()
-        const outcome = renameOrMergePersonNode(store, oldName, newName)
-        if (outcome !== 'noop') {
-          console.log(`[GraphSync] Person node ${outcome}: "${oldName}" → "${newName}"`)
+  unsubscribers.push(
+    bus.onDomainEvent<ContactChangedEvent>(
+      'entity:contact-changed',
+      (event) => {
+        try {
+          const { oldName, newName } = event.payload || {}
+          if (!oldName || !newName) return
+          const store = getKnowledgeGraphStore()
+          const outcome = renameOrMergePersonNode(store, oldName, newName)
+          if (outcome !== 'noop') {
+            console.log(`[GraphSync] Person node ${outcome}: "${oldName}" → "${newName}"`)
+          }
+        } catch (e) {
+          console.warn('[GraphSync] contact-changed surgery failed:', e)
         }
-      } catch (e) {
-        console.warn('[GraphSync] contact-changed surgery failed:', e)
       }
-    }
+    )
   )
 
-  bus.onDomainEvent<TranscriptReadyEvent>(
-    'entity:transcript-ready',
-    () => {
-      try {
-        scheduleIngest()
-      } catch (e) {
-        console.warn('[GraphSync] transcript-ready scheduling failed:', e)
+  unsubscribers.push(
+    bus.onDomainEvent<TranscriptReadyEvent>(
+      'entity:transcript-ready',
+      () => {
+        try {
+          scheduleIngest()
+        } catch (e) {
+          console.warn('[GraphSync] transcript-ready scheduling failed:', e)
+        }
       }
-    }
+    )
   )
 
   console.log('[GraphSync] Living knowledge graph sync started')
+}
+
+/**
+ * Runtime stop for the Context Graph feature (Track I). Unsubscribes from the
+ * event bus and clears the pending debounced ingest so no further graph work
+ * happens while the feature is disabled. Idempotent; startGraphSync() re-arms it.
+ */
+export function stopGraphSync(): void {
+  if (!started) return
+  started = false
+  for (const off of unsubscribers) {
+    try {
+      off()
+    } catch {
+      /* best-effort unsubscribe */
+    }
+  }
+  unsubscribers = []
+  if (ingestTimer) {
+    clearTimeout(ingestTimer)
+    ingestTimer = null
+  }
+  console.log('[GraphSync] Living knowledge graph sync stopped')
 }

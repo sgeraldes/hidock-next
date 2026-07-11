@@ -23,6 +23,7 @@ import { formatBytes, cn } from '@/lib/utils'
 import { HealthCheck } from '@/components/HealthCheck'
 import { ConnectorsSettings } from '@/components/settings/ConnectorsSettings'
 import { AIBrainsSettings } from '@/components/settings/AIBrainsSettings'
+import { FeaturesSettings } from '@/components/settings/FeaturesSettings'
 import { toast } from '@/components/ui/toaster'
 import type { StorageInfo, AppConfig } from '@/types'
 
@@ -569,6 +570,12 @@ export function Settings() {
 
       <div className="flex-1 overflow-auto p-6">
         <div className="max-w-2xl mx-auto space-y-6">
+          {/* Modular features (Track I) — preset selector. The `features` anchor is
+              the deep-link target of FeatureDisabledPage's "Enable in Settings". */}
+          <div id="features">
+            <FeaturesSettings />
+          </div>
+
           {/* Assistant — Chat Placement */}
           <Card>
             <CardHeader>

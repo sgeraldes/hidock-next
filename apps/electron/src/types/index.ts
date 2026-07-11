@@ -30,6 +30,8 @@
 export * from './stores'
 export type { Actionable } from './knowledge'
 import type { Actionable } from './knowledge'
+export type { FeaturesConfig } from '@/shared/feature-registry'
+import type { FeaturesConfig } from '@/shared/feature-registry'
 
 // =============================================================================
 // Existing Types
@@ -195,6 +197,9 @@ export interface AppConfig {
     autoConnect: boolean
     autoDownload: boolean
   }
+  // Modular features (Track I) — mirror of the main-process shape. `preset`
+  // selects a named feature-set; `flags` are sparse per-feature overrides.
+  features?: FeaturesConfig
   ui: {
     theme: 'light' | 'dark' | 'system'
     defaultView: 'week' | 'month'

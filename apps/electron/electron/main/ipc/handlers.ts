@@ -38,8 +38,17 @@ import { registerGitCommitsHandlers } from './git-commits-handlers'
 import { registerWaveformCacheHandlers } from './waveform-cache-handlers'
 import { registerBrainsHandlers } from './brains-handlers'
 import { registerHandoverHandlers } from './handover-handlers'
+import { ipcMain } from 'electron'
+import { installFeatureGate } from '../services/feature-gate'
 
 export function registerIpcHandlers(): void {
+  // Track I (Gate 2): wrap ipcMain.handle for the duration of registration so
+  // every feature-owned channel is auto-gated fail-closed. Core/shared channels
+  // pass through untouched, and under the default `full` preset nothing is gated
+  // (zero behavior change). Restored in `finally` so later dynamic handlers are
+  // unaffected. See services/feature-gate.ts for the rationale.
+  const restoreGate = installFeatureGate(ipcMain)
+  try {
   // Register all IPC handlers
   registerConfigHandlers()
   registerDatabaseHandlers()
@@ -84,6 +93,9 @@ export function registerIpcHandlers(): void {
   registerWaveformCacheHandlers()
   registerBrainsHandlers()
   registerHandoverHandlers()
+  } finally {
+    restoreGate()
+  }
 
   console.log('All IPC handlers registered')
 }

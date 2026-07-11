@@ -65,6 +65,18 @@ export { useLibraryStore } from './useLibraryStore'
 export { useUIStore } from './ui/useUIStore'
 export type { UIStore, SidebarContent, PlaybackState, SentimentSegment } from '@/types/stores'
 
+// Modular features (Track I): resolved feature state + selectors driving nav
+// filtering, route guards and embedded-surface checks.
+export {
+  useFeatureStore,
+  useFeatureEnabled,
+  useFeatureResolved,
+  usePendingRestart,
+  describeDisableReason,
+  featureForPath,
+  initFeatureStoreWiring
+} from './useFeatureStore'
+
 // =============================================================================
 // Legacy Store - Backwards Compatibility
 // =============================================================================

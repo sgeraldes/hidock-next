@@ -13,6 +13,8 @@ import {
 } from 'fs'
 import type { BrainId, BrainTask } from './brains/types'
 import { getBrainCredentialStore } from './brains/brain-credential-store'
+import type { FeaturesConfig } from '../../../src/shared/feature-registry'
+import { DEFAULT_FEATURES_CONFIG } from '../../../src/shared/feature-registry'
 
 /** Best-effort fsync of a path (file or directory). Silently skips where the FS
  *  or platform doesn't support it (e.g. directory fsync on Windows) — durability
@@ -139,6 +141,11 @@ export interface AppConfig {
     taskRouting: Partial<Record<BrainTask, BrainId>>
     models: Partial<Record<BrainId, string>>
   }
+  // Modular features (Track I). `preset` selects a named feature-set; `flags` are
+  // sparse per-feature overrides. Default preset `full` = ZERO behavior change for
+  // existing installs. The effective per-feature state is computed by the pure
+  // resolveFeatureState() in src/shared/feature-registry.ts.
+  features: FeaturesConfig
   ui: {
     theme: 'light' | 'dark' | 'system'
     defaultView: 'week' | 'month'
@@ -211,6 +218,9 @@ const DEFAULT_CONFIG: AppConfig = {
     taskRouting: {},
     models: {}
   },
+  // Default preset `full` → every feature enabled → identical behavior to before
+  // modular features existed. New installs may later be asked during onboarding.
+  features: { ...DEFAULT_FEATURES_CONFIG },
   ui: {
     theme: 'system',
     defaultView: 'week',
