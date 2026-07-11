@@ -15,3 +15,8 @@ export {
 } from './brain-credential-store'
 export { GeminiApiBrain, resolveGeminiApiKey } from './gemini-api-brain'
 export { OllamaBrain } from './ollama-brain'
+export { ClaudeCodeBrain } from './claude-code-brain'
+export { CodexBrain } from './codex-brain'
+export { GeminiCliBrain, parseGeminiJson } from './gemini-cli-brain'
+export { runCli, foldMessagesToPrompt } from './cli-runner'
+export type { SpawnFn, CliRunOptions, CliRunResult } from './cli-runner'

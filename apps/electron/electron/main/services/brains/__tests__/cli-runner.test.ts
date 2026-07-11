@@ -1,0 +1,111 @@
+/**
+ * cli-runner tests — the spawn/timeout/abort/no-throw contract every CLI brain
+ * depends on. Uses the fake spawn (no real child process).
+ *
+ * @vitest-environment node
+ */
+import { describe, it, expect } from 'vitest'
+import { runCli, foldMessagesToPrompt, type SpawnFn } from '../cli-runner'
+import { makeFakeSpawn } from './fake-spawn'
+
+const asSpawn = (fn: unknown) => fn as SpawnFn
+
+describe('runCli', () => {
+  it('captures stdout + exit code on success', async () => {
+    const spawn = makeFakeSpawn({ stdout: 'hello world', code: 0 })
+    const res = await runCli('mycli', ['--flag', 'x'], { timeoutMs: 1000 }, asSpawn(spawn.fn))
+    expect(res.code).toBe(0)
+    expect(res.stdout).toBe('hello world')
+    expect(res.spawnError).toBe(false)
+    expect(res.timedOut).toBe(false)
+    expect(res.aborted).toBe(false)
+    expect(spawn.calls[0]).toMatchObject({ command: 'mycli', args: ['--flag', 'x'] })
+  })
+
+  it('captures stderr + non-zero code without throwing', async () => {
+    const spawn = makeFakeSpawn({ stderr: 'boom', code: 2 })
+    const res = await runCli('mycli', [], { timeoutMs: 1000 }, asSpawn(spawn.fn))
+    expect(res.code).toBe(2)
+    expect(res.stderr).toBe('boom')
+  })
+
+  it('resolves with spawnError when the process errors (ENOENT)', async () => {
+    const spawn = makeFakeSpawn({ emitError: true })
+    const res = await runCli('missing', [], { timeoutMs: 1000 }, asSpawn(spawn.fn))
+    expect(res.spawnError).toBe(true)
+    expect(res.code).toBeNull()
+  })
+
+  it('resolves with spawnError when spawn() itself throws', async () => {
+    const throwingSpawn = asSpawn(() => {
+      throw new Error('cannot spawn')
+    })
+    const res = await runCli('x', [], { timeoutMs: 1000 }, throwingSpawn)
+    expect(res.spawnError).toBe(true)
+  })
+
+  it('kills the child and flags timedOut when it hangs past timeoutMs', async () => {
+    const spawn = makeFakeSpawn({ never: true })
+    const res = await runCli('hang', [], { timeoutMs: 20 }, asSpawn(spawn.fn))
+    expect(res.timedOut).toBe(true)
+    expect(res.code).toBeNull()
+    expect(spawn.lastChild?.kill).toHaveBeenCalled()
+  })
+
+  it('kills the child when the abort signal fires', async () => {
+    const spawn = makeFakeSpawn({ never: true })
+    const controller = new AbortController()
+    const p = runCli('hang', [], { timeoutMs: 5000, signal: controller.signal }, asSpawn(spawn.fn))
+    controller.abort()
+    const res = await p
+    expect(res.aborted).toBe(true)
+    expect(spawn.lastChild?.kill).toHaveBeenCalled()
+  })
+
+  it('does not spawn at all when the signal is already aborted', async () => {
+    const spawn = makeFakeSpawn({ stdout: 'x', code: 0 })
+    const controller = new AbortController()
+    controller.abort()
+    const res = await runCli('x', [], { timeoutMs: 1000, signal: controller.signal }, asSpawn(spawn.fn))
+    expect(res.aborted).toBe(true)
+    expect(spawn.calls).toHaveLength(0)
+  })
+
+  it('writes input to stdin then closes it', async () => {
+    const spawn = makeFakeSpawn({ stdout: 'ok', code: 0 })
+    await runCli('x', [], { timeoutMs: 1000, input: 'piped' }, asSpawn(spawn.fn))
+    expect(spawn.lastChild?.stdin.write).toHaveBeenCalledWith('piped')
+    expect(spawn.lastChild?.stdin.end).toHaveBeenCalled()
+  })
+
+  it('overlays env onto process.env', async () => {
+    const spawn = makeFakeSpawn({ stdout: 'ok', code: 0 })
+    await runCli('x', [], { timeoutMs: 1000, env: { FOO: 'bar' } }, asSpawn(spawn.fn))
+    const opts = spawn.calls[0].options as { env: Record<string, string> }
+    expect(opts.env.FOO).toBe('bar')
+  })
+})
+
+describe('foldMessagesToPrompt', () => {
+  it('surfaces the system turn first, then role-labels the rest', () => {
+    const out = foldMessagesToPrompt(
+      [
+        { role: 'system', content: 'be terse' },
+        { role: 'user', content: 'hi' },
+        { role: 'assistant', content: 'hello' },
+        { role: 'user', content: 'bye' },
+      ],
+    )
+    expect(out).toBe('System: be terse\n\nUser: hi\n\nAssistant: hello\n\nUser: bye')
+  })
+
+  it('prefers an explicit systemPrompt over an in-message system turn', () => {
+    const out = foldMessagesToPrompt([{ role: 'user', content: 'x' }], 'override sys')
+    expect(out).toBe('System: override sys\n\nUser: x')
+  })
+
+  it('omits the System line when there is no system content', () => {
+    const out = foldMessagesToPrompt([{ role: 'user', content: 'only' }])
+    expect(out).toBe('User: only')
+  })
+})
