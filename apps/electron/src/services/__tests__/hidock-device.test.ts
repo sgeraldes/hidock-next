@@ -3773,3 +3773,69 @@ describe('HiDockDeviceService - Singleton Factory', () => {
     expect(instance1).toBe(instance2)
   })
 })
+
+// HIGH-2 (Codex): listRecordings must restore an owning terminal connection status on
+// EVERY scan exit path. The scan enters 'counting-files'; without a terminal transition
+// the UI stays there and useDownloadOrchestrator (which gates on step === 'ready') never
+// starts queued downloads. A SUCCESSFUL scan → 'ready'; a failed/interrupted scan must
+// NOT be 'ready' (it surfaces an honest error state).
+describe('HiDockDeviceService - listRecordings terminal status (HIGH-2)', () => {
+  let HiDockDeviceService: any
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    vi.resetModules()
+    const module = await import('../hidock-device')
+    HiDockDeviceService = (module as any).HiDockDeviceService
+  })
+
+  function makeConnectedService(recordingCount: number) {
+    const service = new HiDockDeviceService()
+    const s = service as any
+    s.state.connected = true
+    s.state.recordingCount = recordingCount
+    s.initializationComplete = true
+    s.cachedRecordings = null
+    s.cachedRecordingCount = -1
+    s.listRecordingsFailureCount = 0
+    s.jensen.isConnected = () => true
+    s.jensen.getLockHolder = () => null
+    return { service, s }
+  }
+
+  it('a completed scan ends at step "ready" so queued downloads can start', async () => {
+    const { service, s } = makeConnectedService(2)
+    s.jensen.listFiles = vi.fn(async () => [
+      { name: 'a.hda', length: 100, duration: 10, time: new Date(), version: 1, signature: 'sig-a' },
+      { name: 'b.hda', length: 200, duration: 20, time: new Date(), version: 1, signature: 'sig-b' }
+    ])
+
+    const recordings = await service.listRecordings()
+
+    expect(recordings).toHaveLength(2)
+    expect(service.getConnectionStatus().step).toBe('ready')
+  })
+
+  it('a scan that THROWS does not end at "ready" — it surfaces an error state', async () => {
+    const { service, s } = makeConnectedService(2)
+    s.jensen.listFiles = vi.fn(async () => { throw new Error('USB decode error') })
+
+    await service.listRecordings()
+
+    const step = service.getConnectionStatus().step
+    expect(step).not.toBe('ready')
+    expect(step).toBe('error')
+  })
+
+  it('an interrupted scan (empty list while device reports files) does not end at "ready"', async () => {
+    const { service, s } = makeConnectedService(2)
+    // Device reports 2 recordings but the scan returns none → interrupted, not empty.
+    s.jensen.listFiles = vi.fn(async () => [])
+
+    await service.listRecordings()
+
+    const step = service.getConnectionStatus().step
+    expect(step).not.toBe('ready')
+    expect(step).toBe('error')
+  })
+})

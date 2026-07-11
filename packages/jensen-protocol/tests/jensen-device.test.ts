@@ -108,6 +108,71 @@ describe('JensenDevice (transport-agnostic core)', () => {
     }
   })
 
+  it('a stalled transfer drains to quiescence before advancing the queue — late transfer packets never overlap the next command', async () => {
+    // CRITICAL regression: the stall path must NOT release the serialized command slot
+    // (send the next command) while transfer packets are still streaming. Doing so
+    // overlaps the device's IN FIFO with a new command and wedges the firmware.
+    const ep = makePollEndpoint()
+    const device = new JensenDevice(makeFakeUsb())
+    const dev = makePollDevice(ep, vi.fn(async () => {}), vi.fn(async () => {}))
+    const transferOut = dev.transferOut as unknown as ReturnType<typeof vi.fn>
+    await device.tryConnect(dev) // real timers (300ms stabilization delay)
+    ;(device as unknown as { startReadLoop: () => void }).startReadLoop()
+
+    vi.useFakeTimers()
+    try {
+      const onChunk = vi.fn()
+      // Large file that never completes; a second command is queued behind it.
+      const dl = device.downloadFile('big.hda', 100_000, onChunk)
+      const info = device.getDeviceInfo(5)
+
+      await vi.advanceTimersByTimeAsync(1)
+      // Only the transfer went out; the second command is blocked on the command lock.
+      expect(transferOut).toHaveBeenCalledTimes(1)
+      const firstSend = transferOut.mock.calls[0][1] as Uint8Array
+      expect((firstSend[2] << 8) | firstSend[3]).toBe(CMD.TRANSFER_FILE)
+
+      // A partial transfer packet arrives (does not complete the file).
+      ep.emit('data', makeResponsePacket(CMD.TRANSFER_FILE, 0, new Uint8Array(4096)))
+      await vi.advanceTimersByTimeAsync(1000) // let the throttled (1s) parse dispatch the handler
+      expect(onChunk).toHaveBeenCalledTimes(1)
+
+      // Device then goes silent for the full inactivity window → watchdog fires and
+      // begins settling (swaps in a no-op absorber, starts draining the IN FIFO).
+      await vi.advanceTimersByTimeAsync(60_000)
+      // Still holding the slot — nothing new sent yet.
+      expect(transferOut).toHaveBeenCalledTimes(1)
+
+      // While draining, the device keeps emitting LATE transfer packets. These must be
+      // absorbed and MUST NOT release the slot or advance the queue mid-stream.
+      for (let i = 0; i < 5; i++) {
+        ep.emit('data', makeResponsePacket(CMD.TRANSFER_FILE, 0, new Uint8Array(4096)))
+        await vi.advanceTimersByTimeAsync(100) // bytes still flowing keeps the drain busy
+      }
+      // INVARIANT: the next command has NOT been sent while packets were still arriving.
+      expect(transferOut).toHaveBeenCalledTimes(1)
+      // The late packets did not resolve the download as complete.
+      expect((device as unknown as { currentCommandTag: string | null }).currentCommandTag)
+        .not.toBeNull()
+
+      // Stream goes quiet → drain reaches its idle boundary (~500ms) → slot released.
+      await vi.advanceTimersByTimeAsync(700)
+
+      await expect(dl).resolves.toBe(false) // stalled transfer fails, not completes
+      // NOW — and only now — the next command is sent, on a quiesced bus.
+      expect(transferOut).toHaveBeenCalledTimes(2)
+      const secondSend = transferOut.mock.calls[1][1] as Uint8Array
+      expect((secondSend[2] << 8) | secondSend[3]).toBe(CMD.GET_DEVICE_INFO)
+
+      // The device-info command resolves against its OWN response (no desync).
+      ep.emit('data', makeResponsePacket(CMD.GET_DEVICE_INFO, 1, new Uint8Array(20)))
+      await vi.advanceTimersByTimeAsync(20)
+      await expect(info).resolves.not.toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('connect() returns false when no devices found', async () => {
     expect(await new JensenDevice(makeFakeUsb()).connect()).toBe(false)
   })

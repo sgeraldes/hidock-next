@@ -28,6 +28,19 @@ interface DownloadQueueItem {
   recordingDate?: Date | string | null
 }
 
+/**
+ * MEDIUM-4 (Codex): a download that was INTERRUPTED and should be re-attempted.
+ * 'failed'    — errored (USB/save failure, stall marked by the main process).
+ * 'cancelled' — cancelActiveDownloads persisted it (disconnect / re-sync / user cancel).
+ * Both are retryable: the main-process retryFailed() re-queues both, so the reconnect
+ * trigger (and any "needs attention" count) must treat them consistently — otherwise a
+ * disconnect-cancelled transfer strands, since the reconnect handler would only look
+ * for 'failed' and never call retryFailed at all. Exported for reuse + unit tests.
+ */
+export function isRetryableDownloadStatus(status: string): boolean {
+  return status === 'failed' || status === 'cancelled'
+}
+
 // DL-14: Module-level abort controller ref so cancelDownloads can be called from outside the hook
 let _downloadAbortControllerRef: AbortController | null = null
 
@@ -562,12 +575,15 @@ export function useDownloadOrchestrator() {
     // on the USB bus, causing stalls and corrupted responses.
     const unsubDevice = deviceService.onStatusChange((status) => {
       if (status.step === 'ready' && isElectron && !isProcessingDownloads.current) {
-        // Only retry FAILED items on reconnect — don't process the full pending queue.
+        // Only retry INTERRUPTED items on reconnect — don't process the full pending queue.
         // Pending items will be processed when auto-sync calls startSession.
+        // MEDIUM-4: include 'cancelled' (disconnect-during-download persists items as
+        // 'cancelled' via cancelActiveDownloads); retrying only 'failed' stranded them.
+        // retryFailed() already re-queues both statuses — we just have to CALL it.
         window.electronAPI.downloadService.getState().then((state) => {
-          const hasFailed = state.queue.some((item: DownloadQueueItem) => item.status === 'failed')
-          if (hasFailed) {
-            if (shouldLogQa()) console.log('[useDownloadOrchestrator] Device ready, retrying failed downloads')
+          const hasRetryable = state.queue.some((item: DownloadQueueItem) => isRetryableDownloadStatus(item.status))
+          if (hasRetryable) {
+            if (shouldLogQa()) console.log('[useDownloadOrchestrator] Device ready, retrying failed/cancelled downloads')
             window.electronAPI.downloadService.retryFailed(true)
           }
         })

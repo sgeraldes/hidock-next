@@ -1159,6 +1159,9 @@ class HiDockDeviceService {
 
     // Create and store the promise for concurrent request handling
     this.listRecordingsPromise = (async () => {
+      // C2/HIGH-2: only a fully successful scan may drive the terminal status to
+      // 'ready' in the finally block. Every early return below is a failure path.
+      let scanSucceeded = false
       try {
         const files = await this.jensen.listFiles((filesFound, expectedFiles) => {
           if (filesFound > animationProgress) {
@@ -1223,6 +1226,7 @@ class HiDockDeviceService {
         // from triggering a fresh retry immediately after the backoff window expired)
         this.listRecordingsLastCompleted = Date.now()
 
+        scanSucceeded = true
         return recordings
       } catch (error) {
         animationCancelled = true
@@ -1240,6 +1244,25 @@ class HiDockDeviceService {
       } finally {
         this.listRecordingsLock = false
         this.listRecordingsPromise = null
+
+        // C2/HIGH-2: Restore an owning terminal status on EVERY scan exit path. The
+        // scan enters 'counting-files' at the top; without a terminal transition the
+        // UI stays stuck there and useDownloadOrchestrator (which gates on
+        // step === 'ready') never starts queued downloads. Guarded on the step so a
+        // concurrent disconnect that already moved us to 'idle'/'error' isn't
+        // clobbered. Only a SUCCESSFUL scan on a still-connected device becomes
+        // 'ready' — the original C2 concern was a finally that flipped to 'ready'
+        // even on failure; a failed/interrupted scan surfaces an honest state
+        // instead (so downloads don't start against an unhealthy device).
+        if (this.connectionStatus.step === 'counting-files') {
+          if (scanSucceeded && this.isConnected()) {
+            this.updateStatus('ready', 'Device ready', 100)
+          } else if (this.isConnected()) {
+            this.updateStatus('error', 'File scan failed — will retry')
+          } else {
+            this.updateStatus('idle', 'Not connected')
+          }
+        }
       }
     })()
 

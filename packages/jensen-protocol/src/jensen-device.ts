@@ -2092,17 +2092,32 @@ export class JensenDevice {
 
     let received = 0
     let aborted = false
+    let settled = false
 
-    // Set real-time progress callback (jensen.js: this.onreceive = r). Report the
-    // per-chunk byte counter (fired on every poll chunk) rather than `received`
-    // (which only advances when the throttled parser runs) so the progress bar
-    // moves smoothly during the download. Clamp to fileSize — the raw counter
-    // includes per-packet Jensen headers, so it would otherwise nudge past 100%.
-    this.onreceive = onProgress ? (bytes: number) => onProgress(Math.min(bytes, fileSize)) : null
+    // Inactivity watchdog. A transfer holds the single serialized command slot for
+    // its ENTIRE duration, so it must NOT use the command-level timeout: expireCommand
+    // advances the queue the instant it fires WITHOUT stopping the still-streaming
+    // transfer, so the next command would be sent while transfer packets are still
+    // arriving — overlapping the device's IN FIFO and wedging the firmware (the #1
+    // forbidden failure mode). Instead we watch for prolonged silence (refreshed by
+    // every inbound byte) and, on a genuine stall, DRAIN the device's IN FIFO to a
+    // quiet boundary BEFORE releasing the slot. 60s of zero packets is far beyond any
+    // inter-packet gap of a live download while still bounding a truly dead transfer.
+    const TRANSFER_STALL_TIMEOUT_MS = 60_000
+    let stallTimerId: ReturnType<typeof setTimeout> | null = null
 
-    // Abort handling
+    const clearStall = (): void => {
+      if (stallTimerId) { clearTimeout(stallTimerId); stallTimerId = null }
+    }
+
+    // Abort handling (disconnect / user cancel). Proven synchronous path: absorb
+    // remaining packets, resolve false, advance the queue. The disconnect IPC path
+    // additionally drains via gracefulCloseDevice, so this need not drain here.
     const abortHandler = (): void => {
+      if (settled) return
+      settled = true
       aborted = true
+      clearStall()
       // Replace handler with no-op absorber for remaining data
       this.handlers.set(CMD.TRANSFER_FILE, () => undefined)
       this.onreceive = null
@@ -2121,15 +2136,69 @@ export class JensenDevice {
     }
     signal?.addEventListener('abort', abortHandler, { once: true })
 
+    // Stall settle: quiesce the stream, THEN release the serialized slot. Mirrors the
+    // listFiles stall watchdog and the disconnect-during-download drain fix. Crucially
+    // it drains to an idle boundary BEFORE sendNextCommand() so a late transfer packet
+    // can never overlap the next command.
+    const settleStalledTransfer = async (): Promise<void> => {
+      if (settled) return
+      settled = true
+      aborted = true
+      clearStall()
+      // Absorb any late packets so they cannot re-trigger onChunk or a resolve.
+      this.handlers.set(CMD.TRANSFER_FILE, () => undefined)
+      this.onreceive = null
+      signal?.removeEventListener('abort', abortHandler)
+      console.warn(
+        `[Jensen] downloadFile stalled for ${TRANSFER_STALL_TIMEOUT_MS / 1000}s ` +
+        `(${received}/${fileSize} bytes) — draining IN FIFO before releasing command slot`)
+      // Let the poll consume whatever remains in the device IN FIFO until it goes
+      // idle. Only after the stream is quiesced is it safe to advance the queue.
+      await this.drainUntilIdle()
+      if (this.currentCommandTag) {
+        const pending = this.pendingPromises.get(this.currentCommandTag)
+        if (pending) {
+          if (pending.timeout) clearTimeout(pending.timeout)
+          pending.resolve(false)
+          this.pendingPromises.delete(this.currentCommandTag)
+        }
+        this.currentCommandTag = null
+        this.currentOperationName = null
+        this.sendNextCommand()
+      }
+    }
+
+    const armStall = (): void => {
+      if (settled) return
+      if (stallTimerId) clearTimeout(stallTimerId)
+      stallTimerId = setTimeout(() => { void settleStalledTransfer() }, TRANSFER_STALL_TIMEOUT_MS)
+    }
+
+    // Set real-time progress callback (jensen.js: this.onreceive = r). Report the
+    // per-chunk byte counter (fired on every poll chunk) rather than `received`
+    // (which only advances when the throttled parser runs) so the progress bar
+    // moves smoothly during the download. Clamp to fileSize — the raw counter
+    // includes per-packet Jensen headers, so it would otherwise nudge past 100%.
+    // This is also the finest-grained signal of transfer activity, so refresh the
+    // stall watchdog here on every inbound chunk.
+    this.onreceive = (bytes: number): void => {
+      armStall()
+      if (onProgress) onProgress(Math.min(bytes, fileSize))
+    }
+
     if (shouldLog()) console.log(`[Jensen] downloadFile: ${filename}, size=${fileSize}`)
 
     // Register handler for TRANSFER_FILE (matches jensen.js: s.registerHandler(5, ...))
     this.handlers.set(CMD.TRANSFER_FILE, (msg) => {
-      if (aborted) return undefined // Absorb stale data after abort
+      if (aborted) return undefined // Absorb stale data after abort/stall
+
+      // A parsed packet is also proof of life — refresh the stall watchdog.
+      armStall()
 
       // null msg = transfer fail (jensen.js: if (b == null) ... return "fail")
       if (!msg) {
         if (shouldLog()) console.log('[Jensen] downloadFile: transfer fail (null msg)')
+        clearStall()
         signal?.removeEventListener('abort', abortHandler)
         this.onreceive = null
         return false
@@ -2142,6 +2211,7 @@ export class JensenDevice {
       // Check if complete (jensen.js: if (h >= t) return "OK")
       if (received >= fileSize) {
         if (shouldLog()) console.log(`[Jensen] downloadFile: complete, ${received}/${fileSize}`)
+        clearStall()
         signal?.removeEventListener('abort', abortHandler)
         this.onreceive = null
         return true
@@ -2154,15 +2224,21 @@ export class JensenDevice {
     const body: number[] = []
     for (let i = 0; i < filename.length; i++) body.push(filename.charCodeAt(i))
 
+    // Arm the watchdog before sending so a device that never streams a single byte
+    // is still bounded (onreceive/handler re-arm it on real activity thereafter).
+    armStall()
     try {
-      // A transfer must not own the serialized command slot forever. Five minutes
-      // bounds a stalled transfer while leaving ample time for normal recordings.
+      // No command-level timeout: the inactivity watchdog owns stall handling and
+      // drains the stream before releasing the slot. A fixed command timeout would
+      // advance the queue mid-stream and wedge the device (see comment above).
       const result = await this.sendCommand<boolean>(
-        new JensenMessage(CMD.TRANSFER_FILE).body(body), 300, `downloadFile:${filename}`)
+        new JensenMessage(CMD.TRANSFER_FILE).body(body), undefined, `downloadFile:${filename}`)
+      clearStall()
       this.onreceive = null
       signal?.removeEventListener('abort', abortHandler)
       return result ?? false
     } catch {
+      clearStall()
       this.onreceive = null
       signal?.removeEventListener('abort', abortHandler)
       return false

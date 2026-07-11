@@ -143,6 +143,10 @@ export function useDeviceSubscriptions() {
             } catch (listError) {
               console.error('[useDeviceSubscriptions] Failed to fetch file list:', listError)
               deviceService.log('error', 'File list fetch failed', listError instanceof Error ? listError.message : 'Unknown error')
+              // HIGH-3: the latch is a re-entrancy guard for an ACTIVE attempt, not a
+              // permanent one-per-connect flag. This attempt failed, so release it —
+              // otherwise a single bad scan disables auto-sync until disconnect.
+              autoSyncTriggeredRef.current = false
               return
             }
           }
@@ -150,6 +154,9 @@ export function useDeviceSubscriptions() {
           // If the scan has not produced data, stop this connection's sync attempt.
           if (!shouldLatchAutoSync(recordings.length, deviceService.getState().recordingCount)) {
             if (shouldLogQa()) console.log('[useDeviceSubscriptions] File list not ready yet — will retry on next ready')
+            // HIGH-3: unusable list (scan not ready) — release the latch so the next
+            // 'ready' (after the scan completes) can retry, as the log message promises.
+            autoSyncTriggeredRef.current = false
             return
           }
           // Auto-download reconcile — only when the user enabled it.
@@ -318,6 +325,9 @@ export function useDeviceSubscriptions() {
           recordings = await deviceService.listRecordings()
         } catch (listError) {
           console.error('[useDeviceSubscriptions] Initial file list fetch failed:', listError)
+          // HIGH-3: release the latch on a failed scan so the status-change trigger
+          // (or a later retry) can re-attempt for this connection.
+          autoSyncTriggeredRef.current = false
           return
         }
       }
@@ -325,6 +335,9 @@ export function useDeviceSubscriptions() {
       // Stop if the scan did not produce a usable list for this connection.
       if (!shouldLatchAutoSync(recordings.length, deviceService.getState().recordingCount)) {
         if (shouldLogQa()) console.log('[useDeviceSubscriptions] Initial file list not ready yet — deferring to status-change trigger')
+        // HIGH-3: unusable list — release the latch so the status-change 'ready'
+        // trigger can retry once the scan actually completes.
+        autoSyncTriggeredRef.current = false
         return
       }
       if (recordings.length > 0) {
