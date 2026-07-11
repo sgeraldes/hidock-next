@@ -192,7 +192,24 @@ describe('DevicePipelineService', () => {
     })
   })
 
-  describe('shouldScan() cache logic', () => {
+    describe('shouldScan() cache logic', () => {
+      it('passes and publishes the streaming onNewFiles callback', async () => {
+        const first = makeFileInfo('streamed.hda')
+        const listFiles = vi.fn(async (_progress, _expected, onNewFiles) => {
+          onNewFiles?.([first])
+          return [first]
+        })
+        const jensen = makeJensen({ listFiles })
+        const svc = new DevicePipelineService(jensen, makeDownloadService())
+        const snapshots: string[][] = []
+        svc.on('files', files => snapshots.push(files.map(file => file.name)))
+
+        await svc.connect()
+
+        expect(listFiles.mock.calls[0][2]).toEqual(expect.any(Function))
+        expect(snapshots).toContainEqual(['streamed.hda'])
+      })
+
     it('scans on first connect (no cache)', async () => {
       const jensen = makeJensen()
       const svc = new DevicePipelineService(jensen, makeDownloadService())

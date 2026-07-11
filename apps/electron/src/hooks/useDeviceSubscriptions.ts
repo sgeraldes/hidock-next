@@ -147,9 +147,7 @@ export function useDeviceSubscriptions() {
             }
           }
 
-          // Defect B: only latch once we actually hold a real file list (or the device
-          // genuinely has zero files). If the scan hasn't produced data yet, bail WITHOUT
-          // latching so the 'ready' fired after the scan completes can retry.
+          // If the scan has not produced data, stop this connection's sync attempt.
           if (!shouldLatchAutoSync(recordings.length, deviceService.getState().recordingCount)) {
             if (shouldLogQa()) console.log('[useDeviceSubscriptions] File list not ready yet — will retry on next ready')
             return
@@ -324,8 +322,7 @@ export function useDeviceSubscriptions() {
         }
       }
 
-      // Defect B: latch only once we hold a real file list (or the device truly has 0 files),
-      // so a premature run before the scan can't permanently suppress auto-download.
+      // Stop if the scan did not produce a usable list for this connection.
       if (!shouldLatchAutoSync(recordings.length, deviceService.getState().recordingCount)) {
         if (shouldLogQa()) console.log('[useDeviceSubscriptions] Initial file list not ready yet — deferring to status-change trigger')
         return

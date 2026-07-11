@@ -1042,8 +1042,8 @@ export class JensenDevice {
    * never sent (the permanent-wedge half of the poll desync). Dropping the read
    * buffer also discards a late response for THIS command so it can't be parsed
    * against the next command's slot. (Only short single-response commands set a
-   * timeout; listFiles/downloadFile use their own watchdogs, so nothing
-   * long-running is discarded here.)
+   * timeout; listFiles uses its own watchdog, while downloadFile uses this
+   * bounded command timeout.)
    */
   private expireCommand(tag: string): void {
     if (shouldLog()) console.log(`[Jensen] timeout: ${tag}`)

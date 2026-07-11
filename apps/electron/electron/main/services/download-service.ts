@@ -725,10 +725,6 @@ class DownloadService {
         item.error = reason
         this.persistQueueItem(item)
 
-        if (this.state.currentSession) {
-          this.state.currentSession.cancelledFiles++
-        }
-
         cancelledCount++
         console.log(`[DownloadService] Cancelled active download: ${item.filename} - ${reason}`)
       }

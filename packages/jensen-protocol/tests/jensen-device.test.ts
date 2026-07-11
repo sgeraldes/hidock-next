@@ -86,6 +86,28 @@ describe('JensenDevice (transport-agnostic core)', () => {
     expect(new JensenDevice(makeFakeUsb()).getModel()).toBe('unknown')
   })
 
+  it('bounds a stalled download and releases the serialized command slot', async () => {
+    vi.useFakeTimers()
+    try {
+      const transferOut = vi.fn(async () => ({ bytesWritten: 0 }))
+      const transferIn = vi.fn(() => new Promise<USBInTransferResult>(() => {}))
+      const device = new JensenDevice(makeFakeUsb())
+      ;(device as unknown as { device: USBDevice }).device = {
+        opened: true,
+        transferOut,
+        transferIn,
+      } as unknown as USBDevice
+
+      const resultPromise = device.downloadFile('stalled.hda', 1024, vi.fn())
+      await vi.advanceTimersByTimeAsync(300_000)
+
+      await expect(resultPromise).resolves.toBe(false)
+      expect((device as unknown as { currentCommandTag: string | null }).currentCommandTag).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('connect() returns false when no devices found', async () => {
     expect(await new JensenDevice(makeFakeUsb()).connect()).toBe(false)
   })

@@ -115,6 +115,20 @@ describe('DownloadService C-004 Fixes', () => {
     })
   })
 
+  describe('BUG-R9: active cancellation remains a cancellation', () => {
+    it('marks downloading items and the session as cancelled rather than failed', () => {
+      service.queueDownloads([{ filename: 'active-cancel.hda', size: 5000 }])
+      service.startSyncSession([{ filename: 'active-cancel.hda', size: 5000 }])
+      service.updateProgress('active-cancel.hda', 100)
+
+      expect(service.cancelActiveDownloads('Device disconnected')).toBe(1)
+
+      const state = service.getState()
+      expect(state.queue.find(item => item.filename === 'active-cancel.hda')?.status).toBe('cancelled')
+      expect(state.session?.failedFiles).toBe(0)
+    })
+  })
+
   describe('C-004-DS-002: isFileAlreadySynced checks mp3 normalized name', () => {
     it('should detect synced mp3 variant of .hda file', () => {
       // .hda file is queried, but the .mp3 version is synced
