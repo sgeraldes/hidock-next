@@ -22,27 +22,27 @@
 
 ## P1 — Fix Soon (noise/quality)
 
-### BUG-R4: Massive "Skipping" log spam from DownloadService
+### BUG-R4: Massive "Skipping" log spam from DownloadService — FIXED
 **Symptom:** 1300+ "Skipping X: In synced_files table" log lines on every auto-sync reconciliation. Repeated twice due to BUG-R3.
-**Files:** `download-service.ts` (getFilesToSync or startSession reconciliation)
-**Fix:** Remove per-file skip logging. Log summary: "Skipped N already-synced files" instead.
+**Files:** `download-service.ts` (getFilesToSync / isFileAlreadySynced / queueDownloads)
+**Fix (done):** Removed the per-file logs inside `isFileAlreadySynced` (the "Found orphaned file on disk" / "Found in recordings table" lines) and the per-file "already synced, skipping" lines in `queueDownloads`. Reconciliation now emits a single summary line — `getFilesToSync` reports `N files skipped (already synced)[ (R reconciled from disk/recordings)], M files queued`, and `queueDownloads` emits one `skipped X already queued, Y already synced` line only when something was skipped. Steady-state summary format is unchanged when nothing is reconciled.
 
 ### BUG-R5: DownloadService reconciliation runs twice per sync
 **Symptom:** The full 1382-file reconciliation (checking each against synced_files) runs TWICE because auto-sync triggers twice (BUG-R3).
 **Files:** `useDeviceSubscriptions.ts`, `download-service.ts`
 **Fix:** Fixing BUG-R3 fixes this.
 
-### BUG-R6: Chromium USB errors still showing
+### BUG-R6: Chromium USB errors still showing — ACCEPTED (cosmetic, documented)
 **Symptom:** 7x SetupDiGetDeviceProperty errors on startup.
-**Root cause:** The `disable-usb-device-event-log` and `device-event-log-level` flags don't work in this Electron version.
+**Root cause:** The `disable-usb-device-event-log` and `device-event-log-level` flags don't fully suppress these in this Electron version.
 **Files:** `electron/main/index.ts`
-**Fix:** These are Chromium stderr, not console.log. Can only be suppressed by redirecting stderr in the launch script, or accepted as cosmetic.
+**Decision (done):** These are written to stderr by native Chromium code (fd 2), not via `console.log`. A JS-level `process.stderr.write` filter cannot intercept native writes, and raising the global `--log-level` would also hide genuine errors. The existing `disable-usb-device-event-log` / `device-event-log-level=3` switches are the clean mechanism and cover most of the noise; anything residual can only be suppressed by redirecting the Electron child's stderr in the dev launcher (dev-only). We ACCEPT the remaining lines as cosmetic rather than add a risky filter. Rationale documented inline in `index.ts` next to the USB switches.
 
-### BUG-R7: Autofill DevTools errors
+### BUG-R7: Autofill DevTools errors — ACCEPTED (cosmetic, documented)
 **Symptom:** "Request Autofill.enable failed" when opening DevTools.
-**Root cause:** Electron's DevTools protocol doesn't support Autofill commands.
-**Files:** N/A (Electron/DevTools internal)
-**Fix:** Cosmetic only. Can be ignored or suppressed by disabling Autofill in DevTools settings.
+**Root cause:** Electron's DevTools protocol backend doesn't implement the Autofill domain, so the DevTools frontend's `Autofill.enable`/`Autofill.setAddresses` calls fail and print to stderr. Only appears in dev with DevTools open.
+**Files:** N/A (Electron/DevTools internal); decision recorded in `electron/main/index.ts`.
+**Decision (done):** Native DevTools-protocol stderr, not interceptable in-process; no Electron switch disables it. ACCEPTED as cosmetic, documented inline in `index.ts` (BUG-R6/R7 comment block).
 
 ## P2 — Backlog (from earlier audit)
 

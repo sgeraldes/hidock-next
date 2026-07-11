@@ -263,7 +263,9 @@ class DownloadService {
     const filePath = join(recordingsPath, wavFilename)
     if (existsSync(filePath)) {
       // File exists but not in synced_files - add it!
-      console.log(`[DownloadService] Found orphaned file on disk: ${wavFilename}, adding to synced_files`)
+      // BUG-R4: no per-file log here — reconciliation runs over 1000+ files and
+      // this once produced 1300+ lines per sync. getFilesToSync() emits a single
+      // summary line (including a reconciled count) instead.
       addSyncedFile(filename, wavFilename, filePath)
       return { synced: true, reason: 'File exists on disk (reconciled)' }
     }
@@ -271,7 +273,7 @@ class DownloadService {
     if (mp3Filename !== filename && mp3Filename !== wavFilename) {
       const mp3Path = join(recordingsPath, mp3Filename)
       if (existsSync(mp3Path)) {
-        console.log(`[DownloadService] Found orphaned MP3 file on disk: ${mp3Filename}, adding to synced_files`)
+        // BUG-R4: no per-file log — folded into getFilesToSync() summary.
         addSyncedFile(filename, mp3Filename, mp3Path)
         return { synced: true, reason: 'MP3 file exists on disk (reconciled)' }
       }
@@ -281,7 +283,7 @@ class DownloadService {
     const recording = getRecordingByFilename(filename) || getRecordingByFilename(wavFilename)
     if (recording && recording.file_path && existsSync(recording.file_path)) {
       // Recording exists with valid file path
-      console.log(`[DownloadService] Found in recordings table: ${filename}`)
+      // BUG-R4: no per-file log — folded into getFilesToSync() summary.
       addSyncedFile(filename, basename(recording.file_path), recording.file_path)
       return { synced: true, reason: 'In recordings table with valid file' }
     }
@@ -296,18 +298,29 @@ class DownloadService {
     const results: Array<{ filename: string; size: number; duration: number; dateCreated: Date; skipReason?: string }> = []
     let skippedCount = 0
     let queuedCount = 0
+    let reconciledCount = 0
 
     for (const file of deviceFiles) {
       const { synced, reason } = this.isFileAlreadySynced(file.filename)
       if (synced) {
         skippedCount++
+        // BUG-R4: files that were healed into synced_files during this pass
+        // (found on disk / in recordings table) used to log one line each.
+        // Count them and report the total on the single summary line below.
+        if (reason.includes('reconciled') || reason === 'In recordings table with valid file') {
+          reconciledCount++
+        }
       } else {
         queuedCount++
       }
       results.push({ ...file, skipReason: synced ? reason : undefined })
     }
 
-    console.log(`[DownloadService] Reconciliation: ${skippedCount} files skipped (already synced), ${queuedCount} files queued`)
+    // BUG-R4: ONE summary line per reconciliation (was 1300+ per-file lines).
+    // reconciled suffix only appears when files were actually healed this pass,
+    // so the steady-state line stays "N files skipped (already synced), M files queued".
+    const reconciledNote = reconciledCount > 0 ? ` (${reconciledCount} reconciled from disk/recordings)` : ''
+    console.log(`[DownloadService] Reconciliation: ${skippedCount} files skipped (already synced)${reconciledNote}, ${queuedCount} files queued`)
     return results
   }
 
@@ -316,6 +329,10 @@ class DownloadService {
    */
   queueDownloads(files: Array<{ filename: string; size: number; dateCreated?: Date }>): string[] {
     const queuedIds: string[] = []
+    // BUG-R4: aggregate per-file skip reasons into one summary line instead of
+    // logging every already-queued/already-synced file (was 1300+ lines per sync).
+    let skippedInQueue = 0
+    let skippedAlreadySynced = 0
 
     for (const file of files) {
       // B-DWN-003: Normalize .hda filenames to .mp3
@@ -328,26 +345,26 @@ class DownloadService {
       )
 
       if (existingInDb) {
-        console.log(`[DownloadService] ${file.filename} already in database queue (${existingInDb.status}), skipping`)
+        skippedInQueue++
         continue
       }
 
       // Skip if already in memory queue (check both original and normalized)
       if (this.state.queue.has(file.filename) || this.state.queue.has(normalizedFilename)) {
-        console.log(`[DownloadService] ${file.filename} already in memory queue, skipping`)
+        skippedInQueue++
         continue
       }
 
       // Skip if already synced (check both original and normalized)
       const { synced } = this.isFileAlreadySynced(file.filename)
       if (synced) {
-        console.log(`[DownloadService] ${file.filename} already synced, skipping`)
+        skippedAlreadySynced++
         continue
       }
       if (normalizedFilename !== file.filename) {
         const { synced: normalizedSynced } = this.isFileAlreadySynced(normalizedFilename)
         if (normalizedSynced) {
-          console.log(`[DownloadService] ${normalizedFilename} (normalized) already synced, skipping`)
+          skippedAlreadySynced++
           continue
         }
       }
@@ -365,6 +382,13 @@ class DownloadService {
       this.persistQueueItem(item) // spec-007: persist to database
       queuedIds.push(file.filename)
       console.log(`[DownloadService] Queued: ${file.filename} (${(file.size / 1024 / 1024).toFixed(1)} MB)`)
+    }
+
+    // BUG-R4: one summary line for skipped files (only when something was skipped).
+    if (skippedInQueue > 0 || skippedAlreadySynced > 0) {
+      console.log(
+        `[DownloadService] queueDownloads: skipped ${skippedInQueue} already queued, ${skippedAlreadySynced} already synced`
+      )
     }
 
     this.markDirty()
