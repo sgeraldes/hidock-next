@@ -331,18 +331,29 @@ function reserveBundleDir(parentDir: string, slug: string): string {
 }
 
 /**
- * TOCTOU guard: re-validate a bundle record IMMEDIATELY before execution. The
- * registry stores path STRINGS captured at creation time — between creation and
- * run, the target could be renamed and replaced by a junction pointing at a
- * different writable directory, silently moving the autonomous agent (and its
- * RUN.log writes) OUTSIDE the vetted boundary. So, right before the run:
+ * TOCTOU guard: re-validate a bundle record against the paths vetted at
+ * creation. Runs twice in runHandoverAgent — once at entry, and AGAIN after
+ * resolveBrain() (whose auth/routing awaits are an unbounded gap) immediately
+ * before the first RUN.log write/emit and the generate() call. Checks:
  *   1. re-realpath targetDir AND bundleDir — each must be EXACTLY the canonical
  *      path recorded at creation (any junction/rename swap changes the realpath);
  *   2. lstat-walk every component from the target down to the bundle dir — each
- *      must be a real directory, never a symlink/junction/reparse point;
+ *      must be a real directory, never a symlink/junction/reparse point
+ *      (isSymbolicLink() does NOT match OneDrive/Dropbox cloud-file reparse
+ *      tags, so cloud-synced folders are not falsely rejected);
  *   3. re-check containment: the bundle must still live under the target.
- * Returns null when the bundle is intact, else a user-facing refusal reason.
- * Nothing is written into the (possibly attacker-controlled) directory on refusal.
+ * Returns null when intact, else a user-facing refusal reason; a refusal writes
+ * nothing into the suspect directory.
+ *
+ * THREAT MODEL — what this defends and what it honestly cannot:
+ * - DEFENDED: a compromised renderer (paths never trusted, only opaque ids) and
+ *   accidental misselection/stale targets (moved/replaced folders are refused).
+ * - RESIDUAL: a string cwd handed to child_process cannot provide race-free
+ *   filesystem identity on Windows — a window remains inside generate()/runCli
+ *   between this final validation and OS process creation.
+ * - OUT OF SCOPE: a concurrent LOCAL attacker with user-level filesystem rights
+ *   (able to swap directories mid-session) — such an attacker already has
+ *   user-equivalent execution and needs no help from this code path.
  */
 export function revalidateBundleRecord(record: BundleRecord): string | null {
   let realTarget: string
@@ -704,9 +715,9 @@ export async function runHandoverAgent(params: RunHandoverAgentParams): Promise<
   const { bundleDir, targetDir } = record
   const runLogPath = join(bundleDir, 'RUN.log')
 
-  // TOCTOU guard: the filesystem may have changed between creation and run —
-  // re-canonicalize and reject junction/rename swaps BEFORE writing anything or
-  // executing anything (a refusal writes nothing into the suspect directory).
+  // Early TOCTOU check: refuse an already-tampered bundle before spending time
+  // on brain auth probes. NOT the authoritative check — that re-runs after
+  // resolveBrain(), immediately before the first write/spawn (see below).
   const tamper = revalidateBundleRecord(record)
   if (tamper) {
     emit('handover:run-failed', { bundleId: params.bundleId, brainId: params.brainId ?? null, error: tamper })
@@ -732,6 +743,26 @@ export async function runHandoverAgent(params: RunHandoverAgentParams): Promise<
 
   try {
     const brain = await resolveBrain(params.brainId)
+
+    // FINAL TOCTOU re-check, at the last moment we control: resolveBrain() above
+    // awaits auth probes / routing (an unbounded gap in which the filesystem can
+    // change), so the pre-gap check alone is not enough. Re-run the cheap
+    // realpath/lstat validation AFTER resolution and IMMEDIATELY before the
+    // first RUN.log write / emit into the bundle and the generate() call. A
+    // refusal here writes NOTHING into the (possibly swapped) directory.
+    const lateTamper = revalidateBundleRecord(record)
+    if (lateTamper) {
+      emit('handover:run-failed', { bundleId: params.bundleId, brainId: params.brainId ?? null, error: lateTamper })
+      return {
+        ok: false,
+        brainId: params.brainId ?? null,
+        brainLabel: null,
+        finalResponse: null,
+        runLogPath,
+        error: lateTamper,
+      }
+    }
+
     if (!brain) {
       const error =
         'No agentic AI brain is available. Enable and sign in to Claude Code, Codex, or Gemini CLI in Settings → AI Brains.'

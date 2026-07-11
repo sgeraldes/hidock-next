@@ -428,6 +428,36 @@ describe('runHandoverAgent', () => {
     expect(existsSync(join(elsewhere, 'handover', 'x', 'RUN.log'))).toBe(false)
   })
 
+  it('refuses when the target is swapped WHILE resolveBrain() is pending (post-resolution re-check)', async () => {
+    // The gap the early check cannot cover: creation-state is intact when the
+    // run starts, and the swap happens DURING the (unbounded) brain resolution.
+    const elsewhere = join(root, 'elsewhere-late')
+    mkdirSync(join(elsewhere, 'handover', 'x'), { recursive: true })
+    const brain = mockBrain('should not run')
+
+    const events: string[] = []
+    const res = await runHandoverAgent({
+      bundleId: 'bundle-1',
+      resolveBrain: async () => {
+        // Swap the target mid-resolution — rename it aside, junction in its place.
+        renameSync(targetDir, join(root, 'moved-aside-late'))
+        symlinkSync(elsewhere, targetDir, 'junction')
+        return brain as any
+      },
+      emit: (type) => events.push(type),
+      lookupBundle: lookup,
+    })
+
+    expect(res.ok).toBe(false)
+    expect(res.error).toMatch(/changed on disk|replaced by a link/i)
+    // No child invocation, no log write anywhere — not through the junction, and
+    // not into the moved-aside original either.
+    expect(brain.generate).not.toHaveBeenCalled()
+    expect(events).toEqual(['handover:run-failed'])
+    expect(existsSync(join(elsewhere, 'handover', 'x', 'RUN.log'))).toBe(false)
+    expect(existsSync(join(root, 'moved-aside-late', 'handover', 'x', 'RUN.log'))).toBe(false)
+  })
+
   it('rejects a forged/unknown bundle id (never accepts renderer paths)', async () => {
     const events: string[] = []
     const brain = mockBrain('should not run')
