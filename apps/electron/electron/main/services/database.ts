@@ -312,9 +312,12 @@ CREATE TABLE IF NOT EXISTS transcription_service_lock (
 );
 
 -- Download queue (v20) - spec-007
--- cancel_reason (v40): origin of a 'cancelled' status — 'user' (deliberate cancel;
+-- cancel_reason (v40): origin of a 'cancelled' status — 'user' (deliberate cancel,
 -- terminal-suppressed from auto-retry AND from reconciliation re-queue until a
--- manual Retry) vs 'interrupted' (disconnect/re-sync; auto-retried on reconnect).
+-- manual Retry) vs 'interrupted' (disconnect/re-sync, auto-retried on reconnect).
+-- NOTE: never put a semicolon character inside schema comments — the executor
+-- splits statements on that character, so the remainder of a comment line
+-- would run as (broken) SQL.
 CREATE TABLE IF NOT EXISTS download_queue (
     id TEXT PRIMARY KEY,
     filename TEXT NOT NULL UNIQUE,
