@@ -7,7 +7,8 @@ import { getVectorStore, SearchResult } from './vector-store'
 import { getOllamaService, OllamaChatMessage } from './ollama'
 import { getChatLLMService } from './chat-llm'
 import { getEmbeddingsService } from './embeddings'
-import { getDatabase, queryOne, escapeLikePattern } from './database'
+import { getDatabase, queryOne, queryAll, escapeLikePattern } from './database'
+import { accentFoldedKey } from './entity-normalize'
 import { Result, success, error } from '../types/api'
 
 interface ChatContext {
@@ -65,6 +66,146 @@ export function trimHistoryByTokens(
   }
 
   return trimmed
+}
+
+// ---------------------------------------------------------------------------
+// F4: Context-graph grounding
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-brain graph-fact token budget. Large-context cloud brains can absorb more
+ * neighborhood facts; small local models are easily flooded, so they get fewer.
+ * Expressed in the same estimated tokens as {@link trimHistoryByTokens} so graph
+ * facts are trimmed within the overall token budget for the turn.
+ */
+const GRAPH_FACT_TOKEN_BUDGET: Record<string, number> = {
+  'gemini-api': 1500,
+  'gemini-cli': 1500,
+  'claude-code': 1500,
+  codex: 1000,
+  kiro: 1000,
+  ollama: 500,
+}
+const DEFAULT_GRAPH_FACT_TOKEN_BUDGET = 1000
+
+/**
+ * The graph-fact token budget for the brain that will actually serve this chat
+ * (config.brains.taskRouting.chat → defaultBrain → gemini-api). Lazy + defensive:
+ * config pulls in electron, so any failure degrades to the default budget.
+ */
+async function graphFactTokenBudget(): Promise<number> {
+  try {
+    const { getConfig } = await import('./config')
+    const brains = getConfig().brains
+    const brainId = (brains?.taskRouting?.chat ?? brains?.defaultBrain ?? 'gemini-api') as string
+    return GRAPH_FACT_TOKEN_BUDGET[brainId] ?? DEFAULT_GRAPH_FACT_TOKEN_BUDGET
+  } catch {
+    return DEFAULT_GRAPH_FACT_TOKEN_BUDGET
+  }
+}
+
+/** Whether an already-accent-folded `label` is named as a whole token-run in the
+ *  accent-folded `haystack` (mirrors findMentionedEntity's word-boundary check). */
+function namedIn(haystack: string, label: string): boolean {
+  if (label.length < 3) return false
+  return (
+    haystack.includes(` ${label} `) ||
+    haystack.includes(` ${label}`) ||
+    haystack.includes(`${label} `)
+  )
+}
+
+/**
+ * Graph node ids named in `message` under the entity-resolver's normalization
+ * tiers (NO LLM call):
+ *   • accent/diacritic-folded person/project node labels (question "Yaravi" → node "Yaraví")
+ *   • accent-folded known contact-alias spellings → that contact's graph node
+ * Dedup is handled by the caller. Fully defensive: any store/DB failure yields [].
+ */
+function detectNormalizedEntities(
+  message: string,
+  kg: typeof import('./knowledge-graph-service')
+): string[] {
+  const ids: string[] = []
+  const haystack = ` ${accentFoldedKey(message)} `
+
+  // Accent-folded label match against person/project nodes.
+  try {
+    const nodes = [...kg.queryListNodes('person'), ...kg.queryListNodes('project')]
+    for (const n of nodes) {
+      if (namedIn(haystack, accentFoldedKey(n.label || ''))) ids.push(n.id)
+    }
+  } catch (e) {
+    console.warn('[RAG] graph label scan skipped:', e)
+  }
+
+  // Alias tier — reuse the resolver's alias source (contact_aliases): a known
+  // spelling in the question maps to that contact's person node.
+  try {
+    const aliases = queryAll<{ alias: string; contact_id: string; source: string | null }>(
+      'SELECT alias, contact_id, source FROM contact_aliases'
+    )
+    for (const a of aliases) {
+      if (a.source === 'rejected') continue
+      if (!namedIn(haystack, accentFoldedKey(a.alias || ''))) continue
+      const nodeId = kg.resolveEntityToNodeId(a.contact_id)
+      if (nodeId) ids.push(nodeId)
+    }
+  } catch (e) {
+    console.warn('[RAG] alias tier scan skipped:', e)
+  }
+
+  return ids
+}
+
+/**
+ * F4 — Context-graph grounding for the assistant.
+ *
+ * Collects compact neighborhood facts for the entities a question is about so the
+ * LLM walks graph edges, not just vector chunks. Beyond the original literal
+ * substring match it adds two entity-resolver-style tiers (accent-fold + alias,
+ * see {@link detectNormalizedEntities}) and, when the chat is scoped to a meeting,
+ * that meeting's own neighborhood. Facts are trimmed to a per-brain token budget so
+ * a small local model isn't flooded (see {@link graphFactTokenBudget}).
+ *
+ * Fully lazy/defensive: the knowledge-graph service pulls in the ingest/LLM stack,
+ * so it is imported here and every failure degrades to "no graph facts".
+ */
+export async function buildGraphContext(
+  message: string,
+  meetingFilter?: string
+): Promise<string[]> {
+  const parts: string[] = []
+  try {
+    const kg = await import('./knowledge-graph-service')
+    const budget = await graphFactTokenBudget()
+    const seenEntities = new Set<string>()
+    let usedTokens = 0
+
+    const addFacts = (entityId: string | null | undefined, hops = 1): void => {
+      if (!entityId || seenEntities.has(entityId)) return
+      seenEntities.add(entityId)
+      const facts = kg.neighborhoodFacts(entityId, hops)
+      if (!facts) return
+      const cost = estimateTokens(facts)
+      if (usedTokens + cost > budget) return // per-brain graph budget spent
+      usedTokens += cost
+      parts.push(facts)
+    }
+
+    // Tier 1 — literal mention (original behaviour).
+    const literal = kg.findMentionedEntity(message)
+    if (literal) addFacts(literal.id)
+
+    // Tier 2 — accent/alias-aware detection (resolver normalization tiers).
+    for (const id of detectNormalizedEntities(message, kg)) addFacts(id)
+
+    // Tier 3 — meeting in scope → inject that meeting's neighborhood.
+    if (meetingFilter) addFacts(meetingFilter)
+  } catch (e) {
+    console.warn('[RAG] Context Graph grounding skipped:', e)
+  }
+  return parts
 }
 
 // B-CHAT-002: LRU session cache with max size eviction
@@ -305,21 +446,13 @@ class RAGService {
       })
     }
 
-    // Ground with Context Graph facts when the question names a known
-    // person/project — the assistant walks graph edges, not just vector chunks.
-    // Loaded lazily so RAG's static import graph stays free of the ingest/LLM
-    // stack (keeps this path testable without mocking the whole graph service).
-    const graphContextParts: string[] = []
-    try {
-      const { findMentionedEntity, neighborhoodFacts } = await import('./knowledge-graph-service')
-      const entity = findMentionedEntity(message)
-      if (entity) {
-        const facts = neighborhoodFacts(entity.id, 1)
-        if (facts) graphContextParts.push(facts)
-      }
-    } catch (e) {
-      console.warn('[RAG] Context Graph grounding skipped:', e)
-    }
+    // Ground with Context Graph facts (F4): the assistant walks graph edges, not
+    // just vector chunks, for entities named in the question — including under
+    // accent/alias spellings (resolver normalization tiers) — and, when the chat
+    // is scoped to a meeting, that meeting's neighborhood. Trimmed to a per-brain
+    // token budget. Loaded lazily inside buildGraphContext so RAG's static import
+    // graph stays free of the ingest/LLM stack.
+    const graphContextParts = await buildGraphContext(message, context.meetingId)
 
     // Combine pinned context, graph facts, and search results
     const allContextParts = [...pinnedContextParts, ...graphContextParts, ...contextParts]
