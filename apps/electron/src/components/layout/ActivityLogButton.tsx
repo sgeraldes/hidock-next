@@ -1,28 +1,40 @@
 /**
- * ActivityLogButton — the titlebar entry point for the Activity Log.
+ * ActivityLogButton — the titlebar entry point for the Activity Log AND the
+ * single host for the Activity Log overlay.
  *
- * The sidebar's ActivityLogPanel remains the dock-footer surface; this button
- * elevates the SAME activity-log data (`useActivityLog`) into the titlebar right
- * cluster (concept 03). It renders a compact ⚡ trigger with a live count badge
- * (amber when there are errors/warnings) and opens a renderer-only overlay that
- * mirrors the existing Activity Log overlay's look and behaviour (Escape to
- * close, auto-scroll to newest, colour-coded entries, Clear).
+ * Open-state is UNIFIED across the app: it reads/writes `activityLogExpanded` on
+ * the shared UI store, so the titlebar ⚡ button and the sidebar's
+ * ActivityLogPanel badge are two triggers for ONE overlay/one open-state — open
+ * from either place and both stay consistent. Because this button lives in the
+ * always-mounted titlebar, it owns the overlay render (the sidebar panel is a
+ * pure trigger and no longer renders its own copy — no more duplicate modals).
  *
- * Self-contained so the titlebar can reuse it without restructuring
- * ActivityLogPanel.
+ * The overlay mirrors the existing look/behaviour (Escape to close, auto-scroll
+ * to newest, colour-coded entries, Clear).
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef } from 'react'
 import { Activity, Terminal, X, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { useActivityLog, useAppStore } from '@/store/useAppStore'
+import { useUIStore } from '@/store/ui/useUIStore'
 import type { ActivityLogEntry } from '@/services/hidock-device'
 
 export function ActivityLogButton() {
   const activityLog = useActivityLog()
   const clearActivityLog = useAppStore((s) => s.clearActivityLog)
-  const [open, setOpen] = useState(false)
+  // Shared open-state (the store field previously reserved for the dock chrome):
+  // both the titlebar button and the sidebar ActivityLogPanel drive this one flag.
+  const open = useUIStore((s) => s.activityLogExpanded)
+  const setOpen = useUIStore((s) => s.setActivityLogExpanded)
+
+  // The flag is persisted (dock-chrome pref legacy) — force the overlay closed on
+  // first mount so it never pops open on app launch.
+  useEffect(() => {
+    setOpen(false)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const count = activityLog.length
   const hasErrors = activityLog.some((e) => e.type === 'error' || e.type === 'warning')

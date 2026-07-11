@@ -4,8 +4,8 @@
  * which of the cell's two dividers are drawn (owner preview).
  */
 
-import { describe, it, expect } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { describe, it, expect, vi } from 'vitest'
+import { render, screen, fireEvent } from '@testing-library/react'
 import { Brand, showBrandVerticalDivider, showBrandHorizontalDivider } from '../Brand'
 
 describe('Brand', () => {
@@ -25,6 +25,22 @@ describe('Brand', () => {
     expect(screen.queryByText('Intelligence')).not.toBeInTheDocument()
     // Mark (svg) still shown in the rail.
     expect(screen.getByTestId('app-brand').querySelector('svg')).not.toBeNull()
+  })
+
+  it('becomes a clickable "home" affordance (button + no-drag) when onHome is provided', () => {
+    const onHome = vi.fn()
+    render(<Brand placement="titlebar" onHome={onHome} />)
+    const home = screen.getByRole('button', { name: /go to home/i })
+    // Opted out of the drag region so the click lands.
+    expect(home).toHaveClass('titlebar-no-drag')
+    fireEvent.click(home)
+    expect(onHome).toHaveBeenCalledTimes(1)
+  })
+
+  it('renders a plain, non-interactive lockup (no button) when onHome is omitted', () => {
+    render(<Brand placement="titlebar" />)
+    expect(screen.queryByRole('button')).not.toBeInTheDocument()
+    expect(screen.getByTestId('app-brand')).toBeInTheDocument()
   })
 
   it('exposes the divider treatment as a swappable prop for both placements', () => {

@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { ActivityLogPanel } from '../ActivityLogPanel'
-import { useAppStore, useActivityLog } from '@/store/useAppStore'
+import { useActivityLog } from '@/store/useAppStore'
+import { useUIStore } from '@/store/ui/useUIStore'
 import type { ActivityLogEntry } from '@/services/hidock-device'
 
 vi.mock('@/store/useAppStore', () => ({
@@ -9,7 +10,11 @@ vi.mock('@/store/useAppStore', () => ({
   useActivityLog: vi.fn()
 }))
 
-const mockClear = vi.fn()
+vi.mock('@/store/ui/useUIStore', () => ({
+  useUIStore: vi.fn()
+}))
+
+const mockSetExpanded = vi.fn()
 
 function entry(partial: Partial<ActivityLogEntry> = {}): ActivityLogEntry {
   return {
@@ -22,13 +27,14 @@ function entry(partial: Partial<ActivityLogEntry> = {}): ActivityLogEntry {
 
 function setupLog(entries: ActivityLogEntry[]) {
   vi.mocked(useActivityLog).mockReturnValue(entries)
-  vi.mocked(useAppStore).mockImplementation((selector: any) => {
-    const state = { clearActivityLog: mockClear }
+  // The panel only reads setActivityLogExpanded from the UI store now.
+  vi.mocked(useUIStore).mockImplementation((selector: any) => {
+    const state = { setActivityLogExpanded: mockSetExpanded, activityLogExpanded: false }
     return typeof selector === 'function' ? selector(state) : state
   })
 }
 
-describe('ActivityLogPanel', () => {
+describe('ActivityLogPanel (pure trigger for the shared overlay)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
   })
@@ -43,41 +49,30 @@ describe('ActivityLogPanel', () => {
     setupLog([entry({ message: 'First' }), entry({ message: 'Second' })])
     render(<ActivityLogPanel sidebarOpen={true} />)
 
-    // Badge present with the count…
     const badge = screen.getByRole('button', { name: 'Open activity log' })
     expect(badge).toBeInTheDocument()
     expect(badge).toHaveTextContent('2')
 
-    // …but the full log list is NOT inline (overlay is closed by default).
+    // The panel itself never renders the overlay/list — that lives in the titlebar.
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(screen.queryByText('First')).not.toBeInTheDocument()
   })
 
-  it('opens the full log in an overlay surface when the badge is clicked', () => {
+  it('opens the shared overlay (sets activityLogExpanded) when the badge is clicked', () => {
     setupLog([entry({ message: 'Device connected', type: 'success' })])
     render(<ActivityLogPanel sidebarOpen={true} />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Open activity log' }))
-
-    const dialog = screen.getByRole('dialog', { name: 'Activity log' })
-    expect(dialog).toBeInTheDocument()
-    expect(screen.getByText('Device connected')).toBeInTheDocument()
+    expect(mockSetExpanded).toHaveBeenCalledWith(true)
   })
 
-  it('clears the log from the overlay', () => {
-    setupLog([entry({ message: 'Boom', type: 'error' })])
-    render(<ActivityLogPanel sidebarOpen={true} />)
-
-    fireEvent.click(screen.getByRole('button', { name: 'Open activity log' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Clear activity log' }))
-    expect(mockClear).toHaveBeenCalled()
-  })
-
-  it('collapses to a tiny icon+count badge in the collapsed sidebar', () => {
+  it('collapses to a tiny icon+count badge that also opens the shared overlay', () => {
     setupLog([entry(), entry(), entry()])
     render(<ActivityLogPanel sidebarOpen={false} />)
 
     const badge = screen.getByRole('button', { name: /Activity log: 3 entries/ })
     expect(badge).toBeInTheDocument()
+    fireEvent.click(badge)
+    expect(mockSetExpanded).toHaveBeenCalledWith(true)
   })
 })

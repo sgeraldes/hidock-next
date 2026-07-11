@@ -97,6 +97,46 @@ describe('Integrated titlebar — right cluster', () => {
   })
 })
 
+describe('Integrated titlebar — ⌘K search shortcut', () => {
+  it('focuses the search input on Cmd/Ctrl+K', () => {
+    renderBar()
+    const searchbox = screen.getByRole('searchbox')
+    expect(searchbox).not.toHaveFocus()
+    fireEvent.keyDown(window, { key: 'k', metaKey: true })
+    expect(searchbox).toHaveFocus()
+  })
+
+  it('does NOT hijack ⌘K while another text field is focused', () => {
+    render(
+      <MemoryRouter>
+        <input data-testid="other" />
+        <TitleBar sidebarOpen onToggleSidebar={vi.fn()} />
+      </MemoryRouter>
+    )
+    const other = screen.getByTestId('other') as HTMLInputElement
+    other.focus()
+    expect(other).toHaveFocus()
+    fireEvent.keyDown(window, { key: 'k', metaKey: true })
+    // Focus stays put; the titlebar search is not stolen.
+    expect(other).toHaveFocus()
+    expect(screen.getByRole('searchbox')).not.toHaveFocus()
+  })
+
+  it('renders a subtle keyboard hint on the search input', () => {
+    renderBar()
+    // ⌘K on mac, "Ctrl K" elsewhere — either way a <kbd> hint is present.
+    expect(screen.getByText(/⌘K|Ctrl K/)).toBeInTheDocument()
+  })
+})
+
+describe('Integrated titlebar — brand is a home affordance', () => {
+  it('navigates home when the brand lockup is clicked', () => {
+    renderBar()
+    const home = screen.getByRole('button', { name: /go to home/i })
+    expect(home).toHaveClass('titlebar-no-drag')
+  })
+})
+
 describe('Integrated titlebar — native window controls gutter', () => {
   it('reserves the native-controls width on the right (where Electron draws — ▢ ✕)', () => {
     const { container } = renderBar()

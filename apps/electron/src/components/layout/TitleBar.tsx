@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Search,
@@ -99,6 +99,7 @@ export function TitleBar({ sidebarOpen, onToggleSidebar, dividerMode = BRAND_DIV
   // until a device-status read path sets it, so the red dot only shows when recording.
   const deviceRecording = useAppStore((s) => s.deviceRecording)
   const [search, setSearch] = useState('')
+  const searchInputRef = useRef<HTMLInputElement>(null)
 
   const submitSearch = (e: React.FormEvent) => {
     e.preventDefault()
@@ -107,6 +108,35 @@ export function TitleBar({ sidebarOpen, onToggleSidebar, dividerMode = BRAND_DIV
     navigate('/explore', { state: { query: q } })
     setSearch('')
   }
+
+  // ⌘K / Ctrl+K → focus the titlebar search (and select any existing text). We
+  // do NOT hijack the shortcut when the user is already typing in another field
+  // or an overlay/modal is open — the search is a chrome affordance, not a modal
+  // trap.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() !== 'k' || !(e.metaKey || e.ctrlKey) || e.altKey) return
+
+      const input = searchInputRef.current
+      const el = document.activeElement as HTMLElement | null
+
+      // A modal is open anywhere → leave ⌘K to that surface.
+      if (document.querySelector('[aria-modal="true"]')) return
+
+      // Focus is in another editable field → don't steal it.
+      if (el && el !== input) {
+        const tag = el.tagName
+        const editable = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable
+        if (editable) return
+      }
+
+      e.preventDefault()
+      input?.focus()
+      input?.select()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
 
   const cellWidth = sidebarOpen ? CELL_WIDTH_OPEN : CELL_WIDTH_COLLAPSED
 
@@ -137,7 +167,7 @@ export function TitleBar({ sidebarOpen, onToggleSidebar, dividerMode = BRAND_DIV
         )}
         style={{ paddingLeft: isMac ? MAC_TRAFFIC_LIGHT_INSET : undefined }}
       >
-        <Brand placement="titlebar" collapsed={!sidebarOpen} />
+        <Brand placement="titlebar" collapsed={!sidebarOpen} onHome={() => navigate('/today')} />
       </div>
 
       {/* EDGE-HANDLE COLLAPSE — a small chevron sitting ON the brand/content
@@ -172,13 +202,23 @@ export function TitleBar({ sidebarOpen, onToggleSidebar, dividerMode = BRAND_DIV
           <div className="relative">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
             <input
+              ref={searchInputRef}
               type="search"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search knowledge, people, projects…"
               aria-label="Search knowledge, people and projects"
-              className="h-7 w-full select-text rounded-md border border-slate-700 bg-slate-800/80 pl-8 pr-3 text-xs text-slate-100 placeholder:text-slate-500 focus-visible:border-sky-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-500"
+              aria-keyshortcuts={isMac ? 'Meta+K' : 'Control+K'}
+              className="h-7 w-full select-text rounded-md border border-slate-700 bg-slate-800/80 pl-8 pr-12 text-xs text-slate-100 placeholder:text-slate-500 focus-visible:border-sky-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-500"
             />
+            {/* Subtle ⌘K / Ctrl+K affordance. Decorative (the shortcut is wired on
+                the window); pointer-events-none so it never blocks typing. */}
+            <kbd
+              aria-hidden="true"
+              className="pointer-events-none absolute right-1.5 top-1/2 hidden -translate-y-1/2 select-none items-center gap-0.5 rounded border border-slate-600 bg-slate-900/70 px-1.5 py-0.5 text-[9px] font-medium leading-none text-slate-400 sm:flex"
+            >
+              {isMac ? '⌘K' : 'Ctrl K'}
+            </kbd>
           </div>
         </form>
 
