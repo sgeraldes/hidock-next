@@ -553,7 +553,9 @@ export function applyTranscriptEntities(opts: {
         // clears the tombstone and resolveProject links to it normally above.
       } else {
         const id = randomUUID()
-        run(`INSERT INTO projects (id, name, status) VALUES (?, ?, 'active')`, [id, projectName])
+        // origin='discovered' (v42): durable provenance — ONLY rows created here
+        // are dismissable via projects:dismissDiscovered (fail-closed elsewhere).
+        run(`INSERT INTO projects (id, name, status, origin) VALUES (?, ?, 'active', 'discovered')`, [id, projectName])
         projectId = id
       }
 

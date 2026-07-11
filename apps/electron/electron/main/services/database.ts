@@ -7,7 +7,7 @@ import { DatabaseEngine, getTableColumns, type SqlJsDatabase } from '@hidock/dat
 import { normalizeName, isGenericSpeakerLabel, detectAmbiguousName } from './entity-normalize'
 import { getEventBus } from './event-bus'
 
-const SCHEMA_VERSION = 41
+const SCHEMA_VERSION = 42
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -405,6 +405,11 @@ CREATE TABLE IF NOT EXISTS projects (
     status TEXT CHECK(status IN ('active', 'archived')) DEFAULT 'active',
     folder_path TEXT,
     url TEXT,
+    -- Durable provenance (v42): 'manual' = explicit user create, 'discovered' =
+    -- reconciler auto-create from a transcript mention. NULL = legacy/unknown.
+    -- dismissDiscoveredProject requires 'discovered' (fail-closed): a project of
+    -- unproven origin can never be tombstone-deleted through the dismiss path.
+    origin TEXT CHECK(origin IN ('manual', 'discovered')),
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -2131,6 +2136,25 @@ const MIGRATIONS: Record<number, () => void> = {
       console.warn('[Migration v41] create project_discovery_rejections failed:', e)
     }
     console.log('Migration v41 complete')
+  },
+
+  42: () => {
+    // v42: projects.origin — durable provenance for the dismiss-discovered path.
+    // 'manual' = explicit user create, 'discovered' = reconciler auto-create.
+    // Legacy rows stay NULL (unknown) and are fail-closed: dismissDiscovered
+    // refuses them, so a renderer bug or direct IPC call can never tombstone-
+    // delete a manually created project. Idempotent: guarded ALTER.
+    console.log('Running migration to schema v42: projects.origin')
+    const database = getDatabase()
+    const cols = getTableColumns(database, 'projects')
+    if (cols.length > 0 && !cols.includes('origin')) {
+      try {
+        database.run('ALTER TABLE projects ADD COLUMN origin TEXT')
+      } catch (e) {
+        console.warn('[Migration v42] add origin failed:', e)
+      }
+    }
+    console.log('Migration v42 complete')
   }
 
 }
@@ -2142,6 +2166,15 @@ const MIGRATIONS: Record<number, () => void> = {
  */
 function repairPhase(): void {
   const database = getDatabase()
+
+  // Repair Projects (v42): origin provenance column. Force-add so an older
+  // on-disk schema that skipped the migration still gets the column before the
+  // reconciler or dismissDiscoveredProject touches it. Idempotent.
+  const projectCols = getTableColumns(database, 'projects')
+  if (projectCols.length > 0 && !projectCols.includes('origin')) {
+    console.log('[Database] Repairing projects: adding origin')
+    try { database.run('ALTER TABLE projects ADD COLUMN origin TEXT') } catch (e) { /* already exists */ }
+  }
 
   // Repair Meetings (v32): all-day flag + named calendar date. Force-add so an
   // older on-disk schema that skipped the migration still gets the columns
@@ -5599,6 +5632,12 @@ export interface Project {
   status: string
   folder_path: string | null
   url: string | null
+  /**
+   * Durable provenance (v42): 'manual' (explicit user create) or 'discovered'
+   * (reconciler auto-create from a transcript). null = legacy/unknown — treated
+   * as NOT dismissable (fail-closed).
+   */
+  origin: 'manual' | 'discovered' | null
   created_at: string
 }
 
@@ -5653,15 +5692,17 @@ export function getProjectById(id: string): Project | undefined {
   return queryOne<Project>('SELECT * FROM projects WHERE id = ?', [id])
 }
 
-export function createProject(project: Omit<Project, 'created_at' | 'folder_path' | 'url'>): Project {
+export function createProject(project: Omit<Project, 'created_at' | 'folder_path' | 'url' | 'origin'>): Project {
+  // This function IS the manual path — it stamps origin='manual' itself so no
+  // caller can accidentally (or deliberately) mint a dismissable project here.
   run(
-    'INSERT INTO projects (id, name, description, status) VALUES (?, ?, ?, ?)',
+    "INSERT INTO projects (id, name, description, status, origin) VALUES (?, ?, ?, ?, 'manual')",
     [project.id, project.name, project.description, project.status || 'active']
   )
   // Manual beats rejection: an explicit create clears any discovery tombstone for
   // this name, so future transcript mentions resolve and link to it normally.
   clearProjectDiscoveryRejection(project.name)
-  return { ...project, folder_path: null, url: null, created_at: new Date().toISOString() }
+  return { ...project, folder_path: null, url: null, origin: 'manual', created_at: new Date().toISOString() }
 }
 
 // ---------------------------------------------------------------------------
@@ -5703,6 +5744,48 @@ export function clearProjectDiscoveryRejection(name: string): void {
   const norm = normalizeName(name)
   if (!norm) return
   run('DELETE FROM project_discovery_rejections WHERE name_norm = ?', [norm])
+}
+
+/** Typed failure reasons for {@link dismissDiscoveredProject}. */
+export class DismissDiscoveredError extends Error {
+  constructor(public readonly code: 'NOT_FOUND' | 'NOT_DISCOVERED', message: string) {
+    super(message)
+    this.name = 'DismissDiscoveredError'
+  }
+}
+
+/**
+ * Dismiss an auto-discovered project: verify provenance, record the durable
+ * tombstone, and delete the row — all in ONE transaction.
+ *
+ * Provenance is enforced HERE, in the database layer, not in the renderer: the
+ * row's origin (v42) must be exactly 'discovered'. 'manual' and NULL (legacy/
+ * unknown) are rejected fail-closed, so a stale UI, a bug, or a compromised
+ * renderer invoking the IPC channel directly can never cascade-delete a
+ * manually created project through this path. (Plain projects:delete remains
+ * the explicit, tombstone-free removal for any project.)
+ */
+export function dismissDiscoveredProject(id: string): void {
+  runInTransaction(() => {
+    const project = queryOne<Project>('SELECT * FROM projects WHERE id = ?', [id])
+    if (!project) {
+      throw new DismissDiscoveredError('NOT_FOUND', `Project with ID ${id} not found`)
+    }
+    if (project.origin !== 'discovered') {
+      throw new DismissDiscoveredError(
+        'NOT_DISCOVERED',
+        'Only auto-discovered projects can be dismissed. This project was created manually ' +
+          '(or predates provenance tracking) — delete it explicitly instead.'
+      )
+    }
+    const sourceMeeting = queryOne<{ meeting_id: string }>(
+      'SELECT mp.meeting_id FROM meeting_projects mp JOIN meetings m ON m.id = mp.meeting_id ' +
+        'WHERE mp.project_id = ? ORDER BY m.start_time DESC LIMIT 1',
+      [id]
+    )
+    addProjectDiscoveryRejection(project.name, sourceMeeting?.meeting_id ?? null)
+    run('DELETE FROM projects WHERE id = ?', [id])
+  })
 }
 
 export interface ProjectUpdateFields {
@@ -5920,10 +6003,11 @@ export function unmergeProjects(journalId: string): UnmergeResult {
       throw new Error(`Cannot unmerge: a project with id ${loser.id} already exists`)
     }
 
-    // 1. Recreate the loser project from the snapshot.
+    // 1. Recreate the loser project from the snapshot (origin preserved — an
+    // unmerged discovered project stays dismissable, a manual one stays guarded).
     runNoSave(
-      `INSERT INTO projects (id, name, description, status, folder_path, url, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO projects (id, name, description, status, folder_path, url, origin, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         loser.id,
         loser.name,
@@ -5931,6 +6015,7 @@ export function unmergeProjects(journalId: string): UnmergeResult {
         loser.status ?? 'active',
         loser.folder_path ?? null,
         loser.url ?? null,
+        loser.origin ?? null,
         loser.created_at
       ]
     )
