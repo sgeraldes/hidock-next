@@ -485,10 +485,25 @@ class RAGService {
     })
 
     if (!answer) {
+      // A null answer means the enabled chat brain failed (no cloud key, CLI not
+      // logged in, rate-limited, or offline). Name the brain that was actually
+      // asked so the surfaced error is actionable rather than blaming the generic
+      // "response". Fully defensive — resolving the brain must never mask the
+      // original failure or throw.
+      let brainLabel = ''
+      try {
+        const { getBrainRouter, getBrainRegistry } = await import('./brains')
+        const brainId = await getBrainRouter().resolvePrimaryChatBrainId('chat')
+        brainLabel = getBrainRegistry().get(brainId)?.label ?? brainId
+      } catch {
+        /* keep the generic message */
+      }
       return {
         answer: '',
         sources: [],
-        error: 'Failed to generate response. Please try again.'
+        error: brainLabel
+          ? `Failed to generate a response with ${brainLabel}. Check that it is configured and reachable, then try again.`
+          : 'Failed to generate response. Please try again.'
       }
     }
 

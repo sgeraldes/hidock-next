@@ -29,11 +29,16 @@ import type {
  * Capability fallback chains (spec §B.4). Ordering is the preference order used
  * when neither taskRouting nor defaultBrain resolves. Audio is gemini-api only
  * (local ASR lives outside the router, in transcription.ts). Embeddings are
- * gemini-api → ollama only. Agentic brains arrive in later phases.
+ * gemini-api → ollama only (the agentic brains cannot embed).
+ *
+ * `chat` lists the agentic brains AFTER gemini-api/ollama: an explicit
+ * defaultBrain/taskRouting choice is honoured because selection tries the
+ * configured brain FIRST (see chatCandidateOrder), while the *implicit* fallback
+ * order stays legacy-first (gemini → ollama) so a default config is unchanged.
  */
 const FALLBACK_CHAINS: Record<BrainCapability, BrainId[]> = {
   generate: ['gemini-api', 'ollama'],
-  chat: ['gemini-api', 'ollama'],
+  chat: ['gemini-api', 'ollama', 'claude-code', 'codex', 'gemini-cli'],
   embed: ['gemini-api', 'ollama'],
   analyzeAudio: ['gemini-api'],
   agentic: ['claude-code', 'codex', 'gemini-cli'],
@@ -134,29 +139,96 @@ export class BrainRouter {
   }
 
   /**
-   * Multi-turn chat. Replicates chat-llm's behaviour: primary (Gemini when a key
-   * is configured) first; on a non-abort error fall back to Ollama; on cancel
-   * return null; when no cloud brain is configured, Ollama serves directly — with
-   * the caller's signal and no uncancellable preflight probe.
+   * The brain-id preference order for a chat task: the configured primary
+   * (taskRouting[task] → defaultBrain → DEFAULT_BRAIN) FIRST, then the
+   * capability fallback chain. Deduped so an explicit choice that also appears
+   * in the chain is only weighed once. This is where an explicit default/route
+   * (e.g. claude-code) gets honoured ahead of the legacy-first chain.
    */
-  async chat(task: BrainTask, messages: BrainMessage[], opts: GenerateOptions = {}): Promise<string | null> {
-    const primary = await this.geminiPrimary(task, 'chat')
+  private chatCandidateOrder(task: BrainTask): BrainId[] {
+    const cfg = this.brainsConfig()
+    const order: BrainId[] = []
+    const push = (id?: BrainId | null) => {
+      if (id && !order.includes(id)) order.push(id)
+    }
+    push(cfg?.taskRouting?.[task])
+    push(cfg?.defaultBrain ?? DEFAULT_BRAIN)
+    for (const id of FALLBACK_CHAINS.chat) push(id)
+    return order
+  }
 
-    if (primary) {
+  /**
+   * Network-free chat resolution: the first enabled, chat-capable brain in
+   * chatCandidateOrder, skipping `exclude`. Mirrors resolve()'s
+   * taskRouting→defaultBrain→chain semantics, with ONE deliberate deviation —
+   * Ollama is accepted on enabled + capability alone (NO authStatus call) so its
+   * network availability probe never enters the selection path (FIX 3/4); it
+   * serves directly and self-reports null when unreachable. Every non-Ollama
+   * brain (gemini-api + the agentic CLIs) has a cheap, local authStatus and MUST
+   * be `configured`, so an unconfigured brain is never handed back.
+   */
+  private async selectChatBrain(task: BrainTask, exclude: BrainId | null): Promise<AIBrain | null> {
+    for (const id of this.chatCandidateOrder(task)) {
+      if (id === exclude) continue
+      const brain = this.registry.get(id)
+      if (!brain) continue
+      if (!this.isEnabled(id)) continue
+      if (!brain.capabilities().has('chat')) continue
+      if (id === 'ollama') return brain // serve directly; no availability preflight
       try {
-        return await primary.chat(messages, opts)
-      } catch (e) {
-        if (e instanceof DOMException && e.name === 'AbortError') {
-          console.log('[BrainRouter] chat request was cancelled')
-          return null
-        }
-        console.error('[BrainRouter] primary chat failed, trying Ollama fallback:', e)
+        if ((await brain.authStatus()).configured) return brain
+      } catch {
+        // treat an authStatus failure as unconfigured; try the next candidate
       }
     }
+    return null
+  }
 
-    // No Gemini primary (or it threw): the capability-aware fallback (enabled +
-    // advertises chat) serves directly with the caller's signal.
-    const fallback = this.capabilityFallback('chat', 'gemini-api')
+  /**
+   * The brain id chat() will invoke FIRST under the current config — the brain
+   * that will ACTUALLY serve the turn — honouring taskRouting.chat → defaultBrain
+   * → capability chain with the SAME enabled+configured checks as chat()'s own
+   * selection and NO Ollama network probe. Consumers (e.g. rag.ts's per-brain
+   * graph-fact token budget) key off this so their tuning matches who really
+   * answers, instead of reading config independently and diverging under
+   * fallback. Falls back to the configured primary id when nothing is currently
+   * usable (best-effort budget key; the turn itself would return null).
+   */
+  async resolvePrimaryChatBrainId(task: BrainTask = 'chat'): Promise<BrainId> {
+    const brain = await this.selectChatBrain(task, null)
+    if (brain) return brain.id
+    const cfg = this.brainsConfig()
+    return cfg?.taskRouting?.[task] ?? cfg?.defaultBrain ?? DEFAULT_BRAIN
+  }
+
+  /**
+   * Multi-turn chat. Selects the serving brain through selectChatBrain (same
+   * semantics as resolve('…','chat') minus Ollama's preflight probe), so an
+   * explicit default/route — Gemini, Ollama, OR an agentic brain (claude-code /
+   * codex / gemini-cli) — is honoured. Legacy behaviour is preserved exactly for
+   * a default config: Gemini-first when a key exists, else Ollama; on a non-abort
+   * primary error fall through to the next capable brain (Ollama for the default
+   * chain); on cancel return null. opts (incl. opts.signal) is forwarded to the
+   * brain's chat() — the agentic adapters fold history and hand the signal to
+   * runCli, so cancellation still works.
+   */
+  async chat(task: BrainTask, messages: BrainMessage[], opts: GenerateOptions = {}): Promise<string | null> {
+    const primary = await this.selectChatBrain(task, null)
+    if (!primary) return null
+
+    try {
+      return await primary.chat(messages, opts)
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') {
+        console.log('[BrainRouter] chat request was cancelled')
+        return null
+      }
+      console.error(`[BrainRouter] ${primary.id} chat failed, trying fallback:`, e)
+    }
+
+    // Primary threw (non-abort): the next enabled, capable brain serves — the
+    // failed primary excluded. For a default config this is Gemini→Ollama.
+    const fallback = await this.selectChatBrain(task, primary.id)
     return fallback ? fallback.chat(messages, opts) : null
   }
 
