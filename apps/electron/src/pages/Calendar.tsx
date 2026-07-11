@@ -64,6 +64,10 @@ import {
   recordingCategory,
   formatUnmatchedRecordingMeta,
   recordingBlockTitle,
+  assignOverlapLanes,
+  buildEventAriaLabel,
+  OVERLAP_INDENT_STEP,
+  OVERLAP_MAX_INDENT_LANES,
 } from '@/lib/calendar-utils'
 
 // Helper functions for date/time formatting in list views. An undated recording
@@ -426,68 +430,42 @@ export function Calendar() {
     return grouped
   }, [meetingOverlays, viewDates, hideEmptyMeetings])
 
-  // Outlook-style conflict layout: assign overlapping blocks to side-by-side
-  // columns instead of stacking them on top of each other.
-  // Returns per-id {col, cols} so the renderer can compute left/width.
-  const computeOverlapColumns = useCallback(
-    (blocks: Array<{ id: string; startTime: Date; endTime: Date }>): Map<string, { col: number; cols: number }> => {
-      const result = new Map<string, { col: number; cols: number }>()
+  // F6: Cascade conflict layout. The owner explicitly rejected Outlook-style
+  // side-by-side column shrinking ("just let it hang like that"), but the E-walk
+  // found unbounded full-overlap makes titles/times unreadable. Reconcile: keep
+  // blocks (almost) full-width and OVERLAPPING, but give each later overlapping
+  // block a small cascading indent + a higher z-index (assignOverlapLanes), so the
+  // earlier event's left edge (icon + title) always peeks out and stays legible.
+  // Returns per-id cascade lane (0 = base, deeper = indented + on top).
+  const computeOverlapLanes = useCallback(
+    (blocks: Array<{ id: string; startTime: Date; endTime: Date }>): Map<string, number> => {
+      // assignOverlapLanes requires start-sorted input; day groups are already
+      // sorted, but sort defensively so lane assignment is always correct.
       const sorted = [...blocks].sort((a, b) => a.startTime.getTime() - b.startTime.getTime())
-
-      let cluster: Array<{ id: string; end: number; col: number }> = []
-      let clusterIds: string[] = []
-      let clusterMaxCols = 0
-
-      const flushCluster = () => {
-        for (const cid of clusterIds) {
-          const entry = result.get(cid)
-          if (entry) entry.cols = clusterMaxCols
-        }
-        cluster = []
-        clusterIds = []
-        clusterMaxCols = 0
+      const map = new Map<string, number>()
+      for (const laid of assignOverlapLanes(sorted)) {
+        map.set(laid.id, laid.lane)
       }
-
-      for (const block of sorted) {
-        const start = block.startTime.getTime()
-        const end = Math.max(block.endTime.getTime(), start + 1)
-
-        // Remove finished blocks from the active set
-        cluster = cluster.filter((c) => c.end > start)
-        if (cluster.length === 0 && clusterIds.length > 0) flushCluster()
-
-        // Assign the smallest free column
-        const used = new Set(cluster.map((c) => c.col))
-        let col = 0
-        while (used.has(col)) col++
-
-        cluster.push({ id: block.id, end, col })
-        clusterIds.push(block.id)
-        clusterMaxCols = Math.max(clusterMaxCols, cluster.length, col + 1)
-        result.set(block.id, { col, cols: 1 })
-      }
-      if (clusterIds.length > 0) flushCluster()
-
-      return result
+      return map
     },
     []
   )
 
-  const overlayColumnsByDay = useMemo(() => {
-    const map: Record<string, Map<string, { col: number; cols: number }>> = {}
+  const overlayLanesByDay = useMemo(() => {
+    const map: Record<string, Map<string, number>> = {}
     for (const key in meetingOverlaysByDay) {
-      map[key] = computeOverlapColumns(meetingOverlaysByDay[key])
+      map[key] = computeOverlapLanes(meetingOverlaysByDay[key])
     }
     return map
-  }, [meetingOverlaysByDay, computeOverlapColumns])
+  }, [meetingOverlaysByDay, computeOverlapLanes])
 
-  const recordingColumnsByDay = useMemo(() => {
-    const map: Record<string, Map<string, { col: number; cols: number }>> = {}
+  const recordingLanesByDay = useMemo(() => {
+    const map: Record<string, Map<string, number>> = {}
     for (const key in recordingsByDay) {
-      map[key] = computeOverlapColumns(recordingsByDay[key])
+      map[key] = computeOverlapLanes(recordingsByDay[key])
     }
     return map
-  }, [recordingsByDay, computeOverlapColumns])
+  }, [recordingsByDay, computeOverlapLanes])
 
   const handleMeetingClick = (meeting: Meeting) => {
     navigate(`/meeting/${meeting.id}`)
@@ -892,9 +870,20 @@ export function Calendar() {
                   return (
                     <div
                       key={recording.id}
+                      role="button"
+                      tabIndex={0}
+                      aria-pressed={isSelected}
+                      aria-label={`${recording.filename}, ${formatShortDate(recording.dateRecorded)} ${formatShortTime(recording.dateRecorded)}${isSelected ? ', selected' : ''}`}
                       onClick={() => toggleSelection(recording.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          toggleSelection(recording.id)
+                        }
+                      }}
                       className={cn(
                         'relative p-3 rounded-lg border cursor-pointer transition-all hover:shadow-md',
+                        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1',
                         isSelected ? 'ring-2 ring-primary bg-primary/5' : 'hover:bg-muted/50'
                       )}
                     >
@@ -1014,12 +1003,17 @@ export function Calendar() {
                     <div
                       key={recording.id}
                       className={cn(
-                        'flex items-center gap-2 px-2 py-1 rounded cursor-pointer text-sm',
+                        'flex items-center gap-2 px-2 py-1 rounded text-sm',
                         isSelected ? 'bg-primary/10' : 'hover:bg-muted/50'
                       )}
                     >
                       {/* Checkbox */}
-                      <button onClick={() => toggleSelection(recording.id)} className="flex-shrink-0">
+                      <button
+                        onClick={() => toggleSelection(recording.id)}
+                        className="flex-shrink-0 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                        aria-pressed={isSelected}
+                        aria-label={`${isSelected ? 'Deselect' : 'Select'} ${recording.filename}`}
+                      >
                         {isSelected ? (
                           <CheckSquare className="h-4 w-4 text-primary" />
                         ) : (
@@ -1217,6 +1211,7 @@ export function Calendar() {
                       {dayMeetings.slice(0, 3).map((meeting) => (
                         <button
                           key={meeting.id}
+                          aria-label={buildEventAriaLabel(meeting.subject, new Date(meeting.start_time), new Date(meeting.end_time))}
                           onClick={() => {
                             // C-CAL-004: All meeting cards should be clickable.
                             // Placeholders open the link dialog; real meetings navigate to detail.
@@ -1234,6 +1229,7 @@ export function Calendar() {
                           className={cn(
                             'w-full text-left text-xs p-1 rounded truncate transition-colors',
                             'hover:ring-1 hover:ring-ring',
+                            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:relative focus-visible:z-10',
                             // Unmatched recording placeholder → amber exception style
                             meeting.isPlaceholder && UNMATCHED_BLOCK,
                             // Recorded meeting → its category color (a badge, below, marks "recorded")
@@ -1376,29 +1372,31 @@ export function Calendar() {
                       if (startHour < visibleStartHour || startHour >= visibleEndHour) return null
 
                       const canShowTime = height > 35
-                      // Outlook-style conflict columns: overlapping meetings share the width
-                      const layout = overlayColumnsByDay[key]?.get(meeting.id) ?? { col: 0, cols: 1 }
+                      // F6: cascade overlapping meetings (owner: no Outlook column-split).
+                      const lane = overlayLanesByDay[key]?.get(meeting.id) ?? 0
+                      const indentPx = Math.min(lane, OVERLAP_MAX_INDENT_LANES) * OVERLAP_INDENT_STEP
 
                       return (
                         <Tooltip key={`overlay-${meeting.id}`}>
                           <TooltipTrigger asChild>
                             <button
                               onClick={() => handleMeetingClick({ id: meeting.id } as Meeting)}
-                              aria-label={`Scheduled meeting, not recorded: ${meeting.subject}`}
+                              aria-label={`Scheduled meeting, not recorded: ${buildEventAriaLabel(meeting.subject, meeting.startTime, meeting.endTime)}`}
                               className={cn(
                                 'absolute rounded-md px-2 py-1 text-xs overflow-hidden transition-colors text-left',
                                 'border-2 border-dashed border-slate-300 dark:border-slate-600',
                                 'bg-slate-50/30 dark:bg-slate-800/20 text-slate-500 dark:text-slate-400',
-                                'hover:bg-slate-100/60 dark:hover:bg-slate-700/30 hover:border-slate-400',
+                                'hover:bg-slate-100/60 dark:hover:bg-slate-700/30 hover:border-slate-400 hover:z-30',
+                                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:z-30 focus-visible:opacity-100',
                                 'opacity-70 hover:opacity-90'
                               )}
                               style={{
                                 top,
                                 height,
                                 minHeight: 24,
-                                left: `calc(${(layout.col / layout.cols) * 100}% + 4px)`,
-                                width: `calc(${100 / layout.cols}% - 8px)`,
-                                zIndex: 5 // Below recordings
+                                left: 4 + indentPx,
+                                width: `calc(100% - 8px - ${indentPx}px)`,
+                                zIndex: 5 + lane // Below recordings; deeper lane on top
                               }}
                             >
                               <div className="flex items-start gap-1 h-full">
@@ -1426,7 +1424,7 @@ export function Calendar() {
                     {/* Recordings shown as category-tinted blocks - positioned by RECORDING time.
                         The block's FILL carries the linked meeting's category; a compact badge
                         (mic + location glyph) carries the "recorded" state — not the whole color. */}
-                    {(recordingsByDay[key] || []).map((recording, recIdx) => {
+                    {(recordingsByDay[key] || []).map((recording) => {
                       const { top, height } = getRecordingStyle(recording)
 
                       const startHour = recording.startTime.getHours()
@@ -1441,24 +1439,27 @@ export function Calendar() {
                       // Matched → meeting subject; unlinked → the recording's own title
                       // (or "Recording · <time>"), never the raw device filename.
                       const displayLabel = recordingBlockTitle(recording)
-                      // Outlook-style conflict columns for overlapping recordings
-                      const layout = recordingColumnsByDay[key]?.get(recording.id) ?? { col: 0, cols: 1 }
+                      // F6: cascade overlapping recordings (owner: no Outlook column-split).
+                      const lane = recordingLanesByDay[key]?.get(recording.id) ?? 0
+                      const indentPx = Math.min(lane, OVERLAP_MAX_INDENT_LANES) * OVERLAP_INDENT_STEP
 
                       const button = (
                         <button
                           onClick={() => handleRecordingClick(recording)}
+                          aria-label={buildEventAriaLabel(displayLabel, recording.startTime, recording.endTime)}
                           className={cn(
                             'absolute rounded-md px-2 py-1 text-xs overflow-hidden text-left transition-[filter,box-shadow]',
                             'shadow-sm hover:z-30 hover:ring-2 hover:ring-ring/60 hover:brightness-[1.03]',
+                            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:z-30',
                             isUnmatched ? UNMATCHED_BLOCK : CATEGORY_BLOCK[category]
                           )}
                           style={{
                             top,
                             height,
                             minHeight: 24,
-                            left: `calc(${(layout.col / layout.cols) * 100}% + 4px)`,
-                            width: `calc(${100 / layout.cols}% - 8px)`,
-                            zIndex: 15 + recIdx // Above meeting overlays
+                            left: 4 + indentPx,
+                            width: `calc(100% - 8px - ${indentPx}px)`,
+                            zIndex: 15 + lane // Above meeting overlays; deeper lane on top
                           }}
                         >
                           <div className="flex items-start gap-1 h-full">

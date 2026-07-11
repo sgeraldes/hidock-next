@@ -256,6 +256,81 @@ export function calculateMeetingColumns(
   return result
 }
 
+// ===== F6: Overlap cascade layout =====
+// Owner constraint (2026-07-08): do NOT shrink overlapping events into Outlook-style
+// side-by-side columns. Blocks stay full-width and "hang" over each other; the lane
+// index below only drives a SMALL cascading indent + stacking order so a later,
+// overlapping event's header does not fully cover the earlier one's title.
+
+/** Horizontal indent (px) applied per cascade lane for overlapping events. */
+export const OVERLAP_INDENT_STEP = 10
+/** Cap on indent lanes so deeply-stacked events never shrink to nothing. */
+export const OVERLAP_MAX_INDENT_LANES = 6
+
+/** Per-item cascade layout produced by {@link assignOverlapLanes}. */
+export interface OverlapLayout {
+  /** Cascade depth: 0 = base (no earlier overlap), higher = indented + on top. */
+  lane: number
+}
+
+/**
+ * Assign cascade lanes to time-ordered blocks so overlapping events remain readable.
+ *
+ * Items MUST already be sorted by start time (the calendar groups sort per day).
+ * Each item receives the lowest lane index not held by an earlier item whose time
+ * range still overlaps it (classic greedy interval colouring). Non-overlapping
+ * items all stay in lane 0, so days without collisions render exactly as before
+ * (no regression). Later-starting overlapping items land in deeper lanes, which the
+ * caller turns into a few px of left indent + a higher z-index — the earlier event's
+ * left edge (icon + title) peeks out and stays legible.
+ *
+ * This is intentionally NOT Outlook-style column splitting (see owner constraint above):
+ * blocks keep (almost) full width and simply cascade.
+ */
+export function assignOverlapLanes<T extends { startTime: Date; endTime: Date }>(
+  items: T[]
+): Array<T & OverlapLayout> {
+  // active[laneIndex] = end time (ms) of the item currently occupying that lane,
+  // or undefined when the lane is free.
+  const active: Array<number | undefined> = []
+
+  return items.map((item) => {
+    const startMs = item.startTime.getTime()
+    const endMs = item.endTime.getTime()
+
+    // Free any lane whose occupant ends at or before this item's start
+    // (touching edges do not count as an overlap).
+    for (let i = 0; i < active.length; i++) {
+      if (active[i] !== undefined && (active[i] as number) <= startMs) {
+        active[i] = undefined
+      }
+    }
+
+    // Lowest free lane (append a new one if all are busy).
+    let lane = active.findIndex((end) => end === undefined)
+    if (lane === -1) {
+      lane = active.length
+      active.push(endMs)
+    } else {
+      active[lane] = endMs
+    }
+
+    return { ...item, lane }
+  })
+}
+
+/**
+ * Build an accessible label for a calendar event block (F7 a11y).
+ * Combines the visible subject with a human time range, e.g.
+ * "Team Standup, 9:00 AM to 10:00 AM".
+ */
+export function buildEventAriaLabel(subject: string, start: Date, end: Date): string {
+  const fmt = (d: Date) =>
+    d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+  const name = subject && subject.trim().length > 0 ? subject.trim() : 'Untitled event'
+  return `${name}, ${fmt(start)} to ${fmt(end)}`
+}
+
 /**
  * Get recording-meeting match score (0 = no match, higher = better match)
  */

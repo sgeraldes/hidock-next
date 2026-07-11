@@ -11,6 +11,8 @@ import {
   formatUnmatchedRecordingMeta,
   recordingBlockTitle,
   sortMeetingsByProximity,
+  assignOverlapLanes,
+  buildEventAriaLabel,
   type CalendarRecording,
   type CalendarMeetingOverlay,
 } from '../calendar-utils'
@@ -699,5 +701,84 @@ describe('#58 UNKNOWN_DATE sentinel does not leak into the Calendar', () => {
       const { calendarRecordings } = buildCalendarRecordings([unlinked], [meeting])
       expect(calendarRecordings).toHaveLength(0)
     })
+  })
+})
+
+/**
+ * F6: Overlap cascade layout — assignOverlapLanes.
+ * Verifies overlapping calendar blocks get distinct cascade lanes (so titles stay
+ * readable) while non-overlapping blocks stay in lane 0 (no regression), and that a
+ * later-starting overlapping block lands in a deeper lane (rendered indented + on top).
+ * This is the honest replacement for the Outlook-style side-by-side split the owner rejected.
+ */
+function overlapBlock(startHour: number, startMin: number, endHour: number, endMin: number, id = `b-${startHour}-${startMin}`) {
+  return {
+    id,
+    startTime: new Date(2026, 2, 2, startHour, startMin, 0),
+    endTime: new Date(2026, 2, 2, endHour, endMin, 0),
+  }
+}
+
+describe('assignOverlapLanes', () => {
+  it('keeps non-overlapping blocks all in lane 0 (no cascade / no regression)', () => {
+    const items = [overlapBlock(9, 0, 10, 0), overlapBlock(10, 0, 11, 0), overlapBlock(11, 0, 12, 0)]
+    const laid = assignOverlapLanes(items)
+    expect(laid.map((i) => i.lane)).toEqual([0, 0, 0])
+  })
+
+  it('assigns a deeper lane to a later-starting overlapping block', () => {
+    // A 9-11 fully contains B 9:30-10:30 => B must be indented + on top.
+    const items = [overlapBlock(9, 0, 11, 0, 'A'), overlapBlock(9, 30, 10, 30, 'B')]
+    const laid = assignOverlapLanes(items)
+    expect(laid.find((i) => i.id === 'A')!.lane).toBe(0)
+    expect(laid.find((i) => i.id === 'B')!.lane).toBe(1)
+  })
+
+  it('cascades three mutually-overlapping blocks into lanes 0,1,2 (>=3 colliding pairs)', () => {
+    const items = [overlapBlock(9, 0, 12, 0, 'A'), overlapBlock(9, 30, 12, 0, 'B'), overlapBlock(10, 0, 12, 0, 'C')]
+    const laid = assignOverlapLanes(items)
+    expect(laid.find((i) => i.id === 'A')!.lane).toBe(0)
+    expect(laid.find((i) => i.id === 'B')!.lane).toBe(1)
+    expect(laid.find((i) => i.id === 'C')!.lane).toBe(2)
+    // Deeper lane => higher z-index in the caller, so C renders above B above A.
+    expect(laid.map((i) => i.lane)).toEqual([0, 1, 2])
+  })
+
+  it('reuses a freed lane once an earlier block ends (touching != overlapping)', () => {
+    // A 9-10, B 9:30-10:30 (overlaps A -> lane 1), C 10:00-11:00 starts as A ends.
+    // A ended, so C reclaims lane 0; B still open in lane 1.
+    const items = [overlapBlock(9, 0, 10, 0, 'A'), overlapBlock(9, 30, 10, 30, 'B'), overlapBlock(10, 0, 11, 0, 'C')]
+    const laid = assignOverlapLanes(items)
+    expect(laid.find((i) => i.id === 'A')!.lane).toBe(0)
+    expect(laid.find((i) => i.id === 'B')!.lane).toBe(1)
+    expect(laid.find((i) => i.id === 'C')!.lane).toBe(0)
+  })
+
+  it('preserves input order and does not mutate the original items', () => {
+    const items = [overlapBlock(9, 0, 11, 0, 'A'), overlapBlock(9, 30, 10, 30, 'B')]
+    const laid = assignOverlapLanes(items)
+    expect(laid.map((i) => i.id)).toEqual(['A', 'B'])
+    expect((items[0] as unknown as { lane?: number }).lane).toBeUndefined()
+  })
+
+  it('returns an empty array for no items', () => {
+    expect(assignOverlapLanes([])).toEqual([])
+  })
+})
+
+/**
+ * F7: accessible label builder for calendar event blocks.
+ */
+describe('buildEventAriaLabel', () => {
+  it('combines subject with a readable time range', () => {
+    const start = new Date(2026, 2, 2, 9, 0, 0)
+    const end = new Date(2026, 2, 2, 10, 30, 0)
+    expect(buildEventAriaLabel('Team Standup', start, end)).toBe('Team Standup, 9:00 AM to 10:30 AM')
+  })
+
+  it('falls back to "Untitled event" for a blank subject', () => {
+    const start = new Date(2026, 2, 2, 14, 0, 0)
+    const end = new Date(2026, 2, 2, 15, 0, 0)
+    expect(buildEventAriaLabel('   ', start, end)).toBe('Untitled event, 2:00 PM to 3:00 PM')
   })
 })
