@@ -474,6 +474,204 @@ describe('JensenDevice (transport-agnostic core)', () => {
     }
   })
 
+  // --- Recovery ownership: an EXPLICIT disconnect cancels the cycle at ANY point ---
+  //
+  // The recovery machine's ownership is a session GENERATION, bumped synchronously
+  // at every explicit disconnect()/reset(). The cycle captures it at quarantine
+  // start and re-checks after every await — so an explicit disconnect during the
+  // quarantine teardown, the backoff, getDevices, open, or setup must fully cancel
+  // recovery with NO reopen.
+
+  function makeRecoveryHarness(getDevicesImpl?: () => Promise<USBDevice[]>) {
+    const ep = makePollEndpoint()
+    const dev = makePollDevice(ep, vi.fn(async () => {}), vi.fn(async () => {}))
+    const getDevices = vi.fn(getDevicesImpl ?? (async () => [dev]))
+    const device = new JensenDevice(makeFakeUsb({ getDevices: getDevices as unknown as USB['getDevices'] }))
+    return { ep, dev, getDevices, device }
+  }
+
+  it('explicit disconnect during the quarantine teardown await → recovery is never scheduled', async () => {
+    const { dev, getDevices, device } = makeRecoveryHarness()
+    await device.tryConnect(dev)
+    ;(device as unknown as { startReadLoop: () => void }).startReadLoop()
+    const openCalls = (dev.open as unknown as ReturnType<typeof vi.fn>).mock.calls.length
+
+    vi.useFakeTimers()
+    try {
+      const dl = device.downloadFile('dead.hda', 100_000, vi.fn())
+      await vi.advanceTimersByTimeAsync(1)
+      getDevices.mockClear()
+
+      // Stall fires at 120s; its drain + the quarantine teardown span the next
+      // ~second. Land the explicit disconnect INSIDE that teardown window.
+      await vi.advanceTimersByTimeAsync(120_700)
+      const d = device.disconnect() // bumps the generation mid-teardown
+      await vi.advanceTimersByTimeAsync(5_000)
+      await d
+      await expect(dl).resolves.toBe(false)
+
+      // The user's disconnect is final: no recovery scheduled, no reopen — ever.
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(getDevices).not.toHaveBeenCalled()
+      expect((dev.open as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(openCalls)
+      expect(device.isConnected()).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('explicit disconnect while recovery awaits getDevices → device is never reopened', async () => {
+    let resolveGetDevices: ((d: USBDevice[]) => void) | null = null
+    const { dev, getDevices, device } = makeRecoveryHarness(
+      () => new Promise<USBDevice[]>((res) => { resolveGetDevices = res })
+    )
+    await device.tryConnect(dev)
+    ;(device as unknown as { startReadLoop: () => void }).startReadLoop()
+    const openCalls = (dev.open as unknown as ReturnType<typeof vi.fn>).mock.calls.length
+
+    vi.useFakeTimers()
+    try {
+      const dl = device.downloadFile('dead.hda', 100_000, vi.fn())
+      await vi.advanceTimersByTimeAsync(1)
+      await vi.advanceTimersByTimeAsync(121_000) // stall → quarantine
+      await expect(dl).resolves.toBe(false)
+
+      await vi.advanceTimersByTimeAsync(2_100) // first backoff fires → attempt blocks on getDevices
+      expect(getDevices).toHaveBeenCalledTimes(1)
+      expect(resolveGetDevices).not.toBeNull()
+
+      await device.disconnect() // explicit — bumps generation mid-attempt
+
+      resolveGetDevices!([dev]) // the await returns AFTER the disconnect
+      await vi.advanceTimersByTimeAsync(1_000)
+
+      // Re-check before opening: the device must NOT be reopened.
+      expect((dev.open as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(openCalls)
+      expect(device.isConnected()).toBe(false)
+      // And the dead cycle never reschedules.
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(getDevices).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('explicit disconnect while recovery awaits open() → no setup, the opened handle is closed', async () => {
+    const { dev, getDevices, device } = makeRecoveryHarness()
+    await device.tryConnect(dev)
+    ;(device as unknown as { startReadLoop: () => void }).startReadLoop()
+    const scMock = dev.selectConfiguration as unknown as ReturnType<typeof vi.fn>
+    const openMock = dev.open as unknown as ReturnType<typeof vi.fn>
+    const closeMock = dev.close as unknown as ReturnType<typeof vi.fn>
+
+    vi.useFakeTimers()
+    try {
+      const dl = device.downloadFile('dead.hda', 100_000, vi.fn())
+      await vi.advanceTimersByTimeAsync(1)
+      await vi.advanceTimersByTimeAsync(121_000) // stall → quarantine
+      await expect(dl).resolves.toBe(false)
+
+      // Recovery's open() hangs until we release it.
+      let resolveOpen: (() => void) | null = null
+      openMock.mockImplementation(() => new Promise<void>((res) => { resolveOpen = res }))
+      const setupCallsBefore = scMock.mock.calls.length
+      const closeCallsBefore = closeMock.mock.calls.length
+
+      await vi.advanceTimersByTimeAsync(2_100) // attempt: getDevices → open (pending)
+      expect(resolveOpen).not.toBeNull()
+
+      await device.disconnect() // explicit — mid-open
+
+      resolveOpen!() // open completes AFTER the disconnect
+      await vi.advanceTimersByTimeAsync(1_000)
+
+      // Re-check before setup: never configured, and the unwanted open was undone.
+      expect(scMock.mock.calls.length).toBe(setupCallsBefore)
+      expect(closeMock.mock.calls.length).toBeGreaterThan(closeCallsBefore)
+      expect(device.isConnected()).toBe(false)
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(getDevices).toHaveBeenCalledTimes(1) // dead cycle never reschedules
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('explicit disconnect while recovery is in setup() → session ends disconnected, cycle dead', async () => {
+    const { dev, getDevices, device } = makeRecoveryHarness()
+    await device.tryConnect(dev)
+    ;(device as unknown as { startReadLoop: () => void }).startReadLoop()
+    const scMock = dev.selectConfiguration as unknown as ReturnType<typeof vi.fn>
+
+    vi.useFakeTimers()
+    try {
+      const dl = device.downloadFile('dead.hda', 100_000, vi.fn())
+      await vi.advanceTimersByTimeAsync(1)
+      await vi.advanceTimersByTimeAsync(121_000) // stall → quarantine
+      await expect(dl).resolves.toBe(false)
+
+      // Recovery's setup blocks at selectConfiguration until we release it.
+      let resolveSc: (() => void) | null = null
+      scMock.mockImplementation(() => new Promise<void>((res) => { resolveSc = res }))
+
+      await vi.advanceTimersByTimeAsync(2_100) // attempt: getDevices → open → setup (pending)
+      expect(resolveSc).not.toBeNull()
+
+      const d = device.disconnect() // explicit — mid-setup
+
+      resolveSc!() // setup proceeds AFTER the disconnect started
+      scMock.mockImplementation(async () => {}) // let teardown-triggered paths pass
+      await vi.advanceTimersByTimeAsync(2_000) // setup 300ms + teardowns settle
+      await d
+
+      // Post-setup generation check tears the fresh session down again.
+      expect(device.isConnected()).toBe(false)
+      // Dead cycle: no further recovery attempts.
+      const calls = getDevices.mock.calls.length
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(getDevices.mock.calls.length).toBe(calls)
+      expect(device.isConnected()).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('concurrent double-disconnect: teardown ownership is refcounted (no premature release)', async () => {
+    // With a shared boolean, the second disconnect finishing first cleared the flag
+    // while the first teardown still owned the bus — letting a settlement advance
+    // mid-teardown. The refcount + serialized teardown bodies prevent that.
+    const ep = makePollEndpoint()
+    const close = vi.fn(async () => {})
+    const device = new JensenDevice(makeFakeUsb())
+    const dev = makePollDevice(ep, vi.fn(async () => {}), close)
+    const transferOut = dev.transferOut as unknown as ReturnType<typeof vi.fn>
+    await device.tryConnect(dev)
+    ;(device as unknown as { startReadLoop: () => void }).startReadLoop()
+
+    const controller = new AbortController()
+    const dl = device.downloadFile('big.hda', 100_000, vi.fn(), undefined, controller.signal)
+    device.getDeviceInfo(5)
+    await new Promise((r) => setTimeout(r, 0))
+    expect(transferOut).toHaveBeenCalledTimes(1)
+
+    // Cancel → the byte-boundary drain is now waiting; teardown must force standdown.
+    controller.abort('user-cancel')
+    await expect(dl).resolves.toBe(false)
+
+    const d1 = device.disconnect()
+    const d2 = device.disconnect()
+    // BOTH teardowns hold ownership immediately (synchronous refcount claim).
+    expect((device as unknown as { teardownDepth: number }).teardownDepth).toBe(2)
+
+    await Promise.all([d1, d2])
+    expect((device as unknown as { teardownDepth: number }).teardownDepth).toBe(0)
+
+    // Give the (stood-down) drain a few ticks — it must never advance the queue.
+    await new Promise((r) => setTimeout(r, 200))
+    expect(transferOut).toHaveBeenCalledTimes(1)
+    expect(close).toHaveBeenCalledTimes(1) // second teardown found nothing to close
+    expect(device.isConnected()).toBe(false)
+  })
+
   it('connect() returns false when no devices found', async () => {
     expect(await new JensenDevice(makeFakeUsb()).connect()).toBe(false)
   })

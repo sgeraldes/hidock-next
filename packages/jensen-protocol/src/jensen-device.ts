@@ -376,11 +376,25 @@ export class JensenDevice {
   // pattern). Reset on setup.
   private poisoned = false
 
-  // True while disconnect() is tearing the session down. A transfer settlement that
-  // is mid-drain checks this every tick and STANDS DOWN the moment teardown starts —
-  // teardown owns the FIFO drain and the close, so no settlement may advance the
-  // queue (or quarantine) once this is set.
-  private teardownInProgress = false
+  // REFCOUNT of in-flight teardowns (disconnect / quarantine / recovery pre-connect
+  // cleanup). A transfer settlement that is mid-drain checks isTearingDown() every
+  // tick and STANDS DOWN the moment any teardown starts — teardown owns the FIFO
+  // drain and the close, so no settlement may advance the queue (or quarantine)
+  // while one is in flight. A refcount (not a boolean) so a second concurrent
+  // disconnect finishing cannot clear the ownership the first one still holds.
+  private teardownDepth = 0
+
+  // Serializes teardown bodies (disconnect / quarantine / recovery cleanup) so two
+  // concurrent teardowns can never interleave gracefulCloseDevice on the same handle.
+  private lifecycleChain: Promise<void> = Promise.resolve()
+
+  // Monotonic generation of the SESSION. Bumped SYNCHRONOUSLY at the entry of every
+  // EXPLICIT lifecycle op (disconnect(), reset(), tryConnect()'s internal
+  // disconnect). A quarantine-recovery cycle captures the generation when it starts
+  // and re-checks it after EVERY await (and before scheduling, opening, setup, and
+  // exhaustion-reporting): any explicit op invalidates the cycle mid-flight, so an
+  // explicit disconnect can never be followed by an unwanted recovery REOPEN.
+  private sessionGeneration = 0
 
   // === Quarantine recovery state machine ===
   // After a quarantine teardown the device is healthy but disconnected, and no
@@ -741,19 +755,26 @@ export class JensenDevice {
    */
   private async quarantineConnection(reason: string): Promise<void> {
     this.poisoned = true
+    // Capture the generation BEFORE the teardown await: if the user explicitly
+    // disconnects while our teardown is in flight, the bump makes the post-await
+    // check fail and NO recovery is scheduled — the user's disconnect is final.
+    const gen = this.sessionGeneration
     console.warn(`[Jensen] quarantining connection — ${reason}; disconnecting, clean reconnect required`)
-    await this.disconnect()
+    await this.performTeardown()
+    if (gen !== this.sessionGeneration) return // explicit op raced our teardown — it owns the outcome
     // Fresh recovery cycle for this quarantine event.
     this.recoveryAttempt = 0
-    this.scheduleQuarantineRecovery()
+    this.scheduleQuarantineRecovery(gen)
   }
 
   /**
    * Schedule the next bounded quarantine-recovery attempt, or surface the terminal
-   * "recovery required" state once the cap is exhausted. ONE clean tryConnect() per
-   * backoff step — never a rapid open/close loop (USB safety).
+   * "recovery required" state once the cap is exhausted. ONE clean reconnect per
+   * backoff step — never a rapid open/close loop (USB safety). `gen` is the cycle's
+   * captured generation: a stale generation neither schedules nor reports.
    */
-  private scheduleQuarantineRecovery(): void {
+  private scheduleQuarantineRecovery(gen: number): void {
+    if (gen !== this.sessionGeneration) return // cycle invalidated by an explicit op
     if (this.recoveryTimer) return // an attempt is already scheduled
     const backoffs = JensenDevice.RECOVERY_BACKOFF_MS
     if (this.recoveryAttempt >= backoffs.length) {
@@ -764,30 +785,70 @@ export class JensenDevice {
       return
     }
     const delay = backoffs[this.recoveryAttempt]
-    this.recoveryTimer = setTimeout(() => { void this.runQuarantineRecoveryAttempt() }, delay)
-  }
-
-  private async runQuarantineRecoveryAttempt(): Promise<void> {
-    this.recoveryTimer = null
-    if (this.isConnected()) { this.recoveryAttempt = 0; return } // reconnected externally
-    this.recoveryAttempt++
-    console.warn(
-      `[Jensen] quarantine recovery attempt ${this.recoveryAttempt}/${JensenDevice.RECOVERY_BACKOFF_MS.length}`)
-    let ok = false
-    try {
-      ok = await this.tryConnect() // one clean attempt; setup() clears poisoned + recovery state
-    } catch {
-      ok = false
-    }
-    if (!ok) this.scheduleQuarantineRecovery() // next backoff step, or terminal state at the cap
+    this.recoveryTimer = setTimeout(() => { void this.runQuarantineRecoveryAttempt(gen) }, delay)
   }
 
   /**
-   * Stop any PENDING recovery attempt (timer only). Called by disconnect() so an
-   * explicit disconnect during a backoff window kills the cycle. Deliberately does
-   * NOT reset recoveryAttempt — tryConnect() calls disconnect() internally during a
-   * recovery attempt, and resetting the counter there would defeat the cap (infinite
-   * retries). The counter is reset only on a fresh quarantine or a successful setup().
+   * One recovery attempt. Deliberately does NOT delegate to tryConnect(): the cycle's
+   * generation must be re-checked after EVERY await — and BEFORE opening and BEFORE
+   * setup — so an explicit disconnect mid-attempt can never be followed by an
+   * unwanted reopen (tryConnect hides those awaits and its internal disconnect() is
+   * an explicit-class op that would invalidate our own cycle).
+   */
+  private async runQuarantineRecoveryAttempt(gen: number): Promise<void> {
+    this.recoveryTimer = null
+    if (gen !== this.sessionGeneration) return // cancelled while the timer was pending
+    if (this.isConnected()) return // reconnected externally — cycle no longer needed
+    this.recoveryAttempt++
+    console.warn(
+      `[Jensen] quarantine recovery attempt ${this.recoveryAttempt}/${JensenDevice.RECOVERY_BACKOFF_MS.length}`)
+
+    let target: USBDevice | undefined
+    let opened = false
+    try {
+      // Clean slate via an INTERNAL teardown (does not bump the generation — that
+      // would invalidate our own cycle the way tryConnect's disconnect() would).
+      await this.performTeardown()
+      if (gen !== this.sessionGeneration) return
+
+      const devices = await this.usb.getDevices()
+      if (gen !== this.sessionGeneration) return // re-check BEFORE opening — no reopen after an explicit disconnect
+      target = devices.find((d) => this.isHiDockUsbDevice(d))
+      if (target) {
+        await target.open()
+        opened = true
+        if (gen !== this.sessionGeneration) {
+          // Explicit disconnect raced the open — undo it, never proceed to setup.
+          try { await target.close() } catch { /* ignore */ }
+          return
+        }
+        this.device = target
+        await this.setup() // success clears poisoned + recovery state, fires onconnect
+        if (gen !== this.sessionGeneration) {
+          // Explicit disconnect raced setup — tear the fresh session down again.
+          try { await this.performTeardown() } catch { /* ignore */ }
+        }
+        return
+      }
+    } catch {
+      // Release anything half-opened so the next attempt starts clean.
+      if (this.device) {
+        try { await this.performTeardown() } catch { /* ignore */ }
+      } else if (opened && target) {
+        try { await target.close() } catch { /* ignore */ }
+      }
+    }
+    if (gen !== this.sessionGeneration) return // no rescheduling/exhaustion for a dead cycle
+    if (this.isConnected()) return
+    this.scheduleQuarantineRecovery(gen) // next backoff step, or terminal state at the cap
+  }
+
+  /**
+   * Stop any PENDING recovery attempt (timer only). Called by explicit lifecycle ops
+   * (disconnect/reset) alongside the generation bump — the bump is what cancels an
+   * attempt already PAST its timer (in-flight awaits re-check the generation).
+   * Deliberately does NOT reset recoveryAttempt: the counter is reset only on a
+   * fresh quarantine or a successful setup(), so nothing can defeat the cap.
    */
   private cancelQuarantineRecovery(): void {
     if (this.recoveryTimer) {
@@ -853,46 +914,73 @@ export class JensenDevice {
     }
   }
 
+  /** True while ANY teardown (disconnect / quarantine / recovery cleanup) is in flight. */
+  private isTearingDown(): boolean {
+    return this.teardownDepth > 0
+  }
+
+  /**
+   * EXPLICIT disconnect (user / IPC / tryConnect's pre-connect cleanup). Bumps the
+   * session generation SYNCHRONOUSLY, which invalidates any pending OR in-flight
+   * quarantine-recovery cycle (every recovery await re-checks the generation) —
+   * an explicit disconnect can therefore never be followed by a recovery reopen.
+   */
   async disconnect(): Promise<void> {
-    // From here TEARDOWN owns the FIFO: any in-flight transfer settlement that is
-    // mid-drain sees this flag and stands down (no advance, no quarantine).
-    this.teardownInProgress = true
-    // An explicit disconnect during a quarantine-recovery backoff window kills the
-    // pending attempt (timer only — see cancelQuarantineRecovery for why the
-    // attempt counter is left alone).
+    this.sessionGeneration++
+    // Kill a recovery attempt still waiting on its backoff timer. An attempt already
+    // past the timer is killed by the generation bump above at its next await.
     this.cancelQuarantineRecovery()
-    try {
-      this.removeUsbDisconnectListener()
+    await this.performTeardown()
+  }
 
-      if (this.device) {
-        await this.gracefulCloseDevice()
-        this.device = null
-      }
+  /**
+   * INTERNAL teardown: refcounted (a concurrent teardown finishing cannot clear the
+   * ownership another still holds — settlements stand down while teardownDepth > 0)
+   * and serialized (two teardown bodies never interleave gracefulCloseDevice on the
+   * same handle). Does NOT bump the session generation — quarantine and recovery use
+   * it to clean up without invalidating their own cycle.
+   */
+  private performTeardown(): Promise<void> {
+    // Claim ownership SYNCHRONOUSLY so a settlement mid-drain stands down the moment
+    // teardown is requested, not when the serialized body eventually runs.
+    this.teardownDepth++
+    const run = this.lifecycleChain.then(
+      () => this.teardownBody(),
+      () => this.teardownBody()
+    )
+    this.lifecycleChain = run.then(() => undefined, () => undefined)
+    return run.finally(() => { this.teardownDepth-- })
+  }
 
-      // Reset all state
-      this.currentCommandTag = null
-      this.currentOperationName = null
-      this.readLoopRunning = false
-      this.sequenceId = 0
-      this.receiveChunks.length = 0
-      this.carryLen = 0
-      this.commandQueue.length = 0
-      this.data = {}
+  private async teardownBody(): Promise<void> {
+    this.removeUsbDisconnectListener()
 
-      if (this.decodeTimer) {
-        clearTimeout(this.decodeTimer)
-        this.decodeTimer = null
-      }
-
-      // Resolve all pending promises with null
-      for (const [, pending] of this.pendingPromises) {
-        if (pending.timeout) clearTimeout(pending.timeout)
-        pending.resolve(null)
-      }
-      this.pendingPromises.clear()
-    } finally {
-      this.teardownInProgress = false
+    if (this.device) {
+      await this.gracefulCloseDevice()
+      this.device = null
     }
+
+    // Reset all state
+    this.currentCommandTag = null
+    this.currentOperationName = null
+    this.readLoopRunning = false
+    this.sequenceId = 0
+    this.receiveChunks.length = 0
+    this.carryLen = 0
+    this.commandQueue.length = 0
+    this.data = {}
+
+    if (this.decodeTimer) {
+      clearTimeout(this.decodeTimer)
+      this.decodeTimer = null
+    }
+
+    // Resolve all pending promises with null
+    for (const [, pending] of this.pendingPromises) {
+      if (pending.timeout) clearTimeout(pending.timeout)
+      pending.resolve(null)
+    }
+    this.pendingPromises.clear()
 
     this.ondisconnect?.()
   }
@@ -903,6 +991,10 @@ export class JensenDevice {
    */
   async reset(): Promise<boolean> {
     if (!this.device) return false
+
+    // Explicit lifecycle op: invalidate any pending/in-flight recovery cycle.
+    this.sessionGeneration++
+    this.cancelQuarantineRecovery()
 
     if (shouldLog()) console.log('[Jensen] Resetting device...')
     try {
@@ -2318,7 +2410,7 @@ export class JensenDevice {
       let lastReceived = received
       let idleMs = 0
       for (;;) {
-        if (this.teardownInProgress || !this.device || this.currentCommandTag === null) return 'standdown'
+        if (this.isTearingDown() || !this.device || this.currentCommandTag === null) return 'standdown'
         if (received >= fileSize) return 'complete'
         await new Promise((r) => setTimeout(r, 50))
         if (received !== lastReceived) {
@@ -2357,7 +2449,7 @@ export class JensenDevice {
           return undefined
         })
         const outcome = await drainToByteBoundary()
-        if (this.teardownInProgress || !this.device) return // teardown raced us — it owns the bus
+        if (this.isTearingDown() || !this.device) return // teardown raced us — it owns the bus
         if (outcome === 'complete') {
           this.releaseSlotAndAdvance() // stream ended at its proven byte boundary
         } else if (outcome === 'stalled') {
@@ -2373,7 +2465,7 @@ export class JensenDevice {
         `[Jensen] downloadFile stalled for ${TRANSFER_STALL_TIMEOUT_MS / 1000}s ` +
         `(${received}/${fileSize} bytes) — draining IN FIFO, then quarantining for reconnect`)
       await this.drainUntilIdle() // best-effort drain so teardown closes on a quiet-ish bus
-      if (this.teardownInProgress || !this.device) return // teardown raced the drain — stand down
+      if (this.isTearingDown() || !this.device) return // teardown raced the drain — stand down
       await this.quarantineConnection(`download stalled (${received}/${fileSize} bytes)`)
     }
 

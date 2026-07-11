@@ -302,6 +302,92 @@ describe('DownloadService', () => {
     })
   })
 
+  describe('MEDIUM (re-review): terminal-row prune has an age source and actually runs', () => {
+    it('cancel-while-pending stamps completedAt (prune age source) and persists it', () => {
+      // Items cancelled while still PENDING have no startedAt — without a
+      // terminal-state stamp they were never pruned and lived forever.
+      service.queueDownloads([{ filename: 'never-started.hda', size: 1024 }])
+      mockRun.mockClear()
+      service.cancelDownload('never-started.hda') // still 'pending' — never downloaded
+
+      const item = service.getState().queue.find((i: DownloadQueueItem) => i.filename === 'never-started.hda')
+      expect(item?.status).toBe('cancelled')
+      expect(item?.startedAt).toBeUndefined() // the exact no-age-source case
+      expect(item?.completedAt).toBeInstanceOf(Date) // now stamped
+
+      const persistCall = mockRun.mock.calls.find(
+        (call: unknown[]) => typeof call[0] === 'string' && (call[0] as string).includes('INSERT OR REPLACE INTO download_queue')
+      )
+      expect(persistCall).toBeDefined()
+      // Params: [id, filename, size, progress, status, error, started, completed, recDate, cancel_reason, id]
+      expect((persistCall![1] as unknown[])[7]).not.toBeNull() // completed_at persisted
+    })
+
+    const makeCancelledRow = (filename: string, completedAt: string | null) => ({
+      id: filename,
+      filename,
+      file_size: 1024,
+      progress: 0,
+      status: 'cancelled' as const,
+      error: 'Cancelled by user',
+      started_at: null, // cancelled while pending — no startedAt (the old leak)
+      completed_at: completedAt,
+      recording_date: null,
+      cancel_reason: 'user' as const,
+      created_at: completedAt
+    })
+
+    it('startup prune removes >24h terminal rows and keeps fresh ones', () => {
+      const old = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString()
+      const fresh = new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString()
+      mockQueryAll.mockReturnValueOnce([makeCancelledRow('ancient.hda', old), makeCancelledRow('recent.hda', fresh)])
+      mockRun.mockClear()
+
+      const restarted = new DownloadService()
+      const queue = restarted.getState().queue
+      expect(queue.find((i: DownloadQueueItem) => i.filename === 'ancient.hda')).toBeUndefined()
+      expect(queue.find((i: DownloadQueueItem) => i.filename === 'recent.hda')?.status).toBe('cancelled')
+
+      // The prune also deleted the durable row (no unbounded table growth).
+      const deleted = mockRun.mock.calls.some(
+        (call: unknown[]) =>
+          typeof call[0] === 'string' &&
+          (call[0] as string).includes('DELETE FROM download_queue') &&
+          (call[1] as unknown[])[0] === 'ancient.hda'
+      )
+      expect(deleted).toBe(true)
+
+      restarted.destroy()
+    })
+
+    it('periodic prune ages out terminal rows during a session (bounded hourly schedule)', () => {
+      vi.useFakeTimers()
+      try {
+        // 23.5h old at startup → survives the startup prune…
+        const almost = new Date(Date.now() - 23.5 * 60 * 60 * 1000).toISOString()
+        mockQueryAll.mockReturnValueOnce([makeCancelledRow('aging.hda', almost)])
+        const restarted = new DownloadService()
+        expect(restarted.getState().queue.find((i: DownloadQueueItem) => i.filename === 'aging.hda')).toBeDefined()
+
+        // …then crosses 24h and the HOURLY periodic prune removes it — no
+        // completion event required (the old prune only ran after successes).
+        vi.advanceTimersByTime(61 * 60 * 1000)
+        expect(restarted.getState().queue.find((i: DownloadQueueItem) => i.filename === 'aging.hda')).toBeUndefined()
+
+        restarted.destroy()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('a terminal row with NO timestamps at all (legacy garbage) is pruned immediately', () => {
+      mockQueryAll.mockReturnValueOnce([makeCancelledRow('ghost.hda', null)])
+      const restarted = new DownloadService()
+      expect(restarted.getState().queue.find((i: DownloadQueueItem) => i.filename === 'ghost.hda')).toBeUndefined()
+      restarted.destroy()
+    })
+  })
+
   describe('BUG-DS-002: cancelAll() does not cancel in-progress downloads', () => {
     it('cancelAll should also cancel downloading items, not just pending', () => {
       // Queue and simulate one actively downloading

@@ -40,7 +40,14 @@ export interface DownloadQueueItem {
   status: 'pending' | 'downloading' | 'completed' | 'failed' | 'cancelled'
   error?: string
   startedAt?: Date
+  // Set when the item reaches ANY terminal state (completed, failed, cancelled) —
+  // not just success. It is the primary AGE SOURCE for the 24h terminal-row prune:
+  // startedAt alone never exists for items cancelled while still PENDING, which let
+  // those rows (and their DB counterparts) grow without bound.
   completedAt?: Date
+  // When the item was first queued (DB created_at on reload). Last-resort prune age
+  // source for legacy rows that predate terminal-state stamping.
+  createdAt?: Date
   recordingDate?: Date // Original recording date from device
   lastProgressAt?: Date // C-004: Track last progress update for smarter stall detection
   // HIGH-3 (Codex): origin of a 'cancelled' status. 'user' = the user deliberately
@@ -87,10 +94,16 @@ export class DownloadService {
   private dirty = true
   private cachedQueueArray: DownloadQueueItem[] = []
 
+  private pruneInterval: NodeJS.Timeout | null = null // MEDIUM (re-review): bounded periodic prune
+
   constructor() {
     console.log('[DownloadService] Initialized')
     this.loadQueueFromDatabase()
+    // MEDIUM (re-review): prune terminal rows at STARTUP — the prune used to run only
+    // after successful completions, so reloaded >24h user-cancelled rows never aged out.
+    this.pruneCompletedItems(10)
     this.startStalledCheckInterval() // spec-007: start periodic timeout detection
+    this.startPruneInterval()
   }
 
   /**
@@ -130,11 +143,32 @@ export class DownloadService {
   }
 
   /**
+   * MEDIUM (re-review): bounded periodic prune (hourly). Terminal rows must age out
+   * even in sessions where no download ever completes — previously the prune ran
+   * only inside processDownload's success path.
+   */
+  private startPruneInterval(): void {
+    const PRUNE_INTERVAL_MS = 60 * 60 * 1000 // hourly — cheap scan, bounded frequency
+    this.pruneInterval = setInterval(() => {
+      this.pruneCompletedItems(10)
+      this.emitStateUpdate()
+    }, PRUNE_INTERVAL_MS)
+  }
+
+  private stopPruneInterval(): void {
+    if (this.pruneInterval) {
+      clearInterval(this.pruneInterval)
+      this.pruneInterval = null
+    }
+  }
+
+  /**
    * C-004: Clean up all timers (stalled check + emit throttle) for graceful shutdown.
    * Should be called before app quit to prevent leaked intervals/timeouts.
    */
   destroy(): void {
     this.stopStalledCheckInterval()
+    this.stopPruneInterval()
     if (this.emitTimer) {
       clearTimeout(this.emitTimer)
       this.emitTimer = null
@@ -163,8 +197,9 @@ export class DownloadService {
         completed_at: string | null
         recording_date: string | null
         cancel_reason: 'user' | 'interrupted' | null
+        created_at: string | null
       }>(`
-        SELECT id, filename, file_size, progress, status, error, started_at, completed_at, recording_date, cancel_reason
+        SELECT id, filename, file_size, progress, status, error, started_at, completed_at, recording_date, cancel_reason, created_at
         FROM download_queue
         WHERE status IN ('pending', 'downloading')
            OR (status = 'cancelled' AND cancel_reason = 'user')
@@ -182,7 +217,9 @@ export class DownloadService {
           startedAt: item.started_at ? new Date(item.started_at) : undefined,
           completedAt: item.completed_at ? new Date(item.completed_at) : undefined,
           recordingDate: item.recording_date ? new Date(item.recording_date) : undefined,
-          cancelReason: item.cancel_reason ?? undefined
+          cancelReason: item.cancel_reason ?? undefined,
+          // Prune age fallback for rows without terminal/start timestamps.
+          createdAt: item.created_at ? new Date(item.created_at) : undefined
         }
         this.state.queue.set(item.filename, queueItem)
       }
@@ -193,8 +230,11 @@ export class DownloadService {
       const now = Date.now()
       const staleKeys: string[] = []
       for (const [key, item] of this.state.queue) {
-        if (item.status === 'pending' && item.startedAt) {
-          const age = now - item.startedAt.getTime()
+        // Age source: startedAt when it ever started; createdAt for never-started
+        // pending rows (they used to have no timestamp and lingered forever).
+        const ref = item.startedAt ?? item.createdAt
+        if (item.status === 'pending' && ref) {
+          const age = now - ref.getTime()
           if (age > STALE_THRESHOLD_MS) {
             staleKeys.push(key)
           }
@@ -426,7 +466,8 @@ export class DownloadService {
         fileSize: file.size,
         progress: 0,
         status: 'pending',
-        recordingDate: file.dateCreated // Store the original recording date
+        recordingDate: file.dateCreated, // Store the original recording date
+        createdAt: new Date() // prune age fallback (DB created_at is set on persist)
       }
 
       this.state.queue.set(file.filename, item)
@@ -617,6 +658,7 @@ export class DownloadService {
     item.status = 'cancelled'
     item.error = 'Cancelled by user'
     item.cancelReason = 'user' // HIGH-3: deliberate cancel — no auto-retry on reconnect
+    item.completedAt = new Date() // terminal-state stamp: prune age source (works for pending cancels too)
     this.persistQueueItem(item) // spec-007: persist cancellation (durable suppression row)
     emitActivityLog('info', `Download cancelled: ${filename}`)
     console.log(`[DownloadService] Cancelled download: ${filename}`)
@@ -676,6 +718,7 @@ export class DownloadService {
     if (item) {
       item.status = 'failed'
       item.error = error
+      item.completedAt = new Date() // terminal-state stamp: prune age source
       this.persistQueueItem(item) // spec-007: persist failure
       emitActivityLog('error', `Download failed: ${filename}`, error)
 
@@ -731,6 +774,7 @@ export class DownloadService {
           console.warn(`[DownloadService] Stall detected for ${item.filename} (${Math.round(elapsed / 1000)}s without progress, timeout=${stallTimeout / 1000}s, size=${item.fileSize})`)
           item.status = 'failed'
           item.error = stallMsg
+          item.completedAt = new Date() // terminal-state stamp: prune age source
           this.persistQueueItem(item)
           emitActivityLog('warning', `Download stalled: ${item.filename}`, stallMsg)
 
@@ -778,6 +822,7 @@ export class DownloadService {
         // HIGH-3: record WHY. Disconnect/re-sync = 'interrupted' (reconnect auto-retries);
         // an explicit user cancel routed through here passes origin 'user' (stays terminal).
         item.cancelReason = origin
+        item.completedAt = new Date() // terminal-state stamp: prune age source
         this.persistQueueItem(item)
 
         cancelledCount++
@@ -872,10 +917,15 @@ export class DownloadService {
         completed.push(key)
       }
 
-      // B-DWN-002: Auto-prune failed/cancelled items older than 24h to prevent memory leaks
-      if ((item.status === 'failed' || item.status === 'cancelled') && item.startedAt) {
-        const age = now - item.startedAt.getTime()
-        if (age > FAILED_MAX_AGE_MS) {
+      // B-DWN-002: Auto-prune failed/cancelled items older than 24h to prevent memory leaks.
+      // MEDIUM (re-review): age source is completedAt (terminal-state stamp) with
+      // startedAt/createdAt fallbacks — keying on startedAt alone meant an item
+      // cancelled while still PENDING (no startedAt) was NEVER pruned, so its row
+      // reloaded forever and the queue/table grew without bound. A terminal row with
+      // no timestamp at all is legacy garbage — prune it immediately.
+      if (item.status === 'failed' || item.status === 'cancelled') {
+        const ref = item.completedAt ?? item.startedAt ?? item.createdAt
+        if (!ref || now - ref.getTime() > FAILED_MAX_AGE_MS) {
           toRemoveStale.push(key)
         }
       }
@@ -937,6 +987,7 @@ export class DownloadService {
           item.status = 'cancelled'
           item.error = 'Cancelled by user'
           item.cancelReason = 'user' // HIGH-3: deliberate cancel — terminal until manual retry
+          item.completedAt = new Date() // terminal-state stamp: prune age source (pending cancels too)
           itemsToCancel.push(item)
         }
       }
