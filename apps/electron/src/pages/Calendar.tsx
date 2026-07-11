@@ -29,6 +29,7 @@ import { categorizeMeeting } from '@/lib/meeting-timing'
 import { CATEGORY_DOT, CATEGORY_BLOCK, UNMATCHED_BLOCK } from '@/lib/meeting-category-colors'
 import { RecordingLinkDialog } from '@/components/RecordingLinkDialog'
 import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
+import { isUnknownDate } from '@/lib/unknownDate'
 import { useToday } from '@/hooks/useToday'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly, hasDeviceFile } from '@/types/unified-recording'
 import { getHiDockDeviceService } from '@/services/hidock-device'
@@ -65,12 +66,16 @@ import {
   recordingBlockTitle,
 } from '@/lib/calendar-utils'
 
-// Helper functions for date/time formatting in list views
+// Helper functions for date/time formatting in list views. An undated recording
+// (UNKNOWN_DATE epoch sentinel) has no real date, so it renders honestly instead
+// of a bogus "Dec 31" / "Jan 1" 1970 short date (#58).
 function formatShortDate(date: Date): string {
+  if (isUnknownDate(date)) return 'Unknown'
   return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 }
 
 function formatShortTime(date: Date): string {
+  if (isUnknownDate(date)) return ''
   return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
 }
 

@@ -5,6 +5,7 @@
 import type { Meeting } from '@/types'
 import type { UnifiedRecording } from '@/types/unified-recording'
 import { categorizeMeeting, isAllDayMeeting, type MeetingCategory } from './meeting-timing'
+import { isUnknownDate } from './unknownDate'
 
 /**
  * A meeting this long (or flagged all-day) is a low-precision "bridge" window. A
@@ -259,6 +260,10 @@ export function calculateMeetingColumns(
  * Get recording-meeting match score (0 = no match, higher = better match)
  */
 export function getRecordingMeetingMatchScore(recording: UnifiedRecording, meeting: Meeting): number {
+  // An undated recording (UNKNOWN_DATE epoch sentinel) has no real time, so it can
+  // overlap no meeting — scoring it would only mis-fire against 1970. It matches
+  // nothing and stays in the Library as "Unknown date", never on the Calendar (#58).
+  if (isUnknownDate(recording.dateRecorded)) return 0
   const recStart = recording.dateRecorded.getTime()
   const recDurationMs = (recording.duration || 0) * 1000
   const recEnd = recStart + recDurationMs
@@ -316,9 +321,15 @@ export function matchRecordingsToMeetings(
   meetings: Meeting[],
   recordings: UnifiedRecording[]
 ): { calendarMeetings: CalendarMeeting[]; orphanRecordings: UnifiedRecording[] } {
+  // Exclude undated recordings (UNKNOWN_DATE sentinel) up front: they can't be
+  // matched to a meeting by time overlap, and — critically — they must NOT fall
+  // through to orphanRecordings, or createPlaceholderMeetings would stamp a 1970
+  // placeholder onto the Calendar. They remain fully visible in the Library as
+  // "Unknown date"; the Calendar simply doesn't place them (#58).
+  const datedRecordings = recordings.filter((rec) => !isUnknownDate(rec.dateRecorded))
   const recordingToBestMeeting = new Map<string, { meeting: Meeting; score: number }>()
 
-  for (const recording of recordings) {
+  for (const recording of datedRecordings) {
     let bestMatch: { meeting: Meeting; score: number } | null = null
 
     for (const meeting of meetings) {
@@ -342,7 +353,7 @@ export function matchRecordingsToMeetings(
     const meetingDurationSeconds = (meetingEnd - meetingStart) / 1000
 
     let matchingRecording: UnifiedRecording | null = null
-    for (const recording of recordings) {
+    for (const recording of datedRecordings) {
       const bestMatch = recordingToBestMeeting.get(recording.id)
       if (bestMatch && bestMatch.meeting.id === meeting.id) {
         matchingRecording = recording
@@ -397,7 +408,7 @@ export function matchRecordingsToMeetings(
     }
   }
 
-  const orphanRecordings = recordings.filter((rec) => !matchedRecordingIds.has(rec.id))
+  const orphanRecordings = datedRecordings.filter((rec) => !matchedRecordingIds.has(rec.id))
 
   return { calendarMeetings, orphanRecordings }
 }
@@ -406,7 +417,12 @@ export function matchRecordingsToMeetings(
  * Create placeholder meetings from orphan recordings
  */
 export function createPlaceholderMeetings(orphanRecordings: UnifiedRecording[]): CalendarMeeting[] {
-  return orphanRecordings.map((rec) => {
+  return orphanRecordings
+    // Never synthesize a placeholder for an undated recording — its epoch date would
+    // render a "Jan 1, 1970" ghost meeting. matchRecordingsToMeetings already keeps
+    // these out of orphanRecordings; this guard also protects direct callers (#58).
+    .filter((rec) => !isUnknownDate(rec.dateRecorded))
+    .map((rec) => {
     const recDate = rec.dateRecorded
     const durationMs = (rec.duration || 30 * 60) * 1000
     const endDate = new Date(recDate.getTime() + durationMs)
@@ -444,9 +460,15 @@ export function buildCalendarRecordings(
   const calendarRecordings: CalendarRecording[] = []
   const meetingsWithRecordings = new Set<string>()
 
+  // Undated recordings (UNKNOWN_DATE sentinel) have no real time to place on the
+  // timeline — a raw epoch would render a recording block at midnight 1970. Drop
+  // them from the recording-centric view; they stay in the Library as "Unknown
+  // date". (#58)
+  const datedRecordings = recordings.filter((rec) => !isUnknownDate(rec.dateRecorded))
+
   const recordingToBestMeeting = new Map<string, Meeting>()
 
-  for (const recording of recordings) {
+  for (const recording of datedRecordings) {
     let bestMatch: { meeting: Meeting; score: number } | null = null
 
     for (const meeting of meetings) {
@@ -462,7 +484,7 @@ export function buildCalendarRecordings(
     }
   }
 
-  for (const recording of recordings) {
+  for (const recording of datedRecordings) {
     const startTime = recording.dateRecorded
     const durationMs = (recording.duration || 0) * 1000
     const endTime = new Date(startTime.getTime() + (durationMs || 30 * 60 * 1000))

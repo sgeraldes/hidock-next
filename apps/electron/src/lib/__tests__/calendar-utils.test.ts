@@ -4,6 +4,7 @@ import {
   matchRecordingsToMeetings,
   buildCalendarRecordings,
   createPlaceholderMeetings,
+  getRecordingMeetingMatchScore,
   groupByDay,
   formatDurationStr,
   recordingCategory,
@@ -15,6 +16,7 @@ import {
 } from '../calendar-utils'
 import type { Meeting } from '@/types'
 import type { UnifiedRecording } from '@/types/unified-recording'
+import { UNKNOWN_DATE } from '@/lib/unknownDate'
 
 /**
  * B-CAL-003: Unit tests for computeVisibleHourRange
@@ -516,5 +518,109 @@ describe('sortMeetingsByProximity', () => {
     const copy = [...meetings]
     sortMeetingsByProximity(meetings, '2026-03-02T14:00:00.000Z')
     expect(meetings).toEqual(copy)
+  })
+})
+
+/**
+ * #58 — the UNKNOWN_DATE (Unix-epoch) sentinel must NEVER leak into the Calendar
+ * as a real 1970 date. Undated recordings (unparseable filename + no device/db
+ * date) carry `dateRecorded = UNKNOWN_DATE`; they stay fully visible in the
+ * Library as "Unknown date" but are simply not PLACED on the Calendar: not
+ * matched to a meeting, not turned into a 1970 placeholder meeting, not built into
+ * a recording block, and not bucketed into any day. Dated recordings are
+ * unaffected.
+ */
+describe('#58 UNKNOWN_DATE sentinel does not leak into the Calendar', () => {
+  // An undated recording: a normal recording stamped with the epoch sentinel
+  // instead of a real capture time (unparseable filename + no device/db date).
+  const makeUndatedRecording = (id: string): UnifiedRecording => ({
+    ...makeUnifiedRecording(id, 9, 20),
+    filename: `undated-${id}.hda`,
+    dateRecorded: UNKNOWN_DATE,
+  })
+
+  // Serialize anything the Calendar produces and assert no 1970/1969 date leaked.
+  const hasEpochDate = (value: unknown): boolean => {
+    const s = JSON.stringify(value)
+    return /1970|1969|Dec 31, 1969|Jan 1, 1970/.test(s)
+  }
+
+  it('getRecordingMeetingMatchScore returns 0 for an undated recording (matches nothing)', () => {
+    // A meeting positioned at the epoch would "overlap" a raw epoch recStart — the
+    // guard must short-circuit before any such arithmetic.
+    const epochMeeting: Meeting = {
+      ...makeMeetingEntity('m-epoch', 'Epoch trap', 0, 1),
+      start_time: new Date(0).toISOString(),
+      end_time: new Date(60 * 60 * 1000).toISOString(),
+    }
+    expect(getRecordingMeetingMatchScore(makeUndatedRecording('u1'), epochMeeting)).toBe(0)
+  })
+
+  it('does not match an undated recording to a meeting and does not orphan it (no placeholder source)', () => {
+    const meetings = [makeMeetingEntity('m1', 'Team Standup', 9, 10)]
+    const recordings = [makeUndatedRecording('u1')]
+
+    const { calendarMeetings, orphanRecordings } = matchRecordingsToMeetings(meetings, recordings)
+
+    // The real meeting shows as "no recording"; the undated recording is neither
+    // matched nor orphaned (so it can never become a 1970 placeholder).
+    expect(calendarMeetings).toHaveLength(1)
+    expect(calendarMeetings[0].hasRecording).toBe(false)
+    expect(orphanRecordings).toHaveLength(0)
+    expect(hasEpochDate(calendarMeetings)).toBe(false)
+  })
+
+  it('creates no 1970 placeholder meeting from an undated recording', () => {
+    // Direct call (defense-in-depth): even if handed an undated recording, no
+    // placeholder is synthesized and no epoch ISO appears.
+    const placeholders = createPlaceholderMeetings([
+      makeUndatedRecording('u1'),
+      makeUnifiedRecording('r1', 14, 30),
+    ])
+    expect(placeholders).toHaveLength(1)
+    expect(placeholders[0].matchedRecordingId).toBe('r1')
+    expect(hasEpochDate(placeholders)).toBe(false)
+  })
+
+  it('does not build a recording block for an undated recording', () => {
+    const meetings = [makeMeetingEntity('m1', 'Team Standup', 9, 10)]
+    const { calendarRecordings } = buildCalendarRecordings(
+      [makeUndatedRecording('u1'), makeUnifiedRecording('r1', 9, 60)],
+      meetings
+    )
+    // Only the dated recording produces a block; no 1970 timestamp anywhere.
+    expect(calendarRecordings.map((r) => r.id)).toEqual(['r1'])
+    expect(hasEpochDate(calendarRecordings)).toBe(false)
+  })
+
+  it('does not bucket an undated recording into any calendar day', () => {
+    const { calendarRecordings } = buildCalendarRecordings(
+      [makeUndatedRecording('u1'), makeUnifiedRecording('r1', 9, 60)],
+      []
+    )
+    const viewDates = [new Date(2026, 2, 2), new Date(2026, 2, 3)]
+    const grouped = groupByDay(calendarRecordings, (r) => r.startTime, viewDates)
+
+    // The dated recording lands in its day; nothing lands in a 1970 bucket, and no
+    // "1970-01-01" key exists.
+    expect(grouped['2026-03-02']).toHaveLength(1)
+    expect(grouped['1970-01-01']).toBeUndefined()
+    const totalBucketed = Object.values(grouped).reduce((n, arr) => n + arr.length, 0)
+    expect(totalBucketed).toBe(1)
+  })
+
+  it('leaves dated recordings fully placed and matched (control)', () => {
+    const meetings = [makeMeetingEntity('m1', 'Team Standup', 9, 10)]
+    const recordings = [makeUnifiedRecording('r1', 9, 60), makeUndatedRecording('u1')]
+
+    const { calendarMeetings, orphanRecordings } = matchRecordingsToMeetings(meetings, recordings)
+    expect(calendarMeetings[0].hasRecording).toBe(true)
+    expect(calendarMeetings[0].matchedRecordingId).toBe('r1')
+    expect(orphanRecordings).toHaveLength(0)
+
+    const { calendarRecordings } = buildCalendarRecordings(recordings, meetings)
+    expect(calendarRecordings).toHaveLength(1)
+    expect(calendarRecordings[0].id).toBe('r1')
+    expect(calendarRecordings[0].linkedMeeting?.subject).toBe('Team Standup')
   })
 })

@@ -8,6 +8,13 @@ import {
   BothLocationsRecording
 } from '@/types/unified-recording'
 import type { KnowledgeCapture } from '@/types/knowledge'
+import { UNKNOWN_DATE, isUnknownDate } from '@/lib/unknownDate'
+
+// Re-exported so existing importers (e.g. regression tests, and any consumer that
+// reached for the sentinel here) keep working. The canonical definition now lives
+// in the dependency-free '@/lib/unknownDate' so pure consumers (calendar-utils)
+// can import the predicate without pulling this hook's React/store/device deps.
+export { UNKNOWN_DATE, isUnknownDate }
 
 interface DatabaseRecording {
   id: string
@@ -74,17 +81,13 @@ function parseDateFromFilename(filename: string): Date | null {
   return null
 }
 
-/**
- * Sentinel "date unknown" value for recordings whose date we genuinely cannot
- * determine (unparseable filename AND no valid device/db date). We MUST NOT fall
- * back to `new Date()` (render-time now) here: doing so stamps every undated item
- * with the current instant, so months-apart recordings all collapse to "today",
- * cluster at the TOP of the newest-first list, and visually bundle together (the
- * #58 "months-apart bundling" bug). Using the Unix epoch instead makes undated
- * items sort to the BOTTOM (they are not "newest") and — via smartDate treating
- * epoch as unknown — render an honest "Unknown date" instead of a fake today.
- */
-export const UNKNOWN_DATE = new Date(0)
+// UNKNOWN_DATE (the Unix-epoch sentinel used below) and its `isUnknownDate`
+// predicate are defined in '@/lib/unknownDate' and re-exported at the top of this
+// file. We MUST NOT fall back to `new Date()` (render-time now) for undated items:
+// that stamps every one with the current instant, so months-apart recordings all
+// collapse to "today", cluster at the TOP of the newest-first list, and visually
+// bundle together (the #58 "months-apart bundling" bug). The epoch sentinel sorts
+// them to the BOTTOM and renders an honest "Unknown date" via smartDate.
 
 // Get the best date for a recording - parse from filename first (most reliable), then fallback
 export function getBestDate(filename: string, deviceDate: Date | null | undefined, fallback: Date = UNKNOWN_DATE): Date {

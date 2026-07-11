@@ -2,6 +2,7 @@ import { getDisplayTitle } from './getDisplayTitle'
 import { parseAttendees } from '@/types'
 import type { UnifiedRecording } from '@/types/unified-recording'
 import type { Meeting, Transcript } from '@/types'
+import { isUnknownDate } from '@/lib/unknownDate'
 
 const MONTH_SHORT = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec']
 const MONTH_FULL  = ['january','february','march','april','may','june','july','august','september','october','november','december']
@@ -44,6 +45,10 @@ export function buildSearchCorpus(
     if (att.name)  parts.push(att.name)
     if (att.email) parts.push(att.email)
   }
-  if (recording.dateRecorded) parts.push(buildDateAliases(recording.dateRecorded))
+  // Skip date aliases for undated recordings — otherwise the epoch sentinel would
+  // make them findable by a fake "jan 1970" / "1970-01-01" search token (#58).
+  if (recording.dateRecorded && !isUnknownDate(recording.dateRecorded)) {
+    parts.push(buildDateAliases(recording.dateRecorded))
+  }
   return parts.join(' ').toLowerCase()
 }
