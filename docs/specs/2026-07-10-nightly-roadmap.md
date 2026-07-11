@@ -70,7 +70,7 @@ Dogfood each un-hardened surface, file findings back here, fix, re-walk:
 - Per surface: clickability / editability / discoverability + liveness + hierarchy; log new items as F-series.
 
 ## Track F — Discovered during audit (append as found)
-- _(populated by the audit-loop agent)_
+- [ ] **F1 (P1, owner-reported 2026-07-11, img #142)** **Projects → Identity suggestions: every KEEPS/ALIAS row shows "Couldn't check transcripts."** On the Projects merge/identity-suggestions panel ("N names may be X: … (67%)"), each suggestion card (both the KEEPS project and each ALIAS candidate) renders an amber "Couldn't check transcripts" warning — systematic, not occasional. Likely the transcript-evidence check for PROJECT-entity merge suggestions is erroring or querying the wrong table/id (works for people/speaker identity, fails for projects). Investigate the project-suggestion transcript lookup (identity-discovery / suggestions handler) — is it calling a transcripts query that throws or returns empty for project entities? Fix so it shows real transcript evidence (or hides the line when genuinely none), not a blanket error. Verify live on the Projects page.
 
 ## Track G — Security / release (owner-gated)
 - [ ] **G1** Promote the Dependabot security fix (0-vuln) from this branch to `main` — **owner's call** (QA-first policy; do not push to main unprompted).
