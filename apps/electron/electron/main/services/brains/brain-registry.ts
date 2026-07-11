@@ -1,13 +1,14 @@
 /**
  * Brain registry — instantiates and caches the enabled brains and exposes them
  * by id. Registers the current-provider brains (Gemini API key, Ollama) plus the
- * three agentic brains that shell out to their installed CLIs (Claude Code,
- * Codex, Gemini CLI).
+ * four agentic brains that shell out to their installed CLIs (Claude Code, Codex,
+ * Gemini CLI, Kiro CLI).
  */
 import { ClaudeCodeBrain } from './claude-code-brain'
 import { CodexBrain } from './codex-brain'
 import { GeminiApiBrain } from './gemini-api-brain'
 import { GeminiCliBrain } from './gemini-cli-brain'
+import { KiroCliBrain } from './kiro-cli-brain'
 import { OllamaBrain } from './ollama-brain'
 import type { AIBrain, BrainId } from './types'
 
@@ -30,6 +31,7 @@ const REGISTRATIONS: Array<() => AIBrain> = [
   () => new ClaudeCodeBrain(),
   () => new CodexBrain({ companionPath: CODEX_COMPANION_PATH }),
   () => new GeminiCliBrain(),
+  () => new KiroCliBrain(),
 ]
 
 export class BrainRegistry {

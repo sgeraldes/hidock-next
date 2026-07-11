@@ -20,6 +20,7 @@ export type BrainId =
   | 'claude-code' // @anthropic-ai/claude-agent-sdk   (Phase 2)
   | 'codex' // @openai/codex-sdk                (Phase 3)
   | 'gemini-cli' // @google/gemini-cli               (Phase 4)
+  | 'kiro' // kiro-cli headless (AWS Kiro CLI)  (Phase 5)
 
 export type BrainCapability =
   | 'generate' // one-shot text generation

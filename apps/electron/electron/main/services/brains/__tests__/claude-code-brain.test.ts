@@ -7,7 +7,7 @@
  * @vitest-environment node
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { ClaudeCodeBrain } from '../claude-code-brain'
+import { ClaudeCodeBrain, preferNativeWindowsCommand } from '../claude-code-brain'
 import type { SpawnFn } from '../cli-runner'
 import { makeFakeSpawn, type FakeSpawnScript } from './fake-spawn'
 
@@ -44,6 +44,18 @@ describe('ClaudeCodeBrain', () => {
       expect(status.method).toBe('none')
       // Honest: never labels a not-logged-in CLI as usable.
       expect(status.detail).toMatch(/not logged in/i)
+    })
+
+    it('surfaces the authMethod in the detail (e.g. "Logged in (claude.ai)")', async () => {
+      const spawn = makeFakeSpawn({
+        stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', email: 'a@b.com' }),
+        code: 0,
+      })
+      const brain = new ClaudeCodeBrain({ spawn: asSpawn(spawn.fn), env: {} })
+      const status = await brain.authStatus()
+      expect(status.configured).toBe(true)
+      expect(status.method).toBe('cli-login')
+      expect(status.detail).toBe('Logged in (claude.ai)')
     })
 
     it('reports api-key when ANTHROPIC_API_KEY is set', async () => {
@@ -128,5 +140,30 @@ describe('ClaudeCodeBrain', () => {
     expect(out).toBe('reply')
     expect(spawn.calls[0].args).toEqual(['-p'])
     expect(spawn.lastChild?.stdin.write).toHaveBeenCalledWith('System: sys\n\nUser: hi')
+  })
+})
+
+describe('preferNativeWindowsCommand (win32 exec-path fix)', () => {
+  const PATH = 'C:\\shim;C:\\real'
+  const env = { PATH } as NodeJS.ProcessEnv
+
+  it('prefers a native claude.exe over an earlier-on-PATH proxy .cmd shim', () => {
+    // Reproduces this machine's bug: a `.cmd` (WSL proxy) shadows the real
+    // `claude.exe`. The runner mirrors that (first dir wins) → probe hits the
+    // broken shim → "auth status unavailable". The fix resolves the native exe.
+    const fileExists = (p: string) => p === 'C:\\shim\\claude.cmd' || p === 'C:\\real\\claude.exe'
+    const out = preferNativeWindowsCommand('claude', env, { platform: 'win32', fileExists })
+    expect(out).toBe('C:\\real\\claude.exe')
+  })
+
+  it('falls back to the bare command when only a .cmd exists (normal npm install)', () => {
+    const fileExists = (p: string) => p === 'C:\\shim\\claude.cmd'
+    const out = preferNativeWindowsCommand('claude', env, { platform: 'win32', fileExists })
+    expect(out).toBe('claude')
+  })
+
+  it('is a no-op off win32 (POSIX resolves natively)', () => {
+    const fileExists = () => true
+    expect(preferNativeWindowsCommand('claude', env, { platform: 'linux', fileExists })).toBe('claude')
   })
 })

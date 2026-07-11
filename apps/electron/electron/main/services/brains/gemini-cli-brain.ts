@@ -16,13 +16,22 @@
  * model). Only fixed flags (`-p ""`, `--output-format json`, `--model <id>`) live
  * in argv.
  *
- * Auth: configured when the `gemini` CLI is present AND a key is available —
- * GEMINI_API_KEY in the env, or the app's existing Gemini key (credential store /
- * config.transcription.geminiApiKey via resolveGeminiApiKey). The key is NOT
- * exercised against the API here (that would be a paid call in a "cheap, cached"
- * probe), so the status honestly reports "present" rather than "verified".
- * authStatus()/generate() NEVER throw.
+ * Auth (login-aware, honest): the CLI's OWN auth is detected first, then keys.
+ *   1. GEMINI_API_KEY in the env            → "GEMINI_API_KEY env"
+ *   2. the app's stored Gemini key          → "app key (injected)"
+ *      (credential store / config.transcription.geminiApiKey via resolveGeminiApiKey)
+ *   3. the CLI's OAuth login (cheap file check for ~/.gemini/oauth_creds.json,
+ *      which the `gemini` CLI writes on `gemini` interactive sign-in) → "OAuth login"
+ * A key is NOT exercised against the API (that would be a paid call in a "cheap,
+ * cached" probe), so keys report "present" not "verified", and OAuth reports the
+ * PRESENCE of stored credentials — never a claim of a verified live session
+ * (honest-auth rule). Order 1→2 first because generate() injects that key into the
+ * child env, so it's the auth actually used when present. authStatus()/generate()
+ * NEVER throw.
  */
+import { existsSync } from 'fs'
+import { homedir } from 'os'
+import { join } from 'path'
 import { runCli, foldMessagesToPrompt, type SpawnFn } from './cli-runner'
 import { resolveGeminiApiKey } from './gemini-api-brain'
 import type {
@@ -45,6 +54,12 @@ const GENERATE_TIMEOUT_MS = 120_000
 export interface GeminiCliBrainDeps {
   spawn?: SpawnFn
   env?: NodeJS.ProcessEnv
+  /**
+   * Cheap detector for the `gemini` CLI's own OAuth login (default: does
+   * `~/.gemini/oauth_creds.json` exist). Injected for hermetic tests so the probe
+   * never touches the real home directory.
+   */
+  hasOAuthLogin?: () => boolean
 }
 
 export class GeminiCliBrain implements AIBrain {
@@ -53,10 +68,12 @@ export class GeminiCliBrain implements AIBrain {
 
   private readonly spawn?: SpawnFn
   private readonly env: NodeJS.ProcessEnv
+  private readonly hasOAuthLogin: () => boolean
 
   constructor(deps: GeminiCliBrainDeps = {}) {
     this.spawn = deps.spawn
     this.env = deps.env ?? process.env
+    this.hasOAuthLogin = deps.hasOAuthLogin ?? defaultHasOAuthLogin
   }
 
   capabilities(): ReadonlySet<BrainCapability> {
@@ -75,7 +92,16 @@ export class GeminiCliBrain implements AIBrain {
   }
 
   async authStatus(): Promise<BrainAuthStatus> {
-    const key = this.resolveKey()
+    const envKey = this.env.GEMINI_API_KEY?.trim() || ''
+    let storedKey = ''
+    if (!envKey) {
+      try {
+        storedKey = resolveGeminiApiKey()
+      } catch {
+        storedKey = ''
+      }
+    }
+
     // Presence probe — the CLI can be authed via OAuth even without a key.
     let cliPresent = false
     let version = 'installed'
@@ -90,13 +116,25 @@ export class GeminiCliBrain implements AIBrain {
     if (!cliPresent) {
       return { configured: false, method: 'none', detail: 'gemini not on PATH' }
     }
-    if (key) {
-      // Presence, not verification — the key isn't exercised against the API here.
-      return { configured: true, method: 'api-key', detail: `API key present + gemini ${version}` }
+    // Keys first — they're what generate() injects into the child env, so they're
+    // the auth actually used when present. Presence, not verification.
+    if (envKey) {
+      return { configured: true, method: 'api-key', detail: `GEMINI_API_KEY env + gemini ${version}` }
     }
-    // CLI present but no key — may still be OAuth-logged-in; report as not
-    // configured (the router won't auto-select it) but keep the reason clear.
-    return { configured: false, method: 'none', detail: `gemini ${version} (no API key — run gemini to sign in)` }
+    if (storedKey) {
+      return { configured: true, method: 'api-key', detail: `app key (injected) + gemini ${version}` }
+    }
+    // No key — fall back to the CLI's own OAuth login. File-presence is honest
+    // evidence of a sign-in; it is NOT a claim of a verified live session.
+    if (this.hasOAuthLogin()) {
+      return { configured: true, method: 'oauth', detail: `OAuth login + gemini ${version}` }
+    }
+    // Present but no usable auth of any kind.
+    return {
+      configured: false,
+      method: 'none',
+      detail: `gemini ${version} (no API key or OAuth login — run gemini to sign in)`,
+    }
   }
 
   async generate(messages: BrainMessage[], opts: GenerateOptions = {}): Promise<string | null> {
@@ -138,6 +176,20 @@ export class GeminiCliBrain implements AIBrain {
   async chat(messages: BrainMessage[], opts: GenerateOptions = {}): Promise<string | null> {
     // The CLI is stateless in -p mode — fold history into one prompt.
     return this.generate(messages, opts)
+  }
+}
+
+/**
+ * Default OAuth-login detector: the `@google/gemini-cli` writes its OAuth
+ * credentials to `~/.gemini/oauth_creds.json` on interactive sign-in. Presence of
+ * that file is cheap, offline evidence of a login (not a liveness guarantee).
+ * Never throws.
+ */
+function defaultHasOAuthLogin(): boolean {
+  try {
+    return existsSync(join(homedir(), '.gemini', 'oauth_creds.json'))
+  } catch {
+    return false
   }
 }
 

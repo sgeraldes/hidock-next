@@ -39,6 +39,14 @@ describe('CodexBrain', () => {
       expect((await brain.authStatus()).configured).toBe(true)
     })
 
+    it('LOGIN-FIRST via companion: cli-login even when OPENAI_API_KEY is set', async () => {
+      const spawn = makeFakeSpawn({ stdout: JSON.stringify({ codex: { available: true }, auth: { loggedIn: true } }), code: 0 })
+      const brain = new CodexBrain({ spawn: asSpawn(spawn.fn), env: { OPENAI_API_KEY: 'sk' }, companionPath: COMPANION })
+      const status = await brain.authStatus()
+      expect(status.method).toBe('cli-login')
+      expect(status.detail).toBe('ChatGPT login active')
+    })
+
     it('not configured when companion reports available but not loggedIn (no key)', async () => {
       const spawn = makeFakeSpawn({ stdout: JSON.stringify({ codex: { available: true }, auth: { loggedIn: false } }), code: 0 })
       const brain = new CodexBrain({ spawn: asSpawn(spawn.fn), env: {}, companionPath: COMPANION })
@@ -66,6 +74,25 @@ describe('CodexBrain', () => {
       expect(status.configured).toBe(true)
       expect(status.method).toBe('cli-login')
       expect(spawn.calls[0]).toMatchObject({ command: 'codex', args: ['login', 'status'] })
+    })
+
+    it('LOGIN-FIRST: reports cli-login "ChatGPT login active" even when OPENAI_API_KEY is set', async () => {
+      const spawn = makeFakeSpawn({ stdout: 'Logged in using ChatGPT', code: 0 })
+      const brain = new CodexBrain({ spawn: asSpawn(spawn.fn), env: { OPENAI_API_KEY: 'sk-x' } })
+      const status = await brain.authStatus()
+      expect(status.configured).toBe(true)
+      expect(status.method).toBe('cli-login') // login wins over the key
+      expect(status.detail).toBe('ChatGPT login active')
+    })
+
+    it('API key is a FALLBACK: reported only when login is absent', async () => {
+      // Installed, not logged in, but a key is present → api-key fallback.
+      const spawn = makeFakeSpawn({ stdout: 'Not logged in', code: 1 })
+      const brain = new CodexBrain({ spawn: asSpawn(spawn.fn), env: { OPENAI_API_KEY: 'sk-x' } })
+      const status = await brain.authStatus()
+      expect(status.configured).toBe(true)
+      expect(status.method).toBe('api-key')
+      expect(status.detail).toMatch(/fallback/i)
     })
 
     it('NOT configured when installed but not logged in (status ran, no "logged in", no key)', async () => {

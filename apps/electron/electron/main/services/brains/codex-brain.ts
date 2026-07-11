@@ -78,6 +78,10 @@ export class CodexBrain implements AIBrain {
     // 2. Fallback: the CLI's own `codex login status`. This exercises the real
     //    login (unlike a version-only probe): it RAN ⇒ codex is installed; its
     //    exit code + text tell us whether a credential is actually present.
+    //
+    //    LOGIN-FIRST: the ChatGPT login is the PRIMARY reported auth — an
+    //    OPENAI_API_KEY in the env is a fallback that's only surfaced when there's
+    //    no login (the key is not the auth codex actually uses when logged in).
     try {
       const res = await runCli(
         'codex',
@@ -86,30 +90,27 @@ export class CodexBrain implements AIBrain {
         this.spawn
       )
       if (res.spawnError) {
-        return hasApiKey
-          ? { configured: true, method: 'api-key', detail: 'OPENAI_API_KEY set' }
-          : { configured: false, method: 'none', detail: 'codex not on PATH' }
+        // CLI absent → only an API key can make it configured.
+        return apiKeyOrNone(hasApiKey, 'codex not on PATH')
       }
       const loggedIn = res.code === 0 && /logged in/i.test(res.stdout)
       if (loggedIn) {
-        const detail = res.stdout.trim().split(/\r?\n/)[0] || 'ChatGPT login active'
-        return {
-          configured: true,
-          method: hasApiKey ? 'api-key' : 'cli-login',
-          detail: hasApiKey ? 'OPENAI_API_KEY set' : detail,
-        }
+        // Login wins even when a key is also present.
+        return { configured: true, method: 'cli-login', detail: 'ChatGPT login active' }
       }
-      // codex installed but not logged in.
-      if (hasApiKey) return { configured: true, method: 'api-key', detail: 'OPENAI_API_KEY set' }
-      return { configured: false, method: 'none', detail: 'codex installed, not logged in' }
+      // codex installed but not logged in → API key fallback, else not configured.
+      return apiKeyOrNone(hasApiKey, 'codex installed, not logged in')
     } catch {
-      return hasApiKey
-        ? { configured: true, method: 'api-key', detail: 'OPENAI_API_KEY set' }
-        : { configured: false, method: 'none', detail: 'codex not on PATH' }
+      return apiKeyOrNone(hasApiKey, 'codex not on PATH')
     }
   }
 
-  /** Run the codex companion and interpret its JSON. Returns null if unusable. */
+  /**
+   * Run the codex companion and interpret its JSON. Returns null when unusable
+   * (companion absent / not parseable / codex reported unavailable) so the caller
+   * falls through to the `codex login status` probe. LOGIN-FIRST: a reported login
+   * is the primary auth; the API key is only a fallback when login is absent.
+   */
   private async authViaCompanion(hasApiKey: boolean): Promise<BrainAuthStatus | null> {
     try {
       const res = await runCli(
@@ -123,17 +124,16 @@ export class CodexBrain implements AIBrain {
       if (!json) return null
       const available = !!(json.codex as Record<string, unknown> | undefined)?.available
       const loggedIn = !!(json.auth as Record<string, unknown> | undefined)?.loggedIn
-      if (available && (loggedIn || hasApiKey)) {
-        return {
-          configured: true,
-          method: hasApiKey ? 'api-key' : 'cli-login',
-          detail: hasApiKey ? 'OPENAI_API_KEY set' : 'ChatGPT login active',
-        }
+      if (loggedIn) {
+        // Login wins even when a key is also present.
+        return { configured: true, method: 'cli-login', detail: 'ChatGPT login active' }
       }
       if (available) {
-        return { configured: false, method: 'none', detail: 'codex installed, not logged in' }
+        // Installed but not logged in → API key fallback, else not configured.
+        return apiKeyOrNone(hasApiKey, 'codex installed, not logged in')
       }
-      return { configured: false, method: 'none', detail: 'codex not available' }
+      // Companion says codex isn't available → let the CLI probe decide.
+      return null
     } catch {
       return null
     }
@@ -175,6 +175,17 @@ export class CodexBrain implements AIBrain {
     // codex exec is stateless — fold history into one prompt.
     return this.generate(messages, opts)
   }
+}
+
+/**
+ * Login-absent resolution: report the API key as a FALLBACK auth when present,
+ * otherwise a clear not-configured reason. The key is deliberately never surfaced
+ * while a ChatGPT login is active (login is the primary auth).
+ */
+function apiKeyOrNone(hasApiKey: boolean, notConfiguredDetail: string): BrainAuthStatus {
+  return hasApiKey
+    ? { configured: true, method: 'api-key', detail: 'API key fallback (OPENAI_API_KEY)' }
+    : { configured: false, method: 'none', detail: notConfiguredDetail }
 }
 
 /**

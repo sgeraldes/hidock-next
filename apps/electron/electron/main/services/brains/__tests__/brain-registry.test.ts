@@ -1,7 +1,7 @@
 /**
- * BrainRegistry tests — the registry must expose all five brains: the two
- * current-provider brains (gemini-api, ollama) and the three agentic CLI brains
- * (claude-code, codex, gemini-cli). Constructing them must not spawn anything.
+ * BrainRegistry tests — the registry must expose all six brains: the two
+ * current-provider brains (gemini-api, ollama) and the four agentic CLI brains
+ * (claude-code, codex, gemini-cli, kiro). Constructing them must not spawn anything.
  *
  * @vitest-environment node
  */
@@ -18,15 +18,15 @@ import { getBrainRegistry, resetBrainRegistry } from '../brain-registry'
 describe('BrainRegistry', () => {
   afterEach(() => resetBrainRegistry())
 
-  it('registers all five brains by id', () => {
+  it('registers all six brains by id', () => {
     const registry = getBrainRegistry()
     const ids = registry.list().map((b) => b.id).sort()
-    expect(ids).toEqual(['claude-code', 'codex', 'gemini-api', 'gemini-cli', 'ollama'])
+    expect(ids).toEqual(['claude-code', 'codex', 'gemini-api', 'gemini-cli', 'kiro', 'ollama'])
   })
 
   it('resolves each new agentic brain and its capabilities', () => {
     const registry = getBrainRegistry()
-    for (const id of ['claude-code', 'codex', 'gemini-cli'] as const) {
+    for (const id of ['claude-code', 'codex', 'gemini-cli', 'kiro'] as const) {
       const brain = registry.get(id)
       expect(brain, `${id} should be registered`).not.toBeNull()
       const caps = [...brain!.capabilities()].sort()
@@ -36,7 +36,7 @@ describe('BrainRegistry', () => {
 
   it('agentic brains advertise neither audio nor embed', () => {
     const registry = getBrainRegistry()
-    for (const id of ['claude-code', 'codex', 'gemini-cli'] as const) {
+    for (const id of ['claude-code', 'codex', 'gemini-cli', 'kiro'] as const) {
       const caps = registry.get(id)!.capabilities()
       expect(caps.has('analyzeAudio')).toBe(false)
       expect(caps.has('embed')).toBe(false)

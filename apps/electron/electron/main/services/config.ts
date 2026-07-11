@@ -198,13 +198,14 @@ const DEFAULT_CONFIG: AppConfig = {
   },
   brains: {
     // Only the two current providers are on by default → nothing changes until
-    // the user enables Claude Code / Codex / Gemini CLI (later phases).
+    // the user enables Claude Code / Codex / Gemini CLI / Kiro CLI (later phases).
     enabled: {
       'gemini-api': true,
       ollama: true,
       'claude-code': false,
       codex: false,
-      'gemini-cli': false
+      'gemini-cli': false,
+      kiro: false
     },
     defaultBrain: 'gemini-api',
     taskRouting: {},
