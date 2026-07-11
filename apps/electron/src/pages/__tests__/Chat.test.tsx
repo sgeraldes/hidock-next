@@ -2,14 +2,17 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react'
 import { Chat } from '../Chat'
 import { MemoryRouter } from 'react-router-dom'
+import { FloatingAssistant } from '@/components/assistant/FloatingAssistant'
+import { useUIStore } from '@/store/ui/useUIStore'
 
-// F2 (review finding 3): capture the ResizeObserver callback so tests can drive
-// container-width transitions across the @lg breakpoint (32rem = 512px). jsdom's
-// getBoundingClientRect() reports width 0, so Chat boots in narrow mode by default.
-type ROEntry = { contentRect: { width: number } }
-let resizeCallback: ((entries: ROEntry[]) => void) | null = null
+// F2 (review finding 3): capture the ResizeObserver callback so tests can trigger
+// re-evaluation of the container breakpoint. Chat measures the LIVE container width
+// (getBoundingClientRect) and LIVE root font size on every evaluation, so tests
+// stub the container's rect and use the callback purely as the trigger. jsdom's
+// default rect width is 0, so Chat boots in narrow mode.
+let resizeCallback: (() => void) | null = null
 class MockResizeObserver {
-  constructor(cb: (entries: ROEntry[]) => void) {
+  constructor(cb: () => void) {
     resizeCallback = cb
   }
   observe = vi.fn()
@@ -17,6 +20,14 @@ class MockResizeObserver {
   disconnect = vi.fn()
 }
 vi.stubGlobal('ResizeObserver', MockResizeObserver)
+
+/** Stub the Chat root container's measured width (jsdom always reports 0). */
+function stubContainerWidth(container: HTMLElement, width: number): HTMLElement {
+  const rootDiv = container.querySelector('[data-container-narrow]') as HTMLElement
+  rootDiv.getBoundingClientRect = () =>
+    ({ width, height: 600, top: 0, left: 0, right: width, bottom: 600, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect
+  return rootDiv
+}
 
 // Mock Electron API
 const now = new Date()
@@ -56,6 +67,9 @@ global.window.electronAPI = {
 describe('Chat Component', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    // Reset environment state that individual tests may mutate.
+    document.documentElement.style.fontSize = ''
+    useUIStore.getState().setChatOpen(false)
   })
 
   it('should render conversation history sidebar', async () => {
@@ -347,7 +361,7 @@ describe('Chat Component', () => {
 
     // F2 review finding 3 (MEDIUM): historyOpen must not survive breakpoint transitions.
     it('resets an open drawer when the container widens past @lg, and it stays closed on re-narrowing', async () => {
-      render(
+      const { container } = render(
         <MemoryRouter>
           <Chat />
         </MemoryRouter>
@@ -358,21 +372,112 @@ describe('Chat Component', () => {
       await screen.findByTestId('chat-history-drawer')
 
       // Widen past the @lg threshold (32rem = 512px at 16px root font size).
+      const rootDiv = stubContainerWidth(container, 800)
       act(() => {
-        resizeCallback?.([{ contentRect: { width: 800 } }])
+        resizeCallback?.()
       })
+      await waitFor(() => {
+        expect(rootDiv).toHaveAttribute('data-container-narrow', 'false')
+      })
+      expect(screen.queryByTestId('chat-history-drawer')).toBeNull()
+
+      // Narrow again — the drawer must NOT pop back uninvited.
+      stubContainerWidth(container, 400)
+      act(() => {
+        resizeCallback?.()
+      })
+      await waitFor(() => {
+        expect(rootDiv).toHaveAttribute('data-container-narrow', 'true')
+      })
+      expect(screen.queryByTestId('chat-history-drawer')).toBeNull()
+    })
+
+    // F2 micro-round: the @lg threshold must track the LIVE root font size — a
+    // zoom/font-size change (rem→px shift) at constant container width must flip
+    // JS narrow-state in agreement with the CSS container query, and compact
+    // search must stay usable (the cached-threshold bug closed it on the first
+    // keystroke because typing re-ran the !isNarrowContainer reset branch).
+    it('re-reads the root font size on every evaluation — font change flips modes and compact search stays open', async () => {
+      ;(window.electronAPI.assistant.getMessages as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+        { id: 'm1', role: 'user', content: 'zoom message', createdAt: now.toISOString(), sources: null }
+      ])
+      const { container } = render(
+        <MemoryRouter>
+          <Chat />
+        </MemoryRouter>
+      )
+      await screen.findByText('HISTORY')
+      await screen.findByText('zoom message')
+
+      // Constant container width of 600px throughout the test.
+      const rootDiv = stubContainerWidth(container, 600)
+      act(() => {
+        resizeCallback?.()
+      })
+      // 16px root font → threshold 512px → 600 is WIDE.
+      await waitFor(() => {
+        expect(rootDiv).toHaveAttribute('data-container-narrow', 'false')
+      })
+
+      try {
+        // User zoom / font setting: 20px root font → CSS @lg flips compact at
+        // 640px. Width unchanged — only the MutationObserver on <html> fires.
+        document.documentElement.style.fontSize = '20px'
+        await waitFor(() => {
+          expect(rootDiv).toHaveAttribute('data-container-narrow', 'true')
+        })
+
+        // Compact search is now fully usable: open it and type — the bar must
+        // stay open (with a stale 512px threshold the first keystroke closed it).
+        fireEvent.click(screen.getByTestId('chat-search-toggle'))
+        const bar = await screen.findByTestId('chat-search-bar')
+        fireEvent.change(within(bar).getByPlaceholderText('Search messages...'), { target: { value: 'zoom' } })
+
+        expect(screen.getByTestId('chat-search-bar')).toBeInTheDocument()
+        expect(screen.getByText('zoom message')).toBeInTheDocument()
+      } finally {
+        document.documentElement.style.fontSize = ''
+      }
+    })
+
+    // F2 micro-round: integration — Chat hosted inside the FloatingAssistant
+    // overlay. One Escape must close ONLY the inner history drawer; the overlay
+    // stays open and focus stays within the assistant.
+    it('inside FloatingAssistant, Escape closes only the inner drawer and focus stays in the assistant', async () => {
+      useUIStore.getState().setChatOpen(true)
+      render(
+        <MemoryRouter>
+          <FloatingAssistant title="Assistant">
+            <Chat />
+          </FloatingAssistant>
+        </MemoryRouter>
+      )
+      const overlay = await screen.findByTestId('floating-assistant-overlay')
+      await screen.findByText('HISTORY')
+
+      const toggle = screen.getByTestId('chat-history-toggle')
+      toggle.focus()
+      fireEvent.click(toggle)
+      const drawer = await screen.findByTestId('chat-history-drawer')
+      await waitFor(() => {
+        expect(drawer.contains(document.activeElement)).toBe(true)
+      })
+
+      // ONE Escape press.
+      fireEvent.keyDown(document.activeElement ?? drawer, { key: 'Escape' })
+
+      // The inner drawer closes…
       await waitFor(() => {
         expect(screen.queryByTestId('chat-history-drawer')).toBeNull()
       })
-
-      // Narrow again — the drawer must NOT pop back uninvited.
-      act(() => {
-        resizeCallback?.([{ contentRect: { width: 400 } }])
-      })
+      // …but the floating overlay is still open (the drawer consumed the press).
+      expect(screen.getByTestId('floating-assistant-overlay')).toBeInTheDocument()
+      expect(useUIStore.getState().chatOpen).toBe(true)
+      // Focus stays within the assistant, restored to the History toggle.
       await waitFor(() => {
-        expect(screen.getByTestId('chat-history-toggle')).toBeInTheDocument()
+        expect(document.activeElement).toBe(toggle)
       })
-      expect(screen.queryByTestId('chat-history-drawer')).toBeNull()
+      expect(overlay.contains(document.activeElement)).toBe(true)
     })
 
     // F2 review finding 2 (MEDIUM): search/export must keep compact affordances below @lg.

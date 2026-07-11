@@ -157,16 +157,39 @@ export function Chat() {
 
   useEffect(() => {
     if (!containerEl) return undefined
-    const remPx = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16
-    const threshold = 32 * remPx // @lg container breakpoint (32rem)
-    const check = (width: number) => setIsNarrowContainer(width < threshold)
-    check(containerEl.getBoundingClientRect().width)
-    if (typeof ResizeObserver === 'undefined') return undefined
-    const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) check(entry.contentRect.width)
-    })
-    observer.observe(containerEl)
-    return () => observer.disconnect()
+    // Evaluate from LIVE values on every pass: the container's current width AND
+    // the current root font size. The @lg threshold is 32rem — user zoom or an
+    // app font-size change alters rem→px, and a threshold cached at mount would
+    // disagree with the CSS container query (review finding: after a font-size
+    // change, CSS shows the compact layout while stale JS state still says
+    // "wide", so typing in compact search immediately closed it).
+    const evaluate = () => {
+      const remPx = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16
+      const threshold = 32 * remPx // @lg container breakpoint (32rem)
+      setIsNarrowContainer(containerEl.getBoundingClientRect().width < threshold)
+    }
+    evaluate()
+    const cleanups: Array<() => void> = []
+    if (typeof ResizeObserver !== 'undefined') {
+      const resizeObserver = new ResizeObserver(evaluate)
+      resizeObserver.observe(containerEl)
+      // A root font-size change usually reflows <html> too; observing it catches
+      // zoom-style changes that never resize the chat container itself.
+      resizeObserver.observe(document.documentElement)
+      cleanups.push(() => resizeObserver.disconnect())
+    }
+    if (typeof MutationObserver !== 'undefined') {
+      // Font-size settings applied as an inline style or class swap on <html>
+      // (theme/font preferences) don't necessarily fire a resize — watch the
+      // attributes as well.
+      const mutationObserver = new MutationObserver(evaluate)
+      mutationObserver.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ['style', 'class'],
+      })
+      cleanups.push(() => mutationObserver.disconnect())
+    }
+    return () => cleanups.forEach((fn) => fn())
   }, [containerEl])
 
   // Reset narrow-only UI state when the container enters wide mode. Conversely,
@@ -912,7 +935,11 @@ export function Chat() {
   )
 
   return (
-    <div ref={setContainerEl} className="@container relative flex h-full bg-background">
+    <div
+      ref={setContainerEl}
+      className="@container relative flex h-full bg-background"
+      data-container-narrow={isNarrowContainer ? 'true' : 'false'}
+    >
       {/* B-CHAT-003: Radix AlertDialog for delete confirmation */}
       <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
         <AlertDialogContent>
