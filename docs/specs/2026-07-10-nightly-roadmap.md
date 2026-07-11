@@ -62,6 +62,7 @@ TRIPWIRE: the sources list must never horizontally scroll and its row separators
 ## Track D — Test / infra hygiene
 - [ ] **D1 (P1)** `src/services/__tests__/hidock-device.test.ts` vitest **worker-teardown race** ("Closing rpc while onUserConsoleLog pending") — quiet teardown logging or isolate that file's pool so the full suite is 0-error.
 - [ ] **D2 (P2)** Address the 122–125 pre-existing eslint warnings (unused caught errors, no-useless-escape) incrementally.
+- [ ] **D3 (P1) — ACTION ITEM (infra, caused by tonight's dev-server restart).** The 19 DB-dependent vitest files (~141 failures) fail with `better-sqlite3` **NODE_MODULE_VERSION 140 vs 147** ABI mismatch: `node_modules/better-sqlite3` is built for the running Electron app (ABI 140), but Node-based vitest needs ABI 147. Proven pre-existing to the brains change (identical failure set on `77b7354b` before cherry-pick). Dual-ABI conflict — one build can't satisfy both. FIX OPTIONS: (a) mock `@hidock/database`/`better-sqlite3` in the DB tests so they're ABI-independent (best); (b) a test script that `npm rebuild better-sqlite3` for Node before the suite + electron-rebuild after; (c) run DB tests only in CI with the app not running. **Do NOT rebuild for Node while the app is being dogfooded — it breaks the running app's DB on its next restart.** Non-DB suites (brains, layout, waveform, etc.) are unaffected and green.
 
 ## Track E — Cross-surface audit loop (expands this list)
 Dogfood each un-hardened surface, file findings back here, fix, re-walk:
