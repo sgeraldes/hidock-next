@@ -26,10 +26,14 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import * as DialogPrimitive from '@radix-ui/react-dialog'
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogHeader,
+  DialogOverlay,
+  DialogPortal,
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog"
@@ -137,6 +141,46 @@ export function Chat() {
   // chat column.
   const [historyOpen, setHistoryOpen] = useState(false)
 
+  // F2 (review finding 2): compact search affordance below @lg — toggles an inline
+  // search bar under the header so the wide-mode search input has a narrow-mode
+  // replacement instead of vanishing.
+  const [searchOpen, setSearchOpen] = useState(false)
+
+  // F2 (review finding 3): track whether the container is below the @lg breakpoint
+  // (Tailwind container-queries @lg = 32rem) so state that only makes sense in
+  // narrow mode (the history drawer) is reset when the container widens — otherwise
+  // an open-but-CSS-hidden drawer would pop back uninvited on the next narrowing.
+  // The element is held in state (callback ref) so the ResizeObserver effect and the
+  // drawer's portal container both re-run once it mounts.
+  const [containerEl, setContainerEl] = useState<HTMLDivElement | null>(null)
+  const [isNarrowContainer, setIsNarrowContainer] = useState(false)
+
+  useEffect(() => {
+    if (!containerEl) return undefined
+    const remPx = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16
+    const threshold = 32 * remPx // @lg container breakpoint (32rem)
+    const check = (width: number) => setIsNarrowContainer(width < threshold)
+    check(containerEl.getBoundingClientRect().width)
+    if (typeof ResizeObserver === 'undefined') return undefined
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) check(entry.contentRect.width)
+    })
+    observer.observe(containerEl)
+    return () => observer.disconnect()
+  }, [containerEl])
+
+  // Reset narrow-only UI state when the container enters wide mode. Conversely,
+  // when narrowing with an active filter, open the compact bar so the filter is
+  // never applied invisibly.
+  useEffect(() => {
+    if (!isNarrowContainer) {
+      setHistoryOpen(false)
+      setSearchOpen(false)
+    } else if (searchQuery) {
+      setSearchOpen(true)
+    }
+  }, [isNarrowContainer, searchQuery])
+
   // C-CHAT: Resizable sidebar
   const [sidebarWidth, setSidebarWidth] = useState<number>(CHAT_SIDEBAR.DEFAULT_WIDTH)
   const [isResizing, setIsResizing] = useState(false)
@@ -154,6 +198,10 @@ export function Chat() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  // F2: the narrow-mode History toggle — the drawer restores focus here on close
+  // (we open the dialog controlled, without a DialogTrigger, so Radix has no
+  // trigger ref of its own to restore to).
+  const historyToggleRef = useRef<HTMLButtonElement>(null)
 
   // Initialize
   useEffect(() => {
@@ -864,7 +912,7 @@ export function Chat() {
   )
 
   return (
-    <div className="@container relative flex h-full bg-background">
+    <div ref={setContainerEl} className="@container relative flex h-full bg-background">
       {/* B-CHAT-003: Radix AlertDialog for delete confirmation */}
       <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
         <AlertDialogContent>
@@ -908,27 +956,42 @@ export function Chat() {
         </div>
       </aside>
 
-      {/* F2: Narrow-container history drawer — only present below @lg. Slides over the
-          chat column (does not steal layout width) and is dismissed by the scrim,
-          selecting a conversation, or starting a new chat. */}
-      {historyOpen && (
-        <div className="@lg:hidden absolute inset-0 z-30 flex" data-testid="chat-history-drawer">
-          <div
-            className="absolute inset-0 bg-background/60"
-            aria-hidden="true"
-            onClick={() => setHistoryOpen(false)}
-          />
-          <aside className="relative z-10 flex w-64 max-w-[80%] flex-col border-r bg-background shadow-xl">
-            <div className="flex items-center justify-between border-b px-3 py-2">
-              <span className="text-sm font-semibold">History</span>
-              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setHistoryOpen(false)} aria-label="Close history">
-                <X className="h-4 w-4" />
-              </Button>
+      {/* F2: Narrow-container history drawer — only used below @lg (the toggle that
+          opens it is @lg:hidden, and isNarrowContainer resets it in wide mode).
+          Built on the Radix Dialog primitives so it is a real accessible modal:
+          focus trap, Tab containment, Escape dismissal, and focus restoration to
+          the toggle come from Radix. Portaled INTO the chat container so it stays
+          inside the floating assistant overlay rather than covering the window. */}
+      <Dialog open={historyOpen} onOpenChange={setHistoryOpen}>
+        <DialogPortal container={containerEl ?? undefined}>
+          <DialogOverlay className="absolute inset-0 z-30 bg-background/60" />
+          <DialogPrimitive.Content
+            data-testid="chat-history-drawer"
+            aria-describedby={undefined}
+            // Stop the Escape keydown from also reaching the FloatingAssistant's
+            // window listener, which would close the whole overlay in the same press.
+            onEscapeKeyDown={(e) => e.stopPropagation()}
+            // Restore focus to the History toggle on close. Radix's modal default
+            // focuses its DialogTrigger ref — null here (controlled open) — so we
+            // take over: preventDefault skips both defaults, then focus the toggle.
+            onCloseAutoFocus={(e) => {
+              e.preventDefault()
+              historyToggleRef.current?.focus()
+            }}
+            className="absolute inset-y-0 left-0 z-30 flex w-64 max-w-[80%] flex-col border-r bg-background shadow-xl focus:outline-none"
+          >
+            <div className="flex shrink-0 items-center justify-between border-b px-3 py-2">
+              <DialogTitle className="text-sm font-semibold leading-none">History</DialogTitle>
+              <DialogClose asChild>
+                <Button variant="ghost" size="icon" className="h-7 w-7" aria-label="Close history">
+                  <X className="h-4 w-4" />
+                </Button>
+              </DialogClose>
             </div>
             {historyPanel}
-          </aside>
-        </div>
-      )}
+          </DialogPrimitive.Content>
+        </DialogPortal>
+      </Dialog>
 
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col min-w-0">
@@ -939,6 +1002,7 @@ export function Chat() {
           <div className="flex min-w-0 items-center gap-2">
             {/* F2: History toggle — narrow containers only (sidebar is hidden there). */}
             <Button
+              ref={historyToggleRef}
               variant="ghost"
               size="icon"
               className="@lg:hidden shrink-0 h-8 w-8"
@@ -983,6 +1047,43 @@ export function Chat() {
             )}
           </div>
           <div className="flex shrink-0 items-center gap-2 @lg:gap-4">
+            {/* F2 (review finding 2): compact icon affordances below @lg — search and
+                export stay reachable at every container width instead of vanishing
+                with the wide-mode group. */}
+            {activeConversation && messages.length > 0 && (
+              <div className="flex @lg:hidden items-center gap-1">
+                <Button
+                  variant={searchOpen ? 'secondary' : 'ghost'}
+                  size="icon"
+                  className="h-8 w-8"
+                  onClick={() => {
+                    if (searchOpen) {
+                      setSearchOpen(false)
+                      setSearchQuery('') // closing clears the filter — no invisible filtering
+                    } else {
+                      setSearchOpen(true)
+                    }
+                  }}
+                  aria-label="Search messages"
+                  aria-expanded={searchOpen}
+                  title="Search messages"
+                  data-testid="chat-search-toggle"
+                >
+                  <Search className="h-4 w-4" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8"
+                  onClick={handleExportConversation}
+                  aria-label="Export conversation"
+                  title="Export conversation"
+                  data-testid="chat-export-compact"
+                >
+                  <Download className="h-4 w-4" />
+                </Button>
+              </div>
+            )}
             {status && (
               <div className="flex items-center gap-2 text-xs">
                 {status.ready ? (
@@ -1039,6 +1140,36 @@ export function Chat() {
             </Button>
           </div>
         </header>
+
+        {/* F2 (review finding 2): narrow-mode inline search bar — the compact
+            replacement for the wide-mode header search input. */}
+        {searchOpen && (
+          <div className="flex @lg:hidden items-center gap-2 border-b bg-muted/20 px-3 py-2" data-testid="chat-search-bar">
+            <div className="relative flex-1">
+              <Search className="absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                type="text"
+                placeholder="Search messages..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="h-8 pl-8"
+                autoFocus
+              />
+            </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 shrink-0"
+              onClick={() => {
+                setSearchOpen(false)
+                setSearchQuery('') // closing clears the filter — no invisible filtering
+              }}
+              aria-label="Close search"
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+        )}
 
         {/* Recording Context Loading */}
         {contextLoading && (
