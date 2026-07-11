@@ -27,6 +27,10 @@ Legend: **P0** blocking · **P1** quality/noise · **P2** polish/nice-to-have.
 - [x] **H13 (P1)** **Right-cluster icons (bell/activity/cog/device/user) too condensed / uniformly spaced / badly placed.** Give proper rhythm: group the three icon-buttons, larger gap before the device pill, then the user menu; align on one baseline; both themes.
 - [x] **H14 (P1)** **No line under the window controls.** The bottom divider stops before the native-controls gutter (`pr-[138px]` in `Layout.tsx`) → extend it FULL width so one continuous line separates the whole bar (incl. under — ▢ ✕) from the app.
 
+### H15–H16 — Chrome placement (2026-07-11 owner, REPEATED complaints) — DONE + TRIPWIRED
+- [x] **H15** **Activity Log must NOT be in the sidebar** (it's already the titlebar ⚡ button). — DONE (`a5132b5a`): removed the sidebar entry point; **deleted** `ActivityLogPanel.tsx` + test. TRIPWIRE: if a sidebar Activity Log ever reappears, remove it — the titlebar is the single owner.
+- [x] **H16 (= D10)** **Collapse button in the WRONG place** (was sidebar top-right corner). Owner: "IT GOES IN THE MIDDLE OF THE SIDEBAR, VERTICALLY, MID-RIGHT." — DONE (`529bcdae`): moved OFF the titlebar onto the sidebar's right border, vertically centred at mid-height. TRIPWIRE: it must stay mid-right on the sidebar edge, never the top corner / titlebar.
+
 ## Track A — Titlebar / chrome polish (agent-flagged gaps)
 - [ ] **A1 (P1)** Wire **⌘K** to focus/open the titlebar search (placeholder only today).
 - [ ] **A2 (P1)** Notifications 🔔: idle click is a no-op + duplicates the sidebar Operations badge — give it a real popover (recent ops/notifications) and reconcile with the sidebar badge.
