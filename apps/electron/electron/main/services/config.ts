@@ -217,20 +217,72 @@ function migrateAutoTranscribeRestore(cfg: AppConfig): boolean {
 }
 
 /**
- * One-time (H10): copy the legacy plaintext `transcription.geminiApiKey` into the
- * encrypted BrainCredentialStore under `gemini-api/apiKey`. Idempotent — skips
- * when a secret already exists. The plaintext value is deliberately LEFT in place
- * for one release (belt-and-suspenders; GeminiApiBrain reads the store first, the
- * plaintext key as fallback), which also closes the standing plaintext-key gap.
- * Never throws; returns true only if `cfg` itself changed (to trigger a re-save).
+ * Reconcile the encrypted BrainCredentialStore's `gemini-api/apiKey` with the
+ * desired plaintext value, writing ONLY when the store's current readable value
+ * differs from the target. This is the self-healing core of the two-write sync:
+ *
+ *  - Idempotent: when the store already matches, it is a no-op (no needless write).
+ *  - Self-healing: a previous save whose store write FAILED left the store still
+ *    mismatched, so the next call re-attempts automatically.
+ *  - Observable: a failed persist is logged loudly (never silently swallowed) and
+ *    reported to the caller via the boolean return.
+ *
+ * `rawKey` is the plaintext geminiApiKey; empty/whitespace means "no key" →
+ * delete the stored secret. Never throws.
+ *
+ * Returns true when the store already matched or was successfully updated; false
+ * when a needed write could not be persisted (state left reconcilable).
+ */
+export function syncGeminiKeyToCredentialStore(rawKey: string): boolean {
+  const desired = rawKey.trim() ? rawKey.trim() : null // null => delete
+  try {
+    const store = getBrainCredentialStore()
+    // getSecret returns null when absent OR unreadable (keychain locked). In both
+    // cases a non-null desired value differs → we (re)write it; a null desired
+    // with an already-absent secret matches → no-op.
+    const current = store.getSecret('gemini-api', 'apiKey')
+    const currentNorm = current && current.length ? current : null
+    if (currentNorm === desired) return true // already in sync
+    const ok = store.setSecret('gemini-api', 'apiKey', desired)
+    if (!ok) {
+      console.error(
+        '[Config] Gemini key sync to credential store FAILED to persist; ' +
+          'state left reconcilable (next save/boot will retry, plaintext fallback still works).'
+      )
+    }
+    return ok
+  } catch (e) {
+    console.error('[Config] Failed to sync Gemini key to credential store:', e)
+    return false
+  }
+}
+
+/**
+ * Boot-time (H10): reconcile the encrypted BrainCredentialStore with the legacy
+ * plaintext `transcription.geminiApiKey`. Originally a one-time copy that ran
+ * only when the store was empty; now it RECONCILES a mismatch too, so a store
+ * that fell behind config.json (e.g. an earlier rotation whose store write
+ * failed) is repaired on the next boot rather than silently serving the stale
+ * stored key (resolveGeminiApiKey prefers the store). Plaintext is authoritative
+ * here — the same "compare store vs plaintext" logic as the per-save sync.
+ *
+ * The plaintext value is deliberately LEFT in place for one release
+ * (belt-and-suspenders; GeminiApiBrain reads the store first, the plaintext key
+ * as fallback). Never throws; returns true only if `cfg` itself changed (to
+ * trigger a re-save).
  */
 export function migrateGeminiKeyToCredentialStore(cfg: AppConfig): boolean {
   const key = cfg.transcription.geminiApiKey?.trim()
   if (!key) return false
   try {
     const store = getBrainCredentialStore()
-    if (store.hasSecret('gemini-api', 'apiKey')) return false
-    store.setSecret('gemini-api', 'apiKey', key)
+    // Reconcile: (re)write when the store doesn't already hold this exact key —
+    // covers empty, unreadable (null), and stale/different values. Idempotent
+    // when it already matches.
+    const current = store.getSecret('gemini-api', 'apiKey')
+    if (current !== key) {
+      store.setSecret('gemini-api', 'apiKey', key)
+    }
     let changed = false
     if (cfg.brains && cfg.brains.enabled['gemini-api'] !== true) {
       cfg.brains.enabled['gemini-api'] = true
@@ -280,24 +332,24 @@ export function getConfig(): AppConfig {
 }
 
 export async function saveConfig(newConfig: Partial<AppConfig>): Promise<void> {
-  const prevGeminiKey = config.transcription?.geminiApiKey ?? ''
   config = deepMerge(config, newConfig)
-  const nextGeminiKey = config.transcription?.geminiApiKey ?? ''
 
   // H10 FIX: keep the encrypted credential store in sync with the plaintext
-  // `transcription.geminiApiKey` whenever it CHANGES. resolveGeminiApiKey()
-  // prefers the store, so without this a rotated/cleared key in Settings (which
-  // only touches the plaintext field) would silently keep using the stale
-  // stored key. Set on a non-empty value, delete when cleared to empty.
-  if (nextGeminiKey !== prevGeminiKey) {
-    try {
-      const store = getBrainCredentialStore()
-      const trimmed = nextGeminiKey.trim()
-      store.setSecret('gemini-api', 'apiKey', trimmed ? trimmed : null)
-    } catch (e) {
-      console.warn('[Config] Failed to sync Gemini key to credential store:', e)
-    }
-  }
+  // `transcription.geminiApiKey`. resolveGeminiApiKey() prefers the store, so
+  // without this a rotated/cleared key in Settings (which only touches the
+  // plaintext field) would silently keep using the stale stored key.
+  //
+  // This is reconcile-based, NOT diff-gated: we compare the store's CURRENT
+  // value against the desired one on EVERY save and write only on a real
+  // mismatch. That makes it idempotent AND self-healing — a save whose store
+  // write previously failed re-attempts here because the store still won't
+  // match (the old diff-gated version skipped the retry once the in-memory
+  // config had already changed, so a failed rotate/clear stayed broken forever).
+  //
+  // Done BEFORE writing config.json so a store-write failure never leaves
+  // config.json ahead of brains.json unnoticed; on failure the sync logs loudly
+  // and leaves a reconcilable state that the next save / boot migration repairs.
+  syncGeminiKeyToCredentialStore(config.transcription?.geminiApiKey ?? '')
 
   const configPath = getConfigPath()
   const configDir = join(configPath, '..')

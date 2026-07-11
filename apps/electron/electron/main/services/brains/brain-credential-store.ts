@@ -20,7 +20,7 @@
 import { app, safeStorage } from 'electron'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'fs'
 import type { BrainId } from './types'
 
 const ENC_PREFIX = '__enc__'
@@ -96,15 +96,21 @@ export class BrainCredentialStore {
     this.loaded = true
   }
 
+  /**
+   * Atomically persist the store: write a sibling `brains.json.tmp` and rename it
+   * over `brains.json`. An interrupted/partial write therefore lands in the temp
+   * file and can NEVER corrupt the real file (rename is atomic on the same
+   * filesystem). Unlike the previous implementation this THROWS on failure — the
+   * caller (setSecret) surfaces it instead of silently swallowing, which is what
+   * let a failed key rotation leave brains.json and config.json split-brained.
+   */
   private persist(): void {
-    try {
-      const path = this.resolvePath()
-      const dir = join(path, '..')
-      if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-      writeFileSync(path, JSON.stringify(this.data, null, 2))
-    } catch (err) {
-      console.error('[BrainCredentialStore] Failed to persist brains.json:', err)
-    }
+    const path = this.resolvePath()
+    const dir = join(path, '..')
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+    const tmp = `${path}.tmp`
+    writeFileSync(tmp, JSON.stringify(this.data, null, 2))
+    renameSync(tmp, path)
   }
 
   private ensure(id: BrainId): PersistedBrainState {
@@ -134,17 +140,45 @@ export class BrainCredentialStore {
     return this.getSecret(brainId, key) !== null
   }
 
-  setSecret(brainId: BrainId, key: string, value: string | null): void {
+  /**
+   * Store (or, for null/'' , delete) a secret and persist atomically.
+   *
+   * Returns `true` only when the change reached disk. On a persistence failure
+   * (read-only/full/permission-denied/interrupted write) the in-memory change is
+   * ROLLED BACK so in-memory state matches on-disk truth, and `false` is
+   * returned. This is what makes the vault reconcilable: because getSecret() then
+   * still reports the OLD value, the next saveConfig/boot re-attempts the sync
+   * instead of believing a failed write succeeded (the old split-brain bug).
+   */
+  setSecret(brainId: BrainId, key: string, value: string | null): boolean {
+    let secrets: Record<string, string>
     try {
-      const secrets = this.ensure(brainId)._secrets
-      if (value === null || value === '') {
-        delete secrets[key]
-      } else {
-        secrets[key] = encryptSecret(value)
-      }
-      this.persist()
+      secrets = this.ensure(brainId)._secrets
     } catch (err) {
-      console.error('[BrainCredentialStore] Failed to set secret:', err)
+      console.error('[BrainCredentialStore] Failed to access secret store:', err)
+      return false
+    }
+
+    const had = Object.prototype.hasOwnProperty.call(secrets, key)
+    const prev = secrets[key]
+    if (value === null || value === '') {
+      delete secrets[key]
+    } else {
+      secrets[key] = encryptSecret(value)
+    }
+
+    try {
+      this.persist()
+      return true
+    } catch (err) {
+      // Roll back so in-memory === on-disk, keeping the state reconcilable.
+      if (had) secrets[key] = prev
+      else delete secrets[key]
+      console.error(
+        '[BrainCredentialStore] Failed to persist secret; change rolled back (state left reconcilable):',
+        err
+      )
+      return false
     }
   }
 
@@ -152,7 +186,11 @@ export class BrainCredentialStore {
   reset(): void {
     this.data = {}
     this.loaded = true
-    this.persist()
+    try {
+      this.persist()
+    } catch (err) {
+      console.error('[BrainCredentialStore] Failed to persist during reset:', err)
+    }
   }
 }
 
