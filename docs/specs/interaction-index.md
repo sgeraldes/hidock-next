@@ -22,9 +22,9 @@ what pixels allow a user to do, never what the API/DB implies.
 | Calendar | – | – | – | pending E-walk | E1 |
 | Meeting detail | – | – | – | pending E-walk | |
 | People / Person detail | – | – | – | pending E-walk | identity merge/suggestions live |
-| Projects | – | – | – | pending E-walk | F1 evidence fixed (69→0) |
-| Context Graph | – | – | – | pending E-walk | E2 |
-| Explore | – | – | – | pending E-walk | E4 |
+| Projects | 7 | 5 | 7 | 2026-07-11 (F9 landing) | C: provenance chips → meeting, EntityMentions, merge/dismiss actions. E: merge + dismiss + assign; no inline rename. D: discovered-automatically card explains WHY a project exists; evidence lines (F1). |
+| Context Graph | 5 | 3 | 6 | 2026-07-11 (F8 landing) | C: nodes clickable, lens switches. E: re-key/cleanup/ingest actions only. D: strata bands now readable full-width (F8), legend counts match pixels. |
+| Explore | 6 | 4 | 7 | 2026-07-11 (F10 landing) | C: real topic chips run searches; results navigable. E: search only. D: honest empty state; no fake data (F10); 21-result search in 2ms. |
 | Actionables | – | – | – | pending E-walk | handover dialog lives here |
 | Assistant (floating + embedded) | – | – | – | pending E-walk | F2 overlay fixed; F3 brain E2E in flight |
 | Settings — AI Brains | – | – | – | pending E-walk | 6 brains, login-first badges |

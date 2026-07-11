@@ -113,3 +113,5 @@ Owner: not everyone wants (or has hardware for) full Meeting Intelligence. Every
 3. Then B (timeline follow-ups), C2/C3 (device bugs, verify-first).
 4. Architectural (C5 DevicePipeline) scoped last — spec before building.
 5. G1 held for the owner.
+
+- [ ] **F12 (P2, from F9 investigation)** Spurious project auto-creation: org-reconciler.ts:534-552 creates a REAL projects row for ANY non-empty extracted name below SUGGEST_THRESHOLD resolution — no confidence floor, no seen-in-≥2-meetings gate → one-off phrases become zero-item dead-end projects. Add a gate (confidence floor / recurrence / defer-to-suggestion). F9 dismiss/merge UX prunes them meanwhile.
