@@ -1,6 +1,8 @@
 import { app, safeStorage } from 'electron'
 import { join } from 'path'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
+import type { BrainId, BrainTask } from './brains/types'
+import { getBrainCredentialStore } from './brains/brain-credential-store'
 
 // CS-007: Encrypt sensitive config values (ICS URL) at rest using Electron safeStorage
 function encryptSensitive(value: string): string {
@@ -73,6 +75,15 @@ export interface AppConfig {
     // source meeting has no project folder. Remembered after the user picks one.
     handoffDirectory: string
   }
+  // Pluggable AI "brains" (H10). Add-on toggles + per-task routing. Secrets live
+  // in BrainCredentialStore (<userData>/brains.json), NOT here. Defaults preserve
+  // the legacy Gemini-first / Ollama-fallback behaviour until the user opts in.
+  brains: {
+    enabled: Record<BrainId, boolean>
+    defaultBrain: BrainId
+    taskRouting: Partial<Record<BrainTask, BrainId>>
+    models: Partial<Record<BrainId, string>>
+  }
   ui: {
     theme: 'light' | 'dark' | 'system'
     defaultView: 'week' | 'month'
@@ -129,6 +140,20 @@ const DEFAULT_CONFIG: AppConfig = {
   },
   integrations: {
     handoffDirectory: ''
+  },
+  brains: {
+    // Only the two current providers are on by default → nothing changes until
+    // the user enables Claude Code / Codex / Gemini CLI (later phases).
+    enabled: {
+      'gemini-api': true,
+      ollama: true,
+      'claude-code': false,
+      codex: false,
+      'gemini-cli': false
+    },
+    defaultBrain: 'gemini-api',
+    taskRouting: {},
+    models: {}
   },
   ui: {
     theme: 'system',
@@ -191,6 +216,33 @@ function migrateAutoTranscribeRestore(cfg: AppConfig): boolean {
   return true
 }
 
+/**
+ * One-time (H10): copy the legacy plaintext `transcription.geminiApiKey` into the
+ * encrypted BrainCredentialStore under `gemini-api/apiKey`. Idempotent — skips
+ * when a secret already exists. The plaintext value is deliberately LEFT in place
+ * for one release (belt-and-suspenders; GeminiApiBrain reads the store first, the
+ * plaintext key as fallback), which also closes the standing plaintext-key gap.
+ * Never throws; returns true only if `cfg` itself changed (to trigger a re-save).
+ */
+export function migrateGeminiKeyToCredentialStore(cfg: AppConfig): boolean {
+  const key = cfg.transcription.geminiApiKey?.trim()
+  if (!key) return false
+  try {
+    const store = getBrainCredentialStore()
+    if (store.hasSecret('gemini-api', 'apiKey')) return false
+    store.setSecret('gemini-api', 'apiKey', key)
+    let changed = false
+    if (cfg.brains && cfg.brains.enabled['gemini-api'] !== true) {
+      cfg.brains.enabled['gemini-api'] = true
+      changed = true
+    }
+    return changed
+  } catch (e) {
+    console.warn('[Config] Gemini key → credential store migration skipped:', e)
+    return false
+  }
+}
+
 export async function initializeConfig(): Promise<void> {
   const configPath = getConfigPath()
 
@@ -209,7 +261,8 @@ export async function initializeConfig(): Promise<void> {
       // and GraphRAG extraction. Persist if anything changed.
       const modelsChanged = migrateRetiredGeminiModels(config)
       const autoTransChanged = migrateAutoTranscribeRestore(config)
-      if (modelsChanged || autoTransChanged) {
+      const keyMigrated = migrateGeminiKeyToCredentialStore(config)
+      if (modelsChanged || autoTransChanged || keyMigrated) {
         await saveConfig(config)
       }
     } else {

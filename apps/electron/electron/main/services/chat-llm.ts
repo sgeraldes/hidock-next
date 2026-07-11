@@ -11,9 +11,9 @@
  * output-generator.ts.
  */
 
-import { GoogleGenerativeAI } from '@google/generative-ai'
 import { getConfig } from './config'
 import { getOllamaService, OllamaChatMessage } from './ollama'
+import { getBrainRouter } from './brains'
 
 export type ChatBackend = 'gemini' | 'ollama' | 'none'
 
@@ -67,69 +67,20 @@ class ChatLLMService {
    * cancellation, mirroring OllamaService.chat.
    */
   async generate(messages: OllamaChatMessage[], options: ChatGenerateOptions = {}): Promise<string | null> {
-    const apiKey = this.geminiKey()
-
-    if (apiKey) {
-      try {
-        return await this.geminiChat(apiKey, messages, options)
-      } catch (e) {
-        if (e instanceof DOMException && e.name === 'AbortError') {
-          console.log('[ChatLLM] Gemini request was cancelled')
-          return null
-        }
-        console.error('[ChatLLM] Gemini chat failed, trying Ollama fallback:', e)
-      }
-    }
-
-    // Ollama fallback (local, optional). Returns null if unreachable.
-    return getOllamaService().chat(messages, options)
+    // Delegate to the BrainRouter: Gemini-first (config.chat.geminiModel) with
+    // Ollama fallback — identical routing to the previous inline implementation,
+    // now shared with embeddings.ts and output-generator.ts via the brain seam.
+    return getBrainRouter().chat('chat', messages, {
+      systemPrompt: options.systemPrompt,
+      temperature: options.temperature,
+      maxTokens: options.maxTokens,
+      signal: options.signal
+    })
   }
 
   /** Convenience: single-prompt generation (mirrors OllamaService.generate). */
   async generateText(prompt: string, systemPrompt?: string): Promise<string | null> {
     return this.generate([{ role: 'user', content: prompt }], { systemPrompt })
-  }
-
-  private async geminiChat(
-    apiKey: string,
-    messages: OllamaChatMessage[],
-    options: ChatGenerateOptions
-  ): Promise<string | null> {
-    const config = getConfig()
-    const genAI = new GoogleGenerativeAI(apiKey)
-    const model = genAI.getGenerativeModel({
-      model: config.chat.geminiModel || 'gemini-3.5-flash',
-      ...(options.systemPrompt ? { systemInstruction: options.systemPrompt } : {})
-    })
-
-    // Map chat history to Gemini's content format: 'assistant' → 'model'.
-    // Any 'system' turns are dropped here (handled via systemInstruction).
-    const contents = messages
-      .filter((m) => m.role !== 'system')
-      .map((m) => ({
-        role: m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: m.content }]
-      }))
-
-    // Gemini requires the first turn to be a user turn. Token-based history
-    // trimming can leave a leading 'model' turn — strip those defensively.
-    while (contents.length > 0 && contents[0].role === 'model') {
-      contents.shift()
-    }
-
-    const result = await model.generateContent(
-      {
-        contents,
-        generationConfig: {
-          temperature: options.temperature ?? 0.7,
-          maxOutputTokens: options.maxTokens ?? 1024,
-          thinkingConfig: { thinkingBudget: 0 }
-        } as never
-      },
-      options.signal ? { signal: options.signal } : {}
-    )
-
-    return result.response.text()
   }
 }
 

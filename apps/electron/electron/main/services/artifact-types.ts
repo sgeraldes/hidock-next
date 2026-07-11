@@ -19,6 +19,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai'
 import pdfParse, { type PdfParseResult } from 'pdf-parse/lib/pdf-parse.js'
 import { chunkText } from './vector-store'
 import { getConfig } from './config'
+import { resolveGeminiApiKey } from './brains'
 
 /** Result of a type's text extraction: the plain text plus optional metadata. */
 export interface ArtifactExtraction {
@@ -200,7 +201,10 @@ registerArtifactType({
   exts: ['png', 'jpg', 'jpeg', 'webp', 'svg'],
   chunk: chunkText,
   extractText: async (filePath, buffer) => {
-    const apiKey = getConfig().transcription.geminiApiKey
+    // Key resolves via the brain credential store (falls back to the plaintext
+    // config key). Vision uses inlineData multimodal input, which has no AIBrain
+    // method in Phase 1, so the SDK call stays here (key resolution is shared).
+    const apiKey = resolveGeminiApiKey()
     if (!apiKey) {
       // Skip gracefully — no vision model configured.
       return { text: '', metadata: { description: null, note: 'image description skipped (no Gemini key)' } }

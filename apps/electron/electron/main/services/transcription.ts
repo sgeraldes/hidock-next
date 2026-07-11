@@ -1,5 +1,6 @@
 import { GeminiEngine } from '@hidock/transcription'
 import { GoogleGenerativeAI } from '@google/generative-ai'
+import { getBrainRegistry, resolveGeminiApiKey } from './brains'
 import { readFile, existsSync } from 'fs'
 import { promisify } from 'util'
 import { spawn } from 'child_process'
@@ -683,19 +684,17 @@ Return as JSON array. If no actionables detected, return empty array [].
 Only include detections with confidence >= 0.6.`
 
   try {
-    const genAI = new GoogleGenerativeAI(config.transcription.geminiApiKey)
-    const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-3.5-flash' })
-
-    // JSON-forced + no thinking, same hardening as the analysis call
-    const result = await model.generateContent({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: {
-        maxOutputTokens: 8192,
-        responseMimeType: 'application/json',
-        thinkingConfig: { thinkingBudget: 0 }
-      } as never
-    })
-    const responseText = result.response.text()
+    // Delegate to the Gemini brain — same model (config.transcription.geminiModel),
+    // JSON-forced, thinking disabled. Behaviour is identical to the previous
+    // inline @google/generative-ai call.
+    const brain = getBrainRegistry().get('gemini-api')
+    if (!brain) return []
+    const responseText =
+      (await brain.generate([{ role: 'user', content: prompt }], {
+        maxTokens: 8192,
+        json: true,
+        disableThinking: true
+      })) ?? ''
 
     // Extract JSON from response (might be wrapped in markdown code blocks)
     const jsonMatch = responseText.match(/\[[\s\S]*\]/)
@@ -771,7 +770,11 @@ async function transcribeWithGemini(
 
   const modelName = config.transcription.geminiModel || 'gemini-3.5-flash'
   const engine = new GeminiEngine({
-    apiKey: config.transcription.geminiApiKey,
+    // Key resolves via the brain credential store (falls back to the plaintext
+    // config key), so the one-time migration is honoured here too. Audio still
+    // uses GeminiEngine directly because it returns per-turn speaker segments —
+    // richer than the string-returning AIBrain.analyzeAudio contract.
+    apiKey: resolveGeminiApiKey(),
     model: modelName,
     language: config.transcription.language || 'unknown'
   })
@@ -1074,7 +1077,11 @@ async function analyzeTranscriptWithGemini(
     }
   }
 
-  const genAI = new GoogleGenerativeAI(config.transcription.geminiApiKey)
+  // Key resolves via the brain credential store (falls back to the plaintext
+  // config key). The two-attempt strategy + response-object diagnostics below
+  // don't fit the string-returning AIBrain.generate contract, so this analysis
+  // path keeps its direct SDK usage — full delegation is deferred to a later phase.
+  const genAI = new GoogleGenerativeAI(resolveGeminiApiKey())
   const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-3.5-flash' })
 
   let meetingSelectionSection = ''

@@ -4,9 +4,7 @@
  * Generates structured outputs from meeting transcripts using LLM.
  */
 
-import { GoogleGenerativeAI } from '@google/generative-ai'
-import { getOllamaService } from './ollama'
-import { getConfig } from './config'
+import { getBrainRouter } from './brains'
 import { getTemplate, getTemplates, OutputTemplateId, OutputTemplate } from './output-templates'
 import {
   getMeetingById,
@@ -181,30 +179,19 @@ class OutputGeneratorService {
 
     const systemPrompt = `You are a professional document writer. Generate clear, well-structured documents based on meeting transcripts. Be concise but thorough. Use the exact format requested.`
 
-    // Prefer the configured cloud provider (Gemini, same credentials as
-    // transcription); fall back to local Ollama when no API key is set.
-    const config = getConfig()
-    const geminiKey = config.transcription.geminiApiKey
-    let content: string | null = null
-
-    if (geminiKey) {
-      const genAI = new GoogleGenerativeAI(geminiKey)
-      const model = genAI.getGenerativeModel({
-        model: config.transcription.geminiModel || 'gemini-3.5-flash',
-        systemInstruction: systemPrompt
-      })
-      const result = await model.generateContent(prompt)
-      content = result.response.text()
-    } else {
-      const ollama = getOllamaService()
-      const isAvailable = await ollama.isAvailable()
-      if (!isAvailable) {
-        throw new Error(
-          'No output provider available. Configure a Gemini API key in Settings or start Ollama.'
-        )
-      }
-      content = await ollama.generate(prompt, systemPrompt)
+    // Prefer the configured cloud brain (Gemini, same credentials as
+    // transcription); fall back to local Ollama when no API key is set. Routing
+    // is now shared with chat-llm.ts and embeddings.ts via the brain seam. The
+    // Gemini brain defaults to config.transcription.geminiModel and lets any API
+    // error propagate — identical to the previous inline behaviour.
+    const brain = await getBrainRouter().resolve('outputs', 'generate')
+    if (!brain) {
+      throw new Error(
+        'No output provider available. Configure a Gemini API key in Settings or start Ollama.'
+      )
     }
+
+    const content = await brain.generate([{ role: 'user', content: prompt }], { systemPrompt })
 
     if (!content) {
       throw new Error('Failed to generate output. Please try again.')

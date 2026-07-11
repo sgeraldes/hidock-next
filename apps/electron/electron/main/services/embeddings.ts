@@ -10,12 +10,8 @@
  * every transcript indexed 0 chunks and the assistant had no memory.
  */
 
-import { GoogleGenerativeAI } from '@google/generative-ai'
 import { getConfig } from './config'
-import { getOllamaService } from './ollama'
-
-const GEMINI_EMBEDDING_MODEL = 'gemini-embedding-001'
-const GEMINI_BATCH_LIMIT = 100
+import { getBrainRouter } from './brains'
 
 class EmbeddingsService {
   /** Which provider is currently active ('gemini' | 'ollama' | 'none'). */
@@ -30,47 +26,10 @@ class EmbeddingsService {
   }
 
   async generateEmbeddings(texts: string[]): Promise<(number[] | null)[]> {
-    if (texts.length === 0) return []
-
-    const apiKey = getConfig().transcription.geminiApiKey
-    if (apiKey) {
-      try {
-        return await this.geminiBatch(apiKey, texts)
-      } catch (e) {
-        console.error('[Embeddings] Gemini embedding failed, trying Ollama fallback:', e)
-      }
-    }
-
-    // Ollama fallback (local, optional)
-    try {
-      const ollama = getOllamaService()
-      if (await ollama.isAvailable()) {
-        return await ollama.generateEmbeddings(texts)
-      }
-    } catch (e) {
-      console.error('[Embeddings] Ollama fallback failed:', e)
-    }
-
-    return texts.map(() => null)
-  }
-
-  private async geminiBatch(apiKey: string, texts: string[]): Promise<(number[] | null)[]> {
-    const genAI = new GoogleGenerativeAI(apiKey)
-    const model = genAI.getGenerativeModel({ model: GEMINI_EMBEDDING_MODEL })
-
-    const out: (number[] | null)[] = []
-    for (let i = 0; i < texts.length; i += GEMINI_BATCH_LIMIT) {
-      const slice = texts.slice(i, i + GEMINI_BATCH_LIMIT)
-      const res = await model.batchEmbedContents({
-        requests: slice.map((t) => ({
-          content: { role: 'user', parts: [{ text: t }] }
-        }))
-      })
-      for (const emb of res.embeddings) {
-        out.push(emb?.values ?? null)
-      }
-    }
-    return out
+    // Delegate to the BrainRouter: Gemini `gemini-embedding-001` first (when a
+    // key is configured), else Ollama — the same routing as before, now shared
+    // with chat-llm.ts and output-generator.ts via the brain seam.
+    return getBrainRouter().embed(texts)
   }
 }
 
