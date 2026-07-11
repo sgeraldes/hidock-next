@@ -3,9 +3,13 @@
  *
  * Verifies (with fully mocked stores) that rag.buildGraphContext:
  *   (a) flows graph facts into BrainRouter.chat messages (real chat-llm → mocked brains),
- *   (b) detects entities beyond a literal match — accent-folded labels + contact aliases,
- *   (c) injects a meeting's neighborhood when the chat is scoped to a meeting,
- *   (d) trims graph facts to a per-brain token budget.
+ *   (b) detects entities beyond a literal match — accent-folded labels + contact aliases —
+ *       with WHOLE-TOKEN matching (no substring false positives: Ana≠banana, Ann≠annual),
+ *   (c) injects a meeting's graph neighborhood when the chat is scoped to a meeting,
+ *       resolving the app meeting id to its GRAPH NODE id first (distinct id spaces),
+ *   (d) trims graph facts to a per-brain token budget, preferring the router's
+ *       resolvePrimaryChatBrainId() when present and falling back to config,
+ *   (e) does bounded work per message: cached entity index, not a per-message corpus scan.
  *
  * @vitest-environment node
  */
@@ -21,16 +25,38 @@ const kgMock = {
 }
 vi.mock('../knowledge-graph-service', () => kgMock)
 
-// --- config (per-brain budget lookup) ---
+// --- config (per-brain budget lookup fallback) ---
 const mockBrains: { taskRouting: Record<string, string>; defaultBrain: string } = {
   taskRouting: {},
   defaultBrain: 'gemini-api',
 }
 vi.mock('../config', () => ({ getConfig: () => ({ brains: mockBrains }) }))
 
-// --- brains: the seam chat-llm.generate() forwards to (BrainRouter.chat) ---
+// --- brains: the seam chat-llm.generate() forwards to (BrainRouter.chat), plus
+// the (feature-detected) resolvePrimaryChatBrainId budget source. The router
+// object is mutable so tests can add/remove the helper.
 const mockBrainChat = vi.fn().mockResolvedValue('AI Response')
-vi.mock('../brains', () => ({ getBrainRouter: () => ({ chat: mockBrainChat }) }))
+const mockRouter: {
+  chat: typeof mockBrainChat
+  resolvePrimaryChatBrainId?: () => string | null | undefined
+} = { chat: mockBrainChat }
+vi.mock('../brains', () => ({ getBrainRouter: () => mockRouter }))
+
+// --- event-bus (lazy-imported for index invalidation; electron-free mock) ---
+// NOTE: rag.ts wires its invalidation handlers ONCE per module lifetime, so this
+// registry must NOT be cleared between tests — the handlers registered on the
+// first buildGraphContext call are the ones later tests fire.
+const domainHandlers = new Map<string, Array<() => void>>()
+vi.mock('../event-bus', () => ({
+  getEventBus: () => ({
+    onDomainEvent: (type: string, handler: () => void) => {
+      const arr = domainHandlers.get(type) ?? []
+      arr.push(handler)
+      domainHandlers.set(type, arr)
+      return () => {}
+    },
+  }),
+}))
 
 // --- ollama (used by real chat-llm status path; unused here but must exist) ---
 vi.mock('../ollama', () => ({
@@ -58,6 +84,8 @@ vi.mock('../vector-store', () => ({
 }))
 
 // --- database: valid conversation, no pinned context, configurable aliases ---
+// aliasRows is read lazily inside the queryAll callback, so the vi.mock factory
+// (hoisted) never touches it before initialization.
 let aliasRows: Array<{ alias: string; contact_id: string; source: string | null }> = []
 vi.mock('../database', () => ({
   getDatabase: () => null, // → pinned-context block is skipped
@@ -72,14 +100,24 @@ vi.mock('../database', () => ({
   escapeLikePattern: (p: string) => p.replace(/[%_\\]/g, '\\$&'),
 }))
 
-import { buildGraphContext, getRAGService, resetRAGService } from '../rag'
+import {
+  buildGraphContext,
+  getRAGService,
+  resetRAGService,
+  resetEntityDetectionIndex,
+} from '../rag'
+import { queryAll } from '../database'
+
+const mockQueryAll = vi.mocked(queryAll)
 
 beforeEach(() => {
   vi.clearAllMocks()
   resetRAGService()
+  resetEntityDetectionIndex()
   aliasRows = []
   mockBrains.taskRouting = {}
   mockBrains.defaultBrain = 'gemini-api'
+  delete mockRouter.resolvePrimaryChatBrainId
 
   // Sensible defaults: nothing detected, empty facts, no nodes/aliases.
   kgMock.findMentionedEntity.mockReturnValue(null)
@@ -110,6 +148,16 @@ describe('buildGraphContext — entity detection tiers', () => {
     expect(parts).toContain('FACT-YARAVI')
   })
 
+  it('Tier 2: matches a multi-word project label', async () => {
+    kgMock.queryListNodes.mockImplementation((type: string) =>
+      type === 'project' ? [{ id: 'prj1', label: 'Project Apollo', type: 'project' }] : []
+    )
+    kgMock.neighborhoodFacts.mockImplementation((id: string) => (id === 'prj1' ? 'FACT-APOLLO' : ''))
+
+    const parts = await buildGraphContext('status of project apollo please')
+    expect(parts).toContain('FACT-APOLLO')
+  })
+
   it('Tier 2 (alias): matches a known contact alias spelling → contact node', async () => {
     aliasRows = [{ alias: 'Yara', contact_id: 'c1', source: null }]
     kgMock.resolveEntityToNodeId.mockImplementation((id: string) => (id === 'c1' ? 'pAlias' : null))
@@ -129,13 +177,6 @@ describe('buildGraphContext — entity detection tiers', () => {
     expect(kgMock.resolveEntityToNodeId).not.toHaveBeenCalled()
   })
 
-  it('Tier 3 (meeting scope): injects the scoped meeting neighborhood', async () => {
-    kgMock.neighborhoodFacts.mockImplementation((id: string) => (id === 'm1' ? 'FACT-MEETING' : ''))
-
-    const parts = await buildGraphContext('summarize this', 'm1')
-    expect(parts).toContain('FACT-MEETING')
-  })
-
   it('dedupes an entity found by multiple tiers (facts fetched once)', async () => {
     kgMock.findMentionedEntity.mockReturnValue({ id: 'p1', label: 'Alice' })
     kgMock.queryListNodes.mockImplementation((type: string) =>
@@ -145,6 +186,90 @@ describe('buildGraphContext — entity detection tiers', () => {
 
     const parts = await buildGraphContext('what did Alice decide?')
     expect(parts).toEqual(['FACT-ALICE'])
+    expect(kgMock.neighborhoodFacts).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('buildGraphContext — whole-token matching (no substring false positives)', () => {
+  it('node label "Ana" does NOT match inside "banana"', async () => {
+    kgMock.queryListNodes.mockImplementation((type: string) =>
+      type === 'person' ? [{ id: 'pAna', label: 'Ana', type: 'person' }] : []
+    )
+    kgMock.neighborhoodFacts.mockReturnValue('SHOULD-NOT-APPEAR')
+
+    const parts = await buildGraphContext('I baked banana bread yesterday')
+    expect(parts).toEqual([])
+  })
+
+  it('alias "Ann" does NOT match inside "annual"', async () => {
+    aliasRows = [{ alias: 'Ann', contact_id: 'c9', source: null }]
+    kgMock.neighborhoodFacts.mockReturnValue('SHOULD-NOT-APPEAR')
+
+    const parts = await buildGraphContext('prepare the annual report')
+    expect(parts).toEqual([])
+    expect(kgMock.resolveEntityToNodeId).not.toHaveBeenCalled()
+  })
+
+  it('a name adjacent to punctuation still matches ("ping Yara, please")', async () => {
+    aliasRows = [{ alias: 'Yara', contact_id: 'c1', source: null }]
+    kgMock.resolveEntityToNodeId.mockImplementation((id: string) => (id === 'c1' ? 'pAlias' : null))
+    kgMock.neighborhoodFacts.mockImplementation((id: string) => (id === 'pAlias' ? 'FACT-ALIAS' : ''))
+
+    const parts = await buildGraphContext('ping Yara, please — (urgent!)')
+    expect(parts).toContain('FACT-ALIAS')
+  })
+
+  it('a label at the very start/end of the message matches', async () => {
+    kgMock.queryListNodes.mockImplementation((type: string) =>
+      type === 'person' ? [{ id: 'pAna', label: 'Ana', type: 'person' }] : []
+    )
+    kgMock.neighborhoodFacts.mockImplementation((id: string) => (id === 'pAna' ? 'FACT-ANA' : ''))
+
+    expect(await buildGraphContext('Ana said yes')).toContain('FACT-ANA')
+    resetEntityDetectionIndex()
+    expect(await buildGraphContext('what about Ana')).toContain('FACT-ANA')
+  })
+})
+
+describe('buildGraphContext — meeting scope resolves app id → graph node id', () => {
+  it('resolves the meeting id to its node id before fetching facts', async () => {
+    // Distinct id spaces: app meeting id 'meeting-123' vs graph node 'node-m1'.
+    // Mirrors the real service: neighborhood facts live under graph node ids.
+    kgMock.resolveEntityToNodeId.mockImplementation((id: string) =>
+      id === 'meeting-123' ? 'node-m1' : null
+    )
+    kgMock.neighborhoodFacts.mockImplementation((id: string) =>
+      id === 'node-m1' ? 'FACT-MEETING' : ''
+    )
+
+    const parts = await buildGraphContext('summarize this', 'meeting-123')
+    expect(parts).toContain('FACT-MEETING')
+    expect(kgMock.resolveEntityToNodeId).toHaveBeenCalledWith('meeting-123')
+    expect(kgMock.neighborhoodFacts).toHaveBeenCalledWith('node-m1', 1)
+    // The raw app meeting id must never reach the facts call.
+    expect(kgMock.neighborhoodFacts).not.toHaveBeenCalledWith('meeting-123', 1)
+  })
+
+  it('skips cleanly when the meeting has no graph node', async () => {
+    kgMock.resolveEntityToNodeId.mockReturnValue(null)
+    kgMock.neighborhoodFacts.mockReturnValue('SHOULD-NOT-APPEAR')
+
+    const parts = await buildGraphContext('summarize this', 'meeting-unknown')
+    expect(parts).toEqual([])
+    expect(kgMock.neighborhoodFacts).not.toHaveBeenCalled()
+  })
+
+  it('dedupes when a named entity resolves to the same node as the meeting', async () => {
+    kgMock.findMentionedEntity.mockReturnValue({ id: 'node-m1', label: 'Standup' })
+    kgMock.resolveEntityToNodeId.mockImplementation((id: string) =>
+      id === 'meeting-123' ? 'node-m1' : null
+    )
+    kgMock.neighborhoodFacts.mockImplementation((id: string) =>
+      id === 'node-m1' ? 'FACT-MEETING' : ''
+    )
+
+    const parts = await buildGraphContext('summarize Standup', 'meeting-123')
+    expect(parts).toEqual(['FACT-MEETING'])
     expect(kgMock.neighborhoodFacts).toHaveBeenCalledTimes(1)
   })
 })
@@ -177,11 +302,101 @@ describe('buildGraphContext — per-brain token budget (d)', () => {
     expect(parts).toHaveLength(3)
   })
 
-  it('honours a per-task chat route over the default brain', async () => {
+  it('honours a per-task chat route over the default brain (config fallback path)', async () => {
     mockBrains.defaultBrain = 'gemini-api'
     mockBrains.taskRouting = { chat: 'ollama' }
     const parts = await buildGraphContext('Alpha Bravo Charlie all spoke')
     expect(parts).toHaveLength(1) // routed to ollama's small budget
+  })
+
+  it('prefers BrainRouter.resolvePrimaryChatBrainId() over the config read when present', async () => {
+    // Config says gemini (budget 1500 → 3 facts) but the router — the source of
+    // truth for what actually serves the chat — says ollama (budget 500 → 1).
+    mockBrains.defaultBrain = 'gemini-api'
+    mockRouter.resolvePrimaryChatBrainId = () => 'ollama'
+    const parts = await buildGraphContext('Alpha Bravo Charlie all spoke')
+    expect(parts).toHaveLength(1)
+  })
+
+  it('falls back to the config read when the router helper returns nothing', async () => {
+    mockBrains.defaultBrain = 'gemini-api'
+    mockRouter.resolvePrimaryChatBrainId = () => null
+    const parts = await buildGraphContext('Alpha Bravo Charlie all spoke')
+    expect(parts).toHaveLength(3) // config path: gemini budget
+  })
+})
+
+describe('buildGraphContext — bounded work (cached entity index)', () => {
+  it('builds the label/alias index once across messages (no per-message corpus scan)', async () => {
+    kgMock.queryListNodes.mockImplementation((type: string) =>
+      type === 'person' ? [{ id: 'p1', label: 'Alice', type: 'person' }] : []
+    )
+    aliasRows = [{ alias: 'Ali', contact_id: 'c1', source: null }]
+
+    await buildGraphContext('first message about Alice')
+    await buildGraphContext('second message about Alice')
+    await buildGraphContext('third message, nothing relevant')
+
+    // One index build = one node listing per type + one alias query, total.
+    expect(kgMock.queryListNodes).toHaveBeenCalledTimes(2) // person + project
+    expect(mockQueryAll.mock.calls.filter(([sql]) => /contact_aliases/i.test(sql))).toHaveLength(1)
+  })
+
+  it('resetEntityDetectionIndex() forces a rebuild (invalidation hook)', async () => {
+    kgMock.queryListNodes.mockReturnValue([])
+    await buildGraphContext('one')
+    resetEntityDetectionIndex()
+    await buildGraphContext('two')
+    expect(kgMock.queryListNodes).toHaveBeenCalledTimes(4) // 2 builds × 2 types
+  })
+
+  it('a domain entity-changed event invalidates the cached index', async () => {
+    kgMock.queryListNodes.mockReturnValue([])
+    await buildGraphContext('one') // wires invalidation + builds index
+    // Let the lazy event-bus import settle, then fire the domain event.
+    await new Promise((r) => setTimeout(r, 0))
+    for (const h of domainHandlers.get('entity:contact-changed') ?? []) h()
+    await buildGraphContext('two')
+    expect(kgMock.queryListNodes).toHaveBeenCalledTimes(4) // rebuilt after event
+  })
+
+  it('scale: hundreds of nodes/aliases, repeated messages stay ms-bounded', async () => {
+    const people = Array.from({ length: 300 }, (_, i) => ({
+      id: `p${i}`,
+      label: `Person${i} Surname${i}`,
+      type: 'person',
+    }))
+    const projects = Array.from({ length: 300 }, (_, i) => ({
+      id: `prj${i}`,
+      label: `Project Codename${i}`,
+      type: 'project',
+    }))
+    kgMock.queryListNodes.mockImplementation((type: string) =>
+      type === 'person' ? people : projects
+    )
+    aliasRows = Array.from({ length: 400 }, (_, i) => ({
+      alias: `Nick${i}`,
+      contact_id: `c${i}`,
+      source: null,
+    }))
+    kgMock.resolveEntityToNodeId.mockImplementation((id: string) =>
+      id.startsWith('c') ? `p-${id}` : null
+    )
+    kgMock.neighborhoodFacts.mockImplementation((id: string) => (id === 'p42' ? 'FACT-P42' : ''))
+
+    const start = performance.now()
+    let hits = 0
+    for (let i = 0; i < 100; i++) {
+      const parts = await buildGraphContext(
+        `a fairly typical chat message ${i} mentioning Person42 Surname42 and some noise words`
+      )
+      if (parts.includes('FACT-P42')) hits++
+    }
+    const elapsed = performance.now() - start
+
+    expect(hits).toBe(100) // correctness at scale
+    expect(kgMock.queryListNodes).toHaveBeenCalledTimes(2) // index built once
+    expect(elapsed).toBeLessThan(1500) // 100 messages vs 600 nodes + 400 aliases
   })
 })
 

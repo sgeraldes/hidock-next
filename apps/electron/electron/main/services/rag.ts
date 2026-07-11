@@ -89,11 +89,29 @@ const GRAPH_FACT_TOKEN_BUDGET: Record<string, number> = {
 const DEFAULT_GRAPH_FACT_TOKEN_BUDGET = 1000
 
 /**
- * The graph-fact token budget for the brain that will actually serve this chat
- * (config.brains.taskRouting.chat → defaultBrain → gemini-api). Lazy + defensive:
- * config pulls in electron, so any failure degrades to the default budget.
+ * The graph-fact token budget for the brain that will actually serve this chat.
+ * Preferred source: BrainRouter.resolvePrimaryChatBrainId() — the router's own
+ * primary-selection logic, kept in sync with what BrainRouter.chat actually does
+ * (feature-detected: the helper ships with the chat-routing fix and may not be
+ * present yet). Fallback: the same config read the router's default resolution
+ * uses (taskRouting.chat → defaultBrain → gemini-api). Lazy + defensive: both
+ * paths pull in electron, so any failure degrades to the default budget.
  */
 async function graphFactTokenBudget(): Promise<number> {
+  try {
+    const { getBrainRouter } = await import('./brains')
+    const router = getBrainRouter() as unknown as {
+      resolvePrimaryChatBrainId?: () => string | null | undefined
+    }
+    if (typeof router?.resolvePrimaryChatBrainId === 'function') {
+      const id = router.resolvePrimaryChatBrainId()
+      if (id) return GRAPH_FACT_TOKEN_BUDGET[id] ?? DEFAULT_GRAPH_FACT_TOKEN_BUDGET
+    }
+  } catch {
+    /* fall through to the config read */
+  }
+  // TODO(brains): remove this config-read fallback once
+  // BrainRouter.resolvePrimaryChatBrainId() has landed with the chat-routing fix.
   try {
     const { getConfig } = await import('./config')
     const brains = getConfig().brains
@@ -104,15 +122,127 @@ async function graphFactTokenBudget(): Promise<number> {
   }
 }
 
-/** Whether an already-accent-folded `label` is named as a whole token-run in the
- *  accent-folded `haystack` (mirrors findMentionedEntity's word-boundary check). */
-function namedIn(haystack: string, label: string): boolean {
-  if (label.length < 3) return false
-  return (
-    haystack.includes(` ${label} `) ||
-    haystack.includes(` ${label}`) ||
-    haystack.includes(`${label} `)
-  )
+/**
+ * Tokenized normalization key: accent-fold (entity-resolver tier), then reduce
+ * every non-letter/number run to a single space. Matching on these keys is
+ * whole-token by construction — "ana" can never match inside "banana", and
+ * punctuation adjacent to a name ("ping Yara,") does not break the match.
+ */
+function tokenizedKey(text: string): string {
+  return accentFoldedKey(text)
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** Longest entity name (in tokens) the n-gram extraction can match. */
+const MAX_ENTITY_TOKENS = 4
+/** Minimum key length considered an entity mention (guards "Al"/"Jo"). */
+const MIN_ENTITY_KEY = 3
+
+/**
+ * Candidate entity keys in a message: every 1..{@link MAX_ENTITY_TOKENS}-token
+ * n-gram of the tokenized message. Bounded by the message length (not by the
+ * size of the graph/alias corpus), so entity detection is O(message) lookups.
+ */
+function candidateNgrams(message: string): Set<string> {
+  const tokens = tokenizedKey(message).split(' ').filter(Boolean)
+  const grams = new Set<string>()
+  for (let i = 0; i < tokens.length; i++) {
+    let gram = ''
+    for (let n = 0; n < MAX_ENTITY_TOKENS && i + n < tokens.length; n++) {
+      gram = gram ? `${gram} ${tokens[i + n]}` : tokens[i + n]
+      if (gram.length >= MIN_ENTITY_KEY) grams.add(gram)
+    }
+  }
+  return grams
+}
+
+/**
+ * Prebuilt lookup index for entity detection: tokenized person/project node
+ * labels → node ids, and tokenized (non-rejected) contact-alias spellings →
+ * contact ids. Built once and cached — NOT rebuilt per message — so each chat
+ * turn costs O(message n-grams) map lookups instead of an O(nodes + aliases)
+ * scan on the main process.
+ */
+interface EntityDetectionIndex {
+  builtAt: number
+  labelToNodes: Map<string, string[]>
+  aliasToContacts: Map<string, string[]>
+}
+
+let entityIndex: EntityDetectionIndex | null = null
+let entityIndexInvalidationWired = false
+/** TTL safety net: covers mutations that arrive without a wired domain event. */
+const ENTITY_INDEX_TTL_MS = 30_000
+
+/** Test/maintenance hook: drop the cached entity-detection index. */
+export function resetEntityDetectionIndex(): void {
+  entityIndex = null
+}
+
+/**
+ * Invalidate the cached index when entities change: contact identity edits and
+ * new transcripts (graph ingest) both reshape names/aliases. Best-effort and
+ * lazy (event-bus pulls in electron); the TTL above covers anything unwired.
+ */
+function wireEntityIndexInvalidation(): void {
+  if (entityIndexInvalidationWired) return
+  entityIndexInvalidationWired = true
+  import('./event-bus')
+    .then(({ getEventBus }) => {
+      const bus = getEventBus()
+      for (const type of ['entity:contact-changed', 'entity:transcript-ready']) {
+        bus.onDomainEvent(type, () => {
+          entityIndex = null
+        })
+      }
+    })
+    .catch(() => {
+      /* TTL fallback covers invalidation */
+    })
+}
+
+function getEntityDetectionIndex(
+  kg: typeof import('./knowledge-graph-service')
+): EntityDetectionIndex {
+  wireEntityIndexInvalidation()
+  if (entityIndex && Date.now() - entityIndex.builtAt < ENTITY_INDEX_TTL_MS) {
+    return entityIndex
+  }
+
+  const labelToNodes = new Map<string, string[]>()
+  try {
+    for (const n of [...kg.queryListNodes('person'), ...kg.queryListNodes('project')]) {
+      const key = tokenizedKey(n.label || '')
+      if (key.length < MIN_ENTITY_KEY) continue
+      const ids = labelToNodes.get(key)
+      if (ids) ids.push(n.id)
+      else labelToNodes.set(key, [n.id])
+    }
+  } catch (e) {
+    console.warn('[RAG] graph label index skipped:', e)
+  }
+
+  const aliasToContacts = new Map<string, string[]>()
+  try {
+    const aliases = queryAll<{ alias: string; contact_id: string; source: string | null }>(
+      'SELECT alias, contact_id, source FROM contact_aliases'
+    )
+    for (const a of aliases) {
+      if (a.source === 'rejected') continue
+      const key = tokenizedKey(a.alias || '')
+      if (key.length < MIN_ENTITY_KEY) continue
+      const ids = aliasToContacts.get(key)
+      if (ids) ids.push(a.contact_id)
+      else aliasToContacts.set(key, [a.contact_id])
+    }
+  } catch (e) {
+    console.warn('[RAG] alias index skipped:', e)
+  }
+
+  entityIndex = { builtAt: Date.now(), labelToNodes, aliasToContacts }
+  return entityIndex
 }
 
 /**
@@ -120,41 +250,35 @@ function namedIn(haystack: string, label: string): boolean {
  * tiers (NO LLM call):
  *   • accent/diacritic-folded person/project node labels (question "Yaravi" → node "Yaraví")
  *   • accent-folded known contact-alias spellings → that contact's graph node
- * Dedup is handled by the caller. Fully defensive: any store/DB failure yields [].
+ * Matching is whole-token n-gram lookup against the cached index — bounded by
+ * the message, not the corpus. Dedup is handled by the caller. Fully defensive:
+ * any store/DB failure yields [].
  */
 function detectNormalizedEntities(
   message: string,
   kg: typeof import('./knowledge-graph-service')
 ): string[] {
   const ids: string[] = []
-  const haystack = ` ${accentFoldedKey(message)} `
+  const grams = candidateNgrams(message)
+  if (grams.size === 0) return ids
+  const index = getEntityDetectionIndex(kg)
 
-  // Accent-folded label match against person/project nodes.
-  try {
-    const nodes = [...kg.queryListNodes('person'), ...kg.queryListNodes('project')]
-    for (const n of nodes) {
-      if (namedIn(haystack, accentFoldedKey(n.label || ''))) ids.push(n.id)
+  for (const gram of grams) {
+    const nodeIds = index.labelToNodes.get(gram)
+    if (nodeIds) ids.push(...nodeIds)
+
+    const contactIds = index.aliasToContacts.get(gram)
+    if (contactIds) {
+      for (const contactId of contactIds) {
+        try {
+          const nodeId = kg.resolveEntityToNodeId(contactId)
+          if (nodeId) ids.push(nodeId)
+        } catch (e) {
+          console.warn('[RAG] alias contact→node resolve skipped:', e)
+        }
+      }
     }
-  } catch (e) {
-    console.warn('[RAG] graph label scan skipped:', e)
   }
-
-  // Alias tier — reuse the resolver's alias source (contact_aliases): a known
-  // spelling in the question maps to that contact's person node.
-  try {
-    const aliases = queryAll<{ alias: string; contact_id: string; source: string | null }>(
-      'SELECT alias, contact_id, source FROM contact_aliases'
-    )
-    for (const a of aliases) {
-      if (a.source === 'rejected') continue
-      if (!namedIn(haystack, accentFoldedKey(a.alias || ''))) continue
-      const nodeId = kg.resolveEntityToNodeId(a.contact_id)
-      if (nodeId) ids.push(nodeId)
-    }
-  } catch (e) {
-    console.warn('[RAG] alias tier scan skipped:', e)
-  }
-
   return ids
 }
 
@@ -200,8 +324,18 @@ export async function buildGraphContext(
     // Tier 2 — accent/alias-aware detection (resolver normalization tiers).
     for (const id of detectNormalizedEntities(message, kg)) addFacts(id)
 
-    // Tier 3 — meeting in scope → inject that meeting's neighborhood.
-    if (meetingFilter) addFacts(meetingFilter)
+    // Tier 3 — meeting in scope → resolve the app meeting id to its GRAPH NODE
+    // id first (the graph is keyed by node ids; the meeting id lives in node
+    // props), then inject that node's neighborhood. Resolving here also keeps
+    // the dedup set in one id space (node ids). Skip cleanly when the meeting
+    // has no graph node yet.
+    if (meetingFilter) {
+      try {
+        addFacts(kg.resolveEntityToNodeId(meetingFilter))
+      } catch (e) {
+        console.warn('[RAG] meeting graph grounding skipped:', e)
+      }
+    }
   } catch (e) {
     console.warn('[RAG] Context Graph grounding skipped:', e)
   }
