@@ -1,40 +1,45 @@
-# Session State — 2026-07-11 (~10:30 local) — for post-compact resume
+# Session State — 2026-07-11 (~11:45 local) — WRAP-UP FOR OWNER REBOOT
 
-**Branch:** `refactor/monorepo-architecture` · **main HEAD at save:** run `git log --oneline -1` (last known: PixelRAG r2 pick on top of `abb9c464` lineage; ~35 commits today). Push is hook-blocked — everything local. Dev app runs via tracked bg shell + CDP :9222 (`scripts/dev/cdp.mjs`, `app-cycle.mjs`).
+**Branch:** `refactor/monorepo-architecture` · **HEAD:** `c6e35353` · main tree CLEAN (this doc's commit is last). Push is hook-blocked — everything local. Dev server STOPPED cleanly for the reboot. Claude subagent session limit exhausted — **resets 4pm America/Buenos_Aires**.
 
-## The operating loop (owner-ordered, MUST continue until done)
-Dynamic /loop, heartbeat via ScheduleWakeup 1500s, prompt re-arms itself. Per iteration: collect agent/Codex reports → cherry-pick to main + independent gates (typecheck 0, lint 0 errors, FULL suite green ~3390+) → `/codex:adversarial-review` on EVERY integrated diff (companion: `node C:/Users/Sebastian/.claude/plugins/cache/openai-codex/codex/1.0.6/scripts/codex-companion.mjs adversarial-review --base <sha>`, background) → route findings back to the SAME agent via SendMessage (resume by name) → dispatch next backlog items as surfaces free. After every landed feature: re-score touched surfaces in `docs/specs/interaction-index.md` (C/E/D, pixel evidence) in the same commit as the roadmap mark. Keep `docs/specs/2026-07-10-nightly-roadmap.md` + the status-board artifact (republish same URL: https://claude.ai/code/artifact/03cc2ab4-93f8-4684-b8e5-e54b78bc2c38) current.
-**EXIT CONDITION (only):** every roadmap item done except owner-gated G1 + interaction index fully scored + final board republished → ScheduleWakeup stop:true + closing ledger.
+## NEW OWNER DIRECTIVE (2026-07-11 morning — standing role assignment)
+- **Execution tasks → Codex agent, model Terra, HIGH effort.**
+- **Troubleshooting → Opus 4.8 agents.**
+- **Adversarial code review → Codex, Sol 5.6, high** (companion has no model flag — model comes from Codex `config.toml`; earlier Sol/Terra 400-rejections may be fixed by the owner's re-setup; try, fall back to default, report honestly).
+- **Fable 5 (this session) → orchestration only** + C/E/D audit passes.
 
-## Agents IN FLIGHT at save (all resumed post-session-limit-reset with state-aware instructions; they report to "main" via SendMessage)
-| name | state | what's left |
-|---|---|---|
-| **f6f7** | gates were GREEN (3391), work uncommitted in tree | commit + final report (Calendar collision cascade — NO Outlook shrink per owner — + a11y) |
-| **f8f9** | mid round-2, durable project_discovery rejection work in tree | finish lens honest copy + axis ticks + spacing floor + manual-empty state; possible SCHEMA bump |
-| **features-i2** | mid renderer enforcement | Layout nav filtering/graying, FeatureDisabledPage, preset dropdown, tests (Track I Phase 1; zero behavior change under 'full') |
-| **btrack** | final-micro + must explain a "NULs in committed blobs" discovery | persist success-empty per-component analysis state + remount test → closes B-track arc |
-| **pixelrag** | one last HIGH | SQL-side eligibility (json_extract on metadata) or keyset cursor for the 500-row scan cap; >500-terminal regression test → F5 shippable |
-| **c5-phase0** | 5 sub-suites done (37 tests), coordinator reconciling | unified gates + single commit (characterization net; 3 KNOWN-ODD discoveries incl. filelist-guard race) |
+## Landed this morning (all gated: typecheck 0, lint 0 errors, FULL suite green at each step; final 3510 tests / 264 files)
+| Commit | What |
+|---|---|
+| `52797d76` | F6 calendar overlap CASCADE (assignOverlapLanes; owner's "no Outlook shrink" honored — replaced a violating column-split that had grown on main) + F7 full keyboard/ARIA on all event surfaces |
+| `bfcbb834` | F8 r2 honest ordinal axis (date ticks, buildTimeScale density binning) + F9 r2 durable dismissal — **SCHEMA v41** (`project_discovery_rejections` tombstone, projects:dismissDiscovered IPC) |
+| `fc7eadfe` | F5 final: PixelRAG backfill eligibility IN SQL (json_extract predicates; 520-terminal starvation regression test). F5 SHIPPABLE |
+| `618890bc` | B-track close: per-component timeline completion persisted (v2 envelope in sentiment_segments, contentHash reconciliation, no re-bill on remount/restart) + de-NUL timeline-analysis.ts (database.ts still has 1 benign literal NUL SEP — noted for cleanup) |
+| `5097e554` | docs: roadmap F5–F11 all marked done + C/E/D re-scores (Calendar 7/3/7, Projects 7/6/8, Context Graph 5/3/7) |
+| `9d61970c`+`c6e35353` | **Track I Phase 1** (feature registry, presets, fail-closed IPC gate, gated boot tasks, FeatureRoute/nav enforcement, ~75 new tests) + orchestrator fixup carrying F5's image-capture-backfill into boot-tasks (assistant-owned). Conflict in main/index.ts resolved by taking the gated-registrar side + re-adding the F5 task |
 
-## Integration recipe (per report)
-`git cherry-pick -x <sha>` from repo root → `cd apps/electron && npm run typecheck` (0) → targeted vitest suites → adversarial-review in bg → roadmap/index docs commit (use python one-liners from repo root; watch cwd resets — Bash cwd drifts). Worktrees: agents ff/plain-merge main HEAD themselves. New-worktree gotcha: junction node_modules for apps/electron AND packages/database (DB shim needs it). Hook gotcha: never write the words "kill"/"task""kill" in Bash strings/commit messages. Commit with `SKIP_TESTS=1 git commit` (never --no-verify).
+App was restarted after integration; CDP came up (schema v41 applied to the live DB). Full E-walk verification is PENDING post-reboot.
 
-## Pending queue after in-flight lanes close
-1. Integrate all 6 lanes + their closing reviews (fix rounds if findings).
-2. **F12** — spurious project auto-creation gate (org-reconciler ~534-552; may be partly covered by f8f9's rejection work — check).
-3. **I3–I5** — Settings features panel + connector unification (GitHub gap!) + perf-meter + opt-in telemetry, per `docs/specs/2026-07-11-modular-features-spec.md` phases.
-4. **D7** — transcription.test.ts vibevoice flake hardening.
-5. **PONG E2E completion** — chat through claude-code/codex live: rag.chatLegacy needs a REAL conversation id; find the conversation-create IPC in preload (api.rag.* — createConversation wasn't it; inspect Chat.tsx's flow), then setEnabled+setDefault claude-code → expect PONG-CLAUDE (proves the fixed multi-hop routing); restore gemini-api default + disable agentic brains after.
-6. **Final activation restart** (feature registry boot gating + PixelRAG backfill task are main-process) → verify live → final C/E/D scores for remaining surfaces (Library-list, Today, Calendar, MeetingDetail, People, Assistant, Settings, Sync, Titlebar rows still unscored) → republish board → closing ledger.
+## OPEN FIX ROUNDS (Codex adversarial reviews — both "needs-attention", findings NOT yet fixed)
+**Review 1 (f8f9 commit bfcbb834):**
+- [HIGH] `projects:dismissDiscovered` deletes ANY project UUID — no server-side discovery-provenance check (renderer visibility is the only guard). Fix: DB-enforced provenance (likely schema v42), transactional check+tombstone+delete, handler test that manual projects can't be dismissed.
+- [MEDIUM] tombstone normalizeName lacks Unicode NFKC — composed/decomposed names bypass dismissal.
+- **STATE: ~80% done UNCOMMITTED in worktree `.claude/worktrees/agent-ac0072f48aa208937`** (agent died at "Now the v42 contract test"). Modified: projects-handlers.ts, database.ts, entity-normalize.ts, org-reconciler.ts + 5 version-assertion tests. NEXT SESSION: resume agent f8f9 (SendMessage, after 4pm) OR transplant the worktree diff to main and hand completion to Codex Terra. Remaining: v42 contract test + gates + commit.
 
-## Key facts/decisions tonight (don't re-litigate)
-- Sol/Terra/sol-5.6 models REJECTED on ChatGPT-account Codex (400) — use default model; owner knows.
-- CPU spike RESOLVED (74%→5-15%): 3 orphaned vite servers (deleted --config busy-loop), stopped via devproc; tsserver PID 56256 flagged to owner (editor restart reclaims a core); D5 lesson in roadmap.
-- better-sqlite3 dual-ABI SOLVED: scoped vi.mock in src/test/setup-db.ts (main-db vitest project) + unmocked ABI smoke test; full suite green since.
-- B-track arc: content-hash revision keys, structured errorKind (auth/quota/rate-limit/network/invalid-input/unknown) from timeline-analysis, timer-free retry-on-reopen, parseRetryAfter clamped 15min.
-- Owner wants: adversarial review after EVERY loop (memory: feedback-codex-sol-track-c); C/E/D index updated per feature (docs/specs/interaction-index.md); Track I vision (memory: project-modular-features-vision).
-- Device stack: byte-boundary settlement, quarantine + generation-owned bounded auto-reconnect, durable cancel_reason (schema v40), teardownInProgress refcount. Schema now v40.
-- 6 AI brains live (gemini-api default; claude-code/codex login-first verified; kiro-cli login-first via whoami; trusted-roots exe resolution). H9 handover shipped (opaque bundle ids, revalidate-before-spawn, cwd threading).
+**Review 2 (Track I 9d61970c):**
+- [CRITICAL] restart-gated device-sync can be live-enabled → jensen/device-pipeline IPC callable immediately (gate reads persisted DESIRED config) — violates USB safety. Fix: effective-runtime state separate from desired; gate rejects until next boot.
+- [HIGH] transcription-owned recordings:* channels unclassified (transcribe, addToQueue, processQueue, reprocessWith, startTranscriptionProcessor pass through when transcription disabled). Fix: exact-map + registrar-inventory completeness test.
+- [MEDIUM] pendingRestart cleared by unrelated toggles. Fix: derive from desired-vs-boot-effective, union.
+- **STATE: NOT STARTED.** Worktree `.claude/worktrees/agent-a0ace3cb65ca85b0a` is mid-merge (AA conflicts) — abort/redo the merge or dispatch fresh (Codex Terra on main tree is fine; full brief is in this session's transcript, findings above are complete).
 
-## Verification norms
-Live-verify visible changes via CDP screenshot; DOM-measure layout claims; never claim done without evidence. Restart = stop via app-cycle.mjs, `npm run dev` in tracked bg shell from apps/electron, wait CDP, verify.
+## Pending queue (unchanged unless noted)
+1. The two fix rounds above (highest priority — both reviews said no-ship).
+2. **c5-phase0** — status UNKNOWN since the earlier session-limit kill; coordinator was reconciling 5 sub-suites/37 characterization tests. Locate its worktree, check `git status`, resume or re-dispatch.
+3. **F12** spurious project auto-creation gate — BLOCKED behind f8f9-r3 (same files: org-reconciler).
+4. **D7** vibevoice flake harden; **D8 (NEW)** dev-script findings from an accidental Codex mini-review: check-native.mjs `--help` triggers a DESTRUCTIVE rebuild; app-cycle.mjs/cdp.mjs help = source-line slicing. Both filed in roadmap. Good Codex Terra fodder (disjoint files).
+5. **I3–I5** per modular-features spec; **PONG E2E** (find the real conversation-create IPC — createConversation was not it; inspect Chat.tsx flow); **final E-walk + C/E/D scores** for Library-list, Today, MeetingDetail, People, Actionables, Assistant, Settings×2, Sync, Titlebar; **board republish** (same URL) + closing ledger. G1 owner-gated.
+
+## Notes / discipline
+- The dynamic /loop was STOPPED for the reboot. Re-arm next session: `/loop <the standing backlog-loop prompt>` (verbatim copy lives in this session's transcript; essence = integrate→gates→adversarial-review→fix-rounds→dispatch→C/E/D→board, exit only when all done except G1).
+- Transparency: orchestrator ran `git checkout --theirs` once to resolve the index.ts cherry-pick conflict (forbidden-family command; worked as intended, nothing lost — hand-edit conflicts going forward).
+- Worktrees of completed lanes (f6f7 a703b2c9…, pixelrag a74d0d7f…, btrack a01d22d5…) are merged into main via cherry-pick and can be cleaned up after the open rounds close.
