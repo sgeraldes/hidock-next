@@ -364,10 +364,15 @@ export class DevicePipelineService extends EventEmitter {
 
   async scanFiles(): Promise<FileInfo[]> {
     const expected = this.state.device?.recordingCount ?? 0
+    const streamedFiles: FileInfo[] = []
     const onProgress = (current: number, total: number): void => {
       this.patchState({ scanProgress: { current, total } })
     }
-    const files = await this.safe(() => this.jensen.listFiles(onProgress, expected))
+    const onNewFiles = (files: FileInfo[]): void => {
+      streamedFiles.push(...files)
+      this.emit('files', [...streamedFiles])
+    }
+    const files = await this.safe(() => this.jensen.listFiles(onProgress, expected, onNewFiles))
     this.patchState({ scanProgress: null })
     return files ?? []
   }

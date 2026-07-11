@@ -2155,8 +2155,10 @@ export class JensenDevice {
     for (let i = 0; i < filename.length; i++) body.push(filename.charCodeAt(i))
 
     try {
+      // A transfer must not own the serialized command slot forever. Five minutes
+      // bounds a stalled transfer while leaving ample time for normal recordings.
       const result = await this.sendCommand<boolean>(
-        new JensenMessage(CMD.TRANSFER_FILE).body(body), undefined, `downloadFile:${filename}`)
+        new JensenMessage(CMD.TRANSFER_FILE).body(body), 300, `downloadFile:${filename}`)
       this.onreceive = null
       signal?.removeEventListener('abort', abortHandler)
       return result ?? false

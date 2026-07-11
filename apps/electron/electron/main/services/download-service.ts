@@ -713,7 +713,7 @@ class DownloadService {
 
   /**
    * spec-007: Cancel active downloads (e.g., on device disconnect).
-   * Only marks 'downloading' items as failed — 'pending' items are preserved
+   * Only marks 'downloading' items as cancelled — 'pending' items are preserved
    * so they can be retried when the device reconnects.
    */
   cancelActiveDownloads(reason: string = 'Cancelled'): number {
@@ -721,12 +721,12 @@ class DownloadService {
 
     for (const item of this.state.queue.values()) {
       if (item.status === 'downloading') {
-        item.status = 'failed'
+        item.status = 'cancelled'
         item.error = reason
         this.persistQueueItem(item)
 
         if (this.state.currentSession) {
-          this.state.currentSession.failedFiles++
+          this.state.currentSession.cancelledFiles++
         }
 
         cancelledCount++

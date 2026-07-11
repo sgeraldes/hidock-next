@@ -57,7 +57,7 @@ TRIPWIRE: the sources list must never horizontally scroll and its row separators
 - [ ] **C2 (P0?)** **BUG-R1/R2/R3/R5**: verify whether the file-list re-scan loop + double auto-sync are already fixed by recent commits; if not, set `autoSyncTriggeredRef` before `listRecordings` + stop emitting 'ready' from the finally block.
 - [ ] **C3 (P2)** **BUG-R8** `downloadFile()` no timeout (`jensen.ts:1458`); **BUG-R9** cancel uses 'failed' not 'cancelled'; **BUG-R10** onNewFiles never passed; **BUG-R11** unused `step1Success`.
 - [ ] **C4 (P1)** **BUG-R6/R7**: Chromium USB / Autofill stderr noise — suppress via launch redirect or accept as cosmetic (document the decision).
-- [ ] **C5 (arch)** **BUG-R13 / DevicePipeline**: collapse scattered device-action policy gates into one coordinator (big; scope + spec first, don't rush).
+- [ ] **C5 (arch)** **BUG-R13 / DevicePipeline**: collapse scattered device-action policy gates into one coordinator. — **SPEC DONE** (`docs/specs/2026-07-11-device-pipeline-spec.md`, via Codex; 18 cited commits independently verified). KEY FINDING: an additive-but-inert Phase-2 `device-pipeline.ts` (+instance, IPC, hook, tests; commits 0212ca3e/177419db/4fabe72c/015012b2) ALREADY EXISTS — the spec's plan is to harden + activate it behind a flag (phases 0–6, each with rollback), not build greenfield. Next: Phase 0 characterization tests after owner reviews the spec.
 
 ## Track D — Test / infra hygiene
 - [ ] **D1 (P1)** `src/services/__tests__/hidock-device.test.ts` vitest **worker-teardown race** ("Closing rpc while onUserConsoleLog pending") — quiet teardown logging or isolate that file's pool so the full suite is 0-error.

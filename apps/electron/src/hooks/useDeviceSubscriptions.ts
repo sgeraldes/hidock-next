@@ -127,6 +127,11 @@ export function useDeviceSubscriptions() {
             return
           }
 
+          // Latch before a file-list request. listRecordings can synchronously publish
+          // status changes while the scan is in flight; those must not schedule a
+          // second auto-sync for the same connection.
+          autoSyncTriggeredRef.current = true
+
           // BUG-007 FIX: File list may not be cached yet after handleConnect (it only
           // gets device info/storage/settings/time). Fetch it now so auto-sync has data.
           let recordings = deviceService.getCachedRecordings()
@@ -138,7 +143,7 @@ export function useDeviceSubscriptions() {
             } catch (listError) {
               console.error('[useDeviceSubscriptions] Failed to fetch file list:', listError)
               deviceService.log('error', 'File list fetch failed', listError instanceof Error ? listError.message : 'Unknown error')
-              return // leave latch false so the next 'ready' retries
+              return
             }
           }
 
@@ -149,8 +154,6 @@ export function useDeviceSubscriptions() {
             if (shouldLogQa()) console.log('[useDeviceSubscriptions] File list not ready yet — will retry on next ready')
             return
           }
-          autoSyncTriggeredRef.current = true
-
           // Auto-download reconcile — only when the user enabled it.
           if (allowed && recordings.length > 0) {
             // DL-06 FIX: Use proper reconciliation logic from download service instead of simple filename matching
@@ -303,6 +306,10 @@ export function useDeviceSubscriptions() {
 
       if (autoSyncTriggeredRef.current) return
 
+      // Claim this connection's auto-sync before listRecordings can publish any
+      // intermediate status updates and re-enter the status-change path.
+      autoSyncTriggeredRef.current = true
+
       if (shouldLogQa()) console.log('[useDeviceSubscriptions] Initial auto-sync check (device pre-connected)')
 
       let recordings = deviceService.getCachedRecordings()
@@ -313,7 +320,7 @@ export function useDeviceSubscriptions() {
           recordings = await deviceService.listRecordings()
         } catch (listError) {
           console.error('[useDeviceSubscriptions] Initial file list fetch failed:', listError)
-          return // leave latch false so a later 'ready' retries
+          return
         }
       }
 
@@ -323,8 +330,6 @@ export function useDeviceSubscriptions() {
         if (shouldLogQa()) console.log('[useDeviceSubscriptions] Initial file list not ready yet — deferring to status-change trigger')
         return
       }
-      autoSyncTriggeredRef.current = true
-
       if (recordings.length > 0) {
         // DL-06 FIX: Use proper reconciliation logic from download service instead of simple filename matching
         const reconcileResults = await window.electronAPI.downloadService.getFilesToSync(
