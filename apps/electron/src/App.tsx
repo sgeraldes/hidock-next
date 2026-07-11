@@ -45,8 +45,10 @@ const ContextGraph = lazyWithRetry(() => import('@/pages/ContextGraph'))
  */
 export function GlobalAssistant(): React.ReactElement | null {
   const location = useLocation()
-  // Library owns its assistant (TriPaneLayout) in both placement modes.
-  if (location.pathname === '/library') return null
+  // Library owns its assistant (TriPaneLayout) in both placement modes, and the
+  // dedicated /assistant page IS the assistant — a floating bubble there could
+  // open a second overlay assistant over the full one (audit F11).
+  if (location.pathname === '/library' || location.pathname === '/assistant') return null
   return (
     <FloatingAssistant title="Assistant">
       <Suspense fallback={<LoadingSpinner message="Loading assistant..." />}>
