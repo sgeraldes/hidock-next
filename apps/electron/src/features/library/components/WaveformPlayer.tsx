@@ -36,7 +36,7 @@
  *    fed (converted) into WaveformCanvas's bar-coloring hook for the gaps.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useState } from 'react'
 import { Play, Pause, Square, SkipBack, SkipForward, Volume2, CheckSquare, GitBranch, StickyNote } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -132,6 +132,11 @@ const EVENT_KIND_ICON = {
   decision: GitBranch,
   note: StickyNote
 } as const
+
+/** Full-mode stage dimensions + the subtle gradient panel (theme-aware). */
+const SENTIMENT_H = 68 // px — sentiment curve panel
+const WAVE_H = 58 // px — waveform band
+const STAGE_GRADIENT = 'linear-gradient(180deg, hsl(var(--muted) / 0.9), hsl(var(--muted) / 0.35))'
 
 /** Shared playback state + transport, derived once and used by every mode. */
 function usePlayback(recordingId?: string, filePath?: string) {
@@ -488,6 +493,8 @@ function FullTimeline({
   // open; the playhead still tracks live playback position (0 when not playing).
   const duration = axisDuration
   const playedProgress = pb.liveDuration > 0 ? Math.min(1, pb.liveTime / pb.liveDuration) : 0
+  // Unique id for this instance's SVG gradient defs (avoids cross-instance clashes).
+  const stageId = useId().replace(/:/g, '')
 
   // Speaker bars for the canvas (seconds → the canvas's WaveformSpeakerRange).
   const canvasSpeakerRanges = useMemo<WaveformSpeakerRange[] | undefined>(() => {
@@ -538,103 +545,155 @@ function FullTimeline({
     [duration, seekTo, onEventClick, setInternalActiveEvent]
   )
 
+  // Interpolate the sentiment curve's y (0 = top … 1 = bottom) at a time fraction,
+  // so numbered markers can sit ON the curve. Falls back to the neutral midline.
+  const curveYAt = (frac: number): number => {
+    const pts = sentimentPath
+    if (!pts || pts.length === 0) return 0.5
+    if (frac <= pts[0].x) return pts[0].y
+    const last = pts[pts.length - 1]
+    if (frac >= last.x) return last.y
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1]
+      const b = pts[i]
+      if (frac >= a.x && frac <= b.x) {
+        const t = b.x === a.x ? 0 : (frac - a.x) / (b.x - a.x)
+        return a.y + (b.y - a.y) * t
+      }
+    }
+    return last.y
+  }
+
   return (
     <div className={cn('space-y-2 rounded-lg border bg-muted/40 p-3', className)} data-testid="waveform-player-full">
-      {/* Sentiment curve — a thin line above the waveform, same time axis. */}
-      {sentimentPath && (
-        <div className="relative h-6" data-testid="sentiment-curve" aria-hidden="true">
-          <svg className="absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none">
-            {/* neutral baseline */}
-            <line x1="0" y1="50" x2="100" y2="50" stroke="hsl(var(--muted-foreground))" strokeOpacity="0.25" strokeWidth="0.5" />
-            <polyline
-              points={sentimentPath.map((p) => `${p.x * 100},${p.y * 100}`).join(' ')}
-              fill="none"
-              stroke="hsl(var(--primary))"
-              strokeWidth="1.5"
-              strokeLinejoin="round"
-              strokeLinecap="round"
-              vectorEffect="non-scaling-stroke"
-            />
-          </svg>
-        </div>
-      )}
-
-      {/* Waveform + overlays. WaveformCanvas draws speaker-colored bars, a strong
-          2px playhead, and seeks on click. Numbered markers sit on the axis. */}
-      <div className="relative">
-        {wf.waveformData ? (
-          <WaveformCanvas
-            audioData={wf.waveformData}
-            sentimentData={canvasSentiment}
-            speakerRanges={canvasSpeakerRanges}
-            currentTime={pb.liveTime}
-            duration={duration}
-            onSeek={seekTo}
-            height={56}
-          />
-        ) : wf.waveformLoadingError ? (
-          <div className="flex h-14 items-center justify-center rounded bg-destructive/10 text-xs text-destructive">
-            Waveform unavailable
-          </div>
-        ) : hasAudio ? (
-          // Decoding (the silent auto-load is in flight). Never "Press play…".
-          <div
-            className="relative flex h-14 items-center gap-0.5 overflow-hidden rounded"
-            data-testid="waveform-loading"
-            role="status"
-            aria-label="Loading waveform"
-          >
-            {Array.from({ length: 64 }).map((_, i) => (
-              <div
-                key={i}
-                className="w-1 shrink-0 rounded bg-muted-foreground/25 motion-safe:animate-pulse"
-                style={{ height: `${((i * 37) % 80) + 20}%`, animationDelay: `${i * 20}ms` }}
-              />
-            ))}
-            <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-xs text-muted-foreground">
-              Loading waveform…
-            </span>
-          </div>
-        ) : (
-          <div className="flex h-14 items-center justify-center rounded bg-background text-xs text-muted-foreground">
-            No audio to load
-          </div>
-        )}
-
-        {/* Explicit playhead cursor line — reinforces WaveformCanvas's playhead
-            and stays visible over the placeholder/loading states too. Uses live
-            playback progress, so it sits at the start until Play is pressed. */}
-        {duration > 0 && (
-          <div
-            className="pointer-events-none absolute inset-y-0 w-px bg-foreground/80"
-            style={{ left: `${playedProgress * 100}%` }}
-            aria-hidden="true"
-          />
-        )}
-
-        {/* Numbered event markers — actions vs decisions in distinct accents. */}
-        {markers.map((m) => {
-          const kind = m.kind ?? 'note'
-          const color = EVENT_KIND_COLOR[kind]
-          const isActive = activeEvent === m.id
-          return (
-            <button
-              key={m.id}
-              type="button"
-              onClick={() => activateEvent(m)}
-              title={`${kind}${m.label ? `: ${m.label}` : ''} (${formatTimestamp(m.timeSec)})`}
-              aria-label={`Jump to marker ${m.index ?? ''} (${kind})${m.label ? `: ${m.label}` : ''}`.trim()}
-              aria-pressed={isActive}
-              className={cn(
-                'absolute -top-1 flex h-4 w-4 -translate-x-1/2 items-center justify-center rounded-full border text-[9px] font-semibold leading-none text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60',
-                isActive ? 'border-foreground ring-2 ring-foreground/40' : 'border-background'
+      {/* Stage: a subtle gradient panel holding the sentiment curve + numbered
+          markers on top, the per-speaker colored waveform below, and the time axis.
+          This composition mirrors the approved timeline mockup. */}
+      <div className="overflow-hidden rounded-lg border border-border/60" style={{ background: STAGE_GRADIENT }} data-testid="timeline-stage">
+        <div className="relative">
+          {/* Sentiment panel — gradient area, +positive / −negative axis labels,
+              the sentiment curve, and numbered event markers riding ON the curve. */}
+          <div className="relative" style={{ height: SENTIMENT_H }} data-testid="sentiment-panel">
+            <svg className="absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+              <defs>
+                <linearGradient id={`wf-sent-fill-${stageId}`} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0" stopColor="hsl(var(--primary))" stopOpacity="0.22" />
+                  <stop offset="1" stopColor="hsl(var(--primary))" stopOpacity="0" />
+                </linearGradient>
+              </defs>
+              {/* neutral baseline */}
+              <line x1="0" y1="50" x2="100" y2="50" stroke="hsl(var(--muted-foreground))" strokeOpacity="0.25" strokeWidth="0.4" />
+              {sentimentPath && (
+                <>
+                  <polygon
+                    points={`0,100 ${sentimentPath.map((p) => `${p.x * 100},${p.y * 100}`).join(' ')} 100,100`}
+                    fill={`url(#wf-sent-fill-${stageId})`}
+                  />
+                  <polyline
+                    data-testid="sentiment-curve"
+                    points={sentimentPath.map((p) => `${p.x * 100},${p.y * 100}`).join(' ')}
+                    fill="none"
+                    stroke="hsl(var(--primary))"
+                    strokeWidth="1.5"
+                    strokeLinejoin="round"
+                    strokeLinecap="round"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                </>
               )}
-              style={{ left: `${m.leftPct}%`, backgroundColor: color }}
-            >
-              {m.index ?? ''}
-            </button>
-          )
-        })}
+            </svg>
+            <span className="pointer-events-none absolute left-2 top-1 text-[10px] leading-none text-muted-foreground/80">＋ positive</span>
+            <span className="pointer-events-none absolute bottom-1 left-2 text-[10px] leading-none text-muted-foreground/80">－ negative</span>
+
+            {/* Numbered event markers ON the curve — colored ring per kind. */}
+            {markers.map((m) => {
+              const kind = m.kind ?? 'note'
+              const color = EVENT_KIND_COLOR[kind]
+              const isActive = activeEvent === m.id
+              const topPct = curveYAt(m.leftPct / 100) * 100
+              return (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => activateEvent(m)}
+                  title={`${kind}${m.label ? `: ${m.label}` : ''} (${formatTimestamp(m.timeSec)})`}
+                  aria-label={`Jump to marker ${m.index ?? ''} (${kind})${m.label ? `: ${m.label}` : ''}`.trim()}
+                  aria-pressed={isActive}
+                  className={cn(
+                    'absolute z-10 flex h-[18px] w-[18px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 bg-background text-[9px] font-bold leading-none shadow focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60',
+                    isActive && 'ring-2 ring-foreground/50'
+                  )}
+                  style={{ left: `${m.leftPct}%`, top: `${topPct}%`, borderColor: color, color }}
+                  data-testid="timeline-marker"
+                >
+                  {m.index ?? ''}
+                </button>
+              )
+            })}
+          </div>
+
+          {/* Wave band — per-speaker colored bars, or a clean placeholder. */}
+          <div className="relative px-2 pb-1.5" style={{ height: WAVE_H }} data-testid="wave-band">
+            {wf.waveformData ? (
+              <WaveformCanvas
+                audioData={wf.waveformData}
+                sentimentData={canvasSentiment}
+                speakerRanges={canvasSpeakerRanges}
+                currentTime={pb.liveTime}
+                duration={duration}
+                onSeek={seekTo}
+                height={WAVE_H - 6}
+              />
+            ) : wf.waveformLoadingError ? (
+              <div className="flex h-full items-center justify-center text-xs text-destructive">
+                Waveform unavailable
+              </div>
+            ) : hasAudio ? (
+              // H5: clean, centered placeholder while (rarely) computing — never a
+              // half-drawn wave with an overlaid label, and no partial bars.
+              <div
+                className="flex h-full items-center justify-center"
+                data-testid="waveform-preparing"
+                role="status"
+                aria-label="Preparing waveform"
+              >
+                <span className="text-xs text-muted-foreground motion-safe:animate-pulse">Preparing waveform…</span>
+              </div>
+            ) : (
+              <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+                No audio to load
+              </div>
+            )}
+          </div>
+
+          {/* Play-zone (dashed) + bright playhead spanning the panel and the wave.
+              Uses live playback progress, so it sits at the start until Play. */}
+          {duration > 0 && (
+            <>
+              <div
+                className="pointer-events-none absolute inset-y-0 z-20 border-x border-dashed border-foreground/40 bg-foreground/5"
+                style={{ left: `calc(${playedProgress * 100}% - 6px)`, width: 12 }}
+                aria-hidden="true"
+              />
+              <div
+                className="pointer-events-none absolute inset-y-0 z-20 w-0.5 bg-foreground shadow-[0_0_6px] shadow-foreground/60"
+                style={{ left: `${playedProgress * 100}%`, transform: 'translateX(-1px)' }}
+                aria-hidden="true"
+              >
+                <span className="absolute -left-[3px] -top-0.5 h-2 w-2 rounded-full bg-foreground" />
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Time axis — 0:00 … total, evenly quartered. */}
+        <div className="flex justify-between border-t border-border/60 px-2 py-1 text-[10px] tabular-nums text-muted-foreground">
+          <span>0:00</span>
+          <span>{formatTimestamp(duration * 0.25)}</span>
+          <span>{formatTimestamp(duration * 0.5)}</span>
+          <span>{formatTimestamp(duration * 0.75)}</span>
+          <span>{formatTimestamp(duration)}</span>
+        </div>
       </div>
 
       {/* Times + transport. NOTE: no speaker-name legend here — the names (and

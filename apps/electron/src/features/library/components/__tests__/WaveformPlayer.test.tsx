@@ -127,12 +127,48 @@ describe('WaveformPlayer', () => {
     })
   })
 
-  it('shows a "Loading waveform…" state (never "Press play…") while peaks decode', () => {
+  it('H5: shows a clean "Preparing waveform…" placeholder — never the old half-drawn "Loading waveform" overlay', () => {
     render(<WaveformPlayer mode="full" recordingId="rec-1" filePath="/a.wav" />)
     expect(screen.getByTestId('waveform-player-full')).toBeInTheDocument()
-    expect(screen.getByTestId('waveform-loading')).toBeInTheDocument()
-    expect(screen.getByText(/loading waveform/i)).toBeInTheDocument()
+    // New clean placeholder…
+    expect(screen.getByTestId('waveform-preparing')).toBeInTheDocument()
+    expect(screen.getByText(/preparing waveform/i)).toBeInTheDocument()
+    // …and NONE of the old half-drawn-wave-with-overlay affordances.
+    expect(screen.queryByTestId('waveform-loading')).not.toBeInTheDocument()
+    expect(screen.queryByText(/loading waveform/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/press play to load/i)).not.toBeInTheDocument()
+  })
+
+  it('H2: full mode renders the mockup composition — gradient stage, sentiment panel, time axis', () => {
+    useUIStore.setState({ currentlyPlayingId: 'rec-1', playbackDuration: 100 })
+    render(<WaveformPlayer mode="full" recordingId="rec-1" filePath="/a.wav" durationSec={100} />)
+    expect(screen.getByTestId('timeline-stage')).toBeInTheDocument()
+    expect(screen.getByTestId('sentiment-panel')).toBeInTheDocument()
+    expect(screen.getByTestId('wave-band')).toBeInTheDocument()
+    // Faint +positive / −negative axis labels from the mockup.
+    expect(screen.getByText(/positive/i)).toBeInTheDocument()
+    expect(screen.getByText(/negative/i)).toBeInTheDocument()
+  })
+
+  it('H2: numbered markers sit ON the sentiment curve inside the sentiment panel', () => {
+    useUIStore.setState({ currentlyPlayingId: 'rec-1', playbackDuration: 100 })
+    render(
+      <WaveformPlayer
+        mode="full"
+        recordingId="rec-1"
+        filePath="/a.wav"
+        durationSec={100}
+        events={[{ id: 'e1', timeSec: 50, index: 1, label: 'Ship it', kind: 'action' }]}
+        sentiment={[
+          { startSec: 0, endSec: 50, score: 0.8 },
+          { startSec: 50, endSec: 100, score: -0.6 },
+        ]}
+      />
+    )
+    const panel = screen.getByTestId('sentiment-panel')
+    // The marker is a child of the sentiment panel (on the curve), not the wave band.
+    expect(within(panel).getByTestId('timeline-marker')).toBeInTheDocument()
+    expect(within(panel).getByRole('button', { name: /jump to marker 1/i })).toBeInTheDocument()
   })
 
   it('silently kicks loadWaveformOnly when it has a file but no decoded peaks (no Play)', () => {

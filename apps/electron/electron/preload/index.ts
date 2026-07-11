@@ -549,6 +549,21 @@ export interface ElectronAPI {
     saveRecording: (filename: string, data: number[], recordingDateIso?: string) => Promise<string>
   }
 
+  // Waveform peak cache (disk-backed) — compute peaks once, load instantly thereafter
+  waveform: {
+    getCache: (recordingId: string, fileSize?: number) => Promise<{
+      version: number
+      recordingId: string
+      peaks: number[]
+      sampleCount: number
+      duration: number
+      fileSize: number
+      createdAt: string
+    } | null>
+    setCache: (recordingId: string, peaks: number[], duration?: number, fileSize?: number) => Promise<boolean>
+    clearCache: (recordingId: string) => Promise<boolean>
+  }
+
   // Synced files - tracking which device files have been downloaded
   syncedFiles: {
     isFileSynced: (originalFilename: string) => Promise<boolean>
@@ -1293,6 +1308,13 @@ const electronAPI: ElectronAPI = {
     readRecording: (filePath) => callIPC('storage:read-recording', filePath),
     deleteRecording: (filePath) => callIPC('storage:delete-recording', filePath),
     saveRecording: (filename, data, recordingDateIso) => callIPC('storage:save-recording', filename, data, recordingDateIso)
+  },
+
+  waveform: {
+    getCache: (recordingId, fileSize) => callIPC('waveform:getCache', recordingId, fileSize),
+    setCache: (recordingId, peaks, duration, fileSize) =>
+      callIPC('waveform:setCache', recordingId, peaks, duration, fileSize),
+    clearCache: (recordingId) => callIPC('waveform:clearCache', recordingId)
   },
 
   syncedFiles: {

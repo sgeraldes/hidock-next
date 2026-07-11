@@ -13,6 +13,42 @@ import { parseError, getErrorMessage } from '@/features/library/utils/errorHandl
 import { generateWaveformData, decodeAudioData, getAudioMimeType } from '@/utils/audioUtils'
 import { shouldLogQa } from '@/services/qa-monitor'
 
+/**
+ * H5: Try to load precomputed waveform peaks from the disk cache.
+ * Returns `{ peaks, duration }` on hit, or null on miss / unavailable.
+ */
+async function tryLoadCachedWaveform(
+  recordingId: string
+): Promise<{ peaks: Float32Array; duration: number } | null> {
+  try {
+    const cache = window.electronAPI?.waveform
+    if (!cache) return null
+    const entry = await cache.getCache(recordingId)
+    if (entry && Array.isArray(entry.peaks) && entry.peaks.length > 0) {
+      return { peaks: Float32Array.from(entry.peaks), duration: entry.duration ?? 0 }
+    }
+  } catch (err) {
+    console.warn('[useAudioPlayback] Waveform cache read failed:', err)
+  }
+  return null
+}
+
+/** H5: Persist computed waveform peaks to the disk cache (best-effort). */
+async function persistWaveform(
+  recordingId: string,
+  peaks: Float32Array,
+  duration: number,
+  fileSize: number
+): Promise<void> {
+  try {
+    const cache = window.electronAPI?.waveform
+    if (!cache) return
+    await cache.setCache(recordingId, Array.from(peaks), duration, fileSize)
+  } catch (err) {
+    console.warn('[useAudioPlayback] Waveform cache write failed:', err)
+  }
+}
+
 export function useAudioPlayback() {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const audioBlobUrlRef = useRef<string | null>(null)
@@ -150,15 +186,25 @@ export function useAudioPlayback() {
         // Generate waveform data for visualization (skip if already loaded)
         const { waveformLoadedForId } = useUIStore.getState()
         if (waveformLoadedForId !== recordingId) {
-          try {
-            const audioBuffer = await decodeAudioData(base64, mimeType)
-            const waveformData = await generateWaveformData(audioBuffer, 1000)
-            setWaveformData(waveformData)
+          // H5: prefer the disk cache — instant, no recompute.
+          const cachedPeaks = await tryLoadCachedWaveform(recordingId)
+          if (cachedPeaks) {
+            setWaveformData(cachedPeaks.peaks)
             useUIStore.getState().setWaveformLoadedFor(recordingId)
-          } catch (waveformError) {
-            console.warn('[useAudioPlayback] Failed to generate waveform:', waveformError)
-            setWaveformData(null)
-            useUIStore.getState().setWaveformLoadingError(recordingId, 'Failed to generate waveform')
+            if (shouldLogQa()) console.log('[useAudioPlayback] Waveform loaded from cache during play')
+          } else {
+            try {
+              const audioBuffer = await decodeAudioData(base64, mimeType)
+              const waveformData = await generateWaveformData(audioBuffer, 1000)
+              setWaveformData(waveformData)
+              useUIStore.getState().setWaveformLoadedFor(recordingId)
+              const fileSizeBytes = Math.ceil((base64.length * 3) / 4)
+              void persistWaveform(recordingId, waveformData, audioBuffer.duration, fileSizeBytes)
+            } catch (waveformError) {
+              console.warn('[useAudioPlayback] Failed to generate waveform:', waveformError)
+              setWaveformData(null)
+              useUIStore.getState().setWaveformLoadingError(recordingId, 'Failed to generate waveform')
+            }
           }
         } else {
           if (shouldLogQa()) console.log('[useAudioPlayback] Skipping waveform generation - already loaded')
@@ -212,13 +258,30 @@ export function useAudioPlayback() {
     const signal = waveformAbortControllerRef.current.signal
 
     const { setWaveformLoading, setWaveformLoadingError, setWaveformLoadedFor, setWaveformData } = useUIStore.getState()
-    setWaveformLoading(recordingId)
 
     try {
       if (signal.aborted) {
         if (shouldLogQa()) console.log('[useAudioPlayback] Waveform load aborted (early)')
         return
       }
+
+      // H5: Load peaks from the disk cache FIRST — instant, no loading state.
+      const cached = await tryLoadCachedWaveform(recordingId)
+      if (signal.aborted) return
+      if (cached) {
+        setWaveformData(cached.peaks)
+        setWaveformLoadedFor(recordingId)
+        // Backfill the real duration from the cache so the rich timeline axis is
+        // correct on a silent open, without decoding the file again.
+        if (Number.isFinite(cached.duration) && cached.duration > 0) {
+          useUIStore.getState().setPlaybackProgress(0, cached.duration)
+        }
+        if (shouldLogQa()) console.log(`[QA-MONITOR][Operation] Waveform loaded from cache: ${recordingId}`)
+        return
+      }
+
+      // Cache miss — only NOW show the (brief) computing state.
+      setWaveformLoading(recordingId)
 
       const response = await window.electronAPI.storage.readRecording(filePath)
 
@@ -247,6 +310,9 @@ export function useAudioPlayback() {
 
       setWaveformData(waveformData)
       setWaveformLoadedFor(recordingId)
+
+      // H5: Persist peaks to disk so the next open is instant (no recompute).
+      void persistWaveform(recordingId, waveformData, audioBuffer.duration, fileSizeBytes)
 
       // Backfill duration: imported/watched files store none, so the Library
       // shows "Unknown". The decode gives us the real value — surface it now

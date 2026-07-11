@@ -220,6 +220,14 @@ export function SourceReader({
   const livePlaybackDuration = useUIStore((s) => s.playbackDuration)
   const waveformLoadedForId = useUIStore((s) => s.waveformLoadedForId)
 
+  // H6: When a transcribed recording is opened via the sidebar Library nav, the
+  // parent may not have enriched the `transcript` prop yet — which left the reader
+  // showing "Transcript not available" and a colorless waveform. Fetch the
+  // transcript directly as a fallback so the transcript + per-speaker colors render
+  // on first paint, regardless of how the recording was selected.
+  const [fallbackTranscript, setFallbackTranscript] = useState<Transcript | undefined>(undefined)
+  const effectiveTranscript = transcript ?? fallbackTranscript
+
   // Reset all state when recording changes
   useEffect(() => {
     setIsEditingTitle(false)
@@ -229,10 +237,30 @@ export function SourceReader({
     setShowTranscribeWarning(false)
     setPendingTranscribe(null)
     setReDiarizing(false)
+    setFallbackTranscript(undefined)
     // A freshly-opened recording always starts at the top → big timeline.
     setScrolled(false)
     if (scrollRef.current) scrollRef.current.scrollTop = 0
   }, [recording?.id])
+
+  // H6: Fetch the transcript directly when the parent didn't supply one but the
+  // recording is transcribed (e.g. selection arrived via the sidebar Library nav
+  // before enrichment landed). No-op when a transcript prop is already present.
+  useEffect(() => {
+    if (transcript) return
+    if (!recording || !hasLocalPath(recording)) return
+    if (recording.transcriptionStatus !== 'complete') return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const fetched = await window.electronAPI?.transcripts?.getByRecordingId(recording.id)
+        if (!cancelled && fetched) setFallbackTranscript(fetched as Transcript)
+      } catch (err) {
+        console.error('[SourceReader] Transcript fallback fetch failed:', err)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [recording, transcript])
 
   // Preload the waveform as soon as a playable recording is opened, so the
   // reader shows the visualization immediately instead of "Press Play to load
@@ -257,14 +285,14 @@ export function SourceReader({
   // a recording is selected — otherwise selecting one adds a hook and React
   // throws "Rendered more hooks than during the previous render."
   const transcriptSegments = useMemo<StoredSegment[] | undefined>(() => {
-    if (!transcript?.speakers) return undefined
+    if (!effectiveTranscript?.speakers) return undefined
     try {
-      const parsed = JSON.parse(transcript.speakers)
+      const parsed = JSON.parse(effectiveTranscript.speakers)
       return Array.isArray(parsed) && parsed.length > 0 ? (parsed as StoredSegment[]) : undefined
     } catch {
       return undefined
     }
-  }, [transcript?.speakers])
+  }, [effectiveTranscript?.speakers])
 
   // People (Participants + Invited), derived from the resolved speaker map so a
   // renamed speaker updates here immediately. Called unconditionally (no
@@ -299,6 +327,33 @@ export function SourceReader({
     () => deriveSpeakerRanges(transcriptSegments, timelineDurationSec, (base) => labelResolution.get(base)),
     [transcriptSegments, timelineDurationSec, labelResolution]
   )
+
+  // The recording's action items (parsed once) — the single home for these is the
+  // timeline event-list below, NOT the transcript body (H3 de-duplication).
+  const actionItems = useMemo(
+    () => parseJsonArray<string>(effectiveTranscript?.action_items).map((s) => s.trim()).filter(Boolean),
+    [effectiveTranscript?.action_items]
+  )
+
+  // H3: Timeline events for the full-mode event-list. Prefer the sibling agent's
+  // analysis markers; when those are absent, synthesize numbered markers from the
+  // action items so the event-list is ALWAYS the reliable single home for them
+  // (and they can be removed from the transcript body without being lost).
+  const timelineEvents = useMemo<TimelineEvent[]>(() => {
+    if (timeline?.events && timeline.events.length > 0) return timeline.events
+    if (actionItems.length === 0 || timelineDurationSec <= 0) return []
+    const decisionHint = /\b(decide|decision|approv|agree|ship|conclu|sign off)\b/i
+    return actionItems.map((label, i) => {
+      const frac = actionItems.length === 1 ? 0.5 : 0.05 + (0.9 * i) / (actionItems.length - 1)
+      return {
+        id: `ai-${i}`,
+        timeSec: Math.min(timelineDurationSec, Math.max(0, frac * timelineDurationSec)),
+        index: i + 1,
+        label,
+        kind: decisionHint.test(label) ? 'decision' : 'action'
+      } as TimelineEvent
+    })
+  }, [timeline?.events, actionItems, timelineDurationSec])
 
   // Fetch the sibling agent's timeline analysis when a recording opens. Empty or
   // absent → attempt a one-time backfill via analyzeTimeline, then re-read. All
@@ -492,7 +547,7 @@ export function SourceReader({
 
   // Same title resolver the list row uses, so clicking a row and the detail
   // header always agree (no raw filename leaking through here).
-  const { primaryText: displayTitle } = getDisplayTitle(recording, meeting, transcript)
+  const { primaryText: displayTitle } = getDisplayTitle(recording, meeting, effectiveTranscript)
 
   // Prefer the stored duration; fall back to the live decoded value for the
   // recording whose waveform is currently loaded (computed as a hook above).
@@ -804,7 +859,7 @@ export function SourceReader({
               filePath={localPath}
               durationSec={durationSeconds}
               speakerRanges={speakerTimeline.ranges}
-              events={timeline?.events}
+              events={timelineEvents}
               sentiment={timeline?.sentiment}
               analyzing={analyzingTimeline}
               scrolled={scrolled}
@@ -947,18 +1002,20 @@ export function SourceReader({
 
           {/* Transcript Content */}
           <div>
-            {transcript ? (
+            {effectiveTranscript ? (
               <TranscriptViewer
-                transcript={transcript.full_text}
+                transcript={effectiveTranscript.full_text}
                 segments={transcriptSegments}
                 recordingId={recording.id}
                 currentTimeMs={currentTimeMs}
                 isPlaying={isPlaying}
                 onSeek={onSeek || (() => {})}
                 showSummary={true}
-                showActionItems={true}
-                summary={transcript.summary ?? undefined}
-                actionItems={parseJsonArray<string>(transcript.action_items)}
+                /* H3: action items live in ONE home — the timeline event-list above.
+                   Keep them out of the transcript body to avoid duplication. */
+                showActionItems={false}
+                summary={effectiveTranscript.summary ?? undefined}
+                actionItems={actionItems}
               />
             ) : recording.transcriptionStatus === 'complete' ? (
               <div className="text-center text-muted-foreground py-8">
