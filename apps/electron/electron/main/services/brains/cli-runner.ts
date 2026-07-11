@@ -72,13 +72,31 @@ export interface CliRunResult {
   /** Set when stdout/stderr blew past its byte cap and the process tree was killed. */
   outputLimitExceeded: boolean
   /**
-   * Set ONLY when the absolute watchdog backstop had to resolve the run before the
-   * process-tree teardown could be confirmed. The forceful tree-termination is
-   * still fired (and logged) in the background, but we could not prove it finished —
-   * so an expensive model invocation MIGHT still be terminating (or, worst case,
-   * alive) when this resolves. Never set on the normal terminate-and-confirm path.
+   * Set when the process-tree teardown could NOT be positively confirmed, so an
+   * expensive model invocation MIGHT still be terminating (or, worst case, alive)
+   * when this resolves. It trips on any of:
+   *   - the absolute watchdog backstop resolving the run before teardown finished;
+   *   - the Windows tree-termination utility (taskkill) exiting non-zero, emitting
+   *     an error, or failing to spawn;
+   *   - the POSIX process-group signal throwing (e.g. ESRCH — the group is gone or
+   *     was never a group), meaning we could not prove descendants were reaped.
+   * The forceful tree-kill is still fired (and logged) in every case. Never set on
+   * the normal, confirmed terminate-and-reap path.
    */
   terminationUnconfirmed?: boolean
+}
+
+/**
+ * Internal seams injected ONLY by unit tests so the OS-specific teardown branches
+ * (win32 taskkill exit-code handling, POSIX process-group signalling) can be
+ * exercised on any host. Real callers never pass this — the defaults bind to the
+ * live `process.platform` / `process.kill`.
+ */
+export interface CliRunnerInternals {
+  /** Override the platform gate (default: process.platform). */
+  platform?: NodeJS.Platform
+  /** Override the process-group signaller (default: process.kill). */
+  processKill?: (pid: number, signal?: string | number) => void
 }
 
 export interface ResolvedExecutable {
@@ -180,13 +198,18 @@ export function runCli(
   command: string,
   args: string[],
   opts: CliRunOptions,
-  spawnFn: SpawnFn = nodeSpawn
+  spawnFn: SpawnFn = nodeSpawn,
+  internals: CliRunnerInternals = {}
 ): Promise<CliRunResult> {
   return new Promise<CliRunResult>((resolve) => {
     const maxStdoutBytes = opts.maxStdoutBytes ?? DEFAULT_MAX_STDOUT_BYTES
     const maxStderrBytes = opts.maxStderrBytes ?? DEFAULT_MAX_STDERR_BYTES
     const killGraceMs = opts.killGraceMs ?? DEFAULT_KILL_GRACE_MS
     const killWatchdogMs = opts.killWatchdogMs ?? DEFAULT_KILL_WATCHDOG_MS
+    // Platform gate + process-group signaller: real by default, overridable by tests.
+    const platform = internals.platform ?? process.platform
+    const processKill =
+      internals.processKill ?? ((pid: number, signal?: string | number) => process.kill(pid, signal))
 
     let settled = false
     let stdout = ''
@@ -257,7 +280,18 @@ export function runCli(
       stdio: ['pipe', 'pipe', 'pipe'],
     }
 
-    if (spawnFn === nodeSpawn && process.platform === 'win32') {
+    // POSIX only: make the child its own process-group LEADER so a later teardown
+    // can signal the WHOLE group via the negative pid (a child spawned without this
+    // shares our group, so `process.kill(-pid)` would target a non-existent group
+    // and throw ESRCH while descendants survive). Not on Windows, which tears the
+    // tree down through the cmd.exe wrapper + `taskkill /T`. `detached` here does
+    // NOT detach stdio (we keep the pipes and never call unref), so stdin piping and
+    // output capture are unaffected.
+    if (platform !== 'win32') {
+      spawnOptions.detached = true
+    }
+
+    if (spawnFn === nodeSpawn && platform === 'win32') {
       const resolved = resolveWindowsExecutable(command, effectiveEnv)
       if (!resolved) {
         // Nothing on PATH — behave exactly like an ENOENT spawn failure.
@@ -298,33 +332,54 @@ export function runCli(
           /* already gone */
         }
         const pid = child.pid
-        if (pid && process.platform === 'win32') {
+        if (pid && platform === 'win32') {
           // A killed .cmd shim / cmd.exe wrapper can leave the real CLI (and its
           // children) running — taskkill /T tears down the whole tree. Await its
-          // exit so we only resolve once the tree teardown was actually dispatched
-          // and reaped.
+          // exit so we only resolve once the teardown was actually reaped, and
+          // only treat a clean exit (code 0) as CONFIRMED. A non-zero exit (access
+          // denied, invalid/reused pid), an error event, or a spawn throw means the
+          // subtree may still be alive → flag terminationUnconfirmed.
+          let killerSettled = false
+          const finishKill = (confirmed: boolean, detail: string) => {
+            if (killerSettled) return
+            killerSettled = true
+            if (!confirmed) {
+              terminationUnconfirmed = true
+              console.warn(
+                `[cli-runner] Windows process-tree teardown could not be confirmed (${detail}); ` +
+                  'flagging terminationUnconfirmed=true — a model invocation may still be running.'
+              )
+            }
+            resolveKill()
+          }
           try {
             const killer = spawnFn(taskkillPath(), ['/pid', String(pid), '/t', '/f'], {
               windowsHide: true,
               stdio: 'ignore',
             })
-            let killerSettled = false
-            const finishKill = () => {
-              if (killerSettled) return
-              killerSettled = true
-              resolveKill()
-            }
-            killer.on?.('error', finishKill)
-            killer.on?.('close', finishKill)
-          } catch {
-            resolveKill()
+            killer.on?.('error', (err: Error) =>
+              finishKill(false, `taskkill spawn error: ${err?.message ?? String(err)}`)
+            )
+            killer.on?.('close', (code: number | null) =>
+              finishKill(code === 0, `taskkill exited with code ${code}`)
+            )
+          } catch (err) {
+            finishKill(false, `taskkill could not be spawned: ${(err as Error)?.message ?? String(err)}`)
           }
-        } else if (pid && process.platform !== 'win32') {
+        } else if (pid && platform !== 'win32') {
+          // The child was spawned detached (a process-group leader), so the negative
+          // pid targets its whole group. VERIFY the signal: a throw (e.g. ESRCH)
+          // means the group is gone or was never a group, so we cannot prove the
+          // descendants were reaped → flag terminationUnconfirmed.
           try {
-            // Negative pid targets the whole process group where available.
-            process.kill(-pid, 'SIGKILL')
-          } catch {
-            /* group kill unsupported / already gone */
+            processKill(-pid, 'SIGKILL')
+          } catch (err) {
+            terminationUnconfirmed = true
+            console.warn(
+              `[cli-runner] POSIX process-group teardown could not be confirmed ` +
+                `(kill(-${pid}) threw: ${(err as Error)?.message ?? String(err)}); ` +
+                'flagging terminationUnconfirmed=true — a model invocation may still be running.'
+            )
           }
           resolveKill()
         } else {

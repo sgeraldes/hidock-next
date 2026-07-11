@@ -194,6 +194,139 @@ describe('runCli — wrapper close must not skip tree teardown (Windows-shaped)'
   })
 })
 
+// HIGH (Codex review, round 2) — the Windows tree-termination utility (taskkill)
+// resolving on its `close`/`error` event WITHOUT checking the exit code meant a
+// FAILED teardown (non-zero exit, error, or spawn throw) was reported as a
+// confirmed kill, even though the CLI subtree may still be running. A failed
+// teardown must flag terminationUnconfirmed. The platform gate is injected so this
+// win32-shaped path is exercised on any host.
+describe('runCli — Windows teardown failure must not be reported as confirmed (HIGH-1)', () => {
+  it('flags terminationUnconfirmed when the tree-termination utility exits NON-ZERO', async () => {
+    const spawn = makeFakeSpawn((cmd) =>
+      /taskkill/i.test(cmd)
+        ? { code: 1 } // teardown utility FAILS (e.g. access denied / invalid pid)
+        : { never: true, pid: 5150 } // wrapper: closes the instant we signal it
+    )
+    const res = await runCli(
+      'wrapper',
+      [],
+      { timeoutMs: 10, killGraceMs: 1000, killWatchdogMs: 5000 },
+      asSpawn(spawn.fn),
+      { platform: 'win32' }
+    )
+    expect(res.timedOut).toBe(true)
+    expect(res.code).toBeNull()
+    // The teardown WAS dispatched…
+    expect(spawn.calls.some((c) => /taskkill/i.test(c.command))).toBe(true)
+    // …but its non-zero exit means we could not confirm it.
+    expect(res.terminationUnconfirmed).toBe(true)
+  })
+
+  it('flags terminationUnconfirmed when the tree-termination utility EMITS AN ERROR', async () => {
+    const spawn = makeFakeSpawn((cmd) =>
+      /taskkill/i.test(cmd)
+        ? { emitError: true } // teardown utility cannot even run
+        : { never: true, pid: 5151 }
+    )
+    const res = await runCli(
+      'wrapper',
+      [],
+      { timeoutMs: 10, killGraceMs: 1000, killWatchdogMs: 5000 },
+      asSpawn(spawn.fn),
+      { platform: 'win32' }
+    )
+    expect(res.timedOut).toBe(true)
+    expect(res.terminationUnconfirmed).toBe(true)
+  })
+
+  it('flags terminationUnconfirmed when the tree-termination utility FAILS TO SPAWN (throws)', async () => {
+    const base = makeFakeSpawn({ never: true, pid: 6060 })
+    const spawnFn = asSpawn((command: string, args: string[], options?: unknown) => {
+      if (/taskkill/i.test(command)) throw new Error('EPERM')
+      return base.fn(command, args, options)
+    })
+    const res = await runCli(
+      'wrapper',
+      [],
+      { timeoutMs: 10, killGraceMs: 1000, killWatchdogMs: 5000 },
+      spawnFn,
+      { platform: 'win32' }
+    )
+    expect(res.timedOut).toBe(true)
+    expect(res.terminationUnconfirmed).toBe(true)
+  })
+
+  it('does NOT flag terminationUnconfirmed when the tree-termination utility exits 0', async () => {
+    const spawn = makeFakeSpawn((cmd) =>
+      /taskkill/i.test(cmd)
+        ? { code: 0 } // clean teardown
+        : { never: true, pid: 5152 }
+    )
+    const res = await runCli(
+      'wrapper',
+      [],
+      { timeoutMs: 10, killGraceMs: 1000, killWatchdogMs: 5000 },
+      asSpawn(spawn.fn),
+      { platform: 'win32' }
+    )
+    expect(res.timedOut).toBe(true)
+    expect(spawn.calls.some((c) => /taskkill/i.test(c.command))).toBe(true)
+    expect(res.terminationUnconfirmed).toBeFalsy()
+  })
+})
+
+// HIGH (Codex review, round 2) — on POSIX the child was spawned WITHOUT
+// `detached:true`, so its pid was not a process-group id; `process.kill(-pid,…)`
+// throws ESRCH (swallowed) while descendants survive, yet the run resolved as a
+// confirmed teardown. Fix: spawn the CLI as a process-group leader and VERIFY the
+// group signal — a throw flags terminationUnconfirmed. The platform + process-group
+// signaller are injected so this POSIX-shaped path is exercised on any host.
+describe('runCli — POSIX process-group teardown (HIGH-2)', () => {
+  it('spawns the child DETACHED (group leader) and signals the NEGATIVE pid on the normal path', async () => {
+    const spawn = makeFakeSpawn({ never: true, ignoreKill: true, pid: 909 })
+    const killed: Array<[number, string | number | undefined]> = []
+    const res = await runCli(
+      'posix-hang',
+      [],
+      { timeoutMs: 10, killGraceMs: 20, killWatchdogMs: 500 },
+      asSpawn(spawn.fn),
+      { platform: 'linux', processKill: (pid, signal) => void killed.push([pid, signal]) }
+    )
+    expect(res.timedOut).toBe(true)
+    // The child was made a process-group leader so the group can be signalled.
+    expect((spawn.calls[0].options as { detached?: boolean }).detached).toBe(true)
+    // Teardown targeted the whole GROUP (negative pid), not just the leader.
+    expect(killed).toContainEqual([-909, 'SIGKILL'])
+    // The group signal succeeded → confirmed teardown.
+    expect(res.terminationUnconfirmed).toBeFalsy()
+  })
+
+  it('flags terminationUnconfirmed when the POSIX group signal throws ESRCH', async () => {
+    const spawn = makeFakeSpawn({ never: true, ignoreKill: true, pid: 4242 })
+    const killed: number[] = []
+    const res = await runCli(
+      'posix-hang',
+      [],
+      { timeoutMs: 10, killGraceMs: 20, killWatchdogMs: 500 },
+      asSpawn(spawn.fn),
+      {
+        platform: 'linux',
+        processKill: (pid) => {
+          killed.push(pid)
+          const err = new Error('kill ESRCH') as NodeJS.ErrnoException
+          err.code = 'ESRCH'
+          throw err
+        },
+      }
+    )
+    expect(res.timedOut).toBe(true)
+    // It DID attempt the group signal (negative pid)…
+    expect(killed).toContain(-4242)
+    // …but the throw means descendants may survive → unconfirmed.
+    expect(res.terminationUnconfirmed).toBe(true)
+  })
+})
+
 // HIGH-3 — unbounded stdout/stderr accumulation is a main-process DoS. Independent
 // byte caps must stop reading, kill the tree, and flag the breach.
 describe('runCli — output byte caps (HIGH-3)', () => {
