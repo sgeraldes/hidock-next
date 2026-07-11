@@ -1,7 +1,6 @@
-import { memo, useState } from 'react'
+import { memo } from 'react'
 import { AlertCircle, Download, Trash2, Wand2, Sparkles, FileText, RefreshCw, AudioLines, MoreHorizontal, Calendar, EyeOff, Eye } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Checkbox } from '@/components/ui/checkbox'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   DropdownMenu,
@@ -27,10 +26,11 @@ interface SourceRowProps {
   transcript?: Transcript
   isSelected?: boolean
   isActiveSource?: boolean
-  /** True when ≥1 row anywhere in the list is selected (selection mode active) —
-      keeps every row's checkbox revealed so the selected set stays adjustable. */
+  /** Bulk-selection checkbox was removed from the row (owner request). Retained so
+      existing callers keep type-checking; no longer drives any UI. */
   anySelected?: boolean
   searchQuery?: string
+  /** Row-level checkbox selection was removed; kept for caller compatibility. */
   onSelectionChange?: (id: string, shiftKey: boolean) => void
   onClick?: () => void
   // Action handlers
@@ -54,9 +54,7 @@ export const SourceRow = memo(function SourceRow({
   transcript,
   isSelected = false,
   isActiveSource = false,
-  anySelected = false,
   searchQuery = '',
-  onSelectionChange,
   onClick,
   onDownload,
   onDelete,
@@ -72,32 +70,16 @@ export const SourceRow = memo(function SourceRow({
 }: SourceRowProps) {
   const error = useLibraryStore((state) => state.recordingErrors.get(recording.id))
 
-  // Reveal-on-interaction state for the bulk-selection checkbox. Tracked locally
-  // so the checkbox can be CONDITIONALLY RENDERED (not just faded): when hidden it
-  // is absent from the DOM entirely, taking ZERO layout width — the title/content
-  // then shifts left into the freed space instead of leaving a permanent gap.
-  const [isHovering, setIsHovering] = useState(false)
-  const [isFocusWithin, setIsFocusWithin] = useState(false)
-  // The checkbox is shown ONLY when: this row is checked, selection mode is active
-  // (≥1 row selected anywhere), or the user is hovering/keyboard-focusing this row.
-  // Merely VIEWING a row (isActiveSource) never shows it — viewing ≠ selecting.
-  const showCheckbox = Boolean(onSelectionChange) && (isSelected || anySelected || isHovering || isFocusWithin)
-
   // Smart title
   const { primaryText, source: titleSource } = getDisplayTitle(recording, meeting, transcript)
   // The machine filename is noise in the prime space — it lives in the row's
   // hover tooltip and the expanded row, never on the always-visible second line.
   const titleIsFilename = titleSource === 'filename'
 
-  const handleCheckboxClick = (e: React.MouseEvent) => {
-    e.stopPropagation()
-    onSelectionChange?.(recording.id, e.shiftKey)
-  }
-
   const handleRowClick = (e: React.MouseEvent) => {
-    // Don't trigger onClick if clicking on buttons or checkbox
+    // Don't trigger onClick when the click lands on an action button.
     const target = e.target as HTMLElement
-    if (target.closest('button') || target.closest('[role="checkbox"]')) {
+    if (target.closest('button')) {
       return
     }
     onClick?.()
@@ -116,8 +98,7 @@ export const SourceRow = memo(function SourceRow({
   return (
     <div
       className={[
-        // `group` lets the selection checkbox reveal on row hover/focus.
-        'group @container flex items-start justify-between gap-2 py-2.5 px-3 cursor-pointer',
+        '@container flex items-start justify-between gap-2 py-2.5 px-3 cursor-pointer',
         'transition-[background-color,box-shadow] duration-150',
         // Hover reads as a gentle elevation (bg + inner ring — the row list is
         // overflow-clipped, so an inset ring conveys lift where a drop shadow can't).
@@ -132,33 +113,10 @@ export const SourceRow = memo(function SourceRow({
       ].filter(Boolean).join(' ')}
       role="option"
       onClick={handleRowClick}
-      onMouseEnter={() => setIsHovering(true)}
-      onMouseLeave={() => setIsHovering(false)}
-      onFocus={() => setIsFocusWithin(true)}
-      onBlur={(e) => {
-        // Only drop focus-reveal when focus leaves the row entirely (not when it
-        // moves between the row and its checkbox/menu children).
-        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
-          setIsFocusWithin(false)
-        }
-      }}
       aria-selected={isSelected}
       tabIndex={0}
     >
       <div className="flex items-start gap-2 min-w-0 flex-1">
-        {/* Checkbox is CONDITIONALLY RENDERED: when hidden it is not in the DOM at
-            all, so it consumes zero width and no flex gap — the title slides left.
-            It reveals on hover/keyboard-focus and stays put while selected or while
-            selection mode is active. */}
-        {onSelectionChange && showCheckbox && (
-          <Checkbox
-            checked={isSelected}
-            onClick={handleCheckboxClick}
-            aria-label={`Select ${recording.filename}`}
-            className="shrink-0 mt-0.5"
-          />
-        )}
-
         {/* Content area — flex-1 to fill remaining space. Status icons moved to the
             right cluster so the title starts flush-left with no wasted gutter. */}
         <div className="flex-1 min-w-0">
@@ -353,7 +311,6 @@ export const SourceRow = memo(function SourceRow({
     prevProps.recording.duration === nextProps.recording.duration &&
     prevProps.recording.size === nextProps.recording.size &&
     prevProps.isSelected === nextProps.isSelected &&
-    prevProps.anySelected === nextProps.anySelected &&
     prevProps.isActiveSource === nextProps.isActiveSource &&
     prevProps.transcript?.id === nextProps.transcript?.id &&
     prevProps.transcript?.title_suggestion === nextProps.transcript?.title_suggestion &&
@@ -361,7 +318,6 @@ export const SourceRow = memo(function SourceRow({
     prevProps.meeting?.subject === nextProps.meeting?.subject &&
     prevProps.searchQuery === nextProps.searchQuery &&
     // Include callback props to detect when they change
-    prevProps.onSelectionChange === nextProps.onSelectionChange &&
     prevProps.onClick === nextProps.onClick
   )
 })
