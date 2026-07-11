@@ -21,11 +21,11 @@ Legend: **P0** blocking · **P1** quality/noise · **P2** polish/nice-to-have.
 - [ ] **H9 (P1 feature)** **Claude Code handover** currently only copies to clipboard / writes a file — build it PROPERLY (a real, usable handoff).
 - [ ] **H10 (P1 feature)** **Pluggable AI "brains"**: add official **Claude Code SDK**, **Codex SDK**, **Gemini CLI SDK** as toggleable provider options/add-ons alongside the current Gemini-API-key path, for all in-app LLM work (transcription analysis, summaries, RAG, handover). A provider abstraction + Settings toggle.
 
-### H11–H14 — Titlebar #138 (2026-07-11 owner feedback) — IN PROGRESS (agent `titlebar-fix`, base `eeed308d`)
-- [ ] **H11 (P1)** **Gradient clashes with the flat native window buttons.** Remove the titlebar gradient → solid dark bar, AND set Electron `titleBarOverlay.color` to that same solid so the native-controls gutter blends. No seam. (Or, rejected alt: give the window buttons a matching gradient — we chose SOLID.)
-- [ ] **H12 (P1)** **Bar too short.** `h-10` (40px) → taller (~`h-14`/56px) to fit the two-line "Meeting / Intelligence" logo + buttons like the mockup. Must bump `titleBarOverlay.height` in `electron/main/index.ts` to match (needs app restart to take effect).
-- [ ] **H13 (P1)** **Right-cluster icons (bell/activity/cog/device/user) too condensed / uniformly spaced / badly placed.** Give proper rhythm: group the three icon-buttons, larger gap before the device pill, then the user menu; align on one baseline; both themes.
-- [ ] **H14 (P1)** **No line under the window controls.** The bottom divider stops before the native-controls gutter (`pr-[138px]` in `Layout.tsx`) → extend it FULL width so one continuous line separates the whole bar (incl. under — ▢ ✕) from the app.
+### H11–H14 — Titlebar #138 (2026-07-11 owner feedback) — DONE (`70d9715a`; solid `#0f1626` bar, h-14/56px + overlay synced, grouped cluster, full-width divider). ⚠️ needs app restart for the native-gutter height/color to show.
+- [x] **H11 (P1)** **Gradient clashes with the flat native window buttons.** Remove the titlebar gradient → solid dark bar, AND set Electron `titleBarOverlay.color` to that same solid so the native-controls gutter blends. No seam. (Or, rejected alt: give the window buttons a matching gradient — we chose SOLID.)
+- [x] **H12 (P1)** **Bar too short.** `h-10` (40px) → taller (~`h-14`/56px) to fit the two-line "Meeting / Intelligence" logo + buttons like the mockup. Must bump `titleBarOverlay.height` in `electron/main/index.ts` to match (needs app restart to take effect).
+- [x] **H13 (P1)** **Right-cluster icons (bell/activity/cog/device/user) too condensed / uniformly spaced / badly placed.** Give proper rhythm: group the three icon-buttons, larger gap before the device pill, then the user menu; align on one baseline; both themes.
+- [x] **H14 (P1)** **No line under the window controls.** The bottom divider stops before the native-controls gutter (`pr-[138px]` in `Layout.tsx`) → extend it FULL width so one continuous line separates the whole bar (incl. under — ▢ ✕) from the app.
 
 ## Track A — Titlebar / chrome polish (agent-flagged gaps)
 - [ ] **A1 (P1)** Wire **⌘K** to focus/open the titlebar search (placeholder only today).
