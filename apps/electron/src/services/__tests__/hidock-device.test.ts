@@ -5,7 +5,7 @@
  * and listener management.
  */
 
-import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest'
 import type { ActivityLogEntry } from '../hidock-device'
 
 // Mock jensen module
@@ -3461,8 +3461,23 @@ describe('HiDockDeviceService - QA Logging Path', () => {
       shouldLogQa: mockShouldLogQa
     }))
 
+    // Provide electronAPI so the constructor's config-load loop resolves
+    // immediately instead of spinning 20 real 100ms setTimeout retries. With
+    // QA logging enabled here, those retries would each console.log AFTER the
+    // test file tears down — the source of the flaky
+    // "Closing rpc while onUserConsoleLog was pending" EnvironmentTeardownError.
+    ;(window as any).electronAPI = {
+      config: {
+        get: vi.fn(async () => ({ success: true, data: { device: { autoConnect: false } } }))
+      }
+    }
+
     const module = await import('../hidock-device')
     HiDockDeviceService = (module as any).HiDockDeviceService
+  })
+
+  afterEach(() => {
+    delete (window as any).electronAPI
   })
 
   it('should log activity notification count when QA logging is enabled', () => {

@@ -37,7 +37,7 @@ export function validateDevicePath(path: string): boolean {
 
   // Only allow alphanumeric characters, underscores, hyphens, and dots
   // Typical recording filename format: REC_YYYYMMDD_HHMMSS.wav or similar
-  const safePattern = /^[a-zA-Z0-9_\-\.]+$/
+  const safePattern = /^[a-zA-Z0-9_\-.]+$/
   if (!safePattern.test(path)) {
     return false
   }
@@ -75,7 +75,7 @@ export function sanitizeDevicePath(path: string): string | null {
   }
 
   // Remove dangerous characters
-  const sanitized = filename.replace(/[^a-zA-Z0-9_\-\.]/g, '_')
+  const sanitized = filename.replace(/[^a-zA-Z0-9_\-.]/g, '_')
 
   // Validate the sanitized result
   if (!validateDevicePath(sanitized)) {

@@ -68,7 +68,7 @@ const migrationLock = {
       // Try to acquire lock
       db.run(`INSERT INTO config (key, value) VALUES ('migration_lock', ?)`, [Date.now().toString()])
       return true
-    } catch (error) {
+    } catch {
       // UNIQUE constraint violation means lock already held
       return false
     }
@@ -154,7 +154,7 @@ function createMigrationBackup(): void {
     const stmt = db.prepare('SELECT migration_status FROM recordings LIMIT 1')
     stmt.free()
     hasMigrationStatus = true
-  } catch (e) {
+  } catch {
     hasMigrationStatus = false
   }
 

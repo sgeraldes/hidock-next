@@ -1098,7 +1098,7 @@ class HiDockDeviceService {
         clearTimeout(timeoutId!)
         onProgress?.(result.length, expectedFileCount)
         return result
-      } catch (error) {
+      } catch {
         clearTimeout(timeoutId!)
         // Do NOT clear listRecordingsPromise or listRecordingsLock here.
         // The promise owner (the IIFE at line 849) clears these in its finally block.
