@@ -68,49 +68,175 @@ export interface AnalysisError {
 }
 
 /**
- * Map a raw provider/IPC error onto an AnalysisError. Prefers structured
- * fields (numeric status / httpStatus / code) over message text; message
- * tokens are only a fallback for providers that stringify everything.
- * Unrecognized shapes are 'unknown' — consumers treat that conservatively
- * (bounded auto-retries, then manual).
+ * Retry-after hints at or beyond this cap are not auto-honored: consumers
+ * treat such a failure as needs-attention (manual Retry) rather than promising
+ * an auto-retry that far out. parseRetryAfter CLAMPS to this value, so a
+ * consumer seeing retryAfterMs >= RETRY_AFTER_MAX_MS knows the hint was at or
+ * over the cap.
  */
-export function classifyAnalysisError(err: unknown): AnalysisError {
-  const e = (err ?? {}) as { status?: unknown; httpStatus?: unknown; code?: unknown; message?: unknown }
-  const message = err instanceof Error ? err.message : typeof err === 'string' ? err : String(e.message ?? '')
+export const RETRY_AFTER_MAX_MS = 15 * 60 * 1000
 
-  const numeric = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
+/**
+ * Parse a Retry-After value — delta-seconds ("120", "1.5") or HTTP-date
+ * ("Wed, 21 Oct 2026 07:28:00 GMT") — into a millisecond delay. Non-finite,
+ * non-positive, or unparseable input → undefined. Finite results are clamped
+ * to RETRY_AFTER_MAX_MS. Exported for tests; `nowMs` injects the clock.
+ */
+export function parseRetryAfter(value: unknown, nowMs: number = Date.now()): number | undefined {
+  if (value == null) return undefined
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value > 0 ? Math.min(Math.round(value * 1000), RETRY_AFTER_MAX_MS) : undefined
+  }
+  const s = String(value).trim()
+  if (!s) return undefined
+  // Delta-seconds form (the common header shape).
+  if (/^\d+(\.\d+)?$/.test(s)) {
+    const ms = parseFloat(s) * 1000
+    return Number.isFinite(ms) && ms > 0 ? Math.min(Math.round(ms), RETRY_AFTER_MAX_MS) : undefined
+  }
+  // HTTP-date form.
+  const t = Date.parse(s)
+  if (Number.isFinite(t)) {
+    const delta = t - nowMs
+    return delta > 0 ? Math.min(Math.round(delta), RETRY_AFTER_MAX_MS) : undefined
+  }
+  return undefined
+}
+
+/** Parse an in-message retry hint ("retry after 12s" / "retry in 1.5 seconds"). */
+function retryHintFromMessage(message: string): number | undefined {
+  const m = message.match(/retry(?:-|\s+)?(?:after|in)[:\s]+(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|secs?|seconds?)?/i)
+  if (!m) return undefined
+  const value = parseFloat(m[1])
+  if (!Number.isFinite(value) || value <= 0) return undefined
+  const unit = (m[2] || 's').toLowerCase()
+  const ms = unit.startsWith('ms') || unit.startsWith('millisecond') ? value : value * 1000
+  return Math.min(Math.round(ms), RETRY_AFTER_MAX_MS)
+}
+
+/** Numeric coercion for status-like fields (rejects non-finite / non-number). */
+function numericStatus(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined
+}
+
+/**
+ * Collect the error node plus every nested error-ish node reachable through
+ * the shapes real SDKs use — `cause` (wrapped fetch errors), `errors[]`
+ * (AggregateError), `response` (fetch Response on SDK wrappers), and a nested
+ * `error` field (JSON API envelopes). Bounded (depth ≤ 4) and cycle-safe.
+ */
+function collectErrorNodes(root: unknown): unknown[] {
+  const out: unknown[] = []
+  const visited = new Set<object>()
+  const visit = (node: unknown, depth: number): void => {
+    if (node == null || depth > 4) return
+    if (typeof node === 'object') {
+      if (visited.has(node as object)) return
+      visited.add(node as object)
+    }
+    out.push(node)
+    if (typeof node !== 'object') return
+    const n = node as Record<string, unknown>
+    visit(n.cause, depth + 1)
+    visit(n.error, depth + 1)
+    visit(n.response, depth + 1)
+    if (Array.isArray(n.errors)) {
+      for (const child of n.errors) visit(child, depth + 1)
+    }
+  }
+  visit(root, 0)
+  return out
+}
+
+/** Read a retry-after header off a Headers-like or plain-object `headers`. */
+function retryAfterFromHeaders(node: unknown, nowMs: number): number | undefined {
+  if (!node || typeof node !== 'object') return undefined
+  const headers = (node as { headers?: unknown }).headers
+  if (!headers || typeof headers !== 'object') return undefined
+  const h = headers as { get?: (name: string) => unknown } & Record<string, unknown>
+  const raw = typeof h.get === 'function' ? h.get('retry-after') : (h['retry-after'] ?? h['Retry-After'])
+  return parseRetryAfter(raw, nowMs)
+}
+
+/** Classify ONE node (status fields + message tokens), without traversal. */
+function classifyNode(node: unknown): { kind: AnalysisErrorKind; retryAfterMs?: number } {
+  const e = (node ?? {}) as { status?: unknown; httpStatus?: unknown; code?: unknown; message?: unknown; statusText?: unknown }
+  const message =
+    node instanceof Error
+      ? node.message
+      : typeof node === 'string'
+        ? node
+        : [e.message, e.statusText].filter((v) => typeof v === 'string').join(' ')
+
   const statusFromText = message.match(/\b([45]\d\d)\b/)
   const status =
-    numeric(e.status) ?? numeric(e.httpStatus) ?? numeric(e.code) ?? (statusFromText ? Number(statusFromText[1]) : undefined)
-
-  // Retry-after hint: "retry after 12s" / "Retry-After: 30" / "retry in 1.5 seconds"
-  let retryAfterMs: number | undefined
-  const retryMatch = message.match(/retry(?:-|\s+)?(?:after|in)[:\s]+(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|secs?|seconds?)?/i)
-  if (retryMatch) {
-    const value = parseFloat(retryMatch[1])
-    const unit = (retryMatch[2] || 's').toLowerCase()
-    retryAfterMs = Math.round(unit.startsWith('ms') || unit.startsWith('millisecond') ? value : value * 1000)
-  }
+    numericStatus(e.status) ??
+    numericStatus(e.httpStatus) ??
+    numericStatus(e.code) ??
+    (statusFromText ? Number(statusFromText[1]) : undefined)
+  const stringCode = typeof e.code === 'string' ? e.code : ''
 
   if (status === 401 || status === 403 || /\b(api.?key|credential\w*|unauthoriz\w*|forbidden|permission.?denied)\b/i.test(message)) {
-    return { kind: 'auth', message }
+    return { kind: 'auth' }
   }
   if (status === 429 || /\b(rate.?limit\w*|too many requests)\b/i.test(message)) {
-    return { kind: 'rate-limit', retryAfterMs, message }
+    return { kind: 'rate-limit', retryAfterMs: retryHintFromMessage(message) }
   }
   if (/\b(quota|resource.?exhausted|billing)\b/i.test(message)) {
-    return { kind: 'quota', message }
+    return { kind: 'quota' }
   }
   if (status === 400 || /\binvalid\s+(argument|request|input)\b/i.test(message)) {
-    return { kind: 'invalid-input', message }
+    return { kind: 'invalid-input' }
   }
   if (
     (status !== undefined && status >= 500) ||
+    /^(ECONN\w*|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EPIPE|ENETUNREACH)$/i.test(stringCode) ||
     /\b(network|fetch failed|timed?\s?out|timeout|econn\w*|enotfound|eai_again|socket|offline|unavailable)\b/i.test(message)
   ) {
-    return { kind: 'network', message }
+    return { kind: 'network' }
   }
-  return { kind: 'unknown', message }
+  return { kind: 'unknown' }
+}
+
+/** Combination precedence when nested nodes classify differently. */
+const KIND_RANK: Record<AnalysisErrorKind, number> = {
+  auth: 5,
+  'rate-limit': 4,
+  quota: 3,
+  'invalid-input': 2,
+  network: 1,
+  unknown: 0
+}
+
+/**
+ * Map a raw provider/IPC error onto an AnalysisError. Inspects the WHOLE error
+ * shape — `cause` chains, AggregateError `errors[]`, SDK wrappers holding a
+ * fetch `response` (including its Retry-After header), and nested `error`
+ * envelopes — via a bounded, cycle-safe traversal, so a wrapped 401 classifies
+ * as auth instead of falling to 'unknown'. Structured status fields win over
+ * message tokens; the most actionable kind found anywhere wins overall
+ * (auth > rate-limit > quota > invalid-input > network). Unrecognized shapes
+ * are 'unknown' — consumers treat that conservatively (bounded auto-retries,
+ * then manual). retryAfterMs, when present, is validated and CLAMPED to
+ * RETRY_AFTER_MAX_MS by parseRetryAfter.
+ */
+export function classifyAnalysisError(err: unknown, nowMs: number = Date.now()): AnalysisError {
+  const topMessage =
+    err instanceof Error ? err.message : typeof err === 'string' ? err : String((err as { message?: unknown } | null)?.message ?? '')
+
+  let bestKind: AnalysisErrorKind = 'unknown'
+  let retryAfterMs: number | undefined
+  for (const node of collectErrorNodes(err)) {
+    const info = classifyNode(node)
+    if (KIND_RANK[info.kind] > KIND_RANK[bestKind]) bestKind = info.kind
+    // Retry-after may live on a different node (e.g. Response headers) than the
+    // one that classified — take the first hint found anywhere.
+    retryAfterMs ??= info.retryAfterMs ?? retryAfterFromHeaders(node, nowMs)
+  }
+
+  return bestKind === 'rate-limit'
+    ? { kind: bestKind, retryAfterMs, message: topMessage }
+    : { kind: bestKind, message: topMessage }
 }
 
 export interface TimelineAnalysis {

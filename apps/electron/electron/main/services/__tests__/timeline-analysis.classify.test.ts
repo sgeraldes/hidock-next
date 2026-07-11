@@ -23,6 +23,8 @@ vi.mock('../file-storage', () => ({
 
 import {
   classifyAnalysisError,
+  parseRetryAfter,
+  RETRY_AFTER_MAX_MS,
   deriveSentimentSegments,
   type SpeakerTurn
 } from '../timeline-analysis'
@@ -81,6 +83,96 @@ describe('classifyAnalysisError', () => {
   it('prefers the structured status over misleading message tokens', () => {
     // Message mentions "quota", but the structured status is 401 → auth wins.
     expect(classifyAnalysisError({ status: 401, message: 'quota check failed: unauthorized' }).kind).toBe('auth')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Round-5 finding 2 — nested / aggregate / SDK-wrapper shapes must classify.
+// ---------------------------------------------------------------------------
+describe('classifyAnalysisError — nested and aggregate error shapes', () => {
+  it('classifies a 401 carried on Error.cause as auth (not unknown)', () => {
+    const err = new Error('mensaje envoltorio localizado', { cause: { status: 401, message: 'no autorizado' } })
+    expect(classifyAnalysisError(err).kind).toBe('auth')
+  })
+
+  it('classifies an AggregateError whose child is a 429 as rate-limit', () => {
+    const child = Object.assign(new Error('demasiadas solicitudes'), { status: 429 })
+    const agg = new AggregateError([new Error('otro fallo'), child], 'varios errores')
+    expect(classifyAnalysisError(agg).kind).toBe('rate-limit')
+  })
+
+  it('classifies a realistic Gemini SDK wrapper holding a fetch Response + Retry-After header', () => {
+    // GoogleGenerativeAIFetchError-style: wrapper Error with a `response`
+    // carrying the real status and Headers (get() interface).
+    const response = {
+      status: 429,
+      statusText: 'Too Many Requests',
+      headers: { get: (name: string) => (name.toLowerCase() === 'retry-after' ? '30' : null) }
+    }
+    const wrapper = Object.assign(new Error('[GoogleGenerativeAI Error]: Error fetching from the API'), { response })
+    const classified = classifyAnalysisError(wrapper)
+    expect(classified.kind).toBe('rate-limit')
+    expect(classified.retryAfterMs).toBe(30_000)
+  })
+
+  it('classifies a nested `error` envelope (JSON API shape)', () => {
+    const err = { message: 'request failed', error: { code: 403, message: 'permiso denegado' } }
+    expect(classifyAnalysisError(err).kind).toBe('auth')
+  })
+
+  it('the most actionable kind wins across nodes (nested auth beats top-level network)', () => {
+    const err = Object.assign(new Error('fetch failed'), { cause: { status: 401 } })
+    expect(classifyAnalysisError(err).kind).toBe('auth')
+  })
+
+  it('is cycle-safe and depth-bounded (self-referential cause does not hang)', () => {
+    const err = new Error('bucle') as Error & { cause?: unknown }
+    err.cause = err
+    expect(classifyAnalysisError(err).kind).toBe('unknown')
+    // Deeply nested beyond the bound (depth > 4) is ignored, not crashed on.
+    const deep: Record<string, unknown> = { message: 'lvl0' }
+    let cursor = deep
+    for (let i = 1; i <= 6; i++) {
+      cursor.cause = { message: `lvl${i}`, ...(i === 6 ? { status: 401 } : {}) }
+      cursor = cursor.cause as Record<string, unknown>
+    }
+    expect(classifyAnalysisError(deep).kind).toBe('unknown')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Round-5 finding 3 — retry-after parsing: delta-seconds, HTTP-date, clamping.
+// ---------------------------------------------------------------------------
+describe('parseRetryAfter', () => {
+  const NOW = Date.UTC(2026, 6, 11, 12, 0, 0) // 2026-07-11T12:00:00Z
+
+  it('parses delta-seconds (integer and fractional)', () => {
+    expect(parseRetryAfter('120', NOW)).toBe(120_000)
+    expect(parseRetryAfter('1.5', NOW)).toBe(1500)
+    expect(parseRetryAfter(30, NOW)).toBe(30_000) // numeric seconds
+  })
+
+  it('parses the HTTP-date form relative to now', () => {
+    const inTwoMinutes = new Date(NOW + 2 * 60 * 1000).toUTCString()
+    expect(parseRetryAfter(inTwoMinutes, NOW)).toBe(120_000)
+  })
+
+  it('clamps absurd values to RETRY_AFTER_MAX_MS (15 minutes)', () => {
+    expect(parseRetryAfter('86400', NOW)).toBe(RETRY_AFTER_MAX_MS) // a day → 15 min
+    const nextWeek = new Date(NOW + 7 * 24 * 60 * 60 * 1000).toUTCString()
+    expect(parseRetryAfter(nextWeek, NOW)).toBe(RETRY_AFTER_MAX_MS)
+    expect(parseRetryAfter(1e12, NOW)).toBe(RETRY_AFTER_MAX_MS)
+  })
+
+  it('rejects invalid, non-finite, non-positive, and past-date input → undefined', () => {
+    expect(parseRetryAfter('soon', NOW)).toBeUndefined()
+    expect(parseRetryAfter('', NOW)).toBeUndefined()
+    expect(parseRetryAfter(null, NOW)).toBeUndefined()
+    expect(parseRetryAfter(Number.NaN, NOW)).toBeUndefined()
+    expect(parseRetryAfter(Number.POSITIVE_INFINITY, NOW)).toBeUndefined()
+    expect(parseRetryAfter(-5, NOW)).toBeUndefined()
+    const past = new Date(NOW - 60_000).toUTCString()
+    expect(parseRetryAfter(past, NOW)).toBeUndefined()
   })
 })
 

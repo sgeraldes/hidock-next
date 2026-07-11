@@ -163,6 +163,15 @@ const PERMANENT_ERROR_KINDS: ReadonlySet<AnalysisErrorKind> = new Set(['auth', '
 const UNKNOWN_MAX_AUTO_ATTEMPTS = 2
 
 /**
+ * Mirror of the service's RETRY_AFTER_MAX_MS (timeline-analysis.ts — the
+ * renderer cannot import main-process modules). The service clamps parsed
+ * retry-after hints to this cap; the renderer defensively re-clamps and treats
+ * any hint AT the cap as needs-attention (manual Retry) rather than promising
+ * an auto-retry that far out.
+ */
+const RETRY_AFTER_MAX_MS = 15 * 60 * 1000
+
+/**
  * The retry policy per failure, evaluated on each reader (re)open. Deliberately
  * TIMER-FREE — nothing is scheduled; time alone never triggers a retry, only
  * reopening the recording does (the transient pill copy says exactly that):
@@ -171,12 +180,17 @@ const UNKNOWN_MAX_AUTO_ATTEMPTS = 2
  *  - rate-limit                   → transient: auto-retry on next reopen, but
  *                                   honoring a provider retry-after hint when
  *                                   one was supplied (checked at reopen time).
+ *                                   A hint at/over RETRY_AFTER_MAX_MS behaves
+ *                                   as permanent-until-Retry.
  *  - unknown                      → conservative: bounded auto-attempts
  *                                   (UNKNOWN_MAX_AUTO_ATTEMPTS), then manual.
  */
 function analysisFailurePolicy(f: AnalysisFailure): { canAutoRetry: boolean; display: 'permanent' | 'transient' } {
   if (PERMANENT_ERROR_KINDS.has(f.kind)) return { canAutoRetry: false, display: 'permanent' }
   if (f.kind === 'rate-limit') {
+    if (f.retryAfterMs !== undefined && f.retryAfterMs >= RETRY_AFTER_MAX_MS) {
+      return { canAutoRetry: false, display: 'permanent' }
+    }
     const ready = !f.retryAfterMs || Date.now() - f.at >= f.retryAfterMs
     return { canAutoRetry: ready, display: 'transient' }
   }
@@ -488,8 +502,14 @@ export function SourceReader({
     ;(async () => {
       try {
         let res = await api.getTimelineAnalysis!(recordingId)
-        const isEmpty = (r?: TimelineAnalysisResult) =>
-          !r || ((r.eventMarkers?.length ?? 0) === 0 && (r.sentimentSegments?.length ?? 0) === 0)
+        // PER-COMPONENT eligibility (not aggregate emptiness): a partially
+        // persisted analysis — markers landed but the Gemini sentiment pass
+        // failed, or vice versa — must still enter the backfill/retry branch,
+        // otherwise a markers-yes/sentiment-no recording would NEVER retry and
+        // would lose its failure/Retry affordance on remount (the recorded
+        // analysisError is not persisted).
+        const missingComponent = (r?: TimelineAnalysisResult) =>
+          !r || (r.sentimentSegments?.length ?? 0) === 0 || (r.eventMarkers?.length ?? 0) === 0
         // Already-transcribed recordings return empty until analyzeTimeline runs
         // once. Backfill it (best-effort) and show the "Analyzing timeline…" hint
         // meanwhile; per-speaker colors + playhead already render without this.
@@ -498,7 +518,7 @@ export function SourceReader({
         // analysisFailurePolicy, keyed on the STRUCTURED errorKind the service
         // classified (never message text). Timer-free: retries fire on REOPEN.
         // A retranscription changes the key and always gets a fresh attempt.
-        if (isEmpty(res) && typeof api.analyzeTimeline === 'function') {
+        if (missingComponent(res) && typeof api.analyzeTimeline === 'function') {
           const prior = backfillStateRef.current.get(transcriptRevisionKey)
           const priorFailure = prior !== undefined && prior !== 'done' ? prior : null
           const canAttempt =
@@ -520,14 +540,18 @@ export function SourceReader({
                 analysisError = { kind: 'unknown' }
               }
               if (analysisError) {
+                // Trust only a validated, CLAMPED retry-after (the service
+                // already clamps; re-clamp defensively for older mains).
+                const rawRetryAfter = analysisError.retryAfterMs
+                const retryAfterMs =
+                  typeof rawRetryAfter === 'number' && Number.isFinite(rawRetryAfter) && rawRetryAfter > 0
+                    ? Math.min(rawRetryAfter, RETRY_AFTER_MAX_MS)
+                    : undefined
                 const failure: AnalysisFailure = {
                   kind: normalizeErrorKind(analysisError.kind),
                   at: Date.now(),
                   attempts,
-                  retryAfterMs:
-                    typeof analysisError.retryAfterMs === 'number' && analysisError.retryAfterMs > 0
-                      ? analysisError.retryAfterMs
-                      : undefined
+                  retryAfterMs
                 }
                 backfillStateRef.current.set(transcriptRevisionKey, failure)
                 if (!cancelled) setTimelineAnalysisFailure(analysisFailurePolicy(failure).display)

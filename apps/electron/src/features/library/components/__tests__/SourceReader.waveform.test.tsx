@@ -461,10 +461,10 @@ describe('SourceReader — timeline backfill', () => {
     )
   })
 
-  it('does NOT call analyzeTimeline when getTimelineAnalysis already has data', async () => {
+  it('does NOT call analyzeTimeline when BOTH components already have data', async () => {
     const populated = {
       sentimentSegments: [{ startSec: 0, endSec: 60, score: 0.5 }],
-      eventMarkers: [],
+      eventMarkers: [{ id: 'e1', kind: 'action' as const, atSec: 30, label: 'Ship it', refId: 'a1' }],
     }
     const getTimelineAnalysis = vi.fn().mockResolvedValue(populated)
     const analyzeTimeline = vi.fn()
@@ -475,5 +475,115 @@ describe('SourceReader — timeline backfill', () => {
     // Give any microtasks a chance, then assert no backfill happened.
     await Promise.resolve()
     expect(analyzeTimeline).not.toHaveBeenCalled()
+  })
+
+  // ---- Round-5 finding 1: PER-COMPONENT retry eligibility -------------------
+  // A partially persisted analysis (markers persisted, sentiment failed) must
+  // still enter the backfill/retry branch — aggregate emptiness would suppress
+  // retries forever and lose the Retry affordance across remounts.
+
+  /** Persisted state: markers landed, sentiment did NOT. */
+  const markersOnly = {
+    sentimentSegments: [],
+    eventMarkers: [{ id: 'e1', kind: 'action' as const, atSec: 30, label: 'Ship it', refId: 'a1' }],
+  }
+
+  it('markers-success/sentiment-failure: reopen RETRIES the sentiment backfill', async () => {
+    const getTimelineAnalysis = vi.fn().mockResolvedValue(markersOnly)
+    const analyzeTimeline = vi.fn().mockResolvedValue({ ...markersOnly, analysisError: { kind: 'network' } })
+    installElectronAPI({ getTimelineAnalysis, analyzeTimeline })
+
+    const recA = makeRecording({ id: 'rec-A', transcriptionStatus: 'complete' })
+    const recB = makeRecording({ id: 'rec-B', transcriptionStatus: 'complete' })
+
+    // Markers exist, sentiment missing → the backfill branch still runs.
+    const { rerender } = render(<SourceReader recording={recA} />)
+    await waitFor(() => expect(analyzeTimeline).toHaveBeenCalledWith('rec-A'))
+
+    // Transient failure → the next reopen retries even though markers exist.
+    await reopenA(rerender, recA, recB, getTimelineAnalysis)
+    await waitFor(() =>
+      expect(analyzeTimeline.mock.calls.filter((c) => c[0] === 'rec-A')).toHaveLength(2)
+    )
+  })
+
+  it('markers-only + failure: switching A → B → A PRESERVES the Retry affordance', async () => {
+    const getTimelineAnalysis = vi.fn().mockResolvedValue(markersOnly)
+    // Permanent failure → no auto-retry, but the pill must survive the switch.
+    const analyzeTimeline = vi.fn().mockResolvedValue({ ...markersOnly, analysisError: { kind: 'auth' } })
+    installElectronAPI({ getTimelineAnalysis, analyzeTimeline })
+
+    const recA = makeRecording({ id: 'rec-A', transcriptionStatus: 'complete' })
+    const recB = makeRecording({ id: 'rec-B', transcriptionStatus: 'complete' })
+
+    const { rerender } = render(<SourceReader recording={recA} />)
+    await waitFor(() => expect(analyzeTimeline).toHaveBeenCalledWith('rec-A'))
+    expect(await screen.findByTestId('timeline-analysis-failed')).toBeInTheDocument()
+
+    // Away and back: no re-bill (permanent), and the affordance is still there.
+    await reopenA(rerender, recA, recB, getTimelineAnalysis)
+    expect(analyzeTimeline.mock.calls.filter((c) => c[0] === 'rec-A')).toHaveLength(1)
+    expect(await screen.findByTestId('timeline-analysis-failed')).toBeInTheDocument()
+    expect(screen.getByTestId('timeline-analysis-retry')).toBeInTheDocument()
+  })
+
+  it('a later SUCCESS clears the failure affordance', async () => {
+    const complete = {
+      sentimentSegments: [{ startSec: 0, endSec: 60, score: 0.4 }],
+      eventMarkers: markersOnly.eventMarkers,
+    }
+    // First open: markers-only + transient failure. Reopen: analysis succeeds
+    // and the re-read returns both components.
+    const getTimelineAnalysis = vi.fn()
+      .mockResolvedValueOnce(markersOnly) // A first read
+      .mockResolvedValueOnce(markersOnly) // A re-read after failed backfill
+      .mockResolvedValueOnce({ sentimentSegments: [], eventMarkers: [] }) // B read
+      .mockResolvedValueOnce({ sentimentSegments: [], eventMarkers: [] }) // B re-read
+      .mockResolvedValueOnce(markersOnly) // A reopened: still missing sentiment
+      .mockResolvedValue(complete) // re-read after successful retry
+    const analyzeTimeline = vi.fn()
+      .mockResolvedValueOnce({ ...markersOnly, analysisError: { kind: 'network' } }) // A attempt 1 fails
+      .mockResolvedValue({ sentimentSegments: [], eventMarkers: [] }) // B + A retry succeed
+    installElectronAPI({ getTimelineAnalysis, analyzeTimeline })
+
+    const recA = makeRecording({ id: 'rec-A', transcriptionStatus: 'complete' })
+    const recB = makeRecording({ id: 'rec-B', transcriptionStatus: 'complete' })
+
+    const { rerender } = render(<SourceReader recording={recA} />)
+    await waitFor(() => expect(analyzeTimeline).toHaveBeenCalledWith('rec-A'))
+    expect(await screen.findByTestId('timeline-analysis-failed')).toBeInTheDocument()
+
+    // Reopen → transient retry runs and SUCCEEDS → the pill is gone.
+    await reopenA(rerender, recA, recB, getTimelineAnalysis)
+    await waitFor(() =>
+      expect(analyzeTimeline.mock.calls.filter((c) => c[0] === 'rec-A')).toHaveLength(2)
+    )
+    await waitFor(() => expect(screen.queryByTestId('timeline-analysis-failed')).not.toBeInTheDocument())
+  })
+
+  // ---- Round-5 finding 3: retry-after hints at/over the cap ----------------
+  it('a rate-limit hint AT the 15-minute cap behaves as needs-attention (no auto-retry)', async () => {
+    const getTimelineAnalysis = vi.fn().mockResolvedValue(emptyTimeline)
+    // The service clamps to the cap, so an absurd upstream hint arrives as 15min.
+    const analyzeTimeline = failedAnalysis('rate-limit', { retryAfterMs: 15 * 60 * 1000 })
+    installElectronAPI({ getTimelineAnalysis, analyzeTimeline })
+
+    const recA = makeRecording({ id: 'rec-A', transcriptionStatus: 'complete' })
+    const recB = makeRecording({ id: 'rec-B', transcriptionStatus: 'complete' })
+
+    const { rerender } = render(<SourceReader recording={recA} />)
+    await waitFor(() => expect(analyzeTimeline).toHaveBeenCalledWith('rec-A'))
+
+    // Needs-attention pill (not the transient copy), and reopens never re-bill.
+    const pill = await screen.findByTestId('timeline-analysis-failed')
+    expect(pill).toHaveAttribute('data-failure', 'permanent')
+    await reopenA(rerender, recA, recB, getTimelineAnalysis)
+    expect(analyzeTimeline.mock.calls.filter((c) => c[0] === 'rec-A')).toHaveLength(1)
+
+    // Manual Retry remains the escape hatch.
+    fireEvent.click(screen.getByTestId('timeline-analysis-retry'))
+    await waitFor(() =>
+      expect(analyzeTimeline.mock.calls.filter((c) => c[0] === 'rec-A')).toHaveLength(2)
+    )
   })
 })
