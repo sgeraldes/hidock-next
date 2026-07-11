@@ -60,7 +60,7 @@ const CONFIG_BRAINS = {
   models: {},
 }
 
-type IpcHandler = (event: unknown, ...args: any[]) => unknown
+type IpcHandler = (event?: any, ...args: any[]) => any
 
 describe('Brains IPC Handlers', () => {
   let handlers: Record<string, IpcHandler> = {}
@@ -69,10 +69,10 @@ describe('Brains IPC Handlers', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     handlers = {}
-    vi.mocked(ipcMain.handle).mockImplementation((channel: string, handler: IpcHandler) => {
+    vi.mocked(ipcMain.handle).mockImplementation(((channel: string, handler: IpcHandler) => {
       handlers[channel] = handler
       return undefined as any
-    })
+    }) as any)
     vi.mocked(getConfig).mockReturnValue({ brains: CONFIG_BRAINS } as any)
     vi.mocked(updateConfig).mockResolvedValue(undefined)
     vi.mocked(getBrainRegistry).mockReturnValue({ list: () => BRAINS } as any)
@@ -109,7 +109,7 @@ describe('Brains IPC Handlers', () => {
       ],
     } as any)
     registerBrainsHandlers()
-    const res = await handlers['brains:list']()
+    const res = await handlers['brains:list']({} as any)
     expect(res).toHaveLength(2)
     expect(res[1].id).toBe('codex')
     expect(res[1].auth.configured).toBe(false)
