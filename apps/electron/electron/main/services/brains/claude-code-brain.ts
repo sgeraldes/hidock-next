@@ -24,23 +24,29 @@
  * machine where PATH resolves `claude` to a `.cmd`/`.bat`/`.ps1` PROXY shim (e.g.
  * one that re-invokes claude inside WSL, where it isn't installed), the probe ran
  * the shim → exit 127, empty stdout → the JSON parse saw nothing → we reported the
- * CLI as unusable even though the real native `claude.exe` (later on PATH) is
- * logged in. cli-runner mirrors cmd.exe/`where` semantics (first PATH dir wins,
- * shim included), so here we resolve the NATIVE `claude.exe`/`.com` ourselves and
- * hand runCli its absolute path — for BOTH the auth probe and generate, so the
- * badge and the actual work agree. Machines with only a working npm `.cmd` (no
- * native exe) are unaffected (we fall back to the bare command).
+ * CLI as unusable even though the real native `claude.exe` is logged in.
+ * cli-runner mirrors cmd.exe/`where` semantics (first PATH dir wins, shim
+ * included), so here we resolve the NATIVE `claude.exe` ourselves and hand runCli
+ * its absolute path — for BOTH the auth probe and generate, so the badge and the
+ * actual work agree. Machines with only a working npm `.cmd` (no native exe) are
+ * unaffected (bare-command fallback).
  *
- * IDENTITY-AWARE: preferring a later exe by basename alone could execute an
- * UNRELATED vendor's `claude.exe` (prompt leakage). So a native candidate is only
- * selected after it PROVES it is Anthropic Claude Code — its `--version` output
- * must match the CLI's signature format (`<semver> (Claude Code)`, verified on
- * this machine: `2.1.207 (Claude Code)`). Unverifiable candidates are skipped and
- * the bare command fallback applies. The resolution is cached per brain instance.
+ * SECURITY (identity + trusted roots): native-exe discovery NEVER touches
+ * arbitrary PATH directories (executing a discovered binary to identity-probe it
+ * would grant code execution to any malicious exe on PATH). Discovery order:
+ * explicit user-configured path (credential store 'claude-code'/'claudePath' —
+ * the escape hatch) → TRUSTED install roots only (the official installer dir
+ * %USERPROFILE%\.local\bin), where a candidate must additionally pass the
+ * `--version` signature (`<semver> (Claude Code)`, verified live: `2.1.207
+ * (Claude Code)`) → bare command. The resolution is cached per brain instance
+ * and re-resolved ONCE after a spawn error / unusable probe (stale-cache
+ * recovery without retry loops).
  */
 import { existsSync } from 'fs'
-import { delimiter, join } from 'path'
-import { runCli, foldMessagesToPrompt, type SpawnFn } from './cli-runner'
+import { homedir } from 'os'
+import { join } from 'path'
+import { runCli, foldMessagesToPrompt, type SpawnFn, type CliRunResult } from './cli-runner'
+import { getBrainCredentialStore } from './brain-credential-store'
 import type {
   AIBrain,
   BrainAuthStatus,
@@ -65,6 +71,12 @@ export interface ClaudeCodeBrainDeps {
   spawn?: SpawnFn
   /** Injected for tests; defaults to process.env. */
   env?: NodeJS.ProcessEnv
+  /**
+   * Injected command resolution seam (tests). Default: resolveClaudeCommand(env)
+   * with a real spawn, or the bare 'claude' with an injected fake spawn (so argv
+   * assertions stay stable).
+   */
+  resolveCommand?: () => Promise<string>
 }
 
 export class ClaudeCodeBrain implements AIBrain {
@@ -73,10 +85,12 @@ export class ClaudeCodeBrain implements AIBrain {
 
   private readonly spawn?: SpawnFn
   private readonly env: NodeJS.ProcessEnv
+  private readonly resolveCommand?: () => Promise<string>
 
   constructor(deps: ClaudeCodeBrainDeps = {}) {
     this.spawn = deps.spawn
     this.env = deps.env ?? process.env
+    this.resolveCommand = deps.resolveCommand
   }
 
   capabilities(): ReadonlySet<BrainCapability> {
@@ -87,16 +101,34 @@ export class ClaudeCodeBrain implements AIBrain {
   private resolvedCommand?: Promise<string>
 
   /**
-   * The `claude` command to spawn. With an injected (fake) spawn — unit tests —
-   * keep the bare command so argv assertions stay stable (the fake bypasses OS
-   * resolution anyway). Only the REAL spawn path needs the identity-verified
-   * native-exe preference that dodges a broken `.cmd`/WSL proxy shim; the
-   * resolution itself is separately unit-tested via resolveClaudeCommand's seams.
+   * The `claude` command to spawn, cached per instance. With an injected (fake)
+   * spawn and no explicit resolveCommand — unit tests — keep the bare command so
+   * argv assertions stay stable (the fake bypasses OS resolution anyway). Only
+   * the REAL spawn path needs the trusted-root, identity-verified native-exe
+   * preference that dodges a broken `.cmd`/WSL proxy shim.
+   *
+   * STALENESS: the cache is invalidated (invalidateResolvedCommand) after a
+   * spawn error or an unusable auth probe, and the operation re-resolves ONCE —
+   * so an install/uninstall/PATH change mid-session recovers on the next call
+   * without an app restart and without retry loops.
    */
   private claudeCommand(): Promise<string> {
-    if (this.spawn) return Promise.resolve('claude')
-    if (!this.resolvedCommand) this.resolvedCommand = resolveClaudeCommand(this.env)
+    if (!this.resolvedCommand) {
+      if (this.resolveCommand) this.resolvedCommand = this.resolveCommand()
+      else if (this.spawn) this.resolvedCommand = Promise.resolve('claude')
+      else this.resolvedCommand = resolveClaudeCommand(this.env)
+    }
     return this.resolvedCommand
+  }
+
+  /** Drop the cached resolution so the next claudeCommand() re-resolves. */
+  private invalidateResolvedCommand(): void {
+    this.resolvedCommand = undefined
+  }
+
+  private async runAuthProbe(): Promise<CliRunResult> {
+    const cmd = await this.claudeCommand()
+    return runCli(cmd, ['auth', 'status', '--json'], { timeoutMs: AUTH_TIMEOUT_MS, env: this.env }, this.spawn)
   }
 
   async authStatus(): Promise<BrainAuthStatus> {
@@ -105,12 +137,19 @@ export class ClaudeCodeBrain implements AIBrain {
       // `claude auth status --json` → { loggedIn, authMethod, email, ... }. This
       // exercises the real credential store, so a logged-out/expired CLI is not
       // advertised as usable (unlike a version-only probe).
-      const res = await runCli(
-        await this.claudeCommand(),
-        ['auth', 'status', '--json'],
-        { timeoutMs: AUTH_TIMEOUT_MS, env: this.env },
-        this.spawn
-      )
+      let res = await this.runAuthProbe()
+      let status = !res.spawnError && res.code === 0 ? parseAuthJson(res.stdout) : null
+
+      // Unusable probe (couldn't spawn, non-zero exit, or unparseable output) may
+      // mean the CACHED resolution went stale (exe uninstalled, shim broke, or a
+      // native exe was installed after we fell back). Invalidate and re-resolve
+      // ONCE — never a loop. A clean "not logged in" (code 0 + parsed JSON) is a
+      // legitimate answer and is NOT retried.
+      if (res.spawnError || !status) {
+        this.invalidateResolvedCommand()
+        res = await this.runAuthProbe()
+        status = !res.spawnError && res.code === 0 ? parseAuthJson(res.stdout) : null
+      }
 
       if (res.spawnError) {
         return hasApiKey
@@ -118,7 +157,6 @@ export class ClaudeCodeBrain implements AIBrain {
           : { configured: false, method: 'none', detail: 'claude not on PATH' }
       }
 
-      const status = res.code === 0 ? parseAuthJson(res.stdout) : null
       if (status?.loggedIn) {
         // Prefer the login METHOD (e.g. "claude.ai", "console.anthropic.com") for
         // the badge — that's the auth actually in use — falling back to the email.
@@ -161,12 +199,23 @@ export class ClaudeCodeBrain implements AIBrain {
     if (opts.model) args.push('--model', opts.model)
 
     try {
-      const res = await runCli(
+      let res = await runCli(
         await this.claudeCommand(),
         args,
         { timeoutMs: GENERATE_TIMEOUT_MS, signal: opts.signal, input: prompt, env: this.env },
         this.spawn
       )
+      if (res.spawnError) {
+        // The cached resolution may be stale (exe uninstalled/moved). Re-resolve
+        // ONCE and retry — cheap, since a spawn error means nothing ran.
+        this.invalidateResolvedCommand()
+        res = await runCli(
+          await this.claudeCommand(),
+          args,
+          { timeoutMs: GENERATE_TIMEOUT_MS, signal: opts.signal, input: prompt, env: this.env },
+          this.spawn
+        )
+      }
       if (res.aborted || res.timedOut || res.spawnError || res.outputLimitExceeded) {
         if (res.outputLimitExceeded) console.error('[ClaudeCodeBrain] generate aborted: output cap exceeded')
         return null
@@ -232,34 +281,63 @@ export interface ClaudeCommandResolveOpts {
    * binary that is not Anthropic Claude Code.
    */
   verify?: (candidatePath: string) => Promise<boolean>
+  /**
+   * Override the user-configured absolute path (escape hatch for nonstandard
+   * installs). Default: credential store 'claude-code' → 'claudePath'.
+   */
+  getConfiguredPath?: () => string
+  /**
+   * Override the TRUSTED install roots scanned for a native exe. Default: the
+   * official Claude Code native-installer directory `%USERPROFILE%\.local\bin`.
+   */
+  trustedRoots?: string[]
 }
 
 /**
- * Resolve the `claude` command to spawn on Windows, dodging broken proxy shims
- * WITHOUT ever trusting a basename. See the module header for the shim story.
+ * Resolve the `claude` command to spawn, dodging broken proxy shims WITHOUT ever
+ * executing untrusted binaries. See the module header for the shim story.
  *
- * Selection is IDENTITY-AWARE: a native `claude.exe`/`.com` found on PATH is only
- * preferred after `verify()` proves it is Anthropic Claude Code (its `--version`
- * output matches the known signature). An unrelated vendor's claude.exe fails the
- * signature and is SKIPPED — we then fall back to the bare `claude` command, i.e.
- * cli-runner's normal cmd.exe-like resolution (a working npm `.cmd` still runs;
- * shim-only machines are unchanged). Never throws.
+ * SECURITY: candidates are NEVER discovered from arbitrary PATH positions — a
+ * malicious/unrelated exe dropped anywhere on PATH would otherwise get executed
+ * by the identity probe itself (the signature check runs AFTER execution, so it
+ * cannot establish trust). Discovery is restricted to:
+ *   1. The EXPLICIT user-configured path (credential store 'claude-code' →
+ *      'claudePath') — user consent, wins outright when the file exists. This is
+ *      the escape hatch for nonstandard installs.
+ *   2. TRUSTED INSTALL ROOTS only (the official native-installer dir
+ *      `%USERPROFILE%\.local\bin`, where the real claude.exe lives) — a candidate
+ *      found there must ADDITIONALLY pass the `--version` identity signature
+ *      before being selected.
+ *   3. Otherwise: the bare `claude` command — exactly what Windows would normally
+ *      select (cli-runner's cmd.exe-like resolution; npm `.cmd` installs and
+ *      shim-only machines unchanged).
+ * Never throws.
  */
 export async function resolveClaudeCommand(
   env: NodeJS.ProcessEnv,
   opts: ClaudeCommandResolveOpts = {}
 ): Promise<string> {
+  const fileExists = opts.fileExists ?? existsSync
+  // 1. Explicit user override — an intentional setting, not an auto-discovery.
+  try {
+    const configured = (opts.getConfiguredPath ?? defaultGetConfiguredClaudePath)()
+    if (configured && fileExists(configured)) return configured
+  } catch {
+    /* misbehaving override source — ignore and continue */
+  }
+
   const platform = opts.platform ?? process.platform
   if (platform !== 'win32') return 'claude'
-  const fileExists = opts.fileExists ?? existsSync
+
   const verify = opts.verify ?? ((candidate: string) => verifyClaudeIdentity(candidate, env))
-  // Only extensions that execute DIRECTLY — never .cmd/.bat/.ps1 wrapper shims.
-  // Lowercase is fine: Windows' filesystem match is case-insensitive.
+  // 2. Trusted install roots only — never arbitrary PATH directories. Only
+  //    extensions that execute DIRECTLY (never .cmd/.bat/.ps1 wrapper shims);
+  //    lowercase is fine, Windows' filesystem match is case-insensitive.
   const nativeExts = ['.exe', '.com']
-  const dirs = (env.PATH || env.Path || '').split(delimiter).filter(Boolean)
-  for (const dir of dirs) {
+  const roots = opts.trustedRoots ?? defaultTrustedClaudeRoots()
+  for (const root of roots) {
     for (const ext of nativeExts) {
-      const candidate = join(dir, 'claude' + ext)
+      const candidate = join(root, 'claude' + ext)
       if (!fileExists(candidate)) continue
       try {
         if (await verify(candidate)) return candidate
@@ -268,7 +346,26 @@ export async function resolveClaudeCommand(
       }
     }
   }
+  // 3. Whatever Windows would normally select.
   return 'claude'
+}
+
+/** Official Claude Code native-installer location(s). Never throws. */
+function defaultTrustedClaudeRoots(): string[] {
+  try {
+    return [join(homedir(), '.local', 'bin')]
+  } catch {
+    return []
+  }
+}
+
+/** User-configured absolute claude path (credential store escape hatch). */
+function defaultGetConfiguredClaudePath(): string {
+  try {
+    return getBrainCredentialStore().getSecret('claude-code', 'claudePath')?.trim() ?? ''
+  } catch {
+    return ''
+  }
 }
 
 /**

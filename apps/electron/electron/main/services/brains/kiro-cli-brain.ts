@@ -204,26 +204,71 @@ export function parseKiroOutput(stdout: string): string | null {
 }
 
 /**
- * Parse `kiro-cli whoami --format json`. The JSON object can be followed by
- * plain-text profile lines on stdout (observed), so extract the first {...}
- * block. Returns null when no parseable login info is present (treated as
- * "not logged in").
+ * Parse `kiro-cli whoami --format json` into a POSITIVE login signal, or null.
+ *
+ * Honesty requirements (a null here means "not logged in"):
+ *   - The leading JSON value is extracted with a string-aware brace-DEPTH scan
+ *     (nested objects and braces inside strings don't truncate it; trailing
+ *     plain-text profile lines — observed on the real CLI — are ignored).
+ *   - A parsed object alone is NOT enough: exit-0 `{}`, `{"loggedIn":false}` or
+ *     an error envelope must never read as "login active". We REQUIRE a positive
+ *     identity/session discriminator — at least one of accountType / email /
+ *     startUrl (the fields real `kiro-cli whoami` output carries) — and reject
+ *     explicit negative signals (`loggedIn: false`, an `error` field).
+ *
+ * Exported for direct unit testing.
  */
-function parseWhoami(stdout: string): { accountType?: string; email?: string } | null {
+export function parseWhoami(stdout: string): { accountType?: string; email?: string } | null {
+  const parsed = extractLeadingJsonObject(stdout)
+  if (!parsed) return null
+  // Explicit negative signals always win.
+  if (parsed.loggedIn === false) return null
+  if (parsed.error !== undefined && parsed.error !== null) return null
+  const accountType = typeof parsed.accountType === 'string' && parsed.accountType ? parsed.accountType : undefined
+  const email = typeof parsed.email === 'string' && parsed.email ? parsed.email : undefined
+  const startUrl = typeof parsed.startUrl === 'string' && parsed.startUrl ? parsed.startUrl : undefined
+  // Positive discriminator: some identity/session evidence must be present.
+  if (!accountType && !email && !startUrl) return null
+  return { accountType, email }
+}
+
+/**
+ * Extract the FIRST complete JSON object leading the (trimmed) CLI output using
+ * a brace-depth scan that respects string literals and escapes — so nested
+ * objects parse whole and trailing non-JSON text is ignored. Null when there is
+ * no leading, parseable object.
+ */
+function extractLeadingJsonObject(stdout: string): Record<string, unknown> | null {
   const trimmed = stdout.trim()
-  if (!trimmed) return null
-  const start = trimmed.indexOf('{')
-  const end = trimmed.indexOf('}', start)
-  if (start < 0 || end <= start) return null
-  try {
-    const parsed = JSON.parse(trimmed.slice(start, end + 1)) as Record<string, unknown>
-    return {
-      accountType: typeof parsed.accountType === 'string' ? parsed.accountType : undefined,
-      email: typeof parsed.email === 'string' ? parsed.email : undefined,
+  if (!trimmed.startsWith('{')) return null // must LEAD the output (modulo whitespace)
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i]
+    if (inString) {
+      if (escaped) escaped = false
+      else if (ch === '\\') escaped = true
+      else if (ch === '"') inString = false
+      continue
     }
-  } catch {
-    return null
+    if (ch === '"') inString = true
+    else if (ch === '{') depth++
+    else if (ch === '}') {
+      depth--
+      if (depth === 0) {
+        try {
+          const value = JSON.parse(trimmed.slice(0, i + 1)) as unknown
+          return value && typeof value === 'object' && !Array.isArray(value)
+            ? (value as Record<string, unknown>)
+            : null
+        } catch {
+          return null
+        }
+      }
+    }
   }
+  return null
 }
 
 /** Default stored-key reader: BrainCredentialStore 'kiro' → 'apiKey'. Never throws. */

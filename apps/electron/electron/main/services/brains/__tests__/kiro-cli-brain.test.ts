@@ -10,7 +10,7 @@
  * @vitest-environment node
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { KiroCliBrain, parseKiroOutput } from '../kiro-cli-brain'
+import { KiroCliBrain, parseKiroOutput, parseWhoami } from '../kiro-cli-brain'
 import type { SpawnFn } from '../cli-runner'
 import { makeFakeSpawn, type FakeSpawnScript } from './fake-spawn'
 
@@ -44,6 +44,47 @@ describe('parseKiroOutput', () => {
   it('returns null when nothing remains', () => {
     expect(parseKiroOutput('\x1b[0m>  ')).toBeNull()
     expect(parseKiroOutput('   ')).toBeNull()
+  })
+})
+
+describe('parseWhoami (positive-discriminator login parse)', () => {
+  it('exit-0 `{}` is NOT a login (no identity fields)', () => {
+    expect(parseWhoami('{}')).toBeNull()
+  })
+
+  it('`{"loggedIn":false}` is NOT a login (explicit negative signal)', () => {
+    expect(parseWhoami('{"loggedIn":false}')).toBeNull()
+    // …even if identity-ish fields are also present.
+    expect(parseWhoami('{"loggedIn":false,"email":"x@y.z"}')).toBeNull()
+  })
+
+  it('an error envelope is NOT a login', () => {
+    expect(parseWhoami('{"error":"token expired"}')).toBeNull()
+    expect(parseWhoami('{"error":{"code":401},"email":"x@y.z"}')).toBeNull()
+  })
+
+  it('parses NESTED-object JSON whole (brace-depth scan, not first-closing-brace)', () => {
+    const nested =
+      '{"accountType":"IamIdentityCenter","meta":{"inner":{"deep":true},"brace":"}{"},"email":"a@b.c"}'
+    const who = parseWhoami(nested + '\n\nProfile:\nSomeProfile')
+    expect(who).toEqual({ accountType: 'IamIdentityCenter', email: 'a@b.c' })
+  })
+
+  it('accepts the real whoami shape with trailing plain-text profile lines', () => {
+    const who = parseWhoami(WHOAMI_STDOUT)
+    expect(who?.accountType).toBe('IamIdentityCenter')
+    expect(who?.email).toBe('user@example.com')
+  })
+
+  it('startUrl alone satisfies the positive discriminator', () => {
+    expect(parseWhoami('{"startUrl":"https://x.awsapps.com/start/"}')).not.toBeNull()
+  })
+
+  it('rejects non-leading JSON (log noise first), non-object JSON, and junk', () => {
+    expect(parseWhoami('starting up...\n{"email":"a@b.c"}')).toBeNull()
+    expect(parseWhoami('["email"]')).toBeNull()
+    expect(parseWhoami('not json at all')).toBeNull()
+    expect(parseWhoami('')).toBeNull()
   })
 })
 
@@ -119,6 +160,16 @@ describe('KiroCliBrain', () => {
       expect(status.configured).toBe(false)
       expect(status.method).toBe('none')
       expect(status.detail).toMatch(/not logged in/i)
+    })
+
+    it('an exit-0 `{}` / error-envelope whoami never reads as "login active"', async () => {
+      for (const stdout of ['{}', '{"loggedIn":false}', '{"error":"token expired"}']) {
+        const spawn = makeFakeSpawn({ stdout, code: 0 })
+        const brain = new KiroCliBrain({ spawn: asSpawn(spawn.fn), env: {}, getStoredKey: () => '' })
+        const status = await brain.authStatus()
+        expect(status.configured, `stdout=${stdout}`).toBe(false)
+        expect(status.method).toBe('none')
+      }
     })
   })
 

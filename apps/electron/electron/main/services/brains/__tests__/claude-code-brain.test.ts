@@ -147,46 +147,101 @@ describe('ClaudeCodeBrain', () => {
   })
 })
 
-describe('resolveClaudeCommand (identity-verified win32 exec-path fix)', () => {
-  const PATH = 'C:\\shim;C:\\real'
-  const env = { PATH } as NodeJS.ProcessEnv
-  const REAL = 'C:\\real\\claude.exe'
+describe('resolveClaudeCommand (trusted-root, identity-verified resolution)', () => {
+  // PATH deliberately contains an "evil" dir that is NOT a trusted root — the
+  // resolver must never even look there.
+  const env = { PATH: 'C:\\evil;C:\\trusted' } as NodeJS.ProcessEnv
+  const TRUSTED = 'C:\\trusted'
+  const REAL = 'C:\\trusted\\claude.exe'
+  const noOverride = () => ''
 
-  it('prefers a native claude.exe over an earlier-on-PATH proxy .cmd shim — after identity verification', async () => {
-    // Reproduces this machine's bug: a `.cmd` (WSL proxy) shadows the real
-    // `claude.exe`. The runner mirrors that (first dir wins) → probe hits the
-    // broken shim → "auth status unavailable". The fix resolves the native exe,
-    // but only once verify() proves it is Anthropic Claude Code.
-    const fileExists = (p: string) => p === 'C:\\shim\\claude.cmd' || p === REAL
+  it('NEVER probes/executes an exe from an arbitrary PATH directory (untrusted discovery banned)', async () => {
+    // A malicious claude.exe sits on an arbitrary PATH dir — identity-probing it
+    // would BE the code execution, so it must never be discovered at all.
+    const checked: string[] = []
+    const fileExists = (p: string) => {
+      checked.push(p)
+      return p === 'C:\\evil\\claude.exe'
+    }
+    const verify = vi.fn(async () => true)
+    const out = await resolveClaudeCommand(env, {
+      platform: 'win32',
+      fileExists,
+      verify,
+      getConfiguredPath: noOverride,
+      trustedRoots: [TRUSTED],
+    })
+    expect(out).toBe('claude') // bare fallback — Windows' normal selection
+    expect(verify).not.toHaveBeenCalled() // the evil exe was never executed
+    expect(checked.some((p) => p.startsWith('C:\\evil'))).toBe(false) // never even looked there
+  })
+
+  it('uses a trusted-root exe only after it passes identity verification', async () => {
+    const fileExists = (p: string) => p === REAL
     const verify = vi.fn(async (p: string) => p === REAL)
-    const out = await resolveClaudeCommand(env, { platform: 'win32', fileExists, verify })
+    const out = await resolveClaudeCommand(env, {
+      platform: 'win32',
+      fileExists,
+      verify,
+      getConfiguredPath: noOverride,
+      trustedRoots: [TRUSTED],
+    })
     expect(out).toBe(REAL)
     expect(verify).toHaveBeenCalledWith(REAL)
   })
 
-  it("REJECTS an unrelated vendor's claude.exe that fails identity verification", async () => {
-    // A random third-party claude.exe on PATH must never be selected — its
-    // --version does not carry the Claude Code signature → fall back to the bare
-    // command (cli-runner's normal resolution).
-    const stranger = 'C:\\shim\\claude.exe'
-    const fileExists = (p: string) => p === stranger
+  it('REJECTS a trusted-root exe that fails identity verification', async () => {
+    const fileExists = (p: string) => p === REAL
     const verify = vi.fn(async () => false)
-    const out = await resolveClaudeCommand(env, { platform: 'win32', fileExists, verify })
-    expect(out).toBe('claude')
-    expect(verify).toHaveBeenCalledWith(stranger)
+    expect(
+      await resolveClaudeCommand(env, {
+        platform: 'win32',
+        fileExists,
+        verify,
+        getConfiguredPath: noOverride,
+        trustedRoots: [TRUSTED],
+      })
+    ).toBe('claude')
   })
 
-  it('skips an unverified exe and accepts a later verified one', async () => {
-    const stranger = 'C:\\shim\\claude.exe'
-    const fileExists = (p: string) => p === stranger || p === REAL
-    const verify = vi.fn(async (p: string) => p === REAL)
-    expect(await resolveClaudeCommand(env, { platform: 'win32', fileExists, verify })).toBe(REAL)
-  })
-
-  it('falls back to the bare command when only a .cmd exists (normal npm install) — verify never runs', async () => {
-    const fileExists = (p: string) => p === 'C:\\shim\\claude.cmd'
+  it('config override WINS outright when the file exists (explicit user consent, no auto-discovery)', async () => {
+    const CUSTOM = 'D:\\my-tools\\claude-custom.exe'
+    const fileExists = (p: string) => p === CUSTOM || p === REAL
     const verify = vi.fn(async () => true)
-    const out = await resolveClaudeCommand(env, { platform: 'win32', fileExists, verify })
+    const out = await resolveClaudeCommand(env, {
+      platform: 'win32',
+      fileExists,
+      verify,
+      getConfiguredPath: () => CUSTOM,
+      trustedRoots: [TRUSTED],
+    })
+    expect(out).toBe(CUSTOM) // beats the trusted-root candidate
+    expect(verify).not.toHaveBeenCalled() // no discovery probing needed
+  })
+
+  it('ignores a configured override whose file does not exist (falls through to trusted roots)', async () => {
+    const fileExists = (p: string) => p === REAL
+    const verify = vi.fn(async () => true)
+    const out = await resolveClaudeCommand(env, {
+      platform: 'win32',
+      fileExists,
+      verify,
+      getConfiguredPath: () => 'D:\\gone\\claude.exe',
+      trustedRoots: [TRUSTED],
+    })
+    expect(out).toBe(REAL)
+  })
+
+  it('falls back to the bare command when trusted roots hold no native exe', async () => {
+    const fileExists = () => false
+    const verify = vi.fn(async () => true)
+    const out = await resolveClaudeCommand(env, {
+      platform: 'win32',
+      fileExists,
+      verify,
+      getConfiguredPath: noOverride,
+      trustedRoots: [TRUSTED],
+    })
     expect(out).toBe('claude')
     expect(verify).not.toHaveBeenCalled()
   })
@@ -196,13 +251,105 @@ describe('resolveClaudeCommand (identity-verified win32 exec-path fix)', () => {
     const verify = vi.fn(async () => {
       throw new Error('probe exploded')
     })
-    expect(await resolveClaudeCommand(env, { platform: 'win32', fileExists, verify })).toBe('claude')
+    expect(
+      await resolveClaudeCommand(env, {
+        platform: 'win32',
+        fileExists,
+        verify,
+        getConfiguredPath: noOverride,
+        trustedRoots: [TRUSTED],
+      })
+    ).toBe('claude')
   })
 
-  it('is a no-op off win32 (POSIX resolves natively)', async () => {
+  it('is a no-op off win32 (POSIX resolves natively) — but the explicit override still wins', async () => {
     const fileExists = () => true
     const verify = vi.fn(async () => true)
-    expect(await resolveClaudeCommand(env, { platform: 'linux', fileExists, verify })).toBe('claude')
+    expect(
+      await resolveClaudeCommand(env, {
+        platform: 'linux',
+        fileExists,
+        verify,
+        getConfiguredPath: noOverride,
+        trustedRoots: [TRUSTED],
+      })
+    ).toBe('claude')
     expect(verify).not.toHaveBeenCalled()
+    // The explicit user override applies on any platform.
+    expect(
+      await resolveClaudeCommand(env, {
+        platform: 'linux',
+        fileExists,
+        verify,
+        getConfiguredPath: () => '/opt/claude/claude',
+        trustedRoots: [TRUSTED],
+      })
+    ).toBe('/opt/claude/claude')
+  })
+})
+
+describe('stale resolution cache (invalidate + single re-resolve)', () => {
+  const DEAD = 'C:\\dead\\claude.exe'
+  const REAL = 'C:\\trusted\\claude.exe'
+
+  it('uninstall-mid-session: a dead cached path recovers on the next call', async () => {
+    let call = 0
+    const resolveCommand = vi.fn(async () => (++call === 1 ? DEAD : 'claude'))
+    const spawn = makeFakeSpawn((cmd) =>
+      cmd === DEAD
+        ? ({ emitError: true } as FakeSpawnScript)
+        : ({ stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }), code: 0 } as FakeSpawnScript)
+    )
+    const brain = new ClaudeCodeBrain({ spawn: asSpawn(spawn.fn), env: {}, resolveCommand })
+    const status = await brain.authStatus()
+    expect(status.configured).toBe(true)
+    expect(status.detail).toBe('Logged in (claude.ai)')
+    expect(resolveCommand).toHaveBeenCalledTimes(2) // initial + one re-resolve
+    expect(spawn.calls.map((c) => c.command)).toEqual([DEAD, 'claude'])
+  })
+
+  it('install-after-fallback: a broken bare fallback picks up the newly installed native exe', async () => {
+    let call = 0
+    const resolveCommand = vi.fn(async () => (++call === 1 ? 'claude' : REAL))
+    const spawn = makeFakeSpawn((cmd) =>
+      cmd === 'claude'
+        ? ({ stdout: '', stderr: 'claude: command not found', code: 127 } as FakeSpawnScript)
+        : ({ stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }), code: 0 } as FakeSpawnScript)
+    )
+    const brain = new ClaudeCodeBrain({ spawn: asSpawn(spawn.fn), env: {}, resolveCommand })
+    const status = await brain.authStatus()
+    expect(status.configured).toBe(true)
+    expect(spawn.calls.map((c) => c.command)).toEqual(['claude', REAL])
+  })
+
+  it('no infinite re-resolve loop: exactly one retry per operation', async () => {
+    const resolveCommand = vi.fn(async () => DEAD)
+    const spawn = makeFakeSpawn({ emitError: true })
+    const brain = new ClaudeCodeBrain({ spawn: asSpawn(spawn.fn), env: {}, resolveCommand })
+    const status = await brain.authStatus()
+    expect(status.configured).toBe(false)
+    expect(spawn.calls).toHaveLength(2) // initial + single retry, then stop
+    expect(resolveCommand).toHaveBeenCalledTimes(2)
+  })
+
+  it('a clean "not logged in" (code 0 + parsed JSON) is NOT retried', async () => {
+    const resolveCommand = vi.fn(async () => 'claude')
+    const spawn = makeFakeSpawn({ stdout: JSON.stringify({ loggedIn: false }), code: 0 })
+    const brain = new ClaudeCodeBrain({ spawn: asSpawn(spawn.fn), env: {}, resolveCommand })
+    const status = await brain.authStatus()
+    expect(status.configured).toBe(false)
+    expect(spawn.calls).toHaveLength(1) // legitimate answer — no re-resolution
+    expect(resolveCommand).toHaveBeenCalledTimes(1)
+  })
+
+  it('generate retries once after a spawn error with a fresh resolution', async () => {
+    let call = 0
+    const resolveCommand = vi.fn(async () => (++call === 1 ? DEAD : 'claude'))
+    const spawn = makeFakeSpawn((cmd) =>
+      cmd === DEAD ? ({ emitError: true } as FakeSpawnScript) : ({ stdout: 'answer', code: 0 } as FakeSpawnScript)
+    )
+    const brain = new ClaudeCodeBrain({ spawn: asSpawn(spawn.fn), env: {}, resolveCommand })
+    expect(await brain.generate([{ role: 'user', content: 'q' }])).toBe('answer')
+    expect(spawn.calls.map((c) => c.command)).toEqual([DEAD, 'claude'])
   })
 })
