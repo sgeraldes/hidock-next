@@ -276,15 +276,16 @@ export function Layout({ children }: LayoutProps) {
       >
         {/* SIDEBAR-COLLAPSE EDGE-HANDLE — straddles the sidebar's RIGHT border,
             vertically centred at MID-HEIGHT (per owner: "mid-right position, in the
-            middle of the sidebar, not the top corner"). z-50 so it sits above the
-            main content it overlaps. Toggles collapse in both states. */}
+            middle of the sidebar, not the top corner"). A tight SQUARE only a couple
+            px larger than the icon (owner: "no circle, square, barely bigger than the
+            icon"). z-50 so it sits above the main content it overlaps. */}
         <button
           type="button"
           onClick={toggleSidebar}
           aria-label={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
           aria-pressed={sidebarOpen}
           title={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
-          className="absolute right-0 top-1/2 z-50 flex h-7 w-7 -translate-y-1/2 translate-x-1/2 items-center justify-center rounded-full border border-slate-600 bg-slate-800 text-slate-300 shadow-md transition-colors hover:bg-slate-700 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+          className="absolute right-0 top-1/2 z-50 flex h-5 w-5 -translate-y-1/2 translate-x-1/2 items-center justify-center rounded-[3px] border border-slate-600 bg-slate-800 text-slate-300 shadow-sm transition-colors hover:bg-slate-700 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
         >
           {sidebarOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeftOpen className="h-4 w-4" />}
         </button>
