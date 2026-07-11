@@ -31,6 +31,14 @@ Legend: **P0** blocking · **P1** quality/noise · **P2** polish/nice-to-have.
 - [x] **H15** **Activity Log must NOT be in the sidebar** (it's already the titlebar ⚡ button). — DONE (`a5132b5a`): removed the sidebar entry point; **deleted** `ActivityLogPanel.tsx` + test. TRIPWIRE: if a sidebar Activity Log ever reappears, remove it — the titlebar is the single owner.
 - [x] **H16 (= D10)** **Collapse button in the WRONG place** (was sidebar top-right corner). Owner: "IT GOES IN THE MIDDLE OF THE SIDEBAR, VERTICALLY, MID-RIGHT." — DONE (`529bcdae`): moved OFF the titlebar onto the sidebar's right border, vertically centred at mid-height. TRIPWIRE: it must stay mid-right on the sidebar edge, never the top corner / titlebar.
 
+### H17 — Library list layout ("for the millionth time", R144–R156) — RESOLVED + DOM-VERIFIED
+Owner's four complaints (images #119–121) — all confirmed fixed via live DOM measurement (2026-07-11), evidence not just a claim:
+- [x] **No horizontal scroll** — sources scroller `scrollWidth-clientWidth = 0`.
+- [x] **No excess left padding** — title starts 12px from row edge; the old checkbox+status-icon left gutter (~44px) is gone (checkbox removed in H4 `f1db2204`; status icons moved to the RIGHT cluster).
+- [x] **Icons on the left moved right** — `SourceRow` status/meeting icons live in the right cluster, one baseline.
+- [x] **Separators reach both edges** — `border-t` on the full-width (100%) row wrapper measures `rowLeft==listLeft (224)` and `rowRight==listRight (561)` → `spansFullWidth: true`.
+TRIPWIRE: the sources list must never horizontally scroll and its row separators must span the full panel width (no left/right inset). Verify with a DOM measure, not eyeballing, if re-touched.
+
 ## Track A — Titlebar / chrome polish (agent-flagged gaps)
 - [ ] **A1 (P1)** Wire **⌘K** to focus/open the titlebar search (placeholder only today).
 - [ ] **A2 (P1)** Notifications 🔔: idle click is a no-op + duplicates the sidebar Operations badge — give it a real popover (recent ops/notifications) and reconcile with the sidebar badge.
