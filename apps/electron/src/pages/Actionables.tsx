@@ -38,6 +38,7 @@ import { toast } from '@/components/ui/toaster'
 import { Checkbox } from '@/components/ui/checkbox'
 import { EntityMention, useContactResolver } from '@/components/entity'
 import { ActionableDetail } from '@/components/actionables/ActionableDetail'
+import { HandoverDialog } from '@/components/actionables/HandoverDialog'
 import { getTemplateInfo, humanizeActionableType } from '@/components/actionables/templateInfo'
 import { ActionablesControls } from '@/components/actionables/ActionablesControls'
 import { BulkActionBar } from '@/components/actionables/BulkActionBar'
@@ -129,10 +130,10 @@ export function Actionables() {
     savedPath?: string
     actionableId?: string
   } | null>(null)
-  // Tracks whether an "Open in Claude Code" launch is in flight (disables the CTA)
-  const [launchingClaude, setLaunchingClaude] = useState(false)
   const [generationError, setGenerationError] = useState<string | null>(null)
   const [showOutputModal, setShowOutputModal] = useState(false)
+  // H9: the "proper" handover dialog (bundle + in-app agentic run).
+  const [showHandoverDialog, setShowHandoverDialog] = useState(false)
   const [generationHistory, setGenerationHistory] = useState<number[]>([])
   // B-ACT-002: Per-actionable loading state to prevent double-clicks
   const [loadingActionableIds, setLoadingActionableIds] = useState<Set<string>>(new Set())
@@ -234,48 +235,6 @@ export function Actionables() {
       }
     } catch (error: any) {
       toast.error('Copy failed', error?.message || 'Failed to copy to clipboard')
-    }
-  }
-
-  // "Open in Claude Code" — launches a Claude Code terminal session pointed at
-  // the handoff prompt. The main process resolves the working directory (source
-  // project folder → configured handoff folder); if none is known it replies
-  // needsFolder and we prompt the user to pick one, then retry with it.
-  const openInClaudeCode = async () => {
-    const output = generatedOutput
-    if (!output?.content) return
-    setLaunchingClaude(true)
-    try {
-      const attempt = (cwd?: string) =>
-        window.electronAPI.outputs.launchClaudeCode({
-          filePath: output.savedPath,
-          content: output.content,
-          templateId: output.templateId,
-          actionableId: output.actionableId,
-          cwd
-        })
-
-      let res = await attempt()
-
-      // No working directory known — ask the user to choose one, then retry.
-      if (res.success && res.data?.needsFolder) {
-        const pick = await window.electronAPI.storage.selectFolder?.()
-        if (!pick?.success || !pick.data) {
-          toast.info('Cancelled', 'Pick a folder to open Claude Code in.')
-          return
-        }
-        res = await attempt(pick.data)
-      }
-
-      if (res.success && res.data?.launched) {
-        toast.success('Opening Claude Code', res.data.cwd ? `Launched in ${res.data.cwd}` : 'Terminal opened.')
-      } else if (!res.success) {
-        toast.error('Could not open Claude Code', res.error?.message || 'Unknown error')
-      }
-    } catch (error: any) {
-      toast.error('Could not open Claude Code', error?.message || 'An unexpected error occurred')
-    } finally {
-      setLaunchingClaude(false)
     }
   }
 
@@ -1039,20 +998,15 @@ export function Actionables() {
           </div>
           <DialogFooter className="gap-2">
             {generatedOutput?.templateId === 'claude_code_prompt' && (
-              // Primary CTA for the Claude Code handoff — closes the loop by
-              // launching a Claude Code session pointed at the generated prompt.
+              // Primary CTA for the Claude Code handoff — opens the handover dialog
+              // (write a bundle into the repo, and optionally run an agent in-app).
               <Button
-                onClick={openInClaudeCode}
-                disabled={launchingClaude}
+                onClick={() => setShowHandoverDialog(true)}
                 className="gap-2 sm:mr-auto"
-                title="Opens Claude Code in the source project folder (or a folder you choose) and hands off this prompt"
+                title="Write a handover bundle into the project and optionally run a coding agent on it"
               >
-                {launchingClaude ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Terminal className="h-4 w-4" />
-                )}
-                Open in Claude Code
+                <Terminal className="h-4 w-4" />
+                Hand off →
               </Button>
             )}
             {generatedOutput?.sourceId && (
@@ -1090,6 +1044,23 @@ export function Actionables() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* H9: proper Claude Code handover — bundle + optional in-app agentic run */}
+      <HandoverDialog
+        open={showHandoverDialog}
+        onOpenChange={setShowHandoverDialog}
+        output={
+          generatedOutput
+            ? {
+                content: generatedOutput.content,
+                templateId: generatedOutput.templateId,
+                savedPath: generatedOutput.savedPath,
+                actionableId: generatedOutput.actionableId,
+                sourceId: generatedOutput.sourceId
+              }
+            : null
+        }
+      />
     </div>
   )
 }

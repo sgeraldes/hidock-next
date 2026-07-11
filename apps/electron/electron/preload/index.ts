@@ -33,6 +33,42 @@ export interface BrainListItem {
 }
 
 /**
+ * Handover bundle types (H9). Mirror of the main-process contract in
+ * `electron/main/services/handover-service.ts` + `ipc/handover-handlers.ts`,
+ * declared inline for the same reason as the brains types above (the renderer
+ * tsconfig program cannot import from `main/services`).
+ */
+export interface HandoverManifest {
+  slug: string
+  title: string
+  generatedAt: string
+  brain: { id: string; label: string } | null
+  source: {
+    actionableId: string | null
+    knowledgeCaptureId: string | null
+    meetingId: string | null
+    recordingIds: string[]
+  }
+  files: string[]
+}
+export interface HandoverCreateBundleResult {
+  created: boolean
+  needsFolder?: boolean
+  bundleDir?: string
+  handoverPath?: string
+  targetDir?: string
+  manifest?: HandoverManifest
+}
+export interface HandoverRunAgentResult {
+  ok: boolean
+  brainId: string | null
+  brainLabel: string | null
+  finalResponse: string | null
+  runLogPath: string
+  error?: string
+}
+
+/**
  * B-SET-004 / QAM-002: QA logging check via localStorage bridge.
  * Preload scripts run in context isolation, so they cannot access Zustand stores directly.
  * Instead, read from the persisted localStorage key that the UI store writes to.
@@ -846,6 +882,25 @@ export interface ElectronAPI {
     setCredential: (args: { id: BrainId; field: string; value: string | null }) => Promise<{ success: boolean }>
   }
 
+  // Handover (H9) — write a handover BUNDLE into a target repo and optionally run
+  // it in-app through an agentic brain (Claude Code / Codex / Gemini CLI).
+  handover: {
+    createBundle: (args: {
+      content: string
+      actionableId?: string
+      knowledgeCaptureId?: string
+      meetingId?: string
+      recordingId?: string
+      targetDir?: string
+      brain?: { id: string; label: string } | null
+    }) => Promise<Result<HandoverCreateBundleResult>>
+    runAgent: (args: {
+      bundleDir: string
+      targetDir: string
+      brainId?: string
+    }) => Promise<Result<HandoverRunAgentResult>>
+  }
+
   // Migration - Database schema migration to V11 (Knowledge Captures)
   migration: MigrationAPI
 
@@ -1408,6 +1463,11 @@ const electronAPI: ElectronAPI = {
     setDefault: (args) => callIPC('brains:setDefault', args),
     setTaskRouting: (args) => callIPC('brains:setTaskRouting', args),
     setCredential: (args) => callIPC('brains:setCredential', args)
+  },
+
+  handover: {
+    createBundle: (args) => callIPC('handover:createBundle', args),
+    runAgent: (args) => callIPC('handover:runAgent', args)
   },
 
   migration: {
