@@ -1,10 +1,12 @@
 /**
  * Tests for the integrated titlebar chrome (Wave: unified bar):
  *  - the brand lockup lives IN the bar (moved out of the sidebar);
- *  - the edge-handle toggles the sidebar collapse in both states;
  *  - the right cluster exposes notifications / activity / settings / device /
  *    user-menu;
  *  - the native window-controls gutter is reserved on the right.
+ *
+ * The sidebar-collapse handle no longer lives in the titlebar (it moved to the
+ * sidebar's right edge); its behaviour is covered by Layout's own tests.
  *
  * Device-pill Restart-in-all-states is covered by TitleBar.test.tsx.
  */
@@ -39,7 +41,7 @@ function setDisconnected() {
 function renderBar(props: Partial<React.ComponentProps<typeof TitleBar>> = {}) {
   return render(
     <MemoryRouter>
-      <TitleBar sidebarOpen onToggleSidebar={vi.fn()} {...props} />
+      <TitleBar sidebarOpen {...props} />
     </MemoryRouter>
   )
 }
@@ -55,22 +57,6 @@ describe('Integrated titlebar — brand cell', () => {
     expect(screen.getByTestId('app-brand')).toBeInTheDocument()
     expect(screen.getByText('Meeting')).toBeInTheDocument()
     expect(screen.getByText('Intelligence')).toBeInTheDocument()
-  })
-})
-
-describe('Integrated titlebar — edge-handle collapse', () => {
-  it('toggles the sidebar when expanded (Collapse)', () => {
-    const onToggle = vi.fn()
-    renderBar({ sidebarOpen: true, onToggleSidebar: onToggle })
-    fireEvent.click(screen.getByRole('button', { name: /collapse sidebar/i }))
-    expect(onToggle).toHaveBeenCalledTimes(1)
-  })
-
-  it('toggles the sidebar when collapsed (Expand)', () => {
-    const onToggle = vi.fn()
-    renderBar({ sidebarOpen: false, onToggleSidebar: onToggle })
-    fireEvent.click(screen.getByRole('button', { name: /expand sidebar/i }))
-    expect(onToggle).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -110,7 +96,7 @@ describe('Integrated titlebar — ⌘K search shortcut', () => {
     render(
       <MemoryRouter>
         <input data-testid="other" />
-        <TitleBar sidebarOpen onToggleSidebar={vi.fn()} />
+        <TitleBar sidebarOpen />
       </MemoryRouter>
     )
     const other = screen.getByTestId('other') as HTMLInputElement

@@ -6,8 +6,6 @@ import {
   Loader2,
   Usb,
   ChevronDown,
-  PanelLeftClose,
-  PanelLeftOpen,
   LogOut,
   ArrowRight,
   AlertTriangle,
@@ -48,14 +46,14 @@ import {
  * Layout (left → right):
  *  1. Brand cell — width == the sidebar width, so the app mark sits directly
  *     above the nav rail (see <Brand>). Swappable placement via the Brand prop.
- *  2. Edge-handle collapse — a chevron ON the divider between the brand cell and
- *     the content area; toggles the sidebar (replaces the old KNOWLEDGE-header
- *     toggle). Works in both expanded and collapsed (rail) states.
- *  3. Centred global search (⌘K-style) — routes to Explore.
- *  4. Right cluster — 🔔 notifications, ⚡ activity, ⚙ settings, the device
+ *  2. Centred global search (⌘K-style) — routes to Explore.
+ *  3. Right cluster — 🔔 notifications, ⚡ activity, ⚙ settings, the device
  *     status pill (all-states, incl. Restart), then the avatar → app menu.
- *  5. Native window controls (— ▢ ✕) — drawn by Electron in the reserved
+ *  4. Native window controls (— ▢ ✕) — drawn by Electron in the reserved
  *     NATIVE_CONTROLS_WIDTH gutter at the far right (inside this bar).
+ *
+ * The sidebar-collapse control does NOT live here — it's an edge-handle on the
+ * SIDEBAR's right border, vertically centred at mid-height (see Layout.tsx).
  *
  * The whole bar is a drag region (`titlebar-drag-region`); every interactive
  * child opts out with `titlebar-no-drag`. Height (h-14 / 56px) MUST stay in sync
@@ -80,20 +78,13 @@ const NATIVE_CONTROLS_WIDTH = 138
 // Windows the brand cell starts flush at x=0 and the grid is pixel-exact.
 const MAC_TRAFFIC_LIGHT_INSET = 72
 
-// Brand-cell width == sidebar width (w-56 open / w-16 collapsed). The edge-handle
-// collapse control is centred on the divider at this x, so it animates with the cell.
-const CELL_WIDTH_OPEN = 224 // w-56
-const CELL_WIDTH_COLLAPSED = 64 // w-16
-
 interface TitleBarProps {
   sidebarOpen: boolean
-  /** Toggles the sidebar — driven by the edge-handle on the brand/content divider. */
-  onToggleSidebar?: () => void
   /** Corner-cell divider treatment (owner preview). Defaults to BRAND_DIVIDER_MODE. */
   dividerMode?: BrandDividerMode
 }
 
-export function TitleBar({ sidebarOpen, onToggleSidebar, dividerMode = BRAND_DIVIDER_MODE }: TitleBarProps) {
+export function TitleBar({ sidebarOpen, dividerMode = BRAND_DIVIDER_MODE }: TitleBarProps) {
   const navigate = useNavigate()
   // Shared with the Device Sync page — same status source, same connect action.
   const { status, label: connectionLabel, failedHint, connect, disconnect } = useDeviceConnection()
@@ -140,8 +131,6 @@ export function TitleBar({ sidebarOpen, onToggleSidebar, dividerMode = BRAND_DIV
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [])
 
-  const cellWidth = sidebarOpen ? CELL_WIDTH_OPEN : CELL_WIDTH_COLLAPSED
-
   return (
     <header
       className={cn(
@@ -173,31 +162,6 @@ export function TitleBar({ sidebarOpen, onToggleSidebar, dividerMode = BRAND_DIV
       >
         <Brand placement="titlebar" collapsed={!sidebarOpen} onHome={() => navigate('/today')} />
       </div>
-
-      {/* EDGE-HANDLE COLLAPSE — a small chevron sitting ON the brand/content
-          divider (concept 04). Toggles the sidebar in BOTH states; replaces the
-          old collapse toggle on the KNOWLEDGE header. Centred on the divider x
-          (translateX -50%) and vertically centred; animates with the cell width. */}
-      {onToggleSidebar && (
-        <button
-          type="button"
-          onClick={onToggleSidebar}
-          aria-label={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
-          aria-pressed={sidebarOpen}
-          title={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
-          className={cn(
-            'titlebar-no-drag absolute z-40 flex h-6 w-6 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-md border border-slate-600 bg-slate-800 text-slate-300 shadow-sm transition-all duration-300 hover:bg-slate-700 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400',
-            // Option 01: the vertical seam is gone from the bar, so the collapse
-            // handle drops to the bar's bottom edge — sitting at the sidebar's
-            // top-right corner, below the bar. Other modes keep it centred on the seam.
-            dividerMode === 'titlebar' ? 'top-full' : 'top-1/2'
-          )}
-          style={{ left: cellWidth }}
-        >
-          {/* Panel-collapse icon (matches the Sources-panel toggle), not a chevron. */}
-          {sidebarOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeftOpen className="h-4 w-4" />}
-        </button>
-      )}
 
       {/* CONTENT COLUMN — centred search + right cluster. */}
       <div className="flex h-full min-w-0 flex-1 items-center gap-2 pl-4 pr-3">

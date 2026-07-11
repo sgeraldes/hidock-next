@@ -12,7 +12,9 @@ import {
   ListTodo,
   Settings,
   Network,
-  Sun
+  Sun,
+  PanelLeftClose,
+  PanelLeftOpen
 } from 'lucide-react'
 import { TitleBar } from '@/components/layout/TitleBar'
 import { showBrandHorizontalDivider } from '@/components/layout/Brand'
@@ -29,7 +31,6 @@ type LucideIcon = typeof FileText
 import { toast } from '@/components/ui/toaster'
 import { OperationController } from '@/components/OperationController'
 import { OperationsPanel } from '@/components/layout/OperationsPanel'
-import { ActivityLogPanel } from '@/components/layout/ActivityLogPanel'
 import { useUIStore } from '@/store/ui/useUIStore'
 import { useActionablesPendingCount, useActionablesStore } from '@/store'
 
@@ -238,8 +239,8 @@ export function Layout({ children }: LayoutProps) {
       <OperationController />
 
       {/* Office-365-style unified titlebar (window chrome merged with the app). The
-          edge-handle on the brand/content divider drives the sidebar collapse. */}
-      <TitleBar sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+          sidebar-collapse handle lives on the sidebar's right edge (below), not here. */}
+      <TitleBar sidebarOpen={sidebarOpen} />
 
       {/* Divider row under the titlebar. Rendered as its own row BELOW the 40px
           titlebar band so the Windows native-controls overlay can't paint over its
@@ -265,13 +266,28 @@ export function Layout({ children }: LayoutProps) {
 
       {/* Sidebar + content row (sits below the titlebar) */}
       <div className="flex min-h-0 flex-1">
-      {/* Dark Sidebar */}
+      {/* Dark Sidebar — `relative` so the collapse edge-handle can anchor to its
+          right border at mid-height. */}
       <aside
         className={cn(
-          'flex flex-col border-r border-slate-700 bg-slate-900 text-slate-100 transition-all duration-300',
+          'relative flex flex-col border-r border-slate-700 bg-slate-900 text-slate-100 transition-all duration-300',
           sidebarOpen ? 'w-56' : 'w-16'
         )}
       >
+        {/* SIDEBAR-COLLAPSE EDGE-HANDLE — straddles the sidebar's RIGHT border,
+            vertically centred at MID-HEIGHT (per owner: "mid-right position, in the
+            middle of the sidebar, not the top corner"). z-50 so it sits above the
+            main content it overlaps. Toggles collapse in both states. */}
+        <button
+          type="button"
+          onClick={toggleSidebar}
+          aria-label={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
+          aria-pressed={sidebarOpen}
+          title={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
+          className="absolute right-0 top-1/2 z-50 flex h-7 w-7 -translate-y-1/2 translate-x-1/2 items-center justify-center rounded-full border border-slate-600 bg-slate-800 text-slate-300 shadow-md transition-colors hover:bg-slate-700 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+        >
+          {sidebarOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeftOpen className="h-4 w-4" />}
+        </button>
         {/* Navigation — nav px-2.5 (10px) + item px-3 (12px) + half-icon (10px)
             lands every icon centre on the shared 32px rail axis (see TitleBar). */}
         <nav className="flex-1 px-2.5 pt-3 pb-2 space-y-4 overflow-y-auto">
@@ -344,9 +360,9 @@ export function Layout({ children }: LayoutProps) {
         {/* Operations Panel - Downloads + Transcriptions */}
         <OperationsPanel sidebarOpen={sidebarOpen} />
 
-        {/* Activity Log — sidebar shows only a compact badge; the full log opens
-            in a dedicated overlay (see ActivityLogPanel), never inline here. */}
-        <ActivityLogPanel sidebarOpen={sidebarOpen} />
+        {/* Activity Log is NOT in the sidebar — it lives ONLY in the titlebar (the
+            ⚡ ActivityLogButton owns the single overlay). Removed from here to kill
+            the duplicate entry point (owner request). Do NOT re-add it. */}
 
         {/* Restart moved OUT of the sidebar into the device pill's dropdown menu
             (see TitleBar.tsx) — it lives with the device connection controls now
