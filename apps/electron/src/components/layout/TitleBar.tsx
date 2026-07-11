@@ -58,8 +58,10 @@ import {
  *     NATIVE_CONTROLS_WIDTH gutter at the far right (inside this bar).
  *
  * The whole bar is a drag region (`titlebar-drag-region`); every interactive
- * child opts out with `titlebar-no-drag`. Height MUST stay in sync with the
- * `titleBarOverlay.height` set in electron/main/index.ts (40px).
+ * child opts out with `titlebar-no-drag`. Height (h-14 / 56px) MUST stay in sync
+ * with the `titleBarOverlay.height` set in electron/main/index.ts, AND the bar's
+ * solid colour (#0f1626) MUST match `titleBarOverlay.color` there so the native
+ * window-controls gutter blends seamlessly with the bar.
  */
 
 const isMac =
@@ -143,13 +145,15 @@ export function TitleBar({ sidebarOpen, onToggleSidebar, dividerMode = BRAND_DIV
   return (
     <header
       className={cn(
-        'titlebar-drag-region relative z-30 flex h-10 shrink-0 items-center text-slate-100 select-none',
+        'titlebar-drag-region relative z-30 flex h-14 shrink-0 items-center text-slate-100 select-none',
         // Option 01 ('titlebar'): the brand flows into the bar as ONE continuous
-        // surface — a subtle top-to-bottom bar GRADIENT (brand shares it, no seam) —
-        // and the whole bar reads as elevated, casting a soft shadow DOWNWARD onto
+        // SOLID surface (brand shares it, no seam) — a single flat dark tone (#0f1626)
+        // so the bar blends with the FLAT native window controls, whose gutter is
+        // tinted the SAME colour via titleBarOverlay.color in electron/main/index.ts.
+        // The whole bar still reads as elevated, casting a soft shadow DOWNWARD onto
         // the sidebar + content below. Matches the approved mockup.
         dividerMode === 'titlebar'
-          ? 'bg-[linear-gradient(180deg,#151d2b,#0d1220)] shadow-[0_7px_18px_-9px_rgba(0,0,0,0.75)]'
+          ? 'bg-[#0f1626] shadow-[0_7px_18px_-9px_rgba(0,0,0,0.75)]'
           : 'bg-slate-900'
       )}
       style={{ paddingRight: isMac ? 12 : NATIVE_CONTROLS_WIDTH }}
@@ -222,19 +226,26 @@ export function TitleBar({ sidebarOpen, onToggleSidebar, dividerMode = BRAND_DIV
           </div>
         </form>
 
-        {/* RIGHT CLUSTER — notifications, activity, settings, device pill, user menu. */}
-        <div className="flex shrink-0 items-center gap-1">
-          <NotificationsButton />
-          <ActivityLogButton />
-          <button
-            type="button"
-            onClick={() => navigate('/settings')}
-            aria-label="Settings"
-            title="Settings"
-            className="titlebar-no-drag flex h-7 w-7 items-center justify-center rounded-md text-slate-300 transition-colors hover:bg-slate-700 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
-          >
-            <SettingsIcon className="h-4 w-4" />
-          </button>
+        {/* RIGHT CLUSTER — a grouped rhythm rather than one uniform tiny gap: the
+            three icon buttons (🔔 notifications · ⚡ activity · ⚙ settings) sit
+            together as a tight trio, then a wider gap sets off the device status
+            pill, then the user menu. All share the h-7 baseline so they line up on
+            one axis in both themes. */}
+        <div className="flex shrink-0 items-center gap-3">
+          {/* Icon-button trio — one visual group with comfortable inner rhythm. */}
+          <div className="flex items-center gap-1">
+            <NotificationsButton />
+            <ActivityLogButton />
+            <button
+              type="button"
+              onClick={() => navigate('/settings')}
+              aria-label="Settings"
+              title="Settings"
+              className="titlebar-no-drag flex h-7 w-7 items-center justify-center rounded-md text-slate-300 transition-colors hover:bg-slate-700 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+            >
+              <SettingsIcon className="h-4 w-4" />
+            </button>
+          </div>
 
           {/* Device connection control — same status + connect/disconnect action as
               the Device Sync page (via useDeviceConnection). Keeps its all-states

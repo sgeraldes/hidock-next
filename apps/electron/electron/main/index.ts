@@ -100,7 +100,9 @@ function createWindow(): void {
   //    top-right, tinted to match our dark titlebar chrome (slate-900 / slate-200).
   //  - macOS: 'hiddenInset' keeps the traffic lights top-left; TitleBar reserves
   //    left padding for them.
-  // The overlay height MUST match the TitleBar height (TITLEBAR_HEIGHT = 40px).
+  // The overlay height MUST match the TitleBar height (h-14 = 56px), and the
+  // overlay color MUST match the TitleBar's solid background (#0f1626) so the
+  // flat native-controls gutter blends seamlessly into the bar (no visible seam).
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -114,9 +116,9 @@ function createWindow(): void {
       ? {}
       : {
           titleBarOverlay: {
-            color: '#0f172a', // slate-900 — matches TitleBar background
+            color: '#0f1626', // matches TitleBar solid background (bg-[#0f1626])
             symbolColor: '#e2e8f0', // slate-200 — matches TitleBar icon color
-            height: 40
+            height: 56
           }
         }),
     webPreferences: {
