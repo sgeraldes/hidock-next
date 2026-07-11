@@ -94,6 +94,14 @@ Walked E1–E8 live. Healthy/no-finding surfaces: **E5 Settings** (Assistant pla
 - [ ] **F10 (P1 dishonest data, E4 Explore)** **"RECURRING TOPICS" is a hardcoded placeholder, not real data.** `apps/electron/src/pages/Explore.tsx:246` renders a literal array `['Amazon Connect','API Design','Migration','Q1 Planning','Security']` under the caption "Topics frequently mentioned in your recent meetings." These generic English topics do NOT reflect the user's ~1900 Spanish DFX5 meetings (real topics: Antamina, S2D, Connect, Onboarding, Belcorp…). The caption asserts something false. NOTE: the Explore SEARCH itself is real and fast (typed "Antamina" → 21 results in 2ms across Knowledge/People/Projects). Fix: derive the chips from actual topic frequency (or drop the section) — do not present static demo strings as "your recent meetings".
 - [ ] **F11 (P2, E8 Assistant)** **Floating "AI Assistant" bubble is redundant on the dedicated /assistant page.** The GlobalAssistant floating button renders on every route including the full Assistant page, so on `#/assistant` a user can open a second (overlay) assistant on top of the full one (evidence `.audit-shots/E8-assistant.png`). Fix: hide the floating bubble when the active route is the Assistant page.
 
+## Track I — Modular Features, Presets & Performance (owner feature, 2026-07-11)
+Owner: not everyone wants (or has hardware for) full Meeting Intelligence. Every FUNCTION must be toggleable — disabling kills its background tasks AND its UI surfaces, with dependency cascade (disable Context Graph → dependent People/Projects/Calendar affordances follow). Connectors (GitHub — currently not even configurable! — Slack, Outlook/M365, ICS) all get config+toggle. Presets: "HiDock library management only" / "HiDock + Transcription" / "Full Context Awareness". Plus: per-feature PERFORMANCE instrumentation (load, running, surface-switch, source-processing) → optimization path + hardware guide; and (privacy-gated, opt-in) usage/perf telemetry to inform local-vs-web service offering.
+- [ ] **I1 (P1)** Design spec: feature registry (id, background tasks, surfaces, IPC, dependency graph), toggle semantics, presets, connector config/toggle unification (incl. the GitHub gap), perf instrumentation points, telemetry consent model.
+- [ ] **I2** Feature registry + flags + dependency cascade (config-backed, UI + background enforcement).
+- [ ] **I3** Settings: Features panel + presets; connector config/toggles unified.
+- [ ] **I4** Perf instrumentation per feature + local report surface (the optimization/hardware guide data).
+- [ ] **I5** Opt-in usage/perf telemetry (explicit consent, anonymized, off by default).
+
 ## Track G — Security / release (owner-gated)
 - [ ] **G1** Promote the Dependabot security fix (0-vuln) from this branch to `main` — **owner's call** (QA-first policy; do not push to main unprompted).
 
