@@ -17,7 +17,7 @@ what pixels allow a user to do, never what the API/DB implies.
 | Surface / Module | C | E | D | Last audited | Evidence / notes |
 |---|---|---|---|---|---|
 | Library — list | – | – | – | pending E-walk | H4/H17 landed; rows click→reader; no inline rename yet |
-| Library — reader/waveform | – | – | – | pending E-walk | markers clickable (B1 in flight); speaker chips→people |
+| Library — reader/waveform | 8 | 5 | 7 | 2026-07-11 (B-track landing; prelim, E-walk confirms) | C: markers/event-rows → transcript cross-highlight (B1, tested), speaker chips → People, action buttons. E: category/project assignable, no inline title edit yet. D: marker tooltips, chip↔bar color parity (B2), honest badges; pulse shows where you landed. |
 | Today | – | – | – | pending E-walk | commits/moments in agenda; verify entity links |
 | Calendar | – | – | – | pending E-walk | E1 |
 | Meeting detail | – | – | – | pending E-walk | |

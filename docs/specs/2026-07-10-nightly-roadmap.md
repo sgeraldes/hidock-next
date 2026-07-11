@@ -47,9 +47,9 @@ TRIPWIRE: the sources list must never horizontally scroll and its row separators
 - [ ] **A5 (P2)** Titlebar responsive pass: verify brand/search/cluster at narrow widths + collapsed rail; both themes.
 
 ## Track B — Waveform / meeting-timeline follow-ups
-- [ ] **B1 (P1)** Marker → transcript **cross-highlight**: clicking a numbered marker (or event-list row) scrolls to + highlights the matching turn / action item in `TranscriptViewer` (refId/onEventClick already surfaced).
-- [ ] **B2 (P2)** `useReaderPeople` dedup: a linked-meeting contact who also spoke can get a fallback bar color — align the color key so chip + bar always match.
-- [ ] **B3 (P2)** Backfill timeline analysis for already-transcribed recordings on open when markers/sentiment are empty (so existing recordings show the rich timeline without a manual re-analyze).
+- [x] **B1 (P1)** Marker → transcript cross-highlight — DONE (`a246ca8e` pick): marker/event-row click scrolls the matching turn centered + 1.6s pulse (reduced-motion honored), keyboard-activatable.
+- [x] **B2 (P2)** Reader-people color-key dedup — DONE: labelColorKey maps every diarization label to its representing chip key; chip swatch and bars always match.
+- [x] **B3 (P2)** Timeline backfill on open — DONE: existing backfill now guarded once-per-recording-per-session (no re-run churn on legitimately-empty recordings).
 
 ## Track C — Device / sync bugs (from remaining-bugs.md; verify-then-fix — USB SAFETY)
 > Do NOT probe hardware. Fix with mocks/unit tests; verify against logs only.
