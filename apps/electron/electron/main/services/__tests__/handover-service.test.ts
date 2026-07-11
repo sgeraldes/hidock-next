@@ -9,7 +9,7 @@
  * null contract.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { mkdtempSync, rmSync, readFileSync, existsSync, mkdirSync, symlinkSync } from 'fs'
+import { mkdtempSync, rmSync, readFileSync, existsSync, mkdirSync, symlinkSync, renameSync, realpathSync } from 'fs'
 
 // All DB/brains/event-bus dependencies are INJECTED in these tests, so mock the
 // modules to keep the suite hermetic (the real ones pull in electron `app`).
@@ -30,6 +30,7 @@ import { tmpdir } from 'os'
 import {
   assembleHandoverBundle,
   validateTargetDir,
+  revalidateBundleRecord,
   getRegisteredBundle,
   resetHandoverRegistry,
   slugify,
@@ -119,6 +120,93 @@ describe('validateTargetDir', () => {
 
   it('rejects caller-supplied protected paths (app install / userData)', () => {
     expect(() => validateTargetDir(root, [root], {} as NodeJS.ProcessEnv)).toThrow(/protected location/i)
+  })
+
+  it('rejects the user-profile root itself (an agent must not get the whole profile)', () => {
+    const env = (process.platform === 'win32' ? { USERPROFILE: root } : { HOME: root }) as NodeJS.ProcessEnv
+    expect(() => validateTargetDir(root, [], env)).toThrow(/user profile/i)
+  })
+
+  it.runIf(process.platform === 'win32')('rejects a CASE-VARIANT spelling of the profile root (no case bypass)', () => {
+    const env = { USERPROFILE: root } as NodeJS.ProcessEnv
+    // Same directory, different casing — realpath + case-insensitive compare must catch it.
+    const variant = root.toUpperCase()
+    expect(() => validateTargetDir(variant, [], env)).toThrow(/user profile/i)
+  })
+
+  it('still allows a project folder INSIDE the profile (home\\projects\\x)', () => {
+    const env = (process.platform === 'win32' ? { USERPROFILE: root } : { HOME: root }) as NodeJS.ProcessEnv
+    const project = join(root, 'projects', 'x')
+    mkdirSync(project, { recursive: true })
+    expect(validateTargetDir(project, [], env).toLowerCase()).toBe(realpathSync(project).toLowerCase())
+  })
+
+  it('rejects a target that is an ANCESTOR of an app-sensitive path (userData)', () => {
+    // root contains <root>/sub/userData → an agent cwd'd at root could reach it.
+    const userData = join(root, 'sub', 'userData')
+    mkdirSync(userData, { recursive: true })
+    expect(() => validateTargetDir(root, [userData], {} as NodeJS.ProcessEnv)).toThrow(/contains a protected location/i)
+  })
+
+  it('rejects an ancestor of a protected path even when that path does not exist yet', () => {
+    expect(() =>
+      validateTargetDir(root, [join(root, 'future', 'userData')], {} as NodeJS.ProcessEnv)
+    ).toThrow(/contains a protected location/i)
+  })
+})
+
+describe('revalidateBundleRecord (TOCTOU guard)', () => {
+  let root: string
+  let target: string
+  let bundleDir: string
+
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'handover-toctou-')))
+    target = join(root, 'repo')
+    bundleDir = join(target, 'handover', 'x')
+    mkdirSync(bundleDir, { recursive: true })
+  })
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  const record = (): BundleRecord => ({ bundleDir, targetDir: target, createdAt: FIXED.toISOString() })
+
+  it('passes for an intact bundle', () => {
+    expect(revalidateBundleRecord(record())).toBeNull()
+  })
+
+  it('refuses when the target was renamed and replaced by a junction (swap attack)', () => {
+    const elsewhere = join(root, 'elsewhere')
+    // Recreate the expected inner structure at the junction destination so only
+    // the canonical-path checks can catch the swap.
+    mkdirSync(join(elsewhere, 'handover', 'x'), { recursive: true })
+    renameSync(target, join(root, 'moved-aside'))
+    symlinkSync(elsewhere, target, 'junction')
+
+    expect(revalidateBundleRecord(record())).toMatch(/changed on disk|replaced by a link/i)
+  })
+
+  it('refuses when the handover component was replaced by a junction', () => {
+    const elsewhere = join(root, 'elsewhere-h')
+    mkdirSync(join(elsewhere, 'x'), { recursive: true })
+    rmSync(join(target, 'handover'), { recursive: true, force: true })
+    symlinkSync(elsewhere, join(target, 'handover'), 'junction')
+
+    expect(revalidateBundleRecord(record())).toMatch(/changed on disk|replaced by a link/i)
+  })
+
+  it('refuses when the bundle dir no longer exists', () => {
+    rmSync(bundleDir, { recursive: true, force: true })
+    expect(revalidateBundleRecord(record())).toMatch(/no longer exists/i)
+  })
+
+  it('refuses a record whose bundle is not inside its target', () => {
+    const outside = join(root, 'outside-bundle')
+    mkdirSync(outside, { recursive: true })
+    expect(
+      revalidateBundleRecord({ bundleDir: outside, targetDir: target, createdAt: FIXED.toISOString() })
+    ).toMatch(/no longer inside/i)
   })
 })
 
@@ -254,17 +342,25 @@ describe('assembleHandoverBundle', () => {
 })
 
 describe('runHandoverAgent', () => {
+  let root: string
+  let targetDir: string
   let bundleDir: string
   let record: BundleRecord
   const lookup = (id: string) => (id === 'bundle-1' ? record : undefined)
 
   beforeEach(() => {
     resetHandoverRegistry()
-    bundleDir = mkdtempSync(join(tmpdir(), 'handover-run-'))
-    record = { bundleDir, targetDir: bundleDir, createdAt: FIXED.toISOString() }
+    // Registry records hold CANONICAL paths (realpath at creation) with the
+    // bundle inside <target>/handover/<slug> — mirror that shape here so the
+    // pre-run TOCTOU revalidation passes for the intact fixtures.
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'handover-run-')))
+    targetDir = join(root, 'repo')
+    bundleDir = join(targetDir, 'handover', 'x')
+    mkdirSync(bundleDir, { recursive: true })
+    record = { bundleDir, targetDir, createdAt: FIXED.toISOString() }
   })
   afterEach(() => {
-    rmSync(bundleDir, { recursive: true, force: true })
+    rmSync(root, { recursive: true, force: true })
   })
 
   const mockBrain = (result: string | null) => ({
@@ -304,7 +400,32 @@ describe('runHandoverAgent', () => {
       emit: () => {},
       lookupBundle: lookup,
     })
-    expect(brain.generate).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ cwd: bundleDir }))
+    expect(brain.generate).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ cwd: targetDir }))
+  })
+
+  it('refuses the run BEFORE generate() when the target was swapped for a junction after creation (TOCTOU)', async () => {
+    // Create-time state is intact (record points at real dirs); now swap the
+    // target: rename it aside and put a junction to another writable dir in its
+    // place — the classic TOCTOU that would move the agent outside the boundary.
+    const elsewhere = join(root, 'elsewhere')
+    mkdirSync(join(elsewhere, 'handover', 'x'), { recursive: true })
+    renameSync(targetDir, join(root, 'moved-aside'))
+    symlinkSync(elsewhere, targetDir, 'junction')
+
+    const events: string[] = []
+    const brain = mockBrain('should not run')
+    const res = await runHandoverAgent({
+      bundleId: 'bundle-1',
+      resolveBrain: async () => brain as any,
+      emit: (type) => events.push(type),
+      lookupBundle: lookup,
+    })
+    expect(res.ok).toBe(false)
+    expect(res.error).toMatch(/changed on disk|replaced by a link/i)
+    expect(brain.generate).not.toHaveBeenCalled()
+    expect(events).toEqual(['handover:run-failed'])
+    // Nothing was written through the junction into the other directory.
+    expect(existsSync(join(elsewhere, 'handover', 'x', 'RUN.log'))).toBe(false)
   })
 
   it('rejects a forged/unknown bundle id (never accepts renderer paths)', async () => {
@@ -317,7 +438,7 @@ describe('runHandoverAgent', () => {
       lookupBundle: lookup,
     })
     expect(res.ok).toBe(false)
-    expect(res.error).toMatch(/unknown handover bundle/i)
+    expect(res.error).toMatch(/expired/i)
     expect(brain.generate).not.toHaveBeenCalled()
     expect(events).toEqual(['handover:run-failed'])
   })

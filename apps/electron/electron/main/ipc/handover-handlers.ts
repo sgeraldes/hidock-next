@@ -26,6 +26,7 @@ import {
   runHandoverAgent,
   getRegisteredBundle,
   validateTargetDir,
+  BUNDLE_EXPIRED_ERROR,
   type HandoverManifest,
   type HandoverSourceRef,
   type RunHandoverAgentResult,
@@ -184,7 +185,9 @@ export function registerHandoverHandlers(): void {
       }
       const bundleId = typeof args.bundleId === 'string' ? args.bundleId : ''
       if (!bundleId || !getRegisteredBundle(bundleId)) {
-        return error('NOT_FOUND', 'Unknown handover bundle. Write the bundle again and retry.')
+        // Registry is session-only: after an app restart every old id is stale,
+        // so this is the normal "bundle expired" path, not just a forged id.
+        return error('NOT_FOUND', BUNDLE_EXPIRED_ERROR)
       }
 
       const result = await runHandoverAgent({

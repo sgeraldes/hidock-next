@@ -28,6 +28,8 @@ vi.mock('../outputs-handlers', () => ({
 }))
 
 vi.mock('../../services/handover-service', () => ({
+  BUNDLE_EXPIRED_ERROR:
+    'This handover bundle has expired (bundles can only be run from the session that wrote them). Write the bundle again and retry.',
   validateTargetDir: vi.fn((dir: string) => dir),
   getRegisteredBundle: vi.fn(() => undefined),
   assembleHandoverBundle: vi.fn(() => ({
@@ -161,10 +163,13 @@ describe('handover IPC handlers', () => {
     expect(res.data).toEqual({ created: false, needsFolder: true })
   })
 
-  it('runAgent rejects a forged/unknown bundleId (opaque-id contract)', async () => {
+  it('runAgent rejects a forged/unknown/stale bundleId with the friendly "expired" message', async () => {
     const res = await handlers['handover:runAgent'](null, { bundleId: 'not-a-real-id' })
     expect(res.success).toBe(false)
     expect(res.error.code).toBe('NOT_FOUND')
+    // Session-only registry: after an app restart old ids land here too, so the
+    // message must read as "expired — write it again", not a scary internal error.
+    expect(res.error.message).toMatch(/expired.*write the bundle again/i)
     const svc = await import('../../services/handover-service')
     expect(svc.runHandoverAgent).not.toHaveBeenCalled()
   })

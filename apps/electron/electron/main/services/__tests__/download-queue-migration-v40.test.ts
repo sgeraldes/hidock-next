@@ -33,7 +33,7 @@ describe('schema v40: download_queue.cancel_reason (durable user-cancel suppress
 
   it('defines an idempotent migration 40 with a guarded ALTER', () => {
     // Migration entry exists…
-    const migration = source.match(/40: \(\) => \{[\s\S]*?\n  \}/)
+    const migration = source.match(/40: \(\) => \{[\s\S]*?\n {2}\}/)
     expect(migration).not.toBeNull()
     const body = migration![0]
     // …checks the column before altering (idempotent — may re-run on corrupted DBs)…
@@ -41,7 +41,7 @@ describe('schema v40: download_queue.cancel_reason (durable user-cancel suppress
     expect(body).toMatch(/!cols\.includes\('cancel_reason'\)/)
     // …adds the column and warns (never throws) on failure.
     expect(body).toContain("ALTER TABLE download_queue ADD COLUMN cancel_reason TEXT")
-    expect(body).toMatch(/console\.warn\(\'\[Migration v40\]/)
+    expect(body).toMatch(/console\.warn\('\[Migration v40\]/)
   })
 
   it('repairPhase force-adds cancel_reason on every boot (skipped-migration safety)', () => {

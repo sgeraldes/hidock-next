@@ -25,7 +25,8 @@
  * are touched here; this service only consumes the public brains seam.
  */
 import { mkdirSync, writeFileSync, appendFileSync, realpathSync, lstatSync } from 'fs'
-import { join, parse, resolve, sep } from 'path'
+import { join, parse, relative, resolve, sep } from 'path'
+import { homedir } from 'os'
 import { randomBytes, randomUUID } from 'crypto'
 import {
   getTranscriptByRecordingId,
@@ -185,14 +186,48 @@ function builtinProtectedPaths(env: NodeJS.ProcessEnv = process.env): string[] {
 }
 
 /**
+ * All comparable forms of a protected path: the resolved string AND (when it
+ * exists) its realpath. Canonicalizing kills subst/mapped-drive aliases and
+ * on-disk case variants — a target can't dodge a protected check by naming the
+ * same directory through a different spelling.
+ */
+function protectedForms(p: string): string[] {
+  const forms = [comparable(p)]
+  try {
+    const real = comparable(realpathSync(p))
+    if (!forms.includes(real)) forms.push(real)
+  } catch {
+    /* protected path doesn't exist on this machine — the resolved form still applies */
+  }
+  return forms
+}
+
+/** The user's home directory (env override for tests, else os.homedir()). */
+function resolveHomeDir(env: NodeJS.ProcessEnv): string | null {
+  const fromEnv = (process.platform === 'win32' ? env.USERPROFILE : env.HOME)?.trim()
+  if (fromEnv) return fromEnv
+  try {
+    return homedir()
+  } catch {
+    return null
+  }
+}
+
+/**
  * Canonicalize and vet a renderer-supplied target directory. Throws with a
  * user-facing message when the target is unusable:
  *   - does not exist / not a directory (realpath resolves symlinks — the
  *     CANONICAL location is what gets vetted and used from here on);
  *   - is a filesystem root (C:\, /);
+ *   - is the user-profile / home directory ITSELF (an autonomous agent must not
+ *     get the whole profile — documents, credentials, every repo — as its cwd;
+ *     deeper subdirectories like home\repos\project remain fine);
  *   - is (or is inside) a protected OS location or a caller-supplied protected
- *     path (app install dir, userData — passed by the IPC handler).
- * Returns the canonical real path.
+ *     path (app install dir, userData — passed by the IPC handler);
+ *   - CONTAINS (is an ancestor of) any protected path — otherwise an agent
+ *     cwd'd above e.g. userData could still reach it.
+ * Every protected path is compared in canonical (realpath) form, case-insensitive
+ * on win32. Returns the canonical real path.
  */
 export function validateTargetDir(
   targetDir: string,
@@ -215,10 +250,22 @@ export function validateTargetDir(
     throw new Error('The handover target cannot be a filesystem root. Pick a project folder.')
   }
 
+  // Home/profile root: EXACT match only — subdirectories are legitimate targets.
+  const home = resolveHomeDir(env)
+  if (home && protectedForms(home).includes(c)) {
+    throw new Error('The handover target cannot be your user profile folder. Pick a specific project folder inside it.')
+  }
+
   for (const protectedPath of [...builtinProtectedPaths(env), ...extraProtectedPaths]) {
-    const p = comparable(protectedPath)
-    if (c === p || c.startsWith(p + sep)) {
-      throw new Error(`The handover target is inside a protected location (${protectedPath}). Pick a project folder.`)
+    for (const p of protectedForms(protectedPath)) {
+      if (c === p || c.startsWith(p + sep)) {
+        throw new Error(`The handover target is inside a protected location (${protectedPath}). Pick a project folder.`)
+      }
+      // Ancestor check: a target CONTAINING a protected path hands the agent
+      // that protected path too.
+      if (p.startsWith(c + sep)) {
+        throw new Error(`The handover target contains a protected location (${protectedPath}). Pick a narrower project folder.`)
+      }
     }
   }
   return canonical
@@ -227,13 +274,24 @@ export function validateTargetDir(
 /**
  * Main-process bundle registry. `handover:runAgent` accepts ONLY an opaque
  * bundleId minted here — a renderer can never point the runner at an arbitrary
- * path. In-memory by design: a bundle is runnable in the session that created it.
+ * path.
+ *
+ * SESSION-ONLY BY DESIGN: the registry is an in-memory Map, so a bundleId is
+ * runnable only in the app session that created it. After an app restart every
+ * previously-issued id is stale — runAgent/`handover:runAgent` then return the
+ * friendly "bundle expired — write it again" error rather than trusting any
+ * persisted path. The bundle FILES on disk survive fine (open-in-terminal /
+ * manual use); only the in-app run token expires.
  */
 export interface BundleRecord {
   bundleDir: string
   targetDir: string
   createdAt: string
 }
+
+/** Friendly stale/forged-id message (also shown after an app restart). */
+export const BUNDLE_EXPIRED_ERROR =
+  'This handover bundle has expired (bundles can only be run from the session that wrote them). Write the bundle again and retry.'
 
 const bundleRegistry = new Map<string, BundleRecord>()
 /** BundleIds with an agent run currently in flight (concurrency guard). */
@@ -270,6 +328,61 @@ function reserveBundleDir(parentDir: string, slug: string): string {
     }
   }
   throw new Error('Could not reserve a handover bundle directory (too many collisions).')
+}
+
+/**
+ * TOCTOU guard: re-validate a bundle record IMMEDIATELY before execution. The
+ * registry stores path STRINGS captured at creation time — between creation and
+ * run, the target could be renamed and replaced by a junction pointing at a
+ * different writable directory, silently moving the autonomous agent (and its
+ * RUN.log writes) OUTSIDE the vetted boundary. So, right before the run:
+ *   1. re-realpath targetDir AND bundleDir — each must be EXACTLY the canonical
+ *      path recorded at creation (any junction/rename swap changes the realpath);
+ *   2. lstat-walk every component from the target down to the bundle dir — each
+ *      must be a real directory, never a symlink/junction/reparse point;
+ *   3. re-check containment: the bundle must still live under the target.
+ * Returns null when the bundle is intact, else a user-facing refusal reason.
+ * Nothing is written into the (possibly attacker-controlled) directory on refusal.
+ */
+export function revalidateBundleRecord(record: BundleRecord): string | null {
+  let realTarget: string
+  let realBundle: string
+  try {
+    realTarget = realpathSync(record.targetDir)
+    realBundle = realpathSync(record.bundleDir)
+  } catch {
+    return 'The handover bundle or its target folder no longer exists. Write the bundle again.'
+  }
+
+  // 1. Exact canonical equality with what was vetted at creation.
+  if (comparable(realTarget) !== comparable(record.targetDir) || comparable(realBundle) !== comparable(record.bundleDir)) {
+    return 'The handover target changed on disk since the bundle was written (moved or replaced by a link). Write the bundle again.'
+  }
+
+  // 2. No reparse points anywhere from the target down to the bundle dir.
+  const rel = relative(record.targetDir, record.bundleDir)
+  if (!rel || rel.startsWith('..') || parse(rel).root) {
+    return 'The handover bundle is no longer inside its target folder. Write the bundle again.'
+  }
+  let walk = record.targetDir
+  for (const segment of [null, ...rel.split(sep)]) {
+    if (segment !== null) walk = join(walk, segment)
+    try {
+      const st = lstatSync(walk)
+      if (st.isSymbolicLink() || !st.isDirectory()) {
+        return 'A folder on the handover bundle path was replaced by a link. Write the bundle again.'
+      }
+    } catch {
+      return 'The handover bundle path is no longer accessible. Write the bundle again.'
+    }
+  }
+
+  // 3. Containment (belt-and-suspenders — implied by 1+2, but cheap to assert).
+  if (!comparable(realBundle).startsWith(comparable(realTarget) + sep)) {
+    return 'The handover bundle escaped its target folder. Write the bundle again.'
+  }
+
+  return null
 }
 
 /** Parse the transcript's stored action_items (JSON array or plain text) to markdown. */
@@ -579,15 +692,26 @@ export async function runHandoverAgent(params: RunHandoverAgentParams): Promise<
       getEventBus().emitDomainEvent({ type, timestamp: now().toISOString(), payload }))
 
   // Only bundles minted by this process are runnable — a forged/unknown id (or a
-  // path smuggled in as an id) resolves to nothing and is refused.
+  // path smuggled in as an id) resolves to nothing and is refused. The registry
+  // is session-only, so this is also the "app restarted since the bundle was
+  // written" path — surfaced as a friendly "expired" message.
   const record = lookupBundle(params.bundleId)
   if (!record) {
-    const error = 'Unknown handover bundle. Write the bundle again and retry.'
+    const error = BUNDLE_EXPIRED_ERROR
     emit('handover:run-failed', { bundleId: params.bundleId, brainId: params.brainId ?? null, error })
     return { ok: false, brainId: params.brainId ?? null, brainLabel: null, finalResponse: null, runLogPath: '', error }
   }
   const { bundleDir, targetDir } = record
   const runLogPath = join(bundleDir, 'RUN.log')
+
+  // TOCTOU guard: the filesystem may have changed between creation and run —
+  // re-canonicalize and reject junction/rename swaps BEFORE writing anything or
+  // executing anything (a refusal writes nothing into the suspect directory).
+  const tamper = revalidateBundleRecord(record)
+  if (tamper) {
+    emit('handover:run-failed', { bundleId: params.bundleId, brainId: params.brainId ?? null, error: tamper })
+    return { ok: false, brainId: params.brainId ?? null, brainLabel: null, finalResponse: null, runLogPath, error: tamper }
+  }
 
   // One run per bundle: a second concurrent run would interleave RUN.log lines
   // indistinguishably and double-execute the same work.
