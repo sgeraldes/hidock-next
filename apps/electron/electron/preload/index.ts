@@ -15,7 +15,7 @@ import type {
  * handler's Node-only transitive imports (fs/os) into the renderer build.
  * The handler's `BrainListItem` is kept structurally identical.
  */
-export type BrainId = 'gemini-api' | 'ollama' | 'claude-code' | 'codex' | 'gemini-cli'
+export type BrainId = 'gemini-api' | 'ollama' | 'claude-code' | 'codex' | 'gemini-cli' | 'kiro'
 export type BrainCapability = 'generate' | 'chat' | 'analyzeAudio' | 'embed' | 'agentic'
 export type BrainTask = 'transcribeAnalyze' | 'chat' | 'outputs' | 'handover' | 'embed' | 'suggestions'
 export interface BrainAuthStatus {

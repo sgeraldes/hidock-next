@@ -17,11 +17,12 @@
  * in argv.
  *
  * Auth (login-aware, honest): the CLI's OWN auth is detected first, then keys.
- *   1. GEMINI_API_KEY in the env            → "GEMINI_API_KEY env"
- *   2. the app's stored Gemini key          → "app key (injected)"
+ *   1. GEMINI_API_KEY in the env            → "GEMINI_API_KEY env (unverified)"
+ *   2. the app's stored Gemini key          → "app key (injected, unverified)"
  *      (credential store / config.transcription.geminiApiKey via resolveGeminiApiKey)
  *   3. the CLI's OAuth login (cheap file check for ~/.gemini/oauth_creds.json,
- *      which the `gemini` CLI writes on `gemini` interactive sign-in) → "OAuth login"
+ *      which the `gemini` CLI writes on `gemini` interactive sign-in)
+ *      → "OAuth login (stored credentials)"
  * A key is NOT exercised against the API (that would be a paid call in a "cheap,
  * cached" probe), so keys report "present" not "verified", and OAuth reports the
  * PRESENCE of stored credentials — never a claim of a verified live session
@@ -117,17 +118,31 @@ export class GeminiCliBrain implements AIBrain {
       return { configured: false, method: 'none', detail: 'gemini not on PATH' }
     }
     // Keys first — they're what generate() injects into the child env, so they're
-    // the auth actually used when present. Presence, not verification.
+    // the auth actually used when present. HONEST: this cheap probe never
+    // exercises the key against the API (that would be a paid call), so the badge
+    // says "(unverified)" instead of reading as verified-ready.
     if (envKey) {
-      return { configured: true, method: 'api-key', detail: `GEMINI_API_KEY env + gemini ${version}` }
+      return {
+        configured: true,
+        method: 'api-key',
+        detail: `GEMINI_API_KEY env (unverified) + gemini ${version}`,
+      }
     }
     if (storedKey) {
-      return { configured: true, method: 'api-key', detail: `app key (injected) + gemini ${version}` }
+      return {
+        configured: true,
+        method: 'api-key',
+        detail: `app key (injected, unverified) + gemini ${version}`,
+      }
     }
     // No key — fall back to the CLI's own OAuth login. File-presence is honest
     // evidence of a sign-in; it is NOT a claim of a verified live session.
     if (this.hasOAuthLogin()) {
-      return { configured: true, method: 'oauth', detail: `OAuth login + gemini ${version}` }
+      return {
+        configured: true,
+        method: 'oauth',
+        detail: `OAuth login (stored credentials) + gemini ${version}`,
+      }
     }
     // Present but no usable auth of any kind.
     return {

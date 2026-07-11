@@ -44,24 +44,24 @@ describe('GeminiCliBrain', () => {
   })
 
   describe('authStatus', () => {
-    it('configured=api-key labelled "GEMINI_API_KEY env" when env has the key', async () => {
+    it('configured=api-key labelled "GEMINI_API_KEY env (unverified)" when env has the key', async () => {
       const spawn = makeFakeSpawn({ stdout: '0.49.0', code: 0 })
       const brain = new GeminiCliBrain({ spawn: asSpawn(spawn.fn), env: { GEMINI_API_KEY: 'k' } })
       const status = await brain.authStatus()
       expect(status.configured).toBe(true)
       expect(status.method).toBe('api-key')
-      expect(status.detail).toMatch(/GEMINI_API_KEY env/)
+      expect(status.detail).toContain('GEMINI_API_KEY env (unverified)')
       expect(spawn.calls[0]).toMatchObject({ command: 'gemini', args: ['--version'] })
     })
 
-    it('configured=api-key labelled "app key (injected)" when the app stored key resolves', async () => {
+    it('configured=api-key labelled "app key (injected, unverified)" when the app stored key resolves', async () => {
       mockResolveKey.mockReturnValue('stored-key')
       const spawn = makeFakeSpawn({ stdout: '0.49.0', code: 0 })
       const brain = new GeminiCliBrain({ spawn: asSpawn(spawn.fn), env: {} })
       const status = await brain.authStatus()
       expect(status.configured).toBe(true)
       expect(status.method).toBe('api-key')
-      expect(status.detail).toMatch(/app key \(injected\)/)
+      expect(status.detail).toContain('app key (injected, unverified)')
     })
 
     it('configured=oauth when no key but the CLI has an OAuth login (honest: presence, not verified)', async () => {
@@ -74,7 +74,7 @@ describe('GeminiCliBrain', () => {
       const status = await brain.authStatus()
       expect(status.configured).toBe(true)
       expect(status.method).toBe('oauth')
-      expect(status.detail).toMatch(/OAuth login/)
+      expect(status.detail).toContain('OAuth login (stored credentials)')
     })
 
     it('not configured when CLI present but no key AND no OAuth login', async () => {

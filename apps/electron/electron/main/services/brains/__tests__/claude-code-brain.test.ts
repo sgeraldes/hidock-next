@@ -7,7 +7,7 @@
  * @vitest-environment node
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { ClaudeCodeBrain, preferNativeWindowsCommand } from '../claude-code-brain'
+import { ClaudeCodeBrain, resolveClaudeCommand } from '../claude-code-brain'
 import type { SpawnFn } from '../cli-runner'
 import { makeFakeSpawn, type FakeSpawnScript } from './fake-spawn'
 
@@ -117,6 +117,10 @@ describe('ClaudeCodeBrain', () => {
       const brain = new ClaudeCodeBrain({ spawn: asSpawn(spawn.fn), env: {} })
       const controller = new AbortController()
       const p = brain.generate([{ role: 'user', content: 'q' }], { signal: controller.signal })
+      // Command resolution is async now — let the child actually spawn first so
+      // the abort exercises the kill path (an abort BEFORE spawn also nulls, but
+      // then there is no child to kill).
+      await new Promise((r) => setTimeout(r, 0))
       controller.abort()
       expect(await p).toBeNull()
       expect(spawn.lastChild?.kill).toHaveBeenCalled()
@@ -143,27 +147,62 @@ describe('ClaudeCodeBrain', () => {
   })
 })
 
-describe('preferNativeWindowsCommand (win32 exec-path fix)', () => {
+describe('resolveClaudeCommand (identity-verified win32 exec-path fix)', () => {
   const PATH = 'C:\\shim;C:\\real'
   const env = { PATH } as NodeJS.ProcessEnv
+  const REAL = 'C:\\real\\claude.exe'
 
-  it('prefers a native claude.exe over an earlier-on-PATH proxy .cmd shim', () => {
+  it('prefers a native claude.exe over an earlier-on-PATH proxy .cmd shim — after identity verification', async () => {
     // Reproduces this machine's bug: a `.cmd` (WSL proxy) shadows the real
     // `claude.exe`. The runner mirrors that (first dir wins) → probe hits the
-    // broken shim → "auth status unavailable". The fix resolves the native exe.
-    const fileExists = (p: string) => p === 'C:\\shim\\claude.cmd' || p === 'C:\\real\\claude.exe'
-    const out = preferNativeWindowsCommand('claude', env, { platform: 'win32', fileExists })
-    expect(out).toBe('C:\\real\\claude.exe')
+    // broken shim → "auth status unavailable". The fix resolves the native exe,
+    // but only once verify() proves it is Anthropic Claude Code.
+    const fileExists = (p: string) => p === 'C:\\shim\\claude.cmd' || p === REAL
+    const verify = vi.fn(async (p: string) => p === REAL)
+    const out = await resolveClaudeCommand(env, { platform: 'win32', fileExists, verify })
+    expect(out).toBe(REAL)
+    expect(verify).toHaveBeenCalledWith(REAL)
   })
 
-  it('falls back to the bare command when only a .cmd exists (normal npm install)', () => {
-    const fileExists = (p: string) => p === 'C:\\shim\\claude.cmd'
-    const out = preferNativeWindowsCommand('claude', env, { platform: 'win32', fileExists })
+  it("REJECTS an unrelated vendor's claude.exe that fails identity verification", async () => {
+    // A random third-party claude.exe on PATH must never be selected — its
+    // --version does not carry the Claude Code signature → fall back to the bare
+    // command (cli-runner's normal resolution).
+    const stranger = 'C:\\shim\\claude.exe'
+    const fileExists = (p: string) => p === stranger
+    const verify = vi.fn(async () => false)
+    const out = await resolveClaudeCommand(env, { platform: 'win32', fileExists, verify })
     expect(out).toBe('claude')
+    expect(verify).toHaveBeenCalledWith(stranger)
   })
 
-  it('is a no-op off win32 (POSIX resolves natively)', () => {
+  it('skips an unverified exe and accepts a later verified one', async () => {
+    const stranger = 'C:\\shim\\claude.exe'
+    const fileExists = (p: string) => p === stranger || p === REAL
+    const verify = vi.fn(async (p: string) => p === REAL)
+    expect(await resolveClaudeCommand(env, { platform: 'win32', fileExists, verify })).toBe(REAL)
+  })
+
+  it('falls back to the bare command when only a .cmd exists (normal npm install) — verify never runs', async () => {
+    const fileExists = (p: string) => p === 'C:\\shim\\claude.cmd'
+    const verify = vi.fn(async () => true)
+    const out = await resolveClaudeCommand(env, { platform: 'win32', fileExists, verify })
+    expect(out).toBe('claude')
+    expect(verify).not.toHaveBeenCalled()
+  })
+
+  it('treats a throwing verifier as unverified (never throws, falls back)', async () => {
+    const fileExists = (p: string) => p === REAL
+    const verify = vi.fn(async () => {
+      throw new Error('probe exploded')
+    })
+    expect(await resolveClaudeCommand(env, { platform: 'win32', fileExists, verify })).toBe('claude')
+  })
+
+  it('is a no-op off win32 (POSIX resolves natively)', async () => {
     const fileExists = () => true
-    expect(preferNativeWindowsCommand('claude', env, { platform: 'linux', fileExists })).toBe('claude')
+    const verify = vi.fn(async () => true)
+    expect(await resolveClaudeCommand(env, { platform: 'linux', fileExists, verify })).toBe('claude')
+    expect(verify).not.toHaveBeenCalled()
   })
 })
