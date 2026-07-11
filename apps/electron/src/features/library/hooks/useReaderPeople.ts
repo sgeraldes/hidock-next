@@ -28,6 +28,7 @@ import type { StoredSegment } from '../components/TranscriptViewer'
 import type { AssignScope } from '../components/SpeakerAssignPopover'
 import {
   resolveParticipants,
+  effectiveLabelFor,
   isRawSpeakerLabel,
   type SpeakerSplit,
   type SpeakerAssignment,
@@ -66,14 +67,16 @@ interface ReaderPeople {
   participants: ParticipantChip[]
   invited: MeetingAttendee[]
   /**
-   * Maps a raw diarization label (base OR split-derived effective label) to the
-   * SAME participant chip key that represents it — crucially, a label resolved to
-   * a linked meeting contact maps to that contact's `mc:` chip key, not a
-   * fallback `l:`/`c:` label key. Feeds `deriveSpeakerRanges` so a speaker who is
-   * ALSO a meeting contact paints its bars under the contact's key, and the chip
-   * swatch (keyed the same) always matches the bar color.
+   * Resolves a raw diarization label AT A SPECIFIC TURN to the participant chip
+   * key that represents it — replaying the SAME split/override/label-binding
+   * logic resolveParticipants uses. Per-turn (not a flat label map) so a base
+   * label split into multiple people yields DIFFERENT keys on each side of the
+   * split boundary. A label resolved to a linked meeting contact maps to that
+   * contact's `mc:` chip key, so its chip swatch and waveform bars share one
+   * color. Feeds `deriveSpeakerRanges` (whose turn indices are computed over the
+   * same expanded, text-filtered turn list).
    */
-  labelColorKey: Map<string, { key: string; name: string }>
+  resolveRangeKey: (baseLabel: string, turnIndex: number) => { key: string; name: string } | undefined
   /** All contacts, for the assign popover's picker (loaded lazily). */
   allContacts: Person[]
   /** Resolve a calendar attendee to a linked meeting contact, if known. */
@@ -220,39 +223,40 @@ export function useReaderPeople({ meetingId, attendees, recordingId, segments }:
     return [...contactChips, ...speakerChips]
   }, [contacts, resolved, contactKeys])
 
-  // label → representing chip key + name. Mirrors the exact merge logic of the
-  // `participants` memo (a resolved speaker whose contact is a meeting contact is
-  // folded into that `mc:` chip), so the waveform's per-speaker bar color keys
-  // line up with the chip swatches for the SAME person. Both the raw base label
-  // and the split-derived effective label are mapped, because deriveSpeakerRanges
-  // resolves by the raw base label while other views key on the effective one.
-  const labelColorKey = useMemo(() => {
-    const contactByName = new Map<string, Contact>()
-    for (const c of contacts) {
-      const n = (c.name || '').trim().toLowerCase()
-      if (n && !contactByName.has(n)) contactByName.set(n, c)
-      const e = (c.email || '').trim().toLowerCase()
-      if (e && !contactByName.has(e)) contactByName.set(e, c)
-    }
-    const m = new Map<string, { key: string; name: string }>()
-    for (const r of resolved) {
-      let key = r.key
-      let name = r.name
-      if (r.contactId && contactKeys.ids.has(r.contactId)) {
-        key = `mc:${r.contactId}`
-      } else {
-        const byName = contactByName.get(r.name.trim().toLowerCase())
-        if (byName) {
-          key = `mc:${byName.id}`
-          name = byName.name || byName.email || r.name
-        }
+  // Per-TURN color-key resolver for the waveform ranges. It replays the exact
+  // identity resolution resolveParticipants applies to each turn — effective
+  // (possibly split-derived) label, then per-turn override ?? label binding —
+  // and then the `participants` fold: an identity that is (or matches by
+  // name/email) a linked meeting contact keys as that contact's `mc:` chip.
+  // Being per-turn (not a flat label map) is what keeps a split base label from
+  // collapsing: "Speaker 1" before the split and "Speaker 1 · B" after it hit
+  // DIFFERENT bindings and therefore different keys/colors — matching their
+  // distinct chips. deriveSpeakerRanges passes turn indices computed over the
+  // SAME expanded, text-filtered turn list, so boundaries line up exactly.
+  const resolveRangeKey = useCallback(
+    (baseLabel: string, turnIndex: number): { key: string; name: string } | undefined => {
+      const base = baseLabel.trim()
+      if (!base) return undefined
+      const effective = effectiveLabelFor(base, turnIndex, splits)
+      const assigned = turnOverrides.get(turnIndex) ?? speakerMap.get(effective)
+      const contactId = assigned?.contactId
+      const name = assigned?.name ?? effective
+
+      // Fold into a linked meeting contact where the participants list does.
+      if (contactId && contactKeys.ids.has(contactId)) {
+        return { key: `mc:${contactId}`, name }
       }
-      for (const lbl of new Set([r.baseLabel, r.effectiveLabel])) {
-        if (lbl) m.set(lbl, { key, name })
+      const nameKey = name.trim().toLowerCase()
+      if (nameKey && contactKeys.names.has(nameKey)) {
+        const byName = contacts.find(
+          (c) => (c.name || '').trim().toLowerCase() === nameKey || (c.email || '').trim().toLowerCase() === nameKey
+        )
+        if (byName) return { key: `mc:${byName.id}`, name: byName.name || byName.email || name }
       }
-    }
-    return m
-  }, [resolved, contacts, contactKeys])
+      return { key: contactId ? `c:${contactId}` : `l:${effective}`, name }
+    },
+    [splits, turnOverrides, speakerMap, contacts, contactKeys]
+  )
 
   // Keys of people who actually spoke — to flag invited attendees who spoke.
   const spoke = useMemo(() => {
@@ -380,7 +384,7 @@ export function useReaderPeople({ meetingId, attendees, recordingId, segments }:
   return {
     participants,
     invited,
-    labelColorKey,
+    resolveRangeKey,
     allContacts,
     resolveAttendee,
     attendeeSpoke,

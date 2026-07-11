@@ -55,6 +55,22 @@ describe('deriveSpeakerRanges', () => {
     expect(legend.find((l) => l.speakerKey === 'c:alice')?.name).toBe('Alice')
   })
 
+  it('resolves PER TURN (passes the turn index) so a split label yields distinct keys per side', () => {
+    // Same base label throughout, but the resolver — like the reader's shared
+    // split/override resolution — maps turns ≥ 2 to a different person.
+    const resolve = (base: string, turnIndex: number) =>
+      base === 'Speaker 1'
+        ? turnIndex >= 2
+          ? { key: 'c:bob', name: 'Bob' }
+          : { key: 'c:alice', name: 'Alice' }
+        : undefined
+    const { ranges, colorByKey } = deriveSpeakerRanges(segs, 30, resolve)
+    // Turn 0 (pre-split) → Alice; turn 2 (post-split) → Bob; different colors.
+    expect(ranges[0]).toMatchObject({ speakerKey: 'c:alice', name: 'Alice' })
+    expect(ranges[2]).toMatchObject({ speakerKey: 'c:bob', name: 'Bob' })
+    expect(colorByKey.get('c:alice')).not.toBe(colorByKey.get('c:bob'))
+  })
+
   it('closes an open final turn at the duration and chains missing ends', () => {
     const open: StoredSegment[] = [
       { speaker: 'Speaker 1', start: 0, text: 'a' }, // no end → next start (5)

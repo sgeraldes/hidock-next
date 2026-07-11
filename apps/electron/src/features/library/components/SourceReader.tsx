@@ -205,11 +205,14 @@ export function SourceReader({
   const [transcriptHighlight, setTranscriptHighlight] = useState<{ atMs: number; nonce: number } | null>(null)
   const highlightNonceRef = useRef(0)
 
-  // B3 backfill guard: recording ids whose one-time timeline analysis has already
-  // been attempted while this reader stays mounted — so an already-transcribed
-  // recording that legitimately yields no markers/sentiment is NOT re-analyzed on
-  // every open (no loop, no repeated Gemini work). A ref (not module state) so it
-  // scopes to the mounted reader session and resets cleanly between test renders.
+  // B3 backfill guard: transcript REVISIONS (recordingId + transcript id +
+  // created_at) whose one-time timeline analysis already SUCCEEDED while this
+  // reader stays mounted — so a recording that legitimately yields no
+  // markers/sentiment is not re-analyzed on every reopen (no loop, no repeated
+  // Gemini work), while a RE-TRANSCRIPTION (new transcript id / created_at)
+  // produces a new key and re-analyzes. A FAILED backfill removes its key, so
+  // the next open may retry — success-empty and failure are distinguished. A
+  // ref (not module state) so it scopes to the mounted reader session.
   const backfillAttemptedRef = useRef<Set<string>>(new Set())
 
   // Transcription warning state. `pendingTranscribe` holds the exact action to
@@ -329,14 +332,15 @@ export function SourceReader({
   }, [recording?.duration, recording?.id, waveformLoadedForId, livePlaybackDuration])
 
   // Per-speaker colored bars + legend, derived CLIENT-SIDE from the transcript.
-  // Resolve each raw diarization label to the SAME chip key the Participants list
-  // uses (`people.labelColorKey` — which maps a label that resolves to a linked
-  // meeting contact onto that contact's `mc:` chip key, not a fallback label key),
-  // so a speaker who is ALSO a meeting contact gets ONE shared color: the chip
-  // swatch and the waveform bars always match.
+  // Each turn is resolved PER-TURN through `people.resolveRangeKey`, which
+  // replays the same split/override/label-binding logic the Participants list
+  // uses — so a split base label paints different colors on each side of the
+  // boundary (matching its distinct chips), and a speaker who is ALSO a linked
+  // meeting contact keys to that contact's `mc:` chip: chip swatch and bars
+  // always share one color.
   const speakerTimeline = useMemo(
-    () => deriveSpeakerRanges(transcriptSegments, timelineDurationSec, (base) => people.labelColorKey.get(base)),
-    [transcriptSegments, timelineDurationSec, people.labelColorKey]
+    () => deriveSpeakerRanges(transcriptSegments, timelineDurationSec, people.resolveRangeKey),
+    [transcriptSegments, timelineDurationSec, people.resolveRangeKey]
   )
 
   // The recording's action items (parsed once) — the single home for these is the
@@ -366,9 +370,17 @@ export function SourceReader({
     })
   }, [timeline?.events, actionItems, timelineDurationSec])
 
-  // Fetch the sibling agent's timeline analysis when a recording opens. Empty or
-  // absent → attempt a one-time backfill via analyzeTimeline, then re-read. All
-  // optional-cast so this file type-checks and no-ops before that IPC lands.
+  // The transcript REVISION this reader is looking at. Re-transcription writes a
+  // fresh transcript row (new id and/or created_at via INSERT OR REPLACE), so
+  // this key changes — invalidating the backfill guard below and re-running the
+  // analysis fetch when a transcription completes in-session.
+  const transcriptRevisionKey = `${recordingId ?? ''}:${effectiveTranscript?.id ?? ''}:${effectiveTranscript?.created_at ?? ''}`
+
+  // Fetch the sibling agent's timeline analysis when a recording opens (and again
+  // when its transcript revision changes — e.g. a retranscription completed).
+  // Empty or absent → attempt a one-time backfill via analyzeTimeline, then
+  // re-read. All optional-cast so this file type-checks and no-ops before that
+  // IPC lands.
   useEffect(() => {
     let cancelled = false
     setTimeline(null)
@@ -387,17 +399,26 @@ export function SourceReader({
         // Already-transcribed recordings return empty until analyzeTimeline runs
         // once. Backfill it (best-effort) and show the "Analyzing timeline…" hint
         // meanwhile; per-speaker colors + playhead already render without this.
-        // Guarded to run AT MOST ONCE per recording per reader session: a
-        // recording that genuinely has no markers/sentiment (e.g. Gemini not
-        // configured, no action items) must not re-trigger a full analysis every
-        // time it's reopened.
-        if (isEmpty(res) && typeof api.analyzeTimeline === 'function' && !backfillAttemptedRef.current.has(recordingId)) {
-          backfillAttemptedRef.current.add(recordingId)
+        // Guarded to run AT MOST ONCE per TRANSCRIPT REVISION per reader session:
+        // a recording that genuinely has no markers/sentiment (e.g. Gemini not
+        // configured, no action items) is not re-analyzed every time it's
+        // reopened, but a NEW transcript revision (retranscription) gets a fresh
+        // attempt. Only a SUCCESSFUL analysis keeps the guard: a failed backfill
+        // removes its key so the next open may retry.
+        if (
+          isEmpty(res) &&
+          typeof api.analyzeTimeline === 'function' &&
+          !backfillAttemptedRef.current.has(transcriptRevisionKey)
+        ) {
+          backfillAttemptedRef.current.add(transcriptRevisionKey)
           if (!cancelled) setAnalyzingTimeline(true)
           try {
             await api.analyzeTimeline(recordingId)
             res = await api.getTimelineAnalysis!(recordingId)
-          } catch { /* backfill best-effort */ }
+          } catch {
+            // Failed (not successful-empty) → allow a retry on a later open.
+            backfillAttemptedRef.current.delete(transcriptRevisionKey)
+          }
           finally { if (!cancelled) setAnalyzingTimeline(false) }
         }
         if (!cancelled && res) setTimeline(mapTimelineAnalysis(res))
@@ -405,7 +426,7 @@ export function SourceReader({
       finally { if (!cancelled) setAnalyzingTimeline(false) }
     })()
     return () => { cancelled = true }
-  }, [recordingId])
+  }, [recordingId, transcriptRevisionKey])
 
   // Scroll-driven collapse: once the body is scrolled a few px past the top, the
   // player morphs from the big timeline to the docked bar (unless pinned). Read

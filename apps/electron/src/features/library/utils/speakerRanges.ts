@@ -83,11 +83,16 @@ const EMPTY: SpeakerRangesResult = { ranges: [], legend: [], colorByKey: new Map
  *                    segment times (callers gate rendering on a real duration).
  * @param resolveLabel Maps a raw diarization label ("Speaker 2") to its resolved
  *                     `{ key, name }` (from the shared participant map). Optional.
+ *                     Receives the turn index (position in the SAME expanded,
+ *                     text-filtered turn list resolveParticipants uses), so
+ *                     per-turn corrections — splits ("Speaker 1 · B" from turn N
+ *                     on) and per-turn overrides — resolve to DIFFERENT keys on
+ *                     each side of a boundary instead of collapsing to one color.
  */
 export function deriveSpeakerRanges(
   segments: StoredSegment[] | undefined,
   durationSec: number,
-  resolveLabel?: (baseLabel: string) => SpeakerLabelResolution | undefined
+  resolveLabel?: (baseLabel: string, turnIndex: number) => SpeakerLabelResolution | undefined
 ): SpeakerRangesResult {
   if (!segments || segments.length === 0) return EMPTY
 
@@ -111,7 +116,7 @@ export function deriveSpeakerRanges(
     const base = seg.speaker?.trim()
     if (!base) continue // untagged turn → leave a color gap
 
-    const resolved = resolveLabel?.(base)
+    const resolved = resolveLabel?.(base, i)
     const key = resolved?.key ?? `l:${base}`
     const name = resolved?.name ?? base
 

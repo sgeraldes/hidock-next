@@ -148,4 +148,56 @@ describe('SourceReader — speaker/contact color-key parity', () => {
     expect(swatch).not.toBeNull()
     expect(swatch!.style.backgroundColor).toBe(hexToRgb(barColor))
   })
+
+  // Regression (adversarial finding 1): one base label SPLIT into two people
+  // must paint DISTINCT range keys on each side of the split boundary — not
+  // collapse both sides onto whichever label entry was written last.
+  it('keeps distinct chip AND range keys on each side of a speaker split', async () => {
+    const api = (window as any).electronAPI
+    // "Speaker 1" splits at turn 1 into "Speaker 1 · B"; each half is bound to a
+    // DIFFERENT contact via the label map.
+    api.turnSpeakers.getSplits = vi.fn().mockResolvedValue({
+      success: true,
+      data: [{ base_label: 'Speaker 1', from_turn_index: 1, derived_label: 'Speaker 1 · B' }],
+    })
+    api.transcripts.getSpeakerMap = vi.fn().mockResolvedValue({
+      success: true,
+      data: [
+        { speaker_label: 'Speaker 1', contact_id: 'c-1', name: 'Alice' },
+        { speaker_label: 'Speaker 1 · B', contact_id: 'c-2', name: 'Bob' },
+      ],
+    })
+    const transcript = {
+      id: 't-1',
+      recording_id: 'rec-1',
+      full_text: 'hello',
+      summary: null,
+      action_items: null,
+      speakers: JSON.stringify([
+        { speaker: 'Speaker 1', start: 0, end: 30, text: 'Alice speaking before the split.' },
+        { speaker: 'Speaker 1', start: 30, end: 60, text: 'Bob speaking after the split.' },
+      ]),
+    } as unknown as Transcript
+
+    render(
+      <MemoryRouter>
+        <SourceReader recording={makeRecording()} transcript={transcript} />
+      </MemoryRouter>
+    )
+
+    // Two DISTINCT participant chips (no meeting here → contact-keyed, not mc:).
+    await screen.findByRole('button', { name: 'Alice' })
+    await screen.findByRole('button', { name: 'Bob' })
+
+    // Ranges resolve PER-TURN: the pre-split turn keys to Alice's contact, the
+    // post-split turn to Bob's — two keys, two colors.
+    await waitFor(() => {
+      const latest = rangeRenders[rangeRenders.length - 1]
+      expect(latest?.map((r) => r.speakerKey)).toEqual(['c:c-1', 'c:c-2'])
+    })
+    const latest = rangeRenders[rangeRenders.length - 1]
+    expect(latest[0].color).not.toBe(latest[1].color)
+    expect(latest[0].name).toBe('Alice')
+    expect(latest[1].name).toBe('Bob')
+  })
 })

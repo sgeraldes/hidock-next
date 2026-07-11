@@ -290,8 +290,11 @@ export function TranscriptViewer({
   const [actionItemsExpanded, setActionItemsExpanded] = useState(true)
   const [transcriptExpanded, setTranscriptExpanded] = useState(true)
 
-  // Cross-highlight: the turn index briefly pulsed after a timeline marker click.
-  const [pulseIndex, setPulseIndex] = useState<number | null>(null)
+  // Cross-highlight: the turn briefly pulsed after a timeline marker click.
+  // Carries the request's nonce so a rapid repeat click on the SAME turn is a
+  // state CHANGE — the scroll/timer effect below re-runs and the pulse restarts
+  // (a bare index would be a same-value setState → no re-run, stale timer).
+  const [pulse, setPulse] = useState<{ index: number; nonce: number } | null>(null)
 
   // Auto-follow: while audio plays, keep the current turn in view. We must not
   // fight the user — a manual scroll pauses following until the next play or an
@@ -517,51 +520,63 @@ export function TranscriptViewer({
     })
   }, [segments, currentTimeMs, hasTimestamps])
 
-  // Find the turn that covers a given audio offset (ms). Only meaningful with
-  // timestamps; segments are start-ordered, so the last turn starting at/before
-  // `ms` is the containing one. Snaps to the first turn when the offset precedes
-  // it (a marker at 0s). Returns -1 when there is nothing to map to.
+  // Find the turn whose time span COVERS a given audio offset (ms), using
+  // half-open coverage: startMs ≤ ms < end. A turn's end is its own endMs, else
+  // the NEXT turn's startMs (turns abut when no explicit end was stored), else —
+  // only for the final turn with no evidence of an end — unbounded. Precedence
+  // when spans overlap: the LATEST turn (by index) that covers `ms` wins, since
+  // markers are anchored to turn STARTS, so the most-recently-started covering
+  // turn is the marker's source. Returns -1 (no match) for offsets in a real
+  // gap between known spans, before the first turn, or past the final turn's
+  // known end — never highlights unrelated text.
   const findSegmentIndexAtMs = useCallback(
     (ms: number): number => {
-      if (!hasTimestamps || segments.length === 0) return -1
-      let found = -1
+      if (!hasTimestamps || segments.length === 0 || !Number.isFinite(ms)) return -1
+      let match = -1
       for (let i = 0; i < segments.length; i++) {
-        if (segments[i].startMs <= ms) found = i
-        else break
+        const start = segments[i].startMs
+        if (start > ms) continue
+        const end = segments[i].endMs ?? (i + 1 < segments.length ? segments[i + 1].startMs : Infinity)
+        if (ms < end) match = i
       }
-      return found >= 0 ? found : 0
+      return match
     },
     [hasTimestamps, segments]
   )
 
   // React to a cross-highlight request from the timeline markers: resolve the
   // matching turn, expand + stop auto-follow so the jump isn't fought, and mark
-  // it for the pulse. Keyed on the nonce so re-clicking the same marker re-fires.
+  // it for the pulse. Keyed on the nonce so re-clicking the same marker re-fires
+  // — the nonce travels into the pulse state so even a same-turn repeat is a
+  // state change (the scroll/timer effect below restarts).
   useEffect(() => {
     if (!highlightRequest) return
     const idx = findSegmentIndexAtMs(highlightRequest.atMs)
     if (idx < 0) return
     setTranscriptExpanded(true)
     setAutoFollow(false)
-    setPulseIndex(idx)
+    setPulse({ index: idx, nonce: highlightRequest.nonce })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [highlightRequest?.nonce])
 
   // Once the pulsed turn is in the DOM, scroll it into view (reduced-motion →
   // instant) and clear the pulse after a short, self-terminating window so the
-  // highlight reads as a brief flash, not a permanent selection.
+  // highlight reads as a brief flash, not a permanent selection. Depends on the
+  // whole {index, nonce} pulse object: a repeat request for the SAME turn still
+  // re-runs (fresh nonce), restarting the timer so the pulse lasts its full
+  // window after the LATEST click.
   useEffect(() => {
-    if (pulseIndex === null) return
+    if (pulse === null) return
     pulseSegmentRef.current?.scrollIntoView({
       behavior: prefersReducedMotion ? 'auto' : 'smooth',
       block: 'center'
     })
     if (pulseTimerRef.current) clearTimeout(pulseTimerRef.current)
-    pulseTimerRef.current = setTimeout(() => setPulseIndex(null), 1600)
+    pulseTimerRef.current = setTimeout(() => setPulse(null), 1600)
     return () => {
       if (pulseTimerRef.current) clearTimeout(pulseTimerRef.current)
     }
-  }, [pulseIndex, prefersReducedMotion])
+  }, [pulse, prefersReducedMotion])
 
   // A (re)start of playback re-enables following: undefined→defined means this
   // transcript's audio just started (e.g. MeetingDetail, where currentTimeMs is
@@ -727,16 +742,16 @@ export function TranscriptViewer({
                     key={i}
                     ref={(el) => {
                       if (hasTimestamps && i === currentSegmentIndex) activeSegmentRef.current = el
-                      if (i === pulseIndex) pulseSegmentRef.current = el
+                      if (i === pulse?.index) pulseSegmentRef.current = el
                     }}
-                    data-testid={i === pulseIndex ? 'transcript-turn-highlighted' : undefined}
+                    data-testid={i === pulse?.index ? 'transcript-turn-highlighted' : undefined}
                     className={cn(
                       'text-sm p-2 rounded-md transition-colors',
                       hasTimestamps && i === currentSegmentIndex && 'bg-primary/10',
                       // Brief cross-highlight pulse from a timeline marker click. The
                       // ring + wash fade out (motion-safe) when the pulse clears; a
                       // reduced-motion user just gets the instant appear/disappear.
-                      i === pulseIndex &&
+                      i === pulse?.index &&
                         'bg-primary/20 ring-2 ring-primary/60 motion-safe:transition-[background-color,box-shadow] motion-safe:duration-700'
                     )}
                   >
