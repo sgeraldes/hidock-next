@@ -39,7 +39,7 @@ import { cn } from '@/lib/utils'
  */
 export type BrandDividerMode = 'titlebar' | 'sidebar' | 'both'
 
-export const BRAND_DIVIDER_MODE: BrandDividerMode = 'both'
+export const BRAND_DIVIDER_MODE: BrandDividerMode = 'titlebar'
 
 /** Vertical divider (brand cell right border) is shown for 'sidebar' + 'both'. */
 export const showBrandVerticalDivider = (mode: BrandDividerMode = BRAND_DIVIDER_MODE): boolean => mode !== 'titlebar'

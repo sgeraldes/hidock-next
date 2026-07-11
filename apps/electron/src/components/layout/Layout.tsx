@@ -247,7 +247,10 @@ export function Layout({ children }: LayoutProps) {
           below the brand" can be dropped ('sidebar' mode) while the line under the
           titlebar CONTENT stays — letting the brand flow straight into the nav rail.
           The left segment tracks the brand-cell width (w-56 / w-16). */}
-      <div className="flex h-px w-full shrink-0">
+      {/* pr-[138px] keeps the line from running UNDER the Windows native window
+          controls (the reserved top-right gutter) — it stops just before them so
+          there's no stray line beneath the — ▢ ✕ buttons. */}
+      <div className="flex h-px w-full shrink-0 pr-[138px]">
         <div
           className={cn(
             'h-px shrink-0 transition-all duration-300',

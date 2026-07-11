@@ -6,8 +6,8 @@ import {
   Loader2,
   Usb,
   ChevronDown,
-  ChevronLeft,
-  ChevronRight,
+  PanelLeftClose,
+  PanelLeftOpen,
   LogOut,
   ArrowRight,
   AlertTriangle,
@@ -112,7 +112,16 @@ export function TitleBar({ sidebarOpen, onToggleSidebar, dividerMode = BRAND_DIV
 
   return (
     <header
-      className="titlebar-drag-region relative z-30 flex h-10 shrink-0 items-center bg-slate-900 text-slate-100 select-none"
+      className={cn(
+        'titlebar-drag-region relative z-30 flex h-10 shrink-0 items-center text-slate-100 select-none',
+        // Option 01 ('titlebar'): the brand flows into the bar as ONE continuous
+        // surface — a subtle top-to-bottom bar GRADIENT (brand shares it, no seam) —
+        // and the whole bar reads as elevated, casting a soft shadow DOWNWARD onto
+        // the sidebar + content below. Matches the approved mockup.
+        dividerMode === 'titlebar'
+          ? 'bg-[linear-gradient(180deg,#151d2b,#0d1220)] shadow-[0_7px_18px_-9px_rgba(0,0,0,0.75)]'
+          : 'bg-slate-900'
+      )}
       style={{ paddingRight: isMac ? 12 : NATIVE_CONTROLS_WIDTH }}
     >
       {/* BRAND CELL — mirrors the sidebar column (same width + border-r) so the
@@ -142,10 +151,17 @@ export function TitleBar({ sidebarOpen, onToggleSidebar, dividerMode = BRAND_DIV
           aria-label={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
           aria-pressed={sidebarOpen}
           title={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
-          className="titlebar-no-drag absolute top-1/2 z-40 flex h-5 w-5 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-slate-600 bg-slate-800 text-slate-300 shadow-sm transition-colors duration-300 hover:bg-slate-700 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+          className={cn(
+            'titlebar-no-drag absolute z-40 flex h-6 w-6 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-md border border-slate-600 bg-slate-800 text-slate-300 shadow-sm transition-all duration-300 hover:bg-slate-700 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400',
+            // Option 01: the vertical seam is gone from the bar, so the collapse
+            // handle drops to the bar's bottom edge — sitting at the sidebar's
+            // top-right corner, below the bar. Other modes keep it centred on the seam.
+            dividerMode === 'titlebar' ? 'top-full' : 'top-1/2'
+          )}
           style={{ left: cellWidth }}
         >
-          {sidebarOpen ? <ChevronLeft className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+          {/* Panel-collapse icon (matches the Sources-panel toggle), not a chevron. */}
+          {sidebarOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeftOpen className="h-4 w-4" />}
         </button>
       )}
 
