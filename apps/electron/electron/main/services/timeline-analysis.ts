@@ -239,9 +239,29 @@ export function classifyAnalysisError(err: unknown, nowMs: number = Date.now()):
     : { kind: bestKind, message: topMessage }
 }
 
+/**
+ * PERSISTED per-component completion state. `sentimentAnalyzed` /
+ * `markersAnalyzed` are true only when that component's analysis COMPLETED for
+ * the transcript's CURRENT content — a legitimately-empty result stays
+ * completed (consumers must not re-bill it on every mount/restart), while a
+ * retranscription (content change) makes both flags read back false.
+ */
+export interface TimelineAnalysisStatus {
+  sentimentAnalyzed: boolean
+  markersAnalyzed: boolean
+}
+
 export interface TimelineAnalysis {
   sentimentSegments: SentimentSegment[]
   eventMarkers: EventMarker[]
+  /**
+   * Present once an analysis has been persisted for this transcript (absent
+   * for never-analyzed rows and legacy bare-array persistence). Flags are
+   * reconciled against the transcript's CURRENT content hash at READ time, so
+   * completion survives app restarts but honestly invalidates on
+   * retranscription.
+   */
+  analysisStatus?: TimelineAnalysisStatus
   /**
    * Present when part of the analysis FAILED (e.g. the Gemini sentiment pass) —
    * classified where the raw error is available. Not persisted; consumers use
@@ -249,6 +269,76 @@ export interface TimelineAnalysis {
    * honest result is empty).
    */
   analysisError?: AnalysisError
+}
+
+// ---------------------------------------------------------------------------
+// Persisted analysis envelope (v2) — completion state WITHOUT a schema bump.
+//
+// The `transcripts.sentiment_segments` column (this module's exclusive
+// read/write territory — nothing else parses it) historically held a bare
+// SentimentSegment[]. It now holds a v2 envelope wrapping the segments plus
+// per-component completion flags and the content hash of the transcript AT
+// ANALYSIS TIME. Legacy bare arrays still parse (segments only, no completion
+// → consumers backfill once, which upgrades the row). `event_markers` stays a
+// bare array.
+// ---------------------------------------------------------------------------
+
+interface SentimentEnvelope {
+  v: 2
+  /** computeTranscriptContentHash(...) of the transcript when analyzed. */
+  contentHash: string
+  sentimentAnalyzed: boolean
+  markersAnalyzed: boolean
+  segments: SentimentSegment[]
+}
+
+/** Cheap deterministic content hash (djb2-xor). */
+function djb2(s: string | null | undefined): string {
+  if (!s) return '0'
+  let h = 5381
+  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) | 0
+  return (h >>> 0).toString(36)
+}
+
+/**
+ * Hash of the timeline-relevant transcript content. Computed identically at
+ * WRITE (analyzeTimeline) and READ (getTimelineAnalysis) so completion flags
+ * are honored only while the content they were computed FROM is unchanged —
+ * the stable transcript id / second-precision created_at are useless for that.
+ */
+function computeTranscriptContentHash(row: {
+  full_text?: string | null
+  speakers: string | null
+  action_items?: string | null
+  key_points?: string | null
+}): string {
+  return [
+    row.full_text?.length ?? 0,
+    djb2(row.full_text),
+    djb2(row.speakers),
+    djb2(row.action_items),
+    djb2(row.key_points)
+  ].join(':')
+}
+
+/** Parse the sentiment column: v2 envelope, legacy bare array, or empty. */
+function parseSentimentColumn(json: string | null | undefined): {
+  segments: SentimentSegment[]
+  envelope?: SentimentEnvelope
+} {
+  if (!json) return { segments: [] }
+  let raw: unknown
+  try {
+    raw = JSON.parse(json)
+  } catch {
+    return { segments: [] }
+  }
+  if (Array.isArray(raw)) return { segments: raw as SentimentSegment[] } // legacy bare array
+  if (raw && typeof raw === 'object' && (raw as { v?: unknown }).v === 2) {
+    const env = raw as SentimentEnvelope
+    return { segments: Array.isArray(env.segments) ? env.segments : [], envelope: env }
+  }
+  return { segments: [] }
 }
 
 /** One coalesced window of speaker turns, ready to be scored. */
@@ -636,10 +726,17 @@ function buildLabel(text: string): string {
 
 interface TranscriptRow {
   recording_id: string
+  full_text: string | null
   speakers: string | null
+  action_items: string | null
+  key_points: string | null
   sentiment_segments: string | null
   event_markers: string | null
 }
+
+/** Shared SELECT — includes the content columns the completion hash covers. */
+const TRANSCRIPT_ROW_SELECT =
+  'SELECT recording_id, full_text, speakers, action_items, key_points, sentiment_segments, event_markers FROM transcripts WHERE recording_id = ?'
 
 interface TranscriptItemsRow {
   action_items: string | null
@@ -669,10 +766,10 @@ export function getTimelineItemsForRecording(recordingId: string): TimelineItem[
   const id = canonical?.id ?? recordingId
 
   const items: TimelineItem[] = []
-  const seen = new Set<string>() // dedupe key: `${kind} ${normalizedText}`
+  const seen = new Set<string>() // dedupe key: `${kind}\0${normalizedText}`
 
   const add = (item: TimelineItem): void => {
-    const key = `${item.kind} ${normalize(item.text)}`
+    const key = `${item.kind}\u0000${normalize(item.text)}`
     if (!item.text.trim() || seen.has(key)) return
     seen.add(key)
     items.push(item)
@@ -753,19 +850,29 @@ export interface AnalyzeProgress {
 /**
  * Read the persisted timeline analysis for a recording. Returns empty arrays if
  * the recording / transcript doesn't exist or hasn't been analyzed yet.
+ * When a v2 completion envelope is present, `analysisStatus` is included with
+ * its flags reconciled against the transcript's CURRENT content hash — so
+ * "analyzed and honestly empty" (no re-bill) is distinguishable from
+ * "never analyzed / content changed" (backfill-eligible) across restarts.
  */
 export function getTimelineAnalysis(recordingId: string): TimelineAnalysis {
   const canonical = getRecordingById(recordingId) ?? resolveRecordingId(recordingId)
   const id = canonical?.id ?? recordingId
-  const row = queryOne<TranscriptRow>(
-    'SELECT recording_id, speakers, sentiment_segments, event_markers FROM transcripts WHERE recording_id = ?',
-    [id]
-  )
+  const row = queryOne<TranscriptRow>(TRANSCRIPT_ROW_SELECT, [id])
   if (!row) return { ...EMPTY }
-  return {
-    sentimentSegments: parseJsonArray<SentimentSegment>(row.sentiment_segments),
+  const { segments, envelope } = parseSentimentColumn(row.sentiment_segments)
+  const result: TimelineAnalysis = {
+    sentimentSegments: segments,
     eventMarkers: parseJsonArray<EventMarker>(row.event_markers)
   }
+  if (envelope) {
+    const fresh = envelope.contentHash === computeTranscriptContentHash(row)
+    result.analysisStatus = {
+      sentimentAnalyzed: fresh && envelope.sentimentAnalyzed === true,
+      markersAnalyzed: fresh && envelope.markersAnalyzed === true
+    }
+  }
+  return result
 }
 
 /**
@@ -782,10 +889,7 @@ export async function analyzeTimeline(
   const canonical = getRecordingById(recordingId) ?? resolveRecordingId(recordingId)
   const id = canonical?.id ?? recordingId
 
-  const row = queryOne<TranscriptRow>(
-    'SELECT recording_id, speakers, sentiment_segments, event_markers FROM transcripts WHERE recording_id = ?',
-    [id]
-  )
+  const row = queryOne<TranscriptRow>(TRANSCRIPT_ROW_SELECT, [id])
   if (!row) return { ...EMPTY }
 
   const turns = parseSpeakerTurns(row.speakers)
@@ -808,14 +912,34 @@ export async function analyzeTimeline(
   const items = getTimelineItemsForRecording(id)
   const eventMarkers = deriveEventMarkers(items, turns)
 
+  // Persist the v2 envelope: segments + per-component completion flags + the
+  // content hash of the transcript AS ANALYZED. Markers derivation is pure and
+  // local (cannot fail transiently) → completed whenever this runs; sentiment
+  // is completed only when the scorer did not fail. A success with honestly
+  // EMPTY results still persists completed=true, so consumers never re-bill it
+  // on remount/restart — while a retranscription changes the content hash and
+  // reads back as not-completed.
+  const envelope: SentimentEnvelope = {
+    v: 2,
+    contentHash: computeTranscriptContentHash(row),
+    sentimentAnalyzed: !analysisError,
+    markersAnalyzed: true,
+    segments: sentimentSegments
+  }
   run('UPDATE transcripts SET sentiment_segments = ?, event_markers = ? WHERE recording_id = ?', [
-    JSON.stringify(sentimentSegments),
+    JSON.stringify(envelope),
     JSON.stringify(eventMarkers),
     id
   ])
 
   onProgress?.({ stage: 'complete', progress: 100 })
-  return analysisError ? { sentimentSegments, eventMarkers, analysisError } : { sentimentSegments, eventMarkers }
+  const analysisStatus: TimelineAnalysisStatus = {
+    sentimentAnalyzed: !analysisError,
+    markersAnalyzed: true
+  }
+  return analysisError
+    ? { sentimentSegments, eventMarkers, analysisStatus, analysisError }
+    : { sentimentSegments, eventMarkers, analysisStatus }
 }
 
 function parseJsonArray<T>(json: string | null | undefined): T[] {

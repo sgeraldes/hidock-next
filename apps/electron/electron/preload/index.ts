@@ -462,10 +462,14 @@ export interface ElectronAPI {
     getTimelineAnalysis: (recordingId: string) => Promise<{
       sentimentSegments: Array<{ startSec: number; endSec: number; score: number }>
       eventMarkers: Array<{ id: string; kind: 'action' | 'decision'; atSec: number; label: string; refId: string }>
+      /** Persisted per-component completion, reconciled to the current transcript content. */
+      analysisStatus?: { sentimentAnalyzed: boolean; markersAnalyzed: boolean }
     }>
     analyzeTimeline: (recordingId: string) => Promise<{
       sentimentSegments: Array<{ startSec: number; endSec: number; score: number }>
       eventMarkers: Array<{ id: string; kind: 'action' | 'decision'; atSec: number; label: string; refId: string }>
+      /** Persisted per-component completion, reconciled to the current transcript content. */
+      analysisStatus?: { sentimentAnalyzed: boolean; markersAnalyzed: boolean }
       /** Present when part of the analysis failed — structured kind for retry policy. */
       analysisError?: {
         kind: 'auth' | 'quota' | 'rate-limit' | 'network' | 'invalid-input' | 'unknown'

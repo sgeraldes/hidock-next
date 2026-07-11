@@ -83,6 +83,13 @@ const CATEGORY_OPTIONS = [
 interface TimelineAnalysisResult {
   sentimentSegments?: Array<{ startSec: number; endSec: number; score: number }>
   eventMarkers?: Array<{ id: string; kind: 'action' | 'decision'; atSec: number; label: string; refId?: string }>
+  /**
+   * PERSISTED per-component completion flags, already reconciled by the
+   * service against the transcript's current content hash. `true` means that
+   * component's analysis completed for THIS content — even when its result is
+   * honestly empty — so it must not be re-billed on remount/restart.
+   */
+  analysisStatus?: { sentimentAnalyzed?: boolean; markersAnalyzed?: boolean }
   /** Structured failure info from the service (analyzeTimeline results only). */
   analysisError?: { kind?: unknown; retryAfterMs?: number; message?: string }
 }
@@ -508,8 +515,18 @@ export function SourceReader({
         // otherwise a markers-yes/sentiment-no recording would NEVER retry and
         // would lose its failure/Retry affordance on remount (the recorded
         // analysisError is not persisted).
+        //
+        // A component counts as missing only when it is empty AND not marked
+        // completed by the PERSISTED analysisStatus (which the service
+        // reconciles against the transcript's current content hash). This is
+        // what makes success-empty survive a full unmount/remount/restart with
+        // ZERO re-billed analyzeTimeline calls, while a retranscription
+        // (content change) reads back not-completed and re-analyzes. Older
+        // mains without analysisStatus behave as before (session guard only).
         const missingComponent = (r?: TimelineAnalysisResult) =>
-          !r || (r.sentimentSegments?.length ?? 0) === 0 || (r.eventMarkers?.length ?? 0) === 0
+          !r ||
+          ((r.sentimentSegments?.length ?? 0) === 0 && r.analysisStatus?.sentimentAnalyzed !== true) ||
+          ((r.eventMarkers?.length ?? 0) === 0 && r.analysisStatus?.markersAnalyzed !== true)
         // Already-transcribed recordings return empty until analyzeTimeline runs
         // once. Backfill it (best-effort) and show the "Analyzing timeline…" hint
         // meanwhile; per-speaker colors + playhead already render without this.

@@ -448,3 +448,76 @@ describe('analyzeTimeline (persist + idempotent)', () => {
     expect(second.eventMarkers).toEqual(result.eventMarkers)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Persisted per-component completion (v2 sentiment envelope) — success-empty
+// must survive app restarts (any fresh read of the DB) without re-billing,
+// while a retranscription (content change) invalidates the flags. No schema
+// bump: the envelope lives inside the existing sentiment_segments column.
+// ---------------------------------------------------------------------------
+describe('analysisStatus — persisted success-empty completion', () => {
+  // A scorer that legitimately returns no scores → honestly-empty sentiment.
+  const emptyScorer = async () => new Map<number, number>()
+
+  it('a success with EMPTY results persists completed flags readable on a fresh read (restart-equivalent)', async () => {
+    seedRecording('recEnv1')
+    seedTranscript('recEnv1', SPEAKERS_JSON) // speakers, but no items → both components empty
+
+    const result = await analyzeTimeline('recEnv1', undefined, { scoreWindows: emptyScorer })
+    expect(result.sentimentSegments).toEqual([])
+    expect(result.eventMarkers).toEqual([])
+    expect(result.analysisStatus).toEqual({ sentimentAnalyzed: true, markersAnalyzed: true })
+
+    // A brand-new read from the DB (what a remounted reader / restarted app
+    // sees) carries the SAME completion — consumers skip the backfill.
+    const persisted = getTimelineAnalysis('recEnv1')
+    expect(persisted.sentimentSegments).toEqual([])
+    expect(persisted.eventMarkers).toEqual([])
+    expect(persisted.analysisStatus).toEqual({ sentimentAnalyzed: true, markersAnalyzed: true })
+  })
+
+  it('a CONTENT change (retranscription) reads the flags back as false', async () => {
+    seedRecording('recEnv2')
+    seedTranscript('recEnv2', SPEAKERS_JSON)
+    await analyzeTimeline('recEnv2', undefined, { scoreWindows: emptyScorer })
+    expect(getTimelineAnalysis('recEnv2').analysisStatus).toEqual({ sentimentAnalyzed: true, markersAnalyzed: true })
+
+    // Retranscription rewrites content (id / created_at may be identical).
+    run('UPDATE transcripts SET full_text = ? WHERE recording_id = ?', ['a completely different second pass', 'recEnv2'])
+    expect(getTimelineAnalysis('recEnv2').analysisStatus).toEqual({ sentimentAnalyzed: false, markersAnalyzed: false })
+  })
+
+  it('a FAILED sentiment pass persists sentimentAnalyzed=false while markers stay completed', async () => {
+    seedRecording('recEnv3')
+    seedFreshTranscript(
+      'recEnv3',
+      SPEAKERS_JSON,
+      ['Carlos will prepare the rollback plan before the deploy window'],
+      []
+    )
+    const throwingScorer = async () => {
+      throw Object.assign(new Error('scorer down'), { status: 503 })
+    }
+    const result = await analyzeTimeline('recEnv3', undefined, { scoreWindows: throwingScorer })
+    expect(result.analysisStatus).toEqual({ sentimentAnalyzed: false, markersAnalyzed: true })
+    expect(result.analysisError?.kind).toBe('network')
+    expect(result.eventMarkers.length).toBe(1)
+
+    // The persisted read agrees: markers completed, sentiment retry-eligible.
+    const persisted = getTimelineAnalysis('recEnv3')
+    expect(persisted.analysisStatus).toEqual({ sentimentAnalyzed: false, markersAnalyzed: true })
+    expect(persisted.eventMarkers.length).toBe(1)
+  })
+
+  it('legacy bare-array persistence still parses — segments returned, NO analysisStatus', async () => {
+    seedRecording('recEnv4')
+    seedTranscript('recEnv4', SPEAKERS_JSON)
+    run('UPDATE transcripts SET sentiment_segments = ? WHERE recording_id = ?', [
+      JSON.stringify([{ startSec: 0, endSec: 10, score: 0.5 }]),
+      'recEnv4'
+    ])
+    const result = getTimelineAnalysis('recEnv4')
+    expect(result.sentimentSegments).toEqual([{ startSec: 0, endSec: 10, score: 0.5 }])
+    expect(result.analysisStatus).toBeUndefined()
+  })
+})

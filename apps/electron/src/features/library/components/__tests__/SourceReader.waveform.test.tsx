@@ -561,6 +561,51 @@ describe('SourceReader — timeline backfill', () => {
     await waitFor(() => expect(screen.queryByTestId('timeline-analysis-failed')).not.toBeInTheDocument())
   })
 
+  // ---- Final arc item: PERSISTED success-empty completion --------------------
+  // Success-empty is persisted WITH the analysis (analysisStatus flags,
+  // content-hash-reconciled by the service), so a FULL unmount/remount — a new
+  // reader session with a fresh in-memory guard — must not re-bill
+  // analyzeTimeline. A content change (retranscription) reads back
+  // not-completed and re-analyzes.
+  it('success-empty analysis survives a FULL unmount/remount with ZERO extra analyzeTimeline calls; changed content re-analyzes', async () => {
+    // Simulated service persistence: completion flags flip on after a
+    // successful analysis and are returned by every later read — exactly what
+    // the real service persists in the sentiment envelope.
+    const completedEmpty = {
+      sentimentSegments: [],
+      eventMarkers: [],
+      analysisStatus: { sentimentAnalyzed: true, markersAnalyzed: true },
+    }
+    let analyzed = false
+    const getTimelineAnalysis = vi.fn().mockImplementation(async () => (analyzed ? completedEmpty : emptyTimeline))
+    const analyzeTimeline = vi.fn().mockImplementation(async () => {
+      analyzed = true
+      return completedEmpty
+    })
+    installElectronAPI({ getTimelineAnalysis, analyzeTimeline })
+
+    const recA = makeRecording({ id: 'rec-A', transcriptionStatus: 'complete' })
+
+    // Mount 1: never analyzed → one backfill; result is honestly empty.
+    const first = render(<SourceReader recording={recA} />)
+    await waitFor(() => expect(analyzeTimeline).toHaveBeenCalledTimes(1))
+    first.unmount()
+
+    // Mount 2 (FULL remount — fresh component, fresh session guard): the
+    // persisted completion is read back → ZERO additional analyzeTimeline calls.
+    const second = render(<SourceReader recording={recA} />)
+    await waitFor(() => expect(getTimelineAnalysis).toHaveBeenCalledWith('rec-A'))
+    await Promise.resolve()
+    expect(analyzeTimeline).toHaveBeenCalledTimes(1)
+    second.unmount()
+
+    // Retranscription: content changed → the service's hash reconciliation
+    // reads the flags back as false → the next mount re-analyzes.
+    analyzed = false
+    render(<SourceReader recording={recA} />)
+    await waitFor(() => expect(analyzeTimeline).toHaveBeenCalledTimes(2))
+  })
+
   // ---- Round-5 finding 3: retry-after hints at/over the cap ----------------
   it('a rate-limit hint AT the 15-minute cap behaves as needs-attention (no auto-retry)', async () => {
     const getTimelineAnalysis = vi.fn().mockResolvedValue(emptyTimeline)
