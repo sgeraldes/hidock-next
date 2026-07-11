@@ -8,11 +8,23 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { existsSync, rmSync } from 'fs'
 
-// safeStorage unavailable → values are stored/read as plaintext (test-mode
-// fallback, matching connector-store / config.ts).
+// safeStorage is toggled per-test via these hoisted spies. Default: encryption
+// UNAVAILABLE → values are stored/read as plaintext (test-mode fallback,
+// matching connector-store / config.ts). Encrypted-mode tests flip
+// mockIsEncAvailable to true; the encrypt/decrypt mocks reversibly wrap the
+// value so a round-trip is observable, and can be made to throw.
+const { mockIsEncAvailable, mockEncrypt, mockDecrypt } = vi.hoisted(() => ({
+  mockIsEncAvailable: vi.fn(() => false),
+  mockEncrypt: vi.fn((s: string) => Buffer.from(`ENC(${s})`)),
+  mockDecrypt: vi.fn((b: Buffer) => b.toString().replace(/^ENC\((.*)\)$/s, '$1')),
+}))
 vi.mock('electron', () => ({
   app: { getPath: () => tmpdir() },
-  safeStorage: { isEncryptionAvailable: () => false },
+  safeStorage: {
+    isEncryptionAvailable: () => mockIsEncAvailable(),
+    encryptString: (s: string) => mockEncrypt(s),
+    decryptString: (b: Buffer) => mockDecrypt(b),
+  },
 }))
 
 import { BrainCredentialStore } from '../brain-credential-store'
@@ -22,6 +34,10 @@ describe('BrainCredentialStore', () => {
   let store: BrainCredentialStore
 
   beforeEach(() => {
+    vi.clearAllMocks()
+    mockIsEncAvailable.mockReturnValue(false)
+    mockEncrypt.mockImplementation((s: string) => Buffer.from(`ENC(${s})`))
+    mockDecrypt.mockImplementation((b: Buffer) => b.toString().replace(/^ENC\((.*)\)$/s, '$1'))
     filePath = join(tmpdir(), `brains-test-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
     store = new BrainCredentialStore(filePath)
     store.load()
@@ -66,5 +82,47 @@ describe('BrainCredentialStore', () => {
     expect(store.getSecret('gemini-api', 'apiKey')).toBe('gem')
     expect(store.getSecret('claude-code', 'ANTHROPIC_API_KEY')).toBe('ant')
     expect(store.getSecret('gemini-api', 'ANTHROPIC_API_KEY')).toBeNull()
+  })
+
+  describe('encryption at rest', () => {
+    it('round-trips an encrypted secret when safeStorage is available', () => {
+      mockIsEncAvailable.mockReturnValue(true)
+      store.setSecret('gemini-api', 'apiKey', 'sk-secret') // pragma: allowlist secret
+
+      // Persisted form is the __enc__-prefixed ciphertext, not the plaintext.
+      const reopened = new BrainCredentialStore(filePath)
+      reopened.load()
+      expect(reopened.getSecret('gemini-api', 'apiKey')).toBe('sk-secret')
+      expect(reopened.hasSecret('gemini-api', 'apiKey')).toBe(true)
+      expect(mockEncrypt).toHaveBeenCalledWith('sk-secret')
+    })
+
+    it('returns null (not the ciphertext) when the keychain is unavailable at read time', () => {
+      // Written while encryption is available…
+      mockIsEncAvailable.mockReturnValue(true)
+      store.setSecret('gemini-api', 'apiKey', 'sk-secret') // pragma: allowlist secret
+
+      // …then the keychain becomes unavailable: the encrypted bytes can't be
+      // read, so getSecret must return null so the plaintext-config fallback wins
+      // (NOT the raw __enc__ ciphertext, which a resolver would treat as a key).
+      mockIsEncAvailable.mockReturnValue(false)
+      const reopened = new BrainCredentialStore(filePath)
+      reopened.load()
+      expect(reopened.getSecret('gemini-api', 'apiKey')).toBeNull()
+      expect(reopened.hasSecret('gemini-api', 'apiKey')).toBe(false)
+    })
+
+    it('returns null when decryption throws (corrupt/foreign ciphertext)', () => {
+      mockIsEncAvailable.mockReturnValue(true)
+      store.setSecret('gemini-api', 'apiKey', 'sk-secret') // pragma: allowlist secret
+
+      mockDecrypt.mockImplementation(() => {
+        throw new Error('decrypt failed')
+      })
+      const reopened = new BrainCredentialStore(filePath)
+      reopened.load()
+      expect(reopened.getSecret('gemini-api', 'apiKey')).toBeNull()
+      expect(reopened.hasSecret('gemini-api', 'apiKey')).toBe(false)
+    })
   })
 })

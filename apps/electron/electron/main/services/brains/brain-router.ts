@@ -96,14 +96,53 @@ export class BrainRouter {
   // ── Convenience wrappers (preserve the legacy fallback semantics) ──────────
 
   /**
+   * Is Gemini the usable cloud primary for `task`/`need`? Decided WITHOUT a
+   * network probe (Gemini authStatus is a key lookup) so the no-Gemini path can
+   * go straight to Ollama with the caller's signal — never blocking on an
+   * uncancellable /api/tags preflight (FIX 3) or double-probing Ollama (FIX 4).
+   * Mirrors resolve()'s taskRouting→defaultBrain preference, restricted to Gemini.
+   */
+  private async geminiPrimary(task: BrainTask, need: BrainCapability): Promise<AIBrain | null> {
+    const cfg = this.brainsConfig()
+    const routed = cfg?.taskRouting?.[task]
+    // An explicit non-Gemini task route means Gemini is not the primary.
+    if (routed && routed !== 'gemini-api') return null
+    const target = routed ?? cfg?.defaultBrain ?? DEFAULT_BRAIN
+    if (target !== 'gemini-api') return null
+    const gemini = this.registry.get('gemini-api')
+    return (await this.isUsable(gemini, need)) ? gemini : null
+  }
+
+  /**
+   * Capability-aware fallback (FIX 5): the first registered, ENABLED brain that
+   * ADVERTISES `need`, excluding `exclude` (the failed/primary Gemini). Unlike
+   * resolve(), this does NOT run an availability probe — the brain's own call
+   * determines reachability (returning null when unreachable) and honours the
+   * caller's abort signal. This keeps chat cancellable (FIX 3) and embeddings to
+   * a single probe (FIX 4) while still refusing a disabled or incapable brain.
+   */
+  private capabilityFallback(need: BrainCapability, exclude: BrainId | null): AIBrain | null {
+    for (const id of FALLBACK_CHAINS[need]) {
+      if (id === exclude) continue
+      const brain = this.registry.get(id)
+      if (!brain) continue
+      if (!this.isEnabled(id)) continue
+      if (!brain.capabilities().has(need)) continue
+      return brain
+    }
+    return null
+  }
+
+  /**
    * Multi-turn chat. Replicates chat-llm's behaviour: primary (Gemini when a key
    * is configured) first; on a non-abort error fall back to Ollama; on cancel
-   * return null; when no cloud brain is configured, Ollama serves directly.
+   * return null; when no cloud brain is configured, Ollama serves directly — with
+   * the caller's signal and no uncancellable preflight probe.
    */
   async chat(task: BrainTask, messages: BrainMessage[], opts: GenerateOptions = {}): Promise<string | null> {
-    const primary = await this.resolve(task, 'chat')
+    const primary = await this.geminiPrimary(task, 'chat')
 
-    if (primary && primary.id === 'gemini-api') {
+    if (primary) {
       try {
         return await primary.chat(messages, opts)
       } catch (e) {
@@ -113,35 +152,34 @@ export class BrainRouter {
         }
         console.error('[BrainRouter] primary chat failed, trying Ollama fallback:', e)
       }
-    } else if (primary) {
-      return primary.chat(messages, opts)
     }
 
-    // No cloud primary (or it threw): Ollama serves directly (null if unreachable).
-    const ollama = this.registry.get('ollama')
-    return ollama ? ollama.chat(messages, opts) : null
+    // No Gemini primary (or it threw): the capability-aware fallback (enabled +
+    // advertises chat) serves directly with the caller's signal.
+    const fallback = this.capabilityFallback('chat', 'gemini-api')
+    return fallback ? fallback.chat(messages, opts) : null
   }
 
   /**
    * Text embeddings. Replicates embeddings.ts: Gemini first when a key exists;
-   * on error fall back to Ollama (which returns nulls when unavailable).
+   * on error fall back to Ollama (which returns nulls when unavailable). Ollama's
+   * single availability probe lives inside its adapter's embed() — this wrapper
+   * adds none, so a transient probe never yields spurious null vectors (FIX 4).
    */
   async embed(texts: string[]): Promise<(number[] | null)[]> {
     if (texts.length === 0) return []
 
-    const primary = await this.resolve('embed', 'embed')
-    if (primary && primary.id === 'gemini-api' && primary.embed) {
+    const primary = await this.geminiPrimary('embed', 'embed')
+    if (primary?.embed) {
       try {
         return await primary.embed(texts)
       } catch (e) {
         console.error('[BrainRouter] Gemini embedding failed, trying Ollama fallback:', e)
       }
-    } else if (primary && primary.id !== 'gemini-api' && primary.embed) {
-      return primary.embed(texts)
     }
 
-    const ollama = this.registry.get('ollama')
-    return ollama?.embed ? ollama.embed(texts) : texts.map(() => null)
+    const fallback = this.capabilityFallback('embed', 'gemini-api')
+    return fallback?.embed ? fallback.embed(texts) : texts.map(() => null)
   }
 
   /**

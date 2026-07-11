@@ -65,6 +65,15 @@ describe('GeminiApiBrain', () => {
       mockConfig.transcription.geminiApiKey = ''
       expect(resolveGeminiApiKey()).toBe('')
     })
+
+    // FIX 1: a store-only key (empty plaintext field) must resolve truthy so the
+    // transcription availability gates — which now all read resolveGeminiApiKey()
+    // — treat it as configured everywhere identically.
+    it('resolves a store-only key even when the plaintext config field is empty', () => {
+      mockGetSecret.mockReturnValue('store-only')
+      mockConfig.transcription.geminiApiKey = ''
+      expect(resolveGeminiApiKey()).toBe('store-only')
+    })
   })
 
   describe('capabilities + authStatus', () => {

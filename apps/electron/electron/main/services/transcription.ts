@@ -376,7 +376,7 @@ async function processQueue(): Promise<void> {
 
     const config = getConfig()
     const provider = config.transcription.provider || 'gemini'
-    if (provider === 'gemini' && !config.transcription.geminiApiKey) {
+    if (provider === 'gemini' && !resolveGeminiApiKey()) {
       console.error('[Transcription] Cannot process queue: Gemini API key not configured')
 
       // Mark all pending items as failed with clear error message
@@ -633,8 +633,7 @@ async function detectActionables(
   knowledgeCaptureId: string,
   metadata: { title?: string; questions?: string[] }
 ): Promise<ActionableDetection[]> {
-  const config = getConfig()
-  if (!config.transcription.geminiApiKey) {
+  if (!resolveGeminiApiKey()) {
     console.log('[Actionable Detection] Gemini API key not configured, skipping')
     return []
   }
@@ -761,7 +760,7 @@ async function transcribeWithGemini(
   progressCallback?: (stage: string, progress: number) => void
 ): Promise<RawTranscriptionResult> {
   const config = getConfig()
-  if (!config.transcription.geminiApiKey) {
+  if (!resolveGeminiApiKey()) {
     throw new Error('Gemini API key not configured')
   }
 
@@ -1067,7 +1066,7 @@ async function analyzeTranscriptWithGemini(
   candidateMeetings: ReturnType<typeof findCandidateMeetingsForRecording>
 ): Promise<TranscriptAnalysis> {
   const config = getConfig()
-  if (!config.transcription.geminiApiKey) {
+  if (!resolveGeminiApiKey()) {
     return {
       summary: 'Local ASR transcript created. Configure Gemini to generate AI summary, action items, and meeting matching.',
       action_items: [],
@@ -1431,8 +1430,7 @@ function logAnalysisFailure(label: string, response: unknown, text: string): voi
  * predictable. Returns the number of transcripts actually healed.
  */
 export async function reanalyzeFailedTranscripts(limit = 3): Promise<number> {
-  const config = getConfig()
-  if (!config.transcription.geminiApiKey) {
+  if (!resolveGeminiApiKey()) {
     // No Gemini key → re-analysis can't produce anything better; skip rather
     // than churn the same rows every run.
     return 0

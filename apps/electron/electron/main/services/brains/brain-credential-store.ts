@@ -36,15 +36,26 @@ function encryptSecret(value: string): string {
   return value
 }
 
-function decryptSecret(value: string): string {
+/**
+ * Decrypt a stored value.
+ *  - No `__enc__` prefix → it's plaintext; return as-is.
+ *  - Encrypted but undecryptable (safeStorage unavailable, or decryptString
+ *    throws) → return null. Returning the raw ciphertext here would make callers
+ *    (resolveGeminiApiKey) treat the `__enc__…` blob as a valid key and skip the
+ *    still-valid plaintext-config fallback, breaking all Gemini ops on a
+ *    keychain lock. null lets the fallback kick in.
+ */
+function decryptSecret(value: string): string | null {
+  if (!value.startsWith(ENC_PREFIX)) return value
   try {
-    if (value.startsWith(ENC_PREFIX) && safeStorage?.isEncryptionAvailable?.()) {
+    if (safeStorage?.isEncryptionAvailable?.()) {
       return safeStorage.decryptString(Buffer.from(value.slice(ENC_PREFIX.length), 'base64'))
     }
   } catch {
-    /* fall through to return as-is */
+    return null
   }
-  return value
+  // Encrypted bytes exist but no keychain is available to read them.
+  return null
 }
 
 /** On-disk shape: a per-brain secrets map keyed by brain id. */
@@ -113,13 +124,14 @@ export class BrainCredentialStore {
     }
   }
 
+  /**
+   * True only when a secret is stored AND readable. An encrypted value that
+   * cannot be decrypted (keychain locked/unavailable) reports false, so the
+   * one-time migration does NOT treat an unreadable value as "already migrated"
+   * and the plaintext-config fallback stays authoritative.
+   */
   hasSecret(brainId: BrainId, key: string): boolean {
-    try {
-      const raw = this.ensure(brainId)._secrets[key]
-      return raw !== undefined && raw !== ''
-    } catch {
-      return false
-    }
+    return this.getSecret(brainId, key) !== null
   }
 
   setSecret(brainId: BrainId, key: string, value: string | null): void {

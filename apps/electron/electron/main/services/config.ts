@@ -280,7 +280,24 @@ export function getConfig(): AppConfig {
 }
 
 export async function saveConfig(newConfig: Partial<AppConfig>): Promise<void> {
+  const prevGeminiKey = config.transcription?.geminiApiKey ?? ''
   config = deepMerge(config, newConfig)
+  const nextGeminiKey = config.transcription?.geminiApiKey ?? ''
+
+  // H10 FIX: keep the encrypted credential store in sync with the plaintext
+  // `transcription.geminiApiKey` whenever it CHANGES. resolveGeminiApiKey()
+  // prefers the store, so without this a rotated/cleared key in Settings (which
+  // only touches the plaintext field) would silently keep using the stale
+  // stored key. Set on a non-empty value, delete when cleared to empty.
+  if (nextGeminiKey !== prevGeminiKey) {
+    try {
+      const store = getBrainCredentialStore()
+      const trimmed = nextGeminiKey.trim()
+      store.setSecret('gemini-api', 'apiKey', trimmed ? trimmed : null)
+    } catch (e) {
+      console.warn('[Config] Failed to sync Gemini key to credential store:', e)
+    }
+  }
 
   const configPath = getConfigPath()
   const configDir = join(configPath, '..')

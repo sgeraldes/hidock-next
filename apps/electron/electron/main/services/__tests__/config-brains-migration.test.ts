@@ -17,7 +17,7 @@ vi.mock('../brains/brain-credential-store', () => ({
   getBrainCredentialStore: () => ({ hasSecret: mockHasSecret, setSecret: mockSetSecret }),
 }))
 
-import { getConfig, migrateGeminiKeyToCredentialStore } from '../config'
+import { getConfig, updateConfig, migrateGeminiKeyToCredentialStore } from '../config'
 import type { AppConfig } from '../config'
 
 function cfgWith(geminiApiKey: string, geminiEnabled = true): AppConfig {
@@ -86,5 +86,45 @@ describe('migrateGeminiKeyToCredentialStore', () => {
     const changed = migrateGeminiKeyToCredentialStore(cfg)
     expect(cfg.brains.enabled['gemini-api']).toBe(true)
     expect(changed).toBe(true)
+  })
+})
+
+/**
+ * H10 FIX 1: Settings only writes the PLAINTEXT geminiApiKey, but
+ * resolveGeminiApiKey() prefers the credential store. saveConfig/updateConfig
+ * must therefore keep the store in sync whenever the key CHANGES — set on a
+ * non-empty value, delete on clear — so rotation/clearing in Settings actually
+ * takes effect instead of silently reusing the stale stored key.
+ */
+describe('Gemini key ↔ credential-store sync (updateConfig)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockHasSecret.mockReturnValue(false)
+  })
+
+  it('mirrors a newly set key into the credential store', async () => {
+    await updateConfig('transcription', { geminiApiKey: 'sk-new' }) // pragma: allowlist secret
+    expect(mockSetSecret).toHaveBeenCalledWith('gemini-api', 'apiKey', 'sk-new')
+  })
+
+  it('rotates the stored secret when the key changes', async () => {
+    await updateConfig('transcription', { geminiApiKey: 'sk-old' }) // pragma: allowlist secret
+    mockSetSecret.mockClear()
+    await updateConfig('transcription', { geminiApiKey: 'sk-rotated' }) // pragma: allowlist secret
+    expect(mockSetSecret).toHaveBeenCalledWith('gemini-api', 'apiKey', 'sk-rotated')
+  })
+
+  it('deletes the stored secret when the key is cleared to empty', async () => {
+    await updateConfig('transcription', { geminiApiKey: 'sk-temp' }) // pragma: allowlist secret
+    mockSetSecret.mockClear()
+    await updateConfig('transcription', { geminiApiKey: '' })
+    expect(mockSetSecret).toHaveBeenCalledWith('gemini-api', 'apiKey', null)
+  })
+
+  it('does not touch the store when the Gemini key is unchanged', async () => {
+    await updateConfig('transcription', { geminiApiKey: 'sk-stable' }) // pragma: allowlist secret
+    mockSetSecret.mockClear()
+    await updateConfig('ui', { theme: 'dark' })
+    expect(mockSetSecret).not.toHaveBeenCalled()
   })
 })
