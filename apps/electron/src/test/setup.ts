@@ -2,29 +2,11 @@
 import '@testing-library/jest-dom'
 import { vi } from 'vitest'
 
-// ---------------------------------------------------------------------------
-// D3: better-sqlite3 dual-ABI shim (native module, so vite `alias` can't touch
-// it — externalized deps are loaded by Node's require and bypass aliases).
-//
-// apps/electron/node_modules/better-sqlite3 is compiled for Electron's ABI
-// (NODE_MODULE_VERSION 140); Node-based vitest runs under a different ABI (147)
-// and can't load it — which broke every DB-backed test file. The
-// @hidock/database workspace installs its own better-sqlite3 built for the Node
-// ABI. Redirect the import to that copy for tests ONLY, via a global module
-// mock. DB tests keep running against REAL SQLite (no behavior change, no
-// stubs), while the Electron-built binding the running app depends on is left
-// completely untouched — no `npm rebuild`, no node_modules mutation.
-vi.mock('better-sqlite3', async () => {
-  const { createRequire } = await import('module')
-  const { fileURLToPath } = await import('url')
-  const { dirname, resolve } = await import('path')
-  const req = createRequire(import.meta.url)
-  const here = dirname(fileURLToPath(import.meta.url))
-  // setup.ts lives at apps/electron/src/test/ → repo root is four levels up.
-  const nodeAbiCopy = resolve(here, '../../../../packages/database/node_modules/better-sqlite3')
-  const Database = req(nodeAbiCopy)
-  return { default: Database }
-})
+// NOTE: the D3 better-sqlite3 dual-ABI shim is intentionally NOT here. It is
+// scoped to the `main-db` vitest project via src/test/setup-db.ts so that
+// non-DB tests never see the mock and the unmocked `native-binding` project
+// (better-sqlite3-binding.smoke.test.ts) can detect a missing/broken
+// production binary. See vitest.config.ts `test.projects`.
 
 // Only setup browser mocks if we're in a browser-like environment
 if (typeof window !== 'undefined') {
