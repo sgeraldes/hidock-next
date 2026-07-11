@@ -7,7 +7,7 @@ import { DatabaseEngine, getTableColumns, type SqlJsDatabase } from '@hidock/dat
 import { normalizeName, isGenericSpeakerLabel, detectAmbiguousName } from './entity-normalize'
 import { getEventBus } from './event-bus'
 
-const SCHEMA_VERSION = 39
+const SCHEMA_VERSION = 40
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -312,6 +312,9 @@ CREATE TABLE IF NOT EXISTS transcription_service_lock (
 );
 
 -- Download queue (v20) - spec-007
+-- cancel_reason (v40): origin of a 'cancelled' status — 'user' (deliberate cancel;
+-- terminal-suppressed from auto-retry AND from reconciliation re-queue until a
+-- manual Retry) vs 'interrupted' (disconnect/re-sync; auto-retried on reconnect).
 CREATE TABLE IF NOT EXISTS download_queue (
     id TEXT PRIMARY KEY,
     filename TEXT NOT NULL UNIQUE,
@@ -322,6 +325,7 @@ CREATE TABLE IF NOT EXISTS download_queue (
     started_at TEXT,
     completed_at TEXT,
     recording_date TEXT,
+    cancel_reason TEXT CHECK(cancel_reason IN ('user', 'interrupted') OR cancel_reason IS NULL),
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -2067,6 +2071,26 @@ const MIGRATIONS: Record<number, () => void> = {
       }
     }
     console.log('Migration v39 complete')
+  },
+
+  40: () => {
+    // v40: download_queue.cancel_reason — durable origin of a 'cancelled' download.
+    // 'user' = deliberate cancel, terminal-suppressed from auto-retry AND from
+    // reconciliation re-queue (across restarts) until a manual Retry clears it;
+    // 'interrupted' = disconnect/re-sync, auto-retried on reconnect. NULL for
+    // pre-v40 rows (treated as 'interrupted' for backward compatibility).
+    // Idempotent: guarded ALTER.
+    console.log('Running migration to schema v40: download_queue.cancel_reason')
+    const database = getDatabase()
+    const cols = getTableColumns(database, 'download_queue')
+    if (cols.length > 0 && !cols.includes('cancel_reason')) {
+      try {
+        database.run('ALTER TABLE download_queue ADD COLUMN cancel_reason TEXT')
+      } catch (e) {
+        console.warn('[Migration v40] add cancel_reason failed:', e)
+      }
+    }
+    console.log('Migration v40 complete')
   }
 
 }
@@ -2160,6 +2184,15 @@ function repairPhase(): void {
         try { database.run(`ALTER TABLE transcription_queue ADD COLUMN ${col.name} ${col.def}`) } catch (e) {}
       }
     }
+  }
+
+  // Repair download_queue (v40): cancel_reason — force-add so an older on-disk
+  // schema that skipped the migration still gets it before the DownloadService
+  // reads/writes cancellation origins. Idempotent.
+  const dlqCols = getTableColumns(database, 'download_queue')
+  if (dlqCols.length > 0 && !dlqCols.includes('cancel_reason')) {
+    console.log('[Database] Repairing download_queue: adding cancel_reason')
+    try { database.run('ALTER TABLE download_queue ADD COLUMN cancel_reason TEXT') } catch { /* column exists */ }
   }
 
   // Repair recording_preassignments (v31): force-create so an older on-disk DB

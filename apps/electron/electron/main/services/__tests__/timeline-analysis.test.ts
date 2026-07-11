@@ -111,9 +111,9 @@ afterEach(() => {
 })
 
 describe('schema v39 timeline columns', () => {
-  it('is at schema version 39', () => {
+  it('is at schema version 40', () => {
     const row = queryOne<{ version: number }>('SELECT version FROM schema_version ORDER BY version DESC LIMIT 1')
-    expect(row?.version).toBe(39)
+    expect(row?.version).toBe(40)
   })
 
   it('transcripts has sentiment_segments + event_markers columns', () => {

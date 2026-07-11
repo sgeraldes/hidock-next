@@ -13,6 +13,7 @@
 
 import { ipcMain, BrowserWindow } from 'electron'
 import { getJensenDevice } from '../services/jensen'
+import { emitActivityLog } from '../services/activity-log'
 import {
   JensenDeleteFileSchema,
   JensenSetAutoRecordSchema,
@@ -574,6 +575,19 @@ export function registerJensenHandlers(): void {
       versionCode: null,
       versionNumber: null,
     })
+  }
+
+  // Quarantine recovery exhausted its bounded reconnect attempts: the session is
+  // terminally down until the user acts. Surface it (Activity Log + push event) —
+  // without this the still-plugged device would silently stay disconnected forever
+  // (no physical USB event ever fires for a quarantine teardown).
+  jensen.onrecoveryexhausted = () => {
+    emitActivityLog(
+      'error',
+      'Device recovery required',
+      'Automatic reconnect after a transfer fault failed — use Connect, or unplug and replug the HiDock.'
+    )
+    broadcast('jensen:recovery-exhausted')
   }
 
   console.log('Jensen IPC handlers registered (27 channels)')

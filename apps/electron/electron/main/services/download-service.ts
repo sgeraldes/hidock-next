@@ -44,11 +44,12 @@ export interface DownloadQueueItem {
   recordingDate?: Date // Original recording date from device
   lastProgressAt?: Date // C-004: Track last progress update for smarter stall detection
   // HIGH-3 (Codex): origin of a 'cancelled' status. 'user' = the user deliberately
-  // cancelled and it must stay terminal until a MANUAL retry; 'interrupted' =
-  // disconnect/re-sync aborted it mid-flight and reconnect should auto-retry it.
-  // In-memory only: cancelled items are never reloaded from the DB (loadQueue reads
-  // only pending/downloading), so no schema column is needed — the distinction is
-  // consulted only within a running session.
+  // cancelled — terminal-suppressed from auto-retry AND from reconciliation
+  // re-queue until the user acts again (manual Retry, or an explicit re-download).
+  // 'interrupted' = disconnect/re-sync aborted it mid-flight; auto-retried on
+  // reconnect. DURABLE: persisted to download_queue.cancel_reason (schema v40) and
+  // user-cancelled rows are reloaded on startup, so a deliberate cancel survives an
+  // app restart instead of resurrecting via post-restart reconciliation.
   cancelReason?: 'user' | 'interrupted'
 }
 
@@ -70,7 +71,9 @@ interface DownloadServiceState {
   isPaused: boolean
 }
 
-class DownloadService {
+// Exported so tests can construct a FRESH instance to simulate an app restart
+// (the module normally uses only the getDownloadService() singleton below).
+export class DownloadService {
   private state: DownloadServiceState = {
     queue: new Map(),
     currentSession: null,
@@ -141,7 +144,11 @@ class DownloadService {
   }
 
   /**
-   * Load queue from database on startup (spec-007: persistence)
+   * Load queue from database on startup (spec-007: persistence).
+   * HIGH-3 (restart resurrection): ALSO loads user-cancelled rows — they act as
+   * durable terminal-suppression markers so post-restart reconciliation cannot
+   * re-queue a file the user deliberately cancelled. Interrupted cancels are NOT
+   * reloaded (they are re-created as pending by reconciliation, which is correct).
    */
   private loadQueueFromDatabase(): void {
     try {
@@ -155,10 +162,12 @@ class DownloadService {
         started_at: string | null
         completed_at: string | null
         recording_date: string | null
+        cancel_reason: 'user' | 'interrupted' | null
       }>(`
-        SELECT id, filename, file_size, progress, status, error, started_at, completed_at, recording_date
+        SELECT id, filename, file_size, progress, status, error, started_at, completed_at, recording_date, cancel_reason
         FROM download_queue
         WHERE status IN ('pending', 'downloading')
+           OR (status = 'cancelled' AND cancel_reason = 'user')
         ORDER BY created_at ASC
       `)
 
@@ -172,7 +181,8 @@ class DownloadService {
           error: item.error ?? undefined,
           startedAt: item.started_at ? new Date(item.started_at) : undefined,
           completedAt: item.completed_at ? new Date(item.completed_at) : undefined,
-          recordingDate: item.recording_date ? new Date(item.recording_date) : undefined
+          recordingDate: item.recording_date ? new Date(item.recording_date) : undefined,
+          cancelReason: item.cancel_reason ?? undefined
         }
         this.state.queue.set(item.filename, queueItem)
       }
@@ -212,8 +222,8 @@ class DownloadService {
     try {
       run(`
         INSERT OR REPLACE INTO download_queue
-        (id, filename, file_size, progress, status, error, started_at, completed_at, recording_date, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM download_queue WHERE id = ?), datetime('now')))
+        (id, filename, file_size, progress, status, error, started_at, completed_at, recording_date, cancel_reason, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM download_queue WHERE id = ?), datetime('now')))
       `, [
         item.id,
         item.filename,
@@ -224,6 +234,7 @@ class DownloadService {
         item.startedAt?.toISOString() ?? null,
         item.completedAt?.toISOString() ?? null,
         item.recordingDate?.toISOString() ?? null,
+        item.cancelReason ?? null, // HIGH-3: durable cancellation origin (v40)
         item.id  // For COALESCE to preserve created_at
       ])
     } catch (e) {
@@ -332,18 +343,51 @@ class DownloadService {
   }
 
   /**
-   * Add files to download queue (spec-007: database duplicate check)
+   * Add files to download queue (spec-007: database duplicate check).
+   *
+   * HIGH-3 `explicit` flag: reconciliation/auto-sync calls (startSyncSession) leave
+   * it false — a user-cancelled item is then terminal-suppressed and NOT re-queued,
+   * in this session or after a restart (the suppression row is durable). An explicit
+   * user action ("Download this file" from the Library) passes true, which CLEARS
+   * the suppression and re-queues — equivalent to a manual Retry for that file.
    */
-  queueDownloads(files: Array<{ filename: string; size: number; dateCreated?: Date }>): string[] {
+  queueDownloads(files: Array<{ filename: string; size: number; dateCreated?: Date }>, explicit: boolean = false): string[] {
     const queuedIds: string[] = []
     // BUG-R4: aggregate per-file skip reasons into one summary line instead of
     // logging every already-queued/already-synced file (was 1300+ lines per sync).
     let skippedInQueue = 0
     let skippedAlreadySynced = 0
+    let skippedUserCancelled = 0
 
     for (const file of files) {
       // B-DWN-003: Normalize .hda filenames to .mp3
       const normalizedFilename = DownloadService.normalizeFilename(file.filename)
+
+      // HIGH-3: terminal-suppression check BEFORE the generic in-queue skip. A
+      // user-cancelled item stays in the queue (memory + DB) exactly so this check
+      // can see it. Auto/reconciliation calls skip the file entirely; an explicit
+      // user request clears the cancel and re-queues it as pending.
+      const suppressed =
+        this.state.queue.get(file.filename) ?? this.state.queue.get(normalizedFilename)
+      if (suppressed && suppressed.status === 'cancelled' && suppressed.cancelReason === 'user') {
+        if (!explicit) {
+          skippedUserCancelled++
+          continue
+        }
+        suppressed.status = 'pending'
+        suppressed.progress = 0
+        suppressed.error = undefined
+        suppressed.cancelReason = undefined
+        suppressed.startedAt = undefined
+        suppressed.completedAt = undefined
+        suppressed.lastProgressAt = undefined
+        suppressed.fileSize = file.size || suppressed.fileSize
+        suppressed.recordingDate = file.dateCreated ?? suppressed.recordingDate
+        this.persistQueueItem(suppressed)
+        queuedIds.push(suppressed.filename)
+        console.log(`[DownloadService] Re-queued after explicit user request: ${suppressed.filename}`)
+        continue
+      }
 
       // spec-007: Check database for existing queue entry (check both original and normalized)
       const existingInDb = queryOne<{ id: string; status: string }>(
@@ -392,9 +436,11 @@ class DownloadService {
     }
 
     // BUG-R4: one summary line for skipped files (only when something was skipped).
-    if (skippedInQueue > 0 || skippedAlreadySynced > 0) {
+    if (skippedInQueue > 0 || skippedAlreadySynced > 0 || skippedUserCancelled > 0) {
+      const userCancelledNote = skippedUserCancelled > 0
+        ? `, ${skippedUserCancelled} user-cancelled (suppressed until manual retry)` : ''
       console.log(
-        `[DownloadService] queueDownloads: skipped ${skippedInQueue} already queued, ${skippedAlreadySynced} already synced`
+        `[DownloadService] queueDownloads: skipped ${skippedInQueue} already queued, ${skippedAlreadySynced} already synced${userCancelledNote}`
       )
     }
 
@@ -571,19 +617,17 @@ class DownloadService {
     item.status = 'cancelled'
     item.error = 'Cancelled by user'
     item.cancelReason = 'user' // HIGH-3: deliberate cancel — no auto-retry on reconnect
-    this.persistQueueItem(item) // spec-007: persist cancellation
+    this.persistQueueItem(item) // spec-007: persist cancellation (durable suppression row)
     emitActivityLog('info', `Download cancelled: ${filename}`)
     console.log(`[DownloadService] Cancelled download: ${filename}`)
     this.markDirty()
     this.emitStateUpdate(true) // C-004: immediate emit for cancellation
 
-    // B-DWN-006: Delayed cleanup for cancelled items (5s)
-    setTimeout(() => {
-      this.state.queue.delete(filename)
-      this.removeFromDatabase(filename)
-      this.markDirty()
-      this.emitStateUpdate()
-    }, 5000)
+    // HIGH-3: NO delayed cleanup (formerly B-DWN-006's 5s delete). The retained
+    // 'cancelled' + cancel_reason='user' row IS the terminal-suppression marker —
+    // deleting it would let the next reconciliation pass (or a restart) re-queue a
+    // file the user deliberately cancelled. It clears via manual Retry, an explicit
+    // re-download, clearCompleted(), or the 24h failed/cancelled prune.
 
     return { success: true }
   }
@@ -913,18 +957,9 @@ class DownloadService {
       this.markDirty()
       this.emitStateUpdate(true)
 
-      // Delayed cleanup for cancelled items
-      const cancelledFilenames = itemsToCancel.map(i => i.filename)
-      if (cancelledFilenames.length > 0) {
-        setTimeout(() => {
-          for (const filename of cancelledFilenames) {
-            this.state.queue.delete(filename)
-            this.removeFromDatabase(filename)
-          }
-          this.markDirty()
-          this.emitStateUpdate()
-        }, 5000)
-      }
+      // HIGH-3: NO delayed cleanup — the retained user-cancelled rows are the
+      // durable terminal-suppression markers (see cancelDownload). They clear via
+      // manual Retry, explicit re-download, clearCompleted(), or the 24h prune.
     } finally {
       this.cancelLock = false
     }
@@ -1063,13 +1098,16 @@ export function registerDownloadServiceHandlers(): void {
   })
 
   // Queue downloads (with optional dateCreated for preserving original recording dates)
+  // HIGH-3: this channel is only invoked by EXPLICIT user actions (Library "Download"
+  // buttons via useOperations) — auto-sync goes through start-session — so it passes
+  // explicit=true, which clears a user-cancel suppression for the requested files.
   ipcMain.handle('download-service:queue-downloads', (_, files: Array<{ filename: string; size: number; dateCreated?: string }>) => {
     // Convert ISO date strings back to Date objects
     const filesWithDates = files.map(f => ({
       ...f,
       dateCreated: f.dateCreated ? new Date(f.dateCreated) : undefined
     }))
-    return service.queueDownloads(filesWithDates)
+    return service.queueDownloads(filesWithDates, true)
   })
 
   // Start sync session (with optional dateCreated for preserving original recording dates)

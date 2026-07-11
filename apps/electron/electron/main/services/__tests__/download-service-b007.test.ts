@@ -149,8 +149,8 @@ describe('DownloadService B-007 Fixes', () => {
     })
   })
 
-  describe('B-DWN-006: cancelDownload has delayed cleanup', () => {
-    it('should mark as cancelled and schedule cleanup', () => {
+  describe('HIGH-3 (supersedes B-DWN-006): user cancel is a durable suppression marker', () => {
+    it('marks as cancelled with origin "user" and RETAINS the row (no 5s cleanup)', () => {
       vi.useFakeTimers()
 
       service.queueDownloads([{ filename: 'test.wav', size: 1024 }])
@@ -162,11 +162,19 @@ describe('DownloadService B-007 Fixes', () => {
       let state = service.getState()
       expect(state.queue[0]?.status).toBe('cancelled')
       expect(state.queue[0]?.error).toBe('Cancelled by user')
+      expect(state.queue[0]?.cancelReason).toBe('user')
 
-      // After 5s, item should be removed
-      vi.advanceTimersByTime(5000)
+      // HIGH-3: the row must SURVIVE — it is the terminal-suppression marker that
+      // stops reconciliation (this session or post-restart) from re-queueing the
+      // file. The old B-DWN-006 5s delete defeated that, resurrecting user cancels.
+      vi.advanceTimersByTime(10_000)
       state = service.getState()
-      expect(state.queue).toHaveLength(0)
+      expect(state.queue).toHaveLength(1)
+      expect(state.queue[0]?.status).toBe('cancelled')
+
+      // It clears through an explicit user action (here: clearCompleted).
+      service.clearCompleted()
+      expect(service.getState().queue).toHaveLength(0)
 
       vi.useRealTimers()
     })

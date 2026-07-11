@@ -943,6 +943,7 @@ export interface ElectronAPI {
     onStateChanged: (callback: (state: { connected: boolean; model: string | null; serialNumber: string | null; versionCode: string | null; versionNumber: number | null }) => void) => () => void
     onConnect: (callback: () => void) => () => void
     onDisconnect: (callback: () => void) => () => void
+    onRecoveryExhausted: (callback: () => void) => () => void
     onDownloadProgress: (callback: (data: { filename: string; bytesReceived: number; totalBytes: number }) => void) => () => void
     onDownloadChunk: (callback: (data: { filename: string; data: Uint8Array }) => void) => () => void
     onScanProgress: (callback: (data: { current: number; total: number }) => void) => () => void
@@ -1636,6 +1637,13 @@ const electronAPI: ElectronAPI = {
       const handler = () => callback()
       ipcRenderer.on('jensen:disconnect-event', handler)
       return () => ipcRenderer.removeListener('jensen:disconnect-event', handler)
+    },
+    // Quarantine recovery exhausted — the device stays disconnected until the user
+    // reconnects manually (or replugs). Terminal "recovery required" signal.
+    onRecoveryExhausted: (callback: () => void) => {
+      const handler = () => callback()
+      ipcRenderer.on('jensen:recovery-exhausted', handler)
+      return () => ipcRenderer.removeListener('jensen:recovery-exhausted', handler)
     },
     onDownloadProgress: (callback: (data: { filename: string; bytesReceived: number; totalBytes: number }) => void) => {
       const handler = (_event: any, data: any) => callback(data)

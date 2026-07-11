@@ -64,7 +64,11 @@ vi.mock('fs', async (importOriginal) => {
 })
 
 // Need to import AFTER mocks
-import { getDownloadService, type DownloadQueueItem } from '../download-service'
+import { getDownloadService, DownloadService, type DownloadQueueItem } from '../download-service'
+import { queryAll, run } from '../database'
+
+const mockQueryAll = vi.mocked(queryAll)
+const mockRun = vi.mocked(run)
 
 describe('DownloadService', () => {
   let service: ReturnType<typeof getDownloadService>
@@ -196,6 +200,105 @@ describe('DownloadService', () => {
       service.retryFailed(true, false)
       const q = service.getState().queue
       expect(q.every((i: DownloadQueueItem) => i.cancelReason === undefined)).toBe(true)
+    })
+  })
+
+  describe('HIGH-3: user cancel is terminal-suppressed from reconciliation, durably', () => {
+    it('reconciliation (non-explicit queueDownloads) does NOT re-queue a user-cancelled file', () => {
+      service.queueDownloads([{ filename: 'nope.hda', size: 1024 }])
+      service.updateProgress('nope.hda', 100)
+      service.cancelDownload('nope.hda') // origin 'user', row retained
+
+      // Auto-sync reconciliation re-offers the same file → must be suppressed.
+      const queued = service.queueDownloads([{ filename: 'nope.hda', size: 1024 }])
+      expect(queued).toHaveLength(0)
+      const item = service.getState().queue.find((i: DownloadQueueItem) => i.filename === 'nope.hda')
+      expect(item?.status).toBe('cancelled')
+      expect(item?.cancelReason).toBe('user')
+    })
+
+    it('an EXPLICIT user re-download clears the suppression and re-queues', () => {
+      service.queueDownloads([{ filename: 'again.hda', size: 1024 }])
+      service.updateProgress('again.hda', 100)
+      service.cancelDownload('again.hda')
+
+      const queued = service.queueDownloads([{ filename: 'again.hda', size: 1024 }], true)
+      expect(queued).toEqual(['again.hda'])
+      const item = service.getState().queue.find((i: DownloadQueueItem) => i.filename === 'again.hda')
+      expect(item?.status).toBe('pending')
+      expect(item?.cancelReason).toBeUndefined()
+    })
+
+    it('persists cancel_reason in the durable row (INSERT includes the column)', () => {
+      service.queueDownloads([{ filename: 'persisted.hda', size: 1024 }])
+      service.updateProgress('persisted.hda', 100)
+      mockRun.mockClear()
+      service.cancelDownload('persisted.hda')
+
+      const persistCall = mockRun.mock.calls.find(
+        (call: unknown[]) => typeof call[0] === 'string' && (call[0] as string).includes('INSERT OR REPLACE INTO download_queue')
+      )
+      expect(persistCall).toBeDefined()
+      expect(persistCall![0]).toContain('cancel_reason')
+      // Params: [id, filename, size, progress, status, error, started, completed, recDate, cancel_reason, id]
+      const params = persistCall![1] as unknown[]
+      expect(params[4]).toBe('cancelled')
+      expect(params[9]).toBe('user')
+    })
+
+    it('restart: a fresh service reloads the user-cancelled row and stays suppressed until manual retry', () => {
+      // Simulate the durable row a previous session persisted, then "restart" by
+      // constructing a FRESH DownloadService whose loadQueueFromDatabase sees it.
+      mockQueryAll.mockReturnValueOnce([
+        {
+          id: 'survivor.hda',
+          filename: 'survivor.hda',
+          file_size: 4096,
+          progress: 37,
+          status: 'cancelled',
+          error: 'Cancelled by user',
+          started_at: new Date().toISOString(),
+          completed_at: null,
+          recording_date: null,
+          cancel_reason: 'user'
+        }
+      ])
+      const restarted = new DownloadService()
+
+      // The suppression marker survived the restart.
+      const loaded = restarted.getState().queue.find((i: DownloadQueueItem) => i.filename === 'survivor.hda')
+      expect(loaded?.status).toBe('cancelled')
+      expect(loaded?.cancelReason).toBe('user')
+
+      // Post-restart auto-sync reconciliation re-offers the file → NOT requeued.
+      const queued = restarted.queueDownloads([{ filename: 'survivor.hda', size: 4096 }])
+      expect(queued).toHaveLength(0)
+      expect(
+        restarted.getState().queue.find((i: DownloadQueueItem) => i.filename === 'survivor.hda')?.status
+      ).toBe('cancelled')
+
+      // Manual Retry clears it.
+      const result = restarted.retryFailed(true, false)
+      expect(result.count).toBe(1)
+      const retried = restarted.getState().queue.find((i: DownloadQueueItem) => i.filename === 'survivor.hda')
+      expect(retried?.status).toBe('pending')
+      expect(retried?.cancelReason).toBeUndefined()
+
+      restarted.destroy() // clean up the interval the fresh instance started
+    })
+
+    it('restart: an interrupted cancel is NOT reloaded (reconciliation re-queues it, correctly)', () => {
+      // loadQueueFromDatabase's WHERE clause excludes cancelled rows unless
+      // cancel_reason='user' — mirror that here: the mocked query returns nothing.
+      mockQueryAll.mockReturnValueOnce([])
+      const restarted = new DownloadService()
+      expect(restarted.getState().queue).toHaveLength(0)
+
+      // Reconciliation re-offers the interrupted file → re-queued as pending.
+      const queued = restarted.queueDownloads([{ filename: 'comeback.hda', size: 2048 }])
+      expect(queued).toEqual(['comeback.hda'])
+
+      restarted.destroy()
     })
   })
 

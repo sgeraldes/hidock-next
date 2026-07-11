@@ -193,11 +193,11 @@ describe('Database Service', () => {
   // 1. initializeDatabase — real boot + schema
   // =========================================================================
   describe('initializeDatabase()', () => {
-    it('initializes and reports the current schema version (39)', () => {
+    it('initializes and reports the current schema version (40)', () => {
       const row = queryOne<{ version: number }>(
         'SELECT version FROM schema_version ORDER BY version DESC LIMIT 1'
       )
-      expect(row?.version).toBe(39)
+      expect(row?.version).toBe(40)
     })
 
     it('creates the expected core tables', () => {
