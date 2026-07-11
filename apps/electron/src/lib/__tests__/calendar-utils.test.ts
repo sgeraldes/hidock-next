@@ -533,8 +533,11 @@ describe('sortMeetingsByProximity', () => {
 describe('#58 UNKNOWN_DATE sentinel does not leak into the Calendar', () => {
   // An undated recording: a normal recording stamped with the epoch sentinel
   // instead of a real capture time (unparseable filename + no device/db date).
-  const makeUndatedRecording = (id: string): UnifiedRecording => ({
-    ...makeUnifiedRecording(id, 9, 20),
+  // Optionally carries an explicit manual link (meetingId): that link is
+  // AUTHORITATIVE and keeps the recording on the Calendar at the linked meeting's
+  // time; without it the recording is simply not placed.
+  const makeUndatedRecording = (id: string, meetingId?: string): UnifiedRecording => ({
+    ...makeUnifiedRecording(id, 9, 20, meetingId),
     filename: `undated-${id}.hda`,
     dateRecorded: UNKNOWN_DATE,
   })
@@ -622,5 +625,79 @@ describe('#58 UNKNOWN_DATE sentinel does not leak into the Calendar', () => {
     expect(calendarRecordings).toHaveLength(1)
     expect(calendarRecordings[0].id).toBe('r1')
     expect(calendarRecordings[0].linkedMeeting?.subject).toBe('Team Standup')
+  })
+
+  // Review follow-up: an explicit manual link (meetingId) is AUTHORITATIVE — an
+  // undated recording that the user linked to a meeting must NOT vanish from the
+  // Calendar. It stays in meeting-match state and is placed at the LINKED
+  // MEETING's time (the link supplies the timestamp the recording lacks).
+  describe('explicitly-linked undated recordings stay on the Calendar', () => {
+    const meeting = makeMeetingEntity('m1', 'Team Standup', 9, 10)
+
+    it('getRecordingMeetingMatchScore honors the manual link before the unknown-date guard', () => {
+      const linked = makeUndatedRecording('u1', 'm1')
+      expect(getRecordingMeetingMatchScore(linked, meeting)).toBe(1000)
+      // Same recording against a DIFFERENT meeting still matches nothing.
+      const other = makeMeetingEntity('m2', 'Planning', 14, 15)
+      expect(getRecordingMeetingMatchScore(linked, other)).toBe(0)
+    })
+
+    it('matchRecordingsToMeetings matches it to the linked meeting at the MEETING time', () => {
+      const { calendarMeetings, orphanRecordings } = matchRecordingsToMeetings(
+        [meeting],
+        [makeUndatedRecording('u1', 'm1')]
+      )
+
+      expect(calendarMeetings).toHaveLength(1)
+      expect(calendarMeetings[0].hasRecording).toBe(true)
+      expect(calendarMeetings[0].matchedRecordingId).toBe('u1')
+      // Placed at the linked meeting's start — never the 1970 epoch.
+      expect(calendarMeetings[0].recordingStartTime?.toISOString()).toBe(meeting.start_time)
+      expect(orphanRecordings).toHaveLength(0)
+      expect(hasEpochDate(calendarMeetings)).toBe(false)
+    })
+
+    it('buildCalendarRecordings builds its block at the linked meeting time and buckets it into that day', () => {
+      const { calendarRecordings, meetingOverlays } = buildCalendarRecordings(
+        [makeUndatedRecording('u1', 'm1')],
+        [meeting]
+      )
+
+      expect(calendarRecordings).toHaveLength(1)
+      expect(calendarRecordings[0].id).toBe('u1')
+      expect(calendarRecordings[0].linkedMeeting?.id).toBe('m1')
+      expect(calendarRecordings[0].startTime.toISOString()).toBe(meeting.start_time)
+      expect(meetingOverlays[0].hasRecording).toBe(true)
+      expect(hasEpochDate(calendarRecordings)).toBe(false)
+
+      // Bucketing: it lands in the linked meeting's day, not a 1970 bucket.
+      const viewDates = [new Date(2026, 2, 2), new Date(2026, 2, 3)]
+      const grouped = groupByDay(calendarRecordings, (r) => r.startTime, viewDates)
+      const meetingDayKey = new Date(meeting.start_time).toISOString().split('T')[0]
+      expect(grouped[meetingDayKey]).toHaveLength(1)
+      expect(grouped['1970-01-01']).toBeUndefined()
+    })
+
+    it('an undated recording linked to a meeting NOT in view is still excluded (no time source)', () => {
+      const elsewhere = makeUndatedRecording('u1', 'meeting-in-another-week')
+
+      const { calendarMeetings, orphanRecordings } = matchRecordingsToMeetings([meeting], [elsewhere])
+      expect(calendarMeetings[0].hasRecording).toBe(false)
+      expect(orphanRecordings).toHaveLength(0)
+
+      const { calendarRecordings } = buildCalendarRecordings([elsewhere], [meeting])
+      expect(calendarRecordings).toHaveLength(0)
+    })
+
+    it('an undated recording WITHOUT a link is still excluded everywhere (control)', () => {
+      const unlinked = makeUndatedRecording('u1')
+
+      const { calendarMeetings, orphanRecordings } = matchRecordingsToMeetings([meeting], [unlinked])
+      expect(calendarMeetings[0].hasRecording).toBe(false)
+      expect(orphanRecordings).toHaveLength(0)
+
+      const { calendarRecordings } = buildCalendarRecordings([unlinked], [meeting])
+      expect(calendarRecordings).toHaveLength(0)
+    })
   })
 })

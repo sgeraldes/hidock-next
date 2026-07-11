@@ -260,18 +260,21 @@ export function calculateMeetingColumns(
  * Get recording-meeting match score (0 = no match, higher = better match)
  */
 export function getRecordingMeetingMatchScore(recording: UnifiedRecording, meeting: Meeting): number {
-  // An undated recording (UNKNOWN_DATE epoch sentinel) has no real time, so it can
-  // overlap no meeting — scoring it would only mis-fire against 1970. It matches
-  // nothing and stays in the Library as "Unknown date", never on the Calendar (#58).
+  // Manual link = highest priority — AUTHORITATIVE even for an undated recording:
+  // the user's explicit link is a stronger signal than any timestamp, and the
+  // linked meeting supplies the placement time the recording lacks.
+  if (recording.meetingId === meeting.id) return 1000
+
+  // Otherwise an undated recording (UNKNOWN_DATE epoch sentinel) has no real time,
+  // so it can overlap no meeting — scoring it would only mis-fire against 1970. It
+  // matches nothing and stays in the Library as "Unknown date", never on the
+  // Calendar (#58).
   if (isUnknownDate(recording.dateRecorded)) return 0
   const recStart = recording.dateRecorded.getTime()
   const recDurationMs = (recording.duration || 0) * 1000
   const recEnd = recStart + recDurationMs
   const meetingStart = new Date(meeting.start_time).getTime()
   const meetingEnd = new Date(meeting.end_time).getTime()
-
-  // Manual link = highest priority
-  if (recording.meetingId === meeting.id) return 1000
 
   // Calculate time overlap
   const overlapStart = Math.max(recStart, meetingStart)
@@ -326,7 +329,15 @@ export function matchRecordingsToMeetings(
   // through to orphanRecordings, or createPlaceholderMeetings would stamp a 1970
   // placeholder onto the Calendar. They remain fully visible in the Library as
   // "Unknown date"; the Calendar simply doesn't place them (#58).
-  const datedRecordings = recordings.filter((rec) => !isUnknownDate(rec.dateRecorded))
+  // EXCEPTION: an undated recording with an explicit manual link (meetingId) to a
+  // meeting in this view IS kept — the link is authoritative and the linked meeting
+  // supplies its placement time. (An undated recording whose linked meeting is not
+  // in `meetings` still has no time source, so it stays excluded.)
+  const datedRecordings = recordings.filter(
+    (rec) =>
+      !isUnknownDate(rec.dateRecorded) ||
+      (rec.meetingId != null && meetings.some((m) => m.id === rec.meetingId))
+  )
   const recordingToBestMeeting = new Map<string, { meeting: Meeting; score: number }>()
 
   for (const recording of datedRecordings) {
@@ -364,7 +375,12 @@ export function matchRecordingsToMeetings(
     if (matchingRecording) {
       matchedRecordingIds.add(matchingRecording.id)
 
-      const recordingStartTime = matchingRecording.dateRecorded
+      // An explicitly-linked undated recording is placed at its LINKED MEETING's
+      // start — the manual link is authoritative and supplies the timestamp the
+      // recording lacks (never the raw 1970 epoch sentinel).
+      const recordingStartTime = isUnknownDate(matchingRecording.dateRecorded)
+        ? new Date(meeting.start_time)
+        : matchingRecording.dateRecorded
       const recordingDurationMs = (matchingRecording.duration || 0) * 1000
       const recordingEndTime = new Date(recordingStartTime.getTime() + recordingDurationMs)
 
@@ -408,7 +424,12 @@ export function matchRecordingsToMeetings(
     }
   }
 
-  const orphanRecordings = datedRecordings.filter((rec) => !matchedRecordingIds.has(rec.id))
+  // Orphans feed createPlaceholderMeetings, which needs a real timestamp — so an
+  // undated recording must never land here (its explicit link, when present and in
+  // view, always matches above with score 1000; this also covers any edge fallout).
+  const orphanRecordings = datedRecordings.filter(
+    (rec) => !matchedRecordingIds.has(rec.id) && !isUnknownDate(rec.dateRecorded)
+  )
 
   return { calendarMeetings, orphanRecordings }
 }
@@ -464,7 +485,13 @@ export function buildCalendarRecordings(
   // timeline — a raw epoch would render a recording block at midnight 1970. Drop
   // them from the recording-centric view; they stay in the Library as "Unknown
   // date". (#58)
-  const datedRecordings = recordings.filter((rec) => !isUnknownDate(rec.dateRecorded))
+  // EXCEPTION: an explicit manual link (meetingId) to a meeting in this view keeps
+  // the recording — it is placed at the linked meeting's time (link = authoritative).
+  const datedRecordings = recordings.filter(
+    (rec) =>
+      !isUnknownDate(rec.dateRecorded) ||
+      (rec.meetingId != null && meetings.some((m) => m.id === rec.meetingId))
+  )
 
   const recordingToBestMeeting = new Map<string, Meeting>()
 
@@ -485,11 +512,18 @@ export function buildCalendarRecordings(
   }
 
   for (const recording of datedRecordings) {
-    const startTime = recording.dateRecorded
+    const linkedMeetingData = recordingToBestMeeting.get(recording.id)
+
+    // An explicitly-linked undated recording renders at its LINKED MEETING's start
+    // (the link supplies the missing timestamp — never the 1970 epoch sentinel).
+    // The filter above guarantees an undated recording here always has its linked
+    // meeting present, so linkedMeetingData is set for it (manual link scores 1000).
+    const startTime =
+      isUnknownDate(recording.dateRecorded) && linkedMeetingData
+        ? new Date(linkedMeetingData.start_time)
+        : recording.dateRecorded
     const durationMs = (recording.duration || 0) * 1000
     const endTime = new Date(startTime.getTime() + (durationMs || 30 * 60 * 1000))
-
-    const linkedMeetingData = recordingToBestMeeting.get(recording.id)
 
     calendarRecordings.push({
       id: recording.id,
