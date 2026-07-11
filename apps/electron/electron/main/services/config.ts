@@ -1,8 +1,63 @@
 import { app, safeStorage } from 'electron'
 import { join } from 'path'
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
+import {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  renameSync,
+  unlinkSync,
+  openSync,
+  fsyncSync,
+  closeSync,
+} from 'fs'
 import type { BrainId, BrainTask } from './brains/types'
 import { getBrainCredentialStore } from './brains/brain-credential-store'
+
+/** Best-effort fsync of a path (file or directory). Silently skips where the FS
+ *  or platform doesn't support it (e.g. directory fsync on Windows) — durability
+ *  is a hardening, never a correctness dependency. Mirrors BrainCredentialStore. */
+function fsyncPath(path: string, mode: string): void {
+  try {
+    const fd = openSync(path, mode)
+    try {
+      fsyncSync(fd)
+    } finally {
+      closeSync(fd)
+    }
+  } catch {
+    /* fsync unsupported / unavailable — ignore */
+  }
+}
+
+/**
+ * Atomically write config.json: write a UNIQUELY-named sibling temp file, fsync
+ * it, then rename it over the target (and fsync the directory where supported).
+ * An interrupted/partial write lands in the temp file and can NEVER corrupt the
+ * real config.json (rename is atomic on the same filesystem). Mirrors
+ * BrainCredentialStore.persist() so both files use the same durability contract.
+ * THROWS on failure (temp cleaned up) so the caller can compensate.
+ */
+function writeConfigAtomically(path: string, contents: string): void {
+  const dir = join(path, '..')
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  const unique = `${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`
+  const tmp = `${path}.${unique}.tmp`
+  try {
+    writeFileSync(tmp, contents)
+    fsyncPath(tmp, 'r+') // durably flush the temp bytes before the rename commits
+    renameSync(tmp, path)
+    fsyncPath(dir, 'r') // durably flush the rename (best-effort; no-op on Windows)
+  } catch (err) {
+    // Clean up our unique temp so a failed write doesn't leak scratch files.
+    try {
+      if (existsSync(tmp)) unlinkSync(tmp)
+    } catch {
+      /* ignore cleanup failure */
+    }
+    throw err
+  }
+}
 
 // CS-007: Encrypt sensitive config values (ICS URL) at rest using Electron safeStorage
 function encryptSensitive(value: string): string {
@@ -332,9 +387,22 @@ export function getConfig(): AppConfig {
 }
 
 export async function saveConfig(newConfig: Partial<AppConfig>): Promise<void> {
-  // Capture the previous plaintext key BEFORE merging so we can roll back a
-  // failed change (HIGH-4) and detect whether the key actually changed.
+  // Snapshot the PRIOR in-memory config and the PRIOR plaintext key BEFORE merging
+  // so we can (a) roll back a failed store write on a key change (HIGH-4) and
+  // (b) compensate a store write that succeeded but whose config.json write then
+  // failed (HIGH — the store-then-config split-brain, other direction).
+  const prevConfig = config
   const prevGeminiKey = config.transcription?.geminiApiKey ?? ''
+
+  // Capture the credential store's PRIOR gemini key so that, if the config.json
+  // write fails AFTER the store write already committed a key change, we can
+  // restore the store to exactly what it held before this save.
+  let priorStoreValue: string | null = null
+  try {
+    priorStoreValue = getBrainCredentialStore().getSecret('gemini-api', 'apiKey')
+  } catch {
+    priorStoreValue = null
+  }
 
   config = deepMerge(config, newConfig)
 
@@ -371,11 +439,6 @@ export async function saveConfig(newConfig: Partial<AppConfig>): Promise<void> {
   }
 
   const configPath = getConfigPath()
-  const configDir = join(configPath, '..')
-
-  if (!existsSync(configDir)) {
-    mkdirSync(configDir, { recursive: true })
-  }
 
   // CS-007: Encrypt sensitive fields before writing to disk
   const toWrite = {
@@ -385,7 +448,44 @@ export async function saveConfig(newConfig: Partial<AppConfig>): Promise<void> {
       icsUrl: encryptSensitive(config.calendar.icsUrl)
     }
   }
-  writeFileSync(configPath, JSON.stringify(toWrite, null, 2))
+
+  // HIGH (store-then-config split-brain, the OTHER direction): the store write
+  // above has ALREADY committed the desired key. If we now fail to write
+  // config.json (disk full / permissions / AV), the store would hold the NEW key
+  // while config.json — and a restart's boot reconciliation — flip back to the OLD
+  // plaintext. Because resolveGeminiApiKey() prefers the store, a *failed* save
+  // would have silently changed the active credential. So we write config.json
+  // ATOMICALLY (temp + rename, mirroring the credential store's own pattern) and,
+  // on failure AFTER a successful store key change, COMPENSATE by restoring the
+  // prior store value AND the prior in-memory config, then rethrow — so disk,
+  // memory, and the effective key all stay on the PREVIOUS value. If compensation
+  // itself fails we log loudly and explicitly (split-brain, naming both files);
+  // never silently.
+  try {
+    writeConfigAtomically(configPath, JSON.stringify(toWrite, null, 2))
+  } catch (writeErr) {
+    // Only the store direction can split-brain here: config.json still holds the
+    // OLD key (its write failed), so we must undo a store write that changed the
+    // key. A reconcile with no key change (config.json unchanged either way) is
+    // already consistent — leave the (healed) store alone.
+    if (syncOk && geminiKeyChanged) {
+      const restored = syncGeminiKeyToCredentialStore(priorStoreValue ?? '')
+      if (!restored) {
+        console.error(
+          '[Config] SPLIT-BRAIN: writing config.json FAILED after the Gemini API key was ' +
+            'changed in the credential store (brains.json), and restoring the previous stored ' +
+            'key ALSO failed. brains.json now holds the NEW key while config.json holds the OLD ' +
+            'key; resolveGeminiApiKey() will use the new (unsaved) key until the next successful ' +
+            'save or boot reconciliation repairs it. Manual reconciliation of brains.json vs ' +
+            'config.json may be required.',
+          writeErr
+        )
+      }
+    }
+    // Restore the prior in-memory config so memory matches what is (still) on disk.
+    config = prevConfig
+    throw writeErr
+  }
 
   if (keyChangeFailed) {
     throw new Error(

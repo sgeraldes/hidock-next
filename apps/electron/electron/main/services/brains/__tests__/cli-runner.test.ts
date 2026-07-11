@@ -132,6 +132,68 @@ describe('runCli — bounded termination (HIGH-2)', () => {
   })
 })
 
+// HIGH (Codex review) — a killed wrapper (cmd.exe / .cmd shim) closes IMMEDIATELY
+// while the real CLI keeps running underneath. The old code let that wrapper close
+// clear the escalation and resolve, so the tree-kill never ran and the model
+// invocation was orphaned. Tree teardown must be part of COMPLETION: run
+// taskkill /pid <pid> /t /f and AWAIT it before resolving, regardless of the
+// wrapper being reaped first.
+describe('runCli — wrapper close must not skip tree teardown (Windows-shaped)', () => {
+  const itWin = process.platform === 'win32' ? it : it.skip
+
+  // (a) The wrapper closes first (models cmd.exe being reaped) but a descendant is
+  // still alive → the tree-termination utility is invoked AND awaited before runCli
+  // resolves. We prove "awaited" by delaying the tree-killer's exit and asserting
+  // the run did not resolve until after that delay.
+  itWin('invokes AND awaits the tree-termination utility even when the wrapper closes first', async () => {
+    const TREE_KILL_DELAY = 40
+    const spawn = makeFakeSpawn((cmd) =>
+      /taskkill/i.test(cmd)
+        ? { code: 0, delayMs: TREE_KILL_DELAY } // tree-killer takes time to confirm
+        : { never: true, pid: 7777 } // wrapper: closes the instant we signal it
+    )
+    const start = Date.now()
+    const res = await runCli(
+      'wrapper',
+      [],
+      { timeoutMs: 10, killGraceMs: 1000, killWatchdogMs: 5000 },
+      asSpawn(spawn.fn)
+    )
+    const elapsed = Date.now() - start
+    expect(res.timedOut).toBe(true)
+    expect(res.code).toBeNull()
+    // Tree teardown ran despite the wrapper closing first…
+    expect(spawn.calls.some((c) => /taskkill/i.test(c.command))).toBe(true)
+    // …and runCli WAITED for it (did not resolve on the wrapper close alone).
+    expect(elapsed).toBeGreaterThanOrEqual(TREE_KILL_DELAY - 5)
+    // Confirmed teardown → NOT flagged unconfirmed.
+    expect(res.terminationUnconfirmed).toBeFalsy()
+  })
+
+  // (b) When the tree teardown itself can't be confirmed in time, the absolute
+  // watchdog resolves the run flagged terminationUnconfirmed — and the cleanup
+  // (tree-kill) is still fired rather than the run silently returning.
+  itWin('flags terminationUnconfirmed and still fires cleanup when the watchdog backstop trips', async () => {
+    const spawn = makeFakeSpawn((cmd) =>
+      /taskkill/i.test(cmd)
+        ? { never: true } // tree-killer never confirms (models a stuck teardown)
+        : { never: true, ignoreKill: true, pid: 8888 } // wrapper ignores signals, never closes
+    )
+    const res = await runCli(
+      'stuck',
+      [],
+      { timeoutMs: 10, killGraceMs: 20, killWatchdogMs: 60 },
+      asSpawn(spawn.fn)
+    )
+    expect(res.timedOut).toBe(true)
+    expect(res.code).toBeNull()
+    expect(res.terminationUnconfirmed).toBe(true)
+    // Cleanup was still attempted (tree-termination dispatched) despite the
+    // unconfirmed return — the survivor is not silently orphaned.
+    expect(spawn.calls.some((c) => /taskkill/i.test(c.command))).toBe(true)
+  })
+})
+
 // HIGH-3 — unbounded stdout/stderr accumulation is a main-process DoS. Independent
 // byte caps must stop reading, kill the tree, and flag the breach.
 describe('runCli — output byte caps (HIGH-3)', () => {

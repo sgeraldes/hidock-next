@@ -71,6 +71,14 @@ export interface CliRunResult {
   spawnError: boolean
   /** Set when stdout/stderr blew past its byte cap and the process tree was killed. */
   outputLimitExceeded: boolean
+  /**
+   * Set ONLY when the absolute watchdog backstop had to resolve the run before the
+   * process-tree teardown could be confirmed. The forceful tree-termination is
+   * still fired (and logged) in the background, but we could not prove it finished —
+   * so an expensive model invocation MIGHT still be terminating (or, worst case,
+   * alive) when this resolves. Never set on the normal terminate-and-confirm path.
+   */
+  terminationUnconfirmed?: boolean
 }
 
 export interface ResolvedExecutable {
@@ -189,6 +197,7 @@ export function runCli(
     let aborted = false
     let outputLimitExceeded = false
     let terminating = false
+    let terminationUnconfirmed = false
 
     let graceTimer: ReturnType<typeof setTimeout> | undefined
     let watchdog: ReturnType<typeof setTimeout> | undefined
@@ -200,7 +209,7 @@ export function runCli(
       if (graceTimer) clearTimeout(graceTimer)
       if (watchdog) clearTimeout(watchdog)
       if (opts.signal) opts.signal.removeEventListener('abort', onAbort)
-      resolve({ code, stdout, stderr, timedOut, aborted, spawnError, outputLimitExceeded })
+      resolve({ code, stdout, stderr, timedOut, aborted, spawnError, outputLimitExceeded, terminationUnconfirmed })
     }
 
     // Resolve a spawn/resolution failure that happens BEFORE the timer/abort
@@ -272,50 +281,92 @@ export function runCli(
       return
     }
 
-    const forceKillTree = () => {
-      try {
-        child.kill('SIGKILL')
-      } catch {
-        /* already gone */
-      }
-      const pid = child.pid
-      if (pid && process.platform === 'win32') {
-        // A killed .cmd shim can leave the real CLI (and its children) running —
-        // taskkill /T tears down the whole tree. Fire-and-forget.
+    // Force-terminate the WHOLE process tree and resolve once the teardown is
+    // confirmed. Idempotent: the tree-killer (taskkill) is spawned at most once;
+    // every caller awaits the SAME completion. This is deliberately NOT
+    // fire-and-forget — on Windows the direct child is usually the `cmd.exe`
+    // wrapper (or a `.cmd` shim), which is reaped the instant we signal it while
+    // the real CLI keeps running underneath. `taskkill /T /F` is the ONLY thing
+    // that tears down that surviving subtree, so we must run it AND wait for it.
+    let treeKillPromise: Promise<void> | null = null
+    const forceKillTree = (): Promise<void> => {
+      if (treeKillPromise) return treeKillPromise
+      treeKillPromise = new Promise<void>((resolveKill) => {
         try {
-          const killer = spawnFn(taskkillPath(), ['/pid', String(pid), '/t', '/f'], {
-            windowsHide: true,
-            stdio: 'ignore',
-          })
-          killer.on?.('error', () => {})
+          child.kill('SIGKILL')
         } catch {
-          /* best-effort */
+          /* already gone */
         }
-      } else if (pid && process.platform !== 'win32') {
-        try {
-          // Negative pid targets the whole process group where available.
-          process.kill(-pid, 'SIGKILL')
-        } catch {
-          /* group kill unsupported / already gone */
+        const pid = child.pid
+        if (pid && process.platform === 'win32') {
+          // A killed .cmd shim / cmd.exe wrapper can leave the real CLI (and its
+          // children) running — taskkill /T tears down the whole tree. Await its
+          // exit so we only resolve once the tree teardown was actually dispatched
+          // and reaped.
+          try {
+            const killer = spawnFn(taskkillPath(), ['/pid', String(pid), '/t', '/f'], {
+              windowsHide: true,
+              stdio: 'ignore',
+            })
+            let killerSettled = false
+            const finishKill = () => {
+              if (killerSettled) return
+              killerSettled = true
+              resolveKill()
+            }
+            killer.on?.('error', finishKill)
+            killer.on?.('close', finishKill)
+          } catch {
+            resolveKill()
+          }
+        } else if (pid && process.platform !== 'win32') {
+          try {
+            // Negative pid targets the whole process group where available.
+            process.kill(-pid, 'SIGKILL')
+          } catch {
+            /* group kill unsupported / already gone */
+          }
+          resolveKill()
+        } else {
+          resolveKill()
         }
-      }
+      })
+      return treeKillPromise
+    }
+
+    // Resolve a TERMINATED run only after the tree teardown is confirmed. The
+    // (possibly-wrapper) child having been reaped does NOT prove the real CLI died,
+    // so we always run + await forceKillTree() before settling. The absolute
+    // watchdog is the only path allowed to resolve without that confirmation.
+    const finalizeTermination = (code: number | null) => {
+      if (settled) return
+      forceKillTree().then(() => done(false, code))
     }
 
     const beginTermination = () => {
       if (terminating) return
       terminating = true
-      // 1. Ask nicely.
+      // 1. Ask nicely first (lets a well-behaved child flush + exit on its own).
       try {
         child.kill()
       } catch {
         /* already gone */
       }
-      // 2. Escalate to a forceful tree-kill if it ignores the signal.
-      graceTimer = setTimeout(forceKillTree, killGraceMs)
-      // 3. Absolute backstop: if the child never emits 'close', resolve anyway so
-      //    we never hang the main process.
+      // 2. If it ignores the graceful signal, force-terminate the whole tree and
+      //    resolve once that teardown is CONFIRMED (not merely dispatched).
+      graceTimer = setTimeout(() => finalizeTermination(null), killGraceMs)
+      // 3. Absolute backstop: if even the tree teardown can't be confirmed in
+      //    time, resolve anyway so we never hang the main process — but flag the
+      //    result as unconfirmed and STILL fire the tree-kill in the background
+      //    (with a loud log) so a survivor is torn down and never silently orphaned.
       watchdog = setTimeout(() => {
-        forceKillTree()
+        terminationUnconfirmed = true
+        void forceKillTree().catch(() => {})
+        console.warn(
+          '[cli-runner] termination watchdog fired before the process tree was confirmed ' +
+            'terminated; resolving with terminationUnconfirmed=true. The forceful tree-kill ' +
+            'was (re)dispatched in the background — a model invocation may still be terminating.'
+        )
         done(false, null)
       }, killWatchdogMs)
     }
@@ -364,7 +415,15 @@ export function runCli(
     })
 
     child.on('close', (code: number | null) => {
-      done(false, code)
+      if (terminating) {
+        // The child was reaped, but during a termination that is often just the
+        // cmd.exe wrapper / .cmd shim — it does NOT prove the real CLI subtree
+        // died. Route through finalizeTermination so the tree-kill still runs and
+        // is awaited; do NOT let this close short-circuit the escalation.
+        finalizeTermination(code)
+      } else {
+        done(false, code)
+      }
     })
 
     if (opts.input !== undefined && child.stdin) {
