@@ -131,6 +131,12 @@ export function Chat() {
   // C-CHAT: Search within conversation
   const [searchQuery, setSearchQuery] = useState('')
 
+  // F2: History drawer for narrow containers (e.g. the floating assistant overlay).
+  // Below the @lg container breakpoint the fixed-width sidebar is hidden; this toggles
+  // a temporary drawer so the conversation list stays reachable without crushing the
+  // chat column.
+  const [historyOpen, setHistoryOpen] = useState(false)
+
   // C-CHAT: Resizable sidebar
   const [sidebarWidth, setSidebarWidth] = useState<number>(CHAT_SIDEBAR.DEFAULT_WIDTH)
   const [isResizing, setIsResizing] = useState(false)
@@ -297,6 +303,7 @@ export function Chat() {
   // AUD3-004: Use generation counter to discard stale async results from rapid switching
   const handleSelectConversation = async (conv: Conversation) => {
     const loadId = ++conversationLoadIdRef.current
+    setHistoryOpen(false) // F2: close narrow-mode drawer on selection
     setActiveConversation(conv)
     setMessages([]) // Clear immediately to avoid showing stale messages
     setContextIds([])
@@ -349,6 +356,7 @@ export function Chat() {
   // Create new conversation
   const handleNewChat = async () => {
     try {
+      setHistoryOpen(false) // F2: close narrow-mode drawer
       const newConv = await window.electronAPI.assistant.createConversation('New Chat')
       setConversations(prev => [newConv, ...prev])
       handleSelectConversation(newConv)
@@ -793,8 +801,70 @@ export function Chat() {
     )
   }
 
+  // F2: Shared conversation-history content — rendered both in the docked sidebar
+  // (wide containers) and in the temporary drawer (narrow containers such as the
+  // floating assistant overlay). Kept as one definition so the two stay in sync.
+  const historyPanel = (
+    <>
+      <div className="p-4 border-b">
+        <Button onClick={handleNewChat} className="w-full gap-2" variant="default">
+          <Plus className="h-4 w-4" />
+          New Chat
+        </Button>
+      </div>
+      <div className="flex-1 overflow-auto">
+        <div className="p-2 space-y-1">
+          <div className="px-2 py-2 text-xs font-semibold text-muted-foreground flex items-center gap-2">
+            <History className="h-3 w-3" />
+            HISTORY
+          </div>
+          {conversations.length === 0 ? (
+            <p className="text-xs text-center text-muted-foreground py-4">No history yet</p>
+          ) : (
+            conversations.map((conv) => (
+              <div
+                key={conv.id}
+                onClick={() => handleSelectConversation(conv)}
+                className={cn(
+                  "w-full text-left px-3 py-2 rounded-lg text-sm transition-colors flex items-center justify-between group cursor-pointer",
+                  activeConversation?.id === conv.id
+                    ? "bg-primary text-primary-foreground"
+                    : "hover:bg-muted text-muted-foreground hover:text-foreground"
+                )}
+              >
+                <div className="flex flex-col gap-0.5 overflow-hidden flex-1">
+                  <div className="flex items-center gap-2 overflow-hidden">
+                    <MessageSquare className={cn("h-4 w-4 flex-shrink-0", activeConversation?.id === conv.id ? "text-primary-foreground" : "text-muted-foreground")} />
+                    <span className="truncate">{conv.title || 'Untitled'}</span>
+                  </div>
+                  <span className={cn(
+                    "text-[10px] pl-6",
+                    activeConversation?.id === conv.id ? "text-primary-foreground/60" : "text-muted-foreground/60"
+                  )}>
+                    {getRelativeTime(conv.updatedAt)}
+                  </span>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className={cn(
+                    "h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0",
+                    activeConversation?.id === conv.id ? "text-primary-foreground hover:bg-primary-foreground/20" : "hover:text-destructive"
+                  )}
+                  onClick={(e) => handleDeleteClick(e, conv.id)}
+                >
+                  <Trash2 className="h-3 w-3" />
+                </Button>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </>
+  )
+
   return (
-    <div className="flex h-full bg-background">
+    <div className="@container relative flex h-full bg-background">
       {/* B-CHAT-003: Radix AlertDialog for delete confirmation */}
       <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
         <AlertDialogContent>
@@ -816,65 +886,16 @@ export function Chat() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Sidebar - Conversations History (C-CHAT: Resizable) */}
+      {/* Sidebar - Conversations History (C-CHAT: Resizable).
+          F2: Hidden below the @lg container width (e.g. inside the floating overlay)
+          where a 256px sidebar would crush the chat column — the drawer below takes
+          over there. */}
       <aside
-        className="border-r flex flex-col bg-muted/10 relative"
+        data-testid="chat-history-sidebar"
+        className="hidden @lg:flex border-r flex-col bg-muted/10 relative"
         style={{ width: `${sidebarWidth}px` }}
       >
-        <div className="p-4 border-b">
-          <Button onClick={handleNewChat} className="w-full gap-2" variant="default">
-            <Plus className="h-4 w-4" />
-            New Chat
-          </Button>
-        </div>
-        <div className="flex-1 overflow-auto">
-          <div className="p-2 space-y-1">
-            <div className="px-2 py-2 text-xs font-semibold text-muted-foreground flex items-center gap-2">
-              <History className="h-3 w-3" />
-              HISTORY
-            </div>
-            {conversations.length === 0 ? (
-              <p className="text-xs text-center text-muted-foreground py-4">No history yet</p>
-            ) : (
-              conversations.map((conv) => (
-                <div
-                  key={conv.id}
-                  onClick={() => handleSelectConversation(conv)}
-                  className={cn(
-                    "w-full text-left px-3 py-2 rounded-lg text-sm transition-colors flex items-center justify-between group cursor-pointer",
-                    activeConversation?.id === conv.id
-                      ? "bg-primary text-primary-foreground"
-                      : "hover:bg-muted text-muted-foreground hover:text-foreground"
-                  )}
-                >
-                  <div className="flex flex-col gap-0.5 overflow-hidden flex-1">
-                    <div className="flex items-center gap-2 overflow-hidden">
-                      <MessageSquare className={cn("h-4 w-4 flex-shrink-0", activeConversation?.id === conv.id ? "text-primary-foreground" : "text-muted-foreground")} />
-                      <span className="truncate">{conv.title || 'Untitled'}</span>
-                    </div>
-                    <span className={cn(
-                      "text-[10px] pl-6",
-                      activeConversation?.id === conv.id ? "text-primary-foreground/60" : "text-muted-foreground/60"
-                    )}>
-                      {getRelativeTime(conv.updatedAt)}
-                    </span>
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className={cn(
-                      "h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0",
-                      activeConversation?.id === conv.id ? "text-primary-foreground hover:bg-primary-foreground/20" : "hover:text-destructive"
-                    )}
-                    onClick={(e) => handleDeleteClick(e, conv.id)}
-                  >
-                    <Trash2 className="h-3 w-3" />
-                  </Button>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
+        {historyPanel}
 
         {/* C-CHAT: Resize handle */}
         <div
@@ -887,17 +908,54 @@ export function Chat() {
         </div>
       </aside>
 
+      {/* F2: Narrow-container history drawer — only present below @lg. Slides over the
+          chat column (does not steal layout width) and is dismissed by the scrim,
+          selecting a conversation, or starting a new chat. */}
+      {historyOpen && (
+        <div className="@lg:hidden absolute inset-0 z-30 flex" data-testid="chat-history-drawer">
+          <div
+            className="absolute inset-0 bg-background/60"
+            aria-hidden="true"
+            onClick={() => setHistoryOpen(false)}
+          />
+          <aside className="relative z-10 flex w-64 max-w-[80%] flex-col border-r bg-background shadow-xl">
+            <div className="flex items-center justify-between border-b px-3 py-2">
+              <span className="text-sm font-semibold">History</span>
+              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setHistoryOpen(false)} aria-label="Close history">
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+            {historyPanel}
+          </aside>
+        </div>
+      )}
+
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col min-w-0">
-        {/* Header */}
-        <header className="flex items-center justify-between border-b px-6 py-4 h-[85px]">
-          <div className="min-w-0">
-            <h1 className="text-2xl font-bold">Knowledge Assistant</h1>
-            <p className="text-sm text-muted-foreground truncate">
-              {activeConversation ? activeConversation.title : 'Knowledge-powered AI conversations'}
-            </p>
+        {/* Header. F2: below @lg (narrow overlay) it compacts — the big title,
+            search and export collapse, and a History toggle replaces the docked
+            sidebar so nothing clips or wraps one-word-per-line. */}
+        <header className="flex items-center justify-between gap-2 border-b px-3 py-2 min-h-[56px] @lg:px-6 @lg:py-4 @lg:h-[85px]">
+          <div className="flex min-w-0 items-center gap-2">
+            {/* F2: History toggle — narrow containers only (sidebar is hidden there). */}
+            <Button
+              variant="ghost"
+              size="icon"
+              className="@lg:hidden shrink-0 h-8 w-8"
+              onClick={() => setHistoryOpen(true)}
+              aria-label="Open conversation history"
+              data-testid="chat-history-toggle"
+            >
+              <History className="h-4 w-4" />
+            </Button>
+            <div className="min-w-0">
+              <h1 className="truncate text-base font-bold @lg:text-2xl">Knowledge Assistant</h1>
+              <p className="hidden @lg:block text-sm text-muted-foreground truncate">
+                {activeConversation ? activeConversation.title : 'Knowledge-powered AI conversations'}
+              </p>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="hidden @lg:flex items-center gap-2">
             {/* C-CHAT: Search within conversation */}
             {activeConversation && messages.length > 0 && (
               <div className="relative">
@@ -924,21 +982,21 @@ export function Chat() {
               </Button>
             )}
           </div>
-          <div className="flex items-center gap-4">
+          <div className="flex shrink-0 items-center gap-2 @lg:gap-4">
             {status && (
               <div className="flex items-center gap-2 text-xs">
                 {status.ready ? (
-                  <div className="hidden sm:flex items-center gap-1.5 text-green-600 dark:text-green-400 bg-green-500/10 px-2 py-1 rounded-full border border-green-500/20">
+                  <div className="hidden @lg:flex items-center gap-1.5 text-green-600 dark:text-green-400 bg-green-500/10 px-2 py-1 rounded-full border border-green-500/20">
                     <CheckCircle2 className="h-3.5 w-3.5" />
                     <span>{backendLabel(status.backend)} · {status.documentCount} chunks</span>
                   </div>
                 ) : status.backend === 'none' ? (
-                  <div className="hidden sm:flex items-center gap-1.5 text-yellow-600 dark:text-yellow-400 bg-yellow-500/10 px-2 py-1 rounded-full border border-yellow-500/20">
+                  <div className="hidden @lg:flex items-center gap-1.5 text-yellow-600 dark:text-yellow-400 bg-yellow-500/10 px-2 py-1 rounded-full border border-yellow-500/20">
                     <AlertCircle className="h-3.5 w-3.5" />
                     <span>AI offline</span>
                   </div>
                 ) : (
-                  <div className="hidden sm:flex items-center gap-1.5 text-yellow-600 dark:text-yellow-400 bg-yellow-500/10 px-2 py-1 rounded-full border border-yellow-500/20">
+                  <div className="hidden @lg:flex items-center gap-1.5 text-yellow-600 dark:text-yellow-400 bg-yellow-500/10 px-2 py-1 rounded-full border border-yellow-500/20">
                     <Database className="h-3.5 w-3.5" />
                     <span>Empty knowledge base</span>
                   </div>
@@ -951,7 +1009,7 @@ export function Chat() {
               <DialogTrigger asChild>
                 <Button variant="outline" size="sm" className="gap-2 h-8" disabled={!activeConversation} title="Add Context">
                   <Layers className="h-4 w-4" />
-                  <span className="hidden md:inline">Context</span>
+                  <span className="hidden @lg:inline">Context</span>
                   {contextIds.length > 0 && (
                     <span className="bg-primary text-primary-foreground rounded-full w-4 h-4 flex items-center justify-center text-[10px]">
                       {contextIds.length}
@@ -977,7 +1035,7 @@ export function Chat() {
               className="h-8 gap-2"
             >
               <FileText className="h-4 w-4" />
-              <span className="hidden md:inline">Chunks</span>
+              <span className="hidden @lg:inline">Chunks</span>
             </Button>
           </div>
         </header>
@@ -1047,7 +1105,7 @@ export function Chat() {
                   No chunks indexed yet. Transcribe recordings to populate the knowledge base.
                 </div>
               ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 pb-4">
+                <div className="grid grid-cols-1 @md:grid-cols-2 gap-2 pb-4">
                   {chunks.map((chunk) => (
                     <div
                       key={chunk.id}
@@ -1118,7 +1176,7 @@ export function Chat() {
         )}
 
         {/* Messages List */}
-        <div className="flex-1 overflow-auto p-6 scroll-smooth">
+        <div className="flex-1 overflow-auto p-4 @lg:p-6 scroll-smooth">
           <div className="max-w-3xl mx-auto space-y-6">
             {messages.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-full py-12 text-center">
@@ -1127,7 +1185,7 @@ export function Chat() {
                 <p className="text-muted-foreground max-w-sm mb-8">
                   I can answer questions based on your captured knowledge and recorded meetings.
                 </p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full max-w-lg">
+                <div className="grid grid-cols-1 @md:grid-cols-2 gap-3 w-full max-w-lg">
                   {[
                     'Summarize my recent meetings',
                     'What are my pending action items?',
@@ -1289,7 +1347,7 @@ export function Chat() {
         </div>
 
         {/* Input Form */}
-        <div className="border-t p-6">
+        <div className="border-t p-3 @lg:p-6">
           <form onSubmit={handleSubmit} className="max-w-3xl mx-auto">
             <div className="relative flex items-center">
               <Input
@@ -1320,12 +1378,15 @@ export function Chat() {
                 <Send className="h-5 w-5" />
               </Button>
             </div>
-            <div className="flex items-center justify-between mt-3 px-1">
-              <p className="text-[10px] text-muted-foreground">
+            {/* F2: caption never wraps one-word-per-line — it truncates on one line,
+                and hides entirely below @sm (the floating overlay) where the counter
+                alone suffices. */}
+            <div className="flex items-center justify-between gap-2 mt-3 px-1">
+              <p className="hidden @sm:block min-w-0 truncate text-[10px] text-muted-foreground">
                 I answer based on your meeting transcripts and documents.
               </p>
               <p className={cn(
-                'text-[10px] tabular-nums',
+                'shrink-0 ml-auto text-[10px] tabular-nums',
                 input.length > MAX_INPUT_LENGTH * 0.9
                   ? 'text-destructive'
                   : 'text-muted-foreground'

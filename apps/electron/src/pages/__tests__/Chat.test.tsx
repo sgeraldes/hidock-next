@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { Chat } from '../Chat'
 import { MemoryRouter } from 'react-router-dom'
 
@@ -169,6 +169,100 @@ describe('Chat Component', () => {
       // ReactMarkdown renders **bold** as <strong>
       const boldEl = screen.getByText('Bold text')
       expect(boldEl.tagName).toBe('STRONG')
+    })
+  })
+
+  // F2: Narrow-container adaptation (floating assistant overlay). Container queries
+  // (@lg/@sm) are not evaluated by jsdom, so these assert the structural contract
+  // that makes the overlay usable: the docked sidebar collapses (carries the
+  // container-hidden classes), a History toggle opens a drawer with the list, and
+  // the send-row caption can never wrap one-word-per-line.
+  describe('narrow-container (overlay) adaptation', () => {
+    it('collapses the docked history sidebar via container-query classes', async () => {
+      render(
+        <MemoryRouter>
+          <Chat />
+        </MemoryRouter>
+      )
+      await screen.findByText('HISTORY')
+
+      const sidebar = screen.getByTestId('chat-history-sidebar')
+      // Hidden by default; only shown as a flex column at the @lg container width.
+      expect(sidebar.className).toContain('hidden')
+      expect(sidebar.className).toContain('@lg:flex')
+    })
+
+    it('opens a history drawer from the narrow-mode toggle and lists conversations', async () => {
+      render(
+        <MemoryRouter>
+          <Chat />
+        </MemoryRouter>
+      )
+      await screen.findByText('HISTORY')
+
+      // Drawer is not mounted until the toggle is used.
+      expect(screen.queryByTestId('chat-history-drawer')).toBeNull()
+
+      fireEvent.click(screen.getByTestId('chat-history-toggle'))
+
+      const drawer = await screen.findByTestId('chat-history-drawer')
+      // The conversation list renders inside the drawer (not just the docked sidebar).
+      expect(within(drawer).getByText('Conversation 1')).toBeInTheDocument()
+      expect(within(drawer).getByText('Latest Chat')).toBeInTheDocument()
+    })
+
+    it('closes the history drawer after selecting a conversation', async () => {
+      render(
+        <MemoryRouter>
+          <Chat />
+        </MemoryRouter>
+      )
+      await screen.findByText('HISTORY')
+
+      fireEvent.click(screen.getByTestId('chat-history-toggle'))
+      const drawer = await screen.findByTestId('chat-history-drawer')
+
+      fireEvent.click(within(drawer).getByText('Conversation 1'))
+
+      await waitFor(() => {
+        expect(screen.queryByTestId('chat-history-drawer')).toBeNull()
+      })
+    })
+
+    it('closes the history drawer when the scrim is clicked', async () => {
+      render(
+        <MemoryRouter>
+          <Chat />
+        </MemoryRouter>
+      )
+      await screen.findByText('HISTORY')
+
+      fireEvent.click(screen.getByTestId('chat-history-toggle'))
+      const drawer = await screen.findByTestId('chat-history-drawer')
+
+      // The scrim is the aria-hidden overlay behind the drawer panel.
+      const scrim = drawer.querySelector('[aria-hidden="true"]') as HTMLElement
+      expect(scrim).toBeTruthy()
+      fireEvent.click(scrim)
+
+      await waitFor(() => {
+        expect(screen.queryByTestId('chat-history-drawer')).toBeNull()
+      })
+    })
+
+    it('keeps the send-row caption on a single line (never wraps one-word-per-line)', async () => {
+      render(
+        <MemoryRouter>
+          <Chat />
+        </MemoryRouter>
+      )
+      await screen.findByText('HISTORY')
+
+      const caption = screen.getByText('I answer based on your meeting transcripts and documents.')
+      // `truncate` forces a single line; `@sm:block` hides it entirely in the
+      // sub-24rem overlay so it can never collapse into a one-word-per-line column.
+      expect(caption.className).toContain('truncate')
+      expect(caption.className).toContain('@sm:block')
     })
   })
 })
