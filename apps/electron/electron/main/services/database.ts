@@ -7,7 +7,7 @@ import { DatabaseEngine, getTableColumns, type SqlJsDatabase } from '@hidock/dat
 import { normalizeName, isGenericSpeakerLabel, detectAmbiguousName } from './entity-normalize'
 import { getEventBus } from './event-bus'
 
-const SCHEMA_VERSION = 40
+const SCHEMA_VERSION = 41
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -617,6 +617,20 @@ CREATE TABLE IF NOT EXISTS project_aliases (
     confidence REAL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+
+-- Discovery tombstones (v41). Dismissing an auto-discovered project records its
+-- normalized name here so a later transcript re-analysis does NOT silently
+-- re-create it (dismiss→reappear loop). Deliberately NOT keyed to a project id:
+-- the dismissed project row is deleted, and project_aliases cascades away with
+-- it, so this standalone table is the durable memory. It blocks ONLY the
+-- reconciler's auto-create path — manual creation always wins and clears the
+-- tombstone (see createProject).
+CREATE TABLE IF NOT EXISTS project_discovery_rejections (
+    name_norm TEXT PRIMARY KEY,
+    original_name TEXT NOT NULL,
+    source_meeting_id TEXT,
+    rejected_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Identity suggestion queue (v27). The 0.5–0.8 resolver band lands here as
@@ -2094,6 +2108,29 @@ const MIGRATIONS: Record<number, () => void> = {
       }
     }
     console.log('Migration v40 complete')
+  },
+
+  41: () => {
+    // v41: project_discovery_rejections — durable tombstones for dismissed
+    // auto-discovered projects. Without this, dismissing a spurious discovery
+    // (delete) left nothing behind and the next transcript re-analysis re-created
+    // the same project. Keyed by normalized name (the deleted project row and its
+    // cascading aliases cannot carry the memory). Idempotent: CREATE IF NOT EXISTS.
+    console.log('Running migration to schema v41: project_discovery_rejections')
+    const database = getDatabase()
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS project_discovery_rejections (
+          name_norm TEXT PRIMARY KEY,
+          original_name TEXT NOT NULL,
+          source_meeting_id TEXT,
+          rejected_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+      `)
+    } catch (e) {
+      console.warn('[Migration v41] create project_discovery_rejections failed:', e)
+    }
+    console.log('Migration v41 complete')
   }
 
 }
@@ -5621,7 +5658,51 @@ export function createProject(project: Omit<Project, 'created_at' | 'folder_path
     'INSERT INTO projects (id, name, description, status) VALUES (?, ?, ?, ?)',
     [project.id, project.name, project.description, project.status || 'active']
   )
+  // Manual beats rejection: an explicit create clears any discovery tombstone for
+  // this name, so future transcript mentions resolve and link to it normally.
+  clearProjectDiscoveryRejection(project.name)
   return { ...project, folder_path: null, url: null, created_at: new Date().toISOString() }
+}
+
+// ---------------------------------------------------------------------------
+// Project discovery tombstones (v41)
+// ---------------------------------------------------------------------------
+// Dismissing an auto-discovered project must be durable: deleting the row alone
+// let the next transcript re-analysis silently re-create it. These helpers give
+// the reconciler's auto-create path a memory keyed by normalized name. Manual
+// creation clears the tombstone (createProject above), so "manual beats
+// rejection" holds.
+
+/** Record that a discovered project name was dismissed (upsert — latest wins). */
+export function addProjectDiscoveryRejection(name: string, sourceMeetingId?: string | null): void {
+  const norm = normalizeName(name)
+  if (!norm) return
+  run(
+    `INSERT INTO project_discovery_rejections (name_norm, original_name, source_meeting_id, rejected_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(name_norm) DO UPDATE SET
+       original_name = excluded.original_name,
+       source_meeting_id = excluded.source_meeting_id,
+       rejected_at = excluded.rejected_at`,
+    [norm, name, sourceMeetingId ?? null, new Date().toISOString()]
+  )
+}
+
+/** True when this name was dismissed as a spurious discovery (blocks auto-create only). */
+export function isProjectDiscoveryRejected(name: string): boolean {
+  const norm = normalizeName(name)
+  if (!norm) return false
+  return !!queryOne<{ name_norm: string }>(
+    'SELECT name_norm FROM project_discovery_rejections WHERE name_norm = ?',
+    [norm]
+  )
+}
+
+/** Remove a tombstone (called on explicit manual create — manual beats rejection). */
+export function clearProjectDiscoveryRejection(name: string): void {
+  const norm = normalizeName(name)
+  if (!norm) return
+  run('DELETE FROM project_discovery_rejections WHERE name_norm = ?', [norm])
 }
 
 export interface ProjectUpdateFields {

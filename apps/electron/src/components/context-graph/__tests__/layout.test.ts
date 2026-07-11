@@ -188,6 +188,116 @@ describe('computeStratifiedLayout: time ordering (x axis)', () => {
   })
 })
 
+describe('date axis ticks (honest ordinal scale)', () => {
+  it('labels the oldest and newest distinct dates at the correct x positions', () => {
+    const nodes = [
+      n('a', 'evidence', 0),
+      n('b', 'evidence', 10),
+      n('c', 'evidence', 100), // clustered gap — exactly what the ordinal axis compresses
+      n('d', 'strategic', 101),
+    ]
+    const { ticks, positions } = computeStratifiedLayout(nodes, { width: 1100 })
+    expect(ticks.length).toBeGreaterThanOrEqual(2)
+    // First tick = oldest date, last tick = newest date — real dates in sight.
+    expect(ticks[0].dateMs).toBe(base + 0 * DAY)
+    expect(ticks[ticks.length - 1].dateMs).toBe(base + 101 * DAY)
+    // Tick x positions align with the shared node scale: the oldest node sits on
+    // the first tick, the newest node's base position on the last tick.
+    expect(ticks[0].x).toBeCloseTo(positions.get('a')!.x, 5)
+    expect(ticks[ticks.length - 1].x).toBeCloseTo(positions.get('d')!.x, 5)
+    // Ticks run strictly left-to-right.
+    for (let i = 1; i < ticks.length; i++) expect(ticks[i].x).toBeGreaterThan(ticks[i - 1].x)
+  })
+
+  it('a single distinct date yields one centered tick; no dated nodes yield none', () => {
+    const one = computeStratifiedLayout([n('a', 'evidence', 5), n('b', 'people', 5)], { width: 1000 })
+    expect(one.ticks).toHaveLength(1)
+    expect(one.ticks[0].dateMs).toBe(base + 5 * DAY)
+    expect(one.ticks[0].x).toBe(500)
+
+    const none = computeStratifiedLayout([n('u', 'evidence', null)], { width: 1000 })
+    expect(none.ticks).toHaveLength(0)
+  })
+
+  it('keeps ticks sparse (bounded count) even with many distinct dates', () => {
+    const nodes = Array.from({ length: 60 }, (_, i) => n(`m${i}`, 'evidence', i))
+    const { ticks } = computeStratifiedLayout(nodes, { width: 1100 })
+    expect(ticks.length).toBeGreaterThanOrEqual(2)
+    expect(ticks.length).toBeLessThanOrEqual(8)
+    expect(ticks[0].dateMs).toBe(base)
+    expect(ticks[ticks.length - 1].dateMs).toBe(base + 59 * DAY)
+  })
+
+  it('tick labels render as short smart dates with the year', async () => {
+    const { tickLabel } = await import('../StratifiedLensCanvas')
+    expect(tickLabel(Date.parse('2026-06-01T12:00:00Z'))).toMatch(/Jun\s+1,\s+2026/)
+    expect(tickLabel(Date.parse('2025-12-31T12:00:00Z'))).toMatch(/2025/)
+  })
+})
+
+describe('dense-timeline binning (no sub-diameter slot spacing)', () => {
+  it('1000 distinct timestamps: the time scale bins ranks — adjacent slots never closer than the node diameter', async () => {
+    // One node per minute for ~16h: without binning the ordinal scale would space
+    // distinct x positions ~1 unit apart — far below the 28-unit node diameter —
+    // and the band would collapse back into an unreadable smear.
+    const { buildTimeScale } = await import('../layout')
+    const MIN = 60_000
+    const dates = Array.from({ length: 1000 }, (_, i) => base + i * MIN)
+    const { slotXs, scaleX, ticks } = buildTimeScale(dates, 1100, 28)
+
+    // The drawable slot grid respects the diameter floor…
+    expect(slotXs.length).toBeGreaterThan(1)
+    expect(slotXs.length).toBeLessThan(1000) // binning actually happened
+    for (let i = 1; i < slotXs.length; i++) {
+      expect(slotXs[i] - slotXs[i - 1]).toBeGreaterThanOrEqual(28 - 1e-9)
+    }
+    // …every node x lands ON that grid (no off-grid sub-diameter positions from
+    // the scale itself)…
+    const grid = new Set(slotXs.map((x) => x.toFixed(6)))
+    for (const d of dates) expect(grid.has(scaleX(d).toFixed(6))).toBe(true)
+    // …order is preserved and the anchors hold.
+    expect(scaleX(dates[0])).toBeLessThan(scaleX(dates[500]))
+    expect(scaleX(dates[500])).toBeLessThan(scaleX(dates[999]))
+    expect(ticks[0].dateMs).toBe(dates[0])
+    expect(ticks[ticks.length - 1].dateMs).toBe(dates[999])
+  })
+
+  it('1000-timestamp layout keeps every sub-row at >= nodeGap spacing (no sub-diameter neighbors in a row)', () => {
+    const MIN = 60_000
+    const nodes: LayoutInputNode[] = Array.from({ length: 1000 }, (_, i) => ({
+      id: `t${i}`,
+      stratum: 'evidence',
+      dateMs: base + i * MIN,
+      degree: 1,
+    }))
+    const { positions } = computeStratifiedLayout(nodes, { width: 1100, nodeGap: 46, minSlotSpacing: 28 })
+    // Group by sub-row (y); horizontally adjacent nodes in a row must keep the
+    // min gap — combined with the slot-grid floor above, nothing the scale or
+    // the sweep produces sits closer than a node's own width to its neighbor.
+    const byRow = new Map<number, number[]>()
+    for (const nd of nodes) {
+      const p = positions.get(nd.id)!
+      if (!byRow.has(p.y)) byRow.set(p.y, [])
+      byRow.get(p.y)!.push(p.x)
+    }
+    for (const xs of byRow.values()) {
+      xs.sort((a, b) => a - b)
+      for (let i = 1; i < xs.length; i++) {
+        expect(xs[i] - xs[i - 1]).toBeGreaterThanOrEqual(46 - 1e-9)
+      }
+    }
+  })
+
+  it('binning does not kick in below the density threshold (few dates stay evenly spread)', async () => {
+    const { buildTimeScale } = await import('../layout')
+    const dates = Array.from({ length: 10 }, (_, i) => base + i * DAY)
+    const { slotXs } = buildTimeScale(dates, 1100, 28)
+    // 10 distinct dates fit comfortably → one slot per date, full-width spread.
+    expect(slotXs.length).toBe(10)
+    expect(slotXs[slotXs.length - 1] - slotXs[0]).toBeGreaterThan(1100 * 0.8)
+  })
+})
+
 describe('node radius clamp (defect: unbounded degree sizing)', () => {
   it('clamps radius into a sane range regardless of degree', async () => {
     const { baseRadius } = await import('../StratifiedLensCanvas')

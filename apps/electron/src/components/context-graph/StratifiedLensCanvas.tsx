@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import ForceGraph2D, { type ForceGraphMethods, type NodeObject } from 'react-force-graph-2d'
 import type { ContextLensData, ContextLensNode } from './types'
 import { colorForType, STRATUM_STYLES } from './graph-theme'
-import { computeStratifiedLayout, type BandRect } from './layout'
+import { computeStratifiedLayout, type BandRect, type AxisTick } from './layout'
+import { formatSmartDate } from '@/lib/smartDate'
 
 type GNode = ContextLensNode & NodeObject
 interface GLink {
@@ -33,6 +34,13 @@ export function baseRadius(degree: number): number {
  *  Exported for regression tests. */
 export function endpointId(v: string | { id: string }): string {
   return typeof v === 'object' && v !== null ? v.id : v
+}
+
+/** Axis tick label — short smart date WITH the year (e.g. "Jun 1, 2026").
+ *  The x axis is ORDINAL (sequence, not duration), so real dates must stay in
+ *  sight for the spacing to read honestly. Exported for regression tests. */
+export function tickLabel(dateMs: number): string {
+  return formatSmartDate(dateMs, { time: false })
 }
 
 /** Labels go into force-graph's HTML tooltip — escape user data. */
@@ -79,7 +87,7 @@ export function StratifiedLensCanvas({
   const lastClickRef = useRef<{ id: string; t: number }>({ id: '', t: 0 })
 
   // Deterministic layout → pinned positions. Rebuilt only when data changes.
-  const { graphData, bands, xExtent } = useMemo(() => {
+  const { graphData, bands, xExtent, ticks } = useMemo(() => {
     const layout = computeStratifiedLayout(
       data.nodes.map((n) => ({ id: n.id, stratum: n.stratum, dateMs: n.dateMs, degree: n.degree })),
       {}
@@ -100,6 +108,7 @@ export function StratifiedLensCanvas({
       graphData: { nodes, links },
       bands: layout.bands,
       xExtent: { min: layout.minX - padX, max: layout.maxX + padX },
+      ticks: layout.ticks,
     }
   }, [data])
 
@@ -196,9 +205,31 @@ export function StratifiedLensCanvas({
         ctx.fillText(style.label.toUpperCase(), left + 8 / globalScale, band.yCenter)
       }
 
+      // Date axis below the bottom band. The x scale is ORDINAL — distance is
+      // sequence, not duration — so sparse REAL-DATE ticks (oldest + newest +
+      // every Nth distinct date, from the layout) keep the axis honest.
+      if (ticks.length > 0) {
+        const axisY = rects[rects.length - 1].yBottom
+        const tickFont = Math.min(Math.max(11 / globalScale, 3), bandHeight * 0.16)
+        ctx.font = `500 ${tickFont}px Inter, system-ui, sans-serif`
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'top'
+        ctx.strokeStyle = isDark ? 'rgba(148,163,184,0.45)' : 'rgba(100,116,139,0.45)'
+        ctx.lineWidth = 1 / globalScale
+        const tickLen = 5 / globalScale
+        for (const t of ticks as AxisTick[]) {
+          ctx.beginPath()
+          ctx.moveTo(t.x, axisY)
+          ctx.lineTo(t.x, axisY + tickLen)
+          ctx.stroke()
+          ctx.fillStyle = isDark ? '#94a3b8' : '#64748b'
+          ctx.fillText(tickLabel(t.dateMs), t.x, axisY + tickLen + 2 / globalScale)
+        }
+      }
+
       ctx.restore()
     },
-    [bands, xExtent, isDark]
+    [bands, xExtent, ticks, isDark]
   )
 
   const paintNode = useCallback(

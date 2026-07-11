@@ -20,8 +20,12 @@ import { join } from 'path'
 const source = readFileSync(join(__dirname, '..', 'database.ts'), 'utf-8')
 
 describe('schema v40: download_queue.cancel_reason (durable user-cancel suppression)', () => {
-  it('bumps SCHEMA_VERSION to 40', () => {
-    expect(source).toMatch(/const SCHEMA_VERSION = 40\b/)
+  it('bumps SCHEMA_VERSION to at least 40', () => {
+    // Floor, not exact pin: later schema bumps (v41+) must not break the v40
+    // contract test. The CURRENT version is pinned by the newest migration test.
+    const m = source.match(/const SCHEMA_VERSION = (\d+)\b/)
+    expect(m).not.toBeNull()
+    expect(Number(m![1])).toBeGreaterThanOrEqual(40)
   })
 
   it('fresh schema creates download_queue with the cancel_reason column', () => {

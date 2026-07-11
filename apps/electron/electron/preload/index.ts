@@ -374,6 +374,8 @@ export interface ElectronAPI {
     create: (request: CreateProjectRequest) => Promise<Result<Project>>
     update: (request: UpdateProjectRequest) => Promise<Result<Project>>
     delete: (id: string) => Promise<Result<void>>
+    /** Dismiss an auto-discovered project: durable tombstone + delete (v41). */
+    dismissDiscovered: (id: string) => Promise<Result<void>>
     tagMeeting: (request: TagMeetingRequest) => Promise<Result<void>>
     untagMeeting: (request: TagMeetingRequest) => Promise<Result<void>>
     getForMeeting: (meetingId: string) => Promise<Result<Project[]>>
@@ -1245,6 +1247,7 @@ const electronAPI: ElectronAPI = {
     create: (request) => callIPC('projects:create', request),
     update: (request) => callIPC('projects:update', request),
     delete: (id) => callIPC('projects:delete', id),
+    dismissDiscovered: (id) => callIPC('projects:dismissDiscovered', id),
     tagMeeting: (request) => callIPC('projects:tagMeeting', request),
     untagMeeting: (request) => callIPC('projects:untagMeeting', request),
     getForMeeting: (meetingId) => callIPC('projects:getForMeeting', meetingId),

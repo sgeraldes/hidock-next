@@ -26,6 +26,7 @@ import {
   getAmbiguousBuckets,
   getBucketResolution,
   healRecordingStatusFromTranscripts,
+  isProjectDiscoveryRejected,
   type RecordingPreassignment
 } from './database'
 import { resolveContact, resolveProject } from './entity-resolver'
@@ -545,6 +546,11 @@ export function applyTranscriptEntities(opts: {
           coOccurring: [],
           ...(res.rarity ? { rarity: res.rarity } : {})
         })
+      } else if (isProjectDiscoveryRejected(projectName)) {
+        // Dismissed discovery — a durable tombstone (v41) blocks silent
+        // re-creation on re-analysis. Only the AUTO-create path is blocked:
+        // if the user manually creates a project with this name, createProject
+        // clears the tombstone and resolveProject links to it normally above.
       } else {
         const id = randomUUID()
         run(`INSERT INTO projects (id, name, status) VALUES (?, ?, 'active')`, [id, projectName])

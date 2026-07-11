@@ -107,6 +107,12 @@ export function Projects() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
   const [projectMembers, setProjectMembers] = useState<ProjectMember[]>([])
 
+  // Dismiss-vs-delete: the delete dialog doubles as the dismiss confirm for a
+  // discovered project. Dismiss routes through projects:dismissDiscovered, which
+  // writes a durable rejection tombstone (v41) BEFORE deleting — a bare delete
+  // let the next transcript re-analysis silently re-create the same project.
+  const [dismissMode, setDismissMode] = useState(false)
+
   // Inline description editing state
   const [isEditingDescription, setIsEditingDescription] = useState(false)
   const [editDescription, setEditDescription] = useState('')
@@ -283,21 +289,34 @@ export function Projects() {
     setCreateDialogOpen(true)
   }
 
-  // B-PRJ-007: Delete project via AlertDialog instead of confirm()
+  // B-PRJ-007: Delete project via AlertDialog instead of confirm().
+  // In dismiss mode (discovered project) the same confirm routes through
+  // dismissDiscovered so the rejection is durable across re-analysis.
   const handleDeleteProject = async () => {
     if (!activeProject) return
+    const dismissing = dismissMode
     try {
-      const result = await window.electronAPI.projects.delete(activeProject.id)
+      const result = dismissing
+        ? await window.electronAPI.projects.dismissDiscovered(activeProject.id)
+        : await window.electronAPI.projects.delete(activeProject.id)
       if (result.success) {
-        toast.success('Project deleted', `"${activeProject.name}" has been deleted.`)
+        if (dismissing) {
+          toast.success('Discovery dismissed', `"${activeProject.name}" won't be re-created from transcripts.`)
+        } else {
+          toast.success('Project deleted', `"${activeProject.name}" has been deleted.`)
+        }
         setProjects(prev => prev.filter(p => p.id !== activeProject.id))
         setActiveProject(null)
       }
     } catch (error) {
       console.error('Failed to delete project:', error)
-      toast.error('Failed to delete project', error instanceof Error ? error.message : 'An unexpected error occurred')
+      toast.error(
+        dismissing ? 'Failed to dismiss project' : 'Failed to delete project',
+        error instanceof Error ? error.message : 'An unexpected error occurred'
+      )
     }
     setDeleteDialogOpen(false)
+    setDismissMode(false)
   }
 
   // Load a project's issues/risks/notes and linked actionables (R3b)
@@ -818,7 +837,7 @@ export function Projects() {
                   variant="ghost"
                   size="icon"
                   className="h-9 w-9 text-muted-foreground hover:text-destructive"
-                  onClick={() => setDeleteDialogOpen(true)}
+                  onClick={() => { setDismissMode(false); setDeleteDialogOpen(true) }}
                 >
                   <Trash2 className="h-4 w-4" />
                 </Button>
@@ -833,13 +852,37 @@ export function Projects() {
                     inferred from. When it ALSO has zero knowledge items and zero
                     people it is a thin (possibly spurious) discovery, so we show an
                     explicit review state — source · merge · dismiss — instead of a
-                    bare "0 Items / 0 Involved" dead end. */}
+                    bare "0 Items / 0 Involved" dead end. The review card is gated on
+                    PROVENANCE (linked meetings): a hand-created empty project is not
+                    "discovered", so it gets a neutral getting-started state instead. */}
                 {(() => {
                   const knowledgeCount = activeProject.knowledgeIds?.length ?? 0
                   const peopleCount = activeProject.personIds?.length ?? 0
+                  const isDiscovered = sourceMeetings.length > 0
                   const sourceChips = sourceMeetings.map((m) => (
                     <EntityMention key={m.id} type="meeting" id={m.id} name={m.subject} showIcon />
                   ))
+
+                  if (knowledgeCount === 0 && peopleCount === 0 && !isDiscovered) {
+                    // Manual empty project — honest but neutral (not "discovered").
+                    return (
+                      <Card className="animate-rise-in bg-muted/5">
+                        <CardContent className="p-6">
+                          <div className="flex items-start gap-3">
+                            <span title="Empty project">
+                              <FolderOpen className="h-5 w-5 text-muted-foreground shrink-0 mt-0.5" aria-hidden="true" />
+                            </span>
+                            <div className="min-w-0 space-y-1">
+                              <h3 className="text-sm font-bold">No items yet</h3>
+                              <p className="text-sm text-muted-foreground">
+                                Add knowledge or link meetings to start building this project's hub.
+                              </p>
+                            </div>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    )
+                  }
 
                   if (knowledgeCount === 0 && peopleCount === 0) {
                     return (
@@ -884,8 +927,8 @@ export function Projects() {
                               variant="ghost"
                               size="sm"
                               className="h-8 gap-1.5 text-muted-foreground hover:text-destructive"
-                              onClick={() => setDeleteDialogOpen(true)}
-                              title="Dismiss this discovered project (deletes it)"
+                              onClick={() => { setDismissMode(true); setDeleteDialogOpen(true) }}
+                              title="Dismiss this discovered project (won't be re-created from transcripts)"
                             >
                               <Trash2 className="h-3.5 w-3.5" />
                               Dismiss
@@ -1366,13 +1409,19 @@ export function Projects() {
         </DialogContent>
       </Dialog>
 
-      {/* B-PRJ-007: Delete Project AlertDialog (replaces confirm()) */}
-      <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+      {/* B-PRJ-007: Delete Project AlertDialog (replaces confirm()).
+          Doubles as the dismiss confirm for discovered projects (dismissMode). */}
+      <AlertDialog
+        open={deleteDialogOpen}
+        onOpenChange={(open) => { setDeleteDialogOpen(open); if (!open) setDismissMode(false) }}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete Project</AlertDialogTitle>
+            <AlertDialogTitle>{dismissMode ? 'Dismiss Discovered Project' : 'Delete Project'}</AlertDialogTitle>
             <AlertDialogDescription>
-              Are you sure you want to delete "{activeProject?.name}"? This will remove all meeting associations for this project. This action cannot be undone.
+              {dismissMode
+                ? `Dismiss "${activeProject?.name}"? It will be deleted and remembered as dismissed, so re-analyzing transcripts won't re-create it. Creating a project with this name manually is still allowed.`
+                : `Are you sure you want to delete "${activeProject?.name}"? This will remove all meeting associations for this project. This action cannot be undone.`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -1381,7 +1430,7 @@ export function Projects() {
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               onClick={handleDeleteProject}
             >
-              Delete
+              {dismissMode ? 'Dismiss' : 'Delete'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

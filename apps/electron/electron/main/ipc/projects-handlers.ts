@@ -29,6 +29,7 @@ import {
   updateProjectNote,
   deleteProjectNote,
   getActionablesForProject,
+  addProjectDiscoveryRejection,
   Project as DBProject,
   ProjectNote
 } from '../services/database'
@@ -217,6 +218,39 @@ export function registerProjectsHandlers(): void {
       } catch (err) {
         console.error('projects:delete error:', err)
         return error('DATABASE_ERROR', 'Failed to delete project', err)
+      }
+    }
+  )
+
+  /**
+   * Dismiss an auto-discovered project: record a durable discovery tombstone
+   * (normalized name + the source meeting, v41) THEN delete the project. The
+   * tombstone blocks the reconciler's auto-create path from silently
+   * re-creating the same project on the next transcript re-analysis; a manual
+   * create with the same name clears it (manual beats rejection).
+   */
+  ipcMain.handle(
+    'projects:dismissDiscovered',
+    async (_, id: unknown): Promise<Result<void>> => {
+      try {
+        const parsed = UUIDSchema.safeParse(id)
+        if (!parsed.success) {
+          return error('VALIDATION_ERROR', 'Invalid project ID', parsed.error.format())
+        }
+
+        const project = getProjectById(parsed.data)
+        if (!project) {
+          return error('NOT_FOUND', `Project with ID ${parsed.data} not found`)
+        }
+
+        const meetings = getMeetingsForProject(parsed.data)
+        addProjectDiscoveryRejection(project.name, meetings[0]?.id ?? null)
+        deleteProject(parsed.data)
+
+        return success(undefined)
+      } catch (err) {
+        console.error('projects:dismissDiscovered error:', err)
+        return error('DATABASE_ERROR', 'Failed to dismiss discovered project', err)
       }
     }
   )

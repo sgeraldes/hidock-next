@@ -6,9 +6,11 @@
  *
  *   • y = STRATUM (abstraction). Fixed horizontal bands, top→down:
  *       strategic → operational → people → evidence.
- *   • x = TIME (recency). A single shared time scale across every band, so a
- *       decision sits roughly ABOVE the meeting that produced it (same date →
- *       same x). Older = left, newer = right.
+ *   • x = TIME (sequence). A single shared ORDINAL time scale across every
+ *     band, so a decision sits roughly ABOVE the meeting that produced it
+ *     (same date → same x). Older = left, newer = right. Distance encodes
+ *     ORDER, not duration — the labelled date ticks (see {@link AxisTick})
+ *     keep that honest.
  *
  * The layout is pure and deterministic (no randomness, stable tie-breaks) so it
  * is unit-testable and renders identically every time — no animated settle.
@@ -31,6 +33,12 @@ export interface BandRect {
   yCenter: number
 }
 
+/** A date tick on the (ordinal) time axis: where to draw it and the real date it marks. */
+export interface AxisTick {
+  x: number
+  dateMs: number
+}
+
 export interface LayoutResult {
   /** node id → fixed graph-space position. */
   positions: Map<string, { x: number; y: number }>
@@ -39,6 +47,13 @@ export interface LayoutResult {
   /** Horizontal extent actually used by the nodes (for band backgrounds). */
   minX: number
   maxX: number
+  /**
+   * Sparse labelled date ticks for the bottom axis. The x scale is ORDINAL
+   * (rank-based), so on-canvas distance is sequence, not duration — these ticks
+   * put real dates in sight so distance is never read as duration. Always
+   * includes the oldest and newest distinct dates; empty when nothing is dated.
+   */
+  ticks: AxisTick[]
 }
 
 export interface LayoutOptions {
@@ -48,16 +63,108 @@ export interface LayoutOptions {
   width?: number
   /** Minimum horizontal gap between two nodes sharing a sub-row (graph units). */
   nodeGap?: number
+  /**
+   * Minimum spacing between two DISTINCT time-slot x positions (graph units).
+   * Defaults to the rendered node diameter (2 × NODE_R_MAX = 28). When more
+   * distinct timestamps exist than fit at this spacing, adjacent ranks are
+   * BINNED into shared slots — never spaced below a node's own width.
+   */
+  minSlotSpacing?: number
 }
 
 const DEFAULTS = {
   bandHeight: 240,
   width: 1100,
   nodeGap: 46,
+  /** Rendered node diameter — keep in sync with NODE_R_MAX (14) in StratifiedLensCanvas. */
+  minSlotSpacing: 28,
 } as const
 
 /** Vertical padding inside a band so nodes never sit on the band edges. */
 const BAND_INNER_PAD = 42
+
+/** How many labelled date ticks the axis aims for (first + last always included). */
+const TICK_TARGET = 6
+
+/** The ordinal time scale used by the layout — exported for regression tests. */
+export interface TimeScale {
+  /** Graph-space x for a node date (null → far left / undated). */
+  scaleX: (ms: number | null) => number
+  /** The distinct drawable slot x positions, left→right (each ≥ minSlotSpacing apart). */
+  slotXs: number[]
+  /** Sparse labelled date ticks (oldest + newest + every Nth distinct date). */
+  ticks: AxisTick[]
+}
+
+/**
+ * Build the shared ORDINAL time scale for a set of node dates.
+ *
+ * Each DISTINCT timestamp maps to an evenly-spaced rank inside a padded domain,
+ * so clustered-recent data spreads across the full width instead of piling at
+ * the right edge. When more distinct timestamps exist than fit at
+ * `minSlotSpacing` (the rendered node diameter), adjacent ranks are BINNED into
+ * shared slots — the scale never produces two distinct x positions closer than
+ * a node's own width. Equal dates always share an x; older always sorts left.
+ */
+export function buildTimeScale(
+  datedMs: number[],
+  width: number,
+  minSlotSpacing: number = DEFAULTS.minSlotSpacing
+): TimeScale {
+  const EDGE_PAD = Math.min(48, width * 0.05)
+  const usableW = Math.max(1, width - EDGE_PAD * 2)
+
+  const uniqueSorted = Array.from(new Set(datedMs)).sort((a, b) => a - b)
+  const rankOf = new Map<number, number>()
+  uniqueSorted.forEach((ms, i) => rankOf.set(ms, i))
+  const distinctDates = uniqueSorted.length
+
+  // Dense-timeline binning: a slot is a drawable x position. When there are more
+  // distinct timestamps than fit at minSlotSpacing, adjacent RANKS share a slot
+  // (aggregate ticks) instead of collapsing the spacing below a node's diameter.
+  const maxSlots = Math.max(2, Math.floor(usableW / minSlotSpacing) + 1)
+  const slotCount = distinctDates <= 1 ? 1 : Math.min(distinctDates, maxSlots)
+  const slotOfRank = (rank: number): number =>
+    distinctDates <= 1 ? 0 : Math.round((rank / (distinctDates - 1)) * (slotCount - 1))
+  const slotX = (slot: number): number =>
+    slotCount <= 1 ? width / 2 : EDGE_PAD + (slot / (slotCount - 1)) * usableW
+
+  const slotXs = Array.from({ length: slotCount }, (_, s) => slotX(s))
+
+  const scaleX = (ms: number | null): number => {
+    if (ms == null) return 0 // undated → far left (oldest), left of the padded domain
+    // All timestamps equal (or a single dated node): center them — a degenerate
+    // time axis carries no ordering signal, so a shared midpoint reads honestly.
+    if (distinctDates <= 1) return width / 2
+    return slotX(slotOfRank(rankOf.get(ms) ?? 0))
+  }
+
+  // Sparse labelled date ticks: first + last rank always, plus every Nth rank in
+  // between (TICK_TARGET total). Deduped by slot so binned ranks yield one tick.
+  const ticks: AxisTick[] = []
+  if (distinctDates === 1) {
+    ticks.push({ x: width / 2, dateMs: uniqueSorted[0] })
+  } else if (distinctDates > 1) {
+    const step = Math.max(1, Math.ceil((distinctDates - 1) / (TICK_TARGET - 1)))
+    const tickRanks = new Set<number>([0, distinctDates - 1])
+    for (let r = step; r < distinctDates - 1; r += step) tickRanks.add(r)
+    const seenSlots = new Set<number>()
+    for (const r of Array.from(tickRanks).sort((a, b) => a - b)) {
+      const slot = slotOfRank(r)
+      if (seenSlots.has(slot)) continue
+      seenSlots.add(slot)
+      ticks.push({ x: slotX(slot), dateMs: uniqueSorted[r] })
+    }
+    // The newest date must always be labelled: if its slot was claimed by an
+    // earlier rank, relabel that final tick with the newest date.
+    const last = ticks[ticks.length - 1]
+    if (last && slotOfRank(distinctDates - 1) === slotOfRank(rankOf.get(last.dateMs) ?? 0)) {
+      last.dateMs = uniqueSorted[distinctDates - 1]
+    }
+  }
+
+  return { scaleX, slotXs, ticks }
+}
 
 /**
  * Compute fixed positions for a set of lens nodes. Nodes are grouped into their
@@ -80,6 +187,7 @@ export function computeStratifiedLayout(
   const bandHeight = opts.bandHeight ?? DEFAULTS.bandHeight
   const width = opts.width ?? DEFAULTS.width
   const nodeGap = opts.nodeGap ?? DEFAULTS.nodeGap
+  const minSlotSpacing = opts.minSlotSpacing ?? DEFAULTS.minSlotSpacing
 
   const positions = new Map<string, { x: number; y: number }>()
 
@@ -89,27 +197,16 @@ export function computeStratifiedLayout(
   // clusters hard in time — a person's recent 2-hop subgraph inherits a handful
   // of recent meeting dates, so ~90% of nodes land in the newest ~5% of the
   // linear range and pile against the right edge, leaving most of the canvas (and
-  // the labelled bands) visibly empty. Mapping each DISTINCT timestamp to an
-  // evenly-spaced rank spreads that cluster across the full width while keeping
-  // the two properties the layout actually promises: equal dates share an x
-  // (vertical cross-band alignment) and older sorts left. Padding the domain
-  // keeps the newest slice off the exact edge so it never clips.
-  const EDGE_PAD = Math.min(48, width * 0.05)
-  const usableW = Math.max(1, width - EDGE_PAD * 2)
-  const uniqueSorted = Array.from(
-    new Set(nodes.filter((n) => n.dateMs != null).map((n) => n.dateMs as number))
-  ).sort((a, b) => a - b)
-  const rankOf = new Map<number, number>()
-  uniqueSorted.forEach((ms, i) => rankOf.set(ms, i))
-  const distinctDates = uniqueSorted.length
-  const scaleX = (ms: number | null): number => {
-    if (ms == null) return 0 // undated → far left (oldest), left of the padded domain
-    // All timestamps equal (or a single dated node): center them — a degenerate
-    // time axis carries no ordering signal, so a shared midpoint reads honestly.
-    if (distinctDates <= 1) return width / 2
-    const rank = rankOf.get(ms) ?? 0
-    return EDGE_PAD + (rank / (distinctDates - 1)) * usableW
-  }
+  // the labelled bands) visibly empty. The ordinal scale spreads that cluster
+  // across the full width while keeping the two properties the layout actually
+  // promises: equal dates share an x (vertical cross-band alignment) and older
+  // sorts left. The trade-off — distance no longer encodes duration — is
+  // disclosed by the labelled date ticks in {@link LayoutResult.ticks}.
+  const { scaleX, ticks } = buildTimeScale(
+    nodes.filter((n) => n.dateMs != null).map((n) => n.dateMs as number),
+    width,
+    minSlotSpacing
+  )
 
   // Only bands that actually hold nodes get a rect (so the picture isn't padded
   // with empty strata).
@@ -162,5 +259,5 @@ export function computeStratifiedLayout(
     maxX = width
   }
 
-  return { positions, bands, minX, maxX }
+  return { positions, bands, minX, maxX, ticks }
 }

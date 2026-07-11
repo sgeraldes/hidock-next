@@ -1,6 +1,6 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { Projects } from '../Projects'
 import { MemoryRouter } from 'react-router-dom'
 import { toast } from '@/components/ui/toaster'
@@ -62,6 +62,7 @@ global.window.electronAPI = {
     getById: mockGetById,
     create: mockCreate,
     delete: vi.fn().mockResolvedValue({ success: true }),
+    dismissDiscovered: vi.fn().mockResolvedValue({ success: true }),
     update: vi.fn().mockResolvedValue({ success: true, data: {} }),
     getNotes: vi.fn().mockResolvedValue({ success: true, data: [] }),
     getActionables: vi.fn().mockResolvedValue({ success: true, data: [] })
@@ -514,9 +515,54 @@ describe('Projects Page', () => {
     expect(screen.getByText('Weekly Sync')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Merge into another project/i })).toBeInTheDocument()
 
-    // Dismiss routes through the existing delete path (confirmation dialog).
+    // Dismiss opens its own confirm (durable-rejection copy, not plain delete)…
     fireEvent.click(screen.getByRole('button', { name: /^Dismiss$/i }))
-    expect(await screen.findByRole('alertdialog')).toHaveTextContent(/Delete Project/i)
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent(/Dismiss Discovered Project/i)
+    expect(dialog).toHaveTextContent(/won't re-create it/i)
+
+    // …and confirming routes through dismissDiscovered (tombstone + delete),
+    // NOT the plain delete path — that's what makes the dismissal durable.
+    fireEvent.click(within(dialog).getByRole('button', { name: /^Dismiss$/i }))
+    await waitFor(() =>
+      expect((global.window.electronAPI as any).projects.dismissDiscovered).toHaveBeenCalledWith('pr1')
+    )
+    expect((global.window.electronAPI as any).projects.delete).not.toHaveBeenCalled()
+  })
+
+  // MEDIUM-4: a hand-created empty project is NOT "discovered" — the review card
+  // is gated on provenance (linked meetings). Manual empties get a neutral state.
+  it('renders a neutral empty state (not "Discovered automatically") for a manual empty project', async () => {
+    ;(global.window.electronAPI as any).projects.getById = vi.fn().mockResolvedValue({
+      success: true,
+      data: {
+        project: {
+          id: 'pr1',
+          name: 'Project Alpha',
+          status: 'active',
+          createdAt: new Date().toISOString(),
+          description: null,
+          knowledgeIds: [],
+          personIds: []
+        },
+        meetings: [], // no provenance → manual project
+        topics: []
+      }
+    })
+
+    render(
+      <MemoryRouter>
+        <Projects />
+      </MemoryRouter>
+    )
+
+    await screen.findByText('Project Alpha')
+    fireEvent.click(screen.getByText('Project Alpha'))
+
+    expect(await screen.findByText('No items yet')).toBeInTheDocument()
+    expect(screen.getByText(/Add knowledge or link meetings/i)).toBeInTheDocument()
+    expect(screen.queryByText('Discovered automatically')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Dismiss$/i })).not.toBeInTheDocument()
   })
 
   it('offers a "View all in Library" affordance on the knowledge card', async () => {
