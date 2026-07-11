@@ -47,8 +47,11 @@ export function GlobalAssistant(): React.ReactElement | null {
   const location = useLocation()
   // Library owns its assistant (TriPaneLayout) in both placement modes, and the
   // dedicated /assistant page IS the assistant — a floating bubble there could
-  // open a second overlay assistant over the full one (audit F11).
-  if (location.pathname === '/library' || location.pathname === '/assistant') return null
+  // open a second overlay assistant over the full one (audit F11). Normalize the
+  // trailing slash so `/assistant/` (which the router still matches) is also
+  // suppressed — exact string equality alone misses it.
+  const path = location.pathname.replace(/\/+$/, '') || '/'
+  if (path === '/library' || path === '/assistant') return null
   return (
     <FloatingAssistant title="Assistant">
       <Suspense fallback={<LoadingSpinner message="Loading assistant..." />}>
