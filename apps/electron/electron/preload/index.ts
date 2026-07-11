@@ -464,6 +464,12 @@ export interface ElectronAPI {
     analyzeTimeline: (recordingId: string) => Promise<{
       sentimentSegments: Array<{ startSec: number; endSec: number; score: number }>
       eventMarkers: Array<{ id: string; kind: 'action' | 'decision'; atSec: number; label: string; refId: string }>
+      /** Present when part of the analysis failed — structured kind for retry policy. */
+      analysisError?: {
+        kind: 'auth' | 'quota' | 'rate-limit' | 'network' | 'invalid-input' | 'unknown'
+        retryAfterMs?: number
+        message?: string
+      }
     }>
     processQueue: () => Promise<boolean>
     getTranscriptionStatus: () => Promise<{ isProcessing: boolean; pendingCount: number; processingCount: number }>

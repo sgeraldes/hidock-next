@@ -51,9 +51,78 @@ export interface EventMarker {
   refId: string
 }
 
+/**
+ * Coarse, renderer-actionable classification of an analysis failure. Derived
+ * HERE (at the service/IPC boundary) where the raw provider error — with its
+ * structured status codes and canonical English tokens — is available, so the
+ * renderer never has to pattern-match possibly-localized message text.
+ */
+export type AnalysisErrorKind = 'auth' | 'quota' | 'rate-limit' | 'network' | 'invalid-input' | 'unknown'
+
+export interface AnalysisError {
+  kind: AnalysisErrorKind
+  /** For rate-limit errors that carry a retry-after hint, in milliseconds. */
+  retryAfterMs?: number
+  /** Raw message, for logging/diagnostics only — NOT for classification. */
+  message?: string
+}
+
+/**
+ * Map a raw provider/IPC error onto an AnalysisError. Prefers structured
+ * fields (numeric status / httpStatus / code) over message text; message
+ * tokens are only a fallback for providers that stringify everything.
+ * Unrecognized shapes are 'unknown' — consumers treat that conservatively
+ * (bounded auto-retries, then manual).
+ */
+export function classifyAnalysisError(err: unknown): AnalysisError {
+  const e = (err ?? {}) as { status?: unknown; httpStatus?: unknown; code?: unknown; message?: unknown }
+  const message = err instanceof Error ? err.message : typeof err === 'string' ? err : String(e.message ?? '')
+
+  const numeric = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
+  const statusFromText = message.match(/\b([45]\d\d)\b/)
+  const status =
+    numeric(e.status) ?? numeric(e.httpStatus) ?? numeric(e.code) ?? (statusFromText ? Number(statusFromText[1]) : undefined)
+
+  // Retry-after hint: "retry after 12s" / "Retry-After: 30" / "retry in 1.5 seconds"
+  let retryAfterMs: number | undefined
+  const retryMatch = message.match(/retry(?:-|\s+)?(?:after|in)[:\s]+(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|secs?|seconds?)?/i)
+  if (retryMatch) {
+    const value = parseFloat(retryMatch[1])
+    const unit = (retryMatch[2] || 's').toLowerCase()
+    retryAfterMs = Math.round(unit.startsWith('ms') || unit.startsWith('millisecond') ? value : value * 1000)
+  }
+
+  if (status === 401 || status === 403 || /\b(api.?key|credential\w*|unauthoriz\w*|forbidden|permission.?denied)\b/i.test(message)) {
+    return { kind: 'auth', message }
+  }
+  if (status === 429 || /\b(rate.?limit\w*|too many requests)\b/i.test(message)) {
+    return { kind: 'rate-limit', retryAfterMs, message }
+  }
+  if (/\b(quota|resource.?exhausted|billing)\b/i.test(message)) {
+    return { kind: 'quota', message }
+  }
+  if (status === 400 || /\binvalid\s+(argument|request|input)\b/i.test(message)) {
+    return { kind: 'invalid-input', message }
+  }
+  if (
+    (status !== undefined && status >= 500) ||
+    /\b(network|fetch failed|timed?\s?out|timeout|econn\w*|enotfound|eai_again|socket|offline|unavailable)\b/i.test(message)
+  ) {
+    return { kind: 'network', message }
+  }
+  return { kind: 'unknown', message }
+}
+
 export interface TimelineAnalysis {
   sentimentSegments: SentimentSegment[]
   eventMarkers: EventMarker[]
+  /**
+   * Present when part of the analysis FAILED (e.g. the Gemini sentiment pass) —
+   * classified where the raw error is available. Not persisted; consumers use
+   * it to drive their retry policy. Absent = the run completed (even when the
+   * honest result is empty).
+   */
+  analysisError?: AnalysisError
 }
 
 /** One coalesced window of speaker turns, ready to be scored. */
@@ -199,6 +268,12 @@ export interface SentimentOptions {
   targetWindowSec?: number
   /** Inject a scorer (tests). Defaults to the Gemini scorer. */
   scoreWindows?: WindowScorer
+  /**
+   * Invoked with the RAW scorer error when sentiment scoring fails (the series
+   * is then omitted). Lets analyzeTimeline classify the failure while this
+   * function keeps its non-throwing contract.
+   */
+  onError?: (err: unknown) => void
 }
 
 /**
@@ -219,6 +294,7 @@ export async function deriveSentimentSegments(
     scores = await scorer(windows)
   } catch (e) {
     console.warn('[Timeline] sentiment scoring failed:', e instanceof Error ? e.message : e)
+    opts.onError?.(e)
     return []
   }
 
@@ -589,7 +665,18 @@ export async function analyzeTimeline(
   const turns = parseSpeakerTurns(row.speakers)
 
   onProgress?.({ stage: 'sentiment', progress: 10 })
-  const sentimentSegments = await deriveSentimentSegments(turns, sentimentOpts)
+  // Capture + classify a scorer failure (deriveSentimentSegments itself never
+  // throws) so consumers get a structured errorKind instead of guessing from
+  // message text. The caller's own onError, if any, still runs.
+  let analysisError: AnalysisError | undefined
+  const callerOnError = sentimentOpts?.onError
+  const sentimentSegments = await deriveSentimentSegments(turns, {
+    ...sentimentOpts,
+    onError: (err) => {
+      analysisError = classifyAnalysisError(err)
+      callerOnError?.(err)
+    }
+  })
 
   onProgress?.({ stage: 'markers', progress: 70 })
   const items = getTimelineItemsForRecording(id)
@@ -602,7 +689,7 @@ export async function analyzeTimeline(
   ])
 
   onProgress?.({ stage: 'complete', progress: 100 })
-  return { sentimentSegments, eventMarkers }
+  return analysisError ? { sentimentSegments, eventMarkers, analysisError } : { sentimentSegments, eventMarkers }
 }
 
 function parseJsonArray<T>(json: string | null | undefined): T[] {
