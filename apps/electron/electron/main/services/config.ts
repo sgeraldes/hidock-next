@@ -109,6 +109,14 @@ export interface AppConfig {
     vibevoiceAttn: string
     autoTranscribe: boolean
     language: string
+    // F16/spec-001 kill-switch: gates the content-based VALUE classification
+    // that rides the post-transcription analysis call (item-9 prompt append +
+    // the applyCaptureValueClassification write/emit). Default true. When
+    // false, the analysis prompt is byte-identical to pre-F16 behavior and no
+    // value write/emit occurs — existing captures can still be classified
+    // later via the standalone backfill (separate complete() call, no
+    // summary-call blast radius). See phase-1-architecture-review.md A1.
+    valueClassificationEnabled: boolean
   }
   embeddings: {
     provider: 'ollama'
@@ -181,7 +189,8 @@ const DEFAULT_CONFIG: AppConfig = {
     vibevoiceDevice: process.env.ASR_DEVICE || 'cuda:0',
     vibevoiceAttn: process.env.VIBEVOICE_ATTN || 'sdpa', // VibeVoice-ASR supports neither flash_attention_2 (not built on Windows) nor flex_attention (unsupported arch); both silently fall back to sdpa, so use it directly
     autoTranscribe: true,
-    language: 'es'
+    language: 'es',
+    valueClassificationEnabled: true
   },
   embeddings: {
     provider: 'ollama',
