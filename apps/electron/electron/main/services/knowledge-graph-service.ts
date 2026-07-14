@@ -324,15 +324,20 @@ export async function ingestFromFolder(folderPath: string): Promise<IngestResult
       }
 
       const extraction = await extractGraphFromTranscript(content, meta, llm)
-      ingestExtraction(store, extraction, meta, {
-        now: new Date().toISOString(),
-        resolvePerson: makePersonResolver(),
-      })
+      // Atomic for the same reason as ingestFromDbTranscripts above: a
+      // mid-ingest failure must not half-commit nodes/edges without the
+      // marker, or the retry inflates edge weights.
+      runInTransaction(() => {
+        ingestExtraction(store, extraction, meta, {
+          now: new Date().toISOString(),
+          resolvePerson: makePersonResolver(),
+        })
 
-      run(
-        'INSERT OR IGNORE INTO graph_ingested_transcripts (transcript_id, ingested_at) VALUES (?, ?)',
-        [transcriptId, new Date().toISOString()]
-      )
+        run(
+          'INSERT OR IGNORE INTO graph_ingested_transcripts (transcript_id, ingested_at) VALUES (?, ?)',
+          [transcriptId, new Date().toISOString()]
+        )
+      })
       result.ingested++
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
