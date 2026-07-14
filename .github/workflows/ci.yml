@@ -26,24 +26,24 @@ jobs:
           apps/electron/package-lock.json
           packages/*/package-lock.json
 
-    # file:-linked @hidock/* packages. --ignore-scripts avoids npm running a
-    # linked sibling's `prepare` (tsup) before that sibling has its devDeps
-    # (connectors-slack -> file:../connectors). npm rebuild restores the
-    # skipped native install scripts (better-sqlite3 Node-ABI copy in
-    # packages/database, usb prebuilds). Alphabetical build order already
-    # places connectors before connectors-slack.
-    - name: Install workspace packages
+    # file:-linked @hidock/* packages in dependency-first order (connectors
+    # before connectors-slack, database before knowledge-graph; a packages/*/
+    # glob sorts "connectors-slack/" BEFORE "connectors/"). --ignore-scripts
+    # stops npm running a linked sibling's `prepare` (tsup) before that
+    # sibling has its devDeps; a bare `npm rebuild` would re-trigger the same
+    # linked prepare, so only better-sqlite3's skipped native install script
+    # is restored, by name. dist/ is not committed — built explicitly last.
+    - name: Install and build workspace packages
       run: |
-        for d in packages/*/; do
-          echo "== npm ci: $d"
-          (cd "$d" && npm ci --ignore-scripts && npm rebuild)
+        PKGS="ai-providers audio-capture calendar-sync connectors connectors-slack database jensen-protocol knowledge-graph storage-controller transcription"
+        for n in $PKGS; do
+          echo "== npm ci: packages/$n"
+          (cd "packages/$n" && npm ci --ignore-scripts)
         done
-
-    - name: Build workspace packages
-      run: |
-        for d in packages/*/; do
-          echo "== build: $d"
-          (cd "$d" && npm run build --if-present)
+        (cd packages/database && npm rebuild better-sqlite3)
+        for n in $PKGS; do
+          echo "== build: packages/$n"
+          (cd "packages/$n" && npm run build --if-present)
         done
 
     - name: Install electron app dependencies
