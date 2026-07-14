@@ -19,15 +19,24 @@
  *    identically).
  *  - getExcludedRecordingIds(): now the UNION of privacy exclusions
  *    (personal/soft-deleted recordings) and value exclusions.
- *  - Graph ingest gate (ingestFromDbTranscripts): a rated-garbage transcript
- *    is skipped and never marked ingested; upgrading the rating afterwards
- *    lets a later call ingest it (reversibility via the un-marked marker
- *    table).
- *  - REQUIRED race test (Codex adversarial review AR-1): eligibility is
- *    decided with a FRESH point-read inside the same transaction as the
- *    persistence write, not from the once-per-run pre-filter Set — a rating
- *    committed between the (mocked) LLM extraction call resolving and the
- *    transactional persist step is honored in BOTH directions.
+ *  - Graph ingest gate (ingestFromDbTranscripts), TWO-LAYER per AR-1: a
+ *    rated-garbage transcript is skipped by the once-per-run pre-filter
+ *    BEFORE any LLM extraction call (layer 1 — the cost bound: skipped rows
+ *    are never marked, so without the pre-filter every ingest pass would
+ *    re-extract them forever), and never marked ingested; upgrading the
+ *    rating afterwards lets the next run ingest it (reversibility via the
+ *    un-marked marker table). Includes a cost regression test (two
+ *    consecutive runs over a still-excluded transcript => zero extractor
+ *    invocations).
+ *  - REQUIRED race test (Codex adversarial review AR-1, layer 2): FINAL
+ *    eligibility is decided with a FRESH point-read inside the same
+ *    transaction as the persistence write — a garbage rating committed
+ *    between the (mocked) LLM extraction call resolving and the
+ *    transactional persist step blocks persistence (no rows, no marker),
+ *    and the row is then pre-filtered on the next run (cost bounded to that
+ *    one in-flight extraction). The upgrade direction rides the pre-filter:
+ *    excluded at run start => skipped without extraction; upgraded => the
+ *    next run ingests.
  *  - Actionable-gate predicate: isValueExcludedRecording() is the exact
  *    predicate transcription.ts's inline actionable-detection block gates on.
  */
@@ -268,7 +277,7 @@ describe('getExcludedRecordingIds() — privacy UNION value exclusions', () => {
 // =============================================================================
 
 describe('ingestFromDbTranscripts() — value gate', () => {
-  it('skips a rated-garbage transcript, writes NO ingest marker, and creates no graph nodes', async () => {
+  it('skips a rated-garbage transcript WITHOUT an LLM call, writes NO ingest marker, and creates no graph nodes', async () => {
     seedRecording('r-gate1')
     seedCapture('cap-gate1', 'r-gate1', 'garbage')
     seedTranscript('tx-gate1', 'r-gate1', 'Alice discussed TypeScript.')
@@ -279,6 +288,8 @@ describe('ingestFromDbTranscripts() — value gate', () => {
     expect(result.skipped).toBe(1)
     expect(result.errors).toHaveLength(0)
     expect(ingestMarker('tx-gate1')).toBeUndefined()
+    // Layer-1 pre-filter: an excluded row must never reach the extractor.
+    expect(complete).not.toHaveBeenCalled()
 
     const store = getKnowledgeGraphStore()
     expect(store.findNodes({ type: 'meeting', label: 'r-gate1' })).toHaveLength(0)
@@ -293,6 +304,8 @@ describe('ingestFromDbTranscripts() — value gate', () => {
     expect(r1.skipped).toBe(1)
     expect(r1.ingested).toBe(0)
     expect(ingestMarker('tx-gate2')).toBeUndefined()
+    // Skipped by the pre-filter — no LLM cost while excluded.
+    expect(complete).not.toHaveBeenCalled()
 
     // Upgrade the rating — the transcript was never marked ingested, so it is
     // still eligible; a later call (here: a second call to the same
@@ -302,6 +315,7 @@ describe('ingestFromDbTranscripts() — value gate', () => {
     const r2 = await ingestFromDbTranscripts()
     expect(r2.ingested).toBe(1)
     expect(r2.skipped).toBe(0)
+    expect(complete).toHaveBeenCalledTimes(1)
     expect(ingestMarker('tx-gate2')).toBeDefined()
 
     const store = getKnowledgeGraphStore()
@@ -318,18 +332,49 @@ describe('ingestFromDbTranscripts() — value gate', () => {
     expect(result.skipped).toBe(0)
     expect(ingestMarker('tx-gate3')).toBeDefined()
   })
+
+  // Cost regression (fix round): a skipped row gets no marker, so the ONLY
+  // thing standing between an excluded transcript and a full LLM extraction
+  // on EVERY ingest pass (60s-debounced transcript-ready, boot ingest,
+  // manual) is the layer-1 pre-filter. Two consecutive runs over a
+  // still-excluded transcript must invoke the extractor ZERO times total.
+  it('never invokes the extractor for a still-excluded transcript across consecutive ingest runs', async () => {
+    seedRecording('r-gate4')
+    seedCapture('cap-gate4', 'r-gate4', 'low-value')
+    seedTranscript('tx-gate4', 'r-gate4', 'Ambient kitchen chatter.')
+
+    const r1 = await ingestFromDbTranscripts()
+    expect(r1.ingested).toBe(0)
+    expect(r1.skipped).toBe(1)
+
+    const r2 = await ingestFromDbTranscripts()
+    expect(r2.ingested).toBe(0)
+    expect(r2.skipped).toBe(1)
+
+    expect(complete).toHaveBeenCalledTimes(0)
+    expect(ingestMarker('tx-gate4')).toBeUndefined()
+  })
 })
 
 // =============================================================================
-// REQUIRED race test (Codex adversarial review AR-1) — pause-after-extraction
-// harness. The mocked complete() call stands in for "the LLM extraction call
-// resolving": performing a DB write inside its resolution and THEN resolving
+// REQUIRED race test (Codex adversarial review AR-1) — two-layer semantics.
+//
+// Pollution direction (pause-after-extraction harness): a row NOT excluded at
+// run start passes the layer-1 pre-filter and gets extracted; the mocked
+// complete() call stands in for "the LLM extraction call resolving" —
+// performing a DB write inside its resolution and THEN resolving
 // deterministically simulates a rating committed in the window between
-// extraction finishing and the transactional persist step, since the real
-// implementation has no other await between them.
+// extraction finishing and the transactional persist step (the real
+// implementation has no other await between them). Layer 2's fresh point-read
+// must block persistence.
+//
+// Upgrade direction (clarified semantics, fix round): a row excluded at run
+// start never reaches the extractor at all (layer-1 pre-filter, zero LLM
+// cost) and is never marked — so reversibility happens via the NEXT ingest
+// pass, whose pre-filter snapshot no longer contains it.
 // =============================================================================
 
-describe('ingestFromDbTranscripts() — AR-1 race: fresh point-read at persistence time', () => {
+describe('ingestFromDbTranscripts() — AR-1 race: two-layer eligibility', () => {
   it('a garbage rating committed between extraction and persistence blocks ingestion (no rows, no marker)', async () => {
     seedRecording('r-race1')
     seedCapture('cap-race1', 'r-race1', 'unrated') // starts NOT excluded
@@ -337,13 +382,16 @@ describe('ingestFromDbTranscripts() — AR-1 race: fresh point-read at persisten
 
     ;(complete as any).mockImplementationOnce(async () => {
       // Simulates a rating write landing WHILE this row's extraction call was
-      // still in flight (i.e. after the pre-filter/row-fetch, before persist).
+      // still in flight (i.e. after the pre-filter snapshot, before persist).
       dbRun(`UPDATE knowledge_captures SET quality_rating = 'garbage' WHERE id = 'cap-race1'`)
       return FAKE_JSON
     })
 
     const result = await ingestFromDbTranscripts()
 
+    // The extraction ran (it passed the run-start pre-filter)...
+    expect(complete).toHaveBeenCalledTimes(1)
+    // ...but layer 2's fresh point-read blocked persistence.
     expect(result.ingested).toBe(0)
     expect(result.skipped).toBe(1)
     expect(result.errors).toHaveLength(0)
@@ -351,24 +399,37 @@ describe('ingestFromDbTranscripts() — AR-1 race: fresh point-read at persisten
 
     const store = getKnowledgeGraphStore()
     expect(store.findNodes({ type: 'meeting', label: 'r-race1' })).toHaveLength(0)
+
+    // Cost bound: the rating is now committed, so the NEXT run's pre-filter
+    // snapshot contains it — the one extraction above is the last one paid.
+    const again = await ingestFromDbTranscripts()
+    expect(again.skipped).toBe(1)
+    expect(complete).toHaveBeenCalledTimes(1)
   })
 
-  it('a valuable flip committed between extraction and persistence still lets it ingest', async () => {
+  it('a recording excluded at run start is skipped without extraction; after an upgrade the next run ingests it', async () => {
     seedRecording('r-race2')
-    seedCapture('cap-race2', 'r-race2', 'garbage') // starts excluded
+    seedCapture('cap-race2', 'r-race2', 'garbage') // excluded at run start
     seedTranscript('tx-race2', 'r-race2', 'Some real meeting content.')
 
-    ;(complete as any).mockImplementationOnce(async () => {
-      // Reverses the exclusion while this row's extraction call was in flight.
-      dbRun(`UPDATE knowledge_captures SET quality_rating = 'valuable' WHERE id = 'cap-race2'`)
-      return FAKE_JSON
-    })
+    // Run 1: the layer-1 pre-filter skips it BEFORE any LLM call.
+    const r1 = await ingestFromDbTranscripts()
+    expect(r1.ingested).toBe(0)
+    expect(r1.skipped).toBe(1)
+    expect(complete).not.toHaveBeenCalled()
+    expect(ingestMarker('tx-race2')).toBeUndefined()
 
-    const result = await ingestFromDbTranscripts()
+    // Rating upgraded (user marks it valuable in the Library).
+    dbRun(`UPDATE knowledge_captures SET quality_rating = 'valuable' WHERE id = 'cap-race2'`)
 
-    expect(result.ingested).toBe(1)
-    expect(result.skipped).toBe(0)
-    expect(result.errors).toHaveLength(0)
+    // Run 2 (the next debounced/boot/manual pass): no marker was written, so
+    // it is still eligible — and the fresh pre-filter snapshot no longer
+    // excludes it. It ingests and gets marked (reversibility via next pass).
+    const r2 = await ingestFromDbTranscripts()
+    expect(r2.ingested).toBe(1)
+    expect(r2.skipped).toBe(0)
+    expect(r2.errors).toHaveLength(0)
+    expect(complete).toHaveBeenCalledTimes(1)
     expect(ingestMarker('tx-race2')).toBeDefined()
 
     const store = getKnowledgeGraphStore()

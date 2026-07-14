@@ -52,6 +52,7 @@ import {
   runInTransaction,
   queryAll,
   queryOne,
+  getValueExcludedRecordingIds,
   isValueExcludedRecording,
   getContactById,
   getContactByName,
@@ -185,7 +186,27 @@ export async function ingestFromDbTranscripts(): Promise<IngestResult> {
 
   const result: IngestResult = { ingested: 0, skipped: 0, errors: [] }
 
+  // F16/spec-002 (AR-1, layer 1 of 2): cheap once-per-run PRE-FILTER. A
+  // transcript whose recording is already value-excluded at run start is
+  // skipped BEFORE the LLM extraction call — no LLM cost, no marker (so a
+  // later rating upgrade re-ingests it on a future pass). This snapshot is
+  // what bounds the cost: skipped rows are never marked, so without this
+  // pre-filter every ingest pass (60s-debounced transcript-ready, boot,
+  // manual) would re-run the full extraction for every excluded transcript,
+  // forever. The snapshot may go stale across the loop's awaits — that is
+  // layer 2's job, not this one's.
+  const valueExcluded = getValueExcludedRecordingIds()
+
   for (const row of rows) {
+    // Pre-filter (layer 1): excluded at run start — skip without extracting.
+    if (valueExcluded.has(row.recording_id)) {
+      result.skipped++
+      console.log(
+        `[KnowledgeGraph] Skipped value-excluded recording ${row.recording_id} (transcript ${row.id})`
+      )
+      continue
+    }
+
     // Check if already ingested (incremental)
     const already = queryOne<{ transcript_id: string }>(
       'SELECT transcript_id FROM graph_ingested_transcripts WHERE transcript_id = ?',
@@ -207,16 +228,18 @@ export async function ingestFromDbTranscripts(): Promise<IngestResult> {
       // DB transaction open.
       const extraction = await extractGraphFromTranscript(row.full_text, meta, llm)
 
-      // F16/spec-002 (AR-1): eligibility is decided with a FRESH point-read at
-      // persistence time, inside the SAME transaction as the graph writes +
-      // ingested-marker insert — never from a Set computed once at the top of
-      // this (potentially long-running, async) loop. A rating written any
-      // time up to this instant — including while THIS row's extraction call
-      // was in flight — is honored: an excluded recording is skipped WITHOUT
-      // writing the marker (so a later rating upgrade re-ingests naturally on
-      // a future call), and a recording whose rating was upgraded mid-run
-      // still ingests. Wrapping ingest+marker in one transaction also makes
-      // them atomic: a mid-ingest failure rolls back both.
+      // F16/spec-002 (AR-1, layer 2 of 2): FINAL eligibility is decided with
+      // a FRESH point-read at persistence time, inside the SAME transaction
+      // as the graph writes + ingested-marker insert — the pre-filter Set
+      // above is only a run-start snapshot and can go stale across this
+      // loop's awaits. A rating written any time up to this instant —
+      // including while THIS row's extraction call was in flight — is
+      // honored: an excluded recording is skipped WITHOUT writing the marker
+      // (its rating is then in the NEXT run's pre-filter snapshot, so the
+      // one extraction this run paid for is the last), and a recording whose
+      // rating cleared mid-run still ingests. Wrapping ingest+marker in one
+      // transaction also makes them atomic: a mid-ingest failure rolls back
+      // both.
       runInTransaction(() => {
         if (isValueExcludedRecording(row.recording_id)) {
           result.skipped++
