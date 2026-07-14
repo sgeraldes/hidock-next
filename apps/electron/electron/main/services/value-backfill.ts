@@ -160,15 +160,24 @@ let cancelled = false
 // transcript, is currently unrated, was NOT explicitly cleared to unrated by
 // the user (COALESCE(quality_source,'')!='user' — the write guard already
 // blocks that downgrade, but excluding it here avoids spending an LLM call
-// re-judging it), is not soft-deleted, is not personal, and its marker (if
-// any) is neither 'classified' nor a capped-out 'failed'. A leftover
-// 'in_progress' row is naturally NOT excluded here — only a prior (necessarily
+// re-judging it), is not soft-deleted (NEITHER the capture NOR its recording —
+// CX-T3-1: a soft-deleted recording's transcript must never reach the external
+// provider), is not personal, and its marker (if any) is neither 'classified'
+// nor capped out at MAX_DURABLE_ATTEMPTS. The attempts cap applies to BOTH
+// 'failed' AND stale 'in_progress' rows (AR-3's eligibility formula, Opus
+// review M1): reserve re-increments attempts on every recovery of a crashed
+// 'in_progress' row, so without the cap a capture that hard-crashes the
+// process during the LLM call would be retried unboundedly. Below the cap, a
+// leftover 'in_progress' row IS re-eligible — only a prior (necessarily
 // crashed/killed) run could have left one, since concurrent runs are
-// impossible (the `running` guard), so it is correctly re-eligible.
+// impossible (the `running` guard + Electron single-instance lock; see the
+// run_id note at startValueBackfill).
 // ---------------------------------------------------------------------------
 
 function getEligibleCaptureIds(order: 'newest' | 'oldest'): string[] {
   const orderClause = order === 'oldest' ? 'ASC' : 'DESC'
+  // The transcripts JOIN cannot fan a capture out into duplicate rows:
+  // transcripts.recording_id is NOT NULL UNIQUE (one transcript per recording).
   const rows = queryAll<{ id: string }>(
     `SELECT kc.id AS id
        FROM knowledge_captures kc
@@ -178,17 +187,43 @@ function getEligibleCaptureIds(order: 'newest' | 'oldest'): string[] {
         AND kc.quality_rating = 'unrated'
         AND COALESCE(kc.quality_source, '') != 'user'
         AND COALESCE(r.personal, 0) = 0
+        AND r.deleted_at IS NULL
         AND t.full_text IS NOT NULL
         AND TRIM(t.full_text) != ''
         AND NOT EXISTS (
           SELECT 1 FROM value_backfill_state vbs
            WHERE vbs.capture_id = kc.id
-             AND (vbs.status = 'classified' OR (vbs.status = 'failed' AND vbs.attempts >= ?))
+             AND (vbs.status = 'classified'
+                  OR (vbs.status IN ('failed', 'in_progress') AND vbs.attempts >= ?))
         )
       ORDER BY kc.captured_at ${orderClause}`,
     [MAX_DURABLE_ATTEMPTS]
   )
   return rows.map((r) => r.id)
+}
+
+/**
+ * Fresh per-item privacy check (CX-T3-2), run immediately BEFORE the RESERVE
+ * + LLM call: the eligible-id list is a snapshot taken at run start, so a
+ * recording marked personal or soft-deleted (or a capture soft-deleted /
+ * hard-purged) WHILE the run is in flight would otherwise still be sent to
+ * the external provider minutes later. A blocked item is skipped entirely —
+ * no reserve, no attempt consumed, no marker — so if the flag is later
+ * reverted, a future run picks the capture up with its counter untouched.
+ */
+function isCapturePrivacyBlocked(captureId: string): boolean {
+  const row = queryOne<{ personal: number; r_deleted: string | null; kc_deleted: string | null }>(
+    `SELECT COALESCE(r.personal, 0) AS personal,
+            r.deleted_at AS r_deleted,
+            kc.deleted_at AS kc_deleted
+       FROM knowledge_captures kc
+       LEFT JOIN recordings r ON r.id = kc.source_recording_id
+      WHERE kc.id = ?`,
+    [captureId]
+  )
+  // Capture vanished mid-run (hard purge) — treat as blocked.
+  if (!row) return true
+  return row.personal === 1 || row.r_deleted !== null || row.kc_deleted !== null
 }
 
 // ---------------------------------------------------------------------------
@@ -323,6 +358,14 @@ export function _getYieldCountForTests(): number {
 type ProcessOutcome = 'marked' | 'unmarked' | 'skipped' | 'failed'
 
 async function processOneCapture(captureId: string, runId: string): Promise<ProcessOutcome> {
+  // CX-T3-2: fresh privacy read BEFORE any durable write or LLM call — the
+  // eligible-id snapshot can be minutes stale by the time this item's turn
+  // comes. Blocked ⇒ skip entirely: no reserve, no attempt consumed, no marker.
+  if (isCapturePrivacyBlocked(captureId)) {
+    console.log(`[ValueBackfill] capture=${captureId} privacy-blocked mid-run (personal/deleted) — skipped, no reserve`)
+    return 'skipped'
+  }
+
   reserveAttempt(captureId, runId)
 
   let raw: RawClassificationResult
@@ -340,13 +383,35 @@ async function processOneCapture(captureId: string, runId: string): Promise<Proc
   // (never-downgrade / confidence floor), in which case its `rating` already
   // reports the row's real current state, not our intended target.
   let resultRating: string = raw.skipped ? raw.currentRating : 'unrated'
-  runInTransaction(() => {
-    if (!raw.skipped) {
-      const applied = applyCaptureValueClassification(captureId, raw.classification)
-      resultRating = applied.rating
+  try {
+    runInTransaction(() => {
+      if (!raw.skipped) {
+        const applied = applyCaptureValueClassification(captureId, raw.classification)
+        resultRating = applied.rating
+      }
+      finalizeClassifiedInTransaction(captureId, runId, resultRating)
+    })
+  } catch (e) {
+    // OP-L1: an environmental DB failure (disk full, locked, ...) in the
+    // finalize transaction parks THIS item and lets the run continue — one
+    // bad write must not abort a long batch. The rolled-back txn left the
+    // rating untouched, so parking is honest.
+    console.warn(
+      `[ValueBackfill] finalize failed for capture=${captureId}:`,
+      e instanceof Error ? e.message : e
+    )
+    try {
+      finalizeFailure(captureId, runId, e)
+    } catch (parkError) {
+      // Even the park write failed — the row stays 'in_progress' (from
+      // reserve) and the next run's stale-in_progress recovery picks it up.
+      console.warn(
+        `[ValueBackfill] could not park capture=${captureId} (row stays in_progress for next-run recovery):`,
+        parkError instanceof Error ? parkError.message : parkError
+      )
     }
-    finalizeClassifiedInTransaction(captureId, runId, resultRating)
-  })
+    return 'failed'
+  }
 
   if (raw.skipped) return 'skipped'
   return resultRating === 'low-value' || resultRating === 'garbage' ? 'marked' : 'unmarked'
@@ -378,26 +443,41 @@ export async function startValueBackfill(opts?: { order?: 'newest' | 'oldest' })
   running = true
   cancelled = false
 
-  const providerConfig = getProviderConfigFromSettings()
-  if (!providerConfig) {
-    running = false
-    return { started: false, reason: 'no-provider' }
-  }
-
-  _ensureValueBackfillTable()
-
-  const order = opts?.order ?? 'newest'
-  const runId = randomUUID()
-  const eligibleIds = getEligibleCaptureIds(order)
-  const total = eligibleIds.length
-
+  // CX-T3-5: EVERYTHING after the flag claim runs inside this try/finally —
+  // a throw anywhere (the eligibility query, table-ensure, an unexpected
+  // reserve failure mid-loop) must never leave `running=true` orphaned, which
+  // would report 'already-running' until app restart.
   let processed = 0
   let marked = 0
   let failed = 0
-  let lastProgressAt = 0
-  lastCallStartedAt = 0
+  let total = 0
+  let loopStarted = false
 
   try {
+    const providerConfig = getProviderConfigFromSettings()
+    if (!providerConfig) {
+      return { started: false, reason: 'no-provider' }
+    }
+
+    _ensureValueBackfillTable()
+
+    const order = opts?.order ?? 'newest'
+    // run_id is stamped on every marker write for diagnostics (which run last
+    // touched a row). Recovery does NOT compare it (AR-3's literal
+    // `run_id != current` predicate): the single-run invariant — this module's
+    // `running` flag plus Electron's single-instance lock — guarantees any
+    // 'in_progress' row observed at run start belongs to a dead run, so every
+    // one is stale by construction. The unbounded-retry risk that predicate
+    // also guarded against is closed by the attempts cap in
+    // getEligibleCaptureIds instead (Opus review M1/L3).
+    const runId = randomUUID()
+    const eligibleIds = getEligibleCaptureIds(order)
+    total = eligibleIds.length
+
+    let lastProgressAt = 0
+    lastCallStartedAt = 0
+    loopStarted = true
+
     outer: for (let i = 0; i < eligibleIds.length; i += CHUNK_SIZE) {
       const chunk = eligibleIds.slice(i, i + CHUNK_SIZE)
       for (const captureId of chunk) {
@@ -418,12 +498,18 @@ export async function startValueBackfill(opts?: { order?: 'newest' | 'oldest' })
       // than one chunk's worth of (already-awaited) work at a time.
       await yieldToEventLoop()
     }
+
+    return { started: true, total }
   } finally {
     running = false
-    notifyRenderer('value:backfill-complete', { processed, total, marked, failed, cancelled })
+    // Only a run whose processing loop actually started emits a completion
+    // event — a setup failure (no-provider, eligibility-query throw) returns/
+    // throws without one, and the Settings card resets its own local state
+    // from the start() response instead.
+    if (loopStarted) {
+      notifyRenderer('value:backfill-complete', { processed, total, marked, failed, cancelled })
+    }
   }
-
-  return { started: true, total }
 }
 
 /** Sets the cancel flag; the loop checks it between items and stops cleanly
@@ -448,20 +534,32 @@ export interface ValueBackfillStatus {
  * Derives status from the marker table (survives a restart — a run cannot,
  * since `running` is in-memory only, but the user re-triggering resumes from
  * exactly where the table left off) + the in-memory `running` flag.
- *  - total: captures ever in scope for this backfill — currently-unrated
- *    eligible captures PLUS anything the backfill has already touched
- *    (tracked in value_backfill_state), so the denominator does not shrink
- *    every time an item gets classified into low-value/garbage.
+ *
+ * ALL aggregates derive from ONE scoped capture set (CX-T3-4/OP-L2): the same
+ * WHERE clause defines the denominator (total) AND the numerators
+ * (done/marked/failed), so a capture that leaves the scope after being
+ * classified — e.g. the user re-rates it, stamping quality_source='user', or
+ * its recording is soft-deleted/marked personal — drops out of every count
+ * together. `done` can therefore never exceed `total`.
+ *  - total: captures in scope — currently-unrated eligible captures PLUS
+ *    anything the backfill has already touched (still-in-scope), so the
+ *    denominator does not shrink as items get classified low-value/garbage.
  *  - done: classified count. marked: classified AND low-value/garbage.
- *  - failed: PARKED count only (attempts >= cap) — a merely-retry-eligible
- *    'failed' row is still counted in `remaining`, not `failed`, since a
- *    future run will pick it back up.
+ *  - failed: PARKED count only (attempts >= cap, whether 'failed' or a
+ *    crashed-at-cap 'in_progress' — mirrors the eligibility predicate) — a
+ *    merely-retry-eligible row is counted in `remaining`, not `failed`,
+ *    since a future run will pick it back up.
  */
 export function getValueBackfillStatus(): ValueBackfillStatus {
   _ensureValueBackfillTable()
 
-  const totalRow = queryOne<{ c: number }>(
-    `SELECT COUNT(DISTINCT kc.id) AS c
+  const row = queryOne<{ total: number; done: number; marked: number; failed: number }>(
+    `SELECT COUNT(DISTINCT kc.id) AS total,
+            COUNT(DISTINCT CASE WHEN vbs.status = 'classified' THEN kc.id END) AS done,
+            COUNT(DISTINCT CASE WHEN vbs.status = 'classified'
+                                 AND vbs.result_rating IN ('low-value', 'garbage') THEN kc.id END) AS marked,
+            COUNT(DISTINCT CASE WHEN vbs.status IN ('failed', 'in_progress')
+                                 AND vbs.attempts >= ? THEN kc.id END) AS failed
        FROM knowledge_captures kc
        JOIN transcripts t ON t.recording_id = kc.source_recording_id
        LEFT JOIN recordings r ON r.id = kc.source_recording_id
@@ -469,23 +567,17 @@ export function getValueBackfillStatus(): ValueBackfillStatus {
       WHERE kc.deleted_at IS NULL
         AND COALESCE(kc.quality_source, '') != 'user'
         AND COALESCE(r.personal, 0) = 0
+        AND r.deleted_at IS NULL
         AND t.full_text IS NOT NULL
         AND TRIM(t.full_text) != ''
-        AND (kc.quality_rating = 'unrated' OR vbs.capture_id IS NOT NULL)`
-  )
-  const doneRow = queryOne<{ c: number }>(`SELECT COUNT(*) AS c FROM value_backfill_state WHERE status = 'classified'`)
-  const markedRow = queryOne<{ c: number }>(
-    `SELECT COUNT(*) AS c FROM value_backfill_state WHERE status = 'classified' AND result_rating IN ('low-value', 'garbage')`
-  )
-  const failedRow = queryOne<{ c: number }>(
-    `SELECT COUNT(*) AS c FROM value_backfill_state WHERE status = 'failed' AND attempts >= ?`,
+        AND (kc.quality_rating = 'unrated' OR vbs.capture_id IS NOT NULL)`,
     [MAX_DURABLE_ATTEMPTS]
   )
 
-  const total = totalRow?.c ?? 0
-  const done = doneRow?.c ?? 0
-  const failed = failedRow?.c ?? 0
+  const total = row?.total ?? 0
+  const done = row?.done ?? 0
+  const failed = row?.failed ?? 0
   const remaining = Math.max(0, total - done - failed)
 
-  return { running, total, done, marked: markedRow?.c ?? 0, failed, remaining }
+  return { running, total, done, marked: row?.marked ?? 0, failed, remaining }
 }

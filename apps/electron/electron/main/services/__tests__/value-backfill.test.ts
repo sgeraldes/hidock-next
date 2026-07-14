@@ -31,13 +31,27 @@ vi.mock('../file-storage', () => ({
 
 // classifyCaptureValueRaw is FULLY replaced (not called through) — its own
 // dependencies (complete(), getProviderConfigFromSettings as used INSIDE it)
-// never execute. applyCaptureValueClassification is kept REAL.
+// never execute. applyCaptureValueClassification routes through a seam that
+// DEFAULTS to the real implementation (set in beforeEach — the guarded write
+// stays genuinely exercised) but can be overridden per test: the OP-L1
+// finalize-throw test injects an environmental DB failure that the real
+// function (whose body is fully try/caught) can never produce on its own.
 const classifyCaptureValueRawMock = vi.fn()
+const applyCaptureValueClassificationMock = vi.fn()
+// vi.hoisted: the mock factory runs during module-graph setup, BEFORE this
+// file's own body statements — a plain module-level `let` would still be in
+// its temporal dead zone when the factory assigns the captured actual.
+const applySeam = vi.hoisted(() => ({
+  actual: undefined as undefined | ((...args: unknown[]) => unknown)
+}))
 vi.mock('../value-classification', async () => {
   const actual = await vi.importActual<typeof import('../value-classification')>('../value-classification')
+  applySeam.actual = actual.applyCaptureValueClassification as (...args: unknown[]) => unknown
   return {
     ...actual,
-    classifyCaptureValueRaw: (...args: unknown[]) => classifyCaptureValueRawMock(...args)
+    classifyCaptureValueRaw: (...args: unknown[]) => classifyCaptureValueRawMock(...args),
+    applyCaptureValueClassification: (...args: unknown[]) =>
+      applyCaptureValueClassificationMock(...args)
   }
 })
 
@@ -216,6 +230,9 @@ describe('value-backfill', () => {
     seq = 0
     classifyCaptureValueRawMock.mockReset()
     classifyCaptureValueRawMock.mockImplementation(async () => successReply())
+    // Default: route the apply seam straight to the REAL implementation.
+    applyCaptureValueClassificationMock.mockReset()
+    applyCaptureValueClassificationMock.mockImplementation((...args: unknown[]) => applySeam.actual!(...args))
     getProviderConfigFromSettingsMock.mockReset()
     getProviderConfigFromSettingsMock.mockReturnValue({ provider: 'google', model: 'gemini-3.5-flash', apiKey: 'test-key' })
     mockConfig.transcription.valueClassificationMinConfidence = 0.6
@@ -268,6 +285,42 @@ describe('value-backfill', () => {
       expect(secondResult).toEqual({ started: false, reason: 'already-running' })
 
       await firstRun
+    })
+
+    // CX-T3-5: a setup failure (here: the eligibility query throwing) must
+    // reset the running guard — otherwise every later start reports
+    // 'already-running' until an app restart.
+    it('a setup failure resets the running guard so a later start succeeds (CX-T3-5)', async () => {
+      seedEligible('cap-1')
+
+      // Make the eligibility query throw: rename transcripts away. (ALTER
+      // RENAME is not intercepted by the mass-delete tripwire — same
+      // technique as T2's value-gates failure-path tests.)
+      run('ALTER TABLE transcripts RENAME TO transcripts_hidden')
+      try {
+        await expect(startValueBackfill()).rejects.toThrow(/no such table|transcripts/i)
+      } finally {
+        run('ALTER TABLE transcripts_hidden RENAME TO transcripts')
+      }
+
+      // The guard was released — this must NOT be 'already-running'.
+      const second = await startValueBackfill()
+      expect(second).toEqual({ started: true, total: 1 })
+      expect(getBackfillStateRow('cap-1')?.status).toBe('classified')
+    })
+
+    it('a setup failure emits NO completion event (nothing started)', async () => {
+      const { win, send } = FAKE_WINDOW_FACTORY()
+      setMainWindowForValueBackfill(win)
+
+      run('ALTER TABLE transcripts RENAME TO transcripts_hidden')
+      try {
+        await expect(startValueBackfill()).rejects.toThrow()
+      } finally {
+        run('ALTER TABLE transcripts_hidden RENAME TO transcripts')
+      }
+
+      expect(send.mock.calls.filter((c) => c[0] === 'value:backfill-complete')).toHaveLength(0)
     })
   })
 
@@ -354,6 +407,23 @@ describe('value-backfill', () => {
       const result = await startValueBackfill()
 
       expect(result.total).toBe(0)
+    })
+
+    // CX-T3-1: the capture's own deleted_at is not enough — a soft-deleted
+    // RECORDING's transcript must never reach the external provider either.
+    it('never selects a capture whose RECORDING is soft-deleted (CX-T3-1)', async () => {
+      const recId = 'rec-softdel'
+      seedRecording(recId)
+      run('UPDATE recordings SET deleted_at = ? WHERE id = ?', ['2026-01-02T00:00:00.000Z', recId])
+      seedTranscript(recId)
+      seedCapture('cap-softdel', recId) // capture itself NOT deleted
+
+      const result = await startValueBackfill()
+
+      expect(result.total).toBe(0)
+      expect(classifyCaptureValueRawMock).not.toHaveBeenCalled()
+      // The status denominator excludes it too (same scoped predicate).
+      expect(getValueBackfillStatus().total).toBe(0)
     })
 
     it('orders newest-first by default', async () => {
@@ -575,6 +645,38 @@ describe('value-backfill', () => {
       expect(getBackfillStateRow('cap-1')).toMatchObject({ status: 'failed', attempts: 3 })
     })
 
+    // OP-M1 (binding AR-3): the cap must govern stale in_progress rows too —
+    // reserve re-increments attempts on every recovery, so a capture that
+    // hard-crashes the process (SIGKILL / power loss) during the CALL window
+    // on every attempt would otherwise be retried unboundedly.
+    it('an in_progress row at the cap is PARKED — a crash-looping item is never re-billed (OP-M1)', async () => {
+      seedEligible('cap-1')
+      seedBackfillState('cap-1', { status: 'in_progress', attempts: 3, runId: 'crashed-run' })
+
+      const result = await startValueBackfill()
+
+      expect(result.total).toBe(0) // parked: attempts(3) >= MAX(3), status irrelevant
+      expect(classifyCaptureValueRawMock).not.toHaveBeenCalled()
+      expect(getBackfillStateRow('cap-1')).toMatchObject({ status: 'in_progress', attempts: 3 })
+
+      // Status mirrors the same predicate: crashed-at-cap counts as parked
+      // (failed), never as remaining — no phantom "Resume" affordance.
+      const status = getValueBackfillStatus()
+      expect(status.failed).toBe(1)
+      expect(status.remaining).toBe(0)
+    })
+
+    it('an in_progress row BELOW the cap is still re-eligible (crash recovery unchanged)', async () => {
+      seedEligible('cap-1')
+      seedBackfillState('cap-1', { status: 'in_progress', attempts: 2, runId: 'crashed-run' })
+      classifyCaptureValueRawMock.mockResolvedValue(successReply('none', 0.9))
+
+      const result = await startValueBackfill()
+
+      expect(result.total).toBe(1)
+      expect(getBackfillStateRow('cap-1')).toMatchObject({ status: 'classified', attempts: 3 })
+    })
+
     it('a later successful attempt recovers a previously-failed item (retried until success within the cap)', async () => {
       seedEligible('cap-1')
       seedBackfillState('cap-1', { status: 'failed', attempts: 2, lastError: 'flaky' })
@@ -700,6 +802,137 @@ describe('value-backfill', () => {
 
       const completeCall = send.mock.calls.find((c) => c[0] === 'value:backfill-complete')
       expect(completeCall?.[1]).toMatchObject({ cancelled: true })
+    })
+  })
+
+  // ---------------------------------------------------------------------
+  // Mid-run privacy changes (CX-T3-2) — the eligible-id list is a run-start
+  // snapshot; a privacy flag set while the run is in flight must be honored
+  // by a FRESH per-item check before any reserve or LLM call.
+  // ---------------------------------------------------------------------
+
+  describe('mid-run privacy changes (CX-T3-2)', () => {
+    it('a recording marked personal mid-run is skipped: NO reserve, NO attempt, NO LLM call', async () => {
+      seedEligible('cap-first', '2026-06-01T00:00:00.000Z') // newest → processed first
+      seedEligible('cap-second', '2026-01-01T00:00:00.000Z') // queued behind it
+      classifyCaptureValueRawMock.mockImplementation(async (captureId: string) => {
+        if (captureId === 'cap-first') {
+          // While item 1's LLM call is in flight, the user marks item 2's
+          // recording personal (simulates recordings:markPersonal landing).
+          run('UPDATE recordings SET personal = 1 WHERE id = ?', ['rec-cap-second'])
+        }
+        return successReply()
+      })
+
+      const result = await startValueBackfill()
+
+      expect(result.total).toBe(2) // snapshot was taken before the flag flip
+      expect(classifyCaptureValueRawMock).toHaveBeenCalledTimes(1) // never for cap-second
+      expect(classifyCaptureValueRawMock).not.toHaveBeenCalledWith('cap-second')
+      expect(getBackfillStateRow('cap-second')).toBeUndefined() // no reserve, no attempt consumed
+      expect(getCaptureRow('cap-second')?.quality_rating).toBe('unrated')
+      // Item 1 completed normally.
+      expect(getBackfillStateRow('cap-first')?.status).toBe('classified')
+    })
+
+    it('a recording soft-deleted mid-run is skipped the same way', async () => {
+      seedEligible('cap-first', '2026-06-01T00:00:00.000Z')
+      seedEligible('cap-second', '2026-01-01T00:00:00.000Z')
+      classifyCaptureValueRawMock.mockImplementation(async (captureId: string) => {
+        if (captureId === 'cap-first') {
+          run('UPDATE recordings SET deleted_at = ? WHERE id = ?', [
+            new Date().toISOString(),
+            'rec-cap-second'
+          ])
+        }
+        return successReply()
+      })
+
+      const result = await startValueBackfill()
+
+      expect(result.total).toBe(2)
+      expect(classifyCaptureValueRawMock).not.toHaveBeenCalledWith('cap-second')
+      expect(getBackfillStateRow('cap-second')).toBeUndefined()
+    })
+
+    it('a privacy-skipped item counts as processed (not failed) in the completion event', async () => {
+      seedEligible('cap-first', '2026-06-01T00:00:00.000Z')
+      seedEligible('cap-second', '2026-01-01T00:00:00.000Z')
+      const { win, send } = FAKE_WINDOW_FACTORY()
+      setMainWindowForValueBackfill(win)
+      classifyCaptureValueRawMock.mockImplementation(async (captureId: string) => {
+        if (captureId === 'cap-first') {
+          run('UPDATE recordings SET personal = 1 WHERE id = ?', ['rec-cap-second'])
+        }
+        return successReply('none', 0.9)
+      })
+
+      await startValueBackfill()
+
+      const completeCall = send.mock.calls.find((c) => c[0] === 'value:backfill-complete')
+      expect(completeCall?.[1]).toMatchObject({ processed: 2, marked: 1, failed: 0, cancelled: false })
+    })
+
+    it('an unreserved privacy-skipped item is picked up by a later run if the flag is reverted', async () => {
+      seedEligible('cap-first', '2026-06-01T00:00:00.000Z')
+      seedEligible('cap-second', '2026-01-01T00:00:00.000Z')
+      classifyCaptureValueRawMock.mockImplementation(async (captureId: string) => {
+        if (captureId === 'cap-first') {
+          run('UPDATE recordings SET personal = 1 WHERE id = ?', ['rec-cap-second'])
+        }
+        return successReply()
+      })
+      await startValueBackfill()
+      expect(getBackfillStateRow('cap-second')).toBeUndefined()
+
+      // The user changes their mind — unmark personal. A later run picks the
+      // capture up with its (never-touched) attempts counter intact.
+      run('UPDATE recordings SET personal = 0 WHERE id = ?', ['rec-cap-second'])
+      classifyCaptureValueRawMock.mockClear()
+      classifyCaptureValueRawMock.mockImplementation(async () => successReply())
+
+      const second = await startValueBackfill()
+
+      expect(second.total).toBe(1)
+      expect(classifyCaptureValueRawMock).toHaveBeenCalledWith('cap-second')
+      expect(getBackfillStateRow('cap-second')).toMatchObject({ status: 'classified', attempts: 1 })
+    })
+  })
+
+  // ---------------------------------------------------------------------
+  // Finalize failure parking (OP-L1) — an environmental DB failure inside
+  // the finalize transaction parks THAT item and the run continues.
+  // ---------------------------------------------------------------------
+
+  describe('finalize failure parking (OP-L1)', () => {
+    it('a throwing finalize txn parks the item (rating rolled back) and the run continues', async () => {
+      seedEligible('cap-bad', '2026-06-01T00:00:00.000Z') // processed first
+      seedEligible('cap-good', '2026-01-01T00:00:00.000Z')
+      const { win, send } = FAKE_WINDOW_FACTORY()
+      setMainWindowForValueBackfill(win)
+      // The apply seam REALLY writes (real implementation) and THEN throws —
+      // the strongest atomicity assertion: the write must be rolled back
+      // together with the aborted finalize transaction.
+      applyCaptureValueClassificationMock.mockImplementation((captureId: string, cls: unknown) => {
+        const applied = applySeam.actual!(captureId, cls)
+        if (captureId === 'cap-bad') throw new Error('disk I/O error')
+        return applied
+      })
+      classifyCaptureValueRawMock.mockImplementation(async () => successReply('none', 0.9))
+
+      const result = await startValueBackfill()
+
+      expect(result).toEqual({ started: true, total: 2 })
+      // The bad item was parked, not fatal.
+      const badRow = getBackfillStateRow('cap-bad')
+      expect(badRow).toMatchObject({ status: 'failed', attempts: 1 })
+      expect(badRow?.last_error).toContain('disk I/O error')
+      // AR-3 atomicity: the rating written inside the aborted txn rolled back.
+      expect(getCaptureRow('cap-bad')?.quality_rating).toBe('unrated')
+      // The run continued to the next item.
+      expect(getBackfillStateRow('cap-good')?.status).toBe('classified')
+      const completeCall = send.mock.calls.find((c) => c[0] === 'value:backfill-complete')
+      expect(completeCall?.[1]).toMatchObject({ processed: 2, failed: 1 })
     })
   })
 
@@ -855,6 +1088,39 @@ describe('value-backfill', () => {
       await startValueBackfill()
 
       expect(capturedStatusDuringRun?.running).toBe(true)
+    })
+
+    // CX-T3-4/OP-L2: every aggregate derives from the SAME scoped capture
+    // set — a capture leaving the scope after classification must drop out
+    // of the numerators AND the denominator together.
+    it('a user re-rating a classified capture drops it from ALL aggregates (done never exceeds total)', async () => {
+      seedEligible('cap-1')
+      classifyCaptureValueRawMock.mockResolvedValue(successReply('none', 0.9))
+      await startValueBackfill()
+
+      let status = getValueBackfillStatus()
+      expect(status).toMatchObject({ total: 1, done: 1, marked: 1, failed: 0, remaining: 0 })
+
+      // The user overrides the AI rating — quality_source stamps 'user' and
+      // the capture leaves the backfill's scope entirely.
+      run(`UPDATE knowledge_captures SET quality_rating = 'valuable', quality_source = 'user' WHERE id = 'cap-1'`)
+
+      status = getValueBackfillStatus()
+      expect(status.done).toBeLessThanOrEqual(status.total) // the invariant under test
+      expect(status).toMatchObject({ total: 0, done: 0, marked: 0, failed: 0, remaining: 0 })
+    })
+
+    it('a soft-deleted recording drops its classified capture from all aggregates together', async () => {
+      seedEligible('cap-1')
+      classifyCaptureValueRawMock.mockResolvedValue(successReply('none', 0.9))
+      await startValueBackfill()
+      expect(getValueBackfillStatus()).toMatchObject({ total: 1, done: 1 })
+
+      run('UPDATE recordings SET deleted_at = ? WHERE id = ?', [new Date().toISOString(), 'rec-cap-1'])
+
+      const status = getValueBackfillStatus()
+      expect(status.done).toBeLessThanOrEqual(status.total)
+      expect(status).toMatchObject({ total: 0, done: 0 })
     })
   })
 
