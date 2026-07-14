@@ -62,6 +62,13 @@ jobs:
       working-directory: ./apps/electron
       run: npm ci
 
+    # install-app-deps (electron postinstall) follows the @hidock/database
+    # symlink and rebuilds ITS better-sqlite3 for Electron's ABI, clobbering
+    # the Node-ABI binding vitest's DB shim loads — restore it.
+    - name: Restore Node-ABI better-sqlite3 for vitest
+      working-directory: ./packages/database
+      run: npm rebuild better-sqlite3
+
     - name: Typecheck
       working-directory: ./apps/electron
       run: npm run typecheck
