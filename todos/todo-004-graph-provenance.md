@@ -27,3 +27,18 @@ The knowledge graph can attribute what each recording contributed, so a hard-del
 
 ## Constraints
 - Fixture/temp DBs only; non-interactive commands; additive schema only; keep graph-sync.ts rename/merge surgery working (update it if node keys change its lookups — it queries `type='person'` by norm_key, unaffected by meeting-key change, but VERIFY).
+
+## Phase-1 learnings addendum (Stage-9 refinement, 2026-07-14 — binding for the T4 spec)
+- Next migration version = 44 (v42+v43 used by Phase 1); tables need lazy CREATE TABLE IF NOT EXISTS
+  besides SCHEMA + MIGRATIONS (repairPhase only re-adds columns). Graph DDL itself lives in
+  GRAPH_SCHEMA (initSchema, idempotent) — decide which home the side table gets and justify it.
+- removeRecordingFromGraph must be TRANSACTIONAL (decide + delete in one runInTransaction; no awaits
+  inside) and return explicit counts/errors — never silent catches (CX-T3-7 lesson).
+- Hard-purge integration point: deleteRecordingCascade's explicit child list (now includes
+  value_backfill_state) — F17/T6 will call the cleanup there; design the API to be callable inside
+  that transaction OR as a guarded pre/post step (justify).
+- The two-layer race pattern (pre-filter + transactional point-read) applies to any new
+  eligibility/cleanup decision vs concurrent ingest — cleanup must not race the 60s-debounced ingest
+  (a transcript being ingested while its recording is purged: define the winner; the marker +
+  edge-source writes are transactional, so cleanup after commit must remove them — consider cleanup
+  deleting graph_ingested_transcripts FIRST inside its txn so a concurrent ingest can't mark after).
