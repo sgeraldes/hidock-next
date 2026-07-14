@@ -236,4 +236,45 @@ describe('KnowledgeGraphStore', () => {
     expect(e1).not.toBe(e2)
     expect(engine.queryAll('SELECT id FROM graph_edges')).toHaveLength(2)
   })
+
+  it('a derived suffix id that is ALREADY taken is skipped for the next candidate', async () => {
+    const { store, engine, dbPath } = await makeStore('edge-suffix-collide')
+    paths.push(dbPath)
+
+    // Base collision pair: 'ABOUT' and 'OWNS' slug identically, so the OWNS
+    // upsert must derive a suffixed candidate.
+    const meetingId = store.upsertNode({ type: 'meeting', label: 'Sync' })
+    const topicId = store.upsertNode({ type: 'topic', label: 'Roadmap' })
+    const e1 = store.upsertEdge({ sourceId: meetingId, targetId: topicId, type: 'ABOUT' })
+
+    // Preoccupy the FIRST candidate upsertEdge would derive for the OWNS
+    // triple (base + '__' + fnv1a(combined)) with an unrelated row — the
+    // derivation must be collision-checked too, not inserted blindly.
+    const combined = `${meetingId}|||${topicId}|||OWNS`
+    const firstCandidate = `${e1}__${fnv1a36(combined)}`
+    engine.run(
+      'INSERT INTO graph_edges (id, source_id, target_id, type, props, weight, created_at) VALUES (?, ?, ?, ?, NULL, 1, ?)',
+      [firstCandidate, 'person:zzz', 'risk:zzz', 'RAISED', 't']
+    )
+
+    const e2 = store.upsertEdge({ sourceId: meetingId, targetId: topicId, type: 'OWNS' })
+
+    expect(e2).not.toBe(e1)
+    expect(e2).not.toBe(firstCandidate)
+    expect(engine.queryAll('SELECT id FROM graph_edges')).toHaveLength(3)
+  })
 })
+
+/**
+ * Mirror of graph-store's private shortHash (FNV-1a → base36), duplicated on
+ * purpose so the suffix-collision test can preoccupy the exact id the store
+ * derives. If the store's hash changes, this test fails loudly — update both.
+ */
+function fnv1a36(input: string): string {
+  let h = 0x811c9dc5
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i)
+    h = Math.imul(h, 0x01000193)
+  }
+  return (h >>> 0).toString(36)
+}

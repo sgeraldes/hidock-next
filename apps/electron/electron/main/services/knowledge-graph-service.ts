@@ -227,7 +227,22 @@ export async function ingestFromDbTranscripts(): Promise<IngestResult> {
       // mid-ingest failure half-committed nodes/edges and the retry on the next
       // cycle re-incremented every already-written edge weight — the LLM
       // extraction above stays OUTSIDE the transaction (it's async and slow).
-      runInTransaction(() => {
+      //
+      // The marker is RE-CHECKED inside the transaction: two ingest entry
+      // points (debounced graph-sync + manual graph:ingestAll) can both pass
+      // the pre-extraction check before either commits, and the loser would
+      // re-upsert every edge (weight inflation). The transaction callback is
+      // synchronous — no await can interleave — so the recheck+writes+marker
+      // are race-free on the single better-sqlite3 connection. The marker
+      // INSERT is deliberately NOT "OR IGNORE": after the recheck a conflict
+      // is impossible, and if one ever happens it must be loud.
+      const ingestedNow = runInTransaction(() => {
+        const claimed = queryOne<{ transcript_id: string }>(
+          'SELECT transcript_id FROM graph_ingested_transcripts WHERE transcript_id = ?',
+          [row.id]
+        )
+        if (claimed) return false // lost the race — a concurrent ingest committed first
+
         ingestExtraction(store, extraction, meta, {
           now: new Date().toISOString(),
           resolvePerson: makePersonResolver(row.meeting_id ?? undefined),
@@ -235,11 +250,13 @@ export async function ingestFromDbTranscripts(): Promise<IngestResult> {
 
         // Mark as ingested
         run(
-          'INSERT OR IGNORE INTO graph_ingested_transcripts (transcript_id, ingested_at) VALUES (?, ?)',
+          'INSERT INTO graph_ingested_transcripts (transcript_id, ingested_at) VALUES (?, ?)',
           [row.id, new Date().toISOString()]
         )
+        return true
       })
-      result.ingested++
+      if (ingestedNow) result.ingested++
+      else result.skipped++
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       result.errors.push({ transcriptId: row.id, error: msg })
@@ -324,21 +341,31 @@ export async function ingestFromFolder(folderPath: string): Promise<IngestResult
       }
 
       const extraction = await extractGraphFromTranscript(content, meta, llm)
-      // Atomic for the same reason as ingestFromDbTranscripts above: a
-      // mid-ingest failure must not half-commit nodes/edges without the
-      // marker, or the retry inflates edge weights.
-      runInTransaction(() => {
+      // Atomic + race-checked for the same reasons as ingestFromDbTranscripts
+      // above: a mid-ingest failure must not half-commit nodes/edges without
+      // the marker, and a concurrent ingest that committed during the await
+      // must be detected inside the synchronous transaction, or the loser
+      // re-upserts every edge (weight inflation).
+      const ingestedNow = runInTransaction(() => {
+        const claimed = queryOne<{ transcript_id: string }>(
+          'SELECT transcript_id FROM graph_ingested_transcripts WHERE transcript_id = ?',
+          [transcriptId]
+        )
+        if (claimed) return false // lost the race — a concurrent ingest committed first
+
         ingestExtraction(store, extraction, meta, {
           now: new Date().toISOString(),
           resolvePerson: makePersonResolver(),
         })
 
         run(
-          'INSERT OR IGNORE INTO graph_ingested_transcripts (transcript_id, ingested_at) VALUES (?, ?)',
+          'INSERT INTO graph_ingested_transcripts (transcript_id, ingested_at) VALUES (?, ?)',
           [transcriptId, new Date().toISOString()]
         )
+        return true
       })
-      result.ingested++
+      if (ingestedNow) result.ingested++
+      else result.skipped++
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       result.errors.push({ transcriptId: file, error: msg })

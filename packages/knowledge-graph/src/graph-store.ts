@@ -144,14 +144,21 @@ export class KnowledgeGraphStore {
     // slugify to the same id (collapsed punctuation, 64-char truncation). That
     // is the root cause of the "UNIQUE constraint failed: graph_nodes.id" ingest
     // error: the (type,norm_key) lookup above misses, then the INSERT collides
-    // on the primary key. Detect a taken id and derive a stable, hashed variant.
+    // on the primary key. Derive stable hashed candidates in a CHECKED loop —
+    // a single unchecked suffix can itself collide (hash collision, or a
+    // natural id equal to the derived one), which would recreate the crash.
     let id = makeNodeId(type, normKey)
-    const clash = this.db.queryOne<{ norm_key: string }>(
-      'SELECT norm_key FROM graph_nodes WHERE id = ?',
-      [id]
-    )
-    if (clash && clash.norm_key !== normKey) {
-      id = `${id}__${shortHash(normKey)}`.slice(0, 96)
+    for (let n = 0; ; n++) {
+      const clash = this.db.queryOne<{ type: string; norm_key: string }>(
+        'SELECT type, norm_key FROM graph_nodes WHERE id = ?',
+        [id]
+      )
+      if (!clash) break
+      // Same identity can't appear here (the (type,norm_key) lookup above
+      // would have matched) — break so the PK violation surfaces loudly
+      // instead of silently minting a duplicate node for the same key.
+      if (clash.type === type && clash.norm_key === normKey) break
+      id = `${makeNodeId(type, normKey)}__${shortHash(n === 0 ? normKey : `${normKey}#${n}`)}`.slice(0, 96)
     }
 
     this.db.run(
@@ -184,14 +191,22 @@ export class KnowledgeGraphStore {
     // can produce the same id. Same failure class as upsertNode above — the
     // triple lookup misses, then the INSERT collides on the primary key
     // ("UNIQUE constraint failed: graph_edges.id", which aborted transcript
-    // ingest forever). Detect a taken id and derive a stable, hashed variant.
+    // ingest forever). Derive stable hashed candidates in a CHECKED loop — a
+    // single unchecked suffix can itself collide (hash collision, or a natural
+    // id equal to the derived one), which would recreate the crash.
+    const combined = `${sourceId}|||${targetId}|||${type}`
     let edgeId = makeEdgeId(sourceId, targetId, type)
-    const clash = this.db.queryOne<{ source_id: string; target_id: string; type: string }>(
-      'SELECT source_id, target_id, type FROM graph_edges WHERE id = ?',
-      [edgeId]
-    )
-    if (clash && (clash.source_id !== sourceId || clash.target_id !== targetId || clash.type !== type)) {
-      edgeId = `${edgeId}__${shortHash(`${sourceId}|||${targetId}|||${type}`)}`
+    for (let n = 0; ; n++) {
+      const clash = this.db.queryOne<{ source_id: string; target_id: string; type: string }>(
+        'SELECT source_id, target_id, type FROM graph_edges WHERE id = ?',
+        [edgeId]
+      )
+      if (!clash) break
+      // Same triple can't appear here (the triple lookup above would have
+      // matched) — break so the PK violation surfaces loudly instead of
+      // silently minting a duplicate edge for the same triple.
+      if (clash.source_id === sourceId && clash.target_id === targetId && clash.type === type) break
+      edgeId = `${makeEdgeId(sourceId, targetId, type)}__${shortHash(n === 0 ? combined : `${combined}#${n}`)}`
     }
 
     this.db.run(
