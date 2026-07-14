@@ -408,6 +408,78 @@ export function Settings() {
     }
   }
 
+  // F16/spec-003 Part I — Library value classification backfill card.
+  // Uses the SAVED config (not the possibly-dirty form fields above) since
+  // this reflects what the main process will actually see when the button
+  // is clicked — mirrors getProviderConfigFromSettings()'s exact condition.
+  const hasValueProvider = useMemo(
+    () => config?.chat.provider === 'gemini' && !!config?.transcription.geminiApiKey,
+    [config]
+  )
+  const [valueBackfillRunning, setValueBackfillRunning] = useState(false)
+  const [valueBackfillProgress, setValueBackfillProgress] = useState<{
+    processed: number
+    total: number
+    marked: number
+    failed: number
+  } | null>(null)
+  const [valueBackfillRemaining, setValueBackfillRemaining] = useState(0)
+
+  useEffect(() => {
+    let cancelledEffect = false
+    window.electronAPI?.valueBackfill?.getStatus().then((res) => {
+      if (cancelledEffect || !res?.success || !res.data) return
+      setValueBackfillRunning(res.data.running)
+      setValueBackfillRemaining(res.data.remaining)
+    })
+
+    const unsubProgress = window.electronAPI?.valueBackfill?.onProgress((progress) => {
+      setValueBackfillRunning(true)
+      setValueBackfillProgress(progress)
+    })
+    const unsubComplete = window.electronAPI?.valueBackfill?.onComplete((result) => {
+      setValueBackfillRunning(false)
+      setValueBackfillProgress(result)
+      setValueBackfillRemaining(Math.max(0, result.total - result.processed))
+      toast.success(
+        result.cancelled ? 'Classification cancelled' : 'Classification complete',
+        `${result.processed} classified · ${result.marked} marked low-value.`
+      )
+    })
+
+    return () => {
+      cancelledEffect = true
+      unsubProgress?.()
+      unsubComplete?.()
+    }
+  }, [])
+
+  const handleStartValueBackfill = useCallback(async () => {
+    setValueBackfillRunning(true)
+    try {
+      const res = await window.electronAPI.valueBackfill.start()
+      if (!res?.success || !res.started) {
+        setValueBackfillRunning(false)
+        if (res?.reason === 'no-provider') {
+          toast.error('No AI provider configured', 'Configure an AI provider above first.')
+        } else if (res?.reason !== 'already-running') {
+          toast.error('Could not start classification', res?.error || 'Unknown error')
+        }
+      }
+    } catch (error) {
+      setValueBackfillRunning(false)
+      toast.error('Could not start classification', error instanceof Error ? error.message : 'Unknown error')
+    }
+  }, [])
+
+  const handleCancelValueBackfill = useCallback(async () => {
+    try {
+      await window.electronAPI.valueBackfill.cancel()
+    } catch (error) {
+      console.error('Failed to cancel value backfill:', error)
+    }
+  }, [])
+
   const handleSaveChat = async () => {
     if (saving) {
       toast.warning('Please wait', 'Previous save in progress')
@@ -1000,6 +1072,49 @@ export function Settings() {
                 <Save className="h-4 w-4 mr-2" aria-hidden="true" />
                 {isTranscriptionDirty ? 'Save' : 'Saved'}
               </Button>
+            </CardContent>
+          </Card>
+
+          {/* Library value classification (F16/spec-003) */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Library value classification</CardTitle>
+              <CardDescription>
+                Classify existing captures by how much lasting, useful knowledge they hold — surfaces low-value and
+                garbage recordings in the Library. Runs in the background, chunked and rate-limited; you can cancel
+                and resume anytime.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {!hasValueProvider && (
+                <p className="text-xs text-muted-foreground">Configure an AI provider above to enable.</p>
+              )}
+              <div className="flex items-center gap-2">
+                <Button
+                  onClick={handleStartValueBackfill}
+                  disabled={!hasValueProvider || valueBackfillRunning}
+                  aria-label="Classify library value"
+                >
+                  {valueBackfillRunning && <RefreshCw className="h-4 w-4 mr-2 animate-spin" aria-hidden="true" />}
+                  {valueBackfillRunning
+                    ? 'Classifying…'
+                    : valueBackfillRemaining > 0
+                      ? 'Resume classification'
+                      : 'Classify library value'}
+                </Button>
+                {valueBackfillRunning && (
+                  <Button variant="outline" onClick={handleCancelValueBackfill} aria-label="Cancel classification">
+                    Cancel
+                  </Button>
+                )}
+              </div>
+              {(valueBackfillRunning || valueBackfillProgress) && (
+                <p className="text-xs text-muted-foreground" aria-live="polite">
+                  {valueBackfillProgress
+                    ? `${valueBackfillProgress.processed} / ${valueBackfillProgress.total} · ${valueBackfillProgress.marked} low-value`
+                    : 'Starting…'}
+                </p>
+              )}
             </CardContent>
           </Card>
 
