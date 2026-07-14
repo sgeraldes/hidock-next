@@ -49,8 +49,10 @@ import { complete } from '@hidock/ai-providers'
 import { getProviderConfigFromSettings } from './ai-provider-config'
 import {
   run,
+  runInTransaction,
   queryAll,
   queryOne,
+  isValueExcludedRecording,
   getContactById,
   getContactByName,
   createContact,
@@ -200,18 +202,42 @@ export async function ingestFromDbTranscripts(): Promise<IngestResult> {
         title: row.subject ?? undefined,
         date: row.date_recorded ?? undefined,
       }
+      // The LLM extraction call stays OUTSIDE the transaction (Codex
+      // adversarial review AR-1) — it can take seconds and must not hold a
+      // DB transaction open.
       const extraction = await extractGraphFromTranscript(row.full_text, meta, llm)
-      ingestExtraction(store, extraction, meta, {
-        now: new Date().toISOString(),
-        resolvePerson: makePersonResolver(row.meeting_id ?? undefined),
-      })
 
-      // Mark as ingested
-      run(
-        'INSERT OR IGNORE INTO graph_ingested_transcripts (transcript_id, ingested_at) VALUES (?, ?)',
-        [row.id, new Date().toISOString()]
-      )
-      result.ingested++
+      // F16/spec-002 (AR-1): eligibility is decided with a FRESH point-read at
+      // persistence time, inside the SAME transaction as the graph writes +
+      // ingested-marker insert — never from a Set computed once at the top of
+      // this (potentially long-running, async) loop. A rating written any
+      // time up to this instant — including while THIS row's extraction call
+      // was in flight — is honored: an excluded recording is skipped WITHOUT
+      // writing the marker (so a later rating upgrade re-ingests naturally on
+      // a future call), and a recording whose rating was upgraded mid-run
+      // still ingests. Wrapping ingest+marker in one transaction also makes
+      // them atomic: a mid-ingest failure rolls back both.
+      runInTransaction(() => {
+        if (isValueExcludedRecording(row.recording_id)) {
+          result.skipped++
+          console.log(
+            `[KnowledgeGraph] Skipped value-excluded recording ${row.recording_id} (transcript ${row.id})`
+          )
+          return
+        }
+
+        ingestExtraction(store, extraction, meta, {
+          now: new Date().toISOString(),
+          resolvePerson: makePersonResolver(row.meeting_id ?? undefined),
+        })
+
+        // Mark as ingested
+        run(
+          'INSERT OR IGNORE INTO graph_ingested_transcripts (transcript_id, ingested_at) VALUES (?, ?)',
+          [row.id, new Date().toISOString()]
+        )
+        result.ingested++
+      })
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       result.errors.push({ transcriptId: row.id, error: msg })
