@@ -4,7 +4,7 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { existsSync, rmSync } from 'fs'
-import initSqlJs from 'sql.js'
+import Database from 'better-sqlite3'
 import { DatabaseEngine } from '@hidock/database'
 import { KnowledgeGraphStore } from '../src/graph-store.js'
 import { ingestExtraction } from '../src/ingest.js'
@@ -17,22 +17,40 @@ import {
 import type { ExtractionResult, ExtractionMeta } from '../src/extract.js'
 
 function tempPath(name: string) {
-  return join(tmpdir(), `hidock-kg-ingest-${name}.sqlite`)
+  return join(tmpdir(), `hidock-kg-ingest-${name}-${Date.now()}-${Math.random().toString(36).slice(2)}.sqlite`)
 }
+
+// better-sqlite3 (unlike the old sql.js engine) holds a native OS file handle
+// open until closeDatabase() runs — on Windows, rmSync() on a still-open file
+// fails with EPERM. Track every engine created by makeStore() and close them
+// all before removing files.
+const engines: DatabaseEngine[] = []
 
 async function makeStore(name: string) {
   const dbPath = tempPath(name)
   const engine = new DatabaseEngine({
-    initSqlJs,
+    betterSqlite3: Database,
     dbPathProvider: () => dbPath,
     schemaVersion: 1,
     schema: 'CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)',
     migrations: {},
   })
   await engine.initialize()
+  engines.push(engine)
   const store = new KnowledgeGraphStore(engine)
   store.initSchema()
   return { store, dbPath }
+}
+
+function closeEngines(): void {
+  for (const e of engines) {
+    try {
+      e.closeDatabase()
+    } catch {
+      /* already closed */
+    }
+  }
+  engines.length = 0
 }
 
 // --- Seed data ---
@@ -85,6 +103,7 @@ describe('ingestExtraction + queries', () => {
   const paths: string[] = []
 
   afterEach(() => {
+    closeEngines()
     for (const p of paths) {
       if (existsSync(p)) rmSync(p, { force: true })
     }
@@ -205,5 +224,119 @@ describe('ingestExtraction + queries', () => {
     // 'Script' should match 'TypeScript'
     const results = topSkillDemonstrators(store, 'Script')
     expect(results.length).toBeGreaterThan(0)
+  })
+})
+
+// =============================================================================
+// F18 (spec-004): meeting-node id-keying + per-edge provenance writes
+// =============================================================================
+
+describe('ingestExtraction: meeting-node id-keying (F18)', () => {
+  const paths: string[] = []
+  afterEach(() => {
+    closeEngines()
+    for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
+    paths.length = 0
+  })
+
+  it('same title, different meetingId → TWO meeting nodes (recurring occurrences no longer fold by title)', async () => {
+    const { store, dbPath } = await makeStore('id-keying-distinct')
+    paths.push(dbPath)
+    const occurrence1: ExtractionMeta = { meetingId: 'series-1::2026-06-01T10:00:00.000Z', title: 'Weekly Sync', date: '2026-06-01' }
+    const occurrence2: ExtractionMeta = { meetingId: 'series-1::2026-06-08T10:00:00.000Z', title: 'Weekly Sync', date: '2026-06-08' }
+
+    ingestExtraction(store, meeting1, occurrence1)
+    ingestExtraction(store, meeting1, occurrence2)
+
+    const meetings = store.findNodes({ type: 'meeting' })
+    expect(meetings).toHaveLength(2)
+    expect(new Set(meetings.map((m) => m.norm_key)).size).toBe(2)
+    // Both keep the SAME display title...
+    expect(meetings.every((m) => m.label === 'Weekly Sync')).toBe(true)
+    // ...but are keyed by their distinct meetingId (id-keying, not title).
+    expect(meetings.map((m) => m.norm_key).sort()).toEqual(
+      ['meeting:series-1::2026-06-01t10:00:00.000z', 'meeting:series-1::2026-06-08t10:00:00.000z']
+    )
+  })
+
+  it('same meetingId ingested twice still folds into ONE node (regression: id-keying does not break re-ingest dedup)', async () => {
+    const { store, dbPath } = await makeStore('id-keying-fold')
+    paths.push(dbPath)
+    ingestExtraction(store, meeting1, meta1)
+    ingestExtraction(store, meeting1, meta1)
+
+    const meetings = store.findNodes({ type: 'meeting' })
+    expect(meetings).toHaveLength(1)
+    expect(meetings[0].norm_key).toBe(`meeting:${meta1.meetingId.toLowerCase()}`)
+  })
+})
+
+describe('ingestExtraction: per-edge provenance writes (F18)', () => {
+  const paths: string[] = []
+  afterEach(() => {
+    closeEngines()
+    for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
+    paths.length = 0
+  })
+
+  it('recordingId + transcriptId writes one graph_edge_sources row per upserted edge', async () => {
+    const { store, dbPath } = await makeStore('provenance-write')
+    paths.push(dbPath)
+    ingestExtraction(store, meeting1, meta1, { recordingId: 'rec-1', transcriptId: 'tx-1' })
+
+    const edges = store.db.queryAll<{ id: string }>('SELECT id FROM graph_edges')
+    expect(edges.length).toBeGreaterThan(0)
+
+    const sources = store.db.queryAll<{ edge_id: string; recording_id: string; transcript_id: string }>(
+      'SELECT edge_id, recording_id, transcript_id FROM graph_edge_sources'
+    )
+    // Every edge from this ingest has exactly one source row, all attributed
+    // to the same (recording, transcript).
+    expect(sources).toHaveLength(edges.length)
+    expect(sources.every((s) => s.recording_id === 'rec-1' && s.transcript_id === 'tx-1')).toBe(true)
+    expect(new Set(sources.map((s) => s.edge_id))).toEqual(new Set(edges.map((e) => e.id)))
+  })
+
+  it('a folder-style call (no recordingId/transcriptId) writes NO graph_edge_sources rows', async () => {
+    const { store, dbPath } = await makeStore('provenance-none')
+    paths.push(dbPath)
+    ingestExtraction(store, meeting1, meta1) // no options → folder-ingest shape
+
+    const edges = store.db.queryAll<{ id: string }>('SELECT id FROM graph_edges')
+    expect(edges.length).toBeGreaterThan(0)
+    const sources = store.db.queryAll('SELECT * FROM graph_edge_sources')
+    expect(sources).toHaveLength(0)
+  })
+
+  it('a duplicate entity within one extraction bumps assertion_count rather than erroring or duplicating the row', async () => {
+    const { store, dbPath } = await makeStore('provenance-duplicate-entity')
+    paths.push(dbPath)
+    const duplicated: ExtractionResult = {
+      people: [
+        { name: 'Alice', skills: [] },
+        { name: 'Alice', skills: [] }, // duplicate entity from the extractor
+      ],
+      topics: [],
+      projects: [],
+      decisions: [],
+      action_items: [],
+      risks: [],
+      next_steps: [],
+    }
+    ingestExtraction(store, duplicated, meta1, { recordingId: 'rec-dup', transcriptId: 'tx-dup' })
+
+    const attended = store.db.queryOne<{ id: string; weight: number }>(
+      "SELECT id, weight FROM graph_edges WHERE type = 'ATTENDED'"
+    )
+    expect(attended?.weight).toBe(2) // upsertEdge bumped weight for the repeat
+
+    const row = store.db.queryOne<{ assertion_count: number }>(
+      'SELECT assertion_count FROM graph_edge_sources WHERE edge_id = ? AND recording_id = ? AND transcript_id = ?',
+      [attended!.id, 'rec-dup', 'tx-dup']
+    )
+    expect(row?.assertion_count).toBe(2)
+
+    const allSourceRows = store.db.queryAll('SELECT * FROM graph_edge_sources WHERE edge_id = ?', [attended!.id])
+    expect(allSourceRows).toHaveLength(1) // one row, not two
   })
 })

@@ -17,6 +17,13 @@ export type {
 export { ingestExtraction } from './ingest.js'
 export type { PersonResolver, IngestOptions } from './ingest.js'
 
+export { removeRecordingProvenance, pruneOrphanEdgeSources } from './recording-provenance.js'
+export type {
+  RecordingProvenanceRemoval,
+  RemoveRecordingProvenanceOptions,
+  PruneOrphanEdgeSourcesResult,
+} from './recording-provenance.js'
+
 export { isGenericEntityLabel, normalizeGenericLabel } from './stop-list.js'
 
 export {

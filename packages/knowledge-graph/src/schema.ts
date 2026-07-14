@@ -62,5 +62,26 @@ CREATE INDEX IF NOT EXISTS idx_graph_edges_source ON graph_edges(source_id);
 
 CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON graph_edges(target_id);
 
-CREATE INDEX IF NOT EXISTS idx_graph_edges_type ON graph_edges(type)
+CREATE INDEX IF NOT EXISTS idx_graph_edges_type ON graph_edges(type);
+
+-- F18 (spec-004): per-edge provenance — which (recording, transcript) asserted
+-- an edge, so a hard-deleted recording's graph traces can be removed
+-- precisely. assertion_count (AR2-4) tracks how many times this exact
+-- (edge, recording, transcript) triple was asserted (duplicate-entity
+-- extraction, re-ingest) — mirrors upsertEdge's own weight bump, and is what
+-- the cleanup engine sums to decrement a shared edge's weight correctly.
+CREATE TABLE IF NOT EXISTS graph_edge_sources (
+  edge_id         TEXT NOT NULL,
+  recording_id    TEXT NOT NULL,
+  transcript_id   TEXT NOT NULL,
+  assertion_count INTEGER NOT NULL DEFAULT 1,
+  created_at      TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_graph_edge_sources
+  ON graph_edge_sources(edge_id, recording_id, transcript_id);
+
+CREATE INDEX IF NOT EXISTS idx_graph_edge_sources_edge ON graph_edge_sources(edge_id);
+
+CREATE INDEX IF NOT EXISTS idx_graph_edge_sources_recording ON graph_edge_sources(recording_id)
 `

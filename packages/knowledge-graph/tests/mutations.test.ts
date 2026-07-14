@@ -143,6 +143,42 @@ describe('knowledge-graph mutations', () => {
     expect(nodeGraphStats(store, a).meetingCount).toBe(2)
   })
 
+  it('mergeNodes (AR2-1): a colliding repoint transfers the dropped edge\'s graph_edge_sources rows + weight onto the surviving keeper edge', async () => {
+    const { store } = await makeStore('merge-collision-provenance')
+    const now = '2026-01-01'
+    const meeting = store.upsertNode({ type: 'meeting', label: 'M', props: { meetingId: 'm', date: '2026-01-05' }, now })
+    const keeper = store.upsertNode({ type: 'topic', label: 'Roadmap', now })
+    const loser = store.upsertNode({ type: 'topic', label: 'Road-map', now })
+
+    const keeperEdge = store.upsertEdge({ sourceId: meeting, targetId: keeper, type: 'ABOUT', now }) // weight 1
+    store.recordEdgeSource(keeperEdge, 'R1', 'T1', now)
+
+    const loserEdge = store.upsertEdge({ sourceId: meeting, targetId: loser, type: 'ABOUT', now }) // weight 1
+    store.recordEdgeSource(loserEdge, 'R2', 'T2', now)
+
+    const res = mergeNodes(store, keeper, loser)
+    expect(res.merged).toBe(true)
+
+    // The loser edge collided (meeting->loser repoints to meeting->keeper,
+    // which already existed) and was dropped — but its provenance moved.
+    const keeperSources = store.db.queryAll<{ recording_id: string; transcript_id: string }>(
+      'SELECT recording_id, transcript_id FROM graph_edge_sources WHERE edge_id = ?',
+      [keeperEdge]
+    )
+    expect(keeperSources.map((r) => r.recording_id).sort()).toEqual(['R1', 'R2'])
+
+    // No dangling source rows under the now-deleted loser edge id.
+    expect(
+      store.db.queryAll('SELECT * FROM graph_edge_sources WHERE edge_id = ?', [loserEdge])
+    ).toHaveLength(0)
+
+    // The dropped edge's weight was folded into the survivor.
+    const edge = store.db.queryOne<{ weight: number }>('SELECT weight FROM graph_edges WHERE id = ?', [
+      keeperEdge,
+    ])
+    expect(edge?.weight).toBe(2)
+  })
+
   it('mergeBlastRadius reports each side, overlap, and resulting edges', async () => {
     const { store } = await makeStore('blast')
     const now = '2026-01-01'

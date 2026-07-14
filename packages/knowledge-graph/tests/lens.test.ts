@@ -4,7 +4,7 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { existsSync, rmSync } from 'fs'
-import initSqlJs from 'sql.js'
+import Database from 'better-sqlite3'
 import { DatabaseEngine } from '@hidock/database'
 import { KnowledgeGraphStore } from '../src/graph-store.js'
 import { ingestExtraction } from '../src/ingest.js'
@@ -26,19 +26,37 @@ function tempPath(name: string) {
   return join(tmpdir(), `hidock-kg-lens-${name}-${Date.now()}-${Math.random().toString(36).slice(2)}.sqlite`)
 }
 
+// better-sqlite3 (unlike the old sql.js engine) holds a native OS file handle
+// open until closeDatabase() runs — on Windows, rmSync() on a still-open file
+// fails with EPERM. Track every engine created by makeStore() and close them
+// all before removing files.
+const engines: DatabaseEngine[] = []
+
 async function makeStore(name: string) {
   const dbPath = tempPath(name)
   const engine = new DatabaseEngine({
-    initSqlJs,
+    betterSqlite3: Database,
     dbPathProvider: () => dbPath,
     schemaVersion: 1,
     schema: 'CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)',
     migrations: {},
   })
   await engine.initialize()
+  engines.push(engine)
   const store = new KnowledgeGraphStore(engine)
   store.initSchema()
   return { store, dbPath }
+}
+
+function closeEngines(): void {
+  for (const e of engines) {
+    try {
+      e.closeDatabase()
+    } catch {
+      /* already closed */
+    }
+  }
+  engines.length = 0
 }
 
 /** A full extraction with a decision, action, risk, next step, topic, project. */
@@ -84,6 +102,7 @@ describe('Lens: strata assignment by type', () => {
 describe('Lens: date derivation', () => {
   const paths: string[] = []
   afterEach(() => {
+    closeEngines()
     for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
     paths.length = 0
   })
@@ -118,6 +137,7 @@ describe('Lens: date derivation', () => {
 describe('Lens: scoping (centered vs whole-graph)', () => {
   const paths: string[] = []
   afterEach(() => {
+    closeEngines()
     for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
     paths.length = 0
   })
@@ -160,6 +180,7 @@ describe('Lens: scoping (centered vs whole-graph)', () => {
 describe('Lens: time-window filtering', () => {
   const paths: string[] = []
   afterEach(() => {
+    closeEngines()
     for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
     paths.length = 0
   })
@@ -212,6 +233,7 @@ describe('Lens: time-window filtering', () => {
 describe('Lens: default center selection', () => {
   const paths: string[] = []
   afterEach(() => {
+    closeEngines()
     for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
     paths.length = 0
   })
@@ -248,6 +270,7 @@ describe('Lens: default center selection', () => {
 describe('Lens: per-stratum node budget', () => {
   const paths: string[] = []
   afterEach(() => {
+    closeEngines()
     for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
     paths.length = 0
   })
@@ -340,6 +363,7 @@ describe('Lens: per-stratum node budget', () => {
 describe('Provenance: path derivation', () => {
   const paths: string[] = []
   afterEach(() => {
+    closeEngines()
     for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
     paths.length = 0
   })

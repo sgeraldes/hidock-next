@@ -187,6 +187,25 @@ export class KnowledgeGraphStore {
     return edgeId
   }
 
+  /**
+   * Record that (recordingId, transcriptId) asserted edge `edgeId` (F18,
+   * spec-004). Upserts on the (edge_id, recording_id, transcript_id) triple:
+   * a first assertion inserts assertion_count=1; a repeat of the EXACT same
+   * triple (duplicate-entity extraction within one transcript, or a re-ingest
+   * pass) bumps assertion_count by 1 (AR2-4) — mirroring upsertEdge's own
+   * weight bump. This is the hook the cleanup engine sums to decrement a
+   * shared edge's weight by exactly what this recording contributed.
+   */
+  recordEdgeSource(edgeId: string, recordingId: string, transcriptId: string, now = ''): void {
+    this.db.run(
+      `INSERT INTO graph_edge_sources (edge_id, recording_id, transcript_id, assertion_count, created_at)
+       VALUES (?, ?, ?, 1, ?)
+       ON CONFLICT(edge_id, recording_id, transcript_id)
+       DO UPDATE SET assertion_count = assertion_count + 1`,
+      [edgeId, recordingId, transcriptId, now]
+    )
+  }
+
   getNode(id: string): GraphNode | undefined {
     return this.db.queryOne<GraphNode>('SELECT * FROM graph_nodes WHERE id = ?', [id])
   }

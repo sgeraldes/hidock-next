@@ -4,24 +4,31 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { existsSync, rmSync } from 'fs'
-import initSqlJs from 'sql.js'
+import Database from 'better-sqlite3'
 import { DatabaseEngine } from '@hidock/database'
 import { KnowledgeGraphStore } from '../src/graph-store.js'
 
 function tempPath(name: string) {
-  return join(tmpdir(), `hidock-kg-store-${name}.sqlite`)
+  return join(tmpdir(), `hidock-kg-store-${name}-${Date.now()}-${Math.random().toString(36).slice(2)}.sqlite`)
 }
+
+// better-sqlite3 (unlike the old sql.js engine) holds a native OS file handle
+// open until closeDatabase() runs — on Windows, rmSync() on a still-open file
+// fails with EPERM. Track every engine created by makeStore() and close them
+// all before removing files.
+const engines: DatabaseEngine[] = []
 
 async function makeStore(name: string) {
   const dbPath = tempPath(name)
   const engine = new DatabaseEngine({
-    initSqlJs,
+    betterSqlite3: Database,
     dbPathProvider: () => dbPath,
     schemaVersion: 1,
     schema: 'CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)',
     migrations: {},
   })
   await engine.initialize()
+  engines.push(engine)
   const store = new KnowledgeGraphStore(engine)
   store.initSchema()
   return { store, engine, dbPath }
@@ -31,6 +38,14 @@ describe('KnowledgeGraphStore', () => {
   const paths: string[] = []
 
   afterEach(() => {
+    for (const e of engines) {
+      try {
+        e.closeDatabase()
+      } catch {
+        /* already closed */
+      }
+    }
+    engines.length = 0
     for (const p of paths) {
       if (existsSync(p)) rmSync(p, { force: true })
     }

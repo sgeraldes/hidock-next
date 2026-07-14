@@ -4,7 +4,7 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { existsSync, rmSync } from 'fs'
-import initSqlJs from 'sql.js'
+import Database from 'better-sqlite3'
 import { DatabaseEngine } from '@hidock/database'
 import { KnowledgeGraphStore } from '../src/graph-store.js'
 import { ingestExtraction, type PersonResolver } from '../src/ingest.js'
@@ -20,19 +20,37 @@ function tempPath(name: string) {
   return join(tmpdir(), `hidock-kg-ctx-${name}-${Date.now()}.sqlite`)
 }
 
+// better-sqlite3 (unlike the old sql.js engine) holds a native OS file handle
+// open until closeDatabase() runs — on Windows, rmSync() on a still-open file
+// fails with EPERM. Track every engine created by makeStore() and close them
+// all before removing files.
+const engines: DatabaseEngine[] = []
+
 async function makeStore(name: string) {
   const dbPath = tempPath(name)
   const engine = new DatabaseEngine({
-    initSqlJs,
+    betterSqlite3: Database,
     dbPathProvider: () => dbPath,
     schemaVersion: 1,
     schema: 'CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)',
     migrations: {},
   })
   await engine.initialize()
+  engines.push(engine)
   const store = new KnowledgeGraphStore(engine)
   store.initSchema()
   return { store, dbPath }
+}
+
+function closeEngines(): void {
+  for (const e of engines) {
+    try {
+      e.closeDatabase()
+    } catch {
+      /* already closed */
+    }
+  }
+  engines.length = 0
 }
 
 const meta: ExtractionMeta = { meetingId: 'mtg-001', title: 'Kickoff', date: '2026-06-01' }
@@ -41,6 +59,7 @@ const meta2: ExtractionMeta = { meetingId: 'mtg-002', title: 'Review', date: '20
 describe('Context Graph: contact-keyed ingest', () => {
   const paths: string[] = []
   afterEach(() => {
+    closeEngines()
     for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
     paths.length = 0
   })
@@ -108,6 +127,7 @@ describe('Context Graph: contact-keyed ingest', () => {
 describe('Context Graph: upsert id-collision fix', () => {
   const paths: string[] = []
   afterEach(() => {
+    closeEngines()
     for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
     paths.length = 0
   })
@@ -135,6 +155,7 @@ describe('Context Graph: upsert id-collision fix', () => {
 describe('Context Graph: neighborhood + fullGraph traversal', () => {
   const paths: string[] = []
   afterEach(() => {
+    closeEngines()
     for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
     paths.length = 0
   })
@@ -204,6 +225,7 @@ describe('Context Graph: neighborhood + fullGraph traversal', () => {
 describe('Context Graph: top-N overview default selection', () => {
   const paths: string[] = []
   afterEach(() => {
+    closeEngines()
     for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
     paths.length = 0
   })
@@ -242,6 +264,7 @@ describe('Context Graph: top-N overview default selection', () => {
 describe('Context Graph: generic-node pruning', () => {
   const paths: string[] = []
   afterEach(() => {
+    closeEngines()
     for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
     paths.length = 0
   })
@@ -291,6 +314,7 @@ describe('Context Graph: generic-node pruning', () => {
 describe('Context Graph: ingest-time stop-list', () => {
   const paths: string[] = []
   afterEach(() => {
+    closeEngines()
     for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
     paths.length = 0
   })
