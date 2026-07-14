@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { RefreshCw, AlertCircle, EyeOff } from 'lucide-react'
+import { RefreshCw, AlertCircle, EyeOff, Trash2 } from 'lucide-react'
 import { toast } from '@/components/ui/toaster'
 import { getHiDockDeviceService } from '@/services/hidock-device'
 import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
@@ -30,12 +30,23 @@ import {
   useAnnouncement,
   TriPaneLayout,
   SourceReader,
-  AssistantPanel
+  AssistantPanel,
+  DeletePermanentDialog,
+  type DeletePermanentDialogImpact
 } from '@/features/library/components'
 import { useSourceSelection, useKeyboardNavigation, useTransitionFilters, useValueSuggestionToasts } from '@/features/library/hooks'
 import { buildSearchCorpus } from '@/features/library/utils/buildSearchCorpus'
 import { getSourceType, matchesSourceTypeFilter } from '@/features/library/utils/sourceType'
 import { matchesDurationPreset } from '@/features/library/utils/durationFilter'
+import { trashRowToUnified } from '@/features/library/utils/trashRow'
+import type { DatabaseRecording } from '@/hooks/useUnifiedRecordings'
+import {
+  softDeleteConfirmDescription,
+  deviceDeleteConfirmDescription,
+  LABEL_MOVE_TO_TRASH,
+  LABEL_DELETE_FROM_DEVICE,
+  TRASH_MODE_BANNER
+} from '@/features/library/utils/deletionCopy'
 import type { TypeCounts } from '@/features/library/components/LibraryFilters'
 import { useLibraryStore, useLibrarySorting } from '@/store/useLibraryStore'
 import { useOperations } from '@/hooks/useOperations'
@@ -224,6 +235,22 @@ export function Library() {
     onConfirm: () => void
   }>({ open: false, title: '', description: '', actionLabel: 'Delete', onConfirm: () => {} })
 
+  // spec-005/F17 T5 §D6 — the permanent-delete flow gets its OWN dialog state
+  // (impact copy + device checkbox have no slot in the shared confirmDialog above).
+  const [deletePermanentDialog, setDeletePermanentDialog] = useState<{
+    open: boolean
+    recording: UnifiedRecording | null
+    impact?: DeletePermanentDialogImpact
+  }>({ open: false, recording: null })
+
+  // spec-005/F17 T5 §D1 — Trash is a view-mode swap, not a filter: soft-deleted
+  // rows are excluded at the DB layer and never enter useUnifiedRecordings.
+  // Deliberately transient/local (never persisted) so the app never boots into
+  // Trash. trashedRecordings is loaded eagerly (for the count) independently of
+  // showTrash (see loadTrash below).
+  const [showTrash, setShowTrash] = useState(false)
+  const [trashedRecordings, setTrashedRecordings] = useState<UnifiedRecording[]>([])
+
   // Selection for bulk operations
   const {
     selectedIds,
@@ -306,6 +333,35 @@ export function Library() {
       }
     })()
   }, [loading, recordings.length, refresh])
+
+  // spec-005/F17 T5 §D1 — loads the Trash *data* (for the toggle's count),
+  // independent of *entering* Trash (showTrash). Cheap: idx_recordings_deleted_at
+  // exists and tombstones are few. Re-run after every soft-delete, restore, and
+  // permanent-delete so the count + the visible Trash list stay accurate.
+  const loadTrash = useCallback(async () => {
+    try {
+      const rows = (await window.electronAPI.recordings.getTrash()) as DatabaseRecording[]
+      // Order preservation (§D5): getTrashedRecordings() returns newest-tombstone-
+      // first; map with a plain .map() — do NOT re-sort (buildRecordingMap sorts
+      // by dateRecorded, which would break that ordering).
+      setTrashedRecordings(rows.map(trashRowToUnified))
+    } catch (e) {
+      console.error('[Library] Failed to load trash:', e)
+      setTrashedRecordings([])
+    }
+  }, [])
+
+  useEffect(() => {
+    loadTrash()
+  }, [loadTrash])
+
+  // Toggling Trash mode also clears bulk selection — Trash rows never wire
+  // onSelectionChange (D1), so a stale "N selected" bulk bar would otherwise
+  // persist from whatever was checked in the live list before the toggle.
+  const handleToggleTrash = useCallback(() => {
+    setShowTrash((prev) => !prev)
+    clearSelection()
+  }, [clearSelection])
 
   // Enrichment: Load transcripts and meetings for recordings
   const [transcripts, setTranscripts] = useState<Map<string, Transcript>>(new Map())
@@ -538,6 +594,13 @@ export function Library() {
   // Count of personal ("ignored") recordings, to decide whether to show the chip.
   const personalCount = useMemo(() => recordings.filter((r) => r.personal).length, [recordings])
 
+  // spec-005/F17 T5 §D1 — the SINGLE swap point: whatever is actually displayed,
+  // in Trash mode or not. Every consumer that indexes into "the currently shown
+  // list" (virtualizer count/estimateSize, the render map, itemIds, the
+  // reveal-on-open findIndex) reads THIS, never filteredRecordings/trashedRecordings
+  // directly — swapping only one of them would desync indices (spec's hazard note).
+  const displayedRecordings = showTrash ? trashedRecordings : filteredRecordings
+
   // Announce filter result changes (after filteredRecordings is declared)
   useEffect(() => {
     if (!loading && filteredRecordings.length !== recordings.length) {
@@ -546,7 +609,7 @@ export function Library() {
   }, [filteredRecordings.length, recordings.length, loading, announce])
 
   // Memoize the list of IDs for keyboard navigation
-  const itemIds = useMemo(() => filteredRecordings.map((r) => r.id), [filteredRecordings])
+  const itemIds = useMemo(() => displayedRecordings.map((r) => r.id), [displayedRecordings])
 
   // Are all currently-shown rows selected? Drives the header select-all/deselect-all
   // toggle label + behavior. Only meaningful once selection mode is active.
@@ -580,7 +643,7 @@ export function Library() {
     onExpandRow: () => {}, // No-op - expansion removed
     onCollapseRow: () => {}, // No-op - expansion removed
     onCollapseAllRows: () => {}, // No-op - expansion removed
-    isEnabled: filteredRecordings.length > 0
+    isEnabled: displayedRecordings.length > 0
   })
 
   // Count recordings that can be bulk processed
@@ -813,6 +876,11 @@ export function Library() {
       // Local copies are intentionally kept — the next device scan reconciles
       // the row to local-only via markRecordingsNotOnDevice.
       await refresh(false)
+      // spec-005/F17 T5 §D2 — device delete previously only ever toasted on
+      // error; a real removal now confirms success too.
+      import('@/components/ui/toaster').then(({ toast }) => {
+        toast.success('Removed from device', `"${recording.filename}" was erased from the HiDock.`)
+      })
     } catch (e) {
       console.error('Failed to delete from device:', e)
       import('@/components/ui/toaster').then(({ toast }) => {
@@ -830,9 +898,9 @@ export function Library() {
 
     setConfirmDialog({
       open: true,
-      title: 'Delete from Device',
-      description: `Delete "${recording.filename}" from device? This cannot be undone.`,
-      actionLabel: 'Delete',
+      title: LABEL_DELETE_FROM_DEVICE,
+      description: deviceDeleteConfirmDescription(recording.filename),
+      actionLabel: LABEL_DELETE_FROM_DEVICE,
       onConfirm: () => executeDeleteFromDevice(recording)
     })
   }, [deviceConnected, executeDeleteFromDevice])
@@ -845,6 +913,13 @@ export function Library() {
       const res = await window.electronAPI.recordings.deleteCascade(recording.id, false)
       if (!res?.success) throw new Error(res?.error || 'Delete failed')
       await refresh(false)
+      // spec-005/F17 T5 §D1 step 7 — keep the Trash count accurate after every
+      // soft-delete (this row just became visible there).
+      await loadTrash()
+      // AR3-5 — soft-deleting a playing/selected row stops playback and clears
+      // its reader/selection immediately (don't wait for the Trash-entry effect).
+      if (currentlyPlayingId === recording.id) audioControls.stop()
+      if (selectedSourceId === recording.id) setSelectedSourceId(null)
       import('@/components/ui/toaster').then(({ toast }) => {
         toast.success('Moved to Trash', `"${recording.filename}" is hidden and excluded from processing.`, {
           duration: 8000,
@@ -853,6 +928,7 @@ export function Library() {
             onClick: async () => {
               await window.electronAPI.recordings.restore(recording.id)
               await refresh(false)
+              await loadTrash()
             }
           }
         })
@@ -865,30 +941,39 @@ export function Library() {
     } finally {
       setDeleting(null)
     }
-  }, [refresh])
+  }, [refresh, loadTrash, currentlyPlayingId, audioControls, selectedSourceId, setSelectedSourceId])
 
   // Soft-delete flow: a light confirm, then hide with an Undo toast (reversible).
   const handleDeleteLocal = useCallback(async (recording: UnifiedRecording) => {
     if (!hasLocalPath(recording)) return
     setConfirmDialog({
       open: true,
-      title: 'Delete recording',
-      description:
-        `Move "${recording.filename}" to Trash? It will be hidden and excluded from all AI ` +
-        `processing. Nothing is erased — you can restore it, or delete it permanently later.`,
-      actionLabel: 'Delete',
+      title: LABEL_MOVE_TO_TRASH,
+      description: softDeleteConfirmDescription(recording.filename),
+      actionLabel: LABEL_MOVE_TO_TRASH,
       onConfirm: () => executeDeleteLocal(recording)
     })
   }, [executeDeleteLocal])
 
-  // Hard purge (privacy): irreversibly remove ALL derived data + files. Confirm
-  // dialog states exactly what will be removed (decidability).
-  const executeDeletePermanent = useCallback(async (recording: UnifiedRecording) => {
+  // Hard purge (privacy): irreversibly remove ALL derived data + files. Impact +
+  // strings are owned by the dedicated DeletePermanentDialog (§D6) now; this just
+  // executes. `opts` is the T5/T6 seam — T6 owns actually honoring
+  // alsoDeleteFromDevice (extending deleteCascade / recording-deletion-service);
+  // T5 only threads it through the call so the dialog's checkbox has somewhere
+  // to go.
+  const executeDeletePermanent = useCallback(async (
+    recording: UnifiedRecording,
+    _opts?: { alsoDeleteFromDevice: boolean }
+  ) => {
     setDeleting(recording.id)
     try {
       const res = await window.electronAPI.recordings.deleteCascade(recording.id, true)
       if (!res?.success) throw new Error(res?.error || 'Permanent delete failed')
       await refresh(false)
+      // spec-005/F17 T5 §D1 step 7 — a purged row must leave the visible Trash
+      // list too (executeDeletePermanent only reloads the default pipeline via
+      // refresh(false); the Trash array is T5-owned).
+      await loadTrash()
       import('@/components/ui/toaster').then(({ toast }) => {
         toast.success('Deleted permanently', `"${recording.filename}" and all derived data were removed.`)
       })
@@ -900,39 +985,65 @@ export function Library() {
     } finally {
       setDeleting(null)
     }
-  }, [refresh])
+  }, [refresh, loadTrash])
 
+  // spec-005/F17 T5 §D6 — fetches the impact and opens the dedicated
+  // DeletePermanentDialog (replaces the shared confirmDialog for this flow;
+  // ConfirmDialog has no slot for impact copy + the device checkbox).
   const handleDeletePermanent = useCallback(async (recording: UnifiedRecording) => {
     if (recording.location === 'device-only') return
-    // Fetch the exact impact so the dialog can name what is removed.
-    let removes = 'the audio file and any transcript'
+    let impact: DeletePermanentDialogImpact | undefined
     try {
       const imp = await window.electronAPI.recordings.deletionImpact(recording.id)
       if (imp?.success && imp.data) {
-        const d = imp.data
-        const parts: string[] = []
-        if (d.transcripts) parts.push(`${d.transcripts} transcript${d.transcripts > 1 ? 's' : ''}`)
-        if (d.actionItems) parts.push(`${d.actionItems} action item${d.actionItems > 1 ? 's' : ''}`)
-        if (d.embeddings) parts.push(`${d.embeddings} embedding${d.embeddings > 1 ? 's' : ''}`)
-        if (d.artifacts) parts.push(`${d.artifacts} artifact${d.artifacts > 1 ? 's' : ''}`)
-        if (d.hasAudioFile) parts.push('the audio file')
-        if (parts.length > 0) {
-          removes = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
+        impact = {
+          transcripts: imp.data.transcripts,
+          actionItems: imp.data.actionItems,
+          embeddings: imp.data.embeddings,
+          captures: imp.data.captures,
+          artifacts: imp.data.artifacts,
+          hasAudioFile: imp.data.hasAudioFile
+          // graphEstimate / onDevice: T6 (spec-006) fills these into the
+          // deletionImpact payload; absent here means "omitted" per §D6.
         }
       }
-    } catch {
-      /* fall back to the generic wording */
+    } catch (e) {
+      console.error('[Library] Failed to fetch deletion impact:', e)
+      /* fall back to DeletePermanentDialog's own generic wording (impact undefined) */
     }
-    setConfirmDialog({
-      open: true,
-      title: 'Delete permanently',
-      description:
-        `Permanently delete "${recording.filename}"? This removes ${removes}, plus its embeddings ` +
-        `from the assistant. This CANNOT be undone. The copy on the device (if any) is not touched.`,
-      actionLabel: 'Delete permanently',
-      onConfirm: () => executeDeletePermanent(recording)
-    })
-  }, [executeDeletePermanent])
+    setDeletePermanentDialog({ open: true, recording, impact })
+  }, [])
+
+  // Confirms the permanent-delete dialog: executes the purge, then closes the
+  // dialog and (per §D1 step 7) refreshes the Trash count/list.
+  const handleConfirmDeletePermanent = useCallback(async (opts: { alsoDeleteFromDevice: boolean }) => {
+    const recording = deletePermanentDialog.recording
+    setDeletePermanentDialog((prev) => ({ ...prev, open: false }))
+    if (!recording) return
+    await executeDeletePermanent(recording, opts)
+  }, [deletePermanentDialog.recording, executeDeletePermanent])
+
+  // spec-005/F17 T5 §D1 step 7 — undo a soft-delete from the Trash surface.
+  // Refreshes BOTH the default pipeline (so the row reappears there) and the
+  // Trash list (so it leaves Trash); the AR3-5 state-boundary effect above
+  // handles clearing the row's own selection once trashedRecordings updates.
+  const handleRestore = useCallback(async (recording: UnifiedRecording) => {
+    try {
+      const res = await window.electronAPI.recordings.restore(recording.id)
+      if (!res?.success) throw new Error('Restore failed')
+      await refresh(false)
+      await loadTrash()
+      announce(`Restored "${recording.filename}"`)
+      import('@/components/ui/toaster').then(({ toast }) => {
+        toast.success('Restored', `"${recording.filename}" is back in your Library.`)
+      })
+    } catch (e) {
+      console.error('Failed to restore recording:', e)
+      import('@/components/ui/toaster').then(({ toast }) => {
+        toast.error('Restore Failed', `Failed to restore "${recording.filename}". Please try again.`)
+      })
+    }
+  }, [refresh, loadTrash, announce])
 
   // Mark / unmark a recording "personal" (ignore) — reversible, non-destructive.
   const handleMarkPersonal = useCallback(async (recording: UnifiedRecording) => {
@@ -1032,6 +1143,22 @@ export function Library() {
     [handleDeletePermanent]
   )
 
+  // spec-005/F17 T5 §D3 — synced ("both") rows only; reuses the EXISTING device
+  // path (handleDeleteFromDevice → executeDeleteFromDevice), no new Jensen code.
+  const handleDeleteFromDeviceCallback = useCallback(
+    (recording: UnifiedRecording) => {
+      handleDeleteFromDevice(recording)
+    },
+    [handleDeleteFromDevice]
+  )
+
+  const handleRestoreCallback = useCallback(
+    (recording: UnifiedRecording) => {
+      handleRestore(recording)
+    },
+    [handleRestore]
+  )
+
   const handleMarkPersonalCallback = useCallback(
     (recording: UnifiedRecording) => {
       handleMarkPersonal(recording)
@@ -1096,18 +1223,39 @@ export function Library() {
   const selectedTranscript = selectedRecording ? transcripts.get(selectedRecording.id) : undefined
   const selectedMeeting = selectedRecording?.meetingId ? meetings.get(selectedRecording.meetingId) : undefined
 
+  // spec-005/F17 T5 §AR3-5 — Trash state boundaries. Re-evaluated whenever the
+  // Trash corpus changes while showTrash is true, which covers BOTH halves of
+  // the amendment with one effect:
+  //   - "Entering Trash: stop playback if the playing row is trashed; clear
+  //     selection/reader when the selected row isn't in the current corpus."
+  //   - "Restore/purge in Trash clears that row's selection" — trashedRecordings
+  //     shrinks after either (loadTrash() re-runs), which re-fires this same
+  //     membership check.
+  // A no-op while showTrash is false (leaving the live view's own state alone).
+  useEffect(() => {
+    if (!showTrash) return
+    if (currentlyPlayingId && trashedRecordings.some((r) => r.id === currentlyPlayingId)) {
+      audioControls.stop()
+    }
+    if (selectedSourceId && !trashedRecordings.some((r) => r.id === selectedSourceId)) {
+      setSelectedSourceId(null)
+    }
+  }, [showTrash, trashedRecordings, currentlyPlayingId, selectedSourceId, audioControls, setSelectedSourceId])
+
   // Virtualization setup
   const parentRef = useRef<HTMLDivElement>(null)
 
   // B-LIB-008: Simplified estimateSize — complex calculations caused unnecessary
   // virtualizer re-measurements. The virtualizer uses measureElement for actual sizing.
+  // Trash mode FORCES the SourceRow list regardless of viewMode (§D1 — SourceCard
+  // has no onRestore affordance), so its row height (48) applies whenever showTrash.
   const estimateSize = useCallback(
-    () => compactView ? 48 : 200,
-    [compactView]
+    () => (compactView || showTrash) ? 48 : 200,
+    [compactView, showTrash]
   )
 
   const rowVirtualizer = useVirtualizer({
-    count: filteredRecordings.length,
+    count: displayedRecordings.length,
     getScrollElement: () => parentRef.current,
     estimateSize,
     overscan: 5
@@ -1127,11 +1275,11 @@ export function Library() {
       return
     }
     if (lastScrolledSourceIdRef.current === selectedSourceId) return
-    const index = filteredRecordings.findIndex((r) => r.id === selectedSourceId)
-    if (index < 0) return // not in the current (possibly filtered) list yet — retry when it appears
+    const index = displayedRecordings.findIndex((r) => r.id === selectedSourceId)
+    if (index < 0) return // not in the current (possibly filtered/Trash) list yet — retry when it appears
     lastScrolledSourceIdRef.current = selectedSourceId
     rowVirtualizer.scrollToIndex(index, { align: 'auto' })
-  }, [selectedSourceId, filteredRecordings, rowVirtualizer])
+  }, [selectedSourceId, displayedRecordings, rowVirtualizer])
 
   // Loading state — show skeleton layout instead of bare spinner
   if (loading && recordings.length === 0) {
@@ -1199,6 +1347,9 @@ export function Library() {
         onBulkProcess={handleBulkProcess}
         onRefresh={() => refresh(true)}
         onSetCompactView={setCompactView}
+        showTrash={showTrash}
+        trashCount={trashedRecordings.length}
+        onToggleTrash={handleToggleTrash}
       />
 
       {/* Device Disconnect Banner */}
@@ -1209,58 +1360,67 @@ export function Library() {
         onRetry={handleRetryConnection}
       />
 
-      {/* Filters */}
+      {/* Filters — hidden in Trash mode (spec-005/F17 T5 §D1: the location/value
+          filter chips + search operate on the default pipeline and are meaningless
+          for tombstones; a one-line banner sets Trash's own expectation instead). */}
       <div className="px-2 sm:px-4 lg:px-6 pb-3 border-b border-border relative">
-        <div className={isFilterPending ? 'opacity-70 pointer-events-none transition-opacity' : 'transition-opacity'}>
-          <LibraryFilters
-            stats={stats}
-            filterableCount={scopedRecordings.length}
-            typeCounts={typeCounts}
-            hasRatedQuality={ratedCount > 0}
-            filterMode={filterMode}
-            semanticFilter={semanticFilter}
-            exclusiveFilter={exclusiveFilter}
-            categoryFilter={categoryFilter ?? 'all'}
-            qualityFilter={qualityFilter ?? 'all'}
-            statusFilter={statusFilter ?? 'all'}
-            sourceTypeFilter={sourceTypeFilter}
-            durationPreset={durationPreset}
-            searchQuery={searchQuery}
-            sortBy={sortBy}
-            sortOrder={sortOrder}
-            onFilterModeChange={setFilterMode}
-            onSemanticFilterChange={setSemanticFilter}
-            onExclusiveFilterChange={setExclusiveFilter}
-            onCategoryFilterChange={(filter) => setCategoryFilter(filter === 'all' ? null : filter)}
-            onQualityFilterChange={(filter) => setQualityFilter(filter === 'all' ? null : filter)}
-            onStatusFilterChange={(filter) => setStatusFilter(filter === 'all' ? null : filter)}
-            onSourceTypeFilterChange={setSourceTypeFilter}
-            onDurationPresetChange={setDurationPreset}
-            onSearchQueryChange={setSearchQuery}
-            onSortByChange={setSortBy}
-            onSortOrderChange={setSortOrder}
-            onClearFilters={clearAllFilters}
-          />
-          {personalCount > 0 && (
-            <div className="mt-2 flex items-center">
-              <button
-                type="button"
-                onClick={() => setShowPersonal((v) => !v)}
-                aria-pressed={showPersonal}
-                className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors ${
-                  showPersonal
-                    ? 'border-primary/40 bg-primary/10 text-primary'
-                    : 'border-border bg-muted/40 text-muted-foreground hover:text-foreground'
-                }`}
-                title="Personal recordings are kept but excluded from AI processing and hidden by default"
-              >
-                <EyeOff className="h-3 w-3" aria-hidden="true" />
-                {showPersonal ? `Showing ${personalCount} personal` : `Show ${personalCount} personal`}
-              </button>
-            </div>
-          )}
-        </div>
-        {isFilterPending && (
+        {showTrash ? (
+          <div className="flex items-center gap-2 py-1.5 text-sm text-muted-foreground" role="status">
+            <Trash2 className="h-4 w-4 shrink-0" aria-hidden="true" />
+            {TRASH_MODE_BANNER}
+          </div>
+        ) : (
+          <div className={isFilterPending ? 'opacity-70 pointer-events-none transition-opacity' : 'transition-opacity'}>
+            <LibraryFilters
+              stats={stats}
+              filterableCount={scopedRecordings.length}
+              typeCounts={typeCounts}
+              hasRatedQuality={ratedCount > 0}
+              filterMode={filterMode}
+              semanticFilter={semanticFilter}
+              exclusiveFilter={exclusiveFilter}
+              categoryFilter={categoryFilter ?? 'all'}
+              qualityFilter={qualityFilter ?? 'all'}
+              statusFilter={statusFilter ?? 'all'}
+              sourceTypeFilter={sourceTypeFilter}
+              durationPreset={durationPreset}
+              searchQuery={searchQuery}
+              sortBy={sortBy}
+              sortOrder={sortOrder}
+              onFilterModeChange={setFilterMode}
+              onSemanticFilterChange={setSemanticFilter}
+              onExclusiveFilterChange={setExclusiveFilter}
+              onCategoryFilterChange={(filter) => setCategoryFilter(filter === 'all' ? null : filter)}
+              onQualityFilterChange={(filter) => setQualityFilter(filter === 'all' ? null : filter)}
+              onStatusFilterChange={(filter) => setStatusFilter(filter === 'all' ? null : filter)}
+              onSourceTypeFilterChange={setSourceTypeFilter}
+              onDurationPresetChange={setDurationPreset}
+              onSearchQueryChange={setSearchQuery}
+              onSortByChange={setSortBy}
+              onSortOrderChange={setSortOrder}
+              onClearFilters={clearAllFilters}
+            />
+            {personalCount > 0 && (
+              <div className="mt-2 flex items-center">
+                <button
+                  type="button"
+                  onClick={() => setShowPersonal((v) => !v)}
+                  aria-pressed={showPersonal}
+                  className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors ${
+                    showPersonal
+                      ? 'border-primary/40 bg-primary/10 text-primary'
+                      : 'border-border bg-muted/40 text-muted-foreground hover:text-foreground'
+                  }`}
+                  title="Personal recordings are kept but excluded from AI processing and hidden by default"
+                >
+                  <EyeOff className="h-3 w-3" aria-hidden="true" />
+                  {showPersonal ? `Showing ${personalCount} personal` : `Show ${personalCount} personal`}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+        {isFilterPending && !showTrash && (
           <div className="absolute top-2 right-2 pointer-events-none">
             <RefreshCw className="h-4 w-4 animate-spin text-muted-foreground" />
           </div>
@@ -1316,8 +1476,18 @@ export function Library() {
             scrolls horizontally — rows truncate instead. The pane itself has a
             sensible minimum (TriPaneLayout) so the title/date can't be starved. */}
         <div className={`w-full min-w-0 transition-opacity ${isFilterPending ? 'opacity-60' : 'opacity-100'}`}>
-          {filteredRecordings.length === 0 ? (
-            qualityFilter !== null && qualityFilter !== 'unrated' && ratedCount === 0 ? (
+          {displayedRecordings.length === 0 ? (
+            showTrash ? (
+              // Trash-specific empty state — the quality-filter/EmptyState copy
+              // below is about the default pipeline's filters and would be
+              // nonsensical here (Trash isn't filtered, per §D1).
+              <div className="text-center py-12 px-6 max-w-md mx-auto" role="status">
+                <p className="text-base font-medium text-foreground">Trash is empty</p>
+                <p className="mt-1.5 text-sm text-muted-foreground">
+                  Recordings you move to Trash appear here until restored or deleted permanently.
+                </p>
+              </div>
+            ) : qualityFilter !== null && qualityFilter !== 'unrated' && ratedCount === 0 ? (
               // Honest empty state: the quality filter isn't broken, there's just
               // no rated data yet. Say so, rather than a bare "no matches".
               <div className="text-center py-12 px-6 max-w-md mx-auto" role="status">
@@ -1342,15 +1512,16 @@ export function Library() {
             )
           ) : (
             <div className="animate-rise-in">
-              {compactView && (
+              {(compactView || showTrash) && (
                 <div className="mb-2 flex items-center justify-between px-3">
                   <div className="flex items-center gap-3">
                     <span className="text-xs text-muted-foreground">
-                      {filteredRecordings.length} shown
+                      {displayedRecordings.length} shown
                     </span>
                     {/* Select-all / deselect-all appears only once selection mode is
-                        active (≥1 row selected), toggling every currently-shown row. */}
-                    {selectedCount > 0 && (
+                        active (≥1 row selected), toggling every currently-shown row.
+                        Never applicable in Trash — rows there never wire selection. */}
+                    {!showTrash && selectedCount > 0 && (
                       <button
                         type="button"
                         onClick={toggleSelectAllShown}
@@ -1361,7 +1532,7 @@ export function Library() {
                       </button>
                     )}
                   </div>
-                  <StatusLegend />
+                  {!showTrash && <StatusLegend />}
                 </div>
               )}
             <div
@@ -1371,14 +1542,16 @@ export function Library() {
                 position: 'relative'
               }}
               role="listbox"
-              aria-label="Knowledge Library"
-              aria-rowcount={filteredRecordings.length}
+              aria-label={showTrash ? 'Trash' : 'Knowledge Library'}
+              aria-rowcount={displayedRecordings.length}
             >
-              {compactView ? (
+              {/* spec-005/F17 T5 §D1 — Trash ALWAYS renders the SourceRow list, even
+                  in card view: SourceCard has no onRestore affordance (AC#10). */}
+              {(compactView || showTrash) ? (
                 // Compact List View - LB-19 fix: Add focus indicator support
                 <div key="compact-view">
                   {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-                    const recording = filteredRecordings[virtualRow.index]
+                    const recording = displayedRecordings[virtualRow.index]
                     const meeting = recording.meetingId ? meetings.get(recording.meetingId) : undefined
                     const isFocused = focusedIndex === virtualRow.index
 
@@ -1401,33 +1574,49 @@ export function Library() {
                         ].join(' ')}
                         aria-rowindex={virtualRow.index + 1}
                       >
-                        <SourceRow
-                          recording={recording}
-                          meeting={meeting}
-                          transcript={transcripts.get(recording.id)}
-                          isSelected={selectedIds.has(recording.id)}
-                          anySelected={selectedCount > 0}
-                          isActiveSource={selectedSourceId === recording.id}
-                          searchQuery={deferredSearchQuery}
-                          onSelectionChange={(id, shiftKey) =>
-                            handleSelectionClick(id, shiftKey, filteredRecordings.map((r) => r.id))
-                          }
-                          onClick={() => handleRowClick(recording)}
-                          onDownload={() => handleDownloadCallback(recording)}
-                          onDelete={() => handleDeleteCallback(recording)}
-                          onDeletePermanent={() => handleDeletePermanentCallback(recording)}
-                          onMarkPersonal={() => handleMarkPersonalCallback(recording)}
-                          onSetValueRating={(rating) => handleSetValueRatingCallback(recording, rating)}
-                          onTranscribe={() => queueTranscription(recording)}
-                          onReprocessVibeVoice={() => reprocessWithVibeVoice(recording)}
-                          onAskAssistant={() => handleAskAssistantCallback(recording)}
-                          onGenerateOutput={() => handleGenerateOutputCallback(recording)}
-                          isDownloading={isDeviceOnly(recording) && isDownloading(recording.deviceFilename)}
-                          downloadProgress={
-                            isDeviceOnly(recording) ? downloadQueue.get(recording.deviceFilename)?.progress : undefined
-                          }
-                          deviceConnected={deviceConnected}
-                        />
+                        {showTrash ? (
+                          // Trash rows are menu-only (§D1): Library passes ONLY
+                          // onRestore + onDeletePermanent — every other SourceRow
+                          // menu item is onX &&-guarded and simply doesn't render.
+                          <SourceRow
+                            recording={recording}
+                            meeting={meeting}
+                            transcript={transcripts.get(recording.id)}
+                            onRestore={() => handleRestoreCallback(recording)}
+                            onDeletePermanent={() => handleDeletePermanentCallback(recording)}
+                          />
+                        ) : (
+                          <SourceRow
+                            recording={recording}
+                            meeting={meeting}
+                            transcript={transcripts.get(recording.id)}
+                            isSelected={selectedIds.has(recording.id)}
+                            anySelected={selectedCount > 0}
+                            isActiveSource={selectedSourceId === recording.id}
+                            searchQuery={deferredSearchQuery}
+                            onSelectionChange={(id, shiftKey) =>
+                              handleSelectionClick(id, shiftKey, filteredRecordings.map((r) => r.id))
+                            }
+                            onClick={() => handleRowClick(recording)}
+                            onDownload={() => handleDownloadCallback(recording)}
+                            onDelete={() => handleDeleteCallback(recording)}
+                            onDeletePermanent={() => handleDeletePermanentCallback(recording)}
+                            onDeleteFromDevice={
+                              recording.location === 'both' ? () => handleDeleteFromDeviceCallback(recording) : undefined
+                            }
+                            onMarkPersonal={() => handleMarkPersonalCallback(recording)}
+                            onSetValueRating={(rating) => handleSetValueRatingCallback(recording, rating)}
+                            onTranscribe={() => queueTranscription(recording)}
+                            onReprocessVibeVoice={() => reprocessWithVibeVoice(recording)}
+                            onAskAssistant={() => handleAskAssistantCallback(recording)}
+                            onGenerateOutput={() => handleGenerateOutputCallback(recording)}
+                            isDownloading={isDeviceOnly(recording) && isDownloading(recording.deviceFilename)}
+                            downloadProgress={
+                              isDeviceOnly(recording) ? downloadQueue.get(recording.deviceFilename)?.progress : undefined
+                            }
+                            deviceConnected={deviceConnected}
+                          />
+                        )}
                       </div>
                     )
                   })}
@@ -1436,7 +1625,7 @@ export function Library() {
                 // Card View - LB-19 fix: Add focus indicator support
                 <div key="card-view" className="space-y-4">
                   {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-                    const recording = filteredRecordings[virtualRow.index]
+                    const recording = displayedRecordings[virtualRow.index]
                     const transcript = transcripts.get(recording.id)
                     const meeting = recording.meetingId ? meetings.get(recording.meetingId) : undefined
                     const isFocused = focusedIndex === virtualRow.index
@@ -1537,6 +1726,11 @@ export function Library() {
               onDeletePermanent={() => {
                 if (selectedRecording) handleDeletePermanentCallback(selectedRecording)
               }}
+              onDeleteFromDevice={() => {
+                if (selectedRecording && selectedRecording.location === 'both') {
+                  handleDeleteFromDeviceCallback(selectedRecording)
+                }
+              }}
               onMarkPersonal={() => {
                 if (selectedRecording) handleMarkPersonalCallback(selectedRecording)
               }}
@@ -1574,7 +1768,8 @@ export function Library() {
         />
       </div>
 
-      {/* B-LIB-006: Confirm Dialog for destructive actions */}
+      {/* B-LIB-006: Confirm Dialog for destructive actions (soft delete, device
+          delete, bulk delete). Permanent delete uses the dedicated dialog below. */}
       <ConfirmDialog
         open={confirmDialog.open}
         onOpenChange={(open) => setConfirmDialog((prev) => ({ ...prev, open }))}
@@ -1583,6 +1778,21 @@ export function Library() {
         actionLabel={confirmDialog.actionLabel}
         variant="destructive"
         onConfirm={confirmDialog.onConfirm}
+      />
+
+      {/* spec-005/F17 T5 §D6 — dedicated permanent-delete dialog (impact copy +
+          device checkbox; ConfirmDialog has no slot for either). */}
+      <DeletePermanentDialog
+        open={deletePermanentDialog.open}
+        onOpenChange={(open) => setDeletePermanentDialog((prev) => ({ ...prev, open }))}
+        filename={deletePermanentDialog.recording?.filename ?? ''}
+        impact={deletePermanentDialog.impact}
+        deviceConnected={
+          !!deletePermanentDialog.recording &&
+          deletePermanentDialog.recording.location === 'both' &&
+          deviceConnected
+        }
+        onConfirm={handleConfirmDeletePermanent}
       />
     </div>
   )

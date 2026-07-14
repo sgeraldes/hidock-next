@@ -197,7 +197,9 @@ global.window.electronAPI = {
   recordings: {
     addExternal: vi.fn(),
     delete: vi.fn(),
-    updateStatus: vi.fn()
+    updateStatus: vi.fn(),
+    // spec-005/F17 T5 — loaded eagerly on mount (for the Trash toggle's count).
+    getTrash: vi.fn().mockResolvedValue([])
   },
   downloadService: {
     queueDownloads: vi.fn()

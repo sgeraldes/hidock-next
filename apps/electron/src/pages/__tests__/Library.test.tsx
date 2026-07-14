@@ -200,7 +200,9 @@ global.window.electronAPI = {
     markPersonal: vi.fn().mockResolvedValue({ success: true, personal: true }),
     deletionImpact: vi.fn().mockResolvedValue({ success: true, data: { transcripts: 0, actionItems: 0, embeddings: 0, artifacts: 0, hasAudioFile: true } }),
     deleteCascade: vi.fn().mockResolvedValue({ success: true, mode: 'soft' }),
-    restore: vi.fn().mockResolvedValue({ success: true })
+    restore: vi.fn().mockResolvedValue({ success: true }),
+    // spec-005/F17 T5 — loaded eagerly on mount (for the Trash toggle's count).
+    getTrash: vi.fn().mockResolvedValue([])
   },
   downloadService: {
     queueDownloads: vi.fn()
