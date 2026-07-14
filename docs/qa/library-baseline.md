@@ -80,8 +80,8 @@ npm run test:performance
 ### Sample Output
 
 ```
-✓ src/__tests__/performance/library-performance.test.ts (5)
-  ✓ Library Performance (5)
+✓ src/__tests__/performance/library-performance.test.tsx (6)
+  ✓ Library Performance (6)
     ✓ renders 100 items within performance budget
       Render time for 100 items: XX.XXms
     ✓ renders 1000 items within performance budget
