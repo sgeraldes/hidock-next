@@ -139,6 +139,10 @@ async function pollRecordingOnce(): Promise<void> {
   const filename = result.recording && result.recording.length > 0 ? result.recording : null
   if (filename !== lastRecordingFilename) {
     lastRecordingFilename = filename
+    // The per-poll CMD-18 send/recv logs are suppressed in the protocol layer
+    // (they printed every 20s forever) — one line per actual state CHANGE keeps
+    // the console signal without the spam.
+    console.log(`[Jensen] recording state: ${filename ?? 'idle'}`)
     broadcast('jensen:recording-changed', { recording: filename })
   }
 }
