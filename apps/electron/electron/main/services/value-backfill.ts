@@ -326,12 +326,22 @@ async function callWithInRunRetries(captureId: string): Promise<RawClassificatio
   let lastError: unknown
   for (let attempt = 0; attempt <= IN_RUN_RETRY_DELAYS_MS.length; attempt++) {
     try {
-      // CX-T3-9: the rate-limit TIMESTAMP is stamped here, immediately before
-      // a real provider invocation (every attempt is one) — never by the wait
-      // half, so a privacy-skipped item can't consume a throttle slot.
-      lastCallStartedAt = Date.now()
-      return await classifyCaptureValueRaw(captureId)
+      const result = await classifyCaptureValueRaw(captureId)
+      // CX-T3-9/CX-T3-11: the rate-limit TIMESTAMP is stamped only when the
+      // provider was ACTUALLY invoked — a raw-level skip (capture became
+      // rated after the snapshot, transcript vanished, provider
+      // deconfigured) performs no provider work and must not consume a
+      // throttle slot. Stamping AFTER the call (end-to-start spacing) is
+      // equally valid rate limiting.
+      if (result.providerCalled) {
+        lastCallStartedAt = Date.now()
+      }
+      return result
     } catch (e) {
+      // classifyCaptureValueRaw throws only from the complete() call itself
+      // (the skip paths return; parsing never throws) — the provider WAS
+      // invoked, so a failed attempt still counts for spacing.
+      lastCallStartedAt = Date.now()
       lastError = e
       if (attempt < IN_RUN_RETRY_DELAYS_MS.length) {
         const baseDelay = IN_RUN_RETRY_DELAYS_MS[attempt]
@@ -345,14 +355,16 @@ async function callWithInRunRetries(captureId: string): Promise<RawClassificatio
 
 // ---------------------------------------------------------------------------
 // Rate limiting between LLM calls (across items, not the in-run retries above).
-// CX-T3-9: WAIT and TIMESTAMP are deliberately separated. waitForThrottle()
-// only spaces against the last REAL call; the stamp happens inside
-// callWithInRunRetries, immediately before each actual classifyCaptureValueRaw
-// invocation. The old combined form stamped BEFORE the privacy check, so every
-// skipped item (personal/deleted/purged after the snapshot) consumed a full
-// MIN_INTERVAL_MS slot and delayed the next real item — a bulk privacy change
-// mid-run turned hundreds of no-ops into minutes of dead waiting. Now at most
-// ONE residual wait follows the last real call, no matter how many skips.
+// CX-T3-9/CX-T3-11: WAIT and TIMESTAMP are deliberately separated.
+// waitForThrottle() only spaces against the last REAL provider invocation;
+// the stamp happens inside callWithInRunRetries, after each attempt that
+// actually reached the provider (result.providerCalled, or a throw from
+// complete() itself). Neither a privacy-skip (never reaches the call) nor a
+// raw-level skip (classifyCaptureValueRaw returns `skipped` without provider
+// work) consumes a throttle slot — the old combined wait+stamp form billed
+// one full MIN_INTERVAL_MS per skip, turning a bulk privacy change mid-run
+// into minutes of dead waiting. Now at most ONE residual wait follows the
+// last real call, no matter how many skips intervene.
 // ---------------------------------------------------------------------------
 
 let lastCallStartedAt = 0

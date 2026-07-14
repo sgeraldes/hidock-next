@@ -201,7 +201,24 @@ function getBackfillStateRow(id: string) {
 }
 
 function successReply(value: 'high' | 'normal' | 'low' | 'none' = 'none', confidence = 0.9, reasons: string[] = []) {
-  return { classification: { value, reasons, confidence }, currentRating: 'unrated' as const }
+  // providerCalled: true — a successful classification means complete() ran
+  // (CX-T3-11); the runner stamps the rate-limit timestamp off this flag.
+  return { classification: { value, reasons, confidence }, currentRating: 'unrated' as const, providerCalled: true }
+}
+
+/** Raw-level skip reply (CX-T3-11): classifyCaptureValueRaw returns `skipped`
+ *  WITHOUT invoking the provider — providerCalled: false, so the runner must
+ *  not bill a throttle slot for it. */
+function skippedReply(
+  skipped: 'no-transcript' | 'already-rated' | 'no-provider' = 'already-rated',
+  currentRating: string = 'valuable'
+) {
+  return {
+    classification: { value: 'normal' as const, reasons: [], confidence: 0 },
+    currentRating,
+    skipped,
+    providerCalled: false
+  }
 }
 
 const FAKE_WINDOW_FACTORY = () => {
@@ -980,6 +997,51 @@ describe('value-backfill', () => {
         }
         expect(getBackfillStateRow('cap-1')?.status).toBe('classified')
         expect(getBackfillStateRow('cap-5')?.status).toBe('classified')
+      } finally {
+        nowSpy.mockRestore()
+      }
+    })
+
+    // CX-T3-11: classifyCaptureValueRaw itself can skip (capture became
+    // rated after the snapshot, transcript vanished, provider deconfigured)
+    // WITHOUT invoking the provider. Unlike the CX-T3-9 privacy skips (which
+    // never reach the call), these DO reach the call — but providerCalled is
+    // false, so they must not stamp a throttle slot either.
+    it('a raw-level skip (providerCalled:false) consumes NO throttle slot; the next real item proceeds without an extra interval (CX-T3-11)', async () => {
+      let fakeNow = 1_000_000
+      const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => fakeNow)
+      const waits: number[] = []
+      try {
+        seedEligible('cap-1', '2026-06-01T00:00:00.000Z') // REAL — processed first
+        seedEligible('cap-2', '2026-05-01T00:00:00.000Z') // raw-level skip (became rated after snapshot)
+        seedEligible('cap-3', '2026-04-01T00:00:00.000Z') // REAL — must not re-wait
+        _setValueBackfillConfigForTests({
+          minIntervalMs: 60000,
+          delayFn: async (ms: number) => {
+            waits.push(ms)
+            fakeNow += ms
+          }
+        })
+        classifyCaptureValueRawMock.mockImplementation(async (captureId: string) =>
+          captureId === 'cap-2' ? skippedReply('already-rated', 'valuable') : successReply('none', 0.9)
+        )
+
+        const result = await startValueBackfill()
+
+        expect(result.total).toBe(3)
+        // ALL three items reach the call (the raw skip happens inside it)...
+        expect(classifyCaptureValueRawMock).toHaveBeenCalledTimes(3)
+        // ...but EXACTLY ONE wait total: cap-2's residual wait after cap-1's
+        // real call. cap-2's skip performed no provider work and stamped
+        // nothing, so cap-3 — the next REAL item — spaces against cap-1's
+        // stamp, already satisfied on the clock. (Pre-fix: cap-2's call
+        // stamped regardless, forcing cap-3 into a second full wait.)
+        expect(waits).toEqual([60000])
+        // The raw skip still finalizes a classified marker (no re-billing on
+        // later runs) carrying the row's current rating.
+        expect(getBackfillStateRow('cap-2')).toMatchObject({ status: 'classified', result_rating: 'valuable' })
+        expect(getBackfillStateRow('cap-1')?.status).toBe('classified')
+        expect(getBackfillStateRow('cap-3')?.status).toBe('classified')
       } finally {
         nowSpy.mockRestore()
       }

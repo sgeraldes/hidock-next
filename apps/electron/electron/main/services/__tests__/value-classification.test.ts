@@ -926,6 +926,9 @@ describe('classifyCaptureValueRaw (no persistence — AR-3 seam split)', () => {
 
     expect(raw.skipped).toBeUndefined()
     expect(raw.classification).toEqual({ value: 'none', reasons: ['personal_family'], confidence: 0.9 })
+    // CX-T3-11: complete() WAS invoked on this path — the backfill's rate
+    // limiter bills a throttle slot off this flag.
+    expect(raw.providerCalled).toBe(true)
     // No persistence — the row is exactly as seeded.
     const row = getCaptureRow('cap-raw-1')
     expect(row?.quality_rating).toBe('unrated')
@@ -958,6 +961,31 @@ describe('classifyCaptureValueRaw (no persistence — AR-3 seam split)', () => {
 
     expect(raw.skipped).toBe('already-rated')
     expect(raw.currentRating).toBe('valuable')
+    expect(mockComplete).not.toHaveBeenCalled()
+    // CX-T3-11: no provider work happened — the flag says so.
+    expect(raw.providerCalled).toBe(false)
+  })
+
+  // CX-T3-11: every skip path reports providerCalled:false — the backfill's
+  // rate limiter must not bill a throttle slot for a skip that never invoked
+  // complete().
+  it('reports providerCalled:false on ALL skip paths (no-transcript / already-rated / no-provider)', async () => {
+    // no-transcript
+    seedRecording('rec-raw-4')
+    seedCapture('cap-raw-4', 'rec-raw-4')
+    const noTranscript = await classifyCaptureValueRaw('cap-raw-4')
+    expect(noTranscript.skipped).toBe('no-transcript')
+    expect(noTranscript.providerCalled).toBe(false)
+
+    // no-provider
+    seedRecording('rec-raw-5')
+    seedTranscript('rec-raw-5', { fullText: 'Some real content.' })
+    seedCapture('cap-raw-5', 'rec-raw-5')
+    mockGetProviderConfig.mockReturnValue(null)
+    const noProvider = await classifyCaptureValueRaw('cap-raw-5')
+    expect(noProvider.skipped).toBe('no-provider')
+    expect(noProvider.providerCalled).toBe(false)
+
     expect(mockComplete).not.toHaveBeenCalled()
   })
 })

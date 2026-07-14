@@ -344,6 +344,12 @@ export interface RawClassificationResult {
    *  accurate `rating` on a skip without a second query. */
   currentRating: QualityRating | 'unrated'
   skipped?: 'no-transcript' | 'already-rated' | 'no-provider'
+  /** True only when complete() was actually invoked (CX-T3-11): the skip
+   *  paths return without any provider work, and the backfill's rate
+   *  limiter must not bill a throttle slot for them. (A thrown complete()
+   *  never produces a result at all — the caller treats a throw as
+   *  provider-called, since the request went out.) */
+  providerCalled: boolean
 }
 
 /**
@@ -382,7 +388,8 @@ export async function classifyCaptureValueRaw(captureId: string): Promise<RawCla
     return {
       classification: emptyClassification,
       currentRating: (row?.quality_rating as QualityRating | null) ?? 'unrated',
-      skipped: 'no-transcript'
+      skipped: 'no-transcript',
+      providerCalled: false
     }
   }
 
@@ -391,13 +398,19 @@ export async function classifyCaptureValueRaw(captureId: string): Promise<RawCla
     return {
       classification: emptyClassification,
       currentRating: (row.quality_rating as QualityRating | null) ?? 'unrated',
-      skipped: 'already-rated'
+      skipped: 'already-rated',
+      providerCalled: false
     }
   }
 
   const providerConfig = getProviderConfigFromSettings()
   if (!providerConfig) {
-    return { classification: emptyClassification, currentRating: 'unrated', skipped: 'no-provider' }
+    return {
+      classification: emptyClassification,
+      currentRating: 'unrated',
+      skipped: 'no-provider',
+      providerCalled: false
+    }
   }
 
   const transcriptExcerpt = truncateTranscript(row.transcript_full_text)
@@ -409,7 +422,7 @@ export async function classifyCaptureValueRaw(captureId: string): Promise<RawCla
   const reply = await complete(prompt, providerConfig)
   const cls = parseValueClassification(extractJsonObject(reply) ?? undefined)
 
-  return { classification: cls, currentRating: 'unrated' }
+  return { classification: cls, currentRating: 'unrated', providerCalled: true }
 }
 
 /**
