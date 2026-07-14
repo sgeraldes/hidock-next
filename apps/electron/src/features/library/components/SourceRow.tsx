@@ -1,5 +1,5 @@
 import { memo } from 'react'
-import { AlertCircle, Download, Trash2, Wand2, Sparkles, FileText, RefreshCw, AudioLines, MoreHorizontal, Calendar, EyeOff, Eye, TrendingDown, Ban, RotateCcw } from 'lucide-react'
+import { AlertCircle, Download, Trash2, Wand2, Sparkles, FileText, RefreshCw, AudioLines, MoreHorizontal, Calendar, EyeOff, Eye, TrendingDown, Ban, RotateCcw, ArchiveRestore } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import {
@@ -12,7 +12,7 @@ import {
 import { formatDateTime } from '@/lib/utils'
 import { Meeting, Transcript } from '@/types'
 import type { QualityRating } from '@/types/knowledge'
-import { UnifiedRecording, hasLocalPath } from '@/types/unified-recording'
+import { UnifiedRecording, hasLocalPath, isRecordingBacked } from '@/types/unified-recording'
 import { StatusIcon } from './StatusIcon'
 import { TranscriptionStatusBadge } from './TranscriptionStatusBadge'
 import { useLibraryStore } from '@/store/useLibraryStore'
@@ -21,6 +21,19 @@ import { highlightText } from '@/features/library/utils/highlightText'
 import { getRowMeta } from '@/features/library/utils/rowMeta'
 import { sourceTypeLabel } from '@/features/library/utils/sourceType'
 import { formatValueReasons } from '@/features/library/utils/valueReasons'
+import {
+  LABEL_DELETE_FROM_DEVICE,
+  LABEL_MOVE_TO_TRASH,
+  LABEL_DELETE_PERMANENTLY,
+  LABEL_RESTORE,
+  SCOPE_DEVICE_DELETE,
+  SCOPE_DEVICE_DELETE_SYNCED,
+  SCOPE_DEVICE_NOT_CONNECTED,
+  SCOPE_TRASH,
+  SCOPE_PERMANENT,
+  SCOPE_RESTORE,
+  ariaLabelWithScope
+} from '@/features/library/utils/deletionCopy'
 
 /**
  * F16/spec-003 — icon-only value badge, rendered only for low-value/garbage
@@ -77,6 +90,11 @@ interface SourceRowProps {
   onDownload?: () => void
   onDelete?: () => void
   onDeletePermanent?: () => void
+  /** Trash-mode only (spec-005/F17 §D1) — Library passes this ONLY for trashed rows. */
+  onRestore?: () => void
+  /** Synced ("both") rows only (spec-005/F17 §D3) — erases the device copy via the
+   *  existing renderer device path, keeps the local copy. */
+  onDeleteFromDevice?: () => void
   onMarkPersonal?: () => void
   /** F16/spec-003 — manual per-row value-rating override (overflow menu). */
   onSetValueRating?: (rating: QualityRating) => void
@@ -101,6 +119,8 @@ export const SourceRow = memo(function SourceRow({
   onDownload,
   onDelete,
   onDeletePermanent,
+  onRestore,
+  onDeleteFromDevice,
   onMarkPersonal,
   onSetValueRating,
   onTranscribe,
@@ -341,25 +361,84 @@ export const SourceRow = memo(function SourceRow({
                   )}
                 </>
               )}
-              {onDelete && (
+              {/* spec-005/F17 T5 §D1/§D2/§D3/AR3-4 — every item below is individually
+                  onX &&-guarded, which is what lets Library reuse this SAME menu for
+                  Trash rows (only onRestore + onDeletePermanent passed) and for
+                  synced rows (onDelete + onDeleteFromDevice + onDeletePermanent).
+                  AR3-4 (binding): capture-only synthetic rows (no source recording)
+                  render NONE of these — gated on isRecordingBacked. */}
+              {isRecordingBacked(recording) && (onDelete || onRestore || onDeletePermanent || onDeleteFromDevice) && (
                 <>
                   <DropdownMenuSeparator />
-                  <DropdownMenuItem
-                    onClick={(e) => { e.stopPropagation(); onDelete(); }}
-                    className="text-destructive focus:text-destructive"
-                  >
-                    <Trash2 className="h-4 w-4" aria-hidden="true" />
-                    {recording.location === 'device-only' ? 'Delete from device'
-                      : recording.location === 'local-only' ? 'Delete from computer'
-                        : 'Delete everywhere'}
-                  </DropdownMenuItem>
+                  {onRestore && (
+                    <DropdownMenuItem
+                      onClick={(e) => { e.stopPropagation(); onRestore(); }}
+                      className="items-start gap-2"
+                      aria-label={ariaLabelWithScope(LABEL_RESTORE, SCOPE_RESTORE)}
+                    >
+                      <ArchiveRestore className="h-4 w-4 mt-0.5 shrink-0" aria-hidden="true" />
+                      <span className="flex flex-col">
+                        <span>{LABEL_RESTORE}</span>
+                        <span className="text-xs text-muted-foreground">{SCOPE_RESTORE}</span>
+                      </span>
+                    </DropdownMenuItem>
+                  )}
+                  {onDelete && recording.location === 'device-only' && (
+                    <DropdownMenuItem
+                      onClick={(e) => { e.stopPropagation(); onDelete(); }}
+                      disabled={!deviceConnected}
+                      className="items-start gap-2 text-destructive focus:text-destructive"
+                      aria-label={ariaLabelWithScope(LABEL_DELETE_FROM_DEVICE, deviceConnected ? SCOPE_DEVICE_DELETE : SCOPE_DEVICE_NOT_CONNECTED)}
+                    >
+                      <Trash2 className="h-4 w-4 mt-0.5 shrink-0" aria-hidden="true" />
+                      <span className="flex flex-col">
+                        <span>{LABEL_DELETE_FROM_DEVICE}</span>
+                        <span className="text-xs text-muted-foreground">
+                          {deviceConnected ? SCOPE_DEVICE_DELETE : SCOPE_DEVICE_NOT_CONNECTED}
+                        </span>
+                      </span>
+                    </DropdownMenuItem>
+                  )}
+                  {onDelete && recording.location !== 'device-only' && (
+                    <DropdownMenuItem
+                      onClick={(e) => { e.stopPropagation(); onDelete(); }}
+                      className="items-start gap-2 text-destructive focus:text-destructive"
+                      aria-label={ariaLabelWithScope(LABEL_MOVE_TO_TRASH, SCOPE_TRASH)}
+                    >
+                      <Trash2 className="h-4 w-4 mt-0.5 shrink-0" aria-hidden="true" />
+                      <span className="flex flex-col">
+                        <span>{LABEL_MOVE_TO_TRASH}</span>
+                        <span className="text-xs text-muted-foreground">{SCOPE_TRASH}</span>
+                      </span>
+                    </DropdownMenuItem>
+                  )}
+                  {onDeleteFromDevice && recording.location === 'both' && (
+                    <DropdownMenuItem
+                      onClick={(e) => { e.stopPropagation(); onDeleteFromDevice(); }}
+                      disabled={!deviceConnected}
+                      className="items-start gap-2 text-destructive focus:text-destructive"
+                      aria-label={ariaLabelWithScope(LABEL_DELETE_FROM_DEVICE, deviceConnected ? SCOPE_DEVICE_DELETE_SYNCED : SCOPE_DEVICE_NOT_CONNECTED)}
+                    >
+                      <Trash2 className="h-4 w-4 mt-0.5 shrink-0" aria-hidden="true" />
+                      <span className="flex flex-col">
+                        <span>{LABEL_DELETE_FROM_DEVICE}</span>
+                        <span className="text-xs text-muted-foreground">
+                          {deviceConnected ? SCOPE_DEVICE_DELETE_SYNCED : SCOPE_DEVICE_NOT_CONNECTED}
+                        </span>
+                      </span>
+                    </DropdownMenuItem>
+                  )}
                   {onDeletePermanent && recording.location !== 'device-only' && (
                     <DropdownMenuItem
                       onClick={(e) => { e.stopPropagation(); onDeletePermanent(); }}
-                      className="text-destructive focus:text-destructive"
+                      className="items-start gap-2 text-destructive focus:text-destructive"
+                      aria-label={ariaLabelWithScope(LABEL_DELETE_PERMANENTLY, SCOPE_PERMANENT)}
                     >
-                      <Trash2 className="h-4 w-4" aria-hidden="true" />
-                      Delete permanently…
+                      <Trash2 className="h-4 w-4 mt-0.5 shrink-0" aria-hidden="true" />
+                      <span className="flex flex-col">
+                        <span>{LABEL_DELETE_PERMANENTLY}</span>
+                        <span className="text-xs text-muted-foreground">{SCOPE_PERMANENT}</span>
+                      </span>
                     </DropdownMenuItem>
                   )}
                 </>
