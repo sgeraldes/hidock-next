@@ -100,6 +100,14 @@ export function registerKnowledgeHandlers(): void {
         fields.push('quality_source = ?')
         values.push('user')
         fields.push('quality_assessed_at = CURRENT_TIMESTAMP')
+        // CX-T1-2: a manual rating supersedes any prior AI classification —
+        // clear the AI reason tags (they justified the OLD rating, not this
+        // one) and record full confidence, mirroring spec-003's
+        // recordings:setValueRating semantics so both user paths behave
+        // identically.
+        fields.push('quality_reasons = NULL')
+        fields.push('quality_confidence = ?')
+        values.push(1.0)
       }
       if (updates.storageTier !== undefined) { fields.push('storage_tier = ?'); values.push(updates.storageTier); }
       

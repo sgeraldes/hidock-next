@@ -168,36 +168,43 @@ describe('Knowledge IPC Handlers', () => {
       expect(result.error).toBe('Update failed')
     })
 
-    // F16/spec-001: a manual quality edit must stamp quality_source='user' +
-    // quality_assessed_at, so the AI value classifier's never-downgrade guard
-    // never overwrites it on a later re-analysis.
-    it('stamps quality_source=user and quality_assessed_at when quality is updated', async () => {
+    // F16/spec-001 + CX-T1-2: a manual quality edit must stamp
+    // quality_source='user' + quality_assessed_at (so the AI value
+    // classifier's never-downgrade guard never overwrites it on a later
+    // re-analysis) AND clear stale AI metadata — quality_reasons justified
+    // the OLD AI rating, not the user's new one — while recording full
+    // confidence (mirrors spec-003's recordings:setValueRating semantics).
+    it('stamps quality_source=user + assessed_at and clears AI reasons/confidence when quality is updated', async () => {
       const result = await handlers['knowledge:update']({}, '1', { title: 'New Title', quality: 'archived' })
 
       expect(run).toHaveBeenCalledWith(
         expect.stringContaining(
-          'UPDATE knowledge_captures SET title = ?, quality_rating = ?, quality_source = ?, quality_assessed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+          'UPDATE knowledge_captures SET title = ?, quality_rating = ?, quality_source = ?, quality_assessed_at = CURRENT_TIMESTAMP, quality_reasons = NULL, quality_confidence = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
         ),
-        ['New Title', 'archived', 'user', '1']
+        ['New Title', 'archived', 'user', 1.0, '1']
       )
       expect(result).toEqual({ success: true })
     })
 
-    it('stamps quality_source=user even when quality is the ONLY field updated', async () => {
+    it('clears AI metadata even when quality is the ONLY field updated', async () => {
       await handlers['knowledge:update']({}, '2', { quality: 'garbage' })
 
       expect(run).toHaveBeenCalledWith(
-        expect.stringContaining('quality_rating = ?, quality_source = ?, quality_assessed_at = CURRENT_TIMESTAMP'),
-        ['garbage', 'user', '2']
+        expect.stringContaining(
+          'quality_rating = ?, quality_source = ?, quality_assessed_at = CURRENT_TIMESTAMP, quality_reasons = NULL, quality_confidence = ?'
+        ),
+        ['garbage', 'user', 1.0, '2']
       )
     })
 
-    it('does NOT touch quality_source when quality is not part of the update', async () => {
+    it('does NOT touch quality_source/reasons/confidence when quality is not part of the update', async () => {
       await handlers['knowledge:update']({}, '3', { summary: 'New summary' })
 
       const [sql] = vi.mocked(run).mock.calls[0]
       expect(sql).not.toContain('quality_source')
       expect(sql).not.toContain('quality_rating')
+      expect(sql).not.toContain('quality_reasons')
+      expect(sql).not.toContain('quality_confidence')
     })
   })
 })
