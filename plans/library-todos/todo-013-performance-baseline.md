@@ -2,6 +2,14 @@
 
 ## Status: PENDING
 
+> **2026-07-14 update:** The jsdom scroll test sketched in Step 2 was implemented and
+> later rewritten (`library-performance.test.tsx`): awaiting 100 `requestAnimationFrame`
+> ticks in jsdom produced a ~2.6s wall-clock floor and a synthetic FPS number with no
+> assertion, which flaked against the 5s default test timeout under full-suite load.
+> It is now a synchronous scroll-burst smoke test ("handles a rapid scroll-event burst
+> over 5000 items without crashing"). The "Scroll FPS measured with 5000 items"
+> acceptance criterion still requires the Playwright real-browser test recommended below.
+
 ## Phase: 2 (Validation - NEW)
 
 ## Priority: HIGH

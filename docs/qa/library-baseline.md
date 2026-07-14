@@ -92,8 +92,8 @@ npm run test:performance
       Filter application time: XX.XXms
     ✓ switches view modes within performance budget
       View switch time: XX.XXms
-    ✓ measures scroll interaction timing (jsdom - limited)
-      Average simulated scroll FPS: XX.XX (jsdom - not real rendering)
+    ✓ handles a rapid scroll-event burst over 5000 items without crashing (jsdom smoke)
+      100 scroll events dispatched in XX.XXms (jsdom - informational only, not asserted)
 ```
 
 ## Analysis

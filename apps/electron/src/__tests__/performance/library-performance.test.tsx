@@ -264,10 +264,19 @@ describe('Library Performance', () => {
     })
   })
 
-  // NOTE: Scroll FPS tests have limitations in jsdom
-  // jsdom doesn't trigger real browser rendering, so FPS measurements are synthetic
-  // For accurate scroll performance testing, use Playwright with real browser
-  it('measures scroll interaction timing (jsdom - limited)', async () => {
+  // jsdom cannot measure scroll performance: nothing in this render listens to
+  // scroll (the virtualizer is mocked above and Library attaches no onScroll),
+  // and jsdom's requestAnimationFrame is just a ~16ms timer, so an "FPS"
+  // derived from it measures suite CPU load, not rendering. The previous
+  // version of this test awaited 100 rAF ticks (~2.6s floor even on an idle
+  // machine) and asserted nothing, so the only way it could ever fail was by
+  // tripping the 5s default test timeout — which it did, flakily, under
+  // full-suite load. What jsdom CAN meaningfully check is that a 5000-item
+  // render survives a rapid burst of scroll events, so that is what this
+  // asserts. Real scroll FPS needs Playwright with real browser rendering
+  // (see docs/qa/library-baseline.md). The explicit timeout only covers the
+  // load-sensitive 5000-item initial render; the burst itself is synchronous.
+  it('handles a rapid scroll-event burst over 5000 items without crashing (jsdom smoke)', { timeout: 15_000 }, async () => {
     const recordings = generateMockRecordings(5000)
 
     vi.mocked(useUnifiedRecordings).mockReturnValue({
@@ -292,32 +301,24 @@ describe('Library Performance', () => {
 
     const list = screen.getByTestId('library-list')
 
-    // Measure frame rate during scroll simulation
-    // NOTE: This is NOT real FPS - jsdom doesn't render pixels
-    // Use Playwright for real browser scroll testing
-    const frames: number[] = []
-    let lastTime = performance.now()
-
-    const measureFrame = () => {
-      const now = performance.now()
-      const fps = 1000 / (now - lastTime)
-      frames.push(fps)
-      lastTime = now
-    }
-
-    // Simulate scroll events
+    // Synchronous dispatch — fireEvent runs scroll handling and React commits
+    // inline, so timer waits between events would add wall-clock, not coverage.
+    const start = performance.now()
     for (let i = 0; i < 100; i++) {
       list.scrollTop += 50
       fireEvent.scroll(list)
-      await new Promise(r => requestAnimationFrame(r))
-      measureFrame()
     }
+    const elapsed = performance.now() - start
 
-    const avgFps = frames.reduce((a, b) => a + b, 0) / frames.length
-    console.log(`Average simulated scroll FPS: ${avgFps.toFixed(2)} (jsdom - not real rendering)`)
+    console.log(`100 scroll events dispatched in ${elapsed.toFixed(2)}ms (jsdom - informational only, not asserted)`)
 
-    // This test provides timing data but not real FPS
-    // For production, implement Playwright scroll tests
+    // Correctness: the list survives the burst. waitFor is act-aware, so it
+    // also flushes Library's pending async state updates (mocked-promise
+    // effects) inside act — a plain sync expect leaves them to land after the
+    // test returns and triggers "not wrapped in act" warnings.
+    await waitFor(() => {
+      expect(screen.getByTestId('library-list')).toBeInTheDocument()
+    })
   })
 
   it('applies filters within performance budget', async () => {
