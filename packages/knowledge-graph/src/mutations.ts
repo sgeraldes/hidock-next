@@ -1,4 +1,4 @@
-import type { KnowledgeGraphStore, GraphNode, GraphDb } from './graph-store.js'
+import { deleteEdgesCleanly, type KnowledgeGraphStore, type GraphNode, type GraphDb } from './graph-store.js'
 import { ownDateMs, neighborhood } from './queries.js'
 
 /**
@@ -191,12 +191,20 @@ export function mergeNodes(
   // about to drop, BEFORE it runs.
   transferCollidingEdgeProvenance(db, keeperId, loserId)
 
+  // Every edge delete goes through deleteEdgesCleanly (CX-T4-3) so the edge's
+  // graph_edge_sources rows die with it — never left to be inherited by a
+  // later re-created edge under the same deterministic id. The two leftover
+  // deletes remove only COLLIDING edges (whose rows the transfer above
+  // already moved — the cascade is a no-op there, kept for uniformity); the
+  // self-loop delete is the live case: a loser→keeper edge repointed into a
+  // keeper→keeper self-loop keeps its id (and rows) through the UPDATE, and
+  // is destroyed here WITH its rows.
   db.run('UPDATE OR IGNORE graph_edges SET source_id = ? WHERE source_id = ?', [keeperId, loserId])
-  db.run('DELETE FROM graph_edges WHERE source_id = ?', [loserId])
+  deleteEdgesCleanly(db, 'source_id = ?', [loserId])
   db.run('UPDATE OR IGNORE graph_edges SET target_id = ? WHERE target_id = ?', [keeperId, loserId])
-  db.run('DELETE FROM graph_edges WHERE target_id = ?', [loserId])
+  deleteEdgesCleanly(db, 'target_id = ?', [loserId])
   // A self-loop (keeper→keeper) can form when loser and keeper were connected.
-  db.run('DELETE FROM graph_edges WHERE source_id = target_id')
+  deleteEdgesCleanly(db, 'source_id = target_id')
   db.run('DELETE FROM graph_nodes WHERE id = ?', [loserId])
 
   return { keeperId, movedEdges, merged: true }
@@ -280,7 +288,8 @@ export interface DeleteNodeResult {
   removedEdges: number
 }
 
-/** Remove a node and every edge touching it. Idempotent (a missing node is a no-op). */
+/** Remove a node and every edge touching it (with the edges' provenance rows —
+ *  CX-T4-3). Idempotent (a missing node is a no-op). */
 export function deleteNode(store: KnowledgeGraphStore, nodeId: string): DeleteNodeResult {
   const db = store.db
   const node = db.queryOne<{ id: string }>('SELECT id FROM graph_nodes WHERE id = ?', [nodeId])
@@ -291,7 +300,7 @@ export function deleteNode(store: KnowledgeGraphStore, nodeId: string): DeleteNo
     [nodeId, nodeId]
   )
   const removedEdges = counted?.c ?? 0
-  db.run('DELETE FROM graph_edges WHERE source_id = ? OR target_id = ?', [nodeId, nodeId])
+  deleteEdgesCleanly(db, 'source_id = ? OR target_id = ?', [nodeId, nodeId])
   db.run('DELETE FROM graph_nodes WHERE id = ?', [nodeId])
   return { removed: true, removedEdges }
 }

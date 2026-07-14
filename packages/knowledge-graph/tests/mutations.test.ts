@@ -1,7 +1,7 @@
 // @vitest-environment node
 
 import { describe, it, expect } from 'vitest'
-import initSqlJs from 'sql.js'
+import initSqlJs, { type Database as SqlJsDatabase, type SqlValue } from 'sql.js'
 import { KnowledgeGraphStore, type GraphDb } from '../src/graph-store.js'
 import {
   renameNode,
@@ -16,19 +16,13 @@ import {
  * A minimal GraphDb over a raw sql.js (pure-wasm) database — no DatabaseEngine,
  * no native better-sqlite3. Keeps the mutation unit tests self-contained and
  * runnable under plain node (the mutations only depend on the GraphDb contract).
+ * GraphDb binds `unknown[]`; sql.js declares the narrower `SqlValue[]` — the
+ * casts are safe because every value these tests bind is a string or number.
  */
-function makeGraphDb(db: {
-  run: (sql: string, params?: unknown[]) => void
-  prepare: (sql: string) => {
-    bind: (p: unknown[]) => void
-    step: () => boolean
-    getAsObject: () => Record<string, unknown>
-    free: () => void
-  }
-}): GraphDb {
+function makeGraphDb(db: SqlJsDatabase): GraphDb {
   const queryAll = <T>(sql: string, params: unknown[] = []): T[] => {
     const stmt = db.prepare(sql)
-    stmt.bind(params)
+    stmt.bind(params as SqlValue[])
     const rows: T[] = []
     while (stmt.step()) rows.push(stmt.getAsObject() as T)
     stmt.free()
@@ -36,7 +30,7 @@ function makeGraphDb(db: {
   }
   return {
     run(sql, params = []) {
-      db.run(sql, params)
+      db.run(sql, params as SqlValue[])
     },
     queryAll,
     queryOne<T>(sql: string, params: unknown[] = []): T | undefined {
@@ -206,6 +200,61 @@ describe('knowledge-graph mutations', () => {
     expect(store.getNode(person)).toBeUndefined()
     // A second delete is a no-op.
     expect(deleteNode(store, person).removed).toBe(false)
+  })
+
+  it('deleteNode (CX-T4-3) cascades graph_edge_sources; a re-created edge under the same deterministic id does NOT inherit stale provenance', async () => {
+    const { store } = await makeStore('delete-cascade')
+    const now = '2026-01-01'
+    const person = store.upsertNode({ type: 'person', label: 'Alice', now })
+    const meeting = store.upsertNode({
+      type: 'meeting',
+      label: 'Kickoff',
+      props: { meetingId: 'm1', date: '2026-01-10' },
+      now,
+    })
+    const edgeId = store.upsertEdge({ sourceId: person, targetId: meeting, type: 'ATTENDED', now })
+    store.recordEdgeSource(edgeId, 'R-old', 'T-old', now)
+
+    deleteNode(store, person)
+    // The deleted edge's source rows died with it — nothing left to inherit.
+    expect(store.db.queryAll('SELECT * FROM graph_edge_sources')).toHaveLength(0)
+
+    // Re-create the SAME node pair: node + edge ids are deterministic, so the
+    // recreated edge lands on the exact same edge id.
+    const personAgain = store.upsertNode({ type: 'person', label: 'Alice', now })
+    const edgeIdAgain = store.upsertEdge({ sourceId: personAgain, targetId: meeting, type: 'ATTENDED', now })
+    expect(edgeIdAgain).toBe(edgeId) // the resurrection precondition this fix exists for
+    store.recordEdgeSource(edgeIdAgain, 'R-new', 'T-new', now)
+
+    const rows = store.db.queryAll<{ recording_id: string }>(
+      'SELECT recording_id FROM graph_edge_sources WHERE edge_id = ?',
+      [edgeIdAgain]
+    )
+    expect(rows.map((r) => r.recording_id)).toEqual(['R-new']) // ONLY the new provenance
+    // The recreated edge starts fresh (weight 1, no ghost of the old assertion).
+    const edge = store.db.queryOne<{ weight: number }>('SELECT weight FROM graph_edges WHERE id = ?', [
+      edgeIdAgain,
+    ])
+    expect(edge?.weight).toBe(1)
+  })
+
+  it('mergeNodes (CX-T4-3) cascades source rows of an edge destroyed by the self-loop cleanup', async () => {
+    const { store } = await makeStore('merge-selfloop-cascade')
+    const now = '2026-01-01'
+    const keeper = store.upsertNode({ type: 'person', label: 'Bob', now })
+    const loser = store.upsertNode({ type: 'person', label: 'Robert', now })
+    // A loser→keeper edge: the repoint turns it into keeper→keeper (id
+    // preserved), and the merge's self-loop cleanup then destroys it.
+    const loopEdge = store.upsertEdge({ sourceId: loser, targetId: keeper, type: 'MENTIONED', now })
+    store.recordEdgeSource(loopEdge, 'R1', 'T1', now)
+
+    const res = mergeNodes(store, keeper, loser)
+    expect(res.merged).toBe(true)
+
+    // The self-loop edge is gone AND its source rows went with it — no
+    // orphaned rows waiting to be inherited by a future edge with this id.
+    expect(store.db.queryOne('SELECT id FROM graph_edges WHERE id = ?', [loopEdge])).toBeUndefined()
+    expect(store.db.queryAll('SELECT * FROM graph_edge_sources')).toHaveLength(0)
   })
 
   it('setNodeProps shallow-merges and can delete keys', async () => {

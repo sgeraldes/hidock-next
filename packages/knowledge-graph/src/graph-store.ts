@@ -74,6 +74,24 @@ function makeEdgeId(sourceId: string, targetId: string, type: string): string {
 }
 
 /**
+ * Delete every graph edge matching `where` AND its `graph_edge_sources` rows —
+ * the ONE sanctioned way to delete edges (CX-T4-3). Edge ids are deterministic
+ * (`makeEdgeId`), so an edge deleted with its source rows left behind can be
+ * RE-CREATED by a later ingest under the exact same id and silently inherit
+ * the stale provenance (before the `pruneOrphanEdgeSources` backstop runs).
+ * `where` is a caller-supplied LITERAL SQL fragment (never external input);
+ * all values are bound via `params`. The source-row delete runs first, while
+ * the edges still exist for the subquery to match.
+ */
+export function deleteEdgesCleanly(db: GraphDb, where: string, params: unknown[] = []): void {
+  db.run(
+    `DELETE FROM graph_edge_sources WHERE edge_id IN (SELECT id FROM graph_edges WHERE ${where})`,
+    params
+  )
+  db.run(`DELETE FROM graph_edges WHERE ${where}`, params)
+}
+
+/**
  * Short deterministic hash of a string (FNV-1a, base36). Used to disambiguate
  * a node id when two distinct norm_keys slugify to the same id — keeps ids
  * stable and collision-free without a random component.
@@ -257,6 +275,9 @@ export class KnowledgeGraphStore {
   }
 
   clear(): void {
+    // Source rows first (CX-T4-3): deterministic edge ids mean a re-ingested
+    // edge would otherwise inherit the stale provenance of its predecessor.
+    this.db.run('DELETE FROM graph_edge_sources')
     this.db.run('DELETE FROM graph_edges')
     this.db.run('DELETE FROM graph_nodes')
   }

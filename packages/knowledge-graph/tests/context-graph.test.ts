@@ -309,6 +309,38 @@ describe('Context Graph: generic-node pruning', () => {
     expect(res2.removedNodes).toBe(0)
     expect(res2.removedEdges).toBe(0)
   })
+
+  it("pruneGenericNodes (CX-T4-3) cascades the pruned edges' graph_edge_sources rows", async () => {
+    const { store, dbPath } = await makeStore('prune-sources')
+    paths.push(dbPath)
+
+    ingestExtraction(
+      store,
+      {
+        people: [{ name: 'Alice', skills: [] }],
+        topics: [], projects: [], decisions: [], action_items: [], risks: [], next_steps: [],
+      },
+      meta,
+      { recordingId: 'rec-1', transcriptId: 'tx-1' }
+    )
+
+    // Inject a generic person with a provenance-bearing edge to the meeting.
+    const meetingId = store.findNodes({ type: 'meeting' })[0].id
+    const garbage = store.upsertNode({ type: 'person', label: 'All attendees' })
+    const garbageEdge = store.upsertEdge({ sourceId: garbage, targetId: meetingId, type: 'ATTENDED' })
+    store.recordEdgeSource(garbageEdge, 'rec-1', 'tx-1')
+
+    const before = store.db.queryAll('SELECT * FROM graph_edge_sources').length
+    const res = pruneGenericNodes(store)
+    expect(res.removedNodes).toBe(1)
+
+    // Exactly the pruned edge's row is gone; Alice's edges keep theirs.
+    const after = store.db.queryAll('SELECT * FROM graph_edge_sources').length
+    expect(after).toBe(before - 1)
+    expect(
+      store.db.queryAll('SELECT * FROM graph_edge_sources WHERE edge_id = ?', [garbageEdge])
+    ).toHaveLength(0)
+  })
 })
 
 describe('Context Graph: ingest-time stop-list', () => {

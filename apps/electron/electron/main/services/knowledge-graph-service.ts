@@ -465,6 +465,9 @@ export interface RemoveRecordingFromGraphResult {
   orphanNodesRemoved: number
   orphanNodesByType: Record<string, number>
   sharedEdgesKept: number
+  /** Edges kept because part of their weight is an unattributed (legacy /
+   *  folder-ingest) co-assertion this recording cannot account for (CX-T4-1). */
+  unattributedResidueKept: number
   /** Populated on failure; the caller inspects this — never a silent catch (CX-T3-7). */
   error?: string
 }
@@ -560,6 +563,7 @@ function emptyRemovalCounts(): Omit<
     orphanNodesRemoved: 0,
     orphanNodesByType: {},
     sharedEdgesKept: 0,
+    unattributedResidueKept: 0,
   }
 }
 

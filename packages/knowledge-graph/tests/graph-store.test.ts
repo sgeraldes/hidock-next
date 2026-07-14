@@ -142,6 +142,27 @@ describe('KnowledgeGraphStore', () => {
     expect(edges).toHaveLength(0)
   })
 
+  it('clear (CX-T4-3) also removes graph_edge_sources — a rebuilt graph inherits no stale provenance', async () => {
+    const { store, engine, dbPath } = await makeStore('clear-sources')
+    paths.push(dbPath)
+
+    const person = store.upsertNode({ type: 'person', label: 'Grace' })
+    const meeting = store.upsertNode({ type: 'meeting', label: 'Sync' })
+    const edgeId = store.upsertEdge({ sourceId: person, targetId: meeting, type: 'ATTENDED' })
+    store.recordEdgeSource(edgeId, 'R-old', 'T-old')
+
+    store.clear()
+    expect(engine.queryAll('SELECT * FROM graph_edge_sources')).toHaveLength(0)
+
+    // Re-ingesting the identical pair mints the SAME deterministic edge id —
+    // it must start with no provenance.
+    const p2 = store.upsertNode({ type: 'person', label: 'Grace' })
+    const m2 = store.upsertNode({ type: 'meeting', label: 'Sync' })
+    const edgeId2 = store.upsertEdge({ sourceId: p2, targetId: m2, type: 'ATTENDED' })
+    expect(edgeId2).toBe(edgeId)
+    expect(engine.queryAll('SELECT * FROM graph_edge_sources WHERE edge_id = ?', [edgeId2])).toHaveLength(0)
+  })
+
   it('id is deterministic (no Date.now/random): topic:machine_learning', async () => {
     const { store, dbPath } = await makeStore('deterministic')
     paths.push(dbPath)

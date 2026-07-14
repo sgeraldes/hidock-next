@@ -1,4 +1,4 @@
-import type { KnowledgeGraphStore } from './graph-store.js'
+import { deleteEdgesCleanly, type KnowledgeGraphStore } from './graph-store.js'
 
 /**
  * F18 (spec-004): per-recording graph-provenance removal engine.
@@ -21,6 +21,17 @@ export interface RecordingProvenanceRemoval {
   orphanNodesByType: Record<string, number>
   /** Edges kept because another recording also sourced them (weight decremented, never deleted). */
   sharedEdgesKept: number
+  /**
+   * Edges kept because their weight exceeds this recording's summed
+   * assertion_count while NO other recording has source rows (CX-T4-1): the
+   * excess weight is an unattributed co-assertion — a legacy edge predating
+   * provenance that this recording later re-asserted, or a folder-ingest
+   * re-assertion of an attributed edge — so the edge is treated like a shared
+   * edge (weight decremented by this recording's sum, floor 1), never
+   * deleted. This is AR2-3's no-unattributed-deletion rule applied to the
+   * WEIGHT dimension, not just the row dimension.
+   */
+  unattributedResidueKept: number
 }
 
 export interface RemoveRecordingProvenanceOptions {
@@ -82,18 +93,17 @@ export function removeRecordingProvenance(
   const dryRun = !!opts.dryRun
   const isProjectProtected = opts.isProjectProtected ?? (() => true)
 
-  // Step 1: edges this recording actually asserted. The JOIN drops any source
-  // row whose edge_id no longer exists (a merge-collision residual not yet
-  // swept by pruneOrphanEdgeSources) — never phantom-counted or -deleted.
-  const attributedEdgeIds = db
-    .queryAll<{ edge_id: string }>(
-      `SELECT DISTINCT s.edge_id AS edge_id
-         FROM graph_edge_sources s
-         JOIN graph_edges e ON e.id = s.edge_id
-        WHERE s.recording_id = ?`,
-      [recordingId]
-    )
-    .map((r) => r.edge_id)
+  // Step 1: edges this recording actually asserted (with their current
+  // weight, needed by step 3's full-attribution check). The JOIN drops any
+  // source row whose edge_id no longer exists (a residual not yet swept by
+  // pruneOrphanEdgeSources) — never phantom-counted or -deleted.
+  const attributedEdges = db.queryAll<{ edge_id: string; weight: number }>(
+    `SELECT DISTINCT s.edge_id AS edge_id, e.weight AS weight
+       FROM graph_edge_sources s
+       JOIN graph_edges e ON e.id = s.edge_id
+      WHERE s.recording_id = ?`,
+    [recordingId]
+  )
 
   // Step 2: total source rows for this recording (its own count, independent
   // of how many distinct edges they span).
@@ -103,36 +113,52 @@ export function removeRecordingProvenance(
       [recordingId]
     )?.c ?? 0
 
-  // Step 3: classify each attributed edge sole-source vs shared. A shared
-  // edge is never deleted; its weight is decremented by the SUM of this
-  // recording's assertion_counts for it (AR2-4 — covers duplicate-entity
-  // extraction and multi-transcript re-ingest of the same recording), floored
-  // at 1 so a surviving shared edge's weight never hits 0.
+  // Step 3: classify each attributed edge. Deletable ⇔ no OTHER recording's
+  // source rows AND this recording's summed assertion_count accounts for the
+  // edge's FULL weight (CX-T4-1): weight is bumped by EVERY upsertEdge, but
+  // only attributed ingests write source rows — so weight in excess of this
+  // recording's own sum is an unattributed co-assertion (a legacy edge this
+  // recording later re-asserted, or a folder-ingest re-assertion). Deleting
+  // such an edge would wipe the unattributed assertion along with ours,
+  // violating AR2-3. A kept edge (shared OR unattributed-residue) has its
+  // weight decremented by the SUM of this recording's assertion_counts
+  // (AR2-4 — covers duplicate-entity extraction and multi-transcript
+  // re-ingest of the same recording), floored at 1 so a surviving edge's
+  // weight never hits 0.
   const soleSourceEdgeIds: string[] = []
   let sharedEdgesKept = 0
+  let unattributedResidueKept = 0
   const weightDecrements: Array<{ edgeId: string; amount: number }> = []
-  for (const edgeId of attributedEdgeIds) {
+  for (const { edge_id: edgeId, weight } of attributedEdges) {
     const remaining =
       db.queryOne<{ c: number }>(
         'SELECT COUNT(*) AS c FROM graph_edge_sources WHERE edge_id = ? AND recording_id <> ?',
         [edgeId, recordingId]
       )?.c ?? 0
-    if (remaining === 0) {
-      soleSourceEdgeIds.push(edgeId)
-      continue
-    }
-    sharedEdgesKept++
     const removedForE =
       db.queryOne<{ s: number }>(
         'SELECT COALESCE(SUM(assertion_count), 0) AS s FROM graph_edge_sources WHERE edge_id = ? AND recording_id = ?',
         [edgeId, recordingId]
       )?.s ?? 0
+    if (remaining === 0) {
+      if (removedForE >= weight) {
+        soleSourceEdgeIds.push(edgeId)
+        continue
+      }
+      // CX-T4-1: unattributed residue — keep, decrement, count separately.
+      unattributedResidueKept++
+      weightDecrements.push({ edgeId, amount: removedForE })
+      continue
+    }
+    sharedEdgesKept++
     weightDecrements.push({ edgeId, amount: removedForE })
   }
 
-  // AR2-3: the deletion set is ONLY sole-source edges — no unattributed-edge
-  // sweep of any kind. An edge with zero source rows at all is, by
-  // definition, never in `attributedEdgeIds` and is therefore never touched.
+  // AR2-3: the deletion set is ONLY fully-attributed sole-source edges — no
+  // unattributed-edge sweep of any kind. An edge with zero source rows at all
+  // is, by definition, never in `attributedEdges` and is therefore never
+  // touched; an edge with unattributed EXCESS weight was diverted to the
+  // residue branch above.
   const edgesToDelete = soleSourceEdgeIds
   const edgesRemoved = edgesToDelete.length
 
@@ -204,7 +230,11 @@ export function removeRecordingProvenance(
   const orphanNodesRemoved = nodesToDelete.length
 
   if (!dryRun) {
-    for (const edgeId of edgesToDelete) db.run('DELETE FROM graph_edges WHERE id = ?', [edgeId])
+    // deleteEdgesCleanly (CX-T4-3) removes each deleted edge's source rows
+    // with it; a fully-attributed sole-source edge's rows all belong to this
+    // recording, so the recording-wide delete below would catch them anyway —
+    // routed through the shared helper for the one-sanctioned-way uniformity.
+    for (const edgeId of edgesToDelete) deleteEdgesCleanly(db, 'id = ?', [edgeId])
     db.run('DELETE FROM graph_edge_sources WHERE recording_id = ?', [recordingId])
     for (const { edgeId, amount } of weightDecrements) {
       db.run('UPDATE graph_edges SET weight = MAX(1, weight - ?) WHERE id = ?', [amount, edgeId])
@@ -224,14 +254,17 @@ export function removeRecordingProvenance(
     orphanNodesRemoved,
     orphanNodesByType,
     sharedEdgesKept,
+    unattributedResidueKept,
   }
 }
 
 /**
- * Hygiene sweep: delete `graph_edge_sources` rows whose `edge_id` no longer
- * exists in `graph_edges` — the residue of a merge-collision repoint that
- * dropped an edge without a keeper to transfer onto (a self-loop collapse;
- * see mutations.ts::mergeNodes). Idempotent; safe to run after every ingest
+ * Backstop hygiene sweep: delete `graph_edge_sources` rows whose `edge_id` no
+ * longer exists in `graph_edges`. Since CX-T4-3 every sanctioned edge-deletion
+ * path (`deleteEdgesCleanly`, `KnowledgeGraphStore.clear`) removes its rows
+ * inline, so this sweep normally finds nothing — it exists to catch rows
+ * orphaned by any historical deletion (pre-fix data) or an unknown/manual
+ * writer bypassing the helper. Idempotent; safe to run after every ingest
  * pass. `removeRecordingProvenance`'s own reads already JOIN against
  * `graph_edges`, so orphaned rows are never phantom-counted/deleted even
  * without this sweep — this is pure hygiene, not a correctness dependency.

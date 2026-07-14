@@ -60,6 +60,7 @@ const ZERO_RESULT = {
   orphanNodesRemoved: 0,
   orphanNodesByType: {},
   sharedEdgesKept: 0,
+  unattributedResidueKept: 0,
 }
 
 describe('removeRecordingProvenance', () => {
@@ -150,6 +151,57 @@ describe('removeRecordingProvenance', () => {
     const edge = store.db.queryOne<{ weight: number }>('SELECT weight FROM graph_edges WHERE id = ?', [edgeId])
     expect(edge?.weight).toBe(1) // 2 - R1's assertion_count(1) = 1
     expect(store.getNode(meeting)).toBeDefined() // R2's edge keeps it alive
+  })
+
+  it('CX-T4-1: a legacy edge (weight predating provenance) re-asserted by R survives cleanup(R) with the legacy weight intact', async () => {
+    const { store, dbPath } = await makeStore('legacy-weight')
+    paths.push(dbPath)
+    const now = '2026-01-01'
+    const person = store.upsertNode({ type: 'person', label: 'Alice', now })
+    const meeting = store.upsertNode({
+      type: 'meeting',
+      label: 'Kickoff',
+      key: 'meeting:m1',
+      props: { meetingId: 'm1' },
+      now,
+    })
+
+    // Legacy history: the edge was asserted TWICE before provenance existed
+    // (weight 2, zero source rows) ...
+    const legacyEdge = store.upsertEdge({ sourceId: person, targetId: meeting, type: 'ATTENDED', now }) // weight 1
+    store.upsertEdge({ sourceId: person, targetId: meeting, type: 'ATTENDED', now }) // weight -> 2
+    // ... then recording R re-asserts it post-F18 (weight -> 3, R's count 1).
+    store.upsertEdge({ sourceId: person, targetId: meeting, type: 'ATTENDED', now }) // weight -> 3
+    store.recordEdgeSource(legacyEdge, 'R1', 'T1', now)
+
+    // Contrast control in the same run: a second, FULLY-attributed edge
+    // (weight 1, R's count 1) must still be deleted.
+    const topic = store.upsertNode({ type: 'topic', label: 'Roadmap', now })
+    const attributedEdge = store.upsertEdge({ sourceId: meeting, targetId: topic, type: 'ABOUT', now })
+    store.recordEdgeSource(attributedEdge, 'R1', 'T1', now)
+
+    // Dry-run first — the plan must classify identically without writing.
+    const dry = removeRecordingProvenance(store, 'R1', { meetingId: 'm1', dryRun: true })
+    const res = removeRecordingProvenance(store, 'R1', { meetingId: 'm1' })
+    expect(res).toEqual(dry)
+
+    expect(res.edgesRemoved).toBe(1) // only the fully-attributed ABOUT edge
+    expect(res.unattributedResidueKept).toBe(1) // the legacy-weight ATTENDED edge
+    expect(res.sharedEdgesKept).toBe(0)
+    expect(res.meetingNodesRemoved).toBe(0) // the kept residue edge keeps M alive
+    expect(res.orphanNodesRemoved).toBe(1) // the topic (its only edge was deleted)
+
+    // The legacy edge survives at its pre-R weight (3 - R's count 1 = 2),
+    // with R's source row gone.
+    const edge = store.db.queryOne<{ weight: number }>('SELECT weight FROM graph_edges WHERE id = ?', [
+      legacyEdge,
+    ])
+    expect(edge?.weight).toBe(2)
+    expect(
+      store.db.queryAll('SELECT * FROM graph_edge_sources WHERE edge_id = ?', [legacyEdge])
+    ).toHaveLength(0)
+    expect(store.db.queryOne('SELECT id FROM graph_edges WHERE id = ?', [attributedEdge])).toBeUndefined()
+    expect(store.getNode(meeting)).toBeDefined()
   })
 
   it('a topic shared by two recordings survives cleanup of one (only the sole-sourced meeting-edge is removed)', async () => {
