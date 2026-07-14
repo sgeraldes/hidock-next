@@ -2,6 +2,12 @@
 import '@testing-library/jest-dom'
 import { vi } from 'vitest'
 
+// NOTE: the D3 better-sqlite3 dual-ABI shim is intentionally NOT here. It is
+// scoped to the `main-db` vitest project via src/test/setup-db.ts so that
+// non-DB tests never see the mock and the unmocked `native-binding` project
+// (better-sqlite3-binding.smoke.test.ts) can detect a missing/broken
+// production binary. See vitest.config.ts `test.projects`.
+
 // Only setup browser mocks if we're in a browser-like environment
 if (typeof window !== 'undefined') {
   // Mock localStorage for Zustand persist middleware
