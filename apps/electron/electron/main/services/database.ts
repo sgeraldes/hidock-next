@@ -3058,18 +3058,104 @@ export function setRecordingPersonal(id: string, personal: boolean): boolean | u
   return personal
 }
 
+// =============================================================================
+// F16/spec-002 (T2) — downstream value gates. A recording is "value-excluded"
+// when it has at least one non-deleted knowledge_capture rated garbage/
+// low-value AND none rated valuable/archived (an explicit "keep" on a
+// multi-capture recording rescues the whole recording). Both AI-set
+// (applyCaptureValueClassification) and user-set (knowledge:update) ratings
+// key on the same quality_rating column, so they gate identically.
+// =============================================================================
+
+/** The two "this isn't worth keeping" ratings that gate RAG/graph/actionables. */
+const VALUE_EXCLUDED_RATINGS = ['garbage', 'low-value'] as const
+/** Ratings that explicitly "keep" a capture — rescue the whole recording even
+ *  if another non-deleted capture of the same recording is garbage/low-value. */
+const VALUE_KEEP_RATINGS = ['valuable', 'archived'] as const
+
+/**
+ * Recording ids value-excluded from downstream intelligence surfaces (RAG
+ * retrieval via getExcludedRecordingIds, graph ingest, actionable
+ * extraction). This is a cheap once-per-call PRE-FILTER ONLY (Codex
+ * adversarial review AR-1): a caller iterating many rows across a
+ * long-running async loop (e.g. the graph ingest, which awaits an LLM
+ * extraction per row) MUST decide FINAL eligibility per row with the fresh
+ * point-read {@link isValueExcludedRecording} at persistence time — a Set
+ * computed once at the top of a long loop can go stale if a rating changes
+ * mid-run. This function is safe to use as-is for a single synchronous pass
+ * (e.g. the RAG union below).
+ */
+export function getValueExcludedRecordingIds(): Set<string> {
+  const excludedPlaceholders = VALUE_EXCLUDED_RATINGS.map(() => '?').join(',')
+  const keepPlaceholders = VALUE_KEEP_RATINGS.map(() => '?').join(',')
+  const rows = queryAll<{ id: string }>(
+    `SELECT DISTINCT kc.source_recording_id AS id
+       FROM knowledge_captures kc
+      WHERE kc.deleted_at IS NULL
+        AND kc.source_recording_id IS NOT NULL
+        AND kc.quality_rating IN (${excludedPlaceholders})
+        AND NOT EXISTS (
+          SELECT 1 FROM knowledge_captures k2
+           WHERE k2.source_recording_id = kc.source_recording_id
+             AND k2.deleted_at IS NULL
+             AND k2.quality_rating IN (${keepPlaceholders}))`,
+    [...VALUE_EXCLUDED_RATINGS, ...VALUE_KEEP_RATINGS]
+  )
+  return new Set(rows.map((r) => r.id))
+}
+
+/**
+ * Single-recording point-read form of {@link getValueExcludedRecordingIds} —
+ * same predicate, scoped to one id. This is the FINAL-eligibility check
+ * (Codex adversarial review AR-1): callers that must decide "ingest/extract
+ * or skip" for one specific recording transactionally at persistence time
+ * (i.e. after a slow async step such as an LLM extraction call) MUST use this
+ * fresh read rather than a Set computed earlier in a long-running run, so a
+ * rating written at any point up to the moment of persistence is honored.
+ */
+export function isValueExcludedRecording(recordingId: string): boolean {
+  const excludedPlaceholders = VALUE_EXCLUDED_RATINGS.map(() => '?').join(',')
+  const keepPlaceholders = VALUE_KEEP_RATINGS.map(() => '?').join(',')
+  const row = queryOne<{ id: string }>(
+    `SELECT kc.source_recording_id AS id
+       FROM knowledge_captures kc
+      WHERE kc.deleted_at IS NULL
+        AND kc.source_recording_id = ?
+        AND kc.quality_rating IN (${excludedPlaceholders})
+        AND NOT EXISTS (
+          SELECT 1 FROM knowledge_captures k2
+           WHERE k2.source_recording_id = kc.source_recording_id
+             AND k2.deleted_at IS NULL
+             AND k2.quality_rating IN (${keepPlaceholders}))
+      LIMIT 1`,
+    [recordingId, ...VALUE_EXCLUDED_RATINGS, ...VALUE_KEEP_RATINGS]
+  )
+  return !!row
+}
+
 /**
  * Recording ids that must be excluded from AI processing and RAG surfaces:
- * every recording flagged `personal` OR soft-deleted (`deleted_at` set). The
- * vector store filters search results against this set so that marking a
- * recording personal instantly pulls its chunks from the assistant's answers
- * WITHOUT re-indexing (reversible), and soft-deleted recordings never surface.
+ * every recording flagged `personal` OR soft-deleted (`deleted_at` set),
+ * UNIONED (F16/spec-002) with {@link getValueExcludedRecordingIds} — a
+ * recording whose only rating(s) are garbage/low-value is excluded from RAG
+ * too. The value union is wrapped defensively: a failure there must never
+ * drop a privacy exclusion, only fail to ADD to it. The vector store filters
+ * search results against this set so that marking a recording personal (or a
+ * capture garbage/low-value) instantly pulls its chunks from the assistant's
+ * answers WITHOUT re-indexing (reversible), and soft-deleted recordings never
+ * surface.
  */
 export function getExcludedRecordingIds(): Set<string> {
   const rows = queryAll<{ id: string }>(
     'SELECT id FROM recordings WHERE personal = 1 OR deleted_at IS NOT NULL'
   )
-  return new Set(rows.map((r) => r.id))
+  const excluded = new Set(rows.map((r) => r.id))
+  try {
+    for (const id of getValueExcludedRecordingIds()) excluded.add(id)
+  } catch (e) {
+    console.warn('[Database] getValueExcludedRecordingIds failed (privacy exclusion unaffected):', e)
+  }
+  return excluded
 }
 
 /** All knowledge_capture ids owned by a recording (via source link or migration). */
