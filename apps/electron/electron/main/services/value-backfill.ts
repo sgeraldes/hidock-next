@@ -255,10 +255,13 @@ function reserveAttempt(captureId: string, runId: string): void {
 /** FINALIZE-as-failure (AR-3): the CALL step exhausted its in-run retries.
  *  Marks 'failed' WITHOUT touching `attempts` (already incremented once, at
  *  reserve) — so this item stays eligible for a LATER run's fresh durable
- *  attempt, up to MAX_DURABLE_ATTEMPTS. */
-function finalizeFailure(captureId: string, runId: string, error: unknown): void {
+ *  attempt, up to MAX_DURABLE_ATTEMPTS. Returns `captureGone: true` when the
+ *  capture was purged mid-flight and NO marker was written (CX-T3-8/CX-T3-10)
+ *  — the caller reports such an item as skipped, not failed. */
+function finalizeFailure(captureId: string, runId: string, error: unknown): { captureGone: boolean } {
   const message = error instanceof Error ? error.message : String(error)
   const now = new Date().toISOString()
+  let captureGone = false
   runInTransaction(() => {
     // CX-T3-8: same existence guard as the classified finalize — a
     // concurrent hard purge removed the capture AND its marker rows; a
@@ -269,6 +272,7 @@ function finalizeFailure(captureId: string, runId: string, error: unknown): void
     )
     if (!exists) {
       console.log(`[ValueBackfill] capture=${captureId} purged mid-run — failure not parked, no marker written`)
+      captureGone = true
       return
     }
     run(
@@ -282,6 +286,7 @@ function finalizeFailure(captureId: string, runId: string, error: unknown): void
       [captureId, runId, message.slice(0, 500), now]
     )
   })
+  return { captureGone }
 }
 
 /** FINALIZE-as-classified (AR-3 step 3): the guarded rating apply and the
@@ -321,6 +326,10 @@ async function callWithInRunRetries(captureId: string): Promise<RawClassificatio
   let lastError: unknown
   for (let attempt = 0; attempt <= IN_RUN_RETRY_DELAYS_MS.length; attempt++) {
     try {
+      // CX-T3-9: the rate-limit TIMESTAMP is stamped here, immediately before
+      // a real provider invocation (every attempt is one) — never by the wait
+      // half, so a privacy-skipped item can't consume a throttle slot.
+      lastCallStartedAt = Date.now()
       return await classifyCaptureValueRaw(captureId)
     } catch (e) {
       lastError = e
@@ -336,16 +345,23 @@ async function callWithInRunRetries(captureId: string): Promise<RawClassificatio
 
 // ---------------------------------------------------------------------------
 // Rate limiting between LLM calls (across items, not the in-run retries above).
+// CX-T3-9: WAIT and TIMESTAMP are deliberately separated. waitForThrottle()
+// only spaces against the last REAL call; the stamp happens inside
+// callWithInRunRetries, immediately before each actual classifyCaptureValueRaw
+// invocation. The old combined form stamped BEFORE the privacy check, so every
+// skipped item (personal/deleted/purged after the snapshot) consumed a full
+// MIN_INTERVAL_MS slot and delayed the next real item — a bulk privacy change
+// mid-run turned hundreds of no-ops into minutes of dead waiting. Now at most
+// ONE residual wait follows the last real call, no matter how many skips.
 // ---------------------------------------------------------------------------
 
 let lastCallStartedAt = 0
 
-async function throttleBeforeCall(): Promise<void> {
+async function waitForThrottle(): Promise<void> {
   const elapsed = Date.now() - lastCallStartedAt
   if (lastCallStartedAt > 0 && elapsed < MIN_INTERVAL_MS) {
     await delayFn(MIN_INTERVAL_MS - elapsed)
   }
-  lastCallStartedAt = Date.now()
 }
 
 let yieldCallCount = 0
@@ -375,8 +391,10 @@ async function processOneCapture(captureId: string, runId: string): Promise<Proc
   // with nothing but the synchronous reserve between it and the LLM call —
   // no await separates the check from the first send. (In-run retries
   // re-send the same already-checked content within seconds of that first
-  // call; they expose nothing the first send didn't.)
-  await throttleBeforeCall()
+  // call; they expose nothing the first send didn't.) The wait spaces
+  // against the last REAL call only (CX-T3-9) — a skipped item stamps
+  // nothing, so consecutive skips cost at most one residual wait in total.
+  await waitForThrottle()
 
   // CX-T3-2: fresh privacy read BEFORE any durable write or LLM call — the
   // eligible-id snapshot can be minutes stale by the time this item's turn
@@ -392,8 +410,12 @@ async function processOneCapture(captureId: string, runId: string): Promise<Proc
   try {
     raw = await callWithInRunRetries(captureId)
   } catch (e) {
-    finalizeFailure(captureId, runId, e)
-    return 'failed'
+    // CX-T3-10: if a concurrent purge removed the capture while the failing
+    // call was in flight, finalizeFailure writes nothing — report the item
+    // as skipped (consistent with the successful-call purge path), not as a
+    // failed-but-nonexistent, non-retryable phantom.
+    const parked = finalizeFailure(captureId, runId, e)
+    return parked.captureGone ? 'skipped' : 'failed'
   }
 
   // resultRating starts as the row's rating at load time (skip case never
@@ -445,7 +467,9 @@ async function processOneCapture(captureId: string, runId: string): Promise<Proc
       e instanceof Error ? e.message : e
     )
     try {
-      finalizeFailure(captureId, runId, e)
+      const parked = finalizeFailure(captureId, runId, e)
+      // CX-T3-10: purged mid-flight — nothing was parked; report skipped.
+      if (parked.captureGone) return 'skipped'
     } catch (parkError) {
       // Even the park write failed — the row stays 'in_progress' (from
       // reserve) and the next run's stale-in_progress recovery picks it up.

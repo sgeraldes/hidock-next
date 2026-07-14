@@ -924,6 +924,66 @@ describe('value-backfill', () => {
       expect(getBackfillStateRow('cap-second')).toBeUndefined() // no reserve either
       expect(getCaptureRow('cap-second')?.quality_rating).toBe('unrated')
     })
+
+    // CX-T3-9: skipped items must not consume rate-limit slots. The WAIT
+    // spaces against the last REAL call only; the TIMESTAMP is stamped
+    // immediately before an actual classifyCaptureValueRaw invocation — so N
+    // consecutive privacy-skips cost at most ONE residual wait in total
+    // (the old combined wait+stamp re-stamped on every skip, turning N
+    // no-ops into N full dead intervals).
+    it('N consecutive privacy-skips consume NO throttle slots; the next real item spaces against the last REAL call (CX-T3-9)', async () => {
+      // Controlled clock: spy Date.now (real setTimeout stays live for the
+      // chunk yield); the injected delayFn advances the fake clock by
+      // exactly the requested wait.
+      let fakeNow = 1_000_000
+      const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => fakeNow)
+      const waits: number[] = []
+      try {
+        seedEligible('cap-1', '2026-06-01T00:00:00.000Z') // REAL — processed first
+        seedEligible('cap-2', '2026-05-01T00:00:00.000Z') // privacy-blocked mid-run
+        seedEligible('cap-3', '2026-04-01T00:00:00.000Z') // privacy-blocked mid-run
+        seedEligible('cap-4', '2026-03-01T00:00:00.000Z') // privacy-blocked mid-run
+        seedEligible('cap-5', '2026-02-01T00:00:00.000Z') // REAL — must not re-wait
+        _setValueBackfillConfigForTests({
+          minIntervalMs: 60000,
+          delayFn: async (ms: number) => {
+            waits.push(ms)
+            fakeNow += ms
+          }
+        })
+        classifyCaptureValueRawMock.mockImplementation(async (captureId: string) => {
+          if (captureId === 'cap-1') {
+            // Bulk privacy change lands while item 1's call is in flight.
+            for (const id of ['rec-cap-2', 'rec-cap-3', 'rec-cap-4']) {
+              run('UPDATE recordings SET personal = 1 WHERE id = ?', [id])
+            }
+          }
+          return successReply('none', 0.9)
+        })
+
+        const result = await startValueBackfill()
+
+        expect(result.total).toBe(5)
+        // Only the two REAL items ever reached the provider.
+        expect(classifyCaptureValueRawMock).toHaveBeenCalledTimes(2)
+        expect(classifyCaptureValueRawMock).toHaveBeenCalledWith('cap-1')
+        expect(classifyCaptureValueRawMock).toHaveBeenCalledWith('cap-5')
+        // EXACTLY ONE wait in total: cap-2's residual wait after cap-1's
+        // real call. cap-3/cap-4 skip with no wait (the interval already
+        // elapsed on the clock), and cap-5 — the next REAL item — needs no
+        // wait either: it spaces against cap-1's REAL stamp, not a phantom
+        // stamp from the skips. (Old combined wait+stamp: 4 waits.)
+        expect(waits).toEqual([60000])
+        // The skips left no trace; both real items completed.
+        for (const id of ['cap-2', 'cap-3', 'cap-4']) {
+          expect(getBackfillStateRow(id)).toBeUndefined()
+        }
+        expect(getBackfillStateRow('cap-1')?.status).toBe('classified')
+        expect(getBackfillStateRow('cap-5')?.status).toBe('classified')
+      } finally {
+        nowSpy.mockRestore()
+      }
+    })
   })
 
   // ---------------------------------------------------------------------
@@ -956,8 +1016,10 @@ describe('value-backfill', () => {
       expect(completeCall?.[1]).toMatchObject({ processed: 1, marked: 0, failed: 0 })
     })
 
-    it('a FAILING call for a mid-flight-purged capture parks nothing (finalizeFailure existence guard)', async () => {
+    it('a FAILING call for a mid-flight-purged capture parks nothing AND counts as skipped, not failed (CX-T3-10)', async () => {
       seedEligible('cap-1')
+      const { win, send } = FAKE_WINDOW_FACTORY()
+      setMainWindowForValueBackfill(win)
       classifyCaptureValueRawMock.mockImplementation(async () => {
         runWithMassDeleteAllowed(() => {
           run(`DELETE FROM value_backfill_state WHERE capture_id = 'cap-1'`)
@@ -970,6 +1032,11 @@ describe('value-backfill', () => {
 
       expect(result.started).toBe(true)
       expect(getBackfillStateRow('cap-1')).toBeUndefined() // failure park skipped too
+      // CX-T3-10: a purged item is nonexistent and non-retryable — reporting
+      // it failed:1 would be inconsistent with the successful-call purge
+      // path (skipped). Both paths now count it as skipped.
+      const completeCall = send.mock.calls.find((c) => c[0] === 'value:backfill-complete')
+      expect(completeCall?.[1]).toMatchObject({ processed: 1, marked: 0, failed: 0 })
     })
   })
 
