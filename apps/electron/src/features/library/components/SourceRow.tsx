@@ -1,5 +1,5 @@
 import { memo } from 'react'
-import { AlertCircle, Download, Trash2, Wand2, Sparkles, FileText, RefreshCw, AudioLines, MoreHorizontal, Calendar, EyeOff, Eye } from 'lucide-react'
+import { AlertCircle, Download, Trash2, Wand2, Sparkles, FileText, RefreshCw, AudioLines, MoreHorizontal, Calendar, EyeOff, Eye, TrendingDown, Ban, RotateCcw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import {
@@ -11,6 +11,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { formatDateTime } from '@/lib/utils'
 import { Meeting, Transcript } from '@/types'
+import type { QualityRating } from '@/types/knowledge'
 import { UnifiedRecording, hasLocalPath } from '@/types/unified-recording'
 import { StatusIcon } from './StatusIcon'
 import { TranscriptionStatusBadge } from './TranscriptionStatusBadge'
@@ -19,6 +20,43 @@ import { getDisplayTitle } from '@/features/library/utils/getDisplayTitle'
 import { highlightText } from '@/features/library/utils/highlightText'
 import { getRowMeta } from '@/features/library/utils/rowMeta'
 import { sourceTypeLabel } from '@/features/library/utils/sourceType'
+import { formatValueReasons } from '@/features/library/utils/valueReasons'
+
+/**
+ * F16/spec-003 — icon-only value badge, rendered only for low-value/garbage
+ * (never valuable/archived/unrated). Lives in the row's `shrink-0` right
+ * cluster so the H17 no-scroll invariant holds: no text label, so the
+ * `flex-1 min-w-0` title always truncates before this cluster can grow.
+ */
+function ValueBadge({ recording }: { recording: UnifiedRecording }) {
+  if (recording.quality !== 'low-value' && recording.quality !== 'garbage') return null
+
+  const isGarbage = recording.quality === 'garbage'
+  const Icon = isGarbage ? Ban : TrendingDown
+  const label = isGarbage ? 'Garbage' : 'Low value'
+  const reasonsText = formatValueReasons(recording.qualityReasons)
+  const secondLine = reasonsText || (recording.qualitySource === 'user' ? 'Set by you' : 'AI-assessed')
+
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span
+            className={`inline-flex shrink-0 ${isGarbage ? 'text-red-600 dark:text-red-400' : 'text-amber-600 dark:text-amber-400'}`}
+            role="img"
+            aria-label={label}
+          >
+            <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          </span>
+        </TooltipTrigger>
+        <TooltipContent>
+          <p>{label}</p>
+          <p className="text-xs text-muted-foreground mt-0.5">{secondLine}</p>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
 
 interface SourceRowProps {
   recording: UnifiedRecording
@@ -38,6 +76,8 @@ interface SourceRowProps {
   onDelete?: () => void
   onDeletePermanent?: () => void
   onMarkPersonal?: () => void
+  /** F16/spec-003 — manual per-row value-rating override (overflow menu). */
+  onSetValueRating?: (rating: QualityRating) => void
   onTranscribe?: () => void
   onReprocessVibeVoice?: () => void
   onAskAssistant?: () => void
@@ -60,6 +100,7 @@ export const SourceRow = memo(function SourceRow({
   onDelete,
   onDeletePermanent,
   onMarkPersonal,
+  onSetValueRating,
   onTranscribe,
   onReprocessVibeVoice,
   onAskAssistant,
@@ -154,6 +195,10 @@ export const SourceRow = memo(function SourceRow({
           the row's top line. The two status icons live here (not a left column) so
           the title starts flush-left. Playback lives in the mid-panel player. */}
       <div className="flex items-center gap-1.5 shrink-0">
+        {/* Value badge (F16/spec-003) — icon-only, low-value/garbage only. Sits
+            before the meeting chip so the two provenance/quality glyphs read
+            left-to-right in the same tight cluster. */}
+        <ValueBadge recording={recording} />
         {/* Meeting-link (calendar) provenance — the system knows this row maps to a
             calendar event; the status icons align with it. */}
         {meeting && (
@@ -268,6 +313,35 @@ export const SourceRow = memo(function SourceRow({
                 </DropdownMenuItem>
               </>
             )}
+            {/* Manual value-rating override (F16/spec-003) — capture-backed,
+                non-device rows only. Explicit user action always applies (the
+                never-downgrade guard only protects against a lower-confidence
+                AI re-classification, never against the user's own rating). */}
+            {onSetValueRating && recording.location !== 'device-only' && recording.knowledgeCaptureId && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onClick={(e) => { e.stopPropagation(); onSetValueRating('low-value'); }}
+                >
+                  <TrendingDown className="h-4 w-4" aria-hidden="true" />
+                  Mark low-value
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={(e) => { e.stopPropagation(); onSetValueRating('garbage'); }}
+                >
+                  <Ban className="h-4 w-4" aria-hidden="true" />
+                  Mark garbage
+                </DropdownMenuItem>
+                {recording.quality && recording.quality !== 'unrated' && (
+                  <DropdownMenuItem
+                    onClick={(e) => { e.stopPropagation(); onSetValueRating('unrated'); }}
+                  >
+                    <RotateCcw className="h-4 w-4" aria-hidden="true" />
+                    Clear rating
+                  </DropdownMenuItem>
+                )}
+              </>
+            )}
             {onDelete && (
               <>
                 <DropdownMenuSeparator />
@@ -308,6 +382,8 @@ export const SourceRow = memo(function SourceRow({
     prevProps.recording.meetingSubject === nextProps.recording.meetingSubject &&
     prevProps.recording.category === nextProps.recording.category &&
     prevProps.recording.quality === nextProps.recording.quality &&
+    prevProps.recording.qualityReasons?.join('|') === nextProps.recording.qualityReasons?.join('|') &&
+    prevProps.recording.qualitySource === nextProps.recording.qualitySource &&
     prevProps.recording.duration === nextProps.recording.duration &&
     prevProps.recording.size === nextProps.recording.size &&
     prevProps.isSelected === nextProps.isSelected &&
