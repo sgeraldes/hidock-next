@@ -15,6 +15,10 @@
  *    ONLY when the resulting rating is low-value/garbage.
  *  - reanalyzeFailedTranscripts: re-analysis re-applies the classification
  *    (no event emit — only the fresh-transcription path announces one).
+ *  - T2 actionable-detection value gate, wire level (last describe): the
+ *    pre-check skips the detection LLM call entirely for an excluded
+ *    recording (Opus F-2), and the CX-T2-1 post-await re-check blocks all
+ *    INSERT INTO actionables when a rating lands mid-detection.
  *
  * @vitest-environment node
  */
@@ -31,6 +35,17 @@ const mockEnsureCapture = vi.fn()
 const mockApplyCaptureValueClassification = vi.fn()
 const mockEmitDomainEvent = vi.fn()
 const mockGenerateContent = vi.fn()
+// T2 actionable-gate wiring (CX-T2-1 / Opus F-2): controllable predicate +
+// write capture + brain seam so the gate's skip branches are testable at the
+// wire level (through transcribeManually), not just at the predicate level.
+const mockIsValueExcludedRecording = vi.fn((..._args: any[]) => false)
+const mockRun = vi.fn()
+const mockBrainGenerate = vi.fn()
+// The local-asr fake child process returns this as the transcript text. The
+// default is the historical short string (under detectActionables' 100-word
+// minimum, so the pre-existing tests never reach the brain call); the
+// actionable-gate tests swap in a long transcript.
+let mockAsrText = 'Reunion breve sobre el estado del proyecto.'
 
 let mockConfig: any = {
   transcription: {
@@ -99,17 +114,17 @@ vi.mock('../database', () => ({
   releaseTranscriptionLock: vi.fn().mockReturnValue(true),
   clearStaleTranscriptionLock: vi.fn(),
   resetStuckTranscriptions: vi.fn().mockReturnValue({ recordingsReset: 0, queueItemsReset: 0 }),
-  run: vi.fn(),
+  run: (...args: any[]) => mockRun(...args),
   runInTransaction: (fn: () => unknown) => fn(),
   saveDatabase: vi.fn(),
   queryAll: (...args: any[]) => mockQueryAll(...args),
   queryOne: (...args: any[]) => mockQueryOne(...args),
-  // F16/spec-002 (T2): the inline actionable-detection block gates on this.
-  // Default false (not excluded) — none of this file's tests exercise the
-  // value-gate itself (that's covered by value-gates.test.ts); this just
-  // keeps the mock's surface in sync with the real module so the new call
-  // site doesn't throw.
-  isValueExcludedRecording: vi.fn(() => false)
+  // F16/spec-002 (T2): the inline actionable-detection block gates on this
+  // (pre-check before detectActionables + CX-T2-1 fresh re-check after it).
+  // Default false (not excluded); the actionable-gate describe below drives
+  // it per-test. The DB-level predicate itself is covered by
+  // value-gates.test.ts against a real engine.
+  isValueExcludedRecording: (...args: any[]) => mockIsValueExcludedRecording(...args)
 }))
 
 vi.mock('electron', () => ({
@@ -156,8 +171,18 @@ vi.mock('child_process', () => ({
   execFile: vi.fn(),
   spawn: (_cmd: string, _args: string[]) =>
     makeFakeChildProcess(
-      JSON.stringify({ text: 'Reunion breve sobre el estado del proyecto.', language: 'es', duration_seconds: 5, processing_time_seconds: 1 })
+      JSON.stringify({ text: mockAsrText, language: 'es', duration_seconds: 5, processing_time_seconds: 1 })
     )
+}))
+
+// detectActionables goes through the brains registry (getBrainRegistry ->
+// brain.generate), not the raw SDK — mock the seam so the actionable-gate
+// tests can count detection calls and inject a mid-flight rating change.
+// resolveGeminiApiKey mirrors the config mock's key (analyzeTranscriptWithGemini
+// also consults it before building its prompt).
+vi.mock('../brains', () => ({
+  getBrainRegistry: () => ({ get: () => ({ generate: (...args: any[]) => mockBrainGenerate(...args) }) }),
+  resolveGeminiApiKey: () => 'test-api-key' // pragma: allowlist secret
 }))
 
 vi.mock('../knowledge-capture-backfill', () => ({
@@ -455,5 +480,88 @@ describe('transcribeRecording — captureId flow + event emit gating', () => {
 
     expect(mockApplyCaptureValueClassification).not.toHaveBeenCalled()
     expect(mockEmitDomainEvent).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'capture:value-classified' }))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// T2 (F16/spec-002) — actionable-detection value gate, wire level.
+// The gate has TWO checks around the async detectActionables() LLM call:
+//  - pre-check (cost gate): a recording already excluded never reaches the
+//    brain call at all (Opus F-2);
+//  - post-await re-check (CX-T2-1): the pre-check is stale by the time the
+//    detection call resolves — a rating committed while it was in flight must
+//    still block every INSERT INTO actionables.
+// detectActionables requires >=100 transcript words and goes through the
+// brains registry, so these tests feed a long ASR transcript and count calls
+// on the mocked brain.generate seam.
+// ---------------------------------------------------------------------------
+
+describe('transcribeRecording — actionable-detection value gate (T2 wire level)', () => {
+  const LONG_ASR_TEXT = Array.from({ length: 120 }, (_, i) => `palabra${i}`).join(' ')
+  const DETECTION_JSON = JSON.stringify([
+    { type: 'action_items', confidence: 0.9, suggestedTitle: 'Enviar notas', reason: 'dice enviar notas', suggestedTemplate: 'action_items' }
+  ])
+  const actionableInserts = () =>
+    mockRun.mock.calls.filter((c) => String(c[0]).includes('INSERT INTO actionables'))
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockIsValueExcludedRecording.mockReset() // back to the default () => false
+    mockBrainGenerate.mockReset()
+    mockBrainGenerate.mockResolvedValue(DETECTION_JSON)
+    mockAsrText = LONG_ASR_TEXT // >=100 words so detectActionables reaches the brain call
+    resetConfig()
+    mockGetRecordingById.mockReturnValue({
+      id: 'rec-gate',
+      filename: 'gate.wav',
+      file_path: 'G:\\Recordings\\gate.wav',
+      status: 'complete'
+    })
+    mockQueryAll.mockImplementation(() => []) // existingProjects
+    mockQueryOne.mockReturnValue({ id: 'cap-gate' }) // actionable-block capture re-query
+    mockEnsureCapture.mockReturnValue('cap-gate')
+    mockApplyCaptureValueClassification.mockReturnValue({ applied: true, rating: 'unrated' })
+    mockGenerateContent.mockResolvedValue(geminiJsonResponse(BASE_ANALYSIS))
+  })
+
+  // Control: an above-threshold recording is unaffected by the gate.
+  it('non-excluded recording: detection runs once and the actionables row is inserted', async () => {
+    const { transcribeManually } = await import('../transcription')
+    await transcribeManually('rec-gate')
+
+    expect(mockBrainGenerate).toHaveBeenCalledTimes(1)
+    expect(actionableInserts()).toHaveLength(1)
+  })
+
+  // Opus F-2: predicate true up front => detectActionables never invoked.
+  it('excluded up front: detectActionables is never invoked and no actionables rows are written', async () => {
+    mockIsValueExcludedRecording.mockReturnValue(true)
+
+    const { transcribeManually } = await import('../transcription')
+    await transcribeManually('rec-gate')
+
+    expect(mockBrainGenerate).not.toHaveBeenCalled()
+    expect(actionableInserts()).toHaveLength(0)
+  })
+
+  // CX-T2-1: a rating committed WHILE detection was in flight is honored by
+  // the fresh post-await re-check — detection ran (that cost is already
+  // spent) but zero rows persist.
+  it('rating lands mid-detection: detection ran exactly once, zero actionables rows persisted', async () => {
+    mockBrainGenerate.mockImplementationOnce(async () => {
+      // Simulates the garbage rating committing while the detection LLM call
+      // was in flight: the pre-check already passed (false); by resolution
+      // time the recording is excluded.
+      mockIsValueExcludedRecording.mockReturnValue(true)
+      return DETECTION_JSON
+    })
+
+    const { transcribeManually } = await import('../transcription')
+    await transcribeManually('rec-gate')
+
+    expect(mockBrainGenerate).toHaveBeenCalledTimes(1)
+    expect(actionableInserts()).toHaveLength(0)
+    // Both the pre-check and the post-await re-check consulted the predicate.
+    expect(mockIsValueExcludedRecording.mock.calls.length).toBeGreaterThanOrEqual(2)
   })
 })

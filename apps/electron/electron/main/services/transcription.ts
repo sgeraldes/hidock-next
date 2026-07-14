@@ -1763,38 +1763,50 @@ Meeting ${i + 1}: "${m.subject}"
         questions: analysis.question_suggestions
       })
 
-      // Create actionable entries with TEXT IDs
-      const VALID_TEMPLATE_IDS = ['meeting_minutes', 'interview_feedback', 'project_status', 'action_items', 'claude_code_prompt']
-
-      for (const detection of detections) {
-        const actionableId = `act_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`
-
-        // Sanitize template ID: fall back to 'meeting_minutes' if AI suggests an invalid one
-        const sanitizedTemplate = detection.suggestedTemplate && VALID_TEMPLATE_IDS.includes(detection.suggestedTemplate)
-          ? detection.suggestedTemplate
-          : 'meeting_minutes'
-
-        run(
-          `INSERT INTO actionables (
-            id, source_knowledge_id, type, title, description, status,
-            confidence, suggested_template, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            actionableId,
-            sourceKnowledgeId, // source_knowledge_id references knowledge_captures.id
-            detection.type,
-            detection.suggestedTitle,
-            detection.reason,
-            'pending',
-            detection.confidence,
-            sanitizedTemplate,
-            new Date().toISOString()
-          ]
+      // CX-T2-1: detectActionables is an async LLM call — the pre-check above
+      // is stale by the time it resolves. Re-check eligibility FRESH before
+      // persisting anything, so a rating committed while detection was in
+      // flight still gates the inserts. (The pre-check above stays: it is the
+      // cost gate that skips the LLM call entirely for a recording already
+      // known to be excluded.)
+      if (isValueExcludedRecording(recordingId)) {
+        console.log(
+          `[Actionable Detection] Skipped value-excluded recording ${recordingId} (rating landed mid-detection; no actionables persisted)`
         )
-      }
+      } else {
+        // Create actionable entries with TEXT IDs
+        const VALID_TEMPLATE_IDS = ['meeting_minutes', 'interview_feedback', 'project_status', 'action_items', 'claude_code_prompt']
 
-      if (detections.length > 0) {
-        console.log(`[Actionable Detection] Created ${detections.length} actionables for ${recordingId}`)
+        for (const detection of detections) {
+          const actionableId = `act_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`
+
+          // Sanitize template ID: fall back to 'meeting_minutes' if AI suggests an invalid one
+          const sanitizedTemplate = detection.suggestedTemplate && VALID_TEMPLATE_IDS.includes(detection.suggestedTemplate)
+            ? detection.suggestedTemplate
+            : 'meeting_minutes'
+
+          run(
+            `INSERT INTO actionables (
+              id, source_knowledge_id, type, title, description, status,
+              confidence, suggested_template, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              actionableId,
+              sourceKnowledgeId, // source_knowledge_id references knowledge_captures.id
+              detection.type,
+              detection.suggestedTitle,
+              detection.reason,
+              'pending',
+              detection.confidence,
+              sanitizedTemplate,
+              new Date().toISOString()
+            ]
+          )
+        }
+
+        if (detections.length > 0) {
+          console.log(`[Actionable Detection] Created ${detections.length} actionables for ${recordingId}`)
+        }
       }
     } catch (error) {
       console.error('[Actionable Detection] Failed to create actionables:', error)

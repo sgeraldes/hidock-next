@@ -270,6 +270,33 @@ describe('getExcludedRecordingIds() — privacy UNION value exclusions', () => {
 
     expect(getExcludedRecordingIds().has('r-personal-only')).toBe(true)
   })
+
+  // Opus F-1: the value union is defensively wrapped — a failure of the
+  // value-exclusion query must degrade to the privacy-only set, never drop a
+  // personal/deleted exclusion. Forced here by renaming the captures table
+  // away so the union query throws "no such table" (rename is not guarded by
+  // the mass-delete tripwire, and each test gets its own fresh temp DB).
+  it('privacy exclusions survive a value-union query failure (captures table unavailable)', () => {
+    seedRecording('r-pu-personal', { personal: 1 })
+    seedRecording('r-pu-deleted', { deleted_at: '2026-07-01T00:00:00.000Z' })
+    seedRecording('r-pu-garbage')
+    seedCapture('cap-pu-garbage', 'r-pu-garbage', 'garbage')
+
+    // Sanity: with a healthy captures table the union includes the value id.
+    expect(getExcludedRecordingIds().has('r-pu-garbage')).toBe(true)
+
+    dbRun('ALTER TABLE knowledge_captures RENAME TO knowledge_captures_offline')
+    try {
+      const excluded = getExcludedRecordingIds()
+      expect(excluded.has('r-pu-personal')).toBe(true)
+      expect(excluded.has('r-pu-deleted')).toBe(true)
+      // The value union failed — it can only fail to ADD, so the value id is
+      // (correctly) absent while both privacy ids remain.
+      expect(excluded.has('r-pu-garbage')).toBe(false)
+    } finally {
+      dbRun('ALTER TABLE knowledge_captures_offline RENAME TO knowledge_captures')
+    }
+  })
 })
 
 // =============================================================================
@@ -353,6 +380,27 @@ describe('ingestFromDbTranscripts() — value gate', () => {
 
     expect(complete).toHaveBeenCalledTimes(0)
     expect(ingestMarker('tx-gate4')).toBeUndefined()
+  })
+
+  // Opus F-3: a layer-1 pre-filter failure degrades to "no pre-filter" — the
+  // ingest PASS itself must complete (no thrown error). With the captures
+  // table gone, layer 2's per-row point-read also throws, which the per-row
+  // try/catch converts into a collected error — fail-closed per row (no
+  // silent ingest, no marker), never a failed pass.
+  it('a value pre-filter failure does not fail the ingest pass (degrades per row, fail-closed)', async () => {
+    seedRecording('r-gate5')
+    seedTranscript('tx-gate5', 'r-gate5', 'Dana discussed the launch plan.')
+
+    dbRun('ALTER TABLE knowledge_captures RENAME TO knowledge_captures_offline')
+    try {
+      const result = await ingestFromDbTranscripts() // must resolve, not reject
+      expect(result.ingested).toBe(0)
+      expect(result.errors).toHaveLength(1)
+      expect(result.errors[0].transcriptId).toBe('tx-gate5')
+      expect(ingestMarker('tx-gate5')).toBeUndefined()
+    } finally {
+      dbRun('ALTER TABLE knowledge_captures_offline RENAME TO knowledge_captures')
+    }
   })
 })
 

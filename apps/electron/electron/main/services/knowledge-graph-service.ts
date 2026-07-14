@@ -194,8 +194,17 @@ export async function ingestFromDbTranscripts(): Promise<IngestResult> {
   // pre-filter every ingest pass (60s-debounced transcript-ready, boot,
   // manual) would re-run the full extraction for every excluded transcript,
   // forever. The snapshot may go stale across the loop's awaits — that is
-  // layer 2's job, not this one's.
-  const valueExcluded = getValueExcludedRecordingIds()
+  // layer 2's job, not this one's. Defensive try/catch (mirrors the RAG
+  // union in getExcludedRecordingIds): a value-query failure degrades to
+  // "no pre-filter" rather than failing the whole ingest pass — layer 2
+  // still gates each row's persistence.
+  let valueExcluded: Set<string>
+  try {
+    valueExcluded = getValueExcludedRecordingIds()
+  } catch (e) {
+    console.warn('[KnowledgeGraph] Value pre-filter unavailable (per-row transactional check still gates):', e)
+    valueExcluded = new Set<string>()
+  }
 
   for (const row of rows) {
     // Pre-filter (layer 1): excluded at run start — skip without extracting.
