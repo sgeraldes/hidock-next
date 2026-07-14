@@ -3,17 +3,14 @@ import { join, extname, basename } from 'path'
 import { randomUUID } from 'crypto'
 import { getRecordingsPath } from './file-storage'
 import {
-  getRecordingById,
-  getRecordingByFilename,
+  getRecordingByFilenameVariants,
   insertRecording,
   getMeetings,
   linkRecordingToMeeting,
-  addToQueue,
   updateRecordingLifecycle,
   Recording
 } from './database'
 import { BrowserWindow } from 'electron'
-import { getConfig } from './config'
 
 const AUDIO_EXTENSIONS = ['.wav', '.mp3', '.m4a', '.ogg', '.webm', '.hda']
 
@@ -93,13 +90,11 @@ async function scanExistingRecordings(): Promise<void> {
   for (const file of audioFiles) {
     const filePath = join(recordingsPath, file)
 
-    // Check if already in database by filename (or .hda/.wav variant)
-    let existing = getRecordingByFilename(file)
-    if (!existing) {
-      const hdaVariant = file.replace(/\.mp3$/i, '.hda')
-      if (hdaVariant !== file) existing = getRecordingByFilename(hdaVariant)
-    }
-    if (!existing) {
+    // Check if already in database by filename (any extension variant).
+    // Rows with missing file_path or stale on_local=0 flags are reprocessed
+    // so processNewRecording can repair their lifecycle columns.
+    const existing = getRecordingByFilenameVariants(file)
+    if (!existing || !existing.file_path || !existing.on_local) {
       filesToProcess.push(filePath)
     }
   }
@@ -136,28 +131,22 @@ async function processNewRecording(filePath: string): Promise<void> {
     const filename = basename(filePath)
     const stats = statSync(filePath)
 
-    let existing = getRecordingByFilename(filename)
-
-    // Also check .hda variant — device records use .hda, downloads normalize to .mp3
-    if (!existing) {
-      const hdaVariant = filename.replace(/\.mp3$/i, '.hda')
-      if (hdaVariant !== filename) {
-        existing = getRecordingByFilename(hdaVariant)
-      }
-    }
-
-    // Also check .wav variant (legacy format)
-    if (!existing) {
-      const wavVariant = filename.replace(/\.(mp3|hda)$/i, '.wav')
-      if (wavVariant !== filename) {
-        existing = getRecordingByFilename(wavVariant)
-      }
-    }
+    // Match any extension variant of the same base name — device rows are .hda
+    // while downloads are saved as .wav/.mp3 (the old .mp3-only check missed
+    // .wav downloads and created duplicate rows).
+    const existing = getRecordingByFilenameVariants(filename)
 
     if (existing) {
       if (!existing.file_path) {
         updateRecordingLifecycle(existing.id, {
           file_path: filePath,
+          on_local: 1,
+          location: existing.on_device ? 'both' : 'local-only'
+        })
+      } else if (!existing.on_local) {
+        // Repair rows left mislabeled by earlier bugs: file exists locally but
+        // lifecycle flags still say device-only.
+        updateRecordingLifecycle(existing.id, {
           on_local: 1,
           location: existing.on_device ? 'both' : 'local-only'
         })
@@ -204,15 +193,11 @@ async function processNewRecording(filePath: string): Promise<void> {
 
     correlateWithMeeting(recordingId, new Date(dateRecorded))
 
-    const config = getConfig()
-    if (config.transcription.autoTranscribe) {
-      addToQueue(recordingId)
-      import('./transcription').then(({ processQueueManually }) => {
-        processQueueManually()
-      }).catch(err => {
-        console.error('[RecordingWatcher] Failed to import transcription service:', err)
-      })
-    }
+    import('./transcription').then(({ queueTranscriptionIfEnabled }) => {
+      queueTranscriptionIfEnabled(recordingId)
+    }).catch(err => {
+      console.error('[RecordingWatcher] Failed to import transcription service:', err)
+    })
 
     notifyRenderer('recording:new', { recording })
   } catch (error) {

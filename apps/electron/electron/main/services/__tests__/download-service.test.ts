@@ -20,6 +20,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 // Mock electron modules BEFORE importing the service
 vi.mock('electron', () => ({
+  app: { getPath: vi.fn(() => '/tmp') },
   BrowserWindow: {
     getAllWindows: vi.fn(() => [])
   },

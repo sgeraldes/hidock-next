@@ -4,7 +4,9 @@
  * Generates structured outputs from meeting transcripts using LLM.
  */
 
+import { GoogleGenerativeAI } from '@google/generative-ai'
 import { getOllamaService } from './ollama'
+import { getConfig } from './config'
 import { getTemplate, getTemplates, OutputTemplateId, OutputTemplate } from './output-templates'
 import {
   getMeetingById,
@@ -59,7 +61,7 @@ class OutputGeneratorService {
     }
 
     // Collect transcripts based on context
-    let transcripts: string[] = []
+    const transcripts: string[] = []
     let contextInfo: Record<string, string> = {}
 
     if (meetingId) {
@@ -129,21 +131,37 @@ class OutputGeneratorService {
         meeting_count: String(meetings.length)
       }
     } else if (options.knowledgeCaptureId) {
-      // Single knowledge capture
+      // Single knowledge capture. Actionables store source_knowledge_id as a
+      // knowledge_captures id when one exists, but fall back to the recording
+      // id when captures are absent — resolve both here.
       const kc = queryOne<any>('SELECT * FROM knowledge_captures WHERE id = ?', [options.knowledgeCaptureId])
-      if (!kc) {
-        throw new Error(`Knowledge capture not found: ${options.knowledgeCaptureId}`)
-      }
 
-      const transcript = getTranscriptByRecordingId(kc.source_recording_id)
-      if (transcript?.full_text) {
+      if (kc) {
+        const transcript = getTranscriptByRecordingId(kc.source_recording_id)
+        if (transcript?.full_text) {
+          transcripts.push(transcript.full_text)
+        }
+
+        contextInfo = {
+          capture_title: kc.title,
+          capture_date: new Date(kc.captured_at).toLocaleDateString(),
+          capture_summary: kc.summary || ''
+        }
+      } else {
+        const transcript = getTranscriptByRecordingId(options.knowledgeCaptureId)
+        if (!transcript?.full_text) {
+          throw new Error(`Knowledge capture not found: ${options.knowledgeCaptureId}`)
+        }
         transcripts.push(transcript.full_text)
-      }
 
-      contextInfo = {
-        capture_title: kc.title,
-        capture_date: new Date(kc.captured_at).toLocaleDateString(),
-        capture_summary: kc.summary || ''
+        const recording = queryOne<any>('SELECT * FROM recordings WHERE id = ?', [options.knowledgeCaptureId])
+        contextInfo = {
+          capture_title: recording?.filename || 'Recording',
+          capture_date: recording?.date_recorded
+            ? new Date(recording.date_recorded).toLocaleDateString()
+            : new Date().toLocaleDateString(),
+          capture_summary: transcript.summary || ''
+        }
       }
     }
 
@@ -161,17 +179,32 @@ class OutputGeneratorService {
       prompt = prompt.replace(`{${key}}`, value)
     }
 
-    // Generate using Ollama
-    const ollama = getOllamaService()
-    const isAvailable = await ollama.isAvailable()
-
-    if (!isAvailable) {
-      throw new Error('Ollama is not available. Please start Ollama to generate outputs.')
-    }
-
     const systemPrompt = `You are a professional document writer. Generate clear, well-structured documents based on meeting transcripts. Be concise but thorough. Use the exact format requested.`
 
-    const content = await ollama.generate(prompt, systemPrompt)
+    // Prefer the configured cloud provider (Gemini, same credentials as
+    // transcription); fall back to local Ollama when no API key is set.
+    const config = getConfig()
+    const geminiKey = config.transcription.geminiApiKey
+    let content: string | null = null
+
+    if (geminiKey) {
+      const genAI = new GoogleGenerativeAI(geminiKey)
+      const model = genAI.getGenerativeModel({
+        model: config.transcription.geminiModel || 'gemini-3.5-flash',
+        systemInstruction: systemPrompt
+      })
+      const result = await model.generateContent(prompt)
+      content = result.response.text()
+    } else {
+      const ollama = getOllamaService()
+      const isAvailable = await ollama.isAvailable()
+      if (!isAvailable) {
+        throw new Error(
+          'No output provider available. Configure a Gemini API key in Settings or start Ollama.'
+        )
+      }
+      content = await ollama.generate(prompt, systemPrompt)
+    }
 
     if (!content) {
       throw new Error('Failed to generate output. Please try again.')

@@ -5,6 +5,8 @@
 
 import { getVectorStore, SearchResult } from './vector-store'
 import { getOllamaService, OllamaChatMessage } from './ollama'
+import { getChatLLMService } from './chat-llm'
+import { getEmbeddingsService } from './embeddings'
 import { getDatabase, queryOne, escapeLikePattern } from './database'
 import { Result, success, error } from '../types/api'
 
@@ -118,12 +120,14 @@ class RAGService {
   private activeControllers: Map<string, AbortController> = new Map()
 
   async isReady(): Promise<{ ready: boolean; reason?: string }> {
-    const ollama = getOllamaService()
     const vectorStore = getVectorStore()
 
-    const ollamaAvailable = await ollama.isAvailable()
-    if (!ollamaAvailable) {
-      return { ready: false, reason: 'Ollama is not running. Start Ollama to use the chat feature.' }
+    const chatStatus = await getChatLLMService().getStatus()
+    if (chatStatus.backend === 'none') {
+      return {
+        ready: false,
+        reason: 'No chat backend available. Add a Gemini API key in Settings or start Ollama.'
+      }
     }
 
     const docCount = vectorStore.getDocumentCount()
@@ -167,7 +171,6 @@ class RAGService {
     message: string,
     meetingFilter?: string
   ): Promise<RAGResponse> {
-    const ollama = getOllamaService()
     const vectorStore = getVectorStore()
 
     // Validate that sessionId corresponds to a valid conversation
@@ -216,7 +219,7 @@ class RAGService {
     if (context.meetingId) {
       // Search within specific meeting
       const docs = await vectorStore.searchByMeeting(context.meetingId)
-      const queryEmbedding = await ollama.generateEmbedding(message)
+      const queryEmbedding = await getEmbeddingsService().generateEmbedding(message)
       if (queryEmbedding) {
         // Re-rank by actual query relevance using cosine similarity
         searchResults = docs.map((doc) => {
@@ -302,8 +305,24 @@ class RAGService {
       })
     }
 
-    // Combine pinned context and search results
-    const allContextParts = [...pinnedContextParts, ...contextParts]
+    // Ground with Context Graph facts when the question names a known
+    // person/project — the assistant walks graph edges, not just vector chunks.
+    // Loaded lazily so RAG's static import graph stays free of the ingest/LLM
+    // stack (keeps this path testable without mocking the whole graph service).
+    const graphContextParts: string[] = []
+    try {
+      const { findMentionedEntity, neighborhoodFacts } = await import('./knowledge-graph-service')
+      const entity = findMentionedEntity(message)
+      if (entity) {
+        const facts = neighborhoodFacts(entity.id, 1)
+        if (facts) graphContextParts.push(facts)
+      }
+    } catch (e) {
+      console.warn('[RAG] Context Graph grounding skipped:', e)
+    }
+
+    // Combine pinned context, graph facts, and search results
+    const allContextParts = [...pinnedContextParts, ...graphContextParts, ...contextParts]
 
     // Prepare messages
     const contextText =
@@ -323,8 +342,9 @@ class RAGService {
     // Add raw message to conversation history (after building messages to avoid duplicate)
     context.conversationHistory.push({ role: 'user', content: message })
 
-    // B-CHAT-005: Generate response with abort signal support
-    const answer = await ollama.chat(messages, {
+    // B-CHAT-005: Generate response with abort signal support.
+    // Gemini-first (config.chat.geminiModel) with Ollama fallback — see chat-llm.ts.
+    const answer = await getChatLLMService().generate(messages, {
       systemPrompt: SYSTEM_PROMPT,
       temperature: 0.7,
       maxTokens: 1024,
@@ -355,7 +375,6 @@ class RAGService {
   }
 
   async summarizeMeeting(meetingId: string): Promise<string | null> {
-    const ollama = getOllamaService()
     const vectorStore = getVectorStore()
 
     // Get all chunks for this meeting
@@ -381,11 +400,10 @@ class RAGService {
 Meeting transcript:
 ${transcript.substring(0, 8000)}` // Limit context size
 
-    return ollama.generate(prompt)
+    return getChatLLMService().generateText(prompt)
   }
 
   async findActionItems(meetingId?: string): Promise<string | null> {
-    const ollama = getOllamaService()
     const vectorStore = getVectorStore()
 
     let docs
@@ -416,7 +434,7 @@ Format as a numbered list.
 Meeting transcripts:
 ${transcript.substring(0, 8000)}`
 
-    return ollama.generate(prompt)
+    return getChatLLMService().generateText(prompt)
   }
 
   /**
@@ -495,7 +513,7 @@ ${transcript.substring(0, 8000)}`
 
         const knowledgeRows = db.exec(`
           SELECT id, title, summary, captured_at FROM knowledge_captures
-          WHERE title LIKE ? ESCAPE '\' OR summary LIKE ? ESCAPE '\'
+          WHERE title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\'
           LIMIT ?
         `, [likeQuery, likeQuery, limit])
 
@@ -508,7 +526,7 @@ ${transcript.substring(0, 8000)}`
 
         const peopleRows = db.exec(`
           SELECT id, name, email, type FROM contacts
-          WHERE name LIKE ? ESCAPE '\' OR email LIKE ? ESCAPE '\' OR company LIKE ? ESCAPE '\' OR role LIKE ? ESCAPE '\'
+          WHERE name LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\' OR company LIKE ? ESCAPE '\\' OR role LIKE ? ESCAPE '\\'
           LIMIT ?
         `, [likeQuery, likeQuery, likeQuery, likeQuery, limit])
 
@@ -521,7 +539,7 @@ ${transcript.substring(0, 8000)}`
 
         const projectRows = db.exec(`
           SELECT id, name, description, status FROM projects
-          WHERE name LIKE ? ESCAPE '\' OR description LIKE ? ESCAPE '\'
+          WHERE name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'
           LIMIT ?
         `, [likeQuery, likeQuery, limit])
 
@@ -540,8 +558,8 @@ ${transcript.substring(0, 8000)}`
         columns: string[],
         selectCols: string,
         limitVal: number
-      ): { sql: string; params: unknown[] } => {
-        const params: unknown[] = []
+      ): { sql: string; params: (string | number)[] } => {
+        const params: (string | number)[] = []
         const termClauses: string[] = []
         const matchCountParts: string[] = []
 
@@ -551,13 +569,13 @@ ${transcript.substring(0, 8000)}`
 
           const colClauses = columns.map((col) => {
             params.push(likeVal)
-            return `${col} LIKE ? ESCAPE '\'`
+            return `${col} LIKE ? ESCAPE '\\'`
           })
           termClauses.push(`(${colClauses.join(' OR ')})`)
 
           const countExpr = columns.map((col) => {
             params.push(likeVal)
-            return `CASE WHEN ${col} LIKE ? ESCAPE '\' THEN 1 ELSE 0 END`
+            return `CASE WHEN ${col} LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END`
           })
           matchCountParts.push(`MAX(${countExpr.join(', ')})`)
         }

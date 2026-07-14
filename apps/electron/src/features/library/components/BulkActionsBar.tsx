@@ -1,4 +1,4 @@
-import { X, Download, Wand2, Trash2, CheckSquare, Square } from 'lucide-react'
+import { X, Download, Wand2, Trash2, CheckSquare, Square, EyeOff } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import { cn } from '@/lib/utils'
@@ -19,6 +19,8 @@ interface BulkActionsBarProps {
   onDownload: () => void
   onProcess: () => void
   onDelete: () => void
+  /** Mark all selected recordings personal (ignore). Optional. */
+  onMarkPersonal?: () => void
 }
 
 export function BulkActionsBar({
@@ -32,7 +34,8 @@ export function BulkActionsBar({
   onDeselectAll,
   onDownload,
   onProcess,
-  onDelete
+  onDelete,
+  onMarkPersonal
 }: BulkActionsBarProps) {
   if (selectedCount === 0) return null
 
@@ -107,6 +110,21 @@ export function BulkActionsBar({
           <Wand2 className="h-4 w-4" />
           {isProcessing ? 'Processing...' : 'Transcribe'}
         </Button>
+
+        {/* Mark Personal Action */}
+        {onMarkPersonal && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onMarkPersonal}
+            disabled={isProcessing}
+            className="gap-2"
+            title="Mark selected personal — kept, but excluded from AI processing and default views"
+          >
+            <EyeOff className="h-4 w-4" />
+            Mark personal
+          </Button>
+        )}
 
         {/* Delete Action */}
         <Button

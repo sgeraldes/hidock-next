@@ -3,8 +3,8 @@
  * Simple in-memory vector store with SQLite persistence for meeting transcript embeddings
  */
 
-import { getDatabase } from './database'
-import { getOllamaService } from './ollama'
+import { getDatabase, getExcludedRecordingIds } from './database'
+import { getEmbeddingsService } from './embeddings'
 
 interface VectorDocument {
   id: string
@@ -17,6 +17,38 @@ interface VectorDocument {
     timestamp?: string
     subject?: string
   }
+}
+
+/**
+ * Persist an embedding as a compact binary Float32 BLOB (4 bytes/dimension)
+ * rather than a JSON text array (~13 bytes/dimension). For the 3072-dim vectors
+ * this app stores that is a ~3x size reduction and was the fix for the P0 where
+ * vector_embeddings alone reached 1.7 GB and crashed the database (schema v36).
+ */
+function embeddingToBlob(embedding: number[]): Buffer {
+  return Buffer.from(new Float32Array(embedding).buffer)
+}
+
+/**
+ * Decode a stored embedding back to a float array. Accepts the binary Float32
+ * BLOB (Buffer/Uint8Array, current format) and legacy JSON text (rows written
+ * before the v36 migration, or not yet compacted). Returns [] on anything
+ * unparseable so a single bad row can never break RAG load.
+ */
+function blobToEmbedding(value: unknown): number[] {
+  if (value == null) return []
+  if (typeof value === 'string') {
+    try {
+      const arr = JSON.parse(value)
+      return Array.isArray(arr) ? (arr as number[]) : []
+    } catch {
+      return []
+    }
+  }
+  const bytes =
+    value instanceof Uint8Array ? value : Buffer.isBuffer(value) ? (value as Buffer) : null
+  if (!bytes) return []
+  return Array.from(new Float32Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 4)))
 }
 
 interface SearchResult {
@@ -120,7 +152,7 @@ class VectorStore {
       const vectorDoc: VectorDocument = {
         id: doc['id'] as string,
         content: doc['content'] as string,
-        embedding: JSON.parse(doc['embedding'] as string),
+        embedding: blobToEmbedding(doc['embedding']),
         metadata: {
           meetingId: doc['meeting_id'] as string | undefined,
           recordingId: doc['recording_id'] as string | undefined,
@@ -138,10 +170,7 @@ class VectorStore {
     content: string,
     metadata: VectorDocument['metadata']
   ): Promise<string | null> {
-    const ollama = getOllamaService()
-
-    // Generate embedding
-    const embedding = await ollama.generateEmbedding(content)
+    const embedding = await getEmbeddingsService().generateEmbedding(content)
     if (!embedding) {
       console.error('Failed to generate embedding for document')
       return null
@@ -168,7 +197,7 @@ class VectorStore {
       [
         id,
         content,
-        JSON.stringify(embedding),
+        embeddingToBlob(embedding),
         metadata.meetingId || null,
         metadata.recordingId || null,
         metadata.chunkIndex,
@@ -200,18 +229,40 @@ class VectorStore {
       }
     }
 
-    // Chunk the transcript
+    // Chunk the transcript and embed all chunks in one batched call
     const chunks = chunkText(transcript)
+    const embeddings = await getEmbeddingsService().generateEmbeddings(chunks)
+
+    const db = getDatabase()
     let indexed = 0
-
     for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i]
-      const id = await this.addDocument(chunk, {
-        ...metadata,
-        chunkIndex: i
-      })
+      const embedding = embeddings[i]
+      if (!embedding) continue
 
-      if (id) indexed++
+      const id = `${metadata.recordingId || 'doc'}_${i}_${Date.now()}`
+      const doc: VectorDocument = {
+        id,
+        content: chunks[i],
+        embedding,
+        metadata: { ...metadata, chunkIndex: i }
+      }
+      this.documents.set(id, doc)
+      db.run(
+        `INSERT OR REPLACE INTO vector_embeddings
+         (id, content, embedding, meeting_id, recording_id, chunk_index, timestamp, subject)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          chunks[i],
+          embeddingToBlob(embedding),
+          metadata.meetingId || null,
+          metadata.recordingId || null,
+          i,
+          metadata.timestamp || null,
+          metadata.subject || null
+        ]
+      )
+      indexed++
     }
 
     console.log(`Indexed ${indexed} chunks for transcript`)
@@ -219,19 +270,29 @@ class VectorStore {
   }
 
   async search(query: string, topK = 5): Promise<SearchResult[]> {
-    const ollama = getOllamaService()
-
-    // Generate query embedding
-    const queryEmbedding = await ollama.generateEmbedding(query)
+    const queryEmbedding = await getEmbeddingsService().generateEmbedding(query)
     if (!queryEmbedding) {
       console.error('Failed to generate query embedding')
       return []
+    }
+
+    // Exclude chunks from personal ("ignored") or soft-deleted recordings so the
+    // assistant never surfaces private content. Filtering at query time (rather
+    // than deleting chunks) makes marking a recording personal instantly
+    // effective and fully reversible without re-indexing.
+    let excluded: Set<string>
+    try {
+      excluded = getExcludedRecordingIds()
+    } catch {
+      excluded = new Set()
     }
 
     // Calculate similarity scores
     const results: SearchResult[] = []
 
     for (const doc of this.documents.values()) {
+      const recId = doc.metadata.recordingId
+      if (recId && excluded.has(recId)) continue
       const score = cosineSimilarity(queryEmbedding, doc.embedding)
       results.push({ document: doc, score })
     }
@@ -239,6 +300,52 @@ class VectorStore {
     // Sort by score descending and take top K
     results.sort((a, b) => b.score - a.score)
     return results.slice(0, topK)
+  }
+
+  /**
+   * Index every transcript that has no vector embeddings yet. Runs in the
+   * background after startup so the assistant's memory covers the whole
+   * knowledge base, not just newly transcribed recordings.
+   */
+  async backfillMissingTranscripts(): Promise<{ indexed: number; skipped: number }> {
+    const db = getDatabase()
+    const stmt = db.prepare(`
+      SELECT t.recording_id, t.full_text, r.date_recorded, r.filename
+      FROM transcripts t
+      LEFT JOIN recordings r ON r.id = t.recording_id
+      WHERE TRIM(COALESCE(t.full_text, '')) != ''
+        AND COALESCE(r.personal, 0) = 0
+        AND r.deleted_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM vector_embeddings v WHERE v.recording_id = t.recording_id
+        )
+    `)
+    const rows: Array<{ recording_id: string; full_text: string; date_recorded?: string; filename?: string }> = []
+    while (stmt.step()) {
+      rows.push(stmt.getAsObject() as never)
+    }
+    stmt.free()
+
+    let indexed = 0
+    let skipped = 0
+    for (const row of rows) {
+      try {
+        const count = await this.indexTranscript(row.full_text, {
+          recordingId: row.recording_id,
+          timestamp: row.date_recorded,
+          subject: row.filename
+        })
+        if (count > 0) indexed++
+        else skipped++
+      } catch (e) {
+        skipped++
+        console.error(`[VectorStore] Backfill failed for ${row.recording_id}:`, e)
+      }
+    }
+    if (rows.length > 0) {
+      console.log(`[VectorStore] Backfill complete: ${indexed} transcripts indexed, ${skipped} skipped (of ${rows.length})`)
+    }
+    return { indexed, skipped }
   }
 
   async searchByMeeting(meetingId: string): Promise<VectorDocument[]> {

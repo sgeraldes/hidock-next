@@ -5,7 +5,7 @@
  * and listener management.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest'
 import type { ActivityLogEntry } from '../hidock-device'
 
 // Mock jensen module
@@ -48,6 +48,29 @@ vi.mock('../../utils/timeout', () => ({
 vi.mock('../qa-monitor', () => ({
   shouldLogQa: vi.fn(() => false)
 }))
+
+// The device service logs verbosely and keeps timers/promises running that emit
+// console output asynchronously — sometimes after a test has finished, while the
+// worker is tearing down. Those late messages were still in flight when the RPC
+// channel closed, surfacing as noisy
+// "Closing rpc while onUserConsoleLog was pending" (EnvironmentTeardownError)
+// lines under parallel workers.
+//
+// Silence the service's own console output for the ENTIRE file lifetime (not just
+// per-test) so no message is ever forwarded to the worker RPC, including during
+// inter-test async work and teardown. Tests that assert on console.error re-spy
+// it themselves; those spies still record calls on top of these no-op stubs and
+// restore back to them (never to the real console) when done.
+const SILENCED_CONSOLE_METHODS = ['log', 'info', 'warn', 'debug', 'error'] as const
+const silencedConsoleSpies: Array<ReturnType<typeof vi.spyOn>> = []
+beforeAll(() => {
+  for (const method of SILENCED_CONSOLE_METHODS) {
+    silencedConsoleSpies.push(vi.spyOn(console, method).mockImplementation(() => {}))
+  }
+})
+afterAll(() => {
+  silencedConsoleSpies.forEach((spy) => spy.mockRestore())
+})
 
 describe('HiDockDeviceService - Activity Log Historical Replay', () => {
   let HiDockDeviceService: any
@@ -1883,7 +1906,6 @@ describe('HiDockDeviceService - State Copy Immutability', () => {
 
   it('should return a copy of state, not the original', () => {
     const service = new HiDockDeviceService()
-    const serviceAny = service as any
 
     const state1 = service.getState()
     const state2 = service.getState()
@@ -1935,7 +1957,6 @@ describe('HiDockDeviceService - Connection Status Copy Immutability', () => {
 
   it('should not affect internal status when modifying returned status', () => {
     const service = new HiDockDeviceService()
-    const serviceAny = service as any
 
     const status = service.getConnectionStatus()
     status.step = 'ready'
@@ -2206,7 +2227,7 @@ describe('HiDockDeviceService - Refresh Storage Info', () => {
     }
     mockJensen.getCardInfo.mockResolvedValue(mockCardInfo)
 
-    const result = await service.refreshStorageInfo()
+    await service.refreshStorageInfo()
 
     expect(mockJensen.getCardInfo).toHaveBeenCalled()
   })
@@ -3566,6 +3587,27 @@ describe('HiDockDeviceService - Constructor Callbacks', () => {
 
     expect(handleConnectSpy).toHaveBeenCalled()
     handleConnectSpy.mockRestore()
+  })
+
+  it('fails the connect cleanly when device info cannot be read (no half-connected SN-null state)', async () => {
+    // Regression: a desynced device returns null device-info (not a throw), which used
+    // to leave the service "connected" with SN null forever — and because the USB handle
+    // stayed open, the next tryConnect short-circuited on "already connected". The connect
+    // must instead tear the handle down and light the honest failure pill.
+    const service = new HiDockDeviceService()
+    const serviceAny = service as any
+    serviceAny.jensen.getModel = vi.fn(() => 'unknown')
+    serviceAny.jensen.isConnected = vi.fn(() => true)
+    serviceAny.jensen.getDeviceInfo = vi.fn().mockResolvedValue(null) // desynced / unresponsive
+    const disconnectSpy = vi.fn().mockResolvedValue(undefined)
+    serviceAny.jensen.disconnect = disconnectSpy
+
+    await serviceAny.handleConnect()
+
+    expect(disconnectSpy).toHaveBeenCalledTimes(1) // USB handle torn down for a clean retry
+    expect(serviceAny.state.connected).toBe(false) // not left half-connected
+    expect(serviceAny.state.serialNumber).toBeNull()
+    expect(serviceAny.connectionStatus.connectFailed).toBe(true) // honest "Connection failed" pill
   })
 
   it('should call handleDisconnect when ondisconnect callback fires', () => {

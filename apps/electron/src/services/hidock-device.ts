@@ -69,6 +69,15 @@ export interface ConnectionStatus {
   step: ConnectionStep
   message: string
   progress?: number // 0-100
+  /**
+   * A connect attempt (auto or manual) just failed while a device was reachable —
+   * drives the titlebar's honest "Connection failed — retry" pill instead of the
+   * generic "Connect device". Cleared automatically by any later status update
+   * (a retry, a successful connect, or a disconnect all emit a fresh status).
+   */
+  connectFailed?: boolean
+  /** Whether an authorized HiDock was present when the failure occurred (busy hint). */
+  devicePresent?: boolean
 }
 
 type ConnectionListener = (connected: boolean) => void
@@ -155,6 +164,18 @@ class HiDockDeviceService {
 
   // Flag to prevent overlapping auto-connect attempts
   private autoConnectInProgress: boolean = false
+
+  // Gentle re-attempt: the boot auto-connect is a single shot, so a device that is
+  // present-but-busy at launch (e.g. actively recording — the moment the user most
+  // needs it) would otherwise never reconnect. While auto-connect is enabled and we
+  // are not connected, we re-attempt ONE clean connect on a slow timer and on USB
+  // attach — never in a tight loop, and never within a minute of a prior failure.
+  private reconnectTimer: number | null = null
+  private lastConnectFailureAt: number = 0
+  private usbAttachHandler: ((e: Event) => void) | null = null
+  private usbDetachHandler: ((e: Event) => void) | null = null
+  private static readonly RECONNECT_INTERVAL_MS = 3 * 60 * 1000
+  private static readonly RECONNECT_FAILURE_COOLDOWN_MS = 60 * 1000
 
   // Synchronous flag to prevent duplicate initAutoConnect (set immediately before any async work)
   // This handles React StrictMode double-invoking effects
@@ -288,13 +309,13 @@ class HiDockDeviceService {
     this.autoConnectEnabled = true
     this.logActivity('info', 'Auto-connect enabled', 'Will connect when device is plugged in')
 
-    // Try ONCE on startup to connect to any already-authorized device
-    // After this, the browser's USB connect event will handle new connections
-    // (set up in jensen.ts setupUsbConnectListener via navigator.usb.onconnect)
+    // Try ONCE on startup to connect to any already-authorized device.
     this.tryConnectSilent()
 
-    // NO POLLING - rely entirely on browser USB connect events
-    // When a device is plugged in, navigator.usb.onconnect fires and jensen.ts handles it
+    // A single boot attempt isn't enough: a device present-but-busy at launch would
+    // never reconnect (no new attach event fires for an already-plugged device).
+    // Arm a gentle re-attempt on a slow timer + on USB attach (both heavily guarded).
+    this.startReconnectWatch()
   }
 
   // Initialize auto-connect on app startup
@@ -355,6 +376,7 @@ class HiDockDeviceService {
       this.autoConnectInterval = null
     }
     this.autoConnectEnabled = false
+    this.stopReconnectWatch()
 
     // Clean up USB connect listener to prevent memory leaks
     this.jensen.removeUsbConnectListener()
@@ -453,12 +475,99 @@ class HiDockDeviceService {
         this.updateStatus('opening', 'Device found, connecting...', 10)
         this.logActivity('success', 'Auto-connect', 'Device found and connected')
       } else {
+        // A device is plugged in but wouldn't open — most often it's busy (e.g.
+        // recording). Surface the honest failed state and arm the retry cooldown.
         this.logActivity('info', 'Auto-connect', 'Found authorized device but connection failed')
+        this.markConnectFailure(true)
       }
       return success
     } finally {
       this.autoConnectInProgress = false
     }
+  }
+
+  /** Whether an authorized HiDock is currently attached (best-effort; false on error). */
+  private async hasAuthorizedDevice(): Promise<boolean> {
+    try {
+      const devices = await navigator.usb.getDevices()
+      return devices.some((device) => {
+        if (!USB_VENDOR_IDS.includes(device.vendorId)) return false
+        const name = device.productName?.toLowerCase() ?? ''
+        if (name.includes('hidock') || name.includes('jensen')) return true
+        return Object.values(USB_PRODUCT_IDS).includes(device.productId)
+      })
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Record a connect-attempt failure and light up the honest "Connection failed —
+   * retry" pill. `devicePresent` gates the busy hint. Emitting a fresh status here
+   * (and on any later retry/success/disconnect) is what clears the flag again.
+   */
+  private markConnectFailure(devicePresent: boolean): void {
+    this.lastConnectFailureAt = Date.now()
+    this.connectionStatus = {
+      step: 'idle',
+      message: devicePresent ? 'Connection failed — device may be busy' : 'Connection failed',
+      connectFailed: true,
+      devicePresent
+    }
+    this.notifyStatusChange(this.connectionStatus)
+  }
+
+  /**
+   * One guarded re-attempt at reconnecting to an already-authorized device. Used by
+   * the slow timer and the USB-attach handler. USB-safe: at most a single clean
+   * attempt, skipped entirely when connected, disabled, mid-operation, or within the
+   * failure cooldown.
+   */
+  private async gentleReattempt(reason: string): Promise<void> {
+    if (this.state.connected) return
+    if (!this.autoConnectConfig.enabled) return
+    if (this.userInitiatedDisconnect) return
+    if (this.autoConnectInProgress) return
+    if (Date.now() - this.lastConnectFailureAt < HiDockDeviceService.RECONNECT_FAILURE_COOLDOWN_MS) return
+    if (!(await this.hasAuthorizedDevice())) return
+
+    if (shouldLogQa()) console.log(`[HiDockDevice] gentle reconnect attempt (${reason})`)
+    await this.tryConnectSilent()
+  }
+
+  private startReconnectWatch(): void {
+    if (this.reconnectTimer === null) {
+      this.reconnectTimer = setInterval(() => {
+        void this.gentleReattempt('timer')
+      }, HiDockDeviceService.RECONNECT_INTERVAL_MS) as unknown as number
+    }
+    if (!this.usbAttachHandler && typeof navigator !== 'undefined' && navigator.usb?.addEventListener) {
+      this.usbAttachHandler = () => {
+        void this.gentleReattempt('usb-attach')
+      }
+      this.usbDetachHandler = () => {
+        // Device unplugged: clear a stale "failed" pill so it reverts to the neutral
+        // "Connect device" state (nothing to retry until it's plugged back in).
+        if (!this.state.connected && this.connectionStatus.connectFailed) {
+          this.updateStatus('idle', 'Device disconnected')
+        }
+      }
+      navigator.usb.addEventListener('connect', this.usbAttachHandler)
+      navigator.usb.addEventListener('disconnect', this.usbDetachHandler)
+    }
+  }
+
+  private stopReconnectWatch(): void {
+    if (this.reconnectTimer !== null) {
+      clearInterval(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+    if (typeof navigator !== 'undefined' && navigator.usb?.removeEventListener) {
+      if (this.usbAttachHandler) navigator.usb.removeEventListener('connect', this.usbAttachHandler)
+      if (this.usbDetachHandler) navigator.usb.removeEventListener('disconnect', this.usbDetachHandler)
+    }
+    this.usbAttachHandler = null
+    this.usbDetachHandler = null
   }
 
   // Try to connect to a previously authorized device (with UI feedback)
@@ -503,16 +612,18 @@ class HiDockDeviceService {
       }
       return success
     } catch (error) {
-      // Handle timeout/abort
+      // A genuine connect failure (timeout or error) — mark it so the titlebar shows
+      // the honest "Connection failed — retry" pill (with a busy hint if a device is
+      // attached), rather than silently reverting to "Connect device".
+      const devicePresent = await this.hasAuthorizedDevice()
       if (isAbortError(error)) {
-        this.updateStatus('error', 'Connection timeout - device not responding', 0)
         this.logActivity('error', 'Connection timeout', 'Device did not respond within 5 seconds')
         console.error('[HiDockDevice] Connection timeout:', error)
       } else {
-        this.updateStatus('idle', 'Connection failed')
         this.logActivity('error', 'Connection failed', error instanceof Error ? error.message : 'Unknown error')
         console.error('[HiDockDevice] Connection error:', error)
       }
+      this.markConnectFailure(devicePresent)
       return false
     }
   }
@@ -529,19 +640,22 @@ class HiDockDeviceService {
     await this.jensen.disconnect()
   }
 
-  // Reset device USB connection (for recovery from stuck state)
+  // Reset device USB connection (for recovery from stuck state).
+  // A "reset" is a clean disconnect + reconnect. The old path used the libusb
+  // device.reset(), which RE-ENUMERATES the device on Windows and leaves it
+  // locked (LIBUSB_ERROR_ACCESS / NOT_FOUND). The reliable recovery is to fully
+  // release the handle (disconnect → reset+close internally) and re-acquire it.
   async resetDevice(): Promise<boolean> {
-    this.logActivity('info', 'Resetting USB device...')
+    this.logActivity('info', 'Resetting USB connection...')
     try {
-      const success = await this.jensen.reset()
-      if (success) {
-        this.logActivity('success', 'Device reset successful')
-        // Re-initialize the device after reset
-        this.initializationComplete = false
-        await this.handleConnect()
-      } else {
-        this.logActivity('error', 'Device reset failed')
-      }
+      await this.disconnect()
+      // Brief settle so the OS fully releases the handle before re-acquiring.
+      await new Promise(resolve => setTimeout(resolve, 300))
+      const success = await this.connect()
+      this.logActivity(
+        success ? 'success' : 'error',
+        success ? 'Device reset complete' : 'Reset failed to reconnect'
+      )
       return success
     } catch (error) {
       this.logActivity('error', 'Device reset error', error instanceof Error ? error.message : 'Unknown error')
@@ -1060,10 +1174,30 @@ class HiDockDeviceService {
         animationCancelled = true
         clearInterval(animationInterval)
 
-        // Fix 1: Guard against null response (disconnect, timeout, decode error)
+        // Fix 1: Guard against null response (disconnect, timeout, decode error).
+        // Do NOT poison the cache or report an empty device — return whatever we
+        // already have so the UI keeps its existing list.
         if (!files) {
           this.logActivity('error', 'Device returned no file data', 'Received null response from listFiles — device may have disconnected')
-          return []
+          return this.cachedRecordings ?? []
+        }
+
+        // An empty result while the device reports recordings means the scan was
+        // INTERRUPTED (disconnect / cancel / stall mid-stream), not an empty device.
+        // Treat it as a failed scan: keep the cache untouched and do not log
+        // "storage empty" — otherwise the poisoned cache (count==expected, list==[])
+        // would make every subsequent call a "cache hit" returning 0 files forever.
+        if (files.length === 0 && expectedFileCount > 0) {
+          this.logActivity(
+            'error',
+            'File scan interrupted',
+            `Device reports ${expectedFileCount} recording${expectedFileCount === 1 ? '' : 's'} but the scan returned none — keeping existing list (likely disconnected mid-scan)`
+          )
+          // Count as a failure so the backoff/retry logic re-scans rather than
+          // trusting this empty result.
+          this.listRecordingsFailureCount++
+          this.listRecordingsLastFailure = Date.now()
+          return this.cachedRecordings ?? []
         }
 
         if (shouldLogQa()) console.log(`[HiDockDevice] listRecordings: Received ${files.length} files`)
@@ -1104,6 +1238,9 @@ class HiDockDeviceService {
 
         return this.cachedRecordings ?? []
       } finally {
+        if (this.state.connected && this.connectionStatus.step === 'counting-files') {
+          this.updateStatus('ready', 'Device ready', 100)
+        }
         this.listRecordingsLock = false
         this.listRecordingsPromise = null
       }
@@ -1392,11 +1529,10 @@ class HiDockDeviceService {
     // this without making the user wait 15s on a truly unresponsive device.
     if (this.initAborted) return
     this.updateStatus('getting-info', 'Reading device information...', 20)
-    let step1Success = false
+    let deviceInfo: DeviceInfo | null = null
     try {
-      await withTimeout(this.refreshDeviceInfo(), FIRST_CMD_TIMEOUT, new AbortController())
-      step1Success = true
-      successCount++
+      deviceInfo = await withTimeout(this.refreshDeviceInfo(), FIRST_CMD_TIMEOUT, new AbortController())
+      if (deviceInfo) successCount++
     } catch (firstError) {
       if (isAbortError(firstError) && !this.initAborted) {
         this.logActivity('info', 'Device not ready', 'Retrying...')
@@ -1405,9 +1541,8 @@ class HiDockDeviceService {
 
         if (!this.initAborted) {
           try {
-            await withTimeout(this.refreshDeviceInfo(), INIT_STEP_TIMEOUT, new AbortController())
-            step1Success = true
-            successCount++
+            deviceInfo = await withTimeout(this.refreshDeviceInfo(), INIT_STEP_TIMEOUT, new AbortController())
+            if (deviceInfo) successCount++
           } catch (retryError) {
             if (isAbortError(retryError)) timeoutCount++
             console.warn('[HiDockDevice] Failed to get device info (retry):', retryError)
@@ -1422,11 +1557,30 @@ class HiDockDeviceService {
       }
     }
 
-    // Check if we should abort due to too many timeouts
-    if (timeoutCount >= MAX_TIMEOUTS_BEFORE_FAIL) {
-      this.logActivity('error', 'Device initialization failed', 'Device is not responding. Please disconnect and reconnect your device.')
-      this.updateStatus('error', 'Device not responding - try reconnecting', 0)
+    // Device info is the one non-negotiable init step: without it we have no serial
+    // number, model or firmware, and every later command is unreliable. If it failed
+    // — a timeout OR a null response from a desynced device — FAIL THE CONNECT
+    // CLEANLY. Never sit in a half-connected "unknown / SN null" state: besides being
+    // dishonest, the USB handle stays open, so the next tryConnect short-circuits on
+    // "already connected" (isConnected() is true) and never re-initializes. Closing
+    // the handle here forces the next attempt to do a fresh open + setup, which — now
+    // that command serialization prevents the init desync — succeeds.
+    if (deviceInfo === null || timeoutCount >= MAX_TIMEOUTS_BEFORE_FAIL) {
+      this.logActivity('error', 'Device initialization failed', 'Could not read device info — reconnecting cleanly.')
       this.initializationComplete = false
+      this.state.connected = false
+      this.state.serialNumber = null
+      this.state.firmwareVersion = null
+      this.state.storage = null
+      this.state.settings = null
+      this.notifyStateChange()
+      try {
+        await this.jensen.disconnect()
+      } catch {
+        /* best effort — device may already be gone */
+      }
+      this.markConnectFailure(true)
+      this.notifyConnectionChange(false)
       return
     }
 

@@ -13,11 +13,23 @@ import {
   ChevronRight,
   Filter,
   UserPlus,
-  Trash2
+  Trash2,
+  GitMerge,
+  ArrowLeftRight,
+  Sparkles,
+  X
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Checkbox } from '@/components/ui/checkbox'
+import { HoverCard, HoverCardTrigger, HoverCardContent } from '@/components/ui/hover-card'
+import { PersonHoverCard } from '@/components/entity'
+import { AddPersonDialog } from '@/components/people/AddPersonDialog'
+import {
+  IdentitySuggestionsSection,
+  type IdentitySuggestionsSectionHandle
+} from '@/components/identity/IdentitySuggestionsSection'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -30,7 +42,11 @@ import {
 } from '@/components/ui/alert-dialog'
 import type { Person, PersonType } from '@/types/knowledge'
 import { cn } from '@/lib/utils'
+import { pageWide } from '@/lib/pageLayout'
 import { toast } from '@/components/ui/toaster'
+
+/** Above this many links on BOTH sides, a merge requires typing the loser's name. */
+const MERGE_LINK_THRESHOLD = 10
 
 export function People() {
   const navigate = useNavigate()
@@ -49,6 +65,22 @@ export function People() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null)
   const [sortBy, setSortBy] = useState<'name' | 'lastSeen' | 'interactions'>('name')
+
+  // Quick-merge selection mode: pick exactly two contacts, then fold one into the other.
+  const [mergeMode, setMergeMode] = useState(false)
+  const [selectedForMerge, setSelectedForMerge] = useState<Person[]>([])
+  const [keeperId, setKeeperId] = useState<string | null>(null)
+  const [merging, setMerging] = useState(false)
+  // High-stakes gate: when BOTH sides are heavily linked, require typing the loser's name.
+  const [mergeImpact, setMergeImpact] = useState<{ keeper: number; loser: number } | null>(null)
+  const [mergeConfirmText, setMergeConfirmText] = useState('')
+
+  // Discovery sweep: analyze contacts for possible duplicates → new suggestions.
+  const [discovering, setDiscovering] = useState(false)
+  const suggestionsRef = useRef<IdentitySuggestionsSectionHandle>(null)
+
+  // Add Person dialog
+  const [addDialogOpen, setAddDialogOpen] = useState(false)
 
   // Debounce: skip firing on initial mount
   const isFirstMount = useRef(true)
@@ -127,6 +159,122 @@ export function People() {
     setDeleteTarget(null)
   }, [deleteTarget, loadPeople, currentPage])
 
+  // --- Quick merge ---
+
+  const toggleMergeMode = useCallback(() => {
+    setMergeMode((prev) => {
+      if (prev) {
+        // Leaving merge mode — clear any pending selection.
+        setSelectedForMerge([])
+        setKeeperId(null)
+      }
+      return !prev
+    })
+  }, [])
+
+  const toggleSelectForMerge = useCallback((person: Person) => {
+    setSelectedForMerge((prev) => {
+      if (prev.some((p) => p.id === person.id)) {
+        return prev.filter((p) => p.id !== person.id)
+      }
+      if (prev.length >= 2) return prev // cap at exactly two
+      return [...prev, person]
+    })
+  }, [])
+
+  // Default the keeper to the contact with more interactions whenever two are picked.
+  useEffect(() => {
+    if (selectedForMerge.length === 2) {
+      const [a, b] = selectedForMerge
+      setKeeperId(a.interactionCount >= b.interactionCount ? a.id : b.id)
+    } else {
+      setKeeperId(null)
+    }
+  }, [selectedForMerge])
+
+  const swapKeeper = useCallback(() => {
+    setKeeperId((current) => {
+      if (selectedForMerge.length !== 2) return current
+      const other = selectedForMerge.find((p) => p.id !== current)
+      return other ? other.id : current
+    })
+  }, [selectedForMerge])
+
+  const keeper = selectedForMerge.find((p) => p.id === keeperId) ?? null
+  const loser = selectedForMerge.find((p) => p.id !== keeperId) ?? null
+
+  // Fetch true link counts for the high-stakes gate whenever the pair changes.
+  useEffect(() => {
+    setMergeConfirmText('')
+    if (!keeper || !loser) {
+      setMergeImpact(null)
+      return
+    }
+    let cancelled = false
+    window.electronAPI.identity
+      .getMergeImpact({ kind: 'contact', keeperId: keeper.id, loserId: loser.id })
+      .then((res) => {
+        if (!cancelled) setMergeImpact(res.success && res.data ? res.data : null)
+      })
+      .catch(() => {
+        if (!cancelled) setMergeImpact(null)
+      })
+    return () => {
+      cancelled = true
+    }
+    // Keyed on ids only: re-fetch when the *pair* changes, not when loadPeople
+    // hands back fresh Person objects for the same two ids.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keeper?.id, loser?.id])
+
+  // Both sides heavily linked → merging the wrong pair is expensive; make the user type the loser's name.
+  const highStakesMerge = !!mergeImpact && mergeImpact.keeper > MERGE_LINK_THRESHOLD && mergeImpact.loser > MERGE_LINK_THRESHOLD
+  const mergeConfirmed = !highStakesMerge || mergeConfirmText.trim() === (loser?.name ?? '').trim()
+
+  const handleConfirmMerge = useCallback(async () => {
+    if (!keeper || !loser) return
+    setMerging(true)
+    try {
+      const result = await window.electronAPI.contacts.merge({ keeperId: keeper.id, loserId: loser.id })
+      if (result.success) {
+        toast.success('Contacts merged', `${loser.name} was merged into ${keeper.name}.`)
+        setMergeMode(false)
+        setSelectedForMerge([])
+        setKeeperId(null)
+        await loadPeople(currentPage)
+      } else {
+        toast.error('Failed to merge contacts', (result as any).error?.message || 'Unknown error')
+      }
+    } catch (error) {
+      console.error('Failed to merge contacts:', error)
+      toast.error('Failed to merge contacts', error instanceof Error ? error.message : 'An unexpected error occurred')
+    } finally {
+      setMerging(false)
+    }
+  }, [keeper, loser, loadPeople, currentPage])
+
+  const handleDiscover = useCallback(async () => {
+    setDiscovering(true)
+    try {
+      const result = await window.electronAPI.identity.discoverContacts()
+      if (result.success && result.data) {
+        const { candidatePairs, suggestionsCreated, autoMergeable } = result.data
+        toast.success(
+          'Discovery complete',
+          `${candidatePairs} candidate pairs analyzed, ${suggestionsCreated} new ${suggestionsCreated === 1 ? 'suggestion' : 'suggestions'}, ${autoMergeable} high-confidence`
+        )
+        suggestionsRef.current?.reload()
+      } else {
+        toast.error('Discovery failed', result.error || 'Unknown error')
+      }
+    } catch (error) {
+      console.error('Failed to discover contacts:', error)
+      toast.error('Discovery failed', error instanceof Error ? error.message : 'An unexpected error occurred')
+    } finally {
+      setDiscovering(false)
+    }
+  }, [])
+
   const sortedPeople = useMemo(() => {
     const sorted = [...people]
     switch (sortBy) {
@@ -166,8 +314,19 @@ export function People() {
     }
   }
 
+  /** Human phrase describing a person's type, for the colored-glyph tooltips. */
+  const getTypeLabel = (type: PersonType): string => {
+    switch (type) {
+      case 'team': return 'Team member'
+      case 'candidate': return 'Candidate'
+      case 'customer': return 'Customer'
+      case 'external': return 'External contact'
+      default: return 'Unclassified contact'
+    }
+  }
+
   return (
-    <div className="flex flex-col h-full">
+    <div className="relative flex flex-col h-full">
       {/* Header */}
       <header className="border-b px-6 py-4">
         <div className="flex items-center justify-between">
@@ -182,9 +341,29 @@ export function People() {
             </Button>
             <Button
               size="sm"
+              variant="outline"
+              onClick={handleDiscover}
+              disabled={discovering}
+              title="Analyze contacts for possible duplicates"
+            >
+              <Sparkles className={cn("h-4 w-4 mr-2", discovering && "animate-pulse")} />
+              {discovering ? 'Discovering…' : 'Discover'}
+            </Button>
+            <Button
+              size="sm"
+              variant={mergeMode ? 'default' : 'outline'}
+              onClick={toggleMergeMode}
+              title="Select two people to merge"
+              aria-pressed={mergeMode}
+            >
+              <GitMerge className="h-4 w-4 mr-2" />
+              {mergeMode ? 'Cancel merge' : 'Merge'}
+            </Button>
+            <Button
+              size="sm"
               variant="default"
-              title="Coming soon"
-              onClick={() => toast.info('Coming soon', 'Contact creation is not yet available.')}
+              title="Add a person by hand"
+              onClick={() => setAddDialogOpen(true)}
             >
               <UserPlus className="h-4 w-4 mr-2" />
               Add Person
@@ -244,7 +423,23 @@ export function People() {
 
       {/* Content */}
       <div className="flex-1 overflow-auto p-6">
-        <div className="max-w-5xl mx-auto">
+        <div className={pageWide}>
+          {/* Identity suggestions review queue (self-hides when empty) */}
+          {!mergeMode && <IdentitySuggestionsSection ref={suggestionsRef} />}
+
+          {/* Merge-mode instruction banner */}
+          {mergeMode && (
+            <div className="mb-4 rounded-lg border border-primary/30 bg-primary/[0.04] px-4 py-3 text-sm">
+              <span className="font-medium">Merge mode:</span> pick two people to combine into one.
+              {' '}
+              {selectedForMerge.length === 0
+                ? 'Select the first person.'
+                : selectedForMerge.length === 1
+                ? 'Select one more.'
+                : 'Review the direction below, then confirm.'}
+            </div>
+          )}
+
           {/* Result count indicator */}
           {!loading && totalCount > 0 && (
             <p className="text-xs text-muted-foreground mb-4">
@@ -269,43 +464,68 @@ export function People() {
             </Card>
           ) : (
             <div>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {sortedPeople.map((person) => (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
+              {sortedPeople.map((person, index) => {
+                const isSelected = selectedForMerge.some((p) => p.id === person.id)
+                const typeLabel = getTypeLabel(person.type)
+                const card = (
                 <Card
-                  key={person.id}
-                  className="group hover:border-primary/50 transition-all cursor-pointer overflow-hidden shadow-sm hover:shadow-md"
-                  onClick={() => navigate(`/person/${person.id}`)}
+                  className={cn(
+                    "group animate-rise-in lift cursor-pointer overflow-hidden shadow-sm border-border/70 dark:border-white/[0.06]",
+                    mergeMode ? "hover:border-primary/70" : "hover:border-primary/50",
+                    isSelected && "ring-2 ring-primary border-primary"
+                  )}
+                  style={{ animationDelay: `${Math.min(index, 8) * 35}ms` }}
+                  onClick={() => (mergeMode ? toggleSelectForMerge(person) : navigate(`/person/${person.id}`))}
+                  aria-pressed={mergeMode ? isSelected : undefined}
                 >
                   <CardHeader className="pb-3 bg-muted/5 group-hover:bg-muted/10 transition-colors">
                     <div className="flex items-start justify-between">
                       <div className="flex items-center gap-3">
-                        <div className={cn(
-                          "w-10 h-10 rounded-xl flex items-center justify-center text-lg font-bold shadow-sm border",
-                          getTypeColor(person.type)
-                        )}>
+                        <div
+                          className={cn(
+                            "w-10 h-10 rounded-xl flex items-center justify-center text-lg font-bold shadow-sm border",
+                            getTypeColor(person.type)
+                          )}
+                          title={typeLabel}
+                        >
                           {person.name.charAt(0)}
                         </div>
                         <div className="min-w-0">
                           <CardTitle className="text-base truncate">{person.name}</CardTitle>
-                          <span className={cn(
-                            "inline-block px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider mt-1",
-                            getTypeColor(person.type)
-                          )}>
+                          <span
+                            className={cn(
+                              "inline-block px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider mt-1",
+                              getTypeColor(person.type)
+                            )}
+                            title={typeLabel}
+                          >
                             {person.type}
                           </span>
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-7 w-7 p-0 hover:bg-destructive/10 hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
-                          onClick={(e) => handleDeleteClick(person.id, person.name, e)}
-                          title="Delete contact"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </Button>
-                        <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:text-primary transition-colors" />
+                        {mergeMode ? (
+                          <Checkbox
+                            checked={isSelected}
+                            tabIndex={-1}
+                            aria-label={`Select ${person.name} to merge`}
+                            className="pointer-events-none"
+                          />
+                        ) : (
+                          <>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 w-7 p-0 hover:bg-destructive/10 hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
+                              onClick={(e) => handleDeleteClick(person.id, person.name, e)}
+                              title="Delete contact"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                            <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:text-primary transition-colors" />
+                          </>
+                        )}
                       </div>
                     </div>
                   </CardHeader>
@@ -355,7 +575,28 @@ export function People() {
                     )}
                   </CardContent>
                 </Card>
-              ))}
+                )
+
+                // Merge mode turns cards into selection targets, so suppress the
+                // hover card there (its "open person" intent would mislead). Outside
+                // merge mode, hovering reveals the net-new detail the card omits —
+                // recent meetings — fetched lazily only when the card opens.
+                if (mergeMode) {
+                  return <div key={person.id}>{card}</div>
+                }
+                return (
+                  <HoverCard key={person.id} openDelay={220} closeDelay={120}>
+                    <HoverCardTrigger asChild>{card}</HoverCardTrigger>
+                    <HoverCardContent align="start" className="w-72">
+                      <PersonHoverCard
+                        id={person.id}
+                        name={person.name}
+                        visibleFields={['name', 'type', 'role', 'company', 'email', 'meetings', 'lastSeen']}
+                      />
+                    </HoverCardContent>
+                  </HoverCard>
+                )
+              })}
             </div>
 
             {/* Pagination controls */}
@@ -388,6 +629,75 @@ export function People() {
           )}
         </div>
       </div>
+
+      {/* Floating merge action bar — appears once exactly two people are selected */}
+      {mergeMode && keeper && loser && (
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-20 w-[min(640px,calc(100%-2rem))]">
+          <div className="flex flex-col gap-3 rounded-xl border bg-background/95 backdrop-blur shadow-lg px-4 py-3">
+            <div className="flex flex-col sm:flex-row items-center gap-3">
+              <div className="flex items-center gap-2 text-sm min-w-0 flex-1">
+                <GitMerge className="h-4 w-4 text-primary flex-shrink-0" />
+                <span className="text-muted-foreground">Keep</span>
+                <span className="font-semibold truncate max-w-[120px]" title={keeper.name}>{keeper.name}</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 w-7 p-0 flex-shrink-0"
+                  onClick={swapKeeper}
+                  title="Swap merge direction"
+                  aria-label="Swap merge direction"
+                >
+                  <ArrowLeftRight className="h-4 w-4" />
+                </Button>
+                <span className="text-muted-foreground">absorb</span>
+                <span className="font-semibold truncate max-w-[120px] line-through decoration-muted-foreground/50" title={loser.name}>
+                  {loser.name}
+                </span>
+              </div>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <Button variant="outline" size="sm" onClick={toggleMergeMode} disabled={merging}>
+                  <X className="h-4 w-4 mr-1" />
+                  Cancel
+                </Button>
+                <Button size="sm" onClick={handleConfirmMerge} disabled={merging || !mergeConfirmed}>
+                  {merging ? (
+                    <RefreshCw className="h-4 w-4 mr-1 animate-spin" />
+                  ) : (
+                    <GitMerge className="h-4 w-4 mr-1" />
+                  )}
+                  Confirm merge
+                </Button>
+              </div>
+            </div>
+            {highStakesMerge && (
+              <div className="rounded-lg border border-amber-500/40 bg-amber-500/[0.06] px-3 py-2 text-xs">
+                <p className="text-amber-700 dark:text-amber-400 font-medium">
+                  High-stakes merge: {keeper.name} has {mergeImpact!.keeper} links and {loser.name} has{' '}
+                  {mergeImpact!.loser}. To confirm, type <span className="font-semibold">{loser.name}</span>.
+                </p>
+                <Input
+                  value={mergeConfirmText}
+                  onChange={(e) => setMergeConfirmText(e.target.value)}
+                  placeholder={loser.name}
+                  aria-label={`Type ${loser.name} to confirm merge`}
+                  className="mt-2 h-8"
+                />
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Add Person dialog */}
+      <AddPersonDialog
+        open={addDialogOpen}
+        onOpenChange={setAddDialogOpen}
+        onCreated={(person) => {
+          loadPeople(0)
+          navigate(`/person/${person.id}`)
+        }}
+        onOpenExisting={(existingId) => navigate(`/person/${existingId}`)}
+      />
 
       {/* Delete Confirmation AlertDialog (replaces confirm()) */}
       <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>

@@ -190,3 +190,20 @@ qa-artifacts/
 # System & Misc
 [Dd]esktop.ini
 nul
+
+# Auto Claude data directory
+.auto-claude/
+
+# Auto Claude generated files
+.auto-claude-security.json
+.auto-claude-status
+.claude_settings.json
+.worktrees/
+.security-key
+logs/security/
+
+# graphify knowledge-graph output (generated)
+graphify-out/
+
+# dev CDP toolkit — transient screenshot (scripts/dev/cdp.mjs screenshot)
+scripts/dev/.last-screenshot.png

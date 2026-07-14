@@ -6,6 +6,10 @@ import {
   createPlaceholderMeetings,
   groupByDay,
   formatDurationStr,
+  recordingCategory,
+  formatUnmatchedRecordingMeta,
+  recordingBlockTitle,
+  sortMeetingsByProximity,
   type CalendarRecording,
   type CalendarMeetingOverlay,
 } from '../calendar-utils'
@@ -285,6 +289,35 @@ describe('buildCalendarRecordings', () => {
   })
 })
 
+describe('all-day / bridge over-attribution', () => {
+  // A 9h all-day "War Room" event that a 20-min recording is fully contained in.
+  const allDayBridge: Meeting = {
+    ...makeMeetingEntity('warroom', 'War Room WTS', 10, 19),
+    is_all_day: 1
+  }
+  const tightMeeting = makeMeetingEntity('apigw', 'API Gateway', 14, 15)
+
+  it('does not pick an all-day bridge as a recording best match by containment alone', () => {
+    const rec = makeUnifiedRecording('r1', 14, 20) // 2:00–2:20 PM, inside the 9h event
+    const { calendarRecordings } = buildCalendarRecordings([rec], [allDayBridge])
+    // No tight meeting exists → the recording is left UNLINKED, not attributed to the bridge.
+    expect(calendarRecordings[0].linkedMeeting).toBeUndefined()
+  })
+
+  it('links a contained recording to the tightly-fitting meeting, not the all-day bridge', () => {
+    const rec = makeUnifiedRecording('r1', 14, 20)
+    const { calendarRecordings } = buildCalendarRecordings([rec], [allDayBridge, tightMeeting])
+    expect(calendarRecordings[0].linkedMeeting?.id).toBe('apigw')
+  })
+
+  it('treats a plain ≥4h meeting as a bridge (no containment-only match)', () => {
+    const longMeeting = makeMeetingEntity('offsite', 'Offsite', 9, 15) // 6h, no flag
+    const rec = makeUnifiedRecording('r1', 13, 20)
+    const { calendarRecordings } = buildCalendarRecordings([rec], [longMeeting])
+    expect(calendarRecordings[0].linkedMeeting).toBeUndefined()
+  })
+})
+
 describe('createPlaceholderMeetings', () => {
   it('should create placeholder meetings from orphan recordings', () => {
     const orphans = [makeUnifiedRecording('r1', 14, 30)]
@@ -375,5 +408,113 @@ describe('formatDurationStr', () => {
   it('should handle fractional seconds', () => {
     expect(formatDurationStr(90)).toBe('2m') // 1.5 minutes rounds to 2
     expect(formatDurationStr(30)).toBe('1m') // 0.5 minutes rounds to 1
+  })
+})
+
+/**
+ * Calendar design language: a recording block's category is derived from its
+ * linked meeting's subject, and an unmatched recording is labeled by a human
+ * string (never the raw device filename).
+ */
+describe('recordingCategory', () => {
+  const withMeeting = (subject: string): CalendarRecording => ({
+    ...makeRecording(9, 0, 10, 0),
+    linkedMeeting: {
+      id: 'm1',
+      subject,
+      startTime: new Date(2026, 2, 2, 9, 0, 0),
+      endTime: new Date(2026, 2, 2, 10, 0, 0),
+      location: null,
+      organizer: null,
+    },
+  })
+
+  it('classifies a recurring meeting subject as recurring', () => {
+    expect(recordingCategory(withMeeting('Daily WTS Standup'))).toBe('recurring')
+  })
+
+  it('classifies a 1:1 subject as one_on_one', () => {
+    expect(recordingCategory(withMeeting('1:1 with Yaraví'))).toBe('one_on_one')
+  })
+
+  it('classifies a client subject as external', () => {
+    expect(recordingCategory(withMeeting('Belcorp kickoff'))).toBe('external')
+  })
+
+  it('falls back to general for a recording with no linked meeting', () => {
+    expect(recordingCategory(makeRecording(9, 0, 10, 0))).toBe('general')
+  })
+})
+
+describe('recordingBlockTitle', () => {
+  const linked = (subject: string): CalendarRecording => ({
+    ...makeRecording(9, 0, 10, 0),
+    linkedMeeting: {
+      id: 'm1',
+      subject,
+      startTime: new Date(2026, 2, 2, 9, 0, 0),
+      endTime: new Date(2026, 2, 2, 10, 0, 0),
+      location: null,
+      organizer: null,
+    },
+  })
+
+  it('shows the meeting subject when linked', () => {
+    expect(recordingBlockTitle(linked('Weekly sync'))).toBe('Weekly sync')
+  })
+
+  it('shows the transcript-derived title for an unlinked recording (never the filename)', () => {
+    const rec: CalendarRecording = {
+      ...makeRecording(14, 7, 14, 19),
+      filename: '2026Jul08-140719-Rec46.hda',
+      title: 'Cierre de Proyecto y Acciones de Retrospectiva',
+    }
+    expect(recordingBlockTitle(rec)).toBe('Cierre de Proyecto y Acciones de Retrospectiva')
+    expect(recordingBlockTitle(rec)).not.toContain('.hda')
+  })
+
+  it('falls back to "Recording · <time>" (not the filename) when untitled', () => {
+    const rec: CalendarRecording = {
+      ...makeRecording(14, 7, 14, 19),
+      filename: '2026Jul08-140719-Rec46.hda',
+    }
+    const label = recordingBlockTitle(rec)
+    expect(label).toMatch(/^Recording · \d{1,2}:\d{2}/)
+    expect(label).not.toContain('.hda')
+  })
+})
+
+describe('formatUnmatchedRecordingMeta', () => {
+  it('formats duration + start time (no filename)', () => {
+    const rec: CalendarRecording = {
+      ...makeRecording(14, 7, 14, 19),
+      filename: '2026Jul08-140719-Rec46.hda',
+    }
+    const meta = formatUnmatchedRecordingMeta(rec)
+    expect(meta).toContain('12m')
+    expect(meta).toMatch(/\d{1,2}:\d{2}/) // e.g. "2:07 PM"
+    expect(meta).not.toContain('.hda')
+  })
+})
+
+describe('sortMeetingsByProximity', () => {
+  it('orders candidate meetings by closeness to the recording time', () => {
+    const ref = '2026-03-02T14:00:00.000Z'
+    const meetings = [
+      { id: 'far', start_time: '2026-03-02T09:00:00.000Z' },
+      { id: 'near', start_time: '2026-03-02T13:45:00.000Z' },
+      { id: 'mid', start_time: '2026-03-02T16:00:00.000Z' },
+    ]
+    expect(sortMeetingsByProximity(meetings, ref).map((m) => m.id)).toEqual(['near', 'mid', 'far'])
+  })
+
+  it('does not mutate the input array', () => {
+    const meetings = [
+      { id: 'a', start_time: '2026-03-02T16:00:00.000Z' },
+      { id: 'b', start_time: '2026-03-02T13:45:00.000Z' },
+    ]
+    const copy = [...meetings]
+    sortMeetingsByProximity(meetings, '2026-03-02T14:00:00.000Z')
+    expect(meetings).toEqual(copy)
   })
 })

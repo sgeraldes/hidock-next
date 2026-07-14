@@ -1,13 +1,97 @@
+import { GeminiEngine } from '@hidock/transcription'
 import { GoogleGenerativeAI } from '@google/generative-ai'
 import { readFile, existsSync } from 'fs'
 import { promisify } from 'util'
-import { extname } from 'path'
+import { spawn } from 'child_process'
+import { join, isAbsolute } from 'path'
 
 const readFileAsync = promisify(readFile)
+
+/**
+ * Spawn a long-running CLI and stream its stderr to the parent's console as
+ * lines arrive (so the user sees progress live) while collecting stdout into
+ * a buffer for the caller. Used for the VibeVoice/local-asr backends, where
+ * the Python CLI logs model load, chunk progress, and generation status to
+ * stderr over minutes — execFileBuffered would hide all of that until exit.
+ *
+ * The optional onStderrLine callback lets callers translate recognised log
+ * lines into progress events (e.g. "Chunk 2/3" -> setProgress).
+ */
+function spawnStreaming(
+  command: string,
+  args: string[],
+  options: {
+    cwd?: string
+    env?: NodeJS.ProcessEnv
+    maxStdoutBytes?: number
+    logPrefix?: string
+    onStderrLine?: (line: string) => void
+  } = {}
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+
+    const prefix = options.logPrefix ?? `[${command}]`
+    const cap = options.maxStdoutBytes ?? 50 * 1024 * 1024
+
+    const stdoutChunks: Buffer[] = []
+    let stdoutBytes = 0
+    let stderrBuf = ''
+    const stderrLines: string[] = []
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdoutBytes += chunk.length
+      if (stdoutBytes <= cap) stdoutChunks.push(chunk)
+    })
+
+    child.stderr.setEncoding('utf-8')
+    child.stderr.on('data', (chunk: string) => {
+      stderrBuf += chunk
+      // Emit every complete line live so the user sees progress.
+      let nl: number
+      while ((nl = stderrBuf.indexOf('\n')) !== -1) {
+        const line = stderrBuf.slice(0, nl).replace(/\r$/, '')
+        stderrBuf = stderrBuf.slice(nl + 1)
+        if (line) {
+          console.log(`${prefix} ${line}`)
+          stderrLines.push(line)
+          try { options.onStderrLine?.(line) } catch { /* ignore callback errors */ }
+        }
+      }
+    })
+
+    child.on('error', (err) => reject(new Error(`Failed to spawn ${command}: ${err.message}`)))
+
+    child.on('close', (code) => {
+      // Flush any trailing stderr without newline.
+      if (stderrBuf) {
+        console.log(`${prefix} ${stderrBuf}`)
+        stderrLines.push(stderrBuf)
+        stderrBuf = ''
+      }
+      const stdout = Buffer.concat(stdoutChunks).toString('utf-8')
+      const stderr = stderrLines.join('\n')
+      if (code !== 0) {
+        const tail = stderr.split('\n').slice(-30).join('\n')
+        reject(new Error(`${command} exited with code ${code}\n${tail}`))
+      } else {
+        resolve({ stdout, stderr })
+      }
+    })
+  })
+}
 import { getConfig } from './config'
 import {
+  addToQueue,
   getRecordingById,
+  resolveRecordingId,
   updateRecordingTranscriptionStatus,
+  updateRecordingStatus,
   insertTranscript,
   getQueueItems,
   updateQueueItem,
@@ -20,7 +104,10 @@ import {
   removeFromQueueByRecordingId,
   cancelPendingTranscriptions,
   run,
+  runInTransaction,
+  saveDatabase,
   queryOne,
+  queryAll,
   acquireTranscriptionLock,
   releaseTranscriptionLock,
   clearStaleTranscriptionLock,
@@ -29,11 +116,29 @@ import {
 } from './database'
 import { BrowserWindow } from 'electron'
 import { getVectorStore } from './vector-store'
+import { ensureKnowledgeCaptureForRecording } from './knowledge-capture-backfill'
 
 let mainWindow: BrowserWindow | null = null
 let isProcessing = false
 let processingInterval: ReturnType<typeof setInterval> | null = null
 let lastSkipLogAt = 0 // Throttle "skipping" spam to once per 60s
+
+// Queue-level pause: when true the processor stops DEQUEUING new items. An item
+// already in-flight finishes normally (a live Gemini/model request cannot be
+// aborted mid-call). In-memory by design — a restart resumes a stopped backlog,
+// which is the correct fallback. Resume continues from where it left off.
+let queuePaused = false
+
+// recording_id currently being transcribed (null when idle). Surfaced in queue
+// state so the renderer can show which item is live.
+let currentProcessingId: string | null = null
+
+// Force a synchronous DB flush (saveDatabase() is the engine's flushNow escape
+// hatch) only every Nth completed transcript. A full sql.js export on EVERY
+// completion is what freezes the app once the DB is large and the backlog runs
+// continuously; the adaptive debounced path persists the in-between writes.
+const FLUSH_EVERY_N_TRANSCRIPTS = 10
+let completedTranscriptsSinceFlush = 0
 
 export function setMainWindowForTranscription(win: BrowserWindow): void {
   mainWindow = win
@@ -69,16 +174,175 @@ export function stopTranscriptionProcessor(): void {
 
 let cancelRequested = false
 
+/**
+ * Recency-first transcription ordering.
+ *
+ * Recording ids the user *explicitly* asked to transcribe — a single
+ * "Transcribe" click, a VibeVoice reprocess, or a manual retry — are held here
+ * so they jump ahead of the whole date-ordered backlog (rule 1), FIFO among
+ * themselves. Auto-transcribe and bulk enqueues are NOT marked, so they fall
+ * under the recording-date ordering (rule 2) instead.
+ *
+ * In-memory (never persisted) by design: a restart drops the "the user wanted
+ * this one first" hint, after which the queue is ordered purely by recency,
+ * which is the correct fallback. Keyed by recording_id (not queue-row id) so it
+ * survives a queue row being deleted and re-added on retry.
+ */
+const userPriorityIds = new Set<string>()
+
+export function markUserPriority(recordingId: string): void {
+  userPriorityIds.add(recordingId)
+}
+
+export function clearUserPriority(recordingId: string): void {
+  userPriorityIds.delete(recordingId)
+}
+
+/**
+ * Explicit numeric processing-order override, keyed by recording_id. This is the
+ * MAIN-PROCESS SOURCE OF TRUTH for the user's dock prioritize/deprioritize
+ * actions: the renderer sends an up/down intent (transcription:reorder) and main
+ * records a rank here, which the picker honours on every dequeue. Default 0;
+ * higher = processed sooner, lower = later. Mirrors the renderer's optimistic
+ * max+1 / min-1 view sort so the visible order and the real order agree.
+ *
+ * In-memory (never persisted): a restart drops manual reordering and the queue
+ * falls back to recency ordering, the correct default. Keyed by recording_id so
+ * it survives a queue row being deleted and re-added on retry.
+ */
+const queuePriorityRank = new Map<string, number>()
+
+/** Clear all ordering hints for a recording once it leaves the active queue. */
+function clearQueueHints(recordingId: string): void {
+  userPriorityIds.delete(recordingId)
+  queuePriorityRank.delete(recordingId)
+}
+
+/**
+ * Apply a user reorder intent from the dock. Computes the new rank the same way
+ * the renderer's optimistic view does — one above the current max (up) or one
+ * below the current min (down) across the pending set — so main's authoritative
+ * order matches what the user sees. Emits queue state so every renderer reflects
+ * the change.
+ */
+export function reorderQueueItem(recordingId: string, direction: 'up' | 'down'): void {
+  const pending = getQueueItems('pending')
+  let max = 0
+  let min = 0
+  for (const it of pending) {
+    const r = queuePriorityRank.get(it.recording_id) ?? 0
+    if (r > max) max = r
+    if (r < min) min = r
+  }
+  queuePriorityRank.set(recordingId, direction === 'up' ? max + 1 : min - 1)
+  emitQueueState()
+}
+
+/** Queue-level pause: stop dequeuing new items (in-flight item finishes). */
+export function pauseQueue(): TranscriptionQueueState {
+  if (!queuePaused) {
+    queuePaused = true
+    console.log('Transcription queue paused (in-flight item, if any, will finish)')
+  }
+  emitQueueState()
+  return getQueueState()
+}
+
+/** Resume dequeuing and kick the processor to pick up where it left off. */
+export function resumeQueue(): TranscriptionQueueState {
+  if (queuePaused) {
+    queuePaused = false
+    console.log('Transcription queue resumed')
+  }
+  emitQueueState()
+  // Fire-and-forget: continue from where we left off (no-op if nothing pending).
+  processQueueManually().catch((e) => console.error('[Transcription] resume kick failed:', e))
+  return getQueueState()
+}
+
+export function isQueuePaused(): boolean {
+  return queuePaused
+}
+
+export interface TranscriptionQueueState {
+  paused: boolean
+  isProcessing: boolean
+  processingId: string | null
+  pendingCount: number
+  processingCount: number
+}
+
+/** Snapshot of the queue processor for the renderer (dock) to reflect. */
+export function getQueueState(): TranscriptionQueueState {
+  return {
+    paused: queuePaused,
+    isProcessing,
+    processingId: currentProcessingId,
+    pendingCount: getQueueItems('pending').length,
+    processingCount: getQueueItems('processing').length
+  }
+}
+
+function emitQueueState(): void {
+  notifyRenderer('transcription:queueState', getQueueState())
+}
+
+type OrderableQueueItem = {
+  recording_id: string
+  created_at: string
+  date_recorded?: string | null
+}
+
+/**
+ * Order pending queue items for processing. Pure + deterministic so the picker
+ * can re-run it on every dequeue:
+ *
+ *   0. Explicit manual reorder rank (queuePriorityRank) DESC — the user's dock
+ *      prioritize/deprioritize. Default 0, so an untouched queue skips this rule.
+ *   1. User-explicit requests first, FIFO among themselves (queue created_at ASC).
+ *   2. Everything else by the recording's content date (date_recorded) DESC, so
+ *      yesterday's meeting beats last month's regardless of when it was enqueued.
+ *      Tiebreak: queue created_at ASC. Undated recordings sort last.
+ *
+ * Because it re-runs per dequeue, an item enqueued later with a newer
+ * date_recorded (e.g. a recording detected mid-backlog) preempts older waiting
+ * items automatically — and a manual reorder always wins over recency.
+ */
+export function orderPendingForProcessing<T extends OrderableQueueItem>(items: T[]): T[] {
+  const cmpCreatedAsc = (a: T, b: T) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0)
+  // NULL/empty date → '' → smallest → sorts last under DESC.
+  const dateVal = (v?: string | null) => v ?? ''
+  const rankOf = (id: string) => queuePriorityRank.get(id) ?? 0
+  return [...items].sort((a, b) => {
+    const ra = rankOf(a.recording_id)
+    const rb = rankOf(b.recording_id)
+    if (ra !== rb) return rb - ra // explicit reorder rank DESC (higher = sooner)
+    const aPri = userPriorityIds.has(a.recording_id) ? 0 : 1
+    const bPri = userPriorityIds.has(b.recording_id) ? 0 : 1
+    if (aPri !== bPri) return aPri - bPri
+    if (aPri === 0) return cmpCreatedAsc(a, b) // both user-explicit → FIFO
+    const da = dateVal(a.date_recorded)
+    const db = dateVal(b.date_recorded)
+    if (da !== db) return da < db ? 1 : -1 // date_recorded DESC
+    return cmpCreatedAsc(a, b)
+  })
+}
+
 export function cancelTranscription(recordingId: string): void {
   removeFromQueueByRecordingId(recordingId)
+  clearQueueHints(recordingId)
   updateRecordingTranscriptionStatus(recordingId, 'none')
   notifyRenderer('transcription:cancelled', { recordingId })
+  emitQueueState()
 }
 
 export function cancelAllTranscriptions(): number {
   cancelRequested = true
   const count = cancelPendingTranscriptions()
+  userPriorityIds.clear()
+  queuePriorityRank.clear()
   notifyRenderer('transcription:all-cancelled', { count })
+  emitQueueState()
   // cancelRequested is reset at the end of processQueue (after the loop breaks)
   // rather than on a timer, to avoid the race where the flag resets before
   // processQueue has a chance to observe it.
@@ -91,7 +355,7 @@ async function processQueue(): Promise<void> {
   if (isProcessing) return
 
   // spec-005: Acquire mutex lock to prevent concurrent processing
-  const processId = `proc_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`
+  const processId = `proc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
   const lockAcquired = acquireTranscriptionLock(processId)
   if (!lockAcquired) {
     // Throttle to once per 60s — this fires every 10s during active transcription, which is expected
@@ -104,8 +368,14 @@ async function processQueue(): Promise<void> {
   }
 
   try {
+    // Queue-level pause: do not dequeue new work. An item already in-flight is
+    // handled by the active run's loop (which breaks after the current item);
+    // every subsequent tick no-ops here until resume.
+    if (queuePaused) return
+
     const config = getConfig()
-    if (!config.transcription.geminiApiKey) {
+    const provider = config.transcription.provider || 'gemini'
+    if (provider === 'gemini' && !config.transcription.geminiApiKey) {
       console.error('[Transcription] Cannot process queue: Gemini API key not configured')
 
       // Mark all pending items as failed with clear error message
@@ -128,6 +398,27 @@ async function processQueue(): Promise<void> {
       }
 
       return
+    } else if (provider === 'local-asr' || provider === 'vibevoice') {
+      const asrPath = config.transcription.localAsrPath
+      const runnerPath = asrPath ? join(asrPath, 'mcp_runner.py') : ''
+      if (!asrPath || !existsSync(runnerPath)) {
+        const error = `Local ASR runner not found: ${runnerPath || 'not configured'}`
+        console.error(`[Transcription] Cannot process queue: ${error}`)
+
+        const pendingItems = getQueueItems('pending')
+        const processingItems = getQueueItems('processing')
+        for (const item of [...pendingItems, ...processingItems]) {
+          updateQueueItem(item.id, 'failed', error)
+          updateRecordingTranscriptionStatus(item.recording_id, 'error')
+          notifyRenderer('transcription:failed', {
+            queueItemId: item.id,
+            recordingId: item.recording_id,
+            error
+          })
+        }
+
+        return
+      }
     }
     // spec-014: Retry failed items with max attempts
     // B-TXN-001: Exponential backoff before retrying failed items
@@ -136,7 +427,15 @@ async function processQueue(): Promise<void> {
       'Recording not found',
       'Recording file not found',
       'Gemini API key not configured',
-      'no local file'
+      'Local ASR runner not found',
+      'no local file',
+      // Deterministic input-side failures — retrying loads the model again for nothing.
+      'Audio too long',
+      'No speech detected',
+      'AudioLoadError',
+      'unsupported language',
+      'VibeVoice returned an empty transcript',
+      'requires the optional `vibevoice`'
     ]
     const failedItems = getQueueItems('failed')
     const now = Date.now()
@@ -154,7 +453,12 @@ async function processQueue(): Promise<void> {
       if (retryCount < MAX_RETRY_ATTEMPTS) {
         // B-TXN-001: Calculate backoff delay: 30s * 2^retryCount, capped at 120s
         const backoffMs = Math.min(30000 * Math.pow(2, retryCount), 120000)
-        const completedAt = item.completed_at ? new Date(item.completed_at).getTime() : 0
+        // SQLite CURRENT_TIMESTAMP writes UTC without a `Z` suffix; appending Z
+        // forces JS to parse it as UTC instead of local time (which previously
+        // produced negative timeSinceFailure and multi-hour fake backoffs).
+        const completedAt = item.completed_at
+          ? new Date(item.completed_at.endsWith('Z') ? item.completed_at : item.completed_at.replace(' ', 'T') + 'Z').getTime()
+          : 0
         const timeSinceFailure = now - completedAt
 
         if (timeSinceFailure < backoffMs) {
@@ -171,18 +475,31 @@ async function processQueue(): Promise<void> {
       }
     }
 
-    const pendingItems = getQueueItems('pending')
-    if (pendingItems.length === 0) {
+    if (getQueueItems('pending').length === 0) {
       return
     }
 
     isProcessing = true
 
-    for (const item of pendingItems) {
-      if (cancelRequested) {
-        console.log('Transcription cancelled by user')
-        break
-      }
+    // Re-pick the highest-priority pending item on every iteration (rather than
+    // iterating a one-time snapshot) so ordering applies per dequeue: an item
+    // enqueued mid-drain with a newer date_recorded — or a user-explicit
+    // request — preempts older items still waiting. `processedThisRun` guarantees
+    // termination: each queue row is handled at most once per run even if its
+    // status write doesn't remove it from the pending set (mocked DB in tests, or
+    // a failed write in prod), while a newly-enqueued row (new id) is still
+    // eligible to preempt.
+    const processedThisRun = new Set<string>()
+    // `!queuePaused`: if the user pauses mid-run, the current item (already being
+    // awaited below) finishes, then the loop condition stops further dequeues.
+    while (!cancelRequested && !queuePaused) {
+      const item = orderPendingForProcessing(getQueueItems('pending')).find(
+        (i) => !processedThisRun.has(i.id)
+      )
+      if (!item) break
+      processedThisRun.add(item.id)
+      currentProcessingId = item.recording_id
+      emitQueueState()
 
       try {
         updateQueueItem(item.id, 'processing')
@@ -223,13 +540,14 @@ async function processQueue(): Promise<void> {
         }
 
         try {
-          await transcribeRecording(item.recording_id, progressCallback)
+          await transcribeRecording(item.recording_id, progressCallback, item.provider)
         } finally {
           clearInterval(progressTicker) // Always clean up the ticker
         }
 
         updateQueueProgress(item.id, 100) // spec-014: mark complete
         updateQueueItem(item.id, 'completed')
+        clearQueueHints(item.recording_id) // request satisfied — drop priority hints
         notifyRenderer('transcription:completed', { queueItemId: item.id, recordingId: item.recording_id })
         const { emitActivityLog: emitDone } = await import('./activity-log')
         const recDone = getRecordingById(item.recording_id)
@@ -241,6 +559,10 @@ async function processQueue(): Promise<void> {
         updateQueueItem(item.id, 'failed', errorMessage)
         // AI-13: Use standard enum value 'error' (not 'failed')
         updateRecordingTranscriptionStatus(item.recording_id, 'error')
+        // Drop the priority hints: a subsequent auto-retry is background work and
+        // should sort by recency. An explicit user retry re-marks it (see the
+        // transcription:retry IPC handler).
+        clearQueueHints(item.recording_id)
         notifyRenderer('transcription:failed', {
           queueItemId: item.id,
           recordingId: item.recording_id,
@@ -255,9 +577,16 @@ async function processQueue(): Promise<void> {
         if (retryCount >= MAX_RETRY_ATTEMPTS) {
           console.log(`Recording ${item.recording_id} failed after ${retryCount} retries (max: ${MAX_RETRY_ATTEMPTS})`)
         }
+      } finally {
+        // This item is no longer in flight — clear before the next dequeue.
+        currentProcessingId = null
+        emitQueueState()
       }
     }
 
+    if (cancelRequested) {
+      console.log('Transcription cancelled by user')
+    }
     isProcessing = false
     // AI-11: Reset cancel flag after loop exits, not on a timer
     cancelRequested = false
@@ -275,9 +604,22 @@ export async function processQueueManually(): Promise<void> {
   return processQueue()
 }
 
+/**
+ * Single funnel for "queue this recording for transcription if the user has
+ * auto-transcribe enabled". Consolidates the previously duplicated gate from
+ * download-service, recording-watcher, and storage:save-recording (ADR-0005
+ * category A). Returns true if the recording was queued, false otherwise.
+ */
+export function queueTranscriptionIfEnabled(recordingId: string): boolean {
+  if (getConfig().transcription.autoTranscribe !== true) return false
+  addToQueue(recordingId)
+  processQueueManually()
+  return true
+}
+
 interface ActionableDetection {
   type: 'meeting_minutes' | 'interview_feedback' | 'status_report' |
-        'decision_log' | 'action_items' | 'research_summary'
+        'decision_log' | 'action_items' | 'research_summary' | 'follow_up_work'
   confidence: number // 0.0 to 1.0
   suggestedTitle: string
   reason: string // Why detected
@@ -322,13 +664,19 @@ Detect if speaker mentions need to:
 4. Document decisions
 5. Share action items
 6. Compile research/findings
+7. Do follow-up work after the call (e.g. draft a solution design document after a
+   sales-to-delivery handoff, kick off or scaffold a project after a kickoff,
+   implement changes discussed in an engineering session, remediate blockers from
+   a status call). If the call is a working/business meeting with concrete next
+   steps, ALWAYS include one follow_up_work detection with template
+   "claude_code_prompt" so the user can hand the work to an AI coding agent.
 
 For each detected intent, return:
-- type: The type of actionable (meeting_minutes, interview_feedback, status_report, decision_log, action_items, research_summary)
+- type: The type of actionable (meeting_minutes, interview_feedback, status_report, decision_log, action_items, research_summary, follow_up_work)
 - confidence: 0.0-1.0 (how confident you are)
-- suggestedTitle: Brief title for the actionable (e.g., "Send meeting notes to team")
+- suggestedTitle: Brief title for the actionable (e.g., "Send meeting notes to team", "Draft SDD for Acme migration")
 - reason: Why you detected this (quote from transcript)
-- suggestedTemplate: Template name to use (e.g., "meeting_minutes", "interview_feedback")
+- suggestedTemplate: Template name to use ("meeting_minutes", "interview_feedback", "project_status", "action_items", "claude_code_prompt")
 - suggestedRecipients: Who should receive it (if mentioned)
 
 Return as JSON array. If no actionables detected, return empty array [].
@@ -336,9 +684,17 @@ Only include detections with confidence >= 0.6.`
 
   try {
     const genAI = new GoogleGenerativeAI(config.transcription.geminiApiKey)
-    const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-2.0-flash-exp' })
+    const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-3.5-flash' })
 
-    const result = await model.generateContent(prompt)
+    // JSON-forced + no thinking, same hardening as the analysis call
+    const result = await model.generateContent({
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: {
+        maxOutputTokens: 8192,
+        responseMimeType: 'application/json',
+        thinkingConfig: { thinkingBudget: 0 }
+      } as never
+    })
     const responseText = result.response.text()
 
     // Extract JSON from response (might be wrapped in markdown code blocks)
@@ -348,7 +704,14 @@ Only include detections with confidence >= 0.6.`
       return []
     }
 
-    const detections = JSON.parse(jsonMatch[0]) as ActionableDetection[]
+    // Repair the same unescaped-inner-quote / raw-control-char malformations
+    // Gemini emits here as in the analysis path (this is where the live
+    // "Expected ',' or '}' after property value at position 1309" was seen).
+    const detections = tryParseJson<ActionableDetection[]>(jsonMatch[0])
+    if (!detections) {
+      console.warn(`[Actionable Detection] Unparseable JSON: ${describeJsonParseError(responseText)}`)
+      return []
+    }
 
     // Filter out low-confidence detections
     const filtered = detections.filter(d => d.confidence >= 0.6)
@@ -361,49 +724,804 @@ Only include detections with confidence >= 0.6.`
   }
 }
 
-async function transcribeRecording(
-  recordingId: string,
+interface LocalAsrSegment {
+  speaker?: string
+  start?: number
+  end?: number
+  text: string
+}
+
+interface RawTranscriptionResult {
+  fullText: string
+  provider: 'gemini' | 'local-asr' | 'vibevoice'
+  model: string
+  language: string
+  speakers?: string
+}
+
+interface TranscriptAnalysis {
+  summary?: string
+  action_items?: string[]
+  topics?: string[]
+  key_points?: string[]
+  title_suggestion?: string
+  question_suggestions?: string[]
+  language?: string
+  selected_meeting_id?: string
+  meeting_confidence?: number
+  selection_reason?: string
+  /** People speaking or mentioned in the call (the ICS feed carries no attendees). */
+  participants?: Array<{ name: string; role?: string }>
+  /** Project this meeting belongs to — matched against existing projects or proposed new. */
+  project?: { name: string; is_new?: boolean }
+}
+
+async function transcribeWithGemini(
+  filePath: string,
+  meetingContext: string,
   progressCallback?: (stage: string, progress: number) => void
-): Promise<void> {
-  const recording = getRecordingById(recordingId)
-  if (!recording || !recording.file_path) {
-    throw new Error(`Recording not found or no local file: ${recordingId}`)
-  }
-
-  if (!existsSync(recording.file_path)) {
-    throw new Error(`Recording file not found: ${recording.file_path}`)
-  }
-
+): Promise<RawTranscriptionResult> {
   const config = getConfig()
   if (!config.transcription.geminiApiKey) {
     throw new Error('Gemini API key not configured')
   }
 
+  progressCallback?.('reading_file', 5)
+  const audioBuffer = await readFileAsync(filePath)
+
+  const modelName = config.transcription.geminiModel || 'gemini-3.5-flash'
+  const engine = new GeminiEngine({
+    apiKey: config.transcription.geminiApiKey,
+    model: modelName,
+    language: config.transcription.language || 'unknown'
+  })
+
+  progressCallback?.('transcribing', 20)
+
+  // Collect the speaker-turn segments yielded by GeminiEngine. Each segment is
+  // one turn with an absolute timestamp and (usually) a "Speaker N" label.
+  // We pass filePath via the extended options so the engine can detect the MIME
+  // type, and meetingContext via options.context for prompt enrichment.
+  const segments: Array<{ speaker: string; start: number; end: number; text: string }> = []
+  for await (const segment of engine.transcribe(audioBuffer, {
+    source: 'mic',
+    language: config.transcription.language,
+    context: meetingContext || undefined,
+    // GeminiEngine reads filePath from options for MIME type detection
+    filePath,
+    // Real per-chunk progress (long recordings are transcribed in ~10-minute
+    // segments) — replaces the fake ticker that sat at 90% for minutes.
+    onProgress: (done: number, total: number) => {
+      progressCallback?.('transcribing', Math.min(45, 20 + Math.round((done / total) * 25)))
+    }
+  } as Parameters<typeof engine.transcribe>[1] & { filePath: string })) {
+    const text = segment.text?.trim()
+    if (text) {
+      segments.push({
+        speaker: segment.speaker,
+        start: segment.startTime,
+        end: segment.endTime,
+        text
+      })
+    }
+  }
+
+  // An empty transcript is a failure, not a success — persisting it would mark
+  // the recording 'complete' with no usable content and block re-transcription.
+  if (segments.length === 0) {
+    throw new Error('Gemini returned an empty transcript')
+  }
+
+  // Each turn's end is the next turn's start (the engine yields start-only).
+  for (let i = 0; i < segments.length; i++) {
+    segments[i].end = segments[i + 1]?.start ?? segments[i].start
+  }
+
+  // full_text stays plain (no timestamps) for search / analysis / embeddings —
+  // one readable turn per line with its speaker label. The timestamped segment
+  // structure is stored separately in `speakers` for the transcript viewer.
+  const fullText = segments.map((s) => (s.speaker ? `${s.speaker}: ${s.text}` : s.text)).join('\n')
+
+  return {
+    fullText,
+    provider: 'gemini',
+    model: modelName,
+    language: config.transcription.language || 'unknown',
+    speakers: JSON.stringify(segments)
+  }
+}
+
+function pythonCommand(): string {
+  return process.platform === 'win32' ? 'python' : 'python3'
+}
+
+async function transcribeWithLocalAsr(
+  filePath: string,
+  progressCallback?: (stage: string, progress: number) => void
+): Promise<RawTranscriptionResult> {
+  const config = getConfig()
+  const asrPath = config.transcription.localAsrPath || process.env.ASR_MCP_PATH
+  if (!asrPath) {
+    throw new Error('Local ASR path not configured')
+  }
+
+  const runnerPath = join(asrPath, 'mcp_runner.py')
+  if (!existsSync(runnerPath)) {
+    throw new Error(`Local ASR runner not found: ${runnerPath}`)
+  }
+
+  const language = (config.transcription.language || 'es').slice(0, 2).toLowerCase()
+  const vocabularyPath = config.transcription.localAsrVocabularyFile
+    ? (isAbsolute(config.transcription.localAsrVocabularyFile)
+        ? config.transcription.localAsrVocabularyFile
+        : join(asrPath, config.transcription.localAsrVocabularyFile))
+    : ''
+
+  const args = [
+    runnerPath,
+    'asr_mcp.cli',
+    filePath,
+    '--language',
+    language,
+    '--format',
+    'json',
+    '--num-beams',
+    String(config.transcription.localAsrNumBeams || 5)
+  ]
+
+  if (config.transcription.localAsrDiarize !== false) {
+    args.push('--diarize')
+  }
+
+  if (vocabularyPath && existsSync(vocabularyPath)) {
+    args.push('--vocabulary', vocabularyPath)
+  }
+
+  progressCallback?.('local_asr_starting', 5)
+  const { stdout } = await spawnStreaming(pythonCommand(), args, {
+    cwd: asrPath,
+    env: {
+      ...process.env,
+      PYTHONUNBUFFERED: '1',
+      HF_TOKEN: config.transcription.localAsrHfToken || process.env.HF_TOKEN || '',
+      ASR_VOCABULARY_FILE: vocabularyPath || process.env.ASR_VOCABULARY_FILE || ''
+    },
+    logPrefix: '[Local ASR]',
+    onStderrLine: (line) => {
+      if (line.includes('Model loaded')) progressCallback?.('local_asr_model_loaded', 20)
+      else if (line.includes('Diarization:')) progressCallback?.('local_asr_diarized', 40)
+      else if (line.match(/Transcribed (\d+)\/(\d+)/)) {
+        const m = line.match(/Transcribed (\d+)\/(\d+)/)!
+        const pct = Math.min(85, Math.round(40 + (parseInt(m[1], 10) / parseInt(m[2], 10)) * 45))
+        progressCallback?.('local_asr_segments', pct)
+      } else if (line.includes('Pipeline complete')) progressCallback?.('local_asr_done', 95)
+    }
+  })
+
+  let parsed: {
+    text?: string
+    language?: string
+    segments?: LocalAsrSegment[]
+    error?: boolean
+    message?: string
+  }
+  try {
+    parsed = JSON.parse(stdout)
+  } catch (error) {
+    throw new Error(`Local ASR returned invalid JSON: ${error instanceof Error ? error.message : 'parse failed'}`)
+  }
+
+  if (parsed.error) {
+    throw new Error(parsed.message || 'Local ASR transcription failed')
+  }
+
+  const segments = Array.isArray(parsed.segments) ? parsed.segments : []
+  const fullText = segments.length > 0
+    ? segments
+        .filter((segment) => segment.text?.trim())
+        .map((segment) => {
+          const speaker = segment.speaker || 'Speaker'
+          return `${speaker}: ${segment.text.trim()}`
+        })
+        .join('\n')
+    : (parsed.text || '').trim()
+
+  if (!fullText) {
+    throw new Error('Local ASR returned an empty transcript')
+  }
+
+  return {
+    fullText,
+    provider: 'local-asr',
+    model: 'CohereLabs/cohere-transcribe-03-2026',
+    language: parsed.language || language,
+    speakers: segments.length > 0 ? JSON.stringify(segments) : undefined
+  }
+}
+
+async function transcribeWithVibeVoice(
+  filePath: string,
+  progressCallback?: (stage: string, progress: number) => void
+): Promise<RawTranscriptionResult> {
+  const config = getConfig()
+  const asrPath = config.transcription.localAsrPath || process.env.ASR_MCP_PATH
+  if (!asrPath) {
+    throw new Error('Local ASR path not configured')
+  }
+
+  const runnerPath = join(asrPath, 'mcp_runner.py')
+  if (!existsSync(runnerPath)) {
+    throw new Error(`Local ASR runner not found: ${runnerPath}`)
+  }
+
+  // VibeVoice auto-detects language and code-switches; "auto" unless overridden.
+  const language = (config.transcription.language || 'auto').toLowerCase()
+  const vocabularyPath = config.transcription.localAsrVocabularyFile
+    ? (isAbsolute(config.transcription.localAsrVocabularyFile)
+        ? config.transcription.localAsrVocabularyFile
+        : join(asrPath, config.transcription.localAsrVocabularyFile))
+    : ''
+
+  const args = [
+    runnerPath,
+    'asr_mcp.cli',
+    filePath,
+    '--backend',
+    'vibevoice',
+    '--language',
+    language,
+    '--format',
+    'json'
+  ]
+
+  if (vocabularyPath && existsSync(vocabularyPath)) {
+    args.push('--vocabulary', vocabularyPath)
+  }
+
+  progressCallback?.('vibevoice_starting', 5)
+  const { stdout } = await spawnStreaming(pythonCommand(), args, {
+    cwd: asrPath,
+    env: {
+      ...process.env,
+      // Force the child Python (and the Python subprocess mcp_runner.py
+      // spawns under .venv) to flush stdout/stderr immediately so the
+      // per-token streamer heartbeat actually reaches us.
+      PYTHONUNBUFFERED: '1',
+      ASR_BACKEND: 'vibevoice',
+      HF_TOKEN: config.transcription.localAsrHfToken || process.env.HF_TOKEN || '',
+      ASR_VOCABULARY_FILE: vocabularyPath || process.env.ASR_VOCABULARY_FILE || '',
+      VIBEVOICE_MODEL_ID: config.transcription.vibevoiceModelId || process.env.VIBEVOICE_MODEL_ID || 'microsoft/VibeVoice-ASR',
+      ASR_DEVICE: config.transcription.vibevoiceDevice || process.env.ASR_DEVICE || 'cuda:0',
+      VIBEVOICE_ATTN: config.transcription.vibevoiceAttn || process.env.VIBEVOICE_ATTN || 'sdpa'
+    },
+    logPrefix: '[VibeVoice]',
+    onStderrLine: (line) => {
+      // Map known log lines from vibevoice_model.py to UI progress events.
+      if (line.includes('VibeVoice loaded')) {
+        progressCallback?.('vibevoice_model_loaded', 15)
+      } else if (line.includes('Long-form:')) {
+        progressCallback?.('vibevoice_chunking', 18)
+      } else {
+        const chunkMatch = line.match(/Chunk (\d+)\/(\d+):/)
+        if (chunkMatch) {
+          const i = parseInt(chunkMatch[1], 10)
+          const n = parseInt(chunkMatch[2], 10)
+          // 20% .. 80% allocated to chunks
+          const pct = Math.min(80, Math.round(20 + ((i - 1) / n) * 60))
+          progressCallback?.(`vibevoice_chunk_${i}_of_${n}`, pct)
+        } else if (line.includes('VibeVoice generated')) {
+          progressCallback?.('vibevoice_parsing', 85)
+        } else if (line.includes('VibeVoice complete')) {
+          progressCallback?.('vibevoice_done', 95)
+        }
+      }
+    }
+  })
+
+  let parsed: {
+    text?: string
+    language?: string
+    segments?: LocalAsrSegment[]
+    error?: boolean
+    message?: string
+  }
+  try {
+    parsed = JSON.parse(stdout)
+  } catch (error) {
+    throw new Error(`VibeVoice returned invalid JSON: ${error instanceof Error ? error.message : 'parse failed'}`)
+  }
+
+  if (parsed.error) {
+    throw new Error(parsed.message || 'VibeVoice transcription failed')
+  }
+
+  const segments = Array.isArray(parsed.segments) ? parsed.segments : []
+  const fullText = segments.length > 0
+    ? segments
+        .filter((segment) => segment.text?.trim())
+        .map((segment) => {
+          const speaker = segment.speaker || 'Speaker'
+          return `${speaker}: ${segment.text.trim()}`
+        })
+        .join('\n')
+    : (parsed.text || '').trim()
+
+  if (!fullText) {
+    throw new Error('VibeVoice returned an empty transcript')
+  }
+
+  return {
+    fullText,
+    provider: 'vibevoice',
+    model: 'microsoft/VibeVoice-ASR',
+    language: parsed.language || language,
+    speakers: segments.length > 0 ? JSON.stringify(segments) : undefined
+  }
+}
+
+async function analyzeTranscriptWithGemini(
+  fullText: string,
+  candidateMeetings: ReturnType<typeof findCandidateMeetingsForRecording>
+): Promise<TranscriptAnalysis> {
+  const config = getConfig()
+  if (!config.transcription.geminiApiKey) {
+    return {
+      summary: 'Local ASR transcript created. Configure Gemini to generate AI summary, action items, and meeting matching.',
+      action_items: [],
+      topics: [],
+      key_points: [],
+      language: config.transcription.language || 'unknown'
+    }
+  }
+
+  const genAI = new GoogleGenerativeAI(config.transcription.geminiApiKey)
+  const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-3.5-flash' })
+
+  let meetingSelectionSection = ''
+  if (candidateMeetings.length > 1) {
+    meetingSelectionSection = `
+5. IMPORTANT - Meeting Selection: Based on the transcript content, determine which meeting this recording most likely belongs to.
+   Analyze mentions of topics, people, projects, or context clues to select the best match.
+
+   Available meetings:
+${candidateMeetings.map((m, i) => `   ${i + 1}. "${m.subject}" (ID: ${m.id})`).join('\n')}
+
+   Include in your response:
+   "selected_meeting_id": "the meeting ID that best matches",
+   "meeting_confidence": 0.0 to 1.0 (how confident you are),
+   "selection_reason": "why you selected the meeting"`
+  } else if (candidateMeetings.length === 1) {
+    meetingSelectionSection = `
+5. Meeting Selection: There is one candidate meeting near this recording's time:
+   1. "${candidateMeetings[0].subject}" (ID: ${candidateMeetings[0].id})
+
+   Determine if this recording actually belongs to this meeting based on topics, people, and context.
+   If the content does NOT match the meeting subject, set meeting_confidence to 0.0 and selected_meeting_id to "none".
+
+   "selected_meeting_id": "the meeting ID if it matches, or \\"none\\" if it doesn't",
+   "meeting_confidence": 0.0 to 1.0,
+   "selection_reason": "why you selected or rejected this meeting"`
+  }
+
+  // Existing projects so the model links to them instead of inventing variants
+  const existingProjects = queryAll<{ name: string }>(
+    `SELECT name FROM projects WHERE status = 'active' ORDER BY name LIMIT 50`
+  ).map((p) => p.name)
+
+  const analysisPrompt = `Analyze this meeting transcript and provide:
+1. A brief summary (2-3 sentences)
+2. A list of action items mentioned (as a JSON array of strings)
+3. Key topics discussed (as a JSON array of strings)
+4. Key points or decisions made (as a JSON array of strings)
+5. A short, descriptive title for this recording (3-8 words that capture the essence)
+6. 4-5 specific, context-aware questions that could be asked about this recording
+   - Questions should be SPECIFIC to the content (e.g., "What was decided about the Q3 marketing budget?")
+   - Avoid generic questions (e.g., "What was discussed?" or "Tell me more")
+   - Questions should help users quickly understand key decisions, action items, and outcomes
+7. Participants: people speaking or clearly mentioned as involved (first names are fine).
+   For each: name, and role if inferable (e.g. "telecom specialist", "PM", "client").
+   Do NOT invent people; only include names actually appearing in the conversation.
+8. Project: which project/initiative this meeting belongs to.
+   ${existingProjects.length > 0 ? `Existing projects (match one of these EXACTLY if it fits): ${existingProjects.join(' | ')}` : 'No projects exist yet.'}
+   If none fits, propose a short new project name (2-5 words, e.g. "DFX5 Gateway" or client name) and set is_new true.
+   If the call is personal or clearly not project work, omit the project field.
+
+IMPORTANT: Respond in the SAME LANGUAGE as the transcript. If the transcript is in Spanish, write the summary, action items, topics, key points, title, and questions in Spanish. If English, respond in English.
+${meetingSelectionSection}
+
+Transcript:
+${fullText}
+
+Respond in JSON format:
+{
+  "summary": "...",
+  "action_items": ["...", "..."],
+  "topics": ["...", "..."],
+  "key_points": ["...", "..."],
+  "title_suggestion": "Brief Descriptive Title (3-8 words)",
+  "question_suggestions": ["Specific question about decision 1?", "Specific question about action item 2?", "..."],
+  "language": "es" or "en",
+  "participants": [{"name": "...", "role": "..."}],
+  "project": {"name": "...", "is_new": false}${candidateMeetings.length > 0 ? `,
+  "selected_meeting_id": "...",
+  "meeting_confidence": 0.0,
+  "selection_reason": "..."` : ''}
+}`
+
+  // Two-attempt strategy (both disable thinking: the thinking model intermittently
+  // burns its output budget on reasoning and returns junk — observed: analysis titled
+  // "Transcripción no proporcionada" for a complete 7.5k-word transcript).
+  //
+  // Order: plain-text FIRST, json-mime second. A full day of live evidence showed the
+  // json-mime attempt fails to parse on essentially every real Spanish transcript
+  // (multiple malformation classes — unescaped inner quotes, raw control chars, and
+  // splice-corruption that the repair pass cannot recover), after which the plain-text
+  // attempt reliably succeeds — so leading with json-mime cost one wasted API call per
+  // analysis. Plain-text (fenced or brace-matched block, run through the same repair
+  // pass) is now the primary. json-mime is kept as a second attempt: it still wins
+  // occasionally on short English prompts and remains a cheap safety net.
+  const attempts: Array<{ label: string; generationConfig: Record<string, unknown> }> = [
+    {
+      label: 'plain-text',
+      generationConfig: {
+        maxOutputTokens: 8192,
+        thinkingConfig: { thinkingBudget: 0 }
+      }
+    },
+    {
+      label: 'json-mime-fallback',
+      generationConfig: {
+        maxOutputTokens: 8192,
+        responseMimeType: 'application/json',
+        thinkingConfig: { thinkingBudget: 0 }
+      }
+    }
+  ]
+
+  for (const attempt of attempts) {
+    try {
+      const analysisResult = await model.generateContent({
+        contents: [{ role: 'user', parts: [{ text: analysisPrompt }] }],
+        generationConfig: attempt.generationConfig as never
+      })
+      const response = analysisResult.response
+      let analysisText = ''
+      try {
+        analysisText = response.text()
+      } catch {
+        // .text() throws when the candidate carries no text part (e.g. blocked
+        // or MAX_TOKENS with no content) — treat as empty and log diagnostics.
+        analysisText = ''
+      }
+
+      const parsed = extractAnalysisJson(analysisText)
+      if (parsed) return parsed
+
+      // Parse miss — surface why so the failure isn't invisible.
+      logAnalysisFailure(attempt.label, response, analysisText)
+    } catch (e) {
+      console.warn(`[Analysis] Gemini call failed (${attempt.label}):`, e instanceof Error ? e.message : e)
+    }
+  }
+
+  return { summary: 'Analysis failed', language: 'unknown' }
+}
+
+/**
+ * Repair the two malformations Gemini's JSON-mode reliably produces on real
+ * (especially Spanish) transcripts, neither of which it escapes: unescaped
+ * inner double-quotes inside string values (e.g. `dijo "no" y ...`) and raw
+ * control characters (newline/tab) inside string values. Also strips trailing
+ * commas. Single left-to-right scan tracking string context.
+ *
+ * Inner-quote heuristic: a `"` seen inside a string is treated as the string's
+ * closing quote only when the next non-whitespace char is structural
+ * (`, } ] :` or end-of-input); otherwise it is an unescaped inner quote and
+ * gets escaped. This is the documented signature of the failures observed live
+ * (`SyntaxError: Expected ',' or '}' after property value`).
+ *
+ * Bracket balancing (last pass): the scan tracks the open `{`/`[` stack. A closer
+ * is emitted as the one its opener actually requires, correcting a mismatch such
+ * as a top-level array closed with `}` instead of `]` (the live position-699
+ * failure); a stray closer with nothing open is dropped; and at end-of-input any
+ * still-open brackets are appended in innermost-first order (with a dangling
+ * trailing comma stripped first). Once the root value closes, anything after it
+ * is discarded — an extra trailing `}`/`]` or text-after-JSON garbage (the live
+ * "Unexpected non-whitespace character after JSON" failure). Balanced JSON is
+ * left untouched.
+ */
+export function repairJsonString(input: string): string {
+  let out = ''
+  let inString = false
+  // Expected closer for each still-open `{`/`[`, innermost last.
+  const stack: string[] = []
+  // Set once the outermost bracket closes; everything after the root value is
+  // trailing garbage (stray closer, second object, prose) and is dropped.
+  let rootClosed = false
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i]
+
+    // Ignore anything after the root value has fully closed.
+    if (rootClosed) continue
+
+    if (!inString) {
+      if (ch === '"') {
+        inString = true
+        out += ch
+        continue
+      }
+      if (ch === '{' || ch === '[') {
+        stack.push(ch === '{' ? '}' : ']')
+        out += ch
+        continue
+      }
+      if (ch === '}' || ch === ']') {
+        // Drop a stray closer that matches nothing that is open.
+        if (stack.length === 0) continue
+        // Emit the closer the opener requires (corrects `}`/`]` mismatches).
+        out += stack.pop()
+        // Root just closed — discard whatever follows.
+        if (stack.length === 0) rootClosed = true
+        continue
+      }
+      if (ch === ',') {
+        // Drop a trailing comma: `,` followed only by whitespace then `}`/`]`
+        // or end-of-input (a closer may still be appended by the EOF balancing).
+        let j = i + 1
+        while (j < input.length && /\s/.test(input[j])) j++
+        if (j >= input.length || input[j] === '}' || input[j] === ']') continue
+      }
+      out += ch
+      continue
+    }
+
+    // Inside a string.
+    if (ch === '\\') {
+      // Preserve an existing escape sequence verbatim (this char + the next).
+      out += ch
+      if (i + 1 < input.length) {
+        out += input[i + 1]
+        i++
+      }
+      continue
+    }
+
+    if (ch === '"') {
+      // Closing quote only if the next non-whitespace char is structural.
+      let j = i + 1
+      while (j < input.length && /\s/.test(input[j])) j++
+      const next = input[j]
+      if (next === undefined || next === ',' || next === '}' || next === ']' || next === ':') {
+        inString = false
+        out += ch
+      } else {
+        out += '\\"'
+      }
+      continue
+    }
+
+    const code = ch.charCodeAt(0)
+    if (code < 0x20) {
+      // Raw control character inside a string — escape it.
+      if (ch === '\n') out += '\\n'
+      else if (ch === '\r') out += '\\r'
+      else if (ch === '\t') out += '\\t'
+      else out += '\\u' + code.toString(16).padStart(4, '0')
+      continue
+    }
+
+    out += ch
+  }
+
+  // EOF balancing: close an unterminated string, drop a dangling trailing comma,
+  // then append any brackets left open (innermost first).
+  if (inString) out += '"'
+  if (stack.length > 0) {
+    out = out.replace(/[\s,]+$/, '')
+    while (stack.length > 0) out += stack.pop()
+  }
+  return out
+}
+
+/**
+ * Parse a JSON candidate, retrying once through repairJsonString() when the
+ * strict parse fails. Shared by the analysis and actionable-detection paths so
+ * both benefit from the same Gemini-quirk repair. Returns null only when even
+ * the repaired text is unparseable.
+ */
+function tryParseJson<T>(candidate: string): T | null {
+  try {
+    return JSON.parse(candidate) as T
+  } catch {
+    try {
+      return JSON.parse(repairJsonString(candidate)) as T
+    } catch {
+      return null
+    }
+  }
+}
+
+/**
+ * Extract the analysis object from a Gemini response body. Tolerates a
+ * ```json fenced block, any fenced block, or a bare brace-matched object
+ * (the plain-text fallback and the JSON-mime path both flow through here),
+ * and repairs the unescaped-inner-quote / raw-control-char malformations
+ * Gemini's JSON mode emits on real transcripts.
+ */
+export function extractAnalysisJson(text: string): TranscriptAnalysis | null {
+  if (!text) return null
+  const fencedInner = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]
+  const candidates = [
+    fencedInner,
+    fencedInner?.match(/\{[\s\S]*\}/)?.[0],
+    text.match(/\{[\s\S]*\}/)?.[0]
+  ].filter((c): c is string => Boolean(c))
+  for (const candidate of candidates) {
+    const parsed = tryParseJson<TranscriptAnalysis>(candidate)
+    if (parsed) return parsed
+  }
+  return null
+}
+
+/**
+ * Build a one-line diagnostic for an unparseable analysis payload: the strict
+ * JSON.parse error and the ±120 chars around the position it reports, so any
+ * future failure is debuggable from a single log line. Uses the same candidate
+ * extraction as extractAnalysisJson so the reported position lines up.
+ */
+function describeJsonParseError(text: string): string {
+  if (!text) return 'empty response body'
+  const fencedInner = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]
+  // Widest brace/bracket span, so object ({…}) and array ([…]) payloads both line up.
+  const braceMatch = (s: string) => s.match(/[[{][\s\S]*[}\]]/)?.[0]
+  const candidate =
+    (fencedInner && braceMatch(fencedInner)) ??
+    fencedInner ??
+    braceMatch(text) ??
+    text
+  try {
+    JSON.parse(candidate)
+    return 'candidate parsed cleanly on retry (transient?)'
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    const pos = Number(msg.match(/position (\d+)/)?.[1])
+    if (Number.isFinite(pos)) {
+      const start = Math.max(0, pos - 120)
+      const end = Math.min(candidate.length, pos + 120)
+      return `${msg} | context[${start}:${end}]=${JSON.stringify(candidate.slice(start, end))}`
+    }
+    return msg
+  }
+}
+
+/**
+ * Log the diagnostics that make an otherwise-silent analysis failure
+ * debuggable: the model's finishReason, token usage, and the head of the
+ * response body (the three things missing when a real transcript produced
+ * `{ summary: 'Analysis failed' }`).
+ */
+function logAnalysisFailure(label: string, response: unknown, text: string): void {
+  const r = response as {
+    candidates?: Array<{ finishReason?: string }>
+    usageMetadata?: unknown
+  }
+  const finishReason = r?.candidates?.[0]?.finishReason ?? 'unknown'
+  const usage = r?.usageMetadata ? JSON.stringify(r.usageMetadata) : 'n/a'
+  console.warn(
+    `[Analysis] Failed to parse Gemini analysis (${label}): finishReason=${finishReason}, ` +
+    `usage=${usage}, parseError=${describeJsonParseError(text)}, ` +
+    `text[0:300]=${JSON.stringify((text || '').slice(0, 300))}`
+  )
+}
+
+/**
+ * Self-healing backfill: find transcripts whose analysis never completed — the
+ * 'Analysis failed' sentinel, or a NULL summary/title from an older build — and
+ * re-run the Gemini analysis on the stored full_text. Analysis normally runs
+ * only once, at transcription time, so without this a transient Gemini failure
+ * leaves a transcript with junk analysis (filename-slug wiki titles, skipped
+ * actionables) forever. Bounded to `limit` rows per run to keep API cost
+ * predictable. Returns the number of transcripts actually healed.
+ */
+export async function reanalyzeFailedTranscripts(limit = 3): Promise<number> {
+  const config = getConfig()
+  if (!config.transcription.geminiApiKey) {
+    // No Gemini key → re-analysis can't produce anything better; skip rather
+    // than churn the same rows every run.
+    return 0
+  }
+
+  const rows = queryAll<{ recording_id: string; full_text: string }>(
+    `SELECT recording_id, full_text FROM transcripts
+     WHERE (summary IS NULL OR summary = 'Analysis failed' OR title_suggestion IS NULL)
+       AND full_text IS NOT NULL AND TRIM(full_text) != ''
+     ORDER BY created_at DESC
+     LIMIT ?`,
+    [limit]
+  )
+  if (rows.length === 0) return 0
+
+  console.log(`[Reanalyze] Re-running analysis for ${rows.length} transcript(s) with failed/missing analysis`)
+
+  let healed = 0
+  for (const row of rows) {
+    try {
+      // Re-run with no candidate meetings — backfill only heals the analysis
+      // fields; meeting matching already ran (or will re-run) elsewhere.
+      const analysis = await analyzeTranscriptWithGemini(row.full_text, [])
+
+      // Still failing — don't overwrite with the sentinel again.
+      if (!analysis.summary || analysis.summary === 'Analysis failed') {
+        console.warn(`[Reanalyze] Analysis still failing for ${row.recording_id}, leaving row as-is`)
+        continue
+      }
+
+      // Batch this transcript's field updates into a single transaction
+      // (sql.js discipline — never loop bare run() for multiple writes).
+      runInTransaction(() => {
+        run(
+          `UPDATE transcripts SET
+             summary = ?, action_items = ?, topics = ?, key_points = ?,
+             title_suggestion = ?, question_suggestions = ?, language = ?
+           WHERE recording_id = ?`,
+          [
+            analysis.summary ?? null,
+            analysis.action_items ? JSON.stringify(analysis.action_items) : null,
+            analysis.topics ? JSON.stringify(analysis.topics) : null,
+            analysis.key_points ? JSON.stringify(analysis.key_points) : null,
+            analysis.title_suggestion ?? null,
+            analysis.question_suggestions ? JSON.stringify(analysis.question_suggestions) : null,
+            analysis.language ?? 'unknown',
+            row.recording_id
+          ]
+        )
+      })
+
+      if (analysis.title_suggestion) {
+        updateKnowledgeCaptureTitle(row.recording_id, analysis.title_suggestion)
+      }
+
+      // Re-export the wiki page from the now-healed row (new file name may
+      // differ from any earlier filename-slug page; acceptable). Non-fatal.
+      try {
+        const { exportMeetingWiki } = await import('./meeting-wiki')
+        const wikiPath = exportMeetingWiki(row.recording_id)
+        if (wikiPath) console.log(`[Reanalyze] Re-exported wiki ${wikiPath}`)
+      } catch (e) {
+        console.error('[Reanalyze] Wiki re-export failed:', e)
+      }
+
+      healed++
+      console.log(`[Reanalyze] Healed transcript ${row.recording_id}: "${analysis.title_suggestion ?? '(no title)'}"`)
+    } catch (e) {
+      console.error(`[Reanalyze] Failed to reanalyze ${row.recording_id}:`, e instanceof Error ? e.message : e)
+    }
+  }
+
+  return healed
+}
+
+async function transcribeRecording(
+  recordingId: string,
+  progressCallback?: (stage: string, progress: number) => void,
+  providerOverride?: string
+): Promise<void> {
+  // Resolve stale/foreign IDs (e.g. a synced_files id queued by an older
+  // renderer build) to the real recordings row before failing.
+  const recording = getRecordingById(recordingId) ?? resolveRecordingId(recordingId)
+  if (!recording || !recording.file_path) {
+    throw new Error(`Recording not found or no local file: ${recordingId}`)
+  }
+  // Continue with the canonical id so status updates hit the real row.
+  recordingId = recording.id
+
+  if (!existsSync(recording.file_path)) {
+    throw new Error(`Recording file not found: ${recording.file_path}`)
+  }
+
   console.log(`Transcribing: ${recording.filename}`)
   // AI-13: Use standard enum values matching Recording.transcription_status
   updateRecordingTranscriptionStatus(recordingId, 'processing')
-
-  progressCallback?.('reading_file', 5) // spec-014: progress reporting
-
-  // Read the audio file asynchronously to avoid blocking the main process
-  const audioBuffer = await readFileAsync(recording.file_path)
-  const base64Audio = audioBuffer.toString('base64')
-
-  // Determine MIME type
-  const ext = extname(recording.file_path).toLowerCase()
-  const mimeTypes: Record<string, string> = {
-    '.wav': 'audio/wav',
-    '.mp3': 'audio/mp3',
-    '.m4a': 'audio/mp4',
-    '.ogg': 'audio/ogg',
-    '.webm': 'audio/webm',
-    '.hda': 'audio/mp3' // HiDock H1E outputs MPEG MP3 format
-  }
-  const mimeType = mimeTypes[ext] || 'audio/wav'
-
-  // Initialize Gemini
-  const genAI = new GoogleGenerativeAI(config.transcription.geminiApiKey)
-  const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-2.0-flash-exp' })
 
   // Find candidate meetings for this recording's time window
   const candidateMeetings = findCandidateMeetingsForRecording(recordingId)
@@ -422,116 +1540,17 @@ Meeting ${i + 1}: "${m.subject}"
 `).join('\n')}`
   }
 
-  progressCallback?.('transcribing', 20) // spec-014: progress reporting
-
-  // First, transcribe the audio with meeting context
-  const transcriptionPrompt = `Transcribe this audio recording.
-The audio may be in Spanish or English - transcribe in the original language.
-Provide a clean, accurate transcription of all speech.
-If there are multiple speakers, try to indicate speaker changes with "Speaker 1:", "Speaker 2:", etc.
-${meetingContext}
-Return ONLY the transcription, no additional commentary.`
-
-  const transcriptionResult = await model.generateContent([
-    {
-      inlineData: {
-        mimeType,
-        data: base64Audio
-      }
-    },
-    { text: transcriptionPrompt }
-  ])
-
-  const fullText = transcriptionResult.response.text()
+  const config = getConfig()
+  const transcriptionProvider = providerOverride || config.transcription.provider || 'gemini'
+  const rawTranscript = transcriptionProvider === 'vibevoice'
+    ? await transcribeWithVibeVoice(recording.file_path, progressCallback)
+    : transcriptionProvider === 'local-asr'
+      ? await transcribeWithLocalAsr(recording.file_path, progressCallback)
+      : await transcribeWithGemini(recording.file_path, meetingContext, progressCallback)
+  const fullText = rawTranscript.fullText
 
   progressCallback?.('analyzing', 50) // spec-014: progress reporting
-
-  // Build meeting selection prompt if there are multiple candidates
-  let meetingSelectionSection = ''
-  if (candidateMeetings.length > 1) {
-    meetingSelectionSection = `
-5. IMPORTANT - Meeting Selection: Based on the transcript content, determine which meeting this recording most likely belongs to.
-   Analyze mentions of topics, people, projects, or context clues to select the best match.
-
-   Available meetings:
-${candidateMeetings.map((m, i) => `   ${i + 1}. "${m.subject}" (ID: ${m.id})`).join('\n')}
-
-   Include in your response:
-   "selected_meeting_id": "the meeting ID that best matches",
-   "meeting_confidence": 0.0 to 1.0 (how confident you are),
-   "selection_reason": "why you selected this meeting"`
-  } else if (candidateMeetings.length === 1) {
-    meetingSelectionSection = `
-5. Meeting Selection: There is one candidate meeting near this recording's time:
-   1. "${candidateMeetings[0].subject}" (ID: ${candidateMeetings[0].id})
-
-   Determine if this recording actually belongs to this meeting based on topics, people, and context.
-   If the content does NOT match the meeting subject, set meeting_confidence to 0.0 and selected_meeting_id to "none".
-
-   "selected_meeting_id": "the meeting ID if it matches, or \\"none\\" if it doesn't",
-   "meeting_confidence": 0.0 to 1.0,
-   "selection_reason": "why you selected or rejected this meeting"`
-  }
-
-  // Now analyze the transcription for summary, action items, etc.
-  const analysisPrompt = `Analyze this meeting transcript and provide:
-1. A brief summary (2-3 sentences)
-2. A list of action items mentioned (as a JSON array of strings)
-3. Key topics discussed (as a JSON array of strings)
-4. Key points or decisions made (as a JSON array of strings)
-5. A short, descriptive title for this recording (3-8 words that capture the essence)
-6. 4-5 specific, context-aware questions that could be asked about this recording
-   - Questions should be SPECIFIC to the content (e.g., "What was decided about the Q3 marketing budget?")
-   - Avoid generic questions (e.g., "What was discussed?" or "Tell me more")
-   - Questions should help users quickly understand key decisions, action items, and outcomes
-
-IMPORTANT: Respond in the SAME LANGUAGE as the transcript. If the transcript is in Spanish, write the summary, action items, topics, key points, title, and questions in Spanish. If English, respond in English.
-${meetingSelectionSection}
-
-Transcript:
-${fullText}
-
-Respond in JSON format:
-{
-  "summary": "...",
-  "action_items": ["...", "..."],
-  "topics": ["...", "..."],
-  "key_points": ["...", "..."],
-  "title_suggestion": "Brief Descriptive Title (3-8 words)",
-  "question_suggestions": ["Specific question about decision 1?", "Specific question about action item 2?", "..."],
-  "language": "es" or "en"${candidateMeetings.length > 0 ? `,
-  "selected_meeting_id": "...",
-  "meeting_confidence": 0.0,
-  "selection_reason": "..."` : ''}
-}`
-
-  const analysisResult = await model.generateContent(analysisPrompt)
-  const analysisText = analysisResult.response.text()
-
-  // Parse the analysis JSON
-  let analysis: {
-    summary?: string
-    action_items?: string[]
-    topics?: string[]
-    key_points?: string[]
-    title_suggestion?: string
-    question_suggestions?: string[]
-    language?: string
-    selected_meeting_id?: string
-    meeting_confidence?: number
-    selection_reason?: string
-  } = {}
-
-  try {
-    // Extract JSON from the response (might be wrapped in markdown code blocks)
-    const jsonMatch = analysisText.match(/\{[\s\S]*\}/)
-    if (jsonMatch) {
-      analysis = JSON.parse(jsonMatch[0])
-    }
-  } catch (e) {
-    console.warn('Failed to parse analysis JSON:', e)
-    analysis = { summary: 'Analysis failed', language: 'unknown' }
-  }
+  const analysis = await analyzeTranscriptWithGemini(fullText, candidateMeetings)
 
   // Process AI meeting selection
   if (candidateMeetings.length > 0) {
@@ -571,23 +1590,50 @@ Respond in JSON format:
     id: `trans_${recordingId}`,
     recording_id: recordingId,
     full_text: fullText,
-    language: analysis.language || 'unknown',
+    language: analysis.language || rawTranscript.language || 'unknown',
     summary: analysis.summary,
     action_items: analysis.action_items ? JSON.stringify(analysis.action_items) : undefined,
     topics: analysis.topics ? JSON.stringify(analysis.topics) : undefined,
     key_points: analysis.key_points ? JSON.stringify(analysis.key_points) : undefined,
     sentiment: undefined,
-    speakers: undefined,
+    speakers: rawTranscript.speakers,
     word_count: wordCount,
-    transcription_provider: 'gemini',
-    transcription_model: config.transcription.geminiModel,
+    transcription_provider: rawTranscript.provider,
+    transcription_model: rawTranscript.model,
     title_suggestion: analysis.title_suggestion,
     question_suggestions: analysis.question_suggestions ? JSON.stringify(analysis.question_suggestions) : undefined
   }
 
   insertTranscript(transcript)
+  // Populate the Knowledge Library entity (knowledge_captures) for this recording.
+  // This is the canonical capture creator — without it the captures table stays
+  // empty on a device-first library. Idempotent + non-fatal; it also sets
+  // recordings.migrated_to_capture_id so updateKnowledgeCaptureTitle() below works.
+  try {
+    ensureKnowledgeCaptureForRecording(recordingId)
+  } catch (e) {
+    console.warn('[KnowledgeCapture] ensure failed (non-fatal):', e)
+  }
   // AI-13: Use standard enum value 'complete' (not 'transcribed')
   updateRecordingTranscriptionStatus(recordingId, 'complete')
+  // BUG B (status drift): the transcript row and transcription_status are written
+  // under the RESOLVED canonical id (recordingId, above) — but recordings.status
+  // (a separate column the meeting-detail badge reads) is only ever advanced by
+  // renderer IPC / deletion, never by this pipeline. It therefore stayed at its
+  // insert-time default ('none' from the recording-watcher) even with a fully
+  // joined transcript, so the badge showed "Not transcribed" over a real
+  // transcript. Advance status on the SAME row the transcript is attached to.
+  updateRecordingStatus(recordingId, 'complete')
+  // Durability: a completed transcript is an expensive artifact (API cost + time),
+  // so we force a synchronous flush to guarantee it survives a crash. But a full
+  // sql.js export on EVERY completion blocks the main thread for seconds once the
+  // DB is large — under continuous backlog that starves the app. So flush every
+  // Nth completion instead; the adaptive debounced path persists the rest, and a
+  // crash loses at most the last <N transcripts (still on disk on next flush).
+  if (++completedTranscriptsSinceFlush >= FLUSH_EVERY_N_TRANSCRIPTS) {
+    completedTranscriptsSinceFlush = 0
+    saveDatabase()
+  }
 
   // Auto-update recording title if we have a title suggestion
   if (analysis.title_suggestion) {
@@ -610,10 +1656,10 @@ Respond in JSON format:
     })
 
     // Create actionable entries with TEXT IDs
-    const VALID_TEMPLATE_IDS = ['meeting_minutes', 'interview_feedback', 'project_status', 'action_items']
+    const VALID_TEMPLATE_IDS = ['meeting_minutes', 'interview_feedback', 'project_status', 'action_items', 'claude_code_prompt']
 
     for (const detection of detections) {
-      const actionableId = `act_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+      const actionableId = `act_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`
 
       // Sanitize template ID: fall back to 'meeting_minutes' if AI suggests an invalid one
       const sanitizedTemplate = detection.suggestedTemplate && VALID_TEMPLATE_IDS.includes(detection.suggestedTemplate)
@@ -645,6 +1691,87 @@ Respond in JSON format:
   } catch (error) {
     console.error('[Actionable Detection] Failed to create actionables:', error)
     // Don't fail the transcription if actionable detection fails
+  }
+
+  // Meeting-timeline data (v39): windowed sentiment + action/decision markers.
+  // Runs automatically so a freshly transcribed recording gets timeline data
+  // without a manual analyzeTimeline() call. Dynamic import avoids a static
+  // cycle (timeline-analysis is otherwise a leaf). Non-fatal — the transcript is
+  // already persisted; a timeline failure must not fail the transcription.
+  try {
+    const { analyzeTimeline } = await import('./timeline-analysis')
+    const timeline = await analyzeTimeline(recordingId)
+    console.log(
+      `[Timeline] Recording ${recordingId}: ${timeline.sentimentSegments.length} sentiment segment(s), ` +
+        `${timeline.eventMarkers.length} event marker(s)`
+    )
+  } catch (e) {
+    console.error('[Timeline] Timeline analysis failed (non-fatal):', e instanceof Error ? e.message : e)
+  }
+
+  // Persist people + project the analysis extracted from the conversation
+  // (the ICS feed has no attendee data — the transcript is the source).
+  try {
+    const { applyTranscriptEntities } = await import('./org-reconciler')
+    const linkedMeetingId =
+      (analysis.selected_meeting_id && analysis.selected_meeting_id !== 'none'
+        ? analysis.selected_meeting_id
+        : undefined) ?? recording.meeting_id ?? getRecordingById(recordingId)?.meeting_id
+    const applied = applyTranscriptEntities({
+      meetingId: linkedMeetingId ?? undefined,
+      recordingId,
+      participants: analysis.participants,
+      project: analysis.project
+    })
+    if (applied.contacts > 0 || applied.projectLinked) {
+      console.log(
+        `[OrgReconciler] Transcript entities: +${applied.contacts} people${applied.projectLinked ? ', project linked' : ''}`
+      )
+    }
+  } catch (e) {
+    console.error('[OrgReconciler] Transcript entity extraction failed:', e)
+  }
+
+  // Self-identification: bind speaker labels to the names people state for
+  // THEMSELVES in the roll-call ("les habla Pedro", "yo también, Santiago de la
+  // Colina"). Near-certain, so it creates/links the contact and writes the
+  // speaker map. LLM-gated by a cheap lexical prefilter; non-fatal. Runs AFTER
+  // applyTranscriptEntities so its 'self-identification' tier upgrades any
+  // weaker attendee-context resolution just written for the same name.
+  try {
+    const { runSelfIdentificationForRecording } = await import('./self-identification')
+    const selfId = await runSelfIdentificationForRecording(recordingId)
+    if (selfId.bound > 0 || selfId.mergeSuspected > 0) {
+      console.log(
+        `[SelfID] Recording ${recordingId}: +${selfId.bound} speaker(s) named` +
+          (selfId.mergeSuspected > 0 ? `, ${selfId.mergeSuspected} merge-suspected` : '')
+      )
+    }
+  } catch (e) {
+    console.error('[SelfID] Self-identification pass failed:', e)
+  }
+
+  // Living knowledge graph (v27): announce the finished transcript so graph-sync
+  // can debounce-ingest only the new material. Non-fatal.
+  try {
+    const { getEventBus } = await import('./event-bus')
+    getEventBus().emitDomainEvent({
+      type: 'entity:transcript-ready',
+      timestamp: new Date().toISOString(),
+      payload: { transcriptId: `trans_${recordingId}`, recordingId }
+    })
+  } catch (e) {
+    console.warn('[GraphSync] transcript-ready emit failed:', e)
+  }
+
+  // Export the per-meeting wiki page (plain markdown knowledge base readable
+  // by the user and by external agents like Claude Code). Non-fatal.
+  try {
+    const { exportMeetingWiki } = await import('./meeting-wiki')
+    const wikiPath = exportMeetingWiki(recordingId)
+    if (wikiPath) console.log(`[MeetingWiki] Exported ${wikiPath}`)
+  } catch (e) {
+    console.error('[MeetingWiki] Export failed:', e)
   }
 
   progressCallback?.('indexing', 85) // spec-014: progress reporting

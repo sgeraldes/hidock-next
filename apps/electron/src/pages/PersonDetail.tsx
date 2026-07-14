@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   ArrowLeft,
@@ -14,7 +14,11 @@ import {
   Bot,
   Check,
   X,
-  Trash2
+  Trash2,
+  GitMerge,
+  Undo2,
+  History,
+  AlertTriangle
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -28,11 +32,77 @@ import {
   AlertDialogHeader,
   AlertDialogTitle
 } from '@/components/ui/alert-dialog'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+  DialogClose
+} from '@/components/ui/dialog'
+import {
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectItem
+} from '@/components/ui/select'
+import { HoverCard, HoverCardTrigger, HoverCardContent } from '@/components/ui/hover-card'
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
+import { MeetingHoverCard } from '@/components/entity'
 import { formatDateTime } from '@/lib/utils'
 import type { Person, PersonType } from '@/types/knowledge'
 import type { Meeting } from '@/types'
 import { cn } from '@/lib/utils'
 import { toast } from '@/components/ui/toaster'
+import { ResolvePerMeetingCard } from '@/components/identity/ResolvePerMeetingCard'
+import type { AmbiguousBucketSummary, BucketResolution } from '@/components/identity/useAmbiguousBuckets'
+import { Users } from 'lucide-react'
+
+const PERSON_TYPES: PersonType[] = ['team', 'candidate', 'customer', 'external', 'unknown']
+
+/** Above this many links on BOTH sides, a merge requires typing the loser's name. */
+const MERGE_LINK_THRESHOLD = 10
+
+/** A past merge folded into this contact (from identity:getMergeJournal). */
+interface MergeHistoryEntry {
+  id: string
+  kind: 'contact' | 'project'
+  keeperId: string
+  loserId: string
+  loserName: string
+  createdAt: string
+  undoneAt: string | null
+  linkCount: number
+}
+
+/** A keeper link that appeared after a merge — surfaced by unmerge for manual review. */
+interface OrphanLink {
+  table: string
+  key: string
+  label: string
+  date: string | null
+}
+
+/** An "also known as" alias folded onto this contact (from identity:getAliases). */
+interface PersonAlias {
+  alias: string
+  source: 'merge' | 'speaker_assign' | 'manual' | 'inferred' | 'rejected' | null
+  confidence: number | null
+  created_at: string
+}
+
+/** Human phrase for where an alias came from, for the per-chip tooltip. */
+function aliasSourceLabel(source: PersonAlias['source']): string {
+  switch (source) {
+    case 'merge': return 'from merge'
+    case 'speaker_assign': return 'speaker assignment'
+    case 'manual': return 'confirmed suggestion'
+    case 'inferred': return 'inferred from context'
+    default: return 'alias'
+  }
+}
 
 export function PersonDetail() {
   const { id } = useParams<{ id: string }>()
@@ -42,10 +112,43 @@ export function PersonDetail() {
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState<'timeline' | 'knowledge'>('timeline')
   const [isEditing, setIsEditing] = useState(false)
-  const [editForm, setEditForm] = useState<{ name: string; email: string; role: string; company: string; notes: string }>({
-    name: '', email: '', role: '', company: '', notes: ''
+  const [editForm, setEditForm] = useState<{
+    name: string
+    email: string
+    role: string
+    company: string
+    notes: string
+    type: PersonType
+    tags: string[]
+  }>({
+    name: '', email: '', role: '', company: '', notes: '', type: 'unknown', tags: []
   })
+  const [tagInput, setTagInput] = useState('')
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
+
+  // Merge dialog state
+  const [mergeDialogOpen, setMergeDialogOpen] = useState(false)
+  const [mergeCandidates, setMergeCandidates] = useState<Person[]>([])
+  const [mergeSearch, setMergeSearch] = useState('')
+  const [mergeTarget, setMergeTarget] = useState<Person | null>(null)
+  const [merging, setMerging] = useState(false)
+  // High-stakes gate: when BOTH sides are heavily linked, require typing the loser's name.
+  const [mergeImpact, setMergeImpact] = useState<{ keeper: number; loser: number } | null>(null)
+  const [mergeConfirmText, setMergeConfirmText] = useState('')
+
+  // "Also known as" aliases (read-only chip row)
+  const [aliases, setAliases] = useState<PersonAlias[]>([])
+
+  // Merge history / unmerge
+  const [mergeJournal, setMergeJournal] = useState<MergeHistoryEntry[]>([])
+  const [unmergeTarget, setUnmergeTarget] = useState<MergeHistoryEntry | null>(null)
+  const [unmerging, setUnmerging] = useState(false)
+  const [orphanReview, setOrphanReview] = useState<{ loserName: string; orphans: OrphanLink[] } | null>(null)
+
+  // Ambiguous-bucket state: when this contact is a bare first name denoting several
+  // real people, offer per-recording resolution instead of pretending it's one person.
+  const [bucket, setBucket] = useState<BucketResolution | null>(null)
+  const [showResolve, setShowResolve] = useState(false)
 
   // B-PPL-002: Wrapped in useCallback to satisfy dependency arrays
   const loadDetails = useCallback(async () => {
@@ -73,7 +176,9 @@ export function PersonDetail() {
           email: personData.email || '',
           role: personData.role || '',
           company: personData.company || '',
-          notes: personData.notes || ''
+          notes: personData.notes || '',
+          type: personData.type || 'unknown',
+          tags: personData.tags || []
         })
         if (result.data.meetings) {
           setMeetings(result.data.meetings)
@@ -83,6 +188,30 @@ export function PersonDetail() {
       console.error('Failed to load person details:', error)
     } finally {
       setLoading(false)
+    }
+  }, [id])
+
+  // Load this contact's "also known as" aliases (read-only chip row).
+  const loadAliases = useCallback(async () => {
+    if (!id) return
+    try {
+      const result = await window.electronAPI.identity.getAliases(id)
+      setAliases(result.success && result.data ? (result.data as PersonAlias[]) : [])
+    } catch (error) {
+      console.error('Failed to load aliases:', error)
+      setAliases([])
+    }
+  }, [id])
+
+  // Load this contact's merge history (open, undoable merges folded into it).
+  const loadMergeJournal = useCallback(async () => {
+    if (!id) return
+    try {
+      const result = await window.electronAPI.identity.getMergeJournal({ kind: 'contact', keeperId: id })
+      setMergeJournal(result.success && result.data ? (result.data as MergeHistoryEntry[]) : [])
+    } catch (error) {
+      console.error('Failed to load merge history:', error)
+      setMergeJournal([])
     }
   }, [id])
 
@@ -110,7 +239,7 @@ export function PersonDetail() {
     }
 
     try {
-      const updatePayload: Record<string, string | undefined> = {
+      const updatePayload: Record<string, unknown> = {
         id,
         notes: editForm.notes || undefined,
         role: editForm.role || undefined,
@@ -123,6 +252,17 @@ export function PersonDetail() {
       }
       if (trimmedEmail !== (person.email || '')) {
         updatePayload.email = trimmedEmail || undefined
+      }
+      // R1b: person type + tags are now editable
+      if (editForm.type !== person.type) {
+        updatePayload.type = editForm.type
+      }
+      const currentTags = person.tags || []
+      const nextTags = editForm.tags
+      const tagsChanged =
+        nextTags.length !== currentTags.length || nextTags.some((t, i) => t !== currentTags[i])
+      if (tagsChanged) {
+        updatePayload.tags = nextTags
       }
 
       await window.electronAPI.contacts.update(updatePayload as any)
@@ -142,9 +282,12 @@ export function PersonDetail() {
         email: person.email || '',
         role: person.role || '',
         company: person.company || '',
-        notes: person.notes || ''
+        notes: person.notes || '',
+        type: person.type || 'unknown',
+        tags: person.tags || []
       })
     }
+    setTagInput('')
     setIsEditing(false)
   }
 
@@ -166,9 +309,182 @@ export function PersonDetail() {
     setDeleteDialogOpen(false)
   }
 
+  // R1b: tag editing (edit mode)
+  const addTag = () => {
+    const t = tagInput.trim()
+    if (!t) return
+    if (editForm.tags.some((existing) => existing.toLowerCase() === t.toLowerCase())) {
+      setTagInput('')
+      return
+    }
+    setEditForm((prev) => ({ ...prev, tags: [...prev.tags, t] }))
+    setTagInput('')
+  }
+
+  const removeTag = (tag: string) => {
+    setEditForm((prev) => ({ ...prev, tags: prev.tags.filter((t) => t !== tag) }))
+  }
+
+  // R1b: merge — fold another contact into this one (canonical entity dedupe)
+  const openMergeDialog = async () => {
+    setMergeDialogOpen(true)
+    setMergeSearch('')
+    setMergeTarget(null)
+    setMergeImpact(null)
+    setMergeConfirmText('')
+    try {
+      const result = await window.electronAPI.contacts.getAll()
+      if (result.success) {
+        setMergeCandidates(result.data.contacts.filter((c) => c.id !== id))
+      }
+    } catch (error) {
+      console.error('Failed to load merge candidates:', error)
+      toast.error('Failed to load contacts')
+    }
+  }
+
+  // Fetch true link counts for the high-stakes gate once a target is picked.
+  useEffect(() => {
+    setMergeConfirmText('')
+    if (!id || !mergeTarget) {
+      setMergeImpact(null)
+      return
+    }
+    let cancelled = false
+    window.electronAPI.identity
+      .getMergeImpact({ kind: 'contact', keeperId: id, loserId: mergeTarget.id })
+      .then((res) => {
+        if (!cancelled) setMergeImpact(res.success && res.data ? res.data : null)
+      })
+      .catch(() => {
+        if (!cancelled) setMergeImpact(null)
+      })
+    return () => {
+      cancelled = true
+    }
+    // Keyed on the target id only — the mergeTarget object is otherwise stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, mergeTarget?.id])
+
+  // Detect whether this contact is an ambiguous bucket (bare first name → several people).
+  const loadBucket = useCallback(async () => {
+    if (!id) return
+    try {
+      const res = await window.electronAPI.identity.getBucketResolution?.(id)
+      setBucket(res?.success ? ((res.data as BucketResolution | null) ?? null) : null)
+    } catch {
+      setBucket(null)
+    }
+  }, [id])
+
+  useEffect(() => {
+    loadBucket()
+  }, [loadBucket])
+
+  // Feed the reused ResolvePerMeetingCard: it wants a summary + fetch/resolve closures.
+  const bucketSummary: AmbiguousBucketSummary | null = useMemo(() => {
+    if (!bucket) return null
+    const resolvedCount = bucket.recordings.filter((r) => r.resolved).length
+    return {
+      contactId: bucket.contactId,
+      name: bucket.name,
+      candidates: bucket.candidates,
+      recordingCount: bucket.recordings.length,
+      resolvedCount,
+      pendingCount: bucket.recordings.length - resolvedCount
+    }
+  }, [bucket])
+
+  const fetchBucketResolution = useCallback(async (): Promise<BucketResolution | null> => {
+    if (!id) return null
+    const res = await window.electronAPI.identity.getBucketResolution?.(id)
+    return res?.success ? ((res.data as BucketResolution | null) ?? null) : null
+  }, [id])
+
+  const resolveBucketMention = useCallback(
+    async (recordingId: string, sourceName: string, contactId: string | null, method = 'manual'): Promise<boolean> => {
+      const res = await window.electronAPI.identity.resolveMention?.({ recordingId, sourceName, contactId, method })
+      return !!res?.success
+    },
+    []
+  )
+
+  // Both sides heavily linked → require typing the loser's name before merging.
+  const highStakesMerge =
+    !!mergeImpact && mergeImpact.keeper > MERGE_LINK_THRESHOLD && mergeImpact.loser > MERGE_LINK_THRESHOLD
+  const mergeConfirmed = !highStakesMerge || mergeConfirmText.trim() === (mergeTarget?.name ?? '').trim()
+
+  const handleMerge = async () => {
+    if (!id || !person || !mergeTarget || !mergeConfirmed) return
+    setMerging(true)
+    try {
+      const result = await window.electronAPI.contacts.merge({ keeperId: id, loserId: mergeTarget.id })
+      if (result.success) {
+        toast.success('Contacts merged', `${mergeTarget.name} was merged into ${person.name}.`)
+        setMergeDialogOpen(false)
+        setMergeTarget(null)
+        setMergeImpact(null)
+        setMergeConfirmText('')
+        await loadDetails()
+        await loadMergeJournal()
+      } else {
+        toast.error('Failed to merge contacts', (result as any).error?.message || 'Unknown error')
+      }
+    } catch (error) {
+      console.error('Failed to merge contacts:', error)
+      toast.error('Failed to merge contacts', error instanceof Error ? error.message : 'Unknown error')
+    } finally {
+      setMerging(false)
+    }
+  }
+
+  // Undo a previously recorded merge: recreate the split contact, repoint the
+  // journaled links back, and surface any links added since the merge for review.
+  const handleUnmerge = async () => {
+    if (!unmergeTarget) return
+    setUnmerging(true)
+    try {
+      const result = await window.electronAPI.contacts.unmerge(unmergeTarget.id)
+      if (result.success && result.data) {
+        const { restored, orphanedSinceMerge, loserName } = result.data
+        toast.success(
+          'Merge undone',
+          `Restored ${loserName}: ${restored.meetingLinks} meeting, ${restored.speakerLinks} speaker link(s)` +
+            (restored.skipped ? `, ${restored.skipped} skipped` : '') +
+            '.'
+        )
+        setUnmergeTarget(null)
+        if (orphanedSinceMerge.length > 0) {
+          setOrphanReview({ loserName, orphans: orphanedSinceMerge as OrphanLink[] })
+        }
+        await loadDetails()
+        await loadMergeJournal()
+      } else {
+        toast.error('Failed to undo merge', (result as any).error?.message || 'Unknown error')
+      }
+    } catch (error) {
+      console.error('Failed to undo merge:', error)
+      toast.error('Failed to undo merge', error instanceof Error ? error.message : 'Unknown error')
+    } finally {
+      setUnmerging(false)
+    }
+  }
+
+  const filteredMergeCandidates = useMemo(() => {
+    const q = mergeSearch.trim().toLowerCase()
+    const list = q
+      ? mergeCandidates.filter(
+          (c) => c.name.toLowerCase().includes(q) || (c.email ?? '').toLowerCase().includes(q)
+        )
+      : mergeCandidates
+    return list.slice(0, 50)
+  }, [mergeCandidates, mergeSearch])
+
   useEffect(() => {
     loadDetails()
-  }, [loadDetails])
+    loadMergeJournal()
+    loadAliases()
+  }, [loadDetails, loadMergeJournal, loadAliases])
 
   const getTypeColor = (type: PersonType) => {
     switch (type) {
@@ -177,6 +493,17 @@ export function PersonDetail() {
       case 'customer': return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400'
       case 'external': return 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400'
       default: return 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-400'
+    }
+  }
+
+  /** Human phrase describing a person's type, for the colored-glyph tooltips. */
+  const getTypeLabel = (type: PersonType): string => {
+    switch (type) {
+      case 'team': return 'Team member'
+      case 'candidate': return 'Candidate'
+      case 'customer': return 'Customer'
+      case 'external': return 'External contact'
+      default: return 'Unclassified contact'
     }
   }
 
@@ -207,10 +534,13 @@ export function PersonDetail() {
               <ArrowLeft className="h-5 w-5" />
             </Button>
             <div className="flex items-center gap-3">
-              <div className={cn(
-                "w-12 h-12 rounded-2xl flex items-center justify-center text-xl font-bold shadow-sm border",
-                getTypeColor(person.type)
-              )}>
+              <div
+                className={cn(
+                  "w-12 h-12 rounded-2xl flex items-center justify-center text-xl font-bold shadow-sm border",
+                  getTypeColor(person.type)
+                )}
+                title={getTypeLabel(person.type)}
+              >
                 {person.name.charAt(0)}
               </div>
               <div>
@@ -226,12 +556,33 @@ export function PersonDetail() {
                   <h1 className="text-xl font-bold leading-tight">{person.name}</h1>
                 )}
                 <div className="flex items-center gap-2 mt-1">
-                  <span className={cn(
-                    "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider",
-                    getTypeColor(person.type)
-                  )}>
-                    {person.type}
-                  </span>
+                  {isEditing ? (
+                    <Select
+                      value={editForm.type}
+                      onValueChange={(value) => setEditForm((prev) => ({ ...prev, type: value as PersonType }))}
+                    >
+                      <SelectTrigger className="h-7 w-[130px] text-xs" aria-label="Person type">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {PERSON_TYPES.map((t) => (
+                          <SelectItem key={t} value={t} className="capitalize">
+                            {t}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    <span
+                      className={cn(
+                        "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider",
+                        getTypeColor(person.type)
+                      )}
+                      title={getTypeLabel(person.type)}
+                    >
+                      {person.type}
+                    </span>
+                  )}
                   {person.company && (
                     <span className="text-xs text-muted-foreground">- {person.company}</span>
                   )}
@@ -262,6 +613,11 @@ export function PersonDetail() {
                   <Edit className="h-4 w-4 mr-2" />
                   Edit
                 </Button>
+                {/* R1b: Merge another contact into this one */}
+                <Button size="sm" variant="outline" onClick={openMergeDialog} disabled={loading}>
+                  <GitMerge className="h-4 w-4 mr-2" />
+                  Merge…
+                </Button>
                 <Button
                   size="sm"
                   variant="ghost"
@@ -280,9 +636,41 @@ export function PersonDetail() {
       {/* Main Content */}
       <div className="flex-1 overflow-auto">
         <div className="max-w-5xl mx-auto p-6 space-y-6">
+          {bucketSummary && bucketSummary.recordingCount > 0 && (
+            <div className="space-y-3">
+              <div className="flex flex-col gap-2 rounded-lg border border-blue-500/30 bg-blue-500/[0.06] px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex items-start gap-2">
+                  <Users className="h-4 w-4 mt-0.5 flex-shrink-0 text-blue-500" />
+                  <p className="text-sm">
+                    This may be several people —{' '}
+                    <span className="font-medium">{bucketSummary.resolvedCount} resolved</span>,{' '}
+                    <span className="font-medium">{bucketSummary.pendingCount} pending</span>.
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 border-blue-500/40 text-blue-600 hover:bg-blue-500/10 dark:text-blue-300"
+                  onClick={() => setShowResolve((v) => !v)}
+                  aria-expanded={showResolve}
+                >
+                  {showResolve ? 'Hide' : 'Resolve'}
+                </Button>
+              </div>
+              {showResolve && (
+                <ResolvePerMeetingCard
+                  bucket={bucketSummary}
+                  fetchResolution={fetchBucketResolution}
+                  resolve={resolveBucketMention}
+                  onOpenRecording={(recordingId) => navigate('/library', { state: { selectedId: recordingId } })}
+                  onResolved={loadBucket}
+                />
+              )}
+            </div>
+          )}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {/* Left Column: Info Card */}
-            <div className="space-y-6">
+            <div className="space-y-6 animate-rise-in">
               <Card>
                 <CardHeader>
                   <CardTitle className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Information</CardTitle>
@@ -363,27 +751,138 @@ export function PersonDetail() {
                 </CardContent>
               </Card>
 
-              {person.tags.length > 0 && (
+              {(person.tags.length > 0 || isEditing) && (
                 <Card>
                   <CardHeader>
                     <CardTitle className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Tags</CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <div className="flex flex-wrap gap-2">
-                      {person.tags.map(tag => (
-                        <div key={tag} className="flex items-center gap-1.5 text-xs bg-secondary px-3 py-1 rounded-full border border-border/50">
-                          <Tag className="h-3 w-3" />
-                          {tag}
+                    {isEditing ? (
+                      <div className="space-y-3">
+                        <div className="flex flex-wrap gap-2">
+                          {editForm.tags.map(tag => (
+                            <div key={tag} className="flex items-center gap-1.5 text-xs bg-secondary px-3 py-1 rounded-full border border-border/50">
+                              <Tag className="h-3 w-3" />
+                              {tag}
+                              <button
+                                type="button"
+                                onClick={() => removeTag(tag)}
+                                className="ml-0.5 text-muted-foreground hover:text-destructive"
+                                aria-label={`Remove tag ${tag}`}
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            </div>
+                          ))}
+                          {editForm.tags.length === 0 && (
+                            <span className="text-xs text-muted-foreground">No tags yet</span>
+                          )}
                         </div>
-                      ))}
-                    </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            value={tagInput}
+                            onChange={(e) => setTagInput(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault()
+                                addTag()
+                              }
+                            }}
+                            className="flex-1 text-sm border rounded px-2 py-1 bg-background"
+                            placeholder="Add a tag..."
+                            aria-label="Add a tag"
+                          />
+                          <Button size="sm" variant="outline" onClick={addTag} disabled={!tagInput.trim()}>
+                            Add
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex flex-wrap gap-2">
+                        {person.tags.map(tag => (
+                          <div key={tag} className="flex items-center gap-1.5 text-xs bg-secondary px-3 py-1 rounded-full border border-border/50">
+                            <Tag className="h-3 w-3" />
+                            {tag}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              )}
+
+              {/* "Also known as" — read-only aliases folded onto this contact */}
+              {aliases.length > 0 && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+                      Also known as
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <TooltipProvider delayDuration={200}>
+                      <div className="flex flex-wrap gap-2">
+                        {aliases.map((a) => (
+                          <Tooltip key={`${a.alias}:${a.created_at}`}>
+                            <TooltipTrigger asChild>
+                              <span className="text-xs bg-muted/60 text-muted-foreground px-2.5 py-1 rounded-full border border-border/40 cursor-default">
+                                {a.alias}
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              {aliasSourceLabel(a.source)} · {formatDateTime(a.created_at)}
+                            </TooltipContent>
+                          </Tooltip>
+                        ))}
+                      </div>
+                    </TooltipProvider>
+                  </CardContent>
+                </Card>
+              )}
+
+              {/* v30: Merge history — undoable merges folded into this contact */}
+              {mergeJournal.length > 0 && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-sm font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-2">
+                      <History className="h-4 w-4" />
+                      Merge history
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-2">
+                    {mergeJournal.map((entry) => (
+                      <div
+                        key={entry.id}
+                        className="flex items-center justify-between gap-2 p-2 border rounded-lg text-sm"
+                      >
+                        <div className="min-w-0">
+                          <p className="font-medium truncate" title={entry.loserName}>
+                            {entry.loserName}
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            {entry.linkCount} link(s) · {formatDateTime(entry.createdAt)}
+                          </p>
+                        </div>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="flex-shrink-0"
+                          onClick={() => setUnmergeTarget(entry)}
+                          title={`Undo merge with ${entry.loserName}`}
+                        >
+                          <Undo2 className="h-3.5 w-3.5 mr-1" />
+                          Undo
+                        </Button>
+                      </div>
+                    ))}
                   </CardContent>
                 </Card>
               )}
             </div>
 
             {/* Right Column: Timeline & Knowledge */}
-            <div className="md:col-span-2 space-y-6">
+            <div className="md:col-span-2 space-y-6 animate-rise-in" style={{ animationDelay: '60ms' }}>
               <div className="w-full">
                 <div className="grid w-full grid-cols-2 bg-muted/50 p-1 rounded-lg">
                   <button
@@ -417,22 +916,29 @@ export function PersonDetail() {
                       </div>
                     ) : (
                       meetings.map((meeting) => (
-                        <Card key={meeting.id} className="group hover:border-primary/30 transition-all cursor-pointer overflow-hidden shadow-sm" onClick={() => navigate(`/meeting/${meeting.id}`)}>
-                          <div className="flex items-stretch h-full">
-                            <div className="w-1 bg-muted group-hover:bg-primary transition-colors" />
-                            <div className="flex-1 p-4">
-                              <div className="flex items-start justify-between">
-                                <div>
-                                  <h3 className="text-sm font-semibold group-hover:text-primary transition-colors">{meeting.subject}</h3>
-                                  <p className="text-xs text-muted-foreground mt-1">
-                                    {formatDateTime(meeting.start_time)}
-                                  </p>
+                        <HoverCard key={meeting.id}>
+                          <HoverCardTrigger asChild>
+                            <Card
+                              className="group lift cursor-pointer overflow-hidden shadow-sm border-border/70 dark:border-white/[0.06] hover:border-primary/40"
+                              onClick={() => navigate(`/meeting/${meeting.id}`)}
+                            >
+                              <div className="p-4">
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="min-w-0">
+                                    <h3 className="text-sm font-semibold group-hover:text-primary transition-colors truncate">{meeting.subject}</h3>
+                                    <p className="text-xs text-muted-foreground mt-1">
+                                      {formatDateTime(meeting.start_time)}
+                                    </p>
+                                  </div>
+                                  <ExternalLink className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
                                 </div>
-                                <ExternalLink className="h-3.5 w-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
                               </div>
-                            </div>
-                          </div>
-                        </Card>
+                            </Card>
+                          </HoverCardTrigger>
+                          <HoverCardContent>
+                            <MeetingHoverCard id={meeting.id} name={meeting.subject} visibleFields={['title', 'time']} />
+                          </HoverCardContent>
+                        </HoverCard>
                       ))
                     )}
                   </div>
@@ -497,6 +1003,142 @@ export function PersonDetail() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* R1b: Merge Contacts Dialog */}
+      <Dialog open={mergeDialogOpen} onOpenChange={setMergeDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Merge into {person.name}</DialogTitle>
+            <DialogDescription>
+              {mergeTarget
+                ? `Merge ${mergeTarget.name} into ${person.name}? All meetings, transcripts, and details will be folded into ${person.name}. You can undo this from ${person.name}'s Merge history.`
+                : `Pick a duplicate contact to fold into ${person.name}. The other contact will be deleted.`}
+            </DialogDescription>
+          </DialogHeader>
+
+          {!mergeTarget && (
+            <>
+              <input
+                type="text"
+                value={mergeSearch}
+                onChange={(e) => setMergeSearch(e.target.value)}
+                placeholder="Search contacts..."
+                aria-label="Search contacts to merge"
+                className="w-full text-sm border rounded px-2 py-1.5 bg-background"
+              />
+              <div className="max-h-64 overflow-auto space-y-1 mt-1">
+                {filteredMergeCandidates.length === 0 ? (
+                  <p className="text-sm text-muted-foreground text-center py-6">No other contacts found.</p>
+                ) : (
+                  filteredMergeCandidates.map((c) => (
+                    <button
+                      key={c.id}
+                      className="w-full text-left p-2 border rounded-lg hover:bg-muted transition-colors"
+                      onClick={() => setMergeTarget(c)}
+                    >
+                      <p className="font-medium text-sm">{c.name}</p>
+                      {c.email && <p className="text-xs text-muted-foreground">{c.email}</p>}
+                    </button>
+                  ))
+                )}
+              </div>
+            </>
+          )}
+
+          {mergeTarget && highStakesMerge && (
+            <div className="rounded-lg border border-amber-500/40 bg-amber-500/[0.06] px-3 py-2 text-xs">
+              <p className="text-amber-700 dark:text-amber-400 font-medium">
+                High-stakes merge: {person.name} has {mergeImpact!.keeper} links and {mergeTarget.name} has{' '}
+                {mergeImpact!.loser}. To confirm, type <span className="font-semibold">{mergeTarget.name}</span>.
+              </p>
+              <input
+                type="text"
+                value={mergeConfirmText}
+                onChange={(e) => setMergeConfirmText(e.target.value)}
+                placeholder={mergeTarget.name}
+                aria-label={`Type ${mergeTarget.name} to confirm merge`}
+                className="w-full text-sm border rounded px-2 py-1.5 bg-background mt-2"
+              />
+            </div>
+          )}
+
+          <DialogFooter>
+            {mergeTarget ? (
+              <>
+                <Button variant="outline" onClick={() => setMergeTarget(null)} disabled={merging}>
+                  Back
+                </Button>
+                <Button
+                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                  onClick={handleMerge}
+                  disabled={merging || !mergeConfirmed}
+                >
+                  {merging ? <RefreshCw className="h-4 w-4 mr-2 animate-spin" /> : <GitMerge className="h-4 w-4 mr-2" />}
+                  Merge
+                </Button>
+              </>
+            ) : (
+              <DialogClose asChild>
+                <Button variant="outline">Cancel</Button>
+              </DialogClose>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* v30: Unmerge confirmation */}
+      <AlertDialog open={!!unmergeTarget} onOpenChange={(open) => !open && setUnmergeTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Undo merge with {unmergeTarget?.loserName}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This recreates {unmergeTarget?.loserName} as a separate contact and moves the{' '}
+              {unmergeTarget?.linkCount ?? 0} link(s) recorded at merge time back to it. Links added to {person.name}{' '}
+              <em>after</em> the merge stay put and are listed for you to reassign by hand.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={unmerging}>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={handleUnmerge} disabled={unmerging}>
+              {unmerging ? <RefreshCw className="h-4 w-4 mr-2 animate-spin" /> : <Undo2 className="h-4 w-4 mr-2" />}
+              Undo merge
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* v30: Manual-review list of links that appeared after the merge */}
+      <Dialog open={!!orphanReview} onOpenChange={(open) => !open && setOrphanReview(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4 text-amber-500" />
+              Review links added after the merge
+            </DialogTitle>
+            <DialogDescription>
+              These {orphanReview?.orphans.length ?? 0} link(s) were attached to {person.name} after the original merge,
+              so unmerge left them in place. If any of them actually belong to {orphanReview?.loserName}, open it and
+              reassign it by hand.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-64 overflow-auto space-y-1">
+            {orphanReview?.orphans.map((o) => (
+              <div key={`${o.table}:${o.key}`} className="p-2 border rounded-lg text-sm">
+                <p className="font-medium">{o.label}</p>
+                <p className="text-xs text-muted-foreground">
+                  {o.table === 'transcript_speakers' ? 'Speaker binding' : 'Meeting link'}
+                  {o.date ? ` · ${formatDateTime(o.date)}` : ''}
+                </p>
+              </div>
+            ))}
+          </div>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button variant="outline">Done</Button>
+            </DialogClose>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

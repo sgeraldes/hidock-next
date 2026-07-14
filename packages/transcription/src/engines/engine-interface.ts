@@ -13,6 +13,8 @@ export interface TranscribeOptions {
   timeOffset?: number
   vocabulary?: string[]
   diarize?: boolean
+  /** Optional free-text context passed to the engine's prompt (e.g. meeting context for Gemini). */
+  context?: string
 }
 
 export interface TranscriptionEngine {

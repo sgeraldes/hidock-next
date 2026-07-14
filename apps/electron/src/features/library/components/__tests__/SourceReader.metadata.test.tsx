@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { SourceReader } from '../SourceReader'
 import type { UnifiedRecording } from '@/types/unified-recording'
 import type { Meeting } from '@/types'
@@ -19,6 +19,17 @@ import type { Meeting } from '@/types'
 // ---------------------------------------------------------------------------
 const mockKnowledgeUpdate = vi.fn().mockResolvedValue({ success: true })
 const mockSelectMeeting = vi.fn().mockResolvedValue({ success: true })
+// Projects assignment (v29)
+const mockGetForKnowledge = vi.fn().mockResolvedValue({ success: true, data: [] })
+const mockGetAllProjects = vi.fn().mockResolvedValue({ success: true, data: { projects: [{ id: 'pr1', name: 'Alpha' }], total: 1 } })
+const mockSetProjects = vi.fn().mockResolvedValue({ success: true })
+
+// PeoplePanel (Participants/Invited) calls useNavigate; these tests render
+// without a Router, so stub navigation to keep them Router-independent.
+vi.mock('react-router-dom', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-router-dom')>()
+  return { ...actual, useNavigate: () => vi.fn() }
+})
 
 // Silence @radix-ui portal issues in jsdom
 vi.mock('@radix-ui/react-portal', () => ({
@@ -77,9 +88,10 @@ vi.mock('@/components/ConfirmDialog', () => ({
   },
 }))
 
-// Mock AudioPlayer to avoid audio API issues
-vi.mock('@/components/AudioPlayer', () => ({
-  AudioPlayer: () => <div data-testid="audio-player" />,
+// Mock the WaveformPlayer to avoid audio API issues (and so its internal speed
+// Select doesn't collide with the mocked category Select below).
+vi.mock('../WaveformPlayer', () => ({
+  WaveformPlayer: () => <div data-testid="waveform-player" />,
 }))
 
 // Mock TranscriptViewer to keep tests focused
@@ -139,11 +151,20 @@ beforeEach(() => {
     value: {
       knowledge: {
         update: mockKnowledgeUpdate,
+        setProjects: mockSetProjects,
+      },
+      projects: {
+        getForKnowledge: mockGetForKnowledge,
+        getAll: mockGetAllProjects,
+        openFolder: vi.fn().mockResolvedValue({ success: true }),
       },
       recordings: {
         selectMeeting: mockSelectMeeting,
         getCandidates: vi.fn().mockResolvedValue({ success: true, data: [] }),
         getMeetingsNearDate: vi.fn().mockResolvedValue({ success: true, data: [] }),
+      },
+      contacts: {
+        getForMeeting: vi.fn().mockResolvedValue({ success: true, data: [] }),
       },
     },
     writable: true,
@@ -315,12 +336,15 @@ describe('SourceReader — metadata editing', () => {
     expect(screen.getByTitle(/remove meeting link/i)).toBeInTheDocument()
   })
 
-  // 13. "Link Meeting" button shows when no meeting linked
-  it('shows Link Meeting button when no meeting is linked', () => {
+  // 13. "Link Meeting" action shows in the overflow menu when no meeting linked
+  it('shows Link Meeting action in the overflow menu when no meeting is linked', async () => {
     const rec = makeRecording({ knowledgeCaptureId: 'kc-1' })
     render(<SourceReader recording={rec} />)
 
-    expect(screen.getByRole('button', { name: /link meeting/i })).toBeInTheDocument()
+    // Link Meeting moved into the "More actions" overflow menu (audit #4).
+    // Radix opens its menu on keydown (Enter/Space/ArrowDown), not click.
+    fireEvent.keyDown(screen.getByRole('button', { name: /more actions/i }), { key: 'Enter' })
+    expect(await screen.findByRole('menuitem', { name: /link meeting/i })).toBeInTheDocument()
   })
 
   // 14. Remove calls selectMeeting(id, null)
@@ -418,4 +442,88 @@ describe('SourceReader — metadata editing', () => {
     expect(screen.queryByTestId('confirm-dialog')).not.toBeInTheDocument()
   })
 
+})
+
+// ---------------------------------------------------------------------------
+// Projects assignment picker (v29)
+// ---------------------------------------------------------------------------
+describe('SourceReader — projects assignment', () => {
+  it('loads assigned projects for a captured recording', async () => {
+    mockGetForKnowledge.mockResolvedValueOnce({ success: true, data: [{ id: 'pr1', name: 'Alpha' }] })
+    const rec = makeRecording({ knowledgeCaptureId: 'kc-1' })
+    render(<SourceReader recording={rec} />)
+
+    expect(await screen.findByText('Alpha')).toBeInTheDocument()
+    expect(mockGetForKnowledge).toHaveBeenCalledWith('kc-1')
+  })
+
+  it('does not render the projects row without a knowledgeCaptureId', () => {
+    const rec = makeRecording({ knowledgeCaptureId: undefined })
+    render(<SourceReader recording={rec} />)
+
+    expect(screen.queryByRole('button', { name: /assign project/i })).not.toBeInTheDocument()
+  })
+
+  it('assigning a project via the picker calls knowledge.setProjects', async () => {
+    const rec = makeRecording({ knowledgeCaptureId: 'kc-1' })
+    render(<SourceReader recording={rec} />)
+
+    // Open the picker popover
+    fireEvent.click(screen.getByRole('button', { name: /assign project/i }))
+
+    // Click the Alpha option (loaded via projects.getAll)
+    const option = await screen.findByRole('button', { name: /alpha/i })
+    fireEvent.click(option)
+
+    await waitFor(() => {
+      expect(mockSetProjects).toHaveBeenCalledWith({ knowledgeCaptureId: 'kc-1', projectIds: ['pr1'] })
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Hook-order stability (regression)
+//
+// The `transcriptSegments` useMemo once sat AFTER the "no recording selected"
+// early return. With no recording the placeholder rendered without that hook;
+// selecting a recording then added it, so React threw "Rendered more hooks than
+// during the previous render." The memo now runs unconditionally above the
+// early return, so hook count is stable across the null → selected transition.
+// ---------------------------------------------------------------------------
+describe('SourceReader — hook order stability (regression)', () => {
+  function makeTranscript() {
+    return {
+      id: 't-1',
+      recording_id: 'rec-1',
+      full_text: 'hola qué tal',
+      summary: 'resumen',
+      action_items: JSON.stringify(['hacer algo']),
+      speakers: JSON.stringify([{ speaker: 'Speaker 1', start: 0, end: 1, text: 'hola qué tal' }]),
+    } as any
+  }
+
+  it('does not throw a hooks-order error when switching from no recording to a selected one', () => {
+    const { rerender } = render(<SourceReader recording={null} />)
+    expect(screen.getByText(/no recording selected/i)).toBeInTheDocument()
+
+    // Selecting a recording that carries a transcript with `speakers` exercises
+    // the transcriptSegments memo — this is the exact transition that crashed.
+    expect(() =>
+      rerender(
+        <SourceReader recording={makeRecording({ title: 'Con transcript' })} transcript={makeTranscript()} />
+      )
+    ).not.toThrow()
+
+    expect(screen.getByTestId('transcript-viewer')).toBeInTheDocument()
+  })
+
+  it('does not throw when switching back from a selected recording to none', () => {
+    const { rerender } = render(
+      <SourceReader recording={makeRecording({ title: 'Con transcript' })} transcript={makeTranscript()} />
+    )
+    expect(screen.getByTestId('transcript-viewer')).toBeInTheDocument()
+
+    expect(() => rerender(<SourceReader recording={null} />)).not.toThrow()
+    expect(screen.getByText(/no recording selected/i)).toBeInTheDocument()
+  })
 })

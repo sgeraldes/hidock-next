@@ -1,5 +1,5 @@
-import initSqlJs, { Database as SqlJsDatabase } from "sql.js";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
+import Database from "better-sqlite3";
+import { existsSync, writeFileSync } from "fs";
 import { join } from "path";
 import { app } from "electron";
 import { v4 as uuidv4 } from "uuid";
@@ -8,9 +8,7 @@ import {
   SCHEMA_VERSION,
   DEFAULT_MEETING_TYPES,
 } from "./database-schema";
-
-let db: SqlJsDatabase | null = null;
-let dbPath: string = "";
+import { DatabaseEngine, type SqlJsDatabase } from "@hidock/database";
 
 // FIX PLY-003: Database migrations for schema evolution
 const MIGRATIONS: Record<number, () => void> = {
@@ -43,13 +41,48 @@ function getDatabasePath(): string {
   return join(getDatabaseDir(), "meeting-recorder.db");
 }
 
-export function getDatabase(): SqlJsDatabase {
-  if (!db) {
-    throw new Error(
-      "Database not initialized. Call initializeDatabase() first.",
-    );
+/**
+ * Phase-2 structural repair. Invoked by the engine on every boot,
+ * after core tables and before migrations: force-adds any columns the current
+ * code requires but an older on-disk schema may lack. Idempotent.
+ */
+function repairPhase(): void {
+  const database = getDatabase();
+  // Ensure critical columns exist even if migrations were skipped (FIX: audio_path column)
+  const repairColumns = [
+    { table: "sessions", column: "audio_path", sql: "ALTER TABLE sessions ADD COLUMN audio_path TEXT" },
+  ];
+  for (const repair of repairColumns) {
+    const tableInfo = database.exec(`PRAGMA table_info(${repair.table})`);
+    if (tableInfo.length > 0 && tableInfo[0].values) {
+      const columns = tableInfo[0].values.map((row: unknown[]) => row[1]);
+      if (!columns.includes(repair.column)) {
+        try {
+          database.run(repair.sql);
+          console.log(`[Database] Repaired: ${repair.table}.${repair.column}`);
+        } catch (e) {
+          console.warn(`[Database] Repair warning:`, e);
+        }
+      }
+    }
   }
-  return db;
+}
+
+/**
+ * Shared SQLite engine, configured with this app's schema, version, migrations,
+ * and structural-repair callback. Owns the sql.js lifecycle and the 4-phase boot.
+ */
+const engine = new DatabaseEngine({
+  betterSqlite3: Database,
+  dbPathProvider: getDatabasePath,
+  schemaVersion: SCHEMA_VERSION,
+  schema: SCHEMA,
+  migrations: MIGRATIONS,
+  repairPhase,
+});
+
+export function getDatabase(): SqlJsDatabase {
+  return engine.getDatabase();
 }
 
 export function mapRows<T>(
@@ -67,158 +100,56 @@ export function mapRows<T>(
 }
 
 export async function initializeDatabase(): Promise<void> {
-  dbPath = getDatabasePath();
+  const { mkdirSync } = await import("fs");
   const dir = getDatabaseDir();
-
   try {
     mkdirSync(dir, { recursive: true });
   } catch (e) {
     console.warn("[Database] Failed to create directory:", e);
   }
 
-  try {
-    const SQL = await initSqlJs();
+  // 4-phase boot: core tables → structural repair → migrations → full schema/indexes
+  await engine.initialize();
 
-    if (existsSync(dbPath)) {
-      const fileBuffer = readFileSync(dbPath);
-      db = new SQL.Database(fileBuffer);
-    } else {
-      db = new SQL.Database();
+  // Post-initialize: seed default meeting types (app-specific, not part of engine)
+  const database = getDatabase();
+  console.log("[Database] Seeding default data...");
+  const existingTypes = database.exec("SELECT COUNT(*) FROM meeting_types");
+  const typeCount =
+    existingTypes.length > 0 ? (existingTypes[0].values[0][0] as number) : 0;
+
+  if (typeCount === 0) {
+    for (const mt of DEFAULT_MEETING_TYPES) {
+      const id = uuidv4();
+      database.run(
+        "INSERT INTO meeting_types (id, name, description, prompt_template, icon, is_default) VALUES (?, ?, ?, ?, ?, 1)",
+        [id, mt.name, mt.description, mt.prompt, mt.icon],
+      );
     }
-
-    const database = getDatabase();
-    const statements = SCHEMA.split(";")
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
-
-    console.log("[Database] Phase 1: Creating core tables...");
-    for (const sql of statements) {
-      if (sql.toUpperCase().startsWith("CREATE TABLE")) {
-        try {
-          database.run(sql);
-        } catch (e) {
-          console.warn(
-            `[Database] Table creation warning: ${(e as Error).message}`,
-          );
-        }
-      }
-    }
-
-    console.log("[Database] Phase 2: Checking schema version...");
-    const versionResult = database.exec(
-      "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1",
-    );
-    const currentVersion =
-      versionResult.length > 0 && versionResult[0].values.length > 0
-        ? (versionResult[0].values[0][0] as number)
-        : 0;
-
-    if (currentVersion === 0) {
-      database.run("INSERT INTO schema_version (version) VALUES (?)", [
-        SCHEMA_VERSION,
-      ]);
-    }
-
-    console.log("[Database] Phase 2.5: Structural repair...");
-    // Ensure critical columns exist even if migrations were skipped (FIX: audio_path column)
-    const repairColumns = [
-      { table: 'sessions', column: 'audio_path', sql: 'ALTER TABLE sessions ADD COLUMN audio_path TEXT' },
-    ];
-    for (const repair of repairColumns) {
-      const tableInfo = database.exec(`PRAGMA table_info(${repair.table})`);
-      if (tableInfo.length > 0 && tableInfo[0].values) {
-        const columns = tableInfo[0].values.map((row: unknown[]) => row[1]);
-        if (!columns.includes(repair.column)) {
-          try {
-            database.run(repair.sql);
-            console.log(`[Database] Repaired: ${repair.table}.${repair.column}`);
-          } catch (e) {
-            console.warn(`[Database] Repair warning:`, e);
-          }
-        }
-      }
-    }
-
-    console.log("[Database] Phase 3: Running migrations...");
-    // Run any pending migrations
-    if (currentVersion < SCHEMA_VERSION) {
-      for (let v = currentVersion + 1; v <= SCHEMA_VERSION; v++) {
-        if (MIGRATIONS[v]) {
-          console.log(`[Database] Applying migration ${v}...`);
-          MIGRATIONS[v]();
-          database.run("UPDATE schema_version SET version = ? WHERE version = ?", [v, currentVersion]);
-        }
-      }
-    }
-
-    console.log("[Database] Phase 4: Seeding default data...");
-    const existingTypes = database.exec("SELECT COUNT(*) FROM meeting_types");
-    const typeCount =
-      existingTypes.length > 0 ? (existingTypes[0].values[0][0] as number) : 0;
-
-    if (typeCount === 0) {
-      for (const mt of DEFAULT_MEETING_TYPES) {
-        const id = uuidv4();
-        database.run(
-          "INSERT INTO meeting_types (id, name, description, prompt_template, icon, is_default) VALUES (?, ?, ?, ?, ?, 1)",
-          [id, mt.name, mt.description, mt.prompt, mt.icon],
-        );
-      }
-    }
-
-    console.log("[Database] Phase 5: Creating indexes...");
-    for (const sql of statements) {
-      if (sql.toUpperCase().startsWith("CREATE INDEX")) {
-        try {
-          database.run(sql);
-        } catch (e) {
-          const msg = (e as Error).message;
-          if (!msg.includes("already exists")) {
-            console.warn(`[Database] Index warning: ${msg}`);
-          }
-        }
-      }
-    }
-
-    console.log("[Database] Phase 6: Crash recovery...");
-    // Only run crash recovery if app didn't shut down cleanly
-    const needsRecovery = checkNeedsRecovery();
-    if (needsRecovery) {
-      const recovered = recoverInterruptedSessions();
-      console.log(`[Database] Recovered ${recovered} interrupted sessions/recordings`);
-    } else {
-      console.log("[Database] Clean shutdown detected, skipping crash recovery");
-    }
-    // Mark as unclean shutdown - will be cleared on normal exit
-    markUncleanShutdown();
-
-    saveDatabase();
-    console.log(
-      `[Database] Initialization complete (schema v${SCHEMA_VERSION})`,
-    );
-  } catch (error) {
-    console.error("[Database] FATAL initialization error:", error);
-    throw error;
   }
+
+  // Post-initialize: crash recovery (app-specific, not part of engine)
+  console.log("[Database] Crash recovery check...");
+  const needsRecovery = checkNeedsRecovery();
+  if (needsRecovery) {
+    const recovered = recoverInterruptedSessions();
+    console.log(`[Database] Recovered ${recovered} interrupted sessions/recordings`);
+  } else {
+    console.log("[Database] Clean shutdown detected, skipping crash recovery");
+  }
+  // Mark as unclean shutdown - will be cleared on normal exit
+  markUncleanShutdown();
+
+  engine.saveDatabase();
+  console.log(`[Database] Initialization complete (schema v${SCHEMA_VERSION})`);
 }
 
 export function saveDatabase(): void {
-  if (db && dbPath) {
-    const data = db.export();
-    const buffer = Buffer.from(data);
-    writeFileSync(dbPath, buffer);
-  }
+  engine.saveDatabase();
 }
 
 export function closeDatabase(): void {
-  if (db) {
-    try {
-      db.close();
-    } catch (e) {
-      console.warn("[Database] Error closing database:", e);
-    }
-    db = null;
-  }
+  engine.closeDatabase();
 }
 
 /**

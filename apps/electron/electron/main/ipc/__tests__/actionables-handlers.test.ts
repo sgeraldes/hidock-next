@@ -264,6 +264,20 @@ describe('Actionables IPC Handlers', () => {
       expect(result).toEqual({ success: true })
     })
 
+    // Idempotent no-op: setting the status the actionable already has succeeds
+    // without an UPDATE. This is what the approve flow relies on when it calls
+    // updateStatus('generated') after outputs:generate already set 'generated'.
+    it('should treat same-status update as an idempotent no-op success', async () => {
+      const { queryAll, run } = await import('../../services/database')
+      vi.mocked(queryAll).mockReturnValue([{ id: 'a-1', status: 'generated', artifact_id: 'out-1' }])
+
+      const result = await handlers['actionables:updateStatus'](null, 'a-1', 'generated')
+
+      expect(result).toEqual({ success: true })
+      // No UPDATE and (critically) no artifact cleanup for a no-op
+      expect(run).not.toHaveBeenCalled()
+    })
+
     it('should reject truly invalid status transition (shared -> in_progress)', async () => {
       const { queryAll, run } = await import('../../services/database')
       vi.mocked(queryAll).mockReturnValue([{ id: 'a-1', status: 'shared' }])

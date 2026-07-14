@@ -504,6 +504,10 @@ export interface Project {
 
   personIds?: string[]
 
+  // Project-as-hub metadata (v29)
+  folderPath?: string | null
+  url?: string | null
+
 
 
 

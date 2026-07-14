@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
   RefreshCw,
   FileText,
@@ -16,7 +17,9 @@ import {
   AlertCircle,
   Copy,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  ChevronDown,
+  Terminal
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -28,30 +31,49 @@ import {
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
-import { cn, formatDateTime } from '@/lib/utils'
+import { cn } from '@/lib/utils'
+import { formatSmartDate, formatRelativeDate } from '@/lib/smartDate'
+import { pageContent } from '@/lib/pageLayout'
 import { toast } from '@/components/ui/toaster'
+import { Checkbox } from '@/components/ui/checkbox'
+import { EntityMention, useContactResolver } from '@/components/entity'
+import { ActionableDetail } from '@/components/actionables/ActionableDetail'
+import { getTemplateInfo, humanizeActionableType } from '@/components/actionables/templateInfo'
+import { ActionablesControls } from '@/components/actionables/ActionablesControls'
+import { BulkActionBar } from '@/components/actionables/BulkActionBar'
+import {
+  sortActionables,
+  groupActionables,
+  filterByType,
+  filterByDate,
+  distinctTypes,
+  type ActionableSortKey,
+  type ActionableGroupKey,
+  type DateFilterKey,
+  type SortDirection
+} from '@/components/actionables/actionablesFilters'
+import { useActionablesStore, useActionablesCounts } from '@/store/features/useActionablesStore'
 import type { Actionable, ActionableStatus } from '@/types/knowledge'
 import type { OutputTemplateId } from '@/types'
 
-// C-ACT-006: Simple loading skeleton for initial load
+// C-ACT-006: Simple loading skeleton for initial load. Mirrors the real card's
+// no-stripe treatment (elevation + hairline border), so the transition to loaded
+// content doesn't shift the layout.
 function ActionableSkeleton() {
   return (
     <div className="space-y-4">
       {[1, 2, 3].map((i) => (
-        <Card key={i} className="overflow-hidden animate-pulse">
-          <div className="flex items-stretch min-h-[100px]">
-            <div className="w-1.5 bg-muted" />
-            <div className="flex-1 p-5 space-y-3">
-              <div className="flex items-center gap-2">
-                <div className="h-4 w-4 rounded-full bg-muted" />
-                <div className="h-3 w-20 bg-muted rounded" />
-              </div>
-              <div className="h-5 w-3/4 bg-muted rounded" />
-              <div className="h-3 w-1/2 bg-muted rounded" />
-              <div className="flex gap-2 mt-2">
-                <div className="h-5 w-28 bg-muted rounded-full" />
-                <div className="h-5 w-24 bg-muted rounded-full" />
-              </div>
+        <Card key={i} className="overflow-hidden animate-pulse shadow-sm">
+          <div className="min-h-[100px] p-5 space-y-3">
+            <div className="flex items-center gap-2">
+              <div className="h-4 w-4 rounded-full bg-muted" />
+              <div className="h-3 w-20 bg-muted rounded" />
+            </div>
+            <div className="h-5 w-3/4 bg-muted rounded" />
+            <div className="h-3 w-1/2 bg-muted rounded" />
+            <div className="flex gap-2 mt-2">
+              <div className="h-5 w-28 bg-muted rounded-full" />
+              <div className="h-5 w-24 bg-muted rounded-full" />
             </div>
           </div>
         </Card>
@@ -66,12 +88,35 @@ const PAGE_SIZE = 20
 export function Actionables() {
   const location = useLocation()
   const navigate = useNavigate()
-  const [actionables, setActionables] = useState<Actionable[]>([])
-  const [loading, setLoading] = useState(true)
+  const { resolveRecipient } = useContactResolver()
+  // Shared store is the single source of truth so the sidebar nav badge and this
+  // page stay in sync and counts are always exact (no "99+" cap).
+  const actionables = useActionablesStore((s) => s.actionables)
+  const loading = useActionablesStore((s) => s.loading)
+  const loadActionables = useActionablesStore((s) => s.loadActionables)
+  const counts = useActionablesCounts()
   const [statusFilter, setStatusFilter] = useState<ActionableStatus | 'all'>('pending')
+
+  // Sort / group / filter controls
+  const [sortKey, setSortKey] = useState<ActionableSortKey>('date')
+  const [sortDir, setSortDir] = useState<SortDirection>('desc')
+  const [groupKey, setGroupKey] = useState<ActionableGroupKey>('none')
+  const [typeFilter, setTypeFilter] = useState<string>('all')
+  const [dateFilter, setDateFilter] = useState<DateFilterKey>('all')
+
+  // Bulk selection (transient — a Set of actionable ids)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [bulkBusy, setBulkBusy] = useState(false)
 
   // C-ACT-005: Pagination state
   const [currentPage, setCurrentPage] = useState(1)
+
+  // Card detail expansion — clicking a card's title area toggles an inline
+  // detail panel (evidence at the decision point). Only one open at a time.
+  const [expandedId, setExpandedId] = useState<string | null>(null)
+  const toggleExpanded = useCallback((id: string) => {
+    setExpandedId((prev) => (prev === id ? null : id))
+  }, [])
 
   // Generation state
   const [generating, setGenerating] = useState(false)
@@ -81,7 +126,11 @@ export function Actionables() {
     templateId: string
     generatedAt: string
     sourceId?: string
+    savedPath?: string
+    actionableId?: string
   } | null>(null)
+  // Tracks whether an "Open in Claude Code" launch is in flight (disables the CTA)
+  const [launchingClaude, setLaunchingClaude] = useState(false)
   const [generationError, setGenerationError] = useState<string | null>(null)
   const [showOutputModal, setShowOutputModal] = useState(false)
   const [generationHistory, setGenerationHistory] = useState<number[]>([])
@@ -94,13 +143,32 @@ export function Actionables() {
   // C-ACT-004: Client-side output cache to avoid redundant fetches
   // C-ACT-M02: Cache has max size limit to prevent memory leaks in long sessions
   const OUTPUT_CACHE_MAX_SIZE = 50
-  const outputCacheRef = useRef<Map<string, { content: string; templateId: string; generatedAt: string; sourceId?: string }>>(new Map())
+  const outputCacheRef = useRef<Map<string, { content: string; templateId: string; generatedAt: string; sourceId?: string; savedPath?: string; actionableId?: string }>>(new Map())
 
   // C-ACT-007: Confirmation dialog state for regeneration
   const [confirmRegenerate, setConfirmRegenerate] = useState<Actionable | null>(null)
 
+  // Cancellable generation: each run gets a nonce; Cancel bumps the nonce so
+  // in-flight results are discarded when the IPC eventually resolves.
+  const generationNonceRef = useRef(0)
+  const cancelGeneration = useCallback((actionableId?: string) => {
+    generationNonceRef.current++
+    setGenerating(false)
+    if (actionableId) {
+      setLoadingActionableIds((prev) => {
+        const next = new Set(prev)
+        next.delete(actionableId)
+        return next
+      })
+      // Revert the server-side in_progress status
+      window.electronAPI.actionables.updateStatus(actionableId, 'pending').catch(() => {})
+    }
+    toast.info('Generation cancelled', 'The output will be discarded when it finishes.')
+  }, [])
+  const [cancellableActionableId, setCancellableActionableId] = useState<string | undefined>(undefined)
+
   // C-ACT-M02: Cache insertion helper with size eviction
-  const cacheOutput = useCallback((id: string, output: { content: string; templateId: string; generatedAt: string; sourceId?: string }) => {
+  const cacheOutput = useCallback((id: string, output: { content: string; templateId: string; generatedAt: string; sourceId?: string; savedPath?: string; actionableId?: string }) => {
     const cache = outputCacheRef.current
     // Evict oldest entries when cache exceeds max size
     if (cache.size >= OUTPUT_CACHE_MAX_SIZE) {
@@ -110,18 +178,6 @@ export function Actionables() {
       }
     }
     cache.set(id, output)
-  }, [])
-
-  const loadActionables = useCallback(async () => {
-    setLoading(true)
-    try {
-      const data = await window.electronAPI.actionables.getAll()
-      setActionables(data)
-    } catch (error) {
-      console.error('Failed to load actionables:', error)
-    } finally {
-      setLoading(false)
-    }
   }, [])
 
   // AC-06: Use ref to read generationHistory, avoiding stale closure and unstable deps
@@ -138,12 +194,15 @@ export function Actionables() {
     setGenerating(true)
     setCurrentGeneratingTemplate(templateId)
     setGenerationError(null)
+    setCancellableActionableId(undefined)
+    const nonce = generationNonceRef.current
 
     try {
       const result = await window.electronAPI.outputs.generate({
         templateId: templateId as OutputTemplateId,
         knowledgeCaptureId: sourceId
       })
+      if (nonce !== generationNonceRef.current) return // cancelled — discard
 
       if (result.success) {
         const output = { ...result.data, sourceId }
@@ -155,10 +214,11 @@ export function Actionables() {
         setGenerationError(result.error.message || 'Failed to generate output')
       }
     } catch (error: any) {
+      if (nonce !== generationNonceRef.current) return
       setGenerationError(error.message || 'Failed to generate output')
       console.error('Output generation failed:', error)
     } finally {
-      setGenerating(false)
+      if (nonce === generationNonceRef.current) setGenerating(false)
     }
   }, [])
 
@@ -174,6 +234,48 @@ export function Actionables() {
       }
     } catch (error: any) {
       toast.error('Copy failed', error?.message || 'Failed to copy to clipboard')
+    }
+  }
+
+  // "Open in Claude Code" — launches a Claude Code terminal session pointed at
+  // the handoff prompt. The main process resolves the working directory (source
+  // project folder → configured handoff folder); if none is known it replies
+  // needsFolder and we prompt the user to pick one, then retry with it.
+  const openInClaudeCode = async () => {
+    const output = generatedOutput
+    if (!output?.content) return
+    setLaunchingClaude(true)
+    try {
+      const attempt = (cwd?: string) =>
+        window.electronAPI.outputs.launchClaudeCode({
+          filePath: output.savedPath,
+          content: output.content,
+          templateId: output.templateId,
+          actionableId: output.actionableId,
+          cwd
+        })
+
+      let res = await attempt()
+
+      // No working directory known — ask the user to choose one, then retry.
+      if (res.success && res.data?.needsFolder) {
+        const pick = await window.electronAPI.storage.selectFolder?.()
+        if (!pick?.success || !pick.data) {
+          toast.info('Cancelled', 'Pick a folder to open Claude Code in.')
+          return
+        }
+        res = await attempt(pick.data)
+      }
+
+      if (res.success && res.data?.launched) {
+        toast.success('Opening Claude Code', res.data.cwd ? `Launched in ${res.data.cwd}` : 'Terminal opened.')
+      } else if (!res.success) {
+        toast.error('Could not open Claude Code', res.error?.message || 'Unknown error')
+      }
+    } catch (error: any) {
+      toast.error('Could not open Claude Code', error?.message || 'An unexpected error occurred')
+    } finally {
+      setLaunchingClaude(false)
     }
   }
 
@@ -206,24 +308,64 @@ export function Actionables() {
     }
   }, [location.state, handleAutoGenerate, navigate, location.pathname])
 
+  // Distinct actionable types present, for the Type filter dropdown.
+  const typeOptions = useMemo(() => distinctTypes(actionables), [actionables])
+
+  // Filter: status (tabs) + type + date window.
   const filteredActionables = useMemo(() => {
-    return actionables.filter(a => {
-      if (statusFilter !== 'all' && a.status !== statusFilter) return false
-      return true
-    })
-  }, [actionables, statusFilter])
+    let list = actionables.filter((a) => statusFilter === 'all' || a.status === statusFilter)
+    list = filterByType(list, typeFilter)
+    list = filterByDate(list, dateFilter)
+    return list
+  }, [actionables, statusFilter, typeFilter, dateFilter])
 
-  // C-ACT-005: Paginated subset of filtered actionables
-  const totalPages = Math.max(1, Math.ceil(filteredActionables.length / PAGE_SIZE))
+  // Sort by date / confidence / type in the chosen direction.
+  const sortedActionables = useMemo(
+    () => sortActionables(filteredActionables, sortKey, sortDir),
+    [filteredActionables, sortKey, sortDir]
+  )
+
+  // Pagination applies only when NOT grouping (grouping renders every bucket).
+  const grouped = groupKey !== 'none'
+  const totalPages = Math.max(1, Math.ceil(sortedActionables.length / PAGE_SIZE))
   const paginatedActionables = useMemo(() => {
+    if (grouped) return sortedActionables
     const start = (currentPage - 1) * PAGE_SIZE
-    return filteredActionables.slice(start, start + PAGE_SIZE)
-  }, [filteredActionables, currentPage])
+    return sortedActionables.slice(start, start + PAGE_SIZE)
+  }, [sortedActionables, currentPage, grouped])
 
-  // C-ACT-005: Reset page to 1 when filter changes
+  // The groups actually rendered (a single unlabelled group when grouping is off).
+  const renderGroups = useMemo(
+    () => groupActionables(paginatedActionables, groupKey),
+    [paginatedActionables, groupKey]
+  )
+
+  // C-ACT-005: Reset page when any filter/sort/group input changes.
   useEffect(() => {
     setCurrentPage(1)
-  }, [statusFilter])
+  }, [statusFilter, typeFilter, dateFilter, sortKey, sortDir, groupKey])
+
+  // ---- Bulk selection (operates over the full filtered/sorted set) ----
+  const visibleIds = useMemo(() => sortedActionables.map((a) => a.id), [sortedActionables])
+  const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id))
+
+  const toggleSelect = useCallback((id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
+
+  const toggleSelectAll = useCallback(() => {
+    setSelectedIds(() => {
+      const everyOn = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id))
+      return everyOn ? new Set<string>() : new Set(visibleIds)
+    })
+  }, [visibleIds, selectedIds])
+
+  const clearSelection = useCallback(() => setSelectedIds(new Set()), [])
 
   // B-ACT-002: Per-actionable loading state, disable button during operation, server-side revert on failure
   const handleApprove = async (actionable: Actionable) => {
@@ -237,9 +379,12 @@ export function Actionables() {
       setGenerating(true)
       setCurrentGeneratingTemplate(templateId)
       setGenerationError(null)
+      setCancellableActionableId(actionable.id)
+      const nonce = generationNonceRef.current
 
       // Call generateOutput handler to update status to in_progress
       const approvalResult = await window.electronAPI.actionables.generateOutput(actionable.id)
+      if (nonce !== generationNonceRef.current) return // cancelled — discard
 
       if (!approvalResult.success) {
         toast.error('Approval failed', approvalResult.error || 'Failed to approve actionable')
@@ -252,17 +397,42 @@ export function Actionables() {
         knowledgeCaptureId: actionable.sourceKnowledgeId,
         actionableId: actionable.id
       })
+      if (nonce !== generationNonceRef.current) return // cancelled — discard
 
       if (result.success) {
-        const output = { ...result.data, sourceId: actionable.sourceKnowledgeId }
+        const output = { ...result.data, sourceId: actionable.sourceKnowledgeId, actionableId: actionable.id }
         // C-ACT-004: Cache the generated output
         cacheOutput(actionable.id, output)
         setGeneratedOutput(output)
         setShowOutputModal(true)
 
-        // Update actionable status to generated
+        // Update actionable status to generated (idempotent on the main side —
+        // outputs:generate already moves it to 'generated' when actionableId is set)
         await window.electronAPI.actionables.updateStatus(actionable.id, 'generated')
         await loadActionables()
+
+        // Post-generation feedback: confirm completion with the saved filename
+        // and a one-click way to open it. The item now leaves the Pending list.
+        const savedPath = output.savedPath
+        const filename = savedPath ? savedPath.replace(/^.*[\\/]/, '') : undefined
+        toast.success(
+          'Output generated',
+          filename ? `Saved as ${filename}` : 'The document is ready.',
+          savedPath
+            ? {
+                action: {
+                  label: 'Open file',
+                  onClick: () => {
+                    window.electronAPI.outputs.openInFolder(savedPath).then((res) => {
+                      if (!res.success) {
+                        toast.error('Open failed', res.error?.message || 'Could not open the file')
+                      }
+                    })
+                  }
+                }
+              }
+            : undefined
+        )
       } else {
         const errorMsg = result.error?.message || 'Failed to generate output'
         toast.error('Generation failed', errorMsg)
@@ -304,6 +474,74 @@ export function Actionables() {
     }
   }
 
+  // ---- Bulk actions over the current selection ----
+  const handleBulkDismiss = async () => {
+    const targets = actionables.filter((a) => selectedIds.has(a.id) && a.status !== 'dismissed')
+    if (targets.length === 0) {
+      toast.info('Nothing to dismiss', 'The selected items are already dismissed.')
+      return
+    }
+    setBulkBusy(true)
+    let ok = 0
+    let failed = 0
+    try {
+      for (const a of targets) {
+        try {
+          const res = await window.electronAPI.actionables.updateStatus(a.id, 'dismissed')
+          if (res.success) ok++
+          else failed++
+        } catch {
+          failed++
+        }
+      }
+      await loadActionables()
+      clearSelection()
+      if (failed === 0) toast.success('Dismissed', `${ok} actionable${ok === 1 ? '' : 's'} dismissed.`)
+      else toast.warning('Partially dismissed', `${ok} dismissed, ${failed} failed.`)
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
+  const handleBulkGenerate = async () => {
+    const targets = actionables.filter((a) => selectedIds.has(a.id) && a.status === 'pending')
+    if (targets.length === 0) {
+      toast.info('Nothing to generate', 'Select one or more pending actionables to generate.')
+      return
+    }
+    setBulkBusy(true)
+    let ok = 0
+    let failed = 0
+    try {
+      for (const a of targets) {
+        try {
+          const templateId = (a.suggestedTemplate || 'meeting_minutes') as OutputTemplateId
+          const result = await window.electronAPI.outputs.generate({
+            templateId,
+            knowledgeCaptureId: a.sourceKnowledgeId,
+            actionableId: a.id
+          })
+          if (result.success) {
+            await window.electronAPI.actionables.updateStatus(a.id, 'generated').catch(() => {})
+            ok++
+          } else {
+            failed++
+            await window.electronAPI.actionables.updateStatus(a.id, 'pending').catch(() => {})
+          }
+        } catch {
+          failed++
+          await window.electronAPI.actionables.updateStatus(a.id, 'pending').catch(() => {})
+        }
+      }
+      await loadActionables()
+      clearSelection()
+      if (failed === 0) toast.success('Outputs generated', `${ok} output${ok === 1 ? '' : 's'} generated.`)
+      else toast.warning('Partially generated', `${ok} generated, ${failed} failed.`)
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
   // C-ACT-003: Consistent status icon mapping
   const getStatusIcon = (status: ActionableStatus) => {
     switch (status) {
@@ -315,14 +553,18 @@ export function Actionables() {
     }
   }
 
-  // C-ACT-003: Consistent status bar color mapping (all statuses covered)
-  const getStatusBarColor = (status: ActionableStatus): string => {
+  // Status semantics carried by a WHOLE-CARD wash instead of a side-stripe
+  // (thick colored left borders are banned in this design language). The tint is
+  // intentionally faint (~4%) so it reads as status context, not an alarm — the
+  // colored status icon does the loud signalling. Both themes verified for
+  // contrast against `bg-card`.
+  const getStatusTint = (status: ActionableStatus): string => {
     switch (status) {
-      case 'pending': return 'bg-amber-500'
-      case 'in_progress': return 'bg-blue-500'
-      case 'generated': return 'bg-emerald-500'
-      case 'shared': return 'bg-violet-500'
-      case 'dismissed': return 'bg-slate-300'
+      case 'pending': return 'bg-amber-500/[0.05] dark:bg-amber-400/[0.04]'
+      case 'in_progress': return 'bg-blue-500/[0.05] dark:bg-blue-400/[0.04]'
+      case 'generated': return 'bg-emerald-500/[0.05] dark:bg-emerald-400/[0.04]'
+      case 'shared': return 'bg-violet-500/[0.05] dark:bg-violet-400/[0.04]'
+      case 'dismissed': return 'bg-muted/30'
     }
   }
 
@@ -343,20 +585,29 @@ export function Actionables() {
           </div>
         </div>
 
-        {/* Filter bar - AC-03 FIX: Added 'in_progress' to filter options */}
+        {/* Filter bar - AC-03 FIX: Added 'in_progress'. Each tab shows the EXACT
+            count (no "99+" cap) sourced from the shared actionables store. */}
         <div className="flex items-center gap-2 mt-4 overflow-x-auto pb-2">
           {(['all', 'pending', 'in_progress', 'generated', 'shared', 'dismissed'] as const).map((s) => (
             <button
               key={s}
               onClick={() => setStatusFilter(s)}
               className={cn(
-                "px-4 py-1.5 rounded-full text-xs font-semibold border transition-all whitespace-nowrap capitalize",
+                "px-4 py-1.5 rounded-full text-xs font-semibold border transition-all whitespace-nowrap capitalize flex items-center gap-1.5",
                 statusFilter === s
                   ? "bg-primary border-primary text-primary-foreground shadow-sm"
                   : "bg-background border-border text-muted-foreground hover:bg-muted"
               )}
             >
-              {s === 'in_progress' ? 'In Progress' : s}
+              <span>{s === 'in_progress' ? 'In Progress' : s}</span>
+              <span
+                className={cn(
+                  "tabular-nums rounded-full px-1.5 text-[10px] font-bold",
+                  statusFilter === s ? "bg-primary-foreground/20" : "bg-muted-foreground/10"
+                )}
+              >
+                {counts[s]}
+              </span>
             </button>
           ))}
         </div>
@@ -364,64 +615,165 @@ export function Actionables() {
 
       {/* Content */}
       <div className="flex-1 overflow-auto p-6">
-        <div className="max-w-4xl mx-auto space-y-6">
+        <div className={cn(pageContent, 'space-y-6')}>
+          {/* Sort / group / filter / select-all toolbar — shown whenever there is
+              anything to organize, so filters remain reachable even if the current
+              status tab is empty. */}
+          {actionables.length > 0 && (
+            <ActionablesControls
+              sortKey={sortKey}
+              onSortKeyChange={setSortKey}
+              sortDir={sortDir}
+              onToggleSortDir={() => setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))}
+              groupKey={groupKey}
+              onGroupKeyChange={setGroupKey}
+              typeFilter={typeFilter}
+              onTypeFilterChange={setTypeFilter}
+              typeOptions={typeOptions}
+              dateFilter={dateFilter}
+              onDateFilterChange={setDateFilter}
+              allSelected={allSelected}
+              onToggleSelectAll={toggleSelectAll}
+              visibleCount={sortedActionables.length}
+            />
+          )}
+
           {/* C-ACT-006: Loading skeleton instead of spinner */}
           {loading && actionables.length === 0 ? (
             <ActionableSkeleton />
-          ) : filteredActionables.length === 0 ? (
+          ) : sortedActionables.length === 0 ? (
             <Card className="border-dashed bg-muted/5">
               <CardContent className="py-16 text-center">
                 <ListTodo className="h-12 w-12 mx-auto mb-4 text-muted-foreground opacity-30" />
-                <h3 className="text-lg font-medium mb-2">No {statusFilter} Actionables</h3>
+                <h3 className="text-lg font-medium mb-2">No matching Actionables</h3>
                 <p className="text-muted-foreground text-sm max-w-xs mx-auto">
-                  Suggestions will appear here as you transcribe meetings and capture knowledge.
+                  {actionables.length === 0
+                    ? 'Suggestions will appear here as you transcribe meetings and capture knowledge.'
+                    : 'No actionables match the current filters. Try widening the status, type, or date filters.'}
                 </p>
               </CardContent>
             </Card>
           ) : (
-            <div className="space-y-4">
-              {paginatedActionables.map((actionable) => (
-                <Card key={actionable.id} className="group overflow-hidden hover:border-primary/30 transition-all shadow-sm">
-                  <div className="flex items-stretch min-h-[100px]">
-                    {/* C-ACT-003: Consistent status bar colors for all statuses */}
-                    <div className={cn(
-                      "w-1.5 transition-colors",
-                      getStatusBarColor(actionable.status)
-                    )} />
-                    <div className="flex-1 p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+            <div className="space-y-6">
+              {renderGroups.map((group) => (
+                <div key={group.key} className="space-y-4">
+                  {group.label && (
+                    <div className="flex items-center gap-2 sticky top-0 z-10 -mx-1 px-1 py-1 bg-background/95 backdrop-blur-sm">
+                      <h2 className="text-xs font-bold uppercase tracking-widest text-muted-foreground">{group.label}</h2>
+                      <span className="text-[10px] font-semibold text-muted-foreground/70 tabular-nums">{group.items.length}</span>
+                      <div className="flex-1 h-px bg-border" />
+                    </div>
+                  )}
+                  {group.items.map((actionable, index) => (
+                <Card
+                  key={actionable.id}
+                  style={{ animationDelay: `${Math.min(index, 6) * 45}ms` }}
+                  className={cn(
+                    // Standard card treatment: hairline border + shadow-sm elevation
+                    // + hover lift (`.lift`), no side-stripe. Entrance rises in with a
+                    // staggered delay (reduced-motion collapses it via the global CSS).
+                    "group animate-rise-in lift overflow-hidden border shadow-sm",
+                    getStatusTint(actionable.status),
+                    selectedIds.has(actionable.id) && "ring-2 ring-primary ring-offset-1 ring-offset-background"
+                  )}
+                >
+                  <div className="min-h-[100px]">
+                    {/* min-w-0 lets the title truncate instead of pushing the action buttons out of the card */}
+                    <div className="min-w-0 p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                      {/* Bulk-select checkbox */}
+                      <div className="flex items-start pt-1 sm:self-center sm:pt-0">
+                        <Checkbox
+                          checked={selectedIds.has(actionable.id)}
+                          onCheckedChange={() => toggleSelect(actionable.id)}
+                          aria-label={`Select actionable: ${actionable.title}`}
+                        />
+                      </div>
                       <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-1">
-                          {getStatusIcon(actionable.status)}
-                          <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">{actionable.type.replace('_', ' ')}</span>
-                        </div>
-                        <h3 className="text-lg font-bold leading-tight truncate pr-4">{actionable.title}</h3>
-                        {actionable.description && (
-                          <p className="text-sm text-muted-foreground mt-1 line-clamp-1 italic pr-4">"{actionable.description}"</p>
-                        )}
+                        {/* Clickable title area toggles the inline detail panel.
+                            Kept separate from the recipients row below so those
+                            person chips remain independently clickable. */}
+                        <button
+                          type="button"
+                          onClick={() => toggleExpanded(actionable.id)}
+                          aria-expanded={expandedId === actionable.id}
+                          className="text-left w-full group/exp rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <div className="flex items-center gap-2 mb-1">
+                            {getStatusIcon(actionable.status)}
+                            <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">{humanizeActionableType(actionable.type)}</span>
+                            <ChevronDown className={cn(
+                              "h-3.5 w-3.5 text-muted-foreground transition-transform ml-auto sm:ml-0",
+                              expandedId === actionable.id && "rotate-180"
+                            )} />
+                          </div>
+                          <h3
+                            className={cn(
+                              "text-lg font-bold leading-tight pr-4 group-hover/exp:text-primary transition-colors",
+                              expandedId === actionable.id ? "whitespace-normal" : "truncate"
+                            )}
+                            title={actionable.title}
+                          >
+                            {actionable.title}
+                          </h3>
+                          {actionable.description && expandedId !== actionable.id && (
+                            <p className="text-sm text-muted-foreground mt-1 line-clamp-1 italic pr-4">"{actionable.description}"</p>
+                          )}
+                        </button>
                         <div className="flex items-center gap-3 mt-3">
-                          <div className="flex items-center gap-1 text-[10px] text-muted-foreground font-medium bg-muted/50 px-2 py-0.5 rounded-full">
+                          <div
+                            className="flex items-center gap-1 text-[10px] text-muted-foreground font-medium bg-muted/50 px-2 py-0.5 rounded-full"
+                            title={formatSmartDate(actionable.createdAt)}
+                          >
                             <Clock className="h-3 w-3" />
-                            <span>{formatDateTime(actionable.createdAt)}</span>
+                            {/* Absolute date carries the YEAR; relative hint gives recency at a glance. */}
+                            <span>{formatSmartDate(actionable.createdAt, { time: false })}</span>
+                            {formatRelativeDate(actionable.createdAt) && (
+                              <span className="text-muted-foreground/70">· {formatRelativeDate(actionable.createdAt)}</span>
+                            )}
                           </div>
                           {actionable.confidence && actionable.status === 'pending' && (
-                            <div className="flex items-center gap-1 text-[10px] font-medium bg-muted/50 px-2 py-0.5 rounded-full">
-                              <Sparkles className="h-3 w-3 text-amber-500" />
-                              <span className={cn(
-                                actionable.confidence >= 0.8 ? "text-emerald-600" :
-                                actionable.confidence >= 0.6 ? "text-amber-600" :
-                                "text-red-600"
-                              )}>
-                                {Math.round(actionable.confidence * 100)}% confidence
-                              </span>
+                            // Confidence carries hierarchy through weight + tint, not
+                            // alarm colors: a strong signal (>=80%) reads as a solid
+                            // emerald pill, a moderate one quiets to a neutral chip, and
+                            // a weak one recedes into muted text — so 95% visibly
+                            // outranks 70% on a squint test without shouting "error".
+                            <div className={cn(
+                              "flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full",
+                              actionable.confidence >= 0.8
+                                ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 font-semibold"
+                                : actionable.confidence >= 0.6
+                                  ? "bg-muted/60 text-foreground/70 font-medium"
+                                  : "bg-muted/40 text-muted-foreground font-normal"
+                            )}>
+                              <Sparkles className={cn(
+                                "h-3 w-3",
+                                actionable.confidence >= 0.8 ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground"
+                              )} />
+                              <span>{Math.round(actionable.confidence * 100)}% confidence</span>
                             </div>
                           )}
                           {actionable.suggestedRecipients.length > 0 && (
-                            <div className="flex items-center gap-1 text-[10px] text-muted-foreground font-medium bg-muted/50 px-2 py-0.5 rounded-full">
-                              <Users className="h-3 w-3" />
-                              <span>{actionable.suggestedRecipients.length} recipients</span>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <Users className="h-3 w-3 text-muted-foreground" />
+                              {actionable.suggestedRecipients.map((recipient, ri) => {
+                                const contact = resolveRecipient(recipient)
+                                return (
+                                  <EntityMention
+                                    key={`${recipient}-${ri}`}
+                                    type="person"
+                                    id={contact?.id}
+                                    name={contact?.name || recipient}
+                                  />
+                                )
+                              })}
                             </div>
                           )}
                         </div>
+
+                        {/* Inline detail panel — full context at the decision point */}
+                        {expandedId === actionable.id && (
+                          <ActionableDetail actionable={actionable} resolveRecipient={resolveRecipient} />
+                        )}
                       </div>
                       <div className="flex items-center gap-2 flex-shrink-0 w-full sm:w-auto border-t sm:border-0 pt-4 sm:pt-0">
                         {actionable.status === 'pending' && (
@@ -438,7 +790,9 @@ export function Actionables() {
                               ) : (
                                 <Sparkles className="h-4 w-4" />
                               )}
-                              {loadingActionableIds.has(actionable.id) ? 'Generating...' : 'Approve & Generate'}
+                              {loadingActionableIds.has(actionable.id)
+                                ? 'Generating...'
+                                : getTemplateInfo(actionable.suggestedTemplate).actionLabel}
                             </Button>
                             <Button
                               onClick={() => handleDismiss(actionable.id)}
@@ -489,7 +843,7 @@ export function Actionables() {
                                 const result = await window.electronAPI.outputs.getByActionableId(actionable.id)
 
                                 if (result.success && result.data) {
-                                  const output = { ...result.data, sourceId: actionable.sourceKnowledgeId }
+                                  const output = { ...result.data, sourceId: actionable.sourceKnowledgeId, actionableId: actionable.id }
                                   // C-ACT-004: Cache the fetched output
                                   cacheOutput(actionable.id, output)
                                   setGeneratedOutput(output)
@@ -504,7 +858,7 @@ export function Actionables() {
                                     knowledgeCaptureId: actionable.sourceKnowledgeId
                                   })
                                   if (genResult.success) {
-                                    const output = { ...genResult.data, sourceId: actionable.sourceKnowledgeId }
+                                    const output = { ...genResult.data, sourceId: actionable.sourceKnowledgeId, actionableId: actionable.id }
                                     cacheOutput(actionable.id, output)
                                     setGeneratedOutput(output)
                                     setShowOutputModal(true)
@@ -513,7 +867,7 @@ export function Actionables() {
                                   }
                                   setGenerating(false)
                                 } else {
-                                  toast.error('Failed to load output', result.error?.message || 'Unknown error')
+                                  toast.error('Failed to load output', (!result.success && result.error?.message) || 'Unknown error')
                                 }
                               } catch (error: any) {
                                 toast.error('Failed to load output', error?.message || 'An unexpected error occurred')
@@ -538,15 +892,17 @@ export function Actionables() {
                     </div>
                   </div>
                 </Card>
+                  ))}
+                </div>
               ))}
             </div>
           )}
 
-          {/* C-ACT-005: Pagination controls */}
-          {filteredActionables.length > PAGE_SIZE && (
+          {/* C-ACT-005: Pagination controls (only when the flat list is un-grouped) */}
+          {!grouped && sortedActionables.length > PAGE_SIZE && (
             <div className="flex items-center justify-between pt-2">
               <span className="text-xs text-muted-foreground">
-                Showing {(currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, filteredActionables.length)} of {filteredActionables.length}
+                Showing {(currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, sortedActionables.length)} of {sortedActionables.length}
               </span>
               <div className="flex items-center gap-1">
                 <Button
@@ -588,9 +944,21 @@ export function Actionables() {
         </div>
       </div>
 
+      {/* Bulk action bar — appears while items are selected. Hidden when the error
+          banner is up so the two don't stack on top of each other. */}
+      {!generationError && (
+        <BulkActionBar
+          count={selectedIds.size}
+          onGenerate={handleBulkGenerate}
+          onDismiss={handleBulkDismiss}
+          onClear={clearSelection}
+          busy={bulkBusy}
+        />
+      )}
+
       {/* C-ACT-M07: Error banner positioned at bottom to avoid overlapping header/nav */}
       {generationError && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 px-4 py-3 bg-destructive/10 border border-destructive/20 rounded-lg flex items-center justify-between gap-4 max-w-2xl w-full shadow-lg">
+        <div className="animate-rise-in fixed bottom-4 left-1/2 -translate-x-1/2 z-40 px-4 py-3 bg-destructive/10 border border-destructive/20 rounded-xl flex items-center justify-between gap-4 max-w-2xl w-full shadow-lg">
           <div className="flex items-center gap-2 flex-1">
             <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0" />
             <span className="text-sm text-destructive font-medium">{generationError}</span>
@@ -609,20 +977,18 @@ export function Actionables() {
       {/* Loading Overlay - AC-08 FIX: Dynamic text based on template type */}
       {generating && (
         <div className="fixed inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="text-center space-y-4 bg-card p-8 rounded-lg shadow-lg border">
+          <div className="animate-rise-in text-center space-y-4 bg-card p-8 rounded-xl shadow-lg border">
             <Loader2 className="h-12 w-12 animate-spin mx-auto text-primary" />
             <div>
               <h3 className="text-lg font-semibold mb-1">
-                Generating {
-                  currentGeneratingTemplate === 'meeting_minutes' ? 'Meeting Minutes' :
-                  currentGeneratingTemplate === 'interview_feedback' ? 'Interview Feedback' :
-                  currentGeneratingTemplate === 'project_status' ? 'Project Status' :
-                  currentGeneratingTemplate === 'action_items' ? 'Action Items' :
-                  'Output'
-                }...
+                Generating {getTemplateInfo(currentGeneratingTemplate).name}...
               </h3>
               <p className="text-sm text-muted-foreground">This may take a few moments...</p>
             </div>
+            <Button variant="outline" size="sm" onClick={() => cancelGeneration(cancellableActionableId)}>
+              <X className="h-4 w-4 mr-2" />
+              Cancel
+            </Button>
           </div>
         </div>
       )}
@@ -633,7 +999,7 @@ export function Actionables() {
           <DialogHeader>
             <DialogTitle>Regenerate Output?</DialogTitle>
             <DialogDescription>
-              This will create a new output using the {confirmRegenerate?.suggestedTemplate || 'meeting_minutes'} template, replacing the previous result.
+              This will create a new {getTemplateInfo(confirmRegenerate?.suggestedTemplate).name} ({getTemplateInfo(confirmRegenerate?.suggestedTemplate).format}), replacing the previous result.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="gap-2">
@@ -659,19 +1025,36 @@ export function Actionables() {
           <DialogHeader>
             <DialogTitle>Generated Output</DialogTitle>
             <DialogDescription>
-              Generated using {generatedOutput?.templateId?.replace(/_/g, ' ')} template
+              {getTemplateInfo(generatedOutput?.templateId).name}
               {/* C-ACT-008: Show timestamp on generated output */}
               {generatedOutput?.generatedAt && (
                 <span className="ml-2 text-xs text-muted-foreground">
-                  &middot; {formatDateTime(generatedOutput.generatedAt)}
+                  &middot; {formatSmartDate(generatedOutput.generatedAt)}
                 </span>
               )}
             </DialogDescription>
           </DialogHeader>
           <div className="prose prose-sm max-w-none dark:prose-invert bg-muted/30 p-4 rounded-md border">
-            <ReactMarkdown>{generatedOutput?.content || ''}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{generatedOutput?.content || ''}</ReactMarkdown>
           </div>
           <DialogFooter className="gap-2">
+            {generatedOutput?.templateId === 'claude_code_prompt' && (
+              // Primary CTA for the Claude Code handoff — closes the loop by
+              // launching a Claude Code session pointed at the generated prompt.
+              <Button
+                onClick={openInClaudeCode}
+                disabled={launchingClaude}
+                className="gap-2 sm:mr-auto"
+                title="Opens Claude Code in the source project folder (or a folder you choose) and hands off this prompt"
+              >
+                {launchingClaude ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Terminal className="h-4 w-4" />
+                )}
+                Open in Claude Code
+              </Button>
+            )}
             {generatedOutput?.sourceId && (
               <Button
                 variant="outline"
@@ -679,6 +1062,21 @@ export function Actionables() {
               >
                 <FileText className="h-4 w-4 mr-2" />
                 View Source
+              </Button>
+            )}
+            {generatedOutput?.savedPath && (
+              <Button
+                variant="outline"
+                onClick={async () => {
+                  const res = await window.electronAPI.outputs.openInFolder(generatedOutput.savedPath!)
+                  if (!res.success) {
+                    toast.error('Open failed', res.error?.message || 'Could not open folder')
+                  }
+                }}
+                title={generatedOutput.savedPath}
+              >
+                <FileText className="h-4 w-4 mr-2" />
+                Show Saved File
               </Button>
             )}
             <Button

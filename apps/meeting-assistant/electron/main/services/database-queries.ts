@@ -481,3 +481,65 @@ export function createNoteTemplate(params: {
     is_default: isDefault,
   };
 }
+
+export function getNotesCount(): number {
+  const db = getDatabase();
+  const result = db.exec("SELECT COUNT(*) FROM notes");
+  if (result.length > 0 && result[0].values.length > 0) {
+    return result[0].values[0][0] as number;
+  }
+  return 0;
+}
+
+// ── Knowledge Base Sources ──────────────────────────────────────────────────
+
+export interface KbSource {
+  id: number;
+  path: string;
+  status: "pending" | "indexing" | "indexed" | "error";
+  chunk_count: number;
+  added_at: number;
+  indexed_at: number | null;
+}
+
+const KB_SOURCE_COLS = ["id", "path", "status", "chunk_count", "added_at", "indexed_at"];
+
+export function addKbSource(path: string): KbSource {
+  const database = getDatabase();
+  const now = Date.now();
+  database.run(
+    "INSERT OR IGNORE INTO kb_sources (path, status, chunk_count, added_at) VALUES (?, ?, 0, ?)",
+    [path, "pending", now],
+  );
+  const result = database.exec(
+    `SELECT ${KB_SOURCE_COLS.join(", ")} FROM kb_sources WHERE path = ?`,
+    [path],
+  );
+  return mapRows<KbSource>(result, KB_SOURCE_COLS)[0];
+}
+
+export function getAllKbSources(): KbSource[] {
+  const database = getDatabase();
+  const result = database.exec(
+    `SELECT ${KB_SOURCE_COLS.join(", ")} FROM kb_sources ORDER BY added_at DESC`,
+  );
+  return mapRows<KbSource>(result, KB_SOURCE_COLS);
+}
+
+export function updateKbSourceStatus(
+  path: string,
+  status: KbSource["status"],
+  chunkCount: number,
+): void {
+  const database = getDatabase();
+  const now = status === "indexed" ? Date.now() : null;
+  database.run(
+    "UPDATE kb_sources SET status = ?, chunk_count = ?, indexed_at = ? WHERE path = ?",
+    [status, chunkCount, now, path],
+  );
+}
+
+export function removeKbSource(path: string): void {
+  const database = getDatabase();
+  database.run("DELETE FROM kb_sources WHERE path = ?", [path]);
+}

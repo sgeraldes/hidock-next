@@ -17,7 +17,24 @@ import { registerKnowledgeHandlers } from './knowledge-handlers'
 import { registerAssistantHandlers } from './assistant-handlers'
 import { registerActionablesHandlers } from './actionables-handlers'
 import { registerMeetingsHandlers } from './meetings-handlers'
+import { registerTranscriptsHandlers } from './transcripts-handlers'
 import { registerJensenHandlers } from './jensen-handlers'
+import { registerKnowledgeGraphHandlers } from './knowledge-graph-handlers'
+import { registerDevicePipelineHandlers } from './device-pipeline-handlers'
+import { registerBriefingHandlers } from './briefing-handlers'
+import { registerActionItemsHandlers } from './action-items-handlers'
+import { registerIdentityHandlers } from './identity-handlers'
+import { registerArtifactHandlers } from './artifact-handlers'
+import { registerTranscriptUpgradeHandlers } from './transcript-upgrade-handlers'
+import { registerConnectorsHandlers } from './connectors-handlers'
+import { registerSelfIdentificationHandlers } from './self-identification-handlers'
+import { registerTurnSpeakersHandlers } from './turn-speakers-handlers'
+import { registerRecordingDeletionHandlers } from './recording-deletion-handlers'
+import { registerTranscriptionHandlers } from './transcription-handlers'
+import { registerReDiarizeHandlers } from './re-diarize-handlers'
+import { registerTimelineHandlers } from './timeline-handlers'
+import { registerClipboardCaptureHandlers } from './clipboard-capture-handlers'
+import { registerGitCommitsHandlers } from './git-commits-handlers'
 
 export function registerIpcHandlers(): void {
   // Register all IPC handlers
@@ -40,7 +57,27 @@ export function registerIpcHandlers(): void {
   registerAssistantHandlers()
   registerActionablesHandlers()
   registerMeetingsHandlers()
+  registerTranscriptsHandlers()
   registerJensenHandlers()
+  registerKnowledgeGraphHandlers()
+  // Slice 4: DevicePipeline state/action IPC bridge. INERT — the live app still
+  // uses the old device path; this only exposes get-state/actions + event bridge.
+  // It does NOT call initAutoConnect (no competing USB connect listener).
+  registerDevicePipelineHandlers()
+  registerBriefingHandlers()
+  registerActionItemsHandlers()
+  registerIdentityHandlers()
+  registerArtifactHandlers()
+  registerTranscriptUpgradeHandlers()
+  registerConnectorsHandlers()
+  registerSelfIdentificationHandlers()
+  registerTurnSpeakersHandlers()
+  registerRecordingDeletionHandlers()
+  registerTranscriptionHandlers()
+  registerReDiarizeHandlers()
+  registerTimelineHandlers()
+  registerClipboardCaptureHandlers()
+  registerGitCommitsHandlers()
 
   console.log('All IPC handlers registered')
 }

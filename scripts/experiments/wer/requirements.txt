@@ -1,0 +1,27 @@
+# WER / hybrid-chunking spike — pinned deps (Python 3.11, Windows, RTX 4090)
+#
+# Install into an isolated venv (uv recommended):
+#   uv venv --python 3.11 .venv
+#   uv pip install --python .venv/Scripts/python.exe -r requirements.txt
+#
+# faster-whisper provides BOTH:
+#   - local ASR (whisper large-v3 == the WhisperX ASR core; and large-v3-turbo)
+#   - a bundled Silero VAD (faster_whisper.vad.get_speech_timestamps) — so we get
+#     VAD segmentation WITHOUT pulling torch (avoids the CUDA-torch ordering
+#     gotcha documented in the diarization spike's requirements.txt).
+#
+# CUDA: ctranslate2 (faster-whisper backend) needs cuBLAS + cuDNN 9 wheels.
+faster-whisper==1.1.1
+ctranslate2>=4.4,<5           # pulled by faster-whisper; CUDA backend
+nvidia-cublas-cu12
+nvidia-cudnn-cu12==9.*
+
+# Gemini (same model/prompt the electron app uses via @google/generative-ai)
+google-generativeai==0.8.5
+
+# metrics / audio
+jiwer==3.1.0
+soundfile==0.13.1
+numpy<2.2
+
+# ffmpeg (system binary) is used for clip extraction and mp3 encoding — NOT a pip dep.

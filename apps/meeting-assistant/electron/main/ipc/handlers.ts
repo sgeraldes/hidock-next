@@ -11,6 +11,7 @@ import { registerNotesHandlers } from "./notes-handlers";
 import { registerScreenshotHandlers } from "./screenshot-handlers";
 import { registerSettingsHandlers } from "./settings-handlers";
 import { registerKnowledgeHandlers } from "./knowledge-handlers";
+import { registerAudioHandlers } from "./audio-handlers";
 
 export function registerIpcHandlers(): void {
   registerAppHandlers();
@@ -21,5 +22,6 @@ export function registerIpcHandlers(): void {
   registerScreenshotHandlers();
   registerSettingsHandlers();
   registerKnowledgeHandlers();
+  registerAudioHandlers();
   console.log("[IPC] All handlers registered");
 }

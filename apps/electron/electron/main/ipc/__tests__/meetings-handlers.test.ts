@@ -13,7 +13,9 @@ vi.mock('electron', () => ({
 // Mock database
 vi.mock('../../services/database', () => ({
   getMeetingById: vi.fn(),
-  updateMeeting: vi.fn()
+  updateMeeting: vi.fn(),
+  addMeetingAttendee: vi.fn(),
+  removeMeetingAttendee: vi.fn()
 }))
 
 describe('Meetings IPC Handlers', () => {
@@ -78,5 +80,77 @@ describe('Meetings IPC Handlers', () => {
 
     expect(result.success).toBe(false)
     expect(result.error.code).toBe('VALIDATION_ERROR')
+  })
+
+  it('should accept organizer fields in meetings:update', async () => {
+    const { getMeetingById, updateMeeting } = await import('../../services/database')
+    vi.mocked(getMeetingById).mockReturnValue({ id: '550e8400-e29b-41d4-a716-446655440000' } as any)
+
+    registerMeetingsHandlers()
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(call => call[0] === 'meetings:update')?.[1]
+    const result = await handler?.({} as any, {
+      id: '550e8400-e29b-41d4-a716-446655440000',
+      organizer_name: 'Alice',
+      organizer_email: 'alice@x.com'
+    }) as any
+
+    expect(result.success).toBe(true)
+    expect(updateMeeting).toHaveBeenCalledWith(
+      '550e8400-e29b-41d4-a716-446655440000',
+      expect.objectContaining({ organizer_name: 'Alice', organizer_email: 'alice@x.com' })
+    )
+  })
+
+  it('should register and delegate meetings:addAttendee', async () => {
+    const { getMeetingById, addMeetingAttendee } = await import('../../services/database')
+    vi.mocked(getMeetingById).mockReturnValue({ id: '550e8400-e29b-41d4-a716-446655440000' } as any)
+    vi.mocked(addMeetingAttendee).mockReturnValue({ id: 'c1', name: 'Bob' } as any)
+
+    registerMeetingsHandlers()
+    expect(ipcMain.handle).toHaveBeenCalledWith('meetings:addAttendee', expect.any(Function))
+
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(call => call[0] === 'meetings:addAttendee')?.[1]
+    const result = await handler?.({} as any, {
+      meetingId: '550e8400-e29b-41d4-a716-446655440000',
+      name: 'Bob',
+      email: 'bob@x.com'
+    }) as any
+
+    expect(result.success).toBe(true)
+    expect(addMeetingAttendee).toHaveBeenCalledWith(
+      '550e8400-e29b-41d4-a716-446655440000',
+      { name: 'Bob', email: 'bob@x.com' }
+    )
+  })
+
+  it('should reject addAttendee with neither name nor email', async () => {
+    registerMeetingsHandlers()
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(call => call[0] === 'meetings:addAttendee')?.[1]
+    const result = await handler?.({} as any, {
+      meetingId: '550e8400-e29b-41d4-a716-446655440000'
+    }) as any
+
+    expect(result.success).toBe(false)
+    expect(result.error.code).toBe('VALIDATION_ERROR')
+  })
+
+  it('should register and delegate meetings:removeAttendee', async () => {
+    const { getMeetingById, removeMeetingAttendee } = await import('../../services/database')
+    vi.mocked(getMeetingById).mockReturnValue({ id: '550e8400-e29b-41d4-a716-446655440000' } as any)
+
+    registerMeetingsHandlers()
+    expect(ipcMain.handle).toHaveBeenCalledWith('meetings:removeAttendee', expect.any(Function))
+
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(call => call[0] === 'meetings:removeAttendee')?.[1]
+    const result = await handler?.({} as any, {
+      meetingId: '550e8400-e29b-41d4-a716-446655440000',
+      contactId: '660e8400-e29b-41d4-a716-446655440001'
+    }) as any
+
+    expect(result.success).toBe(true)
+    expect(removeMeetingAttendee).toHaveBeenCalledWith(
+      '550e8400-e29b-41d4-a716-446655440000',
+      '660e8400-e29b-41d4-a716-446655440001'
+    )
   })
 })

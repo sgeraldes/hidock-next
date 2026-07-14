@@ -88,7 +88,6 @@ describe('Activity Log Integration - Spec Compliance', () => {
       // Expected: logActivity('success', 'Found N files on device', 'N recordings available')
       // Actual: No such call exists
 
-      const fileCount = 5
       emitActivityLog('success', 'Found 5 files on device', '5 recordings available')
 
       expect(sentMessages).toHaveLength(1)

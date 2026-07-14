@@ -17,7 +17,6 @@ import { BrowserWindow, ipcMain, Notification } from 'electron'
 import {
   markRecordingDownloaded,
   addSyncedFile,
-  addToQueue,
   isFileSynced,
   getRecordingByFilename,
   getSyncedFilenames,
@@ -28,7 +27,6 @@ import {
 } from './database'
 import { saveRecording, getRecordingsPath } from './file-storage'
 import { emitActivityLog } from './activity-log'
-import { getConfig } from './config'
 import { existsSync } from 'fs'
 import { join, basename } from 'path'
 
@@ -462,15 +460,14 @@ class DownloadService {
       // Save the file with the original recording date if available
       const filePath = await saveRecording(filename, data, undefined, item.recordingDate)
 
-      // Update database
-      const wavFilename = filename.replace(/\.hda$/i, '.wav')
+      // Update database. markRecordingDownloaded matches any extension variant
+      // (.hda device name vs .wav local name) and creates the recordings row
+      // itself when none exists, so downloads never race the file watcher.
       addSyncedFile(filename, basename(filePath), filePath, data.length)
-      markRecordingDownloaded(filename, filePath)
-
-      // Also try to mark by wav name if different
-      if (wavFilename !== filename) {
-        markRecordingDownloaded(wavFilename, filePath)
-      }
+      const recordingId = markRecordingDownloaded(filename, filePath, {
+        fileSize: data.length,
+        dateRecorded: item.recordingDate?.toISOString()
+      })
 
       // Update queue item
       item.status = 'completed'
@@ -486,21 +483,11 @@ class DownloadService {
       this.markDirty()
       this.emitStateUpdate(true) // C-004: immediate emit for completion
 
-      const config = getConfig()
-      if (config.transcription.autoTranscribe) {
-        const recording = getRecordingByFilename(filename)
-          ?? (wavFilename !== filename ? getRecordingByFilename(wavFilename) : undefined)
-          ?? getRecordingByFilename(basename(filePath))
-
-        if (recording) {
-          addToQueue(recording.id)
-          import('./transcription').then(({ processQueueManually }) => {
-            processQueueManually()
-          }).catch(err => {
-            console.error('[DownloadService] Failed to import transcription service:', err)
-          })
-        }
-      }
+      import('./transcription').then(({ queueTranscriptionIfEnabled }) => {
+        queueTranscriptionIfEnabled(recordingId)
+      }).catch(err => {
+        console.error('[DownloadService] Failed to import transcription service:', err)
+      })
 
       // DL-07: Clean up completed items from queue after emitting final state.
       // Keep them briefly so the renderer sees the 100% state, then remove.
@@ -576,7 +563,6 @@ class DownloadService {
   updateProgress(filename: string, bytesReceived: number): void {
     const item = this.state.queue.get(filename)
     if (item) {
-      const oldProgress = item.progress
       const statusTransition = item.status === 'pending'
       if (statusTransition) {
         item.status = 'downloading'
@@ -589,8 +575,13 @@ class DownloadService {
       const rawProgress = item.fileSize > 0 ? (bytesReceived / item.fileSize) * 100 : 0
       item.progress = Math.round(Number.isFinite(rawProgress) ? rawProgress : 0)
 
-      // Persist every 10% to avoid database spam
-      if (Math.floor(oldProgress / 10) !== Math.floor(item.progress / 10)) {
+      // Persist ONLY the pending -> downloading status transition, never the
+      // progress percentage. Progress lives in memory + throttled IPC; writing
+      // it to the DB on every 10% was a per-file multiplier on the full-DB save
+      // storm that froze the main thread. On restart an incomplete download is
+      // re-attempted from scratch, so the exact mid-download percentage is not
+      // worth a database write.
+      if (statusTransition) {
         this.persistQueueItem(item)
       }
 

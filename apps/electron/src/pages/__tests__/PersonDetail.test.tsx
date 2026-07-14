@@ -28,15 +28,42 @@ const mockGetById = vi.fn().mockResolvedValue({
 })
 
 const mockUpdate = vi.fn().mockResolvedValue({ success: true })
+const mockGetAll = vi.fn().mockResolvedValue({
+  success: true,
+  data: {
+    contacts: [
+      { id: 'p1', name: 'Mario', email: 'mario@example.com', type: 'team', tags: [] },
+      { id: 'p2', name: 'Luigi', email: 'luigi@example.com', type: 'team', tags: [] }
+    ],
+    total: 2
+  }
+})
+const mockMerge = vi.fn().mockResolvedValue({ success: true, data: { id: 'p1', name: 'Mario' } })
+// Aliases empty by default; individual tests override via mockGetAliases.mockResolvedValueOnce.
+const mockGetAliases = vi.fn().mockResolvedValue({ success: true, data: [] })
 
 // Mock Electron API
 global.window.electronAPI = {
   contacts: {
     getById: mockGetById,
     update: mockUpdate,
-    delete: vi.fn().mockResolvedValue({ success: true })
+    delete: vi.fn().mockResolvedValue({ success: true }),
+    getAll: mockGetAll,
+    merge: mockMerge,
+    unmerge: vi.fn().mockResolvedValue({ success: true, data: { loserId: 'l', loserName: 'L', restored: { meetingLinks: 0, speakerLinks: 0, knowledgeLinks: 0, aliases: 0, fieldsRestored: 0, skipped: 0 }, orphanedSinceMerge: [] } })
+  },
+  // v30: merge history empty + low link counts by default.
+  identity: {
+    getMergeJournal: vi.fn().mockResolvedValue({ success: true, data: [] }),
+    getMergeImpact: vi.fn().mockResolvedValue({ success: true, data: { keeper: 1, loser: 1 } }),
+    getAliases: mockGetAliases
   }
 } as any
+
+// Mock toast to avoid store side effects
+vi.mock('@/components/ui/toaster', () => ({
+  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() }
+}))
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -175,5 +202,58 @@ describe('PersonDetail Page', () => {
     await screen.findByText('Mario')
 
     expect(screen.getByText('Great teammate')).toBeInTheDocument()
+  })
+
+  it('should show a Type select in edit mode', async () => {
+    renderPersonDetail()
+    await screen.findByText('Mario')
+
+    fireEvent.click(screen.getByText('Edit'))
+    expect(screen.getByLabelText('Person type')).toBeInTheDocument()
+  })
+
+  it('should merge another contact into this one with the right ids', async () => {
+    renderPersonDetail()
+    await screen.findByText('Mario')
+
+    // Open the merge dialog
+    fireEvent.click(screen.getByRole('button', { name: /Merge/i }))
+
+    // Candidates are loaded (current contact p1 filtered out)
+    await waitFor(() => expect(mockGetAll).toHaveBeenCalled())
+    const luigi = await screen.findByText('Luigi')
+    fireEvent.click(luigi)
+
+    // Confirm the merge
+    fireEvent.click(await screen.findByRole('button', { name: 'Merge' }))
+
+    await waitFor(() =>
+      expect(mockMerge).toHaveBeenCalledWith({ keeperId: 'p1', loserId: 'p2' })
+    )
+  })
+
+  it('renders "Also known as" chips when aliases exist', async () => {
+    mockGetAliases.mockResolvedValueOnce({
+      success: true,
+      data: [
+        { alias: 'super mario', source: 'merge', confidence: 1, created_at: '2026-02-20T10:00:00Z' },
+        { alias: 'mario bros', source: 'speaker_assign', confidence: 0.95, created_at: '2026-02-21T10:00:00Z' }
+      ]
+    })
+    renderPersonDetail()
+    await screen.findByText('Mario')
+
+    expect(await screen.findByText('Also known as')).toBeInTheDocument()
+    expect(screen.getByText('super mario')).toBeInTheDocument()
+    expect(screen.getByText('mario bros')).toBeInTheDocument()
+  })
+
+  it('hides the "Also known as" section when there are no aliases', async () => {
+    // mockGetAliases default resolves to an empty list.
+    renderPersonDetail()
+    await screen.findByText('Mario')
+
+    await waitFor(() => expect(mockGetAliases).toHaveBeenCalledWith('p1'))
+    expect(screen.queryByText('Also known as')).not.toBeInTheDocument()
   })
 })

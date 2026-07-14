@@ -4,11 +4,24 @@ import { X, CheckCircle2, AlertCircle, Info } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 // Toast context for global state
+export interface ToastAction {
+  label: string
+  onClick: () => void
+}
+
 interface Toast {
   id: string
   title?: string
   description?: string
   variant?: 'default' | 'success' | 'error' | 'warning' | 'info'
+  duration?: number
+  /** Optional inline action button (e.g. "Undo"). Dismisses the toast when clicked. */
+  action?: ToastAction
+}
+
+/** Extra options for the convenience helpers beyond title/description. */
+interface ToastOptions {
+  action?: ToastAction
   duration?: number
 }
 
@@ -37,17 +50,17 @@ export function toast(options: Omit<Toast, 'id'>) {
 }
 
 // Convenience helpers for common toast types
-toast.success = (title: string, description?: string) =>
-  toast({ variant: 'success', title, description })
+toast.success = (title: string, description?: string, opts?: ToastOptions) =>
+  toast({ variant: 'success', title, description, ...opts })
 
-toast.error = (title: string, description?: string) =>
-  toast({ variant: 'error', title, description })
+toast.error = (title: string, description?: string, opts?: ToastOptions) =>
+  toast({ variant: 'error', title, description, ...opts })
 
-toast.warning = (title: string, description?: string) =>
-  toast({ variant: 'warning', title, description })
+toast.warning = (title: string, description?: string, opts?: ToastOptions) =>
+  toast({ variant: 'warning', title, description, ...opts })
 
-toast.info = (title: string, description?: string) =>
-  toast({ variant: 'info', title, description })
+toast.info = (title: string, description?: string, opts?: ToastOptions) =>
+  toast({ variant: 'info', title, description, ...opts })
 
 let globalToastFn: ((options: Omit<Toast, 'id'>) => void) | null = null
 
@@ -136,6 +149,19 @@ function ToastItem({ toast: t, onClose }: { toast: Toast; onClose: () => void })
           </ToastPrimitive.Description>
         )}
       </div>
+      {t.action && (
+        <ToastPrimitive.Action
+          altText={t.action.label}
+          className="flex-shrink-0 self-center rounded-md border px-2.5 py-1 text-xs font-medium hover:bg-accent transition-colors"
+          onClick={(e) => {
+            e.preventDefault()
+            t.action?.onClick()
+            onClose()
+          }}
+        >
+          {t.action.label}
+        </ToastPrimitive.Action>
+      )}
       <ToastPrimitive.Close
         className="rounded-md p-1 hover:bg-accent transition-colors"
         onClick={onClose}

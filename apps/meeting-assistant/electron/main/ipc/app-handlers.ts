@@ -42,7 +42,8 @@ export function registerAppHandlers(): void {
     properties?: Array<'openFile' | 'openDirectory' | 'multiSelections'>;
   }) => {
     const win = BrowserWindow.fromWebContents(event.sender);
-    const result = await dialog.showOpenDialog(win!, {
+    if (!win) return null;
+    const result = await dialog.showOpenDialog(win, {
       title: options?.title ?? "Select file or folder",
       filters: options?.filters,
       properties: options?.properties ?? ['openFile', 'openDirectory'],

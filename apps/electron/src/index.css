@@ -3,49 +3,71 @@
 @tailwind utilities;
 
 @layer base {
+  /* LIGHT THEME
+   * Canvas is a lavender-tinted near-white so the pure-white elevated tier
+   * (cards, popovers, panels) visibly lifts off it with real, tinted shadows.
+   * Primary is a committed deep-sky azure (AA-safe with white text). */
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
+    --background: 250 30% 96.5%;
+    --foreground: 224 40% 12%;
     --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
+    --card-foreground: 224 40% 12%;
     --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
-    --primary: 222.2 47.4% 11.2%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 222.2 84% 4.9%;
-    --radius: 0.5rem;
+    --popover-foreground: 224 40% 12%;
+    --primary: 205 90% 36%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 248 26% 92%;
+    --secondary-foreground: 224 40% 16%;
+    --muted: 248 24% 92.5%;
+    --muted-foreground: 224 14% 40%;
+    --accent: 248 32% 91%;
+    --accent-foreground: 224 40% 16%;
+    --destructive: 0 78% 46%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 248 22% 88%;
+    --input: 248 22% 88%;
+    --ring: 205 90% 40%;
+    --radius: 0.625rem;
+
+    /* Elevation — real y-offset shadows, faintly primary-tinted (cool ink),
+     * so depth reads even in a static screenshot. */
+    --shadow-sm: 0 1px 2px -1px hsl(224 45% 20% / 0.10), 0 2px 8px -2px hsl(224 45% 20% / 0.12);
+    --shadow-md: 0 6px 20px -4px hsl(224 45% 20% / 0.16), 0 2px 6px -2px hsl(224 45% 20% / 0.10);
+    --shadow-lg: 0 16px 40px -8px hsl(224 45% 22% / 0.22), 0 6px 16px -6px hsl(224 45% 20% / 0.14);
+
+    /* Motion language */
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    --dur-entrance: 300ms;
+    --dur-hover: 150ms;
   }
 
+  /* DARK THEME
+   * Canvas is slate-950; cards sit one step up (slate-900) with a subtle inner
+   * hairline (white/6) + black-based shadow. Primary is the same sky, luminous. */
   .dark {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
-    --card: 222.2 84% 4.9%;
-    --card-foreground: 210 40% 98%;
-    --popover: 222.2 84% 4.9%;
-    --popover-foreground: 210 40% 98%;
-    --primary: 210 40% 98%;
-    --primary-foreground: 222.2 47.4% 11.2%;
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-    --accent: 217.2 32.6% 17.5%;
-    --accent-foreground: 210 40% 98%;
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 212.7 26.8% 83.9%;
+    --background: 224 45% 6%;
+    --foreground: 210 40% 96%;
+    --card: 224 40% 9%;
+    --card-foreground: 210 40% 96%;
+    --popover: 224 42% 8%;
+    --popover-foreground: 210 40% 96%;
+    --primary: 205 90% 60%;
+    --primary-foreground: 224 45% 8%;
+    --secondary: 222 30% 16%;
+    --secondary-foreground: 210 40% 96%;
+    --muted: 222 28% 15%;
+    --muted-foreground: 216 20% 68%;
+    --accent: 222 30% 18%;
+    --accent-foreground: 210 40% 96%;
+    --destructive: 0 70% 47%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 222 25% 18%;
+    --input: 222 25% 20%;
+    --ring: 205 90% 60%;
+
+    --shadow-sm: 0 1px 2px 0 hsl(0 0% 0% / 0.55), 0 1px 3px 0 hsl(0 0% 0% / 0.45);
+    --shadow-md: 0 6px 20px -4px hsl(0 0% 0% / 0.6), 0 2px 6px -2px hsl(0 0% 0% / 0.5);
+    --shadow-lg: 0 18px 44px -8px hsl(0 0% 0% / 0.75), 0 6px 16px -6px hsl(0 0% 0% / 0.6);
   }
 }
 
@@ -86,6 +108,61 @@
 
 .titlebar-no-drag {
   -webkit-app-region: no-drag;
+}
+
+/* ── Motion language ───────────────────────────────────────────────
+ * entrance = fade + rise; hover = lift + shadow; press = scale; live = pulse.
+ * All ease-out. The reduced-motion block below neutralizes every animation
+ * and transition to an instant (opacity-only) result — WCAG 2.3.3. */
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes soft-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@layer utilities {
+  .animate-rise-in {
+    animation: rise-in var(--dur-entrance) var(--ease-out) both;
+  }
+  /* Lift + deepen shadow on hover; settle with a subtle press. */
+  .lift {
+    transition: transform var(--dur-hover) var(--ease-out), box-shadow var(--dur-hover) var(--ease-out);
+    will-change: transform;
+  }
+  .lift:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-md);
+  }
+  .lift:active {
+    transform: scale(0.985);
+  }
+  .animate-soft-pulse {
+    animation: soft-pulse 2.4s var(--ease-out) infinite;
+  }
+}
+
+/* Accessibility: honor the OS "reduce motion" setting (WCAG 2.1 — 2.3.3). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  /* No positional/scale motion — hover still deepens the shadow, but the
+   * card does not physically move or scale (opacity/shadow only). */
+  .lift:hover,
+  .lift:active {
+    transform: none !important;
+  }
+  .animate-rise-in {
+    animation: none !important;
+  }
 }
 
 /* Row expansion - no animation to ensure virtualizer measures correctly */

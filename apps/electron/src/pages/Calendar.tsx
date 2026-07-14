@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { Mic, RefreshCw, Play, X, LayoutGrid, Square, CheckSquare, FileText, Trash2, List, FileAudio, Download } from 'lucide-react'
+import { useLocation, useNavigate } from 'react-router-dom'
+import { Mic, RefreshCw, Play, X, LayoutGrid, Square, CheckSquare, FileText, Trash2, List, FileAudio, Download, Link2Off } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn, formatTime, isToday, formatDuration } from '@/lib/utils'
 import {
@@ -23,6 +23,10 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { HoverCard, HoverCardTrigger, HoverCardContent } from '@/components/ui/hover-card'
+import { MeetingHoverCard, meetingHoverWillHaveContent } from '@/components/entity'
+import { categorizeMeeting } from '@/lib/meeting-timing'
+import { CATEGORY_DOT, CATEGORY_BLOCK, UNMATCHED_BLOCK } from '@/lib/meeting-category-colors'
 import { RecordingLinkDialog } from '@/components/RecordingLinkDialog'
 import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
 import { useToday } from '@/hooks/useToday'
@@ -56,6 +60,9 @@ import {
   formatDurationStr,
   groupByDay,
   computeVisibleHourRange,
+  recordingCategory,
+  formatUnmatchedRecordingMeta,
+  recordingBlockTitle,
 } from '@/lib/calendar-utils'
 
 // Helper functions for date/time formatting in list views
@@ -120,6 +127,20 @@ export function Calendar() {
   // B-CAL-001: Named action selectors replace raw useAppStore.setState()
   const setLastCalendarSync = useSetLastCalendarSync()
   const setCalendarSyncing = useSetCalendarSyncing()
+
+  // Navigate the calendar to a requested date (e.g. "Go to Calendar" from a
+  // meeting detail page) instead of always showing the current week.
+  const location = useLocation()
+  useEffect(() => {
+    const state = location.state as { date?: string } | null
+    if (state?.date) {
+      const target = new Date(state.date)
+      if (!isNaN(target.getTime())) {
+        setCurrentDate(target)
+      }
+      navigate(location.pathname, { replace: true, state: null })
+    }
+  }, [location.state, location.pathname, navigate, setCurrentDate])
 
   // Get unified recordings (device + local)
   const { recordings: unifiedRecordings, loading: recordingsLoading, refresh: refreshRecordings, deviceConnected, stats } = useUnifiedRecordings()
@@ -186,8 +207,8 @@ export function Calendar() {
     }
   }, [uiConfig, calendarConfig, setCalendarView, setLastCalendarSync])
 
-  // Load meetings when date or view changes
-  useEffect(() => {
+  // Compute the [start, end] ISO range covering the current view.
+  const computeViewRange = useCallback((): { startDate: string; endDate: string } => {
     let startDate: string
     let endDate: string
 
@@ -218,8 +239,36 @@ export function Calendar() {
       endDate = lastDate.toISOString()
     }
 
+    return { startDate, endDate }
+  }, [currentDate, calendarView])
+
+  // Load meetings when date or view changes
+  useEffect(() => {
+    const { startDate, endDate } = computeViewRange()
     loadMeetings(startDate, endDate)
-  }, [currentDate, calendarView, loadMeetings])
+  }, [computeViewRange, loadMeetings])
+
+  // Refetch when a calendar sync completes (boot/background sync lands new
+  // meetings in the DB; without this the view keeps showing the pre-sync list).
+  // Debounced so a burst of syncs triggers a single reload.
+  useEffect(() => {
+    const onDomainEvent = window.electronAPI?.onDomainEvent
+    if (!onDomainEvent) return
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const unsubscribe = onDomainEvent((event: { type?: string }) => {
+      if (event?.type !== 'calendar:synced') return
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = null
+        const { startDate, endDate } = computeViewRange()
+        loadMeetings(startDate, endDate)
+      }, 300)
+    })
+    return () => {
+      if (timer) clearTimeout(timer)
+      unsubscribe?.()
+    }
+  }, [computeViewRange, loadMeetings])
 
   // Get dates for current view
   const viewDates = useMemo((): Date[] => {
@@ -372,6 +421,69 @@ export function Calendar() {
     return grouped
   }, [meetingOverlays, viewDates, hideEmptyMeetings])
 
+  // Outlook-style conflict layout: assign overlapping blocks to side-by-side
+  // columns instead of stacking them on top of each other.
+  // Returns per-id {col, cols} so the renderer can compute left/width.
+  const computeOverlapColumns = useCallback(
+    (blocks: Array<{ id: string; startTime: Date; endTime: Date }>): Map<string, { col: number; cols: number }> => {
+      const result = new Map<string, { col: number; cols: number }>()
+      const sorted = [...blocks].sort((a, b) => a.startTime.getTime() - b.startTime.getTime())
+
+      let cluster: Array<{ id: string; end: number; col: number }> = []
+      let clusterIds: string[] = []
+      let clusterMaxCols = 0
+
+      const flushCluster = () => {
+        for (const cid of clusterIds) {
+          const entry = result.get(cid)
+          if (entry) entry.cols = clusterMaxCols
+        }
+        cluster = []
+        clusterIds = []
+        clusterMaxCols = 0
+      }
+
+      for (const block of sorted) {
+        const start = block.startTime.getTime()
+        const end = Math.max(block.endTime.getTime(), start + 1)
+
+        // Remove finished blocks from the active set
+        cluster = cluster.filter((c) => c.end > start)
+        if (cluster.length === 0 && clusterIds.length > 0) flushCluster()
+
+        // Assign the smallest free column
+        const used = new Set(cluster.map((c) => c.col))
+        let col = 0
+        while (used.has(col)) col++
+
+        cluster.push({ id: block.id, end, col })
+        clusterIds.push(block.id)
+        clusterMaxCols = Math.max(clusterMaxCols, cluster.length, col + 1)
+        result.set(block.id, { col, cols: 1 })
+      }
+      if (clusterIds.length > 0) flushCluster()
+
+      return result
+    },
+    []
+  )
+
+  const overlayColumnsByDay = useMemo(() => {
+    const map: Record<string, Map<string, { col: number; cols: number }>> = {}
+    for (const key in meetingOverlaysByDay) {
+      map[key] = computeOverlapColumns(meetingOverlaysByDay[key])
+    }
+    return map
+  }, [meetingOverlaysByDay, computeOverlapColumns])
+
+  const recordingColumnsByDay = useMemo(() => {
+    const map: Record<string, Map<string, { col: number; cols: number }>> = {}
+    for (const key in recordingsByDay) {
+      map[key] = computeOverlapColumns(recordingsByDay[key])
+    }
+    return map
+  }, [recordingsByDay, computeOverlapColumns])
+
   const handleMeetingClick = (meeting: Meeting) => {
     navigate(`/meeting/${meeting.id}`)
   }
@@ -381,7 +493,8 @@ export function Calendar() {
     if (recording.linkedMeeting) {
       navigate(`/meeting/${recording.linkedMeeting.id}`)
     } else {
-      // Open link dialog for orphan recordings
+      // Open link dialog for orphan recordings (assignment surface owned by the
+      // recording-match flow).
       setLinkDialogRecording({
         id: recording.id,
         filename: recording.filename,
@@ -706,7 +819,7 @@ export function Calendar() {
             <span>Syncing calendar...</span>
           </div>
         )}
-        /* List/Cards View */
+        {/* List/Cards View */}
         <div className="flex-1 flex flex-col overflow-hidden">
           {/* Bulk Actions Bar */}
           {selectedIds.size > 0 && (
@@ -1053,7 +1166,7 @@ export function Calendar() {
 
           {/* Month Grid */}
           <div className="flex-1 overflow-auto">
-            <div className="grid grid-cols-7 h-full" style={{ gridAutoRows: 'minmax(100px, 1fr)' }}>
+            <div className="grid grid-cols-7 h-full animate-rise-in" style={{ gridAutoRows: 'minmax(100px, 1fr)' }}>
               {monthDates.map((date) => {
                 const key = date.toISOString().split('T')[0]
                 const dayMeetings = meetingsByMonth[key] || []
@@ -1116,10 +1229,12 @@ export function Calendar() {
                           className={cn(
                             'w-full text-left text-xs p-1 rounded truncate transition-colors',
                             'hover:ring-1 hover:ring-ring',
-                            meeting.hasRecording && !meeting.isPlaceholder && 'bg-green-100 text-green-800 dark:bg-green-900/50 dark:text-green-300',
-                            meeting.isPlaceholder && 'bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-300 border-dashed border border-amber-300',
-                            meeting.recordingLocation === 'device-only' && 'bg-orange-100 text-orange-800 dark:bg-orange-900/50 dark:text-orange-300',
-                            !meeting.hasRecording && !meeting.isPlaceholder && 'bg-gray-50/50 text-gray-400 dark:bg-gray-800/30 dark:text-gray-500 opacity-50 border border-dashed border-gray-300',
+                            // Unmatched recording placeholder → amber exception style
+                            meeting.isPlaceholder && UNMATCHED_BLOCK,
+                            // Recorded meeting → its category color (a badge, below, marks "recorded")
+                            meeting.hasRecording && !meeting.isPlaceholder && CATEGORY_BLOCK[categorizeMeeting({ subject: meeting.subject })],
+                            // Scheduled, not recorded → faded dashed ghost
+                            !meeting.hasRecording && !meeting.isPlaceholder && 'border border-dashed border-border bg-muted/30 text-muted-foreground/70 opacity-70',
                             meeting.hasConflicts && 'ring-1 ring-orange-400'
                           )}
                         >
@@ -1174,8 +1289,8 @@ export function Calendar() {
                   )}
                 >
                   <div className={cn(
-                    'text-xs font-medium uppercase tracking-wide',
-                    isWeekend ? 'text-muted-foreground' : 'text-muted-foreground'
+                    'text-xs font-semibold uppercase tracking-wide',
+                    today ? 'text-primary' : 'text-foreground/70'
                   )}>
                     {date.toLocaleDateString('en-US', { weekday: calendarView === 'day' ? 'long' : 'short' })}
                   </div>
@@ -1194,7 +1309,7 @@ export function Calendar() {
 
           {/* Time Grid - scrollable, with stable scrollbar gutter */}
           <div ref={scrollContainerRef} className="flex-1 overflow-auto" style={{ scrollbarGutter: 'stable' }}>
-            <div className="flex min-h-full">
+            <div className="flex min-h-full animate-rise-in">
               {/* Time Labels - B-CAL-003: Uses dynamic visibleHours */}
               <div className="w-14 flex-shrink-0 bg-background">
                 {visibleHours.map((hour) => (
@@ -1256,23 +1371,28 @@ export function Calendar() {
                       if (startHour < visibleStartHour || startHour >= visibleEndHour) return null
 
                       const canShowTime = height > 35
+                      // Outlook-style conflict columns: overlapping meetings share the width
+                      const layout = overlayColumnsByDay[key]?.get(meeting.id) ?? { col: 0, cols: 1 }
 
                       return (
                         <Tooltip key={`overlay-${meeting.id}`}>
                           <TooltipTrigger asChild>
                             <button
                               onClick={() => handleMeetingClick({ id: meeting.id } as Meeting)}
+                              aria-label={`Scheduled meeting, not recorded: ${meeting.subject}`}
                               className={cn(
-                                'absolute w-[calc(100%-8px)] left-1 rounded-md px-2 py-1 text-xs overflow-hidden transition-all text-left',
+                                'absolute rounded-md px-2 py-1 text-xs overflow-hidden transition-colors text-left',
                                 'border-2 border-dashed border-slate-300 dark:border-slate-600',
-                                'bg-slate-50/30 dark:bg-slate-800/20 text-slate-400 dark:text-slate-500',
-                                'hover:bg-slate-100/50 dark:hover:bg-slate-700/30 hover:border-slate-400',
-                                'opacity-60 hover:opacity-80'
+                                'bg-slate-50/30 dark:bg-slate-800/20 text-slate-500 dark:text-slate-400',
+                                'hover:bg-slate-100/60 dark:hover:bg-slate-700/30 hover:border-slate-400',
+                                'opacity-70 hover:opacity-90'
                               )}
                               style={{
                                 top,
                                 height,
                                 minHeight: 24,
+                                left: `calc(${(layout.col / layout.cols) * 100}% + 4px)`,
+                                width: `calc(${100 / layout.cols}% - 8px)`,
                                 zIndex: 5 // Below recordings
                               }}
                             >
@@ -1297,8 +1417,10 @@ export function Calendar() {
                       )
                     })}
 
-                    {/* ===== RECORDINGS (SOLID - PRIMARY) ===== */}
-                    {/* Recordings shown as solid blocks - positioned by RECORDING time */}
+                    {/* ===== RECORDINGS (PRIMARY) ===== */}
+                    {/* Recordings shown as category-tinted blocks - positioned by RECORDING time.
+                        The block's FILL carries the linked meeting's category; a compact badge
+                        (mic + location glyph) carries the "recorded" state — not the whole color. */}
                     {(recordingsByDay[key] || []).map((recording, recIdx) => {
                       const { top, height } = getRecordingStyle(recording)
 
@@ -1308,58 +1430,92 @@ export function Calendar() {
                       const canShowTime = height > 35
                       const canShowMultiline = height > 60
 
-                      // Display label: meeting subject if linked, otherwise filename
-                      const displayLabel = recording.linkedMeeting?.subject || recording.filename
+                      const linked = recording.linkedMeeting
+                      const isUnmatched = !linked
+                      const category = recordingCategory(recording)
+                      // Matched → meeting subject; unlinked → the recording's own title
+                      // (or "Recording · <time>"), never the raw device filename.
+                      const displayLabel = recordingBlockTitle(recording)
+                      // Outlook-style conflict columns for overlapping recordings
+                      const layout = recordingColumnsByDay[key]?.get(recording.id) ?? { col: 0, cols: 1 }
+
+                      const button = (
+                        <button
+                          onClick={() => handleRecordingClick(recording)}
+                          className={cn(
+                            'absolute rounded-md px-2 py-1 text-xs overflow-hidden text-left transition-[filter,box-shadow]',
+                            'shadow-sm hover:z-30 hover:ring-2 hover:ring-ring/60 hover:brightness-[1.03]',
+                            isUnmatched ? UNMATCHED_BLOCK : CATEGORY_BLOCK[category]
+                          )}
+                          style={{
+                            top,
+                            height,
+                            minHeight: 24,
+                            left: `calc(${(layout.col / layout.cols) * 100}% + 4px)`,
+                            width: `calc(${100 / layout.cols}% - 8px)`,
+                            zIndex: 15 + recIdx // Above meeting overlays
+                          }}
+                        >
+                          <div className="flex items-start gap-1 h-full">
+                            {isUnmatched ? (
+                              // Unlinked-state glyph — this recording matched no meeting.
+                              <Link2Off className="mt-0.5 h-3 w-3 flex-shrink-0 opacity-80" aria-hidden="true" />
+                            ) : (
+                              <span
+                                className={cn('mt-1 h-2 w-2 flex-shrink-0 rounded-full', CATEGORY_DOT[category])}
+                                aria-hidden="true"
+                              />
+                            )}
+                            <div className="flex-1 min-w-0">
+                              <div className={cn(
+                                'font-semibold leading-tight',
+                                canShowMultiline ? 'line-clamp-2' : 'truncate'
+                              )}>
+                                {displayLabel}
+                              </div>
+                              {canShowTime && (
+                                <div className={cn(
+                                  'text-[10px] mt-0.5 opacity-80',
+                                  canShowMultiline ? '' : 'truncate'
+                                )}>
+                                  {isUnmatched
+                                    ? formatUnmatchedRecordingMeta(recording)
+                                    : `${formatTime(recording.startTime.toISOString())} - ${formatTime(recording.endTime.toISOString())}${recording.durationSeconds > 0 ? ` (${formatDurationStr(recording.durationSeconds)})` : ''}`}
+                                </div>
+                              )}
+                            </div>
+                            {/* Recorded badge: mic + where the audio lives */}
+                            <span
+                              className="flex flex-shrink-0 items-center gap-0.5 rounded bg-background/40 px-1 py-0.5"
+                              title="Recorded"
+                            >
+                              <Mic className="h-3 w-3" aria-hidden="true" />
+                              <StatusIcon location={recording.location} />
+                            </span>
+                          </div>
+                        </button>
+                      )
+
+                      // Matched recordings get the richer MeetingHoverCard (organizer /
+                      // location / participants) — gated so it never pops in empty; else
+                      // fall back to the recording tooltip (also used for unmatched blocks).
+                      const meetingLike = linked
+                        ? { id: linked.id, organizer_name: linked.organizer, location: linked.location }
+                        : null
+                      if (meetingLike && meetingHoverWillHaveContent(meetingLike, ['title', 'time'])) {
+                        return (
+                          <HoverCard key={recording.id}>
+                            <HoverCardTrigger asChild>{button}</HoverCardTrigger>
+                            <HoverCardContent side="right" align="start">
+                              <MeetingHoverCard id={linked!.id} name={linked!.subject} visibleFields={['title', 'time']} />
+                            </HoverCardContent>
+                          </HoverCard>
+                        )
+                      }
 
                       return (
                         <Tooltip key={recording.id}>
-                          <TooltipTrigger asChild>
-                            <button
-                              onClick={() => handleRecordingClick(recording)}
-                              className={cn(
-                                'absolute w-[calc(100%-8px)] left-1 rounded-md px-2 py-1 text-xs overflow-hidden transition-all text-left',
-                                'hover:ring-2 hover:ring-ring hover:z-30 hover:shadow-lg',
-                                'shadow-sm',
-                                // Synced/downloaded recording (green)
-                                (recording.location === 'both' || recording.location === 'local-only') &&
-                                  'bg-emerald-500 text-white border-l-4 border-emerald-700',
-                                // Device-only recording (orange)
-                                recording.location === 'device-only' &&
-                                  'bg-orange-500 text-white border-l-4 border-orange-700',
-                                // No linked meeting - slightly different shade
-                                !recording.linkedMeeting && recording.location !== 'device-only' &&
-                                  'bg-amber-500 text-white border-l-4 border-amber-700'
-                              )}
-                              style={{
-                                top,
-                                height,
-                                minHeight: 24,
-                                zIndex: 15 + recIdx // Above meeting overlays
-                              }}
-                            >
-                              <div className="flex items-start gap-1 h-full relative z-10">
-                                <Mic className="h-3 w-3 flex-shrink-0 mt-0.5 opacity-90" />
-                                <div className="flex-1 min-w-0">
-                                  <div className={cn(
-                                    'font-semibold leading-tight',
-                                    canShowMultiline ? 'line-clamp-2' : 'truncate'
-                                  )}>
-                                    {displayLabel}
-                                  </div>
-                                  {canShowTime && (
-                                    <div className={cn(
-                                      'text-[10px] mt-0.5 opacity-80',
-                                      canShowMultiline ? '' : 'truncate'
-                                    )}>
-                                      {formatTime(recording.startTime.toISOString())} - {formatTime(recording.endTime.toISOString())}
-                                      {recording.durationSeconds > 0 && ` (${formatDurationStr(recording.durationSeconds)})`}
-                                    </div>
-                                  )}
-                                </div>
-                                <StatusIcon location={recording.location} />
-                              </div>
-                            </button>
-                          </TooltipTrigger>
+                          <TooltipTrigger asChild>{button}</TooltipTrigger>
                           <TooltipContent side="right" align="start">
                             <RecordingTooltipContent recording={recording} />
                           </TooltipContent>

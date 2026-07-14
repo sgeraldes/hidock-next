@@ -2,6 +2,7 @@ import { app, desktopCapturer } from 'electron'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { createProvider, embed } from '@hidock/ai-providers'
+import { TranscriptionPipeline } from '@hidock/transcription'
 import type { LanguageModel } from 'ai'
 import type { AIProviderKey, EmbeddingProviderConfig } from '@hidock/ai-providers'
 import { settingsStore } from './settings-store'
@@ -10,6 +11,7 @@ import {
   createSession,
   updateSession,
   getAllSessions,
+  getSession,
   getRecentTranscriptSegments,
   getScreenshotsBySession,
 } from './database-queries'
@@ -20,11 +22,14 @@ import { NotesGenerator } from './notes-generator'
 import { KnowledgeBase } from './knowledge-base'
 import { MeetingDetector } from './meeting-detector'
 import { MicMonitor } from './mic-monitor'
+import { AudioTranscriptionBridge } from './audio-transcription-bridge'
 import { setSuggestionService } from '../ipc/suggestion-handlers'
 import { setScreenshotService } from '../ipc/screenshot-handlers'
 import { setNotesService } from '../ipc/notes-handlers'
 import { setKnowledgeBaseService } from '../ipc/knowledge-handlers'
+import { setAudioBridge } from '../ipc/audio-handlers'
 import { broadcastToAllWindows } from '../ipc/broadcast'
+import { mapDbSession } from '../ipc/map-db-session'
 import { showMiniBar, hideMiniBar } from '../windows'
 import { updateTrayState } from './tray-manager'
 
@@ -40,6 +45,7 @@ export class SessionOrchestrator {
   private knowledgeBase: KnowledgeBase | null = null
   private meetingDetector: MeetingDetector | null = null
   private micMonitor: MicMonitor | null = null
+  private audioBridge: AudioTranscriptionBridge | null = null
 
   private activeSessionId: string | null = null
   private activeSessionDir: string | null = null
@@ -63,9 +69,7 @@ export class SessionOrchestrator {
       chunkSize: settingsStore.get('kb.chunkSize'),
       chunkOverlap: settingsStore.get('kb.chunkOverlap'),
     })
-    if (embedFn) {
-      this.knowledgeBase.setEmbedFunction(embedFn)
-    }
+    this.knowledgeBase.setEmbedFunction(embedFn)
 
     this.suggestionEngine = new SuggestionEngine({
       triggerIntervalMs: settingsStore.get('suggestions.triggerIntervalSeconds') * 1000,
@@ -113,13 +117,27 @@ export class SessionOrchestrator {
       this.notesGenerator.setModel(this.currentModel)
     }
 
-    // 5. Wire IPC handler services
+    // 5. Instantiate MeetingDetector and MicMonitor
+    this.createAndStartMeetingDetector()
+
+    this.micMonitor = new MicMonitor(3000)
+    this.micMonitor.on((status) => {
+      if (status === 'active' && settingsStore.get('mic.enabled')) {
+        this.meetingDetector?.onMicActivity()
+      }
+    })
+    this.micMonitor.start()
+
+    // 6. Instantiate audio transcription bridge
+    this.createAudioBridge()
+
+    // 7. Wire IPC handler services
     this.wireIpcHandlers()
 
     console.log('[SessionOrchestrator] Initialized')
   }
 
-  async startSession(title?: string): Promise<void> {
+  async startSession(title?: string): Promise<string> {
     if (this.activeSessionId) {
       throw new Error('A session is already active')
     }
@@ -136,6 +154,9 @@ export class SessionOrchestrator {
     // Signal renderer to start audio capture
     broadcastToAllWindows('audio:startCapture', { sessionId: session.id })
 
+    // Activate audio transcription bridge
+    this.audioBridge?.start(session.id, this._sessionStartTime)
+
     // Start suggestion engine
     if (this.suggestionEngine && settingsStore.get('suggestions.enabled')) {
       this.suggestionEngine.start(session.id)
@@ -150,10 +171,15 @@ export class SessionOrchestrator {
     showMiniBar()
     updateTrayState('recording')
 
-    // Broadcast session created
-    broadcastToAllWindows('session:created', session)
+    // Broadcast session created (mapped to camelCase for renderer)
+    broadcastToAllWindows('session:created', mapDbSession(session))
+
+    // Broadcast recording state for mini-bar and other UI
+    broadcastToAllWindows('app:recordingState', { isRecording: true, sessionId: session.id })
 
     saveDatabase()
+
+    return session.id
   }
 
   async stopSession(): Promise<unknown> {
@@ -170,48 +196,57 @@ export class SessionOrchestrator {
     this.suggestionEngine?.stop()
     this.screenCapture?.stopAutoCapture()
 
-    // Update database
+    // Flush and stop audio bridge (must come after suggestion/screen, before DB update)
+    await this.audioBridge?.stop()
+
+    // Update database — mark completed with end timestamp
     updateSession(sessionId, {
       ended_at: Date.now(),
-      status: 'processing',
+      status: 'completed',
     })
     saveDatabase()
+
+    // Broadcast session updated with mapped camelCase data
+    const updatedSession = getSession(sessionId)
+    if (updatedSession) {
+      broadcastToAllWindows('session:updated', mapDbSession(updatedSession))
+    }
 
     // Update UI
     hideMiniBar()
-    updateTrayState('processing')
-
-    // Broadcast status change
-    broadcastToAllWindows('session:statusChanged', {
-      sessionId,
-      status: 'processing',
-    })
-
-    // Complete session
-    updateSession(sessionId, { status: 'completed' })
-    saveDatabase()
 
     this.activeSessionId = null
     this.activeSessionDir = null
     updateTrayState('idle')
 
+    // Broadcast recording state stopped
+    broadcastToAllWindows('app:recordingState', { isRecording: false, sessionId: null })
+
     return { sessionId }
   }
 
   async onSettingsChanged(key: string): Promise<void> {
+    console.log(`[SessionOrchestrator] Settings changed: ${key}`)
     if (key.startsWith('ai.provider') || key.startsWith('ai.model') || key.startsWith('ai.apiKey')) {
       this.configureAIProvider()
       this.setModelOnServices()
     }
 
     if (key.startsWith('ai.embedding')) {
-      const embedFn = this.createEmbedFunction()
-      if (embedFn && this.knowledgeBase) {
-        this.knowledgeBase.setEmbedFunction(embedFn)
+      if (this.knowledgeBase) {
+        this.knowledgeBase.setEmbedFunction(this.createEmbedFunction())
       }
-      // Re-wire KB service
       this.wireKnowledgeBaseService()
     }
+
+    if (key.startsWith('calendar.') || key.startsWith('mic.') || key.startsWith('correlation.')) {
+      this.meetingDetector?.stop()
+      this.createAndStartMeetingDetector()
+    }
+  }
+
+  isSessionActive(id: string): boolean {
+    return this.activeSessionId === id
   }
 
   shutdown(): void {
@@ -234,9 +269,65 @@ export class SessionOrchestrator {
     this.screenCapture?.stopAutoCapture()
     this.meetingDetector?.stop()
     this.micMonitor?.stop()
+    this.audioBridge?.dispose()
   }
 
   // ── Private methods ─────────────────────────────────────────────────────
+
+  private createAndStartMeetingDetector(): void {
+    this.meetingDetector = new MeetingDetector({
+      calendarSource: settingsStore.get('calendar.source'),
+      calendarPollMinutes: settingsStore.get('calendar.pollIntervalMinutes'),
+      calendarEnabled: settingsStore.get('calendar.enabled'),
+      micEnabled: settingsStore.get('mic.enabled'),
+      micDefaultAction: settingsStore.get('mic.defaultAction'),
+      autoRecordWithCalendar: settingsStore.get('mic.autoRecordWithCalendar'),
+      autoRecordOnMeeting: settingsStore.get('calendar.autoRecordOnMeeting'),
+      correlationAutoLinkMinutes: settingsStore.get('correlation.autoLinkMinutes'),
+      correlationSuggestLinkMinutes: settingsStore.get('correlation.suggestLinkMinutes'),
+      correlationSuggestEnabled: settingsStore.get('correlation.suggestEnabled'),
+      preNotificationSeconds: settingsStore.get('calendar.preNotificationSeconds'),
+    })
+
+    this.meetingDetector.on(async (event) => {
+      switch (event.type) {
+        case 'meeting-started': {
+          const meeting = event.event
+          if (settingsStore.get('calendar.autoRecordOnMeeting')) {
+            await this.autoStartSession(meeting?.title)
+          }
+          break
+        }
+        case 'meeting-upcoming':
+          broadcastToAllWindows('meeting:upcoming', event)
+          break
+        case 'mic-detected':
+          if (event.action === 'auto-record') {
+            await this.autoStartSession()
+          } else if (event.action === 'ask') {
+            broadcastToAllWindows('meeting:micDetected', event)
+          }
+          break
+        case 'correlation':
+          broadcastToAllWindows('meeting:correlation', event)
+          break
+        case 'error':
+          console.error('[SessionOrchestrator] MeetingDetector error:', event.error)
+          break
+      }
+    })
+
+    this.meetingDetector.start()
+  }
+
+  private async autoStartSession(title?: string): Promise<void> {
+    if (this.activeSessionId) return
+    try {
+      await this.startSession(title)
+    } catch (error) {
+      console.error('[SessionOrchestrator] Auto-start failed:', error)
+    }
+  }
 
   private configureAIProvider(): void {
     const provider = settingsStore.get('ai.provider')
@@ -248,6 +339,7 @@ export class SessionOrchestrator {
       const result = createProvider(config)
       this.currentModel = result.model
       this._provider = result.provider
+      console.log(`[SessionOrchestrator] AI provider configured: ${result.provider}/${model}`)
     } catch (error) {
       console.error('[SessionOrchestrator] Failed to configure AI provider:', error)
       this.currentModel = null
@@ -276,7 +368,7 @@ export class SessionOrchestrator {
     }
   }
 
-  private createEmbedFunction(): ((text: string) => Promise<number[]>) | null {
+  private createEmbedFunction(): (text: string) => Promise<number[]> {
     const provider = settingsStore.get('ai.embeddingProvider')
     const model = settingsStore.get('ai.embeddingModel')
 
@@ -370,6 +462,30 @@ export class SessionOrchestrator {
     })
   }
 
+  private createAudioBridge(): void {
+    try {
+      // Build a pipeline with zero engines — acts as a passthrough that throws on transcription,
+      // which is safe since flush() catches errors and broadcasts transcript:error.
+      // Callers may inject real engines if API keys are available.
+      const apiKey = credentialStore.retrieve('ai.apiKey', settingsStore.get('ai.apiKey'))
+        ?? settingsStore.get('ai.apiKey')
+
+      // TranscriptionPipeline requires at least one engine; instantiate with empty array
+      // only if no key is available (pipeline will throw on collect, caught by bridge flush).
+      const engines: import('@hidock/transcription').TranscriptionEngine[] = []
+      const pipeline = engines.length > 0
+        ? new TranscriptionPipeline(engines)
+        : (apiKey ? new TranscriptionPipeline([]) : null)
+
+      this.audioBridge = new AudioTranscriptionBridge(pipeline)
+      setAudioBridge(this.audioBridge)
+      console.log('[SessionOrchestrator] Audio transcription bridge created')
+    } catch (error) {
+      console.error('[SessionOrchestrator] Failed to create audio bridge:', error)
+      this.audioBridge = null
+    }
+  }
+
   private recoverInterruptedSessions(): void {
     try {
       const sessions = getAllSessions()
@@ -387,4 +503,16 @@ export class SessionOrchestrator {
       console.error('[SessionOrchestrator] Error recovering sessions:', error)
     }
   }
+}
+
+// ── Module-level singleton helpers ────────────────────────────────────────────
+
+let _orchestratorInstance: SessionOrchestrator | null = null
+
+export function getOrchestrator(): SessionOrchestrator | null {
+  return _orchestratorInstance
+}
+
+export function setOrchestratorInstance(orchestrator: SessionOrchestrator): void {
+  _orchestratorInstance = orchestrator
 }

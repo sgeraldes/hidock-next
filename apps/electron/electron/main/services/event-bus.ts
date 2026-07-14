@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events'
-import { BrowserWindow } from 'electron'
+import type { BrowserWindow } from 'electron'
 
 // Domain Event Types
 export interface DomainEvent {
@@ -38,7 +38,53 @@ export interface RecordingCleanupSuggestedEvent extends DomainEvent {
   }
 }
 
-export type KnownDomainEvent = QualityAssessedEvent | StorageTierAssignedEvent | RecordingCleanupSuggestedEvent
+/** A canonical contact was renamed or merged — the living graph re-keys its node (v27). */
+export interface ContactChangedEvent extends DomainEvent {
+  type: 'entity:contact-changed'
+  payload: {
+    contactId: string
+    change: 'updated' | 'merged'
+    oldName?: string
+    newName?: string
+  }
+}
+
+/** A transcript finished analysis/entity extraction — the living graph auto-ingests it (v27). */
+export interface TranscriptReadyEvent extends DomainEvent {
+  type: 'entity:transcript-ready'
+  payload: {
+    transcriptId: string
+    recordingId: string
+  }
+}
+
+/** An imported artifact finished extraction/indexing — Layer-1 pipeline hook (C0/v28). */
+export interface ArtifactReadyEvent extends DomainEvent {
+  type: 'entity:artifact-ready'
+  payload: {
+    artifactId: string
+    knowledgeCaptureId: string
+    kind: string
+    indexedChunks: number
+  }
+}
+
+/** A calendar sync finished successfully — meeting-list surfaces should refetch. */
+export interface CalendarSyncedEvent extends DomainEvent {
+  type: 'calendar:synced'
+  payload: {
+    meetingsCount: number
+  }
+}
+
+export type KnownDomainEvent =
+  | QualityAssessedEvent
+  | StorageTierAssignedEvent
+  | RecordingCleanupSuggestedEvent
+  | ContactChangedEvent
+  | TranscriptReadyEvent
+  | ArtifactReadyEvent
+  | CalendarSyncedEvent
 
 /**
  * Sanitize event payload before broadcasting to renderer process

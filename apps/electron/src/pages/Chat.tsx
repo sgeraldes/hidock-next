@@ -45,6 +45,8 @@ import {
 } from '@/components/ui/alert-dialog'
 import { toast } from '@/components/ui/toaster'
 import { ContextPicker } from '@/components/ContextPicker'
+import { HoverCard, HoverCardTrigger, HoverCardContent } from '@/components/ui/hover-card'
+import { MeetingHoverCard } from '@/components/entity'
 import { cn, getRelativeTime } from '@/lib/utils'
 import type { Message, Conversation, KnowledgeCapture } from '@/types/knowledge'
 
@@ -69,6 +71,8 @@ interface VectorChunk {
 }
 
 interface RAGStatus {
+  backend?: 'gemini' | 'ollama' | 'none'
+  chatAvailable?: boolean
   ollamaAvailable: boolean
   documentCount: number
   meetingCount: number
@@ -81,6 +85,18 @@ interface Source {
   subject?: string
   timestamp?: string
   score: number
+}
+
+// Human-readable label for the active chat backend shown in the status badge.
+function backendLabel(backend?: 'gemini' | 'ollama' | 'none'): string {
+  switch (backend) {
+    case 'gemini':
+      return 'Gemini'
+    case 'ollama':
+      return 'Ollama'
+    default:
+      return 'AI'
+  }
 }
 
 export function Chat() {
@@ -414,15 +430,19 @@ export function Chat() {
   }
 
   const checkRAGStatus = async () => {
+    const unavailable: RAGStatus = {
+      backend: 'none',
+      chatAvailable: false,
+      ollamaAvailable: false,
+      documentCount: 0,
+      meetingCount: 0,
+      ready: false
+    }
     try {
       const result = await window.electronAPI.rag.status()
-      if (result.success) {
-        setStatus(result.data)
-      } else {
-        setStatus({ ollamaAvailable: false, documentCount: 0, meetingCount: 0, ready: false })
-      }
+      setStatus(result.success ? result.data : unavailable)
     } catch (error) {
-      setStatus({ ollamaAvailable: false, documentCount: 0, meetingCount: 0, ready: false })
+      setStatus(unavailable)
     }
   }
 
@@ -490,7 +510,7 @@ export function Chat() {
       if (result.success) {
         toast.success('Conversation exported', result.data)
       } else {
-        toast.error('Export failed', result.error || 'Unknown error')
+        toast.error('Export failed', result.error?.message || 'Unknown error')
       }
     } catch (error) {
       console.error('Export error:', error)
@@ -643,7 +663,7 @@ export function Chat() {
         const errorMsg = await window.electronAPI.assistant.addMessage(
           activeConversation.id,
           'assistant',
-          'Sorry, I encountered an error processing your request. Please make sure Ollama is running and try again.'
+          'Sorry, I encountered an error processing your request. Please check that a Gemini API key is set in Settings (or that Ollama is running) and try again.'
         )
         setMessages((prev) => [...prev, errorMsg])
         setFailedMessageIds(prev => new Set(prev).add(errorMsg.id))
@@ -910,12 +930,12 @@ export function Chat() {
                 {status.ready ? (
                   <div className="hidden sm:flex items-center gap-1.5 text-green-600 dark:text-green-400 bg-green-500/10 px-2 py-1 rounded-full border border-green-500/20">
                     <CheckCircle2 className="h-3.5 w-3.5" />
-                    <span>{status.documentCount} chunks indexed</span>
+                    <span>{backendLabel(status.backend)} · {status.documentCount} chunks</span>
                   </div>
-                ) : !status.ollamaAvailable ? (
+                ) : status.backend === 'none' ? (
                   <div className="hidden sm:flex items-center gap-1.5 text-yellow-600 dark:text-yellow-400 bg-yellow-500/10 px-2 py-1 rounded-full border border-yellow-500/20">
                     <AlertCircle className="h-3.5 w-3.5" />
-                    <span>Ollama offline</span>
+                    <span>AI offline</span>
                   </div>
                 ) : (
                   <div className="hidden sm:flex items-center gap-1.5 text-yellow-600 dark:text-yellow-400 bg-yellow-500/10 px-2 py-1 rounded-full border border-yellow-500/20">
@@ -1189,17 +1209,43 @@ export function Chat() {
                       {/* Sources for AI responses */}
                       {message.role === 'assistant' && msgSources.length > 0 && (
                         <div className="flex flex-wrap gap-2 mt-1">
-                          {msgSources.slice(0, 3).map((source, idx) => (
-                            <div
-                              key={idx}
-                              className="group/source relative"
-                            >
-                              <div className="flex items-center gap-1.5 text-[10px] px-2 py-1 bg-muted rounded-full border border-border/50 hover:bg-muted/80 cursor-default transition-colors">
+                          {msgSources.slice(0, 3).map((source, idx) => {
+                            const chipInner = (
+                              <>
                                 <FileText className="h-3 w-3 text-muted-foreground" />
                                 <span className="max-w-[120px] truncate">{source.subject || 'Reference'}</span>
+                              </>
+                            )
+                            // Sources with a meeting id deep-link to the meeting + show a
+                            // hover card; sources without one stay informational chips.
+                            if (source.meetingId) {
+                              return (
+                                <HoverCard key={idx}>
+                                  <HoverCardTrigger asChild>
+                                    <button
+                                      type="button"
+                                      onClick={() => navigate(`/meeting/${source.meetingId}`)}
+                                      aria-label={`Open meeting ${source.subject || 'Reference'}`}
+                                      className="flex items-center gap-1.5 text-[10px] px-2 py-1 bg-muted rounded-full border border-border/50 hover:bg-muted/80 hover:underline transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                    >
+                                      {chipInner}
+                                    </button>
+                                  </HoverCardTrigger>
+                                  <HoverCardContent>
+                                    <MeetingHoverCard id={source.meetingId} name={source.subject || 'Reference'} visibleFields={['title']} />
+                                  </HoverCardContent>
+                                </HoverCard>
+                              )
+                            }
+                            return (
+                              <div
+                                key={idx}
+                                className="flex items-center gap-1.5 text-[10px] px-2 py-1 bg-muted rounded-full border border-border/50 transition-colors"
+                              >
+                                {chipInner}
                               </div>
-                            </div>
-                          ))}
+                            )
+                          })}
                         </div>
                       )}
                     </div>
@@ -1251,7 +1297,9 @@ export function Chat() {
                 placeholder={
                   status?.ready
                     ? 'Ask me anything about your knowledge base...'
-                    : 'Index meetings to enable AI conversations'
+                    : status?.backend === 'none'
+                      ? 'Add a Gemini API key in Settings to enable AI chat'
+                      : 'Index meetings to enable AI conversations'
                 }
                 value={input}
                 onChange={(e) => {

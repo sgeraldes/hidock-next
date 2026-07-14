@@ -28,6 +28,7 @@ vi.mock('../../services/database', () => ({
   getCandidatesForRecordingWithDetails: vi.fn(),
   getMeetingsNearDate: vi.fn(),
   insertRecording: vi.fn(),
+  resolveRecordingId: vi.fn(),
   getQueueItems: vi.fn(),
   addToQueue: vi.fn(),
   updateQueueItem: vi.fn()
@@ -137,7 +138,8 @@ vi.mock('../../services/transcription', () => ({
   stopTranscriptionProcessor: vi.fn(),
   cancelTranscription: vi.fn(),
   cancelAllTranscriptions: vi.fn(),
-  processQueueManually: vi.fn().mockResolvedValue(undefined)
+  processQueueManually: vi.fn().mockResolvedValue(undefined),
+  markUserPriority: vi.fn()
 }))
 
 // Mock config service
@@ -391,7 +393,7 @@ describe('Recording IPC Handlers', () => {
 
   describe('recordings:deleteBatch', () => {
     it('should delete multiple recordings and return results', async () => {
-      const { getRecordingById, updateRecordingStatus } = await import('../../services/database')
+      const { getRecordingById } = await import('../../services/database')
       const { deleteRecording } = await import('../../services/file-storage')
 
       const id1 = '550e8400-e29b-41d4-a716-446655440000'
@@ -411,7 +413,7 @@ describe('Recording IPC Handlers', () => {
     })
 
     it('should return partial results when some deletions fail', async () => {
-      const { getRecordingById, updateRecordingStatus } = await import('../../services/database')
+      const { getRecordingById } = await import('../../services/database')
       const { deleteRecording } = await import('../../services/file-storage')
 
       const id1 = '550e8400-e29b-41d4-a716-446655440000'
@@ -726,22 +728,89 @@ describe('Recording IPC Handlers', () => {
   })
 
   describe('recordings:getCandidates', () => {
-    it('should return meeting candidates for a valid recording ID', async () => {
-      const { getCandidatesForRecordingWithDetails } = await import('../../services/database')
-      const recId = '550e8400-e29b-41d4-a716-446655440000'
-      const mockCandidates = [
-        { recording_id: recId, meeting_id: 'm-1', confidence_score: 0.9 }
-      ]
-      vi.mocked(getCandidatesForRecordingWithDetails).mockReturnValue(mockCandidates as any)
+    const recId = '550e8400-e29b-41d4-a716-446655440000'
+
+    // Recording 2:07–2:37 PM whose transcript is a retrospective; none of the
+    // candidate meetings overlap, so scoring must lean on time proximity + the
+    // lexical title↔subject signal to make the field decidable.
+    function primeRec46() {
+      const dateRecorded = '2026-07-08T14:07:19-05:00'
+      return {
+        dateRecorded,
+        candidates: [
+          { id: 'c-almuerzo', recordingId: recId, meetingId: 'almuerzo', subject: 'Almuerzo', startTime: '2026-07-08T13:00:00-05:00', endTime: '2026-07-08T14:00:00-05:00', confidenceScore: 0.1, matchReason: 'Time overlap only', isAiSelected: false, isUserConfirmed: false },
+          { id: 'c-retro', recordingId: recId, meetingId: 'retro', subject: 'Retro Belcorp', startTime: '2026-07-08T15:00:00-05:00', endTime: '2026-07-08T15:30:00-05:00', confidenceScore: 0.1, matchReason: 'Time overlap only', isAiSelected: false, isUserConfirmed: false },
+          { id: 'c-dfx5', recordingId: recId, meetingId: 'dfx5', subject: 'DFX5 AM3', startTime: '2026-07-08T15:00:00-05:00', endTime: '2026-07-08T16:00:00-05:00', confidenceScore: 0.1, matchReason: 'Time overlap only', isAiSelected: false, isUserConfirmed: false }
+        ],
+        recording: { id: recId, date_recorded: dateRecorded, duration_seconds: 30 * 60 }
+      }
+    }
+
+    it('re-scores stored candidates into an honest, discriminating, sorted field', async () => {
+      const { getCandidatesForRecordingWithDetails, getMeetingsNearDate, getTranscriptByRecordingId, resolveRecordingId } =
+        await import('../../services/database')
+      const { candidates, recording } = primeRec46()
+      vi.mocked(resolveRecordingId).mockReturnValue(recording as any)
+      vi.mocked(getCandidatesForRecordingWithDetails).mockReturnValue(candidates as any)
+      vi.mocked(getMeetingsNearDate).mockReturnValue([])
+      vi.mocked(getTranscriptByRecordingId).mockReturnValue({
+        title_suggestion: 'Cierre de Proyecto y Acciones de Retrospectiva',
+        summary: 'El equipo cerró el proyecto.',
+        speakers: JSON.stringify([{ speaker: 'Speaker 1' }, { speaker: 'Speaker 2' }])
+      } as any)
 
       const result = await handlers['recordings:getCandidates'](null, recId)
 
-      expect(getCandidatesForRecordingWithDetails).toHaveBeenCalledWith(recId)
-      expect(result).toEqual({ success: true, data: mockCandidates })
+      expect(result.success).toBe(true)
+      // Retro Belcorp (content match) leads and is flagged as the best match.
+      expect(result.data[0].meetingId).toBe('retro')
+      expect(result.data[0].isAiSelected).toBe(true)
+      expect(result.data[0].matchReason).toContain('"retro"')
+      // Scores are no longer flat placeholders.
+      const scores = result.data.map((c: any) => c.confidenceScore)
+      expect(new Set(scores).size).toBeGreaterThan(1)
+      expect(result.data.every((c: any) => c.matchReason !== 'Time overlap only')).toBe(true)
+      // Header context reflects the transcript.
+      expect(result.recordingContext).toMatchObject({
+        title: 'Cierre de Proyecto y Acciones de Retrospectiva',
+        speakerCount: 2,
+        hasTranscript: true
+      })
     })
 
-    it('should return error shape for invalid recording ID', async () => {
-      const result = await handlers['recordings:getCandidates'](null, 'bad-id')
+    it('unions nearby meetings so a content match can surface an un-stored meeting', async () => {
+      const { getCandidatesForRecordingWithDetails, getMeetingsNearDate, getTranscriptByRecordingId, resolveRecordingId } =
+        await import('../../services/database')
+      const { recording } = primeRec46()
+      vi.mocked(resolveRecordingId).mockReturnValue(recording as any)
+      vi.mocked(getCandidatesForRecordingWithDetails).mockReturnValue([])
+      vi.mocked(getMeetingsNearDate).mockReturnValue([
+        { id: 'retro', subject: 'Retro Belcorp', start_time: '2026-07-08T15:00:00-05:00', end_time: '2026-07-08T15:30:00-05:00' }
+      ] as any)
+      vi.mocked(getTranscriptByRecordingId).mockReturnValue({
+        title_suggestion: 'Acciones de Retrospectiva'
+      } as any)
+
+      const result = await handlers['recordings:getCandidates'](null, recId)
+
+      expect(result.success).toBe(true)
+      expect(result.data).toHaveLength(1)
+      expect(result.data[0].meetingId).toBe('retro')
+      expect(result.data[0].matchReason).toContain('"retro"')
+    })
+
+    it('returns empty candidates for unresolvable ids (device-only synthetic ids)', async () => {
+      const { getCandidatesForRecordingWithDetails, resolveRecordingId } = await import('../../services/database')
+      vi.mocked(resolveRecordingId).mockReturnValue(undefined)
+
+      const result = await handlers['recordings:getCandidates'](null, '2026Jul07-193144-Rec43.hda')
+
+      expect(getCandidatesForRecordingWithDetails).not.toHaveBeenCalled()
+      expect(result).toEqual({ success: true, data: [], recordingContext: null })
+    })
+
+    it('should return error shape for non-string recording ID', async () => {
+      const result = await handlers['recordings:getCandidates'](null, 42)
 
       expect(result).toEqual({ success: false, data: [], error: 'Invalid recording ID' })
     })
@@ -810,7 +879,8 @@ describe('Recording IPC Handlers', () => {
 
   describe('recordings:addToQueue', () => {
     it('should add recording to queue and update transcription status', async () => {
-      const { addToQueue, updateRecordingTranscriptionStatus } = await import('../../services/database')
+      const { addToQueue, updateRecordingTranscriptionStatus, resolveRecordingId } = await import('../../services/database')
+      vi.mocked(resolveRecordingId).mockReturnValue({ id: 'rec-1' } as any)
       vi.mocked(addToQueue).mockReturnValue('queue-item-id')
 
       const result = await handlers['recordings:addToQueue'](null, 'rec-1')
@@ -820,8 +890,36 @@ describe('Recording IPC Handlers', () => {
       expect(result).toBe('queue-item-id')
     })
 
+    it('resolves a stale/synced id to the canonical recording id before queueing', async () => {
+      const { addToQueue, updateRecordingTranscriptionStatus, resolveRecordingId } = await import('../../services/database')
+      // Renderer sent a synced_files id; resolver maps it to the real recording
+      vi.mocked(resolveRecordingId).mockReturnValue({ id: 'real-rec-id' } as any)
+      vi.mocked(addToQueue).mockReturnValue('queue-item-id')
+
+      const result = await handlers['recordings:addToQueue'](null, 'synced-file-id')
+
+      expect(resolveRecordingId).toHaveBeenCalledWith('synced-file-id')
+      expect(addToQueue).toHaveBeenCalledWith('real-rec-id')
+      expect(updateRecordingTranscriptionStatus).toHaveBeenCalledWith('real-rec-id', 'queued')
+      expect(result).toBe('queue-item-id')
+    })
+
+    it('returns an error when the recording cannot be resolved', async () => {
+      const { addToQueue, resolveRecordingId } = await import('../../services/database')
+      vi.mocked(resolveRecordingId).mockReturnValue(undefined)
+
+      const result = await handlers['recordings:addToQueue'](null, 'ghost-id')
+
+      expect(addToQueue).not.toHaveBeenCalled()
+      expect(result).toEqual({
+        success: false,
+        error: 'Recording not found: ghost-id. Try refreshing the library.'
+      })
+    })
+
     it('should return false on error', async () => {
-      const { addToQueue } = await import('../../services/database')
+      const { addToQueue, resolveRecordingId } = await import('../../services/database')
+      vi.mocked(resolveRecordingId).mockReturnValue({ id: 'rec-1' } as any)
       vi.mocked(addToQueue).mockImplementation(() => {
         throw new Error('Queue full')
       })

@@ -32,7 +32,7 @@ interface ProjectsState {
   clearError: () => void
 }
 
-export const useProjectsStore = create<ProjectsState>((set, get) => ({
+export const useProjectsStore = create<ProjectsState>((set, _get) => ({
   projects: [],
   selectedProject: null,
   loading: false,

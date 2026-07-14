@@ -1,4 +1,5 @@
-import { app, BrowserWindow, shell } from "electron";
+import { app, BrowserWindow, shell, session } from "electron";
+app.commandLine.appendSwitch('remote-debugging-port', '9444');
 import { electronApp, optimizer } from "@electron-toolkit/utils";
 import { createMainWindow, destroyAllWindows } from "./windows";
 import { initializeTray, destroyTray, setTrayCallbacks } from "./services/tray-manager";
@@ -7,7 +8,7 @@ import { initializeDatabase } from "./services/database";
 import { getSetting } from "./services/database-settings";
 import { hydrate } from "./services/credential-store";
 import { SENSITIVE_SETTING_KEYS } from "./services/sensitive-keys";
-import { SessionOrchestrator } from "./services/session-orchestrator";
+import { SessionOrchestrator, setOrchestratorInstance } from "./services/session-orchestrator";
 
 /**
  * Load any encrypted credential values from the DB into the in-memory
@@ -37,6 +38,13 @@ app.whenReady().then(async () => {
     optimizer.watchWindowShortcuts(window);
   });
 
+  // Grant microphone and display-capture permissions automatically
+  session.defaultSession.setPermissionRequestHandler(
+    (_webContents, permission, callback) => {
+      callback(['media', 'display-capture'].includes(permission))
+    }
+  );
+
   await initializeDatabase();
 
   hydrateCredentials();
@@ -44,6 +52,7 @@ app.whenReady().then(async () => {
   // Initialize the session orchestrator (wires all services)
   orchestrator = new SessionOrchestrator();
   await orchestrator.initialize();
+  setOrchestratorInstance(orchestrator);
 
   const mainWindow = createMainWindow();
 

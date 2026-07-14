@@ -1,5 +1,6 @@
-import { Plus, FolderOpen, Download, Zap, RefreshCw, LayoutGrid, List } from 'lucide-react'
+import { Plus, FileUp, FolderOpen, Download, Zap, RefreshCw, LayoutGrid, List } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { TranscriptUpgradeButton } from './TranscriptUpgradeButton'
 
 interface LibraryHeaderProps {
   stats: {
@@ -19,6 +20,7 @@ interface LibraryHeaderProps {
   bulkProcessing: boolean
   bulkProgress: { current: number; total: number }
   onAddRecording: () => void
+  onImportFile: () => void
   onOpenFolder: () => void
   onBulkDownload: () => void
   onBulkProcess: () => void
@@ -36,6 +38,7 @@ export function LibraryHeader({
   bulkProcessing,
   bulkProgress,
   onAddRecording,
+  onImportFile,
   onOpenFolder,
   onBulkDownload,
   onBulkProcess,
@@ -63,6 +66,10 @@ export function LibraryHeader({
           <Button variant="outline" size="sm" onClick={onAddRecording} title="Import audio file">
             <Plus className="h-4 w-4 mr-2" />
             Add Capture
+          </Button>
+          <Button variant="outline" size="sm" onClick={onImportFile} title="Import a document or image (PDF, MD, TXT, JSON, PNG, JPG, SVG, WEBP)">
+            <FileUp className="h-4 w-4 mr-2" />
+            Import File
           </Button>
           <Button variant="outline" size="sm" onClick={onOpenFolder}>
             <FolderOpen className="h-4 w-4 mr-2" />
@@ -115,21 +122,25 @@ export function LibraryHeader({
             </Button>
           )}
 
+          <TranscriptUpgradeButton />
+
           <Button variant="outline" size="sm" onClick={onRefresh} disabled={loading}>
             <RefreshCw className={`h-4 w-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
             Refresh
           </Button>
 
           {/* View Toggle */}
-          <div className="flex items-center border rounded-md overflow-hidden ml-2" data-testid="grid-view-toggle">
+          <div className="flex items-center border rounded-md overflow-hidden ml-2" role="group" aria-label="View layout" data-testid="grid-view-toggle">
             <Button
               variant={compactView ? 'ghost' : 'default'}
               size="sm"
               onClick={() => onSetCompactView(false)}
               className="rounded-none border-0 px-2"
               title="Card view"
+              aria-label="Card view"
+              aria-pressed={!compactView}
             >
-              <LayoutGrid className="h-4 w-4" />
+              <LayoutGrid className="h-4 w-4" aria-hidden="true" />
             </Button>
             <Button
               variant={compactView ? 'default' : 'ghost'}
@@ -137,8 +148,10 @@ export function LibraryHeader({
               onClick={() => onSetCompactView(true)}
               className="rounded-none border-0 border-l px-2"
               title="List view"
+              aria-label="List view"
+              aria-pressed={compactView}
             >
-              <List className="h-4 w-4" />
+              <List className="h-4 w-4" aria-hidden="true" />
             </Button>
           </div>
         </div>

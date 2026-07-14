@@ -12,6 +12,7 @@ import type {
   Project,
   ProjectWithMeetings
 } from './database'
+import type { Person } from '@/types/knowledge'
 
 // =============================================================================
 // Result Wrapper Pattern
@@ -138,15 +139,16 @@ export interface RAGSource {
  */
 export interface GetContactsRequest {
   search?: string
+  type?: 'team' | 'candidate' | 'customer' | 'external' | 'unknown' | 'all'
   limit?: number
   offset?: number
 }
 
 /**
- * Response with paginated contacts
+ * Response with paginated contacts (server maps rows to Person before returning)
  */
 export interface GetContactsResponse {
-  contacts: Contact[]
+  contacts: Person[]
   total: number
 }
 
@@ -155,6 +157,17 @@ export interface GetContactsResponse {
  */
 export interface GetContactByIdRequest {
   id: string
+}
+
+/**
+ * Request to create a new contact (manual "Add Person")
+ */
+export interface CreateContactRequest {
+  name: string
+  email?: string | null
+  type?: 'team' | 'candidate' | 'customer' | 'external' | 'unknown'
+  role?: string
+  company?: string
 }
 
 /**
@@ -214,7 +227,7 @@ export interface CreateProjectRequest {
 export interface UpdateProjectRequest {
   id: string
   name?: string
-  description?: string
+  description?: string | null
   status?: 'active' | 'archived'
 }
 
@@ -233,7 +246,7 @@ export interface TagMeetingRequest {
 /**
  * Available output template identifiers
  */
-export type OutputTemplateId = 'meeting_minutes' | 'interview_feedback' | 'project_status' | 'action_items'
+export type OutputTemplateId = 'meeting_minutes' | 'interview_feedback' | 'project_status' | 'action_items' | 'claude_code_prompt'
 
 /**
  * Output template definition
@@ -264,6 +277,8 @@ export interface GenerateOutputResponse {
   content: string
   templateId: OutputTemplateId
   generatedAt: string
+  /** Absolute path of the auto-exported markdown file, when export succeeded */
+  savedPath?: string
 }
 
 // =============================================================================
@@ -293,6 +308,37 @@ export interface GetMeetingsResponse {
 }
 
 // =============================================================================
+// Artifacts API Types (C0 entity-type foundation)
+// =============================================================================
+
+/** Slim view of an artifacts row returned to the renderer (no full text blob). */
+export interface ArtifactSummary {
+  id: string
+  knowledgeCaptureId: string | null
+  kind: string
+  mime: string | null
+  size: number | null
+  storagePath: string | null
+  hasText: boolean
+  metadata: Record<string, unknown> | null
+  createdAt: string
+}
+
+/** Import outcome for one file: the summary plus dedup + indexing info. */
+export interface ArtifactImportSummary extends ArtifactSummary {
+  deduped: boolean
+  indexedChunks: number
+}
+
+/** Artifacts namespace for electronAPI */
+export interface ArtifactsAPI {
+  import: (filePaths: string[]) => Promise<Result<ArtifactImportSummary[]>>
+  pickAndImport: () => Promise<Result<ArtifactImportSummary[]>>
+  getForCapture: (knowledgeCaptureId: string) => Promise<Result<ArtifactSummary[]>>
+  openInFolder: (id: string) => Promise<Result<void>>
+}
+
+// =============================================================================
 // Preload API Type Exports
 // =============================================================================
 
@@ -302,7 +348,17 @@ export interface GetMeetingsResponse {
 export interface ContactsAPI {
   getAll: (request?: GetContactsRequest) => Promise<Result<GetContactsResponse>>
   getById: (id: string) => Promise<Result<ContactWithMeetings>>
+  create: (request: CreateContactRequest) => Promise<Result<Person>>
   update: (request: UpdateContactRequest) => Promise<Result<Contact>>
+  merge: (request: MergeContactsRequest) => Promise<Result<Person>>
+}
+
+/**
+ * Request to merge one contact into another (keeper survives)
+ */
+export interface MergeContactsRequest {
+  keeperId: string
+  loserId: string
 }
 
 /**
@@ -341,6 +397,11 @@ export interface ExtendedRAGAPI {
  * RAG service status
  */
 export interface RAGStatus {
+  /** Backend that will serve chat requests: 'gemini' | 'ollama' | 'none'. */
+  backend: 'gemini' | 'ollama' | 'none'
+  /** True when a chat backend (Gemini key or reachable Ollama) is available. */
+  chatAvailable: boolean
+  /** Retained for backward compatibility; true when local Ollama is reachable. */
   ollamaAvailable: boolean
   documentCount: number
   meetingCount: number

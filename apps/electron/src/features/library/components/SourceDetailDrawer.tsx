@@ -298,7 +298,7 @@ export function SourceDetailDrawer({
         {/* Audio Player (sticky when playing) */}
         {isPlaying && canPlay && (
           <div className="sticky top-0 bg-background z-10 py-4 border-b">
-            <AudioPlayer filename={source.filename} onClose={onStop} />
+            <AudioPlayer recordingId={source.id} filename={source.filename} onClose={onStop} />
           </div>
         )}
 

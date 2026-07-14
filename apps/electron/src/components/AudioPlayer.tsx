@@ -15,6 +15,21 @@ import { formatTimestamp } from '@/utils/audioUtils'
 
 interface AudioPlayerProps {
   filename?: string
+  /**
+   * The recording this player is showing. When provided, waveform/loading/error
+   * states are scoped to it, so a different recording's stale error or waveform
+   * (these live in global store fields) never bleeds onto this one.
+   */
+  recordingId?: string
+  /**
+   * Local file path for this recording. Required for the Play button to do the
+   * INITIAL load+play when this recording isn't already the one loaded in the
+   * shared audio engine (fresh open). When absent (device-only, not downloaded)
+   * and nothing is loaded, the Play button is disabled ("Download to play").
+   * Thread it from the same source the file-list uses:
+   * `hasLocalPath(recording) ? recording.localPath : undefined`.
+   */
+  filePath?: string
   onClose?: () => void
 }
 
@@ -24,18 +39,27 @@ interface AudioPlayerProps {
  * The actual audio playback is handled by OperationController.
  * This component displays the playback state, waveform, and controls.
  */
-export function AudioPlayer({ filename, onClose }: AudioPlayerProps) {
+export function AudioPlayer({ filename, recordingId, filePath, onClose }: AudioPlayerProps) {
   // Read playback state from UIStore
   const isPlaying = useUIStore((state) => state.isPlaying)
+  const currentlyPlayingId = useUIStore((state) => state.currentlyPlayingId)
   const currentTime = useUIStore((state) => state.playbackCurrentTime)
   const duration = useUIStore((state) => state.playbackDuration)
-  const waveformData = useUIStore((state) => state.playbackWaveformData)
+  const playbackWaveformData = useUIStore((state) => state.playbackWaveformData)
   const sentimentData = useUIStore((state) => state.playbackSentimentData)
 
   // Read waveform loading state from UIStore
   const waveformLoadingId = useUIStore((state) => state.waveformLoadingId)
-  const waveformLoadingError = useUIStore((state) => state.waveformLoadingError)
-  const currentlyPlayingId = useUIStore((state) => state.currentlyPlayingId)
+  const rawWaveformError = useUIStore((state) => state.waveformLoadingError)
+  const waveformErrorForId = useUIStore((state) => state.waveformErrorForId)
+  const waveformLoadedForId = useUIStore((state) => state.waveformLoadedForId)
+
+  // Scope global waveform state to this recording (when known) so a different
+  // recording's stale waveform/error/loading never shows here.
+  const isForThis = (id: string | null) => !recordingId || id === recordingId
+  const waveformData = isForThis(waveformLoadedForId) ? playbackWaveformData : null
+  const waveformLoadingError = isForThis(waveformErrorForId) ? rawWaveformError : null
+  const isLoadingThis = !!waveformLoadingId && isForThis(waveformLoadingId)
 
   // Get audio controls from OperationController
   const audioControls = useAudioControls()
@@ -43,13 +67,30 @@ export function AudioPlayer({ filename, onClose }: AudioPlayerProps) {
   // Local state for playback speed
   const [playbackRate, setPlaybackRate] = useState('1')
 
+  // Is THIS recording the one currently loaded in the shared audio engine?
+  // When no recordingId is provided (legacy mount sites that only render while
+  // their own recording is playing), treat it as loaded so pause/resume works.
+  const isLoaded = !recordingId || currentlyPlayingId === recordingId
+
+  // The Play button can act when: this recording is already loaded (pause/resume),
+  // OR it isn't loaded but we have what we need to load+play it (id + local path).
+  const canPlayThis = isLoaded || (!!recordingId && !!filePath)
+
   const togglePlay = useCallback(() => {
-    if (isPlaying) {
-      audioControls.pause()
-    } else {
-      audioControls.resume()
+    if (isLoaded) {
+      // Already the active recording — just pause/resume.
+      if (isPlaying) {
+        audioControls.pause()
+      } else {
+        audioControls.resume()
+      }
+    } else if (recordingId && filePath) {
+      // Fresh open: nothing loaded yet for this recording. Do the initial
+      // load+play, which also kicks off the waveform generation the panel
+      // promises ("Press Play to load the waveform").
+      audioControls.play(recordingId, filePath)
     }
-  }, [isPlaying, audioControls])
+  }, [isLoaded, isPlaying, audioControls, recordingId, filePath])
 
   const handleStop = useCallback(() => {
     audioControls.stop()
@@ -96,20 +137,20 @@ export function AudioPlayer({ filename, onClose }: AudioPlayerProps) {
           onSeek={seekAudio}
           height={80}
         />
-      ) : waveformLoadingError && currentlyPlayingId ? (
+      ) : waveformLoadingError ? (
         <div className="h-20 bg-destructive/10 rounded flex flex-col items-center justify-center gap-1 text-sm">
           <p className="text-destructive">Failed to load waveform</p>
           <p className="text-xs text-muted-foreground">{waveformLoadingError}</p>
         </div>
-      ) : waveformLoadingId && currentlyPlayingId ? (
+      ) : isLoadingThis ? (
         <div className="h-20 bg-background rounded flex items-center justify-center">
           <div className="flex gap-1 items-end h-12">
             {Array.from({ length: 40 }).map((_, i) => (
               <div
                 key={i}
-                className="w-1 bg-muted-foreground/30 rounded animate-pulse"
+                className="w-1 bg-muted-foreground/30 rounded motion-safe:animate-pulse"
                 style={{
-                  height: `${Math.random() * 100}%`,
+                  height: `${((i * 37) % 100)}%`,
                   animationDelay: `${i * 20}ms`
                 }}
               />
@@ -118,7 +159,7 @@ export function AudioPlayer({ filename, onClose }: AudioPlayerProps) {
         </div>
       ) : (
         <div className="h-20 bg-background rounded flex items-center justify-center text-sm text-muted-foreground">
-          Select a recording to view waveform
+          {filename ? 'Press Play to load the waveform' : 'Select a recording to view waveform'}
         </div>
       )}
 
@@ -144,6 +185,8 @@ export function AudioPlayer({ filename, onClose }: AudioPlayerProps) {
             variant="outline"
             size="icon"
             onClick={togglePlay}
+            disabled={!canPlayThis}
+            title={canPlayThis ? undefined : 'Download to play'}
             className="h-10 w-10"
           >
             {isPlaying ? (

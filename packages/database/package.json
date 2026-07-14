@@ -1,0 +1,51 @@
+{
+  "name": "@hidock/database",
+  "version": "0.1.0",
+  "description": "Shared SQLite (better-sqlite3 + WAL) engine + migration runner for HiDock apps",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "prepare": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT",
+  "peerDependencies": {
+    "better-sqlite3": ">=11"
+  },
+  "peerDependenciesMeta": {
+    "better-sqlite3": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.0.0",
+    "better-sqlite3": "^12.11.1",
+    "tsup": "^8.5.1",
+    "typescript": "^5.6.0",
+    "vitest": "^4"
+  },
+  "overrides": {
+    "esbuild": "^0.28.1"
+  }
+}

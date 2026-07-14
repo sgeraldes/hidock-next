@@ -115,6 +115,18 @@ export interface FilterStore {
 
 export type SidebarContent = 'calendar' | 'contact' | 'project' | 'chat' | 'none'
 
+/**
+ * Where the AI assistant lives.
+ *  - `floating`: a chat-bubble button floats over the app; clicking opens a
+ *    floating overlay that does NOT push page content.
+ *  - `embedded`: the assistant is a docked pane in the Library tri-pane layout
+ *    (the classic behaviour), collapsible to a thin side rail.
+ */
+export type ChatPlacement = 'floating' | 'embedded'
+
+/** Which edge the assistant favours: the floating bubble corner and the docked pane side. */
+export type ChatPosition = 'left' | 'right'
+
 export interface SentimentSegment {
   startTime: number // Seconds
   endTime: number // Seconds
@@ -134,11 +146,30 @@ export interface UIStore {
   sidebarOpen: boolean
   sidebarContent: SidebarContent
   selectedMeetingId: string | null
+
+  // AI assistant placement (Chat Placement — see ChatPlacement/ChatPosition).
+  /** Floating chat-bubble (default) vs embedded docked pane. Persisted. */
+  chatPlacement: ChatPlacement
+  /** Preferred edge for the bubble/pane (Left/Right). Persisted. */
+  chatPosition: ChatPosition
+  /** Floating overlay open/visible. Transient (renderer-only). */
+  chatOpen: boolean
+  /** Embedded pane collapsed to a thin rail (mirrors the list pane). Persisted. */
+  chatEmbeddedCollapsed: boolean
+
   isGeneratingOutput: boolean
   outputContent: string | null
 
   // Recordings page view preference (persists across navigation)
   recordingsCompactView: boolean
+
+  // Operations dock (bottom Transcriptions/Downloads + Activity Log) chrome state
+  /** Collapse the operations dock to a compact summary chip (persisted). */
+  operationsDockCollapsed: boolean
+  /** Open the larger in-app operations detail overlay (transient, renderer-only). */
+  operationsOverlayOpen: boolean
+  /** Activity Log expanded in the sidebar dock (persisted). */
+  activityLogExpanded: boolean
 
   // Playback state (managed by OperationController)
   currentlyPlayingId: string | null
@@ -152,12 +183,22 @@ export interface UIStore {
   // Waveform loading state (independent of playback)
   waveformLoadingId: string | null
   waveformLoadingError: string | null
+  waveformErrorForId: string | null
   waveformLoadedForId: string | null
 
   // Actions
   toggleSidebar: () => void
   setSidebarOpen: (open: boolean) => void
   setSidebarContent: (content: SidebarContent) => void
+
+  // AI assistant placement actions
+  setChatPlacement: (placement: ChatPlacement) => void
+  setChatPosition: (position: ChatPosition) => void
+  setChatOpen: (open: boolean) => void
+  toggleChatOpen: () => void
+  setChatEmbeddedCollapsed: (collapsed: boolean) => void
+  toggleChatEmbeddedCollapsed: () => void
+
   selectMeeting: (id: string | null) => void
   setGeneratingOutput: (generating: boolean) => void
   setOutputContent: (content: string | null) => void
@@ -165,6 +206,14 @@ export interface UIStore {
 
   // Recordings view actions
   setRecordingsCompactView: (compact: boolean) => void
+
+  // Operations dock actions
+  toggleOperationsDock: () => void
+  setOperationsDockCollapsed: (collapsed: boolean) => void
+  openOperationsOverlay: () => void
+  closeOperationsOverlay: () => void
+  toggleActivityLog: () => void
+  setActivityLogExpanded: (expanded: boolean) => void
 
   // Playback actions
   setCurrentlyPlaying: (recordingId: string | null, filePath: string | null) => void
@@ -181,7 +230,18 @@ export interface UIStore {
   // QA monitoring toggle
   qaLogsEnabled: boolean
   setQaLogsEnabled: (enabled: boolean) => void
+
+  // Auto-capture screenshots from the clipboard (background poll). Default off.
+  autoCaptureScreenshots: boolean
+  setAutoCaptureScreenshots: (enabled: boolean) => void
+
+  // Theme preference. 'system' follows the OS (prefers-color-scheme); 'light'/
+  // 'dark' pin it. Persisted to localStorage (and mirrored to config).
+  theme: ThemePreference
+  setTheme: (theme: ThemePreference) => void
 }
+
+export type ThemePreference = 'light' | 'dark' | 'system'
 
 // =============================================================================
 // Recordings Store (existing, but typed)
@@ -245,7 +305,7 @@ export interface ChatStore {
 // Output Store
 // =============================================================================
 
-export type OutputTemplateId = 'meeting_minutes' | 'interview_feedback' | 'project_status' | 'action_items'
+export type OutputTemplateId = 'meeting_minutes' | 'interview_feedback' | 'project_status' | 'action_items' | 'claude_code_prompt'
 
 export interface OutputTemplate {
   id: OutputTemplateId
@@ -294,6 +354,8 @@ export interface AppConfig {
   version: string
   storage: {
     dataPath: string
+    recordingsPath?: string
+    transcriptsPath?: string
     maxRecordingsGB: number
   }
   calendar: {
@@ -303,9 +365,14 @@ export interface AppConfig {
     lastSyncAt: string | null
   }
   transcription: {
-    provider: 'gemini'
+    provider: 'gemini' | 'local-asr' | 'vibevoice'
     geminiApiKey: string
     geminiModel: string
+    localAsrPath: string
+    localAsrHfToken: string
+    localAsrVocabularyFile: string
+    localAsrDiarize: boolean
+    localAsrNumBeams: number
     autoTranscribe: boolean
     language: string
   }

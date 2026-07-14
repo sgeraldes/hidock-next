@@ -2,7 +2,7 @@
  * Pre-Migration Cleanup for V11
  */
 
-import { Database as SqlJsDatabase } from 'sql.js'
+import type { SqlJsDatabase } from '@hidock/database'
 
 export interface CleanupReport {
   orphanedTranscripts: number

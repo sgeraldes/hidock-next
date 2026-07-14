@@ -36,7 +36,7 @@ def get_default_config() -> dict:
     """Returns the default configuration dictionary."""
     return {
         "autoconnect": False,
-        "download_directory": os.path.join(_APP_ROOT_DIR, "..", "audio"),  # ../audio relative to hidock-desktop-app
+        "download_directory": os.path.join(os.path.expanduser("~"), "HiDock_Downloads"),
         "log_level": "INFO",
         "selected_vid": DEFAULT_VENDOR_ID,  # From constants.py
         "selected_pid": DEFAULT_PRODUCT_ID,  # From constants.py
@@ -362,10 +362,20 @@ class Logger:
 
         try:
             self.log_file = open(log_file_path, "a", encoding="utf-8")
+            # Remember the resolved path and track the live byte count so we can rotate
+            # mid-session (rotation otherwise only ran at startup, letting a single long
+            # session grow the active log without bound — this produced a 19GB file).
+            self.log_file_path = log_file_path
+            try:
+                self._bytes_written = os.path.getsize(log_file_path)
+            except OSError:
+                self._bytes_written = 0
             # Write a startup marker
             startup_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self.log_file.write(f"\n=== Logger started at {startup_time} ===\n")
+            startup_marker = f"\n=== Logger started at {startup_time} ===\n"
+            self.log_file.write(startup_marker)
             self.log_file.flush()
+            self._bytes_written += len(startup_marker.encode("utf-8"))
         except IOError as e:
             # Fall back to console logging if file cannot be opened
             print(f"[ERROR] Logger::_setup_file_logging - Cannot open log file {log_file_path}: {e}")
@@ -407,6 +417,30 @@ class Logger:
                 os.rename(log_file_path, backup_file)
         except OSError as e:
             print(f"[WARNING] Logger::_rotate_log_file_if_needed - Error rotating log file: {e}")
+
+    def _rotate_active_log(self):
+        """
+        Rotates the currently-open log file mid-session.
+
+        Closes the active handle, runs the standard rotation (which renames the
+        current file to .1 and shifts older backups), then reopens a fresh file.
+        Called from _log() when the live byte count exceeds the configured cap.
+        """
+        log_file_path = getattr(self, "log_file_path", None)
+        if not log_file_path:
+            return
+        try:
+            if self.log_file:
+                self.log_file.close()
+                self.log_file = None
+            # _rotate_log_file_if_needed re-checks size on disk and performs the rename.
+            self._rotate_log_file_if_needed(log_file_path)
+            # Reopen a fresh file and reset the live counter.
+            self.log_file = open(log_file_path, "a", encoding="utf-8")
+            self._bytes_written = 0
+        except OSError as e:
+            print(f"[WARNING] Logger::_rotate_active_log - Error rotating active log: {e}")
+            self.log_file = None
 
     def update_config(self, new_config_dict):
         """
@@ -513,8 +547,15 @@ class Logger:
         file_threshold = force_level if force_level is not None else getattr(self, "file_level", self.level)
         if self.log_file and self.config.get("enable_file_logging", False) and msg_level_val >= file_threshold:
             try:
-                self.log_file.write(base_log_message + "\n")
+                line = base_log_message + "\n"
+                self.log_file.write(line)
                 self.log_file.flush()
+                # Track live size and rotate mid-session once the configured cap is hit,
+                # so a single long-running session can't grow the log without bound.
+                self._bytes_written = getattr(self, "_bytes_written", 0) + len(line.encode("utf-8"))
+                max_size_bytes = self.config.get("log_file_max_size_mb", 10) * 1024 * 1024
+                if self._bytes_written >= max_size_bytes:
+                    self._rotate_active_log()
             except IOError as e:
                 # If file write fails, disable file logging to prevent spam
                 print(f"[ERROR] Logger::_log - Failed to write to log file: {e}")

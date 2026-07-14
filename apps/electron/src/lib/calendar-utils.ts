@@ -4,6 +4,17 @@
 
 import type { Meeting } from '@/types'
 import type { UnifiedRecording } from '@/types/unified-recording'
+import { categorizeMeeting, isAllDayMeeting, type MeetingCategory } from './meeting-timing'
+
+/**
+ * A meeting this long (or flagged all-day) is a low-precision "bridge" window. A
+ * recording merely contained in one must NOT be picked as its best match — see
+ * getRecordingMeetingMatchScore. Kept in sync with LONG_MEETING_MS in the main
+ * process's recording-match-scoring.ts.
+ */
+const LONG_MEETING_MATCH_MS = 4 * 60 * 60 * 1000
+/** Minimum symmetric fit (IoU) a bridge meeting needs to count as a display match. */
+const BRIDGE_ALIGN_MIN = 0.5
 
 // Calendar view types
 export type CalendarViewType = 'day' | 'workweek' | 'week' | 'month'
@@ -20,6 +31,10 @@ export interface CalendarRecording {
   durationSeconds: number
   location: 'device-only' | 'local-only' | 'both'
   transcriptionStatus: 'none' | 'pending' | 'processing' | 'complete' | 'error'
+  // Transcript-derived identity (present once analyzed) — what the recording IS,
+  // so the calendar can show it instead of a machine filename.
+  title?: string
+  summary?: string
   // Linked meeting metadata (optional)
   linkedMeeting?: {
     id: string
@@ -258,6 +273,23 @@ export function getRecordingMeetingMatchScore(recording: UnifiedRecording, meeti
   const overlapEnd = Math.min(recEnd, meetingEnd)
   const overlapMs = Math.max(0, overlapEnd - overlapStart)
 
+  // All-day / multi-hour "bridge" events are a WEAK signal: a recording fully
+  // contained in a 9h window scores ~100% by naive coverage, wrongly beating the
+  // real meeting. Require GENUINE alignment (symmetric IoU fit) — containment alone
+  // is not enough, so a recording with no tighter match is left unlinked, not
+  // attributed to an all-day event.
+  const meetingDurationMs = meetingEnd - meetingStart
+  const isBridge =
+    meeting.is_all_day === 1 ||
+    isAllDayMeeting(meeting.start_time, meeting.end_time) ||
+    (Number.isFinite(meetingDurationMs) && meetingDurationMs >= LONG_MEETING_MATCH_MS)
+  if (isBridge) {
+    if (overlapMs <= 0 || recDurationMs <= 0) return 0
+    const unionMs = Math.max(recEnd, meetingEnd) - Math.min(recStart, meetingStart)
+    const iou = unionMs > 0 ? overlapMs / unionMs : 0
+    return iou >= BRIDGE_ALIGN_MIN ? iou * 100 : 0
+  }
+
   if (overlapMs === 0) {
     const bufferMs = 5 * 60 * 1000
     if (recStart >= meetingStart - bufferMs && recStart <= meetingStart) {
@@ -445,6 +477,8 @@ export function buildCalendarRecordings(
       durationSeconds: recording.duration || 0,
       location: recording.location,
       transcriptionStatus: recording.transcriptionStatus,
+      title: recording.title,
+      summary: recording.summary,
       linkedMeeting: linkedMeetingData
         ? {
             id: linkedMeetingData.id,
@@ -469,6 +503,58 @@ export function buildCalendarRecordings(
   }))
 
   return { calendarRecordings, meetingOverlays }
+}
+
+/**
+ * Category color key for a recording block, derived from its linked meeting's
+ * subject. A recording that matched no meeting has no category — it renders in
+ * the distinct "unmatched" style instead — so this falls back to 'general'.
+ */
+export function recordingCategory(recording: CalendarRecording): MeetingCategory {
+  if (!recording.linkedMeeting) return 'general'
+  return categorizeMeeting({ subject: recording.linkedMeeting.subject })
+}
+
+/** The honest, specific state name for a recording with no linked meeting. */
+export const UNLINKED_STATE_LABEL = 'Not linked to a meeting'
+
+/**
+ * Primary block label. A linked recording shows its meeting's subject; an unlinked
+ * one shows what it IS — its transcript-derived title — falling back to
+ * "Recording · <start time>" when it has no title yet. The raw device filename
+ * (e.g. "2026Jul08-140719-Rec46.hda") is NEVER surfaced as the label.
+ */
+export function recordingBlockTitle(recording: CalendarRecording): string {
+  if (recording.linkedMeeting) return recording.linkedMeeting.subject
+  const title = recording.title?.trim()
+  if (title) return title
+  const time = recording.startTime.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+  return `Recording · ${time}`
+}
+
+/**
+ * Sub-label for an unlinked recording block: "<duration> · <start time>", e.g.
+ * "12m · 2:07 PM".
+ */
+export function formatUnmatchedRecordingMeta(recording: CalendarRecording): string {
+  const duration = formatDurationStr(recording.durationSeconds)
+  const time = recording.startTime.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+  return `${duration} · ${time}`
+}
+
+/**
+ * Rank candidate meetings for assignment by how close their start is to a
+ * recording's time — the nearest meeting first. Pure and side-effect-free so the
+ * assignment dialog's fallback list is decidably ordered (content-based ranking,
+ * e.g. speaker/attendee overlap, is a separate future step).
+ */
+export function sortMeetingsByProximity<T extends { start_time: string }>(meetings: T[], refIso: string): T[] {
+  const ref = new Date(refIso).getTime()
+  const distance = (m: T) => {
+    const t = new Date(m.start_time).getTime()
+    return Number.isFinite(t) && Number.isFinite(ref) ? Math.abs(t - ref) : Number.POSITIVE_INFINITY
+  }
+  return [...meetings].sort((a, b) => distance(a) - distance(b))
 }
 
 /**

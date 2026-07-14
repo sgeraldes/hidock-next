@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useLocation } from 'react-router-dom'
 import {
   Search,
   RefreshCw,
@@ -16,6 +16,8 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { HoverCard, HoverCardTrigger, HoverCardContent } from '@/components/ui/hover-card'
+import { PersonHoverCard, ProjectHoverCard } from '@/components/entity'
 import { formatDateTime, cn } from '@/lib/utils'
 import { toast } from '@/components/ui/toaster'
 import { highlightMatch } from '@/utils/highlight'
@@ -59,7 +61,10 @@ const SEARCH_PAGE_SIZE = 20
 
 export function Explore() {
   const navigate = useNavigate()
-  const [query, setQuery] = useState('')
+  const location = useLocation()
+  // Seed the search box from the titlebar global-search handoff (navigate('/explore', { state: { query } })).
+  const initialQuery = (location.state as { query?: string } | null)?.query ?? ''
+  const [query, setQuery] = useState(initialQuery)
   const [results, setResults] = useState<any>(null)
   const [loading, setLoading] = useState(false)
   const [searchError, setSearchError] = useState<string | null>(null)
@@ -376,21 +381,28 @@ export function Explore() {
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                       {results.people.map(p => (
-                        <Card key={p.id} className="group hover:border-blue-500/30 cursor-pointer transition-all shadow-sm overflow-hidden" onClick={() => navigate(`/person/${p.id}`)}>
-                          <CardContent className="p-4 flex items-center gap-3">
-                            <div className="w-10 h-10 rounded-full bg-blue-500/10 flex items-center justify-center font-bold text-blue-600 border border-blue-500/20">
-                              {p.name.charAt(0)}
-                            </div>
-                            <div className="min-w-0 flex-1">
-                              {/* B-EXP-001: Highlight matching terms in people names */}
-                              <h4
-                                className="font-semibold text-sm group-hover:text-blue-600 transition-colors truncate [&_mark]:bg-yellow-200 dark:[&_mark]:bg-yellow-800 [&_mark]:rounded-sm [&_mark]:px-0.5"
-                                dangerouslySetInnerHTML={{ __html: highlightMatch(p.name || '', query) }}
-                              />
-                              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mt-0.5">{p.type}</p>
-                            </div>
-                          </CardContent>
-                        </Card>
+                        <HoverCard key={p.id}>
+                          <HoverCardTrigger asChild>
+                            <Card className="group hover:border-blue-500/30 cursor-pointer transition-all shadow-sm overflow-hidden" onClick={() => navigate(`/person/${p.id}`)}>
+                              <CardContent className="p-4 flex items-center gap-3">
+                                <div className="w-10 h-10 rounded-full bg-blue-500/10 flex items-center justify-center font-bold text-blue-600 border border-blue-500/20">
+                                  {p.name.charAt(0)}
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  {/* B-EXP-001: Highlight matching terms in people names */}
+                                  <h4
+                                    className="font-semibold text-sm group-hover:text-blue-600 transition-colors truncate [&_mark]:bg-yellow-200 dark:[&_mark]:bg-yellow-800 [&_mark]:rounded-sm [&_mark]:px-0.5"
+                                    dangerouslySetInnerHTML={{ __html: highlightMatch(p.name || '', query) }}
+                                  />
+                                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider mt-0.5">{p.type}</p>
+                                </div>
+                              </CardContent>
+                            </Card>
+                          </HoverCardTrigger>
+                          <HoverCardContent>
+                            <PersonHoverCard id={p.id} name={p.name || ''} visibleFields={['name', 'type']} />
+                          </HoverCardContent>
+                        </HoverCard>
                       ))}
                     </div>
                   </div>
@@ -406,26 +418,33 @@ export function Explore() {
                     <div className="grid grid-cols-1 gap-3">
                       {/* B-EXP-002: Navigate to /projects with selectedId in navigation state */}
                       {results.projects.map(pr => (
-                        <Card key={pr.id} className="group hover:border-emerald-500/30 cursor-pointer transition-all shadow-sm" onClick={() => navigate('/projects', { state: { selectedId: pr.id } })}>
-                          <CardContent className="p-4 flex items-center justify-between gap-4">
-                            <div className="flex items-center gap-3 min-w-0 flex-1">
-                              <div className="w-9 h-9 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-600 border border-emerald-500/20">
-                                <Folder className="h-5 w-5" />
-                              </div>
-                              <div className="min-w-0">
-                                {/* B-EXP-001: Highlight matching terms in project names */}
-                                <h4
-                                  className="font-semibold text-sm group-hover:text-emerald-600 transition-colors truncate [&_mark]:bg-yellow-200 dark:[&_mark]:bg-yellow-800 [&_mark]:rounded-sm [&_mark]:px-0.5"
-                                  dangerouslySetInnerHTML={{ __html: highlightMatch(pr.name || '', query) }}
-                                />
-                                <span className="text-[10px] text-muted-foreground uppercase tracking-widest">{pr.status}</span>
-                              </div>
-                            </div>
-                            <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full opacity-0 group-hover:opacity-100 transition-opacity">
-                              <ChevronRight className="h-4 w-4" />
-                            </Button>
-                          </CardContent>
-                        </Card>
+                        <HoverCard key={pr.id}>
+                          <HoverCardTrigger asChild>
+                            <Card className="group hover:border-emerald-500/30 cursor-pointer transition-all shadow-sm" onClick={() => navigate('/projects', { state: { selectedId: pr.id } })}>
+                              <CardContent className="p-4 flex items-center justify-between gap-4">
+                                <div className="flex items-center gap-3 min-w-0 flex-1">
+                                  <div className="w-9 h-9 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-600 border border-emerald-500/20">
+                                    <Folder className="h-5 w-5" />
+                                  </div>
+                                  <div className="min-w-0">
+                                    {/* B-EXP-001: Highlight matching terms in project names */}
+                                    <h4
+                                      className="font-semibold text-sm group-hover:text-emerald-600 transition-colors truncate [&_mark]:bg-yellow-200 dark:[&_mark]:bg-yellow-800 [&_mark]:rounded-sm [&_mark]:px-0.5"
+                                      dangerouslySetInnerHTML={{ __html: highlightMatch(pr.name || '', query) }}
+                                    />
+                                    <span className="text-[10px] text-muted-foreground uppercase tracking-widest">{pr.status}</span>
+                                  </div>
+                                </div>
+                                <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full opacity-0 group-hover:opacity-100 transition-opacity">
+                                  <ChevronRight className="h-4 w-4" />
+                                </Button>
+                              </CardContent>
+                            </Card>
+                          </HoverCardTrigger>
+                          <HoverCardContent>
+                            <ProjectHoverCard id={pr.id} name={pr.name || ''} visibleFields={['name', 'status']} />
+                          </HoverCardContent>
+                        </HoverCard>
                       ))}
                     </div>
                   </div>

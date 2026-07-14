@@ -25,6 +25,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.invoke("session:delete", { sessionId }),
     linkMeeting: (sessionId: string, meetingId: string) =>
       ipcRenderer.invoke("session:linkMeeting", { sessionId, meetingId }),
+    stats: () => ipcRenderer.invoke("session:stats"),
     onCreated: (callback: (data: unknown) => void): Unsubscribe => {
       const handler = (_: unknown, data: unknown) => callback(data);
       ipcRenderer.on("session:created", handler);
@@ -164,6 +165,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     search: (query: string, topK?: number) =>
       ipcRenderer.invoke("kb:search", { query, topK }),
     reindex: () => ipcRenderer.invoke("kb:reindex"),
+    listSources: () => ipcRenderer.invoke("kb:listSources"),
     onIndexProgress: (callback: (data: unknown) => void): Unsubscribe => {
       const handler = (_: unknown, data: unknown) => callback(data);
       ipcRenderer.on("kb:indexProgress", handler);
@@ -174,5 +176,55 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.on("kb:indexComplete", handler);
       return () => ipcRenderer.removeListener("kb:indexComplete", handler);
     },
+  },
+
+  audio: {
+    sendChunk: (data: Uint8Array, timestamp: number, index: number) =>
+      ipcRenderer.invoke("audio:chunk", { data, timestamp, index }),
+    onStartCapture: (cb: (data: { sessionId: string }) => void): Unsubscribe => {
+      const h = (_: unknown, d: { sessionId: string }) => cb(d);
+      ipcRenderer.on("audio:startCapture", h);
+      return () => ipcRenderer.removeListener("audio:startCapture", h);
+    },
+    onStopCapture: (cb: () => void): Unsubscribe => {
+      const h = () => cb();
+      ipcRenderer.on("audio:stopCapture", h);
+      return () => ipcRenderer.removeListener("audio:stopCapture", h);
+    },
+  },
+
+  meeting: {
+    onUpcoming: (callback: (data: unknown) => void): Unsubscribe => {
+      const handler = (_: unknown, data: unknown) => callback(data);
+      ipcRenderer.on("meeting:upcoming", handler);
+      return () => ipcRenderer.removeListener("meeting:upcoming", handler);
+    },
+    onMicDetected: (callback: (data: unknown) => void): Unsubscribe => {
+      const handler = (_: unknown, data: unknown) => callback(data);
+      ipcRenderer.on("meeting:micDetected", handler);
+      return () => ipcRenderer.removeListener("meeting:micDetected", handler);
+    },
+    onCorrelation: (callback: (data: unknown) => void): Unsubscribe => {
+      const handler = (_: unknown, data: unknown) => callback(data);
+      ipcRenderer.on("meeting:correlation", handler);
+      return () => ipcRenderer.removeListener("meeting:correlation", handler);
+    },
+  },
+
+  onNavigate: (callback: (path: string) => void): Unsubscribe => {
+    const handler = (_: unknown, path: string) => callback(path);
+    ipcRenderer.on("navigate", handler);
+    return () => ipcRenderer.removeListener("navigate", handler);
+  },
+
+  onRecordingState: (
+    callback: (data: { isRecording: boolean; sessionId: string | null }) => void,
+  ): Unsubscribe => {
+    const handler = (
+      _: unknown,
+      data: { isRecording: boolean; sessionId: string | null },
+    ) => callback(data);
+    ipcRenderer.on("app:recordingState", handler);
+    return () => ipcRenderer.removeListener("app:recordingState", handler);
   },
 });

@@ -1,13 +1,13 @@
-import initSqlJs, { Database as SqlJsDatabase } from 'sql.js'
-import { existsSync, readFileSync, writeFileSync } from 'fs'
+import Database from 'better-sqlite3'
+import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { getDatabasePath } from './file-storage'
+import { DatabaseEngine, getTableColumns, type SqlJsDatabase } from '@hidock/database'
+import { normalizeName, isGenericSpeakerLabel, detectAmbiguousName } from './entity-normalize'
+import { getEventBus } from './event-bus'
 
-let db: SqlJsDatabase | null = null
-let dbPath: string = ''
-
-const SCHEMA_VERSION = 24
+const SCHEMA_VERSION = 39
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS meetings (
     is_recurring INTEGER DEFAULT 0,
     recurrence_rule TEXT,
     meeting_url TEXT,
+    is_all_day INTEGER DEFAULT 0,
+    all_day_date TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
@@ -55,6 +57,11 @@ CREATE TABLE IF NOT EXISTS recordings (
     migrated_to_capture_id TEXT,
     migration_status TEXT CHECK(migration_status IN ('pending', 'migrated', 'skipped', 'error')) DEFAULT 'pending',
     migrated_at TEXT,
+    -- Privacy / lifecycle (v38). personal = user-marked "ignore" (kept on disk but
+    -- pulled out of every AI pipeline and default surface). deleted_at = soft-delete
+    -- tombstone (hidden everywhere, restorable until hard-purged). See deleteRecordingCascade.
+    personal INTEGER DEFAULT 0,
+    deleted_at TEXT,
     FOREIGN KEY (meeting_id) REFERENCES meetings(id)
 );
 
@@ -138,6 +145,7 @@ CREATE TABLE IF NOT EXISTS action_items (
     -- Action item content
     content TEXT NOT NULL,
     assignee TEXT,
+    assignee_contact_id TEXT, -- canonical contact link (v26) — assignee stays the raw name string
     due_date TEXT,
 
     -- Priority and status
@@ -252,6 +260,11 @@ CREATE TABLE IF NOT EXISTS transcripts (
     transcription_model TEXT,
     title_suggestion TEXT,
     question_suggestions TEXT,
+    -- Meeting-timeline data (v39): windowed sentiment + event markers, both JSON.
+    -- sentiment_segments: [{startSec,endSec,score:-1..1}] time-series across the recording.
+    -- event_markers: [{id,kind,atSec,label,refId}] action/decision markers with audio offsets.
+    sentiment_segments TEXT,
+    event_markers TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (recording_id) REFERENCES recordings(id)
 );
@@ -283,6 +296,7 @@ CREATE TABLE IF NOT EXISTS transcription_queue (
     retry_count INTEGER DEFAULT 0,
     progress INTEGER DEFAULT 0,
     error_message TEXT,
+    provider TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     started_at TEXT,
     completed_at TEXT,
@@ -374,13 +388,30 @@ CREATE TABLE IF NOT EXISTS contacts (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
--- User-created projects for organizing meetings
+-- User-created projects for organizing meetings. Projects are full hubs (v29):
+-- folder_path binds a project to a location on disk (repo, docs folder), url binds
+-- it to a webpage. project_notes below holds its issues/risks/notes.
 CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     description TEXT,
     status TEXT CHECK(status IN ('active', 'archived')) DEFAULT 'active',
+    folder_path TEXT,
+    url TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Project issues / risks / free-form notes (v29). Each row is one item tracked
+-- against a project. Issues and risks toggle open↔resolved, notes are informational.
+CREATE TABLE IF NOT EXISTS project_notes (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    kind TEXT CHECK(kind IN ('issue', 'risk', 'note')),
+    content TEXT NOT NULL,
+    status TEXT CHECK(status IN ('open', 'resolved')) DEFAULT 'open',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    resolved_at TEXT,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
 -- Junction table: Meeting-Contact relationship
@@ -393,12 +424,55 @@ CREATE TABLE IF NOT EXISTS meeting_contacts (
     FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
 );
 
+-- Speaker identity map: binds a transcript speaker label (e.g. "Speaker 1")
+-- to a canonical contact, per recording (v25).
+CREATE TABLE IF NOT EXISTS transcript_speakers (
+    id TEXT PRIMARY KEY,
+    recording_id TEXT NOT NULL,
+    speaker_label TEXT NOT NULL,
+    contact_id TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(recording_id, speaker_label),
+    FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+    FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+);
+
+-- Mention resolutions: per-recording assignment of an ambiguous bucket name
+-- (a bare first name like "Sergio" that could be several people) to the real
+-- contact it denotes IN THAT recording. source_name is the raw spoken/extracted
+-- name and resolved_contact_id is the chosen person (NULL = marked Unclear).
+-- One decision per (recording, name) so a re-analysis honors it instead of
+-- re-bucketing. See detectAmbiguousName + the "Resolve per meeting" surface.
+CREATE TABLE IF NOT EXISTS mention_resolutions (
+    id TEXT PRIMARY KEY,
+    recording_id TEXT NOT NULL,
+    source_name TEXT NOT NULL,
+    resolved_contact_id TEXT,
+    method TEXT,
+    confidence REAL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(recording_id, source_name),
+    FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+    FOREIGN KEY (resolved_contact_id) REFERENCES contacts(id) ON DELETE SET NULL
+);
+
 -- Junction table: Meeting-Project relationship
 CREATE TABLE IF NOT EXISTS meeting_projects (
     meeting_id TEXT NOT NULL,
     project_id TEXT NOT NULL,
     PRIMARY KEY (meeting_id, project_id),
     FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+
+-- Junction table: Knowledge-Project relationship (v26). Enables DIRECT project
+-- assignment for knowledge captures / recordings with no meeting.
+CREATE TABLE IF NOT EXISTS knowledge_projects (
+    knowledge_capture_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (knowledge_capture_id, project_id),
+    FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE,
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
@@ -417,6 +491,18 @@ CREATE TABLE IF NOT EXISTS recording_meeting_candidates (
     FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
     FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE,
     UNIQUE(recording_id, meeting_id)
+);
+
+-- Recording pre-assignments (v31): user's IN-ADVANCE attribution choice for a
+-- recording the device is CURRENTLY capturing, keyed by the live device filename.
+--   meeting_id = <id>  → force-link to this meeting when the file is downloaded
+--   meeting_id = NULL  → force STANDALONE (block time-overlap auto-link)
+-- Consumed (deleted) by autoLinkRecordingsToMeetings once applied.
+CREATE TABLE IF NOT EXISTS recording_preassignments (
+    filename TEXT PRIMARY KEY,
+    meeting_id TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
 );
 
 -- Device files cache - persists device file list for offline viewing
@@ -459,8 +545,14 @@ CREATE INDEX IF NOT EXISTS idx_contacts_name ON contacts(name);
 CREATE INDEX IF NOT EXISTS idx_projects_name ON projects(name);
 CREATE INDEX IF NOT EXISTS idx_meeting_contacts_meeting ON meeting_contacts(meeting_id);
 CREATE INDEX IF NOT EXISTS idx_meeting_contacts_contact ON meeting_contacts(contact_id);
+CREATE INDEX IF NOT EXISTS idx_transcript_speakers_recording ON transcript_speakers(recording_id);
+CREATE INDEX IF NOT EXISTS idx_mention_resolutions_recording ON mention_resolutions(recording_id);
+CREATE INDEX IF NOT EXISTS idx_mention_resolutions_contact ON mention_resolutions(resolved_contact_id);
 CREATE INDEX IF NOT EXISTS idx_meeting_projects_meeting ON meeting_projects(meeting_id);
 CREATE INDEX IF NOT EXISTS idx_meeting_projects_project ON meeting_projects(project_id);
+CREATE INDEX IF NOT EXISTS idx_project_notes_project_kind ON project_notes(project_id, kind);
+CREATE INDEX IF NOT EXISTS idx_knowledge_projects_knowledge ON knowledge_projects(knowledge_capture_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_projects_project ON knowledge_projects(project_id);
 CREATE INDEX IF NOT EXISTS idx_recording_candidates_recording ON recording_meeting_candidates(recording_id);
 CREATE INDEX IF NOT EXISTS idx_recording_candidates_meeting ON recording_meeting_candidates(meeting_id);
 CREATE INDEX IF NOT EXISTS idx_recording_candidates_selected ON recording_meeting_candidates(is_selected);
@@ -495,6 +587,144 @@ CREATE TABLE IF NOT EXISTS actionables (
 
 CREATE INDEX IF NOT EXISTS idx_actionables_source_knowledge ON actionables(source_knowledge_id);
 CREATE INDEX IF NOT EXISTS idx_actionables_status ON actionables(status);
+
+-- Alias memory (v27). Every merge, speaker assignment, and accepted/rejected
+-- suggestion writes a permanent alias so a settled identity is never re-asked.
+-- alias_norm is the normalized (lowercased, whitespace-collapsed) alias string,
+-- and a rejected-source row blocks resolving that alias to the paired entity.
+CREATE TABLE IF NOT EXISTS contact_aliases (
+    id TEXT PRIMARY KEY,
+    alias_norm TEXT NOT NULL UNIQUE,
+    contact_id TEXT NOT NULL,
+    source TEXT CHECK(source IN ('merge', 'speaker_assign', 'manual', 'inferred', 'rejected')),
+    confidence REAL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS project_aliases (
+    id TEXT PRIMARY KEY,
+    alias_norm TEXT NOT NULL UNIQUE,
+    project_id TEXT NOT NULL,
+    source TEXT CHECK(source IN ('merge', 'speaker_assign', 'manual', 'inferred', 'rejected')),
+    confidence REAL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+
+-- Identity suggestion queue (v27). The 0.5–0.8 resolver band lands here as
+-- reviewable cards. Accept writes an alias and links, reject blocks the pairing.
+CREATE TABLE IF NOT EXISTS identity_suggestions (
+    id TEXT PRIMARY KEY,
+    kind TEXT CHECK(kind IN ('person', 'project')),
+    candidate_name TEXT,
+    target_id TEXT,
+    confidence REAL,
+    evidence TEXT,
+    status TEXT CHECK(status IN ('pending', 'accepted', 'rejected')) DEFAULT 'pending',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(kind, candidate_name, target_id)
+);
+
+-- Merge journal (v30): one row per executed contact/project merge, written inside
+-- the merge's own transaction, so a fold can be reversed. loser_snapshot is the
+-- full deleted loser row. repointed_manifest is the exact set of child rows the
+-- merge moved (plus the loser's own aliases and the keeper's pre-merge link set,
+-- for precise restore and orphan detection). folded_fields records which keeper
+-- fields the merge filled from the loser, with before/after values.
+CREATE TABLE IF NOT EXISTS merge_journal (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK(kind IN ('contact', 'project')),
+    keeper_id TEXT NOT NULL,
+    loser_snapshot TEXT NOT NULL,
+    repointed_manifest TEXT NOT NULL,
+    folded_fields TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    undone_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_contact_aliases_contact ON contact_aliases(contact_id);
+CREATE INDEX IF NOT EXISTS idx_project_aliases_project ON project_aliases(project_id);
+CREATE INDEX IF NOT EXISTS idx_identity_suggestions_status ON identity_suggestions(status);
+CREATE INDEX IF NOT EXISTS idx_merge_journal_kind_keeper ON merge_journal(kind, keeper_id);
+
+-- Entity-type artifacts (C0 / v28). Every concrete imported file/blob (pdf, md,
+-- txt, json, image…). A knowledge_capture can own many artifacts. Text is
+-- extracted per registered entity type (artifact-types.ts), dedup by content_hash.
+CREATE TABLE IF NOT EXISTS artifacts (
+    id TEXT PRIMARY KEY,
+    knowledge_capture_id TEXT,
+    kind TEXT NOT NULL,
+    mime TEXT,
+    storage_path TEXT,
+    size INTEGER,
+    content_hash TEXT,
+    extracted_text TEXT,
+    metadata TEXT,
+    source_connector_id TEXT,
+    source_ref TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_artifacts_capture ON artifacts(knowledge_capture_id);
+CREATE INDEX IF NOT EXISTS idx_artifacts_kind ON artifacts(kind);
+CREATE INDEX IF NOT EXISTS idx_artifacts_content_hash ON artifacts(content_hash);
+
+-- Per-turn speaker override (v37). Supersedes the label→contact default for ONE
+-- transcript turn (identified by its zero-based turn_index within the rendered
+-- turns). Lets a user correct a single turn without rewriting every turn that
+-- shares the diarization label. See "Just this turn" in SpeakerAssignPopover.
+CREATE TABLE IF NOT EXISTS turn_speaker_overrides (
+    id TEXT PRIMARY KEY,
+    recording_id TEXT NOT NULL,
+    turn_index INTEGER NOT NULL,
+    contact_id TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(recording_id, turn_index),
+    FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+    FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+);
+
+-- Speaker splits (v37). Forks a diarization label into an independently
+-- assignable derived label from a chosen turn onward. Fixes the merged-speaker
+-- case (one label = two real people): split at the boundary, then assign each
+-- half its own contact. from_turn_index is the first turn of the derived label;
+-- derived_label (e.g. "Speaker 1 · B") becomes a first-class key in
+-- transcript_speakers. Reversible by deleting the row ("merge back").
+CREATE TABLE IF NOT EXISTS speaker_splits (
+    id TEXT PRIMARY KEY,
+    recording_id TEXT NOT NULL,
+    base_label TEXT NOT NULL,
+    from_turn_index INTEGER NOT NULL,
+    derived_label TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(recording_id, base_label, from_turn_index),
+    FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_turn_overrides_recording ON turn_speaker_overrides(recording_id);
+CREATE INDEX IF NOT EXISTS idx_speaker_splits_recording ON speaker_splits(recording_id);
+
+-- Deletion journal (v38): one row per source-delete action so a soft-delete is
+-- restorable and every purge is auditable. recording_snapshot holds the full
+-- recordings row (JSON) captured at delete time (used to restore a soft-delete).
+-- removed_counts holds a JSON summary of derived rows removed (hard purge). A
+-- hard purge is intentionally NOT restorable (privacy) — its journal row is an
+-- audit trail only. restored_at is set when a soft-delete is undone.
+CREATE TABLE IF NOT EXISTS deletion_journal (
+    id TEXT PRIMARY KEY,
+    recording_id TEXT NOT NULL,
+    mode TEXT NOT NULL CHECK(mode IN ('soft', 'hard')),
+    recording_snapshot TEXT,
+    removed_counts TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    restored_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_recordings_personal ON recordings(personal);
+CREATE INDEX IF NOT EXISTS idx_recordings_deleted_at ON recordings(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_deletion_journal_recording ON deletion_journal(recording_id);
 
 `
 
@@ -1344,190 +1574,874 @@ const MIGRATIONS: Record<number, () => void> = {
     } catch (e) {
       console.warn('[Migration v24] Failed:', e)
     }
-  }
+  },
 
-}
-
-function runMigrations(currentVersion: number): void {
-  for (let v = currentVersion + 1; v <= SCHEMA_VERSION; v++) {
-    const migration = MIGRATIONS[v]
-    if (migration) {
-      console.log(`Running migration to v${v}...`)
-      migration()
-    }
-    // Record the migration
-    getDatabase().run('INSERT OR REPLACE INTO schema_version (version) VALUES (?)', [v])
-  }
-}
-
-/**
- * Safe database initialization.
- * Performs a 4-phase boot sequence:
- * 1. Core Tables: Ensure basic table structure exists.
- * 2. Structural Repair: Force-add missing columns required by the code.
- * 3. Migrations: Handle version-specific data transformations.
- * 4. Full Schema: Apply indexes and constraints safely.
- */
-export async function initializeDatabase(): Promise<void> {
-  dbPath = getDatabasePath()
-
-  try {
-    const SQL = await initSqlJs()
-    if (existsSync(dbPath)) {
-      const fileBuffer = readFileSync(dbPath)
-      db = new SQL.Database(fileBuffer)
-    } else {
-      db = new SQL.Database()
-    }
-
+  25: () => {
+    // v25: Add transcript_speakers — binds a transcript speaker label to a
+    // canonical contact per recording. Idempotent (CREATE TABLE IF NOT EXISTS).
+    console.log('Running migration to schema v25: Adding transcript_speakers table')
     const database = getDatabase()
-    const statements = SCHEMA.split(';').map(s => s.trim()).filter(s => s.length > 0)
 
-    // --- PHASE 1: CORE TABLES ---
-    console.log('[Database] Phase 1: Ensuring core tables exist...')
-    for (const sql of statements) {
-      if (sql.toUpperCase().startsWith('CREATE TABLE')) {
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS transcript_speakers (
+          id TEXT PRIMARY KEY,
+          recording_id TEXT NOT NULL,
+          speaker_label TEXT NOT NULL,
+          contact_id TEXT NOT NULL,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(recording_id, speaker_label),
+          FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+          FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+        )
+      `)
+      database.run('CREATE INDEX IF NOT EXISTS idx_transcript_speakers_recording ON transcript_speakers(recording_id)')
+      console.log('Migration v25 complete: transcript_speakers table ready')
+    } catch (e) {
+      console.warn('[Migration v25] Failed:', e)
+    }
+  },
+
+  26: () => {
+    // v26: Deep editability backend.
+    //  - knowledge_projects junction: DIRECT project assignment for knowledge
+    //    captures / recordings that have no meeting.
+    //  - action_items.assignee_contact_id: canonical contact link for assignees.
+    // Idempotent: CREATE TABLE IF NOT EXISTS + guarded ALTER.
+    console.log('Running migration to schema v26: knowledge_projects + action_items.assignee_contact_id')
+    const database = getDatabase()
+
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS knowledge_projects (
+          knowledge_capture_id TEXT NOT NULL,
+          project_id TEXT NOT NULL,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (knowledge_capture_id, project_id),
+          FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE,
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+      `)
+      database.run('CREATE INDEX IF NOT EXISTS idx_knowledge_projects_knowledge ON knowledge_projects(knowledge_capture_id)')
+      database.run('CREATE INDEX IF NOT EXISTS idx_knowledge_projects_project ON knowledge_projects(project_id)')
+    } catch (e) {
+      console.warn('[Migration v26] knowledge_projects failed:', e)
+    }
+
+    try {
+      const info = database.exec('PRAGMA table_info(action_items)')
+      if (info.length > 0 && info[0].values) {
+        const cols = info[0].values.map((row: unknown[]) => row[1])
+        if (!cols.includes('assignee_contact_id')) {
+          database.run('ALTER TABLE action_items ADD COLUMN assignee_contact_id TEXT')
+        }
+      }
+    } catch (e) {
+      console.warn('[Migration v26] action_items.assignee_contact_id failed:', e)
+    }
+
+    console.log('Migration v26 complete')
+  },
+
+  27: () => {
+    // v27: Alias memory + identity suggestion queue (Round 4a).
+    //  - contact_aliases / project_aliases: permanent normalized-name → entity
+    //    aliases with a source + confidence (a 'rejected' row blocks a pairing).
+    //  - identity_suggestions: the 0.5–0.8 resolver band as reviewable cards.
+    // Idempotent: CREATE TABLE IF NOT EXISTS.
+    console.log('Running migration to schema v27: alias memory + identity suggestions')
+    const database = getDatabase()
+
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS contact_aliases (
+          id TEXT PRIMARY KEY,
+          alias_norm TEXT NOT NULL UNIQUE,
+          contact_id TEXT NOT NULL,
+          source TEXT CHECK(source IN ('merge', 'speaker_assign', 'manual', 'inferred', 'rejected')),
+          confidence REAL,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+        )
+      `)
+      database.run(`
+        CREATE TABLE IF NOT EXISTS project_aliases (
+          id TEXT PRIMARY KEY,
+          alias_norm TEXT NOT NULL UNIQUE,
+          project_id TEXT NOT NULL,
+          source TEXT CHECK(source IN ('merge', 'speaker_assign', 'manual', 'inferred', 'rejected')),
+          confidence REAL,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+      `)
+      database.run(`
+        CREATE TABLE IF NOT EXISTS identity_suggestions (
+          id TEXT PRIMARY KEY,
+          kind TEXT CHECK(kind IN ('person', 'project')),
+          candidate_name TEXT,
+          target_id TEXT,
+          confidence REAL,
+          evidence TEXT,
+          status TEXT CHECK(status IN ('pending', 'accepted', 'rejected')) DEFAULT 'pending',
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(kind, candidate_name, target_id)
+        )
+      `)
+      database.run('CREATE INDEX IF NOT EXISTS idx_contact_aliases_contact ON contact_aliases(contact_id)')
+      database.run('CREATE INDEX IF NOT EXISTS idx_project_aliases_project ON project_aliases(project_id)')
+      database.run('CREATE INDEX IF NOT EXISTS idx_identity_suggestions_status ON identity_suggestions(status)')
+    } catch (e) {
+      console.warn('[Migration v27] Failed:', e)
+    }
+
+    console.log('Migration v27 complete')
+  },
+  28: () => {
+    // v28: Entity-type foundation (C0). `artifacts` table holds every concrete
+    // imported file/blob keyed to a knowledge_capture. Idempotent: CREATE TABLE
+    // IF NOT EXISTS + guarded indexes.
+    console.log('Running migration to schema v28: artifacts (entity-type foundation)')
+    const database = getDatabase()
+
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS artifacts (
+          id TEXT PRIMARY KEY,
+          knowledge_capture_id TEXT,
+          kind TEXT NOT NULL,
+          mime TEXT,
+          storage_path TEXT,
+          size INTEGER,
+          content_hash TEXT,
+          extracted_text TEXT,
+          metadata TEXT,
+          source_connector_id TEXT,
+          source_ref TEXT,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE
+        )
+      `)
+      database.run('CREATE INDEX IF NOT EXISTS idx_artifacts_capture ON artifacts(knowledge_capture_id)')
+      database.run('CREATE INDEX IF NOT EXISTS idx_artifacts_kind ON artifacts(kind)')
+      database.run('CREATE INDEX IF NOT EXISTS idx_artifacts_content_hash ON artifacts(content_hash)')
+    } catch (e) {
+      console.warn('[Migration v28] Failed:', e)
+    }
+
+    console.log('Migration v28 complete')
+  },
+  29: () => {
+    // v29: Projects as full hubs.
+    //  - projects.folder_path / projects.url: bind a project to a location on
+    //    disk and a webpage.
+    //  - project_notes: issues / risks / notes tracked against a project.
+    // Idempotent: guarded ALTER + CREATE TABLE IF NOT EXISTS.
+    console.log('Running migration to schema v29: project folder_path/url + project_notes')
+    const database = getDatabase()
+
+    try {
+      const info = database.exec('PRAGMA table_info(projects)')
+      if (info.length > 0 && info[0].values) {
+        const cols = info[0].values.map((row: unknown[]) => row[1])
+        if (!cols.includes('folder_path')) {
+          database.run('ALTER TABLE projects ADD COLUMN folder_path TEXT')
+        }
+        if (!cols.includes('url')) {
+          database.run('ALTER TABLE projects ADD COLUMN url TEXT')
+        }
+      }
+    } catch (e) {
+      console.warn('[Migration v29] projects folder_path/url failed:', e)
+    }
+
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS project_notes (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          kind TEXT CHECK(kind IN ('issue', 'risk', 'note')),
+          content TEXT NOT NULL,
+          status TEXT CHECK(status IN ('open', 'resolved')) DEFAULT 'open',
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          resolved_at TEXT,
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+      `)
+      database.run('CREATE INDEX IF NOT EXISTS idx_project_notes_project_kind ON project_notes(project_id, kind)')
+    } catch (e) {
+      console.warn('[Migration v29] project_notes failed:', e)
+    }
+
+    console.log('Migration v29 complete')
+  },
+
+  30: () => {
+    // v30: Merge safety & reversibility. merge_journal records every executed
+    // contact/project merge so it can be unmerged. Idempotent CREATE + index.
+    console.log('Running migration to schema v30: merge_journal (merge reversibility)')
+    const database = getDatabase()
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS merge_journal (
+          id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL CHECK(kind IN ('contact', 'project')),
+          keeper_id TEXT NOT NULL,
+          loser_snapshot TEXT NOT NULL,
+          repointed_manifest TEXT NOT NULL,
+          folded_fields TEXT,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          undone_at TEXT
+        )
+      `)
+      database.run('CREATE INDEX IF NOT EXISTS idx_merge_journal_kind_keeper ON merge_journal(kind, keeper_id)')
+    } catch (e) {
+      console.warn('[Migration v30] merge_journal failed:', e)
+    }
+    console.log('Migration v30 complete')
+  },
+
+  31: () => {
+    // v31: recording_preassignments — the user's in-advance attribution choice for
+    // the recording the device is currently capturing (see schema comment).
+    console.log('Running migration to schema v31: recording_preassignments')
+    const database = getDatabase()
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS recording_preassignments (
+          filename TEXT PRIMARY KEY,
+          meeting_id TEXT,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+        )
+      `)
+    } catch (e) {
+      console.warn('[Migration v31] recording_preassignments failed:', e)
+    }
+    console.log('Migration v31 complete')
+  },
+
+  32: () => {
+    // v32: all-day / holiday events. is_all_day flags a calendar-DATE event;
+    // all_day_date is its timezone-independent named day (YYYY-MM-DD) so the UI
+    // matches by local calendar date rather than the stored UTC instant.
+    console.log('Running migration to schema v32: meetings.is_all_day + all_day_date')
+    const database = getDatabase()
+    const info = database.exec('PRAGMA table_info(meetings)')
+    if (info.length > 0 && info[0].values) {
+      const columns = info[0].values.map((row: any) => row[1])
+      if (!columns.includes('is_all_day')) {
         try {
-          database.run(sql)
+          database.run('ALTER TABLE meetings ADD COLUMN is_all_day INTEGER DEFAULT 0')
         } catch (e) {
-          console.warn(`[Database] Table creation warning: ${(e as Error).message}`)
+          console.warn('[Migration v32] add is_all_day failed:', e)
+        }
+      }
+      if (!columns.includes('all_day_date')) {
+        try {
+          database.run('ALTER TABLE meetings ADD COLUMN all_day_date TEXT')
+        } catch (e) {
+          console.warn('[Migration v32] add all_day_date failed:', e)
         }
       }
     }
+    console.log('Migration v32 complete')
+  },
 
-    // --- PHASE 2: MANDATORY STRUCTURAL REPAIR ---
-    // This runs on EVERY boot to ensure parity between code and disk.
-    console.log('[Database] Phase 2: Aligning table structures...')
-    
-    // Repair Recordings
-    const recordingsInfo = database.exec("PRAGMA table_info(recordings)")
-    const recCols = recordingsInfo[0].values.map(col => col[1])
-    const recordingRepairs = [
-      { name: 'migrated_to_capture_id', def: "TEXT" },
-      { name: 'migration_status', def: "TEXT CHECK(migration_status IN ('pending', 'migrated', 'skipped', 'error')) DEFAULT 'pending'" },
-      { name: 'migrated_at', def: "TEXT" }
-    ]
+  // v33 reserved (connectors), v34 reserved (transcript-triage) — see other agents.
+
+  35: () => {
+    // v35: mention_resolutions — per-recording assignment of an ambiguous bucket
+    // name (bare first name matching several distinct people) to the real contact.
+    console.log('Running migration to schema v35: mention_resolutions')
+    const database = getDatabase()
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS mention_resolutions (
+          id TEXT PRIMARY KEY,
+          recording_id TEXT NOT NULL,
+          source_name TEXT NOT NULL,
+          resolved_contact_id TEXT,
+          method TEXT,
+          confidence REAL,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(recording_id, source_name),
+          FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+          FOREIGN KEY (resolved_contact_id) REFERENCES contacts(id) ON DELETE SET NULL
+        )
+      `)
+      database.run('CREATE INDEX IF NOT EXISTS idx_mention_resolutions_recording ON mention_resolutions(recording_id)')
+      database.run('CREATE INDEX IF NOT EXISTS idx_mention_resolutions_contact ON mention_resolutions(resolved_contact_id)')
+    } catch (e) {
+      console.warn('[Migration v35] mention_resolutions failed:', e)
+    }
+    console.log('Migration v35 complete')
+  },
+  36: () => {
+    // v36 (P0 DB-bloat fix): the RAG vector store persisted each embedding as a
+    // JSON text array (avg ~39 KB/row for a 3072-dim vector). At ~46k rows that
+    // was 1.7 GB — 90%+ of the whole database — which drove sql.js past its heap
+    // ceiling and crashed the app. Compact every embedding to a binary Float32
+    // BLOB (~3x smaller) and drop duplicate (recording_id, chunk_index) rows.
+    // Idempotent: only rows whose embedding is still TEXT are converted, so a
+    // re-run is a no-op. The engine runs VACUUM after this migration to reclaim
+    // the freed pages. See vector-store.ts for the matching write/read change.
+    console.log('Running migration to schema v36: compact vector_embeddings (JSON text -> Float32 BLOB) + dedupe')
+    const database = getDatabase()
+
+    // Skip cleanly if the table was never created (RAG never used on this DB).
+    const exists = database.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='vector_embeddings'")
+    if (exists.length === 0) {
+      console.log('[Migration v36] vector_embeddings table absent; nothing to compact')
+      return
+    }
+
+    // 1. Dedupe: one recording indexed twice leaves duplicate (recording_id,
+    // chunk_index) rows. Keep the newest (max rowid).
+    try {
+      run(`
+        DELETE FROM vector_embeddings
+        WHERE recording_id IS NOT NULL
+          AND rowid NOT IN (
+            SELECT MAX(rowid) FROM vector_embeddings
+            WHERE recording_id IS NOT NULL
+            GROUP BY recording_id, chunk_index
+          )
+      `)
+      console.log(`[Migration v36] removed ${database.getRowsModified()} duplicate embedding rows`)
+    } catch (e) {
+      console.warn('[Migration v36] dedupe failed (non-fatal):', e)
+    }
+
+    // 2. Convert JSON-text embeddings to Float32 BLOBs, in bounded batches so a
+    // large table never materializes fully in memory. Each UPDATE flips the row
+    // from typeof 'text' to 'blob', so it drops out of the next batch's filter;
+    // a row with an unparseable embedding is deleted (unusable for search) to
+    // guarantee the loop terminates.
+    let converted = 0
+    let deleted = 0
+    try {
+      for (;;) {
+        const res = database.exec(
+          "SELECT id, embedding FROM vector_embeddings WHERE typeof(embedding) = 'text' LIMIT 500"
+        )
+        if (res.length === 0 || res[0].values.length === 0) break
+        const rows = res[0].values as [string, string][]
+        runInTransaction(() => {
+          for (const [id, embedding] of rows) {
+            try {
+              const arr = JSON.parse(embedding)
+              if (!Array.isArray(arr) || arr.length === 0) {
+                run('DELETE FROM vector_embeddings WHERE id = ?', [id])
+                deleted++
+                continue
+              }
+              const buf = Buffer.from(new Float32Array(arr).buffer)
+              run('UPDATE vector_embeddings SET embedding = ? WHERE id = ?', [buf, id])
+              converted++
+            } catch {
+              // Malformed JSON — unusable chunk; drop it so the filter shrinks.
+              run('DELETE FROM vector_embeddings WHERE id = ?', [id])
+              deleted++
+            }
+          }
+        })
+      }
+      console.log(
+        `[Migration v36] compacted ${converted} embeddings to Float32 BLOB` +
+          (deleted > 0 ? `, dropped ${deleted} malformed` : '') +
+          ' (VACUUM reclaims the freed space)'
+      )
+    } catch (e) {
+      console.warn('[Migration v36] embedding compaction failed (non-fatal):', e)
+    }
+  },
+
+  37: () => {
+    // v37: per-turn speaker overrides + speaker splits. Label-level speaker
+    // assignment (transcript_speakers) rewrites EVERY turn of a diarization
+    // label; when the diarizer merges two people onto one label, the user could
+    // not fix it. These two tables add (a) a per-turn override that supersedes
+    // the label default for a single turn, and (b) a split that forks a label
+    // into an independently-assignable derived label from a turn onward.
+    // Idempotent: CREATE TABLE IF NOT EXISTS + guarded index creation.
+    console.log('Running migration to schema v37: turn_speaker_overrides + speaker_splits')
+    const database = getDatabase()
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS turn_speaker_overrides (
+          id TEXT PRIMARY KEY,
+          recording_id TEXT NOT NULL,
+          turn_index INTEGER NOT NULL,
+          contact_id TEXT NOT NULL,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(recording_id, turn_index),
+          FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+          FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+        )
+      `)
+      database.run('CREATE INDEX IF NOT EXISTS idx_turn_overrides_recording ON turn_speaker_overrides(recording_id)')
+    } catch (e) {
+      console.warn('[Migration v37] turn_speaker_overrides failed (non-fatal):', e)
+    }
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS speaker_splits (
+          id TEXT PRIMARY KEY,
+          recording_id TEXT NOT NULL,
+          base_label TEXT NOT NULL,
+          from_turn_index INTEGER NOT NULL,
+          derived_label TEXT NOT NULL,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(recording_id, base_label, from_turn_index),
+          FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+        )
+      `)
+      database.run('CREATE INDEX IF NOT EXISTS idx_speaker_splits_recording ON speaker_splits(recording_id)')
+    } catch (e) {
+      console.warn('[Migration v37] speaker_splits failed (non-fatal):', e)
+    }
+    console.log('Migration v37 complete')
+  },
+  38: () => {
+    // v38: privacy source-deletion. Two per-recording lifecycle flags plus a
+    // deletion journal. `personal` marks a recording "ignore" (kept on disk but
+    // pulled from every AI pipeline + default surface). `deleted_at` is a
+    // soft-delete tombstone (hidden everywhere, restorable). deletion_journal
+    // records each delete so soft-deletes are restorable and purges are audited.
+    // Idempotent: guarded ALTERs + CREATE TABLE IF NOT EXISTS.
+    console.log('Running migration to schema v38: personal + deleted_at + deletion_journal')
+    const database = getDatabase()
+    const recCols = getTableColumns(database, 'recordings')
+    if (recCols.length > 0) {
+      if (!recCols.includes('personal')) {
+        try { database.run('ALTER TABLE recordings ADD COLUMN personal INTEGER DEFAULT 0') } catch (e) {
+          console.warn('[Migration v38] add personal failed:', e)
+        }
+      }
+      if (!recCols.includes('deleted_at')) {
+        try { database.run('ALTER TABLE recordings ADD COLUMN deleted_at TEXT') } catch (e) {
+          console.warn('[Migration v38] add deleted_at failed:', e)
+        }
+      }
+    }
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS deletion_journal (
+          id TEXT PRIMARY KEY,
+          recording_id TEXT NOT NULL,
+          mode TEXT NOT NULL CHECK(mode IN ('soft', 'hard')),
+          recording_snapshot TEXT,
+          removed_counts TEXT,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          restored_at TEXT
+        )
+      `)
+      database.run('CREATE INDEX IF NOT EXISTS idx_recordings_personal ON recordings(personal)')
+      database.run('CREATE INDEX IF NOT EXISTS idx_recordings_deleted_at ON recordings(deleted_at)')
+      database.run('CREATE INDEX IF NOT EXISTS idx_deletion_journal_recording ON deletion_journal(recording_id)')
+    } catch (e) {
+      console.warn('[Migration v38] deletion_journal failed (non-fatal):', e)
+    }
+    console.log('Migration v38 complete')
+  },
+  39: () => {
+    // v39: meeting-timeline data. Two JSON columns on transcripts hold the
+    // rich-waveform timeline: `sentiment_segments` (a time-windowed sentiment
+    // series) and `event_markers` (action/decision markers with audio offsets).
+    // Both are (re)computed by timeline-analysis and are safe to leave NULL until
+    // analyzed. Idempotent: guarded ALTERs.
+    console.log('Running migration to schema v39: transcripts.sentiment_segments + event_markers')
+    const database = getDatabase()
+    const cols = getTableColumns(database, 'transcripts')
+    if (cols.length > 0) {
+      if (!cols.includes('sentiment_segments')) {
+        try { database.run('ALTER TABLE transcripts ADD COLUMN sentiment_segments TEXT') } catch (e) {
+          console.warn('[Migration v39] add sentiment_segments failed:', e)
+        }
+      }
+      if (!cols.includes('event_markers')) {
+        try { database.run('ALTER TABLE transcripts ADD COLUMN event_markers TEXT') } catch (e) {
+          console.warn('[Migration v39] add event_markers failed:', e)
+        }
+      }
+    }
+    console.log('Migration v39 complete')
+  }
+
+}
+
+/**
+ * Phase-2 structural repair (app-specific). Invoked by the engine on every boot,
+ * after core tables and before migrations: force-adds any columns the current
+ * code requires but an older on-disk schema may lack. Idempotent.
+ */
+function repairPhase(): void {
+  const database = getDatabase()
+
+  // Repair Meetings (v32): all-day flag + named calendar date. Force-add so an
+  // older on-disk schema that skipped the migration still gets the columns
+  // before any calendar-sync write. Idempotent.
+  const meetingCols = getTableColumns(database, 'meetings')
+  const meetingRepairs = [
+    { name: 'is_all_day', def: 'INTEGER DEFAULT 0' },
+    { name: 'all_day_date', def: 'TEXT' }
+  ]
+  if (meetingCols.length > 0) {
+    for (const col of meetingRepairs) {
+      if (!meetingCols.includes(col.name)) {
+        console.log(`[Database] Repairing meetings: adding ${col.name}`)
+        try { database.run(`ALTER TABLE meetings ADD COLUMN ${col.name} ${col.def}`) } catch (e) {}
+      }
+    }
+  }
+
+  // Repair Recordings
+  const recCols = getTableColumns(database, 'recordings')
+  const recordingRepairs = [
+    { name: 'migrated_to_capture_id', def: "TEXT" },
+    { name: 'migration_status', def: "TEXT CHECK(migration_status IN ('pending', 'migrated', 'skipped', 'error')) DEFAULT 'pending'" },
+    { name: 'migrated_at', def: "TEXT" },
+    // v38 privacy source-deletion columns — force-add so older on-disk schemas
+    // have them before any read-site filters on personal/deleted_at.
+    { name: 'personal', def: "INTEGER DEFAULT 0" },
+    { name: 'deleted_at', def: "TEXT" }
+  ]
+  if (recCols.length > 0) {
     for (const col of recordingRepairs) {
       if (!recCols.includes(col.name)) {
         console.log(`[Database] Repairing recordings: adding ${col.name}`)
         try { database.run(`ALTER TABLE recordings ADD COLUMN ${col.name} ${col.def}`) } catch (e) {}
       }
     }
+  } else {
+    console.warn('[Database] recordings table unavailable during structural repair; skipping recordings repair')
+  }
 
-    // Repair Knowledge Captures
-    const captureInfo = database.exec("PRAGMA table_info(knowledge_captures)")
-    const capCols = captureInfo[0].values.map(col => col[1])
-    const knowledgeRepairs = [
-      { name: 'category', def: "category TEXT CHECK(category IN ('meeting', 'interview', '1:1', 'brainstorm', 'note', 'other')) DEFAULT 'meeting'" },
-      { name: 'status', def: "status TEXT CHECK(status IN ('processing', 'ready', 'enriched')) DEFAULT 'ready'" },
-      { name: 'quality_rating', def: "quality_rating TEXT CHECK(quality_rating IN ('valuable', 'archived', 'low-value', 'garbage', 'unrated')) DEFAULT 'unrated'" },
-      { name: 'quality_confidence', def: "quality_confidence REAL" },
-      { name: 'quality_assessed_at', def: "quality_assessed_at TEXT" },
-      { name: 'storage_tier', def: "storage_tier TEXT CHECK(storage_tier IN ('hot', 'cold', 'expiring', 'deleted')) DEFAULT 'hot'" },
-      { name: 'retention_days', def: "retention_days INTEGER" },
-      { name: 'expires_at', def: "expires_at TEXT" },
-      { name: 'meeting_id', def: "meeting_id TEXT REFERENCES meetings(id)" },
-      { name: 'correlation_confidence', def: "correlation_confidence REAL" },
-      { name: 'correlation_method', def: "correlation_method TEXT" },
-      { name: 'source_recording_id', def: "source_recording_id TEXT REFERENCES recordings(id)" }
-    ]
+  // Repair Knowledge Captures
+  const capCols = getTableColumns(database, 'knowledge_captures')
+  const knowledgeRepairs = [
+    { name: 'category', def: "category TEXT CHECK(category IN ('meeting', 'interview', '1:1', 'brainstorm', 'note', 'other')) DEFAULT 'meeting'" },
+    { name: 'status', def: "status TEXT CHECK(status IN ('processing', 'ready', 'enriched')) DEFAULT 'ready'" },
+    { name: 'quality_rating', def: "quality_rating TEXT CHECK(quality_rating IN ('valuable', 'archived', 'low-value', 'garbage', 'unrated')) DEFAULT 'unrated'" },
+    { name: 'quality_confidence', def: "quality_confidence REAL" },
+    { name: 'quality_assessed_at', def: "quality_assessed_at TEXT" },
+    { name: 'storage_tier', def: "storage_tier TEXT CHECK(storage_tier IN ('hot', 'cold', 'expiring', 'deleted')) DEFAULT 'hot'" },
+    { name: 'retention_days', def: "retention_days INTEGER" },
+    { name: 'expires_at', def: "expires_at TEXT" },
+    { name: 'meeting_id', def: "meeting_id TEXT REFERENCES meetings(id)" },
+    { name: 'correlation_confidence', def: "correlation_confidence REAL" },
+    { name: 'correlation_method', def: "correlation_method TEXT" },
+    { name: 'source_recording_id', def: "source_recording_id TEXT REFERENCES recordings(id)" }
+  ]
+  if (capCols.length > 0) {
     for (const col of knowledgeRepairs) {
       if (!capCols.includes(col.name)) {
         console.log(`[Database] Repairing knowledge_captures: adding ${col.name}`)
         try { database.run(`ALTER TABLE knowledge_captures ADD COLUMN ${col.def}`) } catch (e) {}
       }
     }
-
-    // Repair transcription_queue (spec-014: retry persistence and real-time progress)
-    const queueInfo = database.exec("PRAGMA table_info(transcription_queue)")
-    if (queueInfo.length > 0 && queueInfo[0].values) {
-      const queueCols = queueInfo[0].values.map(col => col[1])
-      const queueRepairs = [
-        { name: 'retry_count', def: 'INTEGER DEFAULT 0' },
-        { name: 'progress', def: 'INTEGER DEFAULT 0' }
-      ]
-      for (const col of queueRepairs) {
-        if (!queueCols.includes(col.name)) {
-          console.log(`[Database] Repairing transcription_queue: adding ${col.name}`)
-          try { database.run(`ALTER TABLE transcription_queue ADD COLUMN ${col.name} ${col.def}`) } catch (e) {}
-        }
-      }
-    }
-
-    // Repair chat_messages (AI-15: columns referenced by assistant mapper)
-    const chatMsgInfo = database.exec("PRAGMA table_info(chat_messages)")
-    if (chatMsgInfo.length > 0 && chatMsgInfo[0].values) {
-      const chatCols = chatMsgInfo[0].values.map(col => col[1])
-      const chatRepairs = [
-        { name: 'edited_at', def: 'TEXT' },
-        { name: 'original_content', def: 'TEXT' },
-        { name: 'created_output_id', def: 'TEXT' },
-        { name: 'saved_as_insight_id', def: 'TEXT' }
-      ]
-      for (const col of chatRepairs) {
-        if (!chatCols.includes(col.name)) {
-          console.log(`[Database] Repairing chat_messages: adding ${col.name}`)
-          try { database.run(`ALTER TABLE chat_messages ADD COLUMN ${col.name} ${col.def}`) } catch (e) {}
-        }
-      }
-    }
-
-    // --- PHASE 3: VERSIONED MIGRATIONS ---
-    const versionResult = database.exec('SELECT version FROM schema_version ORDER BY version DESC LIMIT 1')
-    const currentVersion = versionResult.length > 0 && versionResult[0].values.length > 0
-        ? (versionResult[0].values[0][0] as number)
-        : 0
-
-    if (currentVersion < SCHEMA_VERSION) {
-      console.log(`[Database] Phase 3: Migrating v${currentVersion} -> v${SCHEMA_VERSION}`)
-      runMigrations(currentVersion)
-    } else if (currentVersion === 0) {
-      database.run('INSERT INTO schema_version (version) VALUES (?)', [SCHEMA_VERSION])
-    }
-
-    // --- PHASE 4: FULL SCHEMA (INDEXES & CONSTRAINTS) ---
-    console.log('[Database] Phase 4: Finalizing schema and indexes...')
-    for (const sql of statements) {
-      try {
-        database.run(sql)
-      } catch (e) {
-        // Log but don't crash the boot if a statement (like an existing index) fails
-        const msg = (e as Error).message
-        if (!msg.includes('already exists') && !msg.includes('duplicate column name')) {
-          console.warn(`[Database] Schema statement warning: ${msg}`)
-        }
-      }
-    }
-
-    saveDatabase()
-    console.log(`[Database] Initialization complete (schema v${SCHEMA_VERSION})`)
-  } catch (error) {
-    console.error('[Database] FATAL initialization error:', error)
-    throw error
+  } else {
+    console.warn('[Database] knowledge_captures table unavailable during structural repair; skipping capture repair')
   }
+
+  // Repair transcription_queue (spec-014: retry persistence and real-time progress)
+  const queueInfo = database.exec("PRAGMA table_info(transcription_queue)")
+  if (queueInfo.length > 0 && queueInfo[0].values) {
+    const queueCols = queueInfo[0].values.map(col => col[1])
+    const queueRepairs = [
+      { name: 'retry_count', def: 'INTEGER DEFAULT 0' },
+      { name: 'progress', def: 'INTEGER DEFAULT 0' },
+      { name: 'provider', def: 'TEXT' }
+    ]
+    for (const col of queueRepairs) {
+      if (!queueCols.includes(col.name)) {
+        console.log(`[Database] Repairing transcription_queue: adding ${col.name}`)
+        try { database.run(`ALTER TABLE transcription_queue ADD COLUMN ${col.name} ${col.def}`) } catch (e) {}
+      }
+    }
+  }
+
+  // Repair recording_preassignments (v31): force-create so an older on-disk DB
+  // that skipped the migration still gets it before any preassign write. Idempotent.
+  try {
+    database.run(`
+      CREATE TABLE IF NOT EXISTS recording_preassignments (
+        filename TEXT PRIMARY KEY,
+        meeting_id TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+      )
+    `)
+  } catch (e) { /* table already exists */ }
+
+  // Repair transcript_speakers (v25): a new table has no columns to ALTER, but
+  // force-create it here so an older on-disk DB that skipped the migration still
+  // gets it before any assignSpeaker write. Idempotent.
+  try {
+    database.run(`
+      CREATE TABLE IF NOT EXISTS transcript_speakers (
+        id TEXT PRIMARY KEY,
+        recording_id TEXT NOT NULL,
+        speaker_label TEXT NOT NULL,
+        contact_id TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(recording_id, speaker_label),
+        FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+        FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+      )
+    `)
+  } catch (e) { /* table already exists */ }
+
+  // Repair mention_resolutions (v35): force-create so an older on-disk DB that
+  // skipped the migration still gets it before any resolveMention write. Idempotent.
+  try {
+    database.run(`
+      CREATE TABLE IF NOT EXISTS mention_resolutions (
+        id TEXT PRIMARY KEY,
+        recording_id TEXT NOT NULL,
+        source_name TEXT NOT NULL,
+        resolved_contact_id TEXT,
+        method TEXT,
+        confidence REAL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(recording_id, source_name),
+        FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+        FOREIGN KEY (resolved_contact_id) REFERENCES contacts(id) ON DELETE SET NULL
+      )
+    `)
+  } catch { /* table already exists */ }
+
+  // Repair per-turn speaker overrides + speaker splits (v37): force-create so an
+  // older on-disk DB that skipped the migration still gets them before any
+  // setTurnOverride/splitSpeakerFrom write. Idempotent.
+  try {
+    database.run(`
+      CREATE TABLE IF NOT EXISTS turn_speaker_overrides (
+        id TEXT PRIMARY KEY,
+        recording_id TEXT NOT NULL,
+        turn_index INTEGER NOT NULL,
+        contact_id TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(recording_id, turn_index),
+        FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+        FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+      )
+    `)
+  } catch { /* table already exists */ }
+  try {
+    database.run(`
+      CREATE TABLE IF NOT EXISTS speaker_splits (
+        id TEXT PRIMARY KEY,
+        recording_id TEXT NOT NULL,
+        base_label TEXT NOT NULL,
+        from_turn_index INTEGER NOT NULL,
+        derived_label TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(recording_id, base_label, from_turn_index),
+        FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+      )
+    `)
+  } catch { /* table already exists */ }
+
+  // Repair knowledge_projects (v26): force-create so an older on-disk DB that
+  // skipped the migration still gets it before any setProjects write. Idempotent.
+  try {
+    database.run(`
+      CREATE TABLE IF NOT EXISTS knowledge_projects (
+        knowledge_capture_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (knowledge_capture_id, project_id),
+        FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE,
+        FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+      )
+    `)
+  } catch (e) { /* table already exists */ }
+
+  // Repair alias memory + suggestion tables (v27): force-create so an older
+  // on-disk DB that skipped the migration still gets them. Idempotent.
+  try {
+    database.run(`
+      CREATE TABLE IF NOT EXISTS contact_aliases (
+        id TEXT PRIMARY KEY,
+        alias_norm TEXT NOT NULL UNIQUE,
+        contact_id TEXT NOT NULL,
+        source TEXT CHECK(source IN ('merge', 'speaker_assign', 'manual', 'inferred', 'rejected')),
+        confidence REAL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+      )
+    `)
+    database.run(`
+      CREATE TABLE IF NOT EXISTS project_aliases (
+        id TEXT PRIMARY KEY,
+        alias_norm TEXT NOT NULL UNIQUE,
+        project_id TEXT NOT NULL,
+        source TEXT CHECK(source IN ('merge', 'speaker_assign', 'manual', 'inferred', 'rejected')),
+        confidence REAL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+      )
+    `)
+    database.run(`
+      CREATE TABLE IF NOT EXISTS identity_suggestions (
+        id TEXT PRIMARY KEY,
+        kind TEXT CHECK(kind IN ('person', 'project')),
+        candidate_name TEXT,
+        target_id TEXT,
+        confidence REAL,
+        evidence TEXT,
+        status TEXT CHECK(status IN ('pending', 'accepted', 'rejected')) DEFAULT 'pending',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(kind, candidate_name, target_id)
+      )
+    `)
+    database.run('CREATE INDEX IF NOT EXISTS idx_contact_aliases_contact ON contact_aliases(contact_id)')
+    database.run('CREATE INDEX IF NOT EXISTS idx_project_aliases_project ON project_aliases(project_id)')
+    database.run('CREATE INDEX IF NOT EXISTS idx_identity_suggestions_status ON identity_suggestions(status)')
+  } catch (e) { /* tables already exist */ }
+
+  // Repair artifacts table (v28): force-create so an older on-disk DB that
+  // skipped the migration still gets it before any importArtifact write. Idempotent.
+  try {
+    database.run(`
+      CREATE TABLE IF NOT EXISTS artifacts (
+        id TEXT PRIMARY KEY,
+        knowledge_capture_id TEXT,
+        kind TEXT NOT NULL,
+        mime TEXT,
+        storage_path TEXT,
+        size INTEGER,
+        content_hash TEXT,
+        extracted_text TEXT,
+        metadata TEXT,
+        source_connector_id TEXT,
+        source_ref TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE
+      )
+    `)
+    database.run('CREATE INDEX IF NOT EXISTS idx_artifacts_capture ON artifacts(knowledge_capture_id)')
+    database.run('CREATE INDEX IF NOT EXISTS idx_artifacts_kind ON artifacts(kind)')
+    database.run('CREATE INDEX IF NOT EXISTS idx_artifacts_content_hash ON artifacts(content_hash)')
+  } catch (e) { /* table already exists */ }
+
+  // Repair action_items (v26): force-add assignee_contact_id if missing.
+  const actionItemCols = getTableColumns(database, 'action_items')
+  if (actionItemCols.length > 0 && !actionItemCols.includes('assignee_contact_id')) {
+    console.log('[Database] Repairing action_items: adding assignee_contact_id')
+    try { database.run('ALTER TABLE action_items ADD COLUMN assignee_contact_id TEXT') } catch (e) {}
+  }
+
+  // Repair transcripts (v39): force-add the meeting-timeline JSON columns so an
+  // older on-disk schema that skipped the migration still has them before any
+  // timeline-analysis write. Idempotent.
+  const transcriptCols = getTableColumns(database, 'transcripts')
+  if (transcriptCols.length > 0) {
+    for (const col of ['sentiment_segments', 'event_markers']) {
+      if (!transcriptCols.includes(col)) {
+        console.log(`[Database] Repairing transcripts: adding ${col}`)
+        try { database.run(`ALTER TABLE transcripts ADD COLUMN ${col} TEXT`) } catch (e) {}
+      }
+    }
+  }
+
+  // Repair projects (v29): force-add folder_path/url if missing.
+  const projectCols = getTableColumns(database, 'projects')
+  if (projectCols.length > 0) {
+    for (const col of ['folder_path', 'url']) {
+      if (!projectCols.includes(col)) {
+        console.log(`[Database] Repairing projects: adding ${col}`)
+        try { database.run(`ALTER TABLE projects ADD COLUMN ${col} TEXT`) } catch (e) {}
+      }
+    }
+  }
+
+  // Repair project_notes (v29): force-create so an older on-disk DB that skipped
+  // the migration still gets it before any note write. Idempotent.
+  try {
+    database.run(`
+      CREATE TABLE IF NOT EXISTS project_notes (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        kind TEXT CHECK(kind IN ('issue', 'risk', 'note')),
+        content TEXT NOT NULL,
+        status TEXT CHECK(status IN ('open', 'resolved')) DEFAULT 'open',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        resolved_at TEXT,
+        FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+      )
+    `)
+    database.run('CREATE INDEX IF NOT EXISTS idx_project_notes_project_kind ON project_notes(project_id, kind)')
+  } catch (e) { /* table already exists */ }
+
+  // Repair chat_messages (AI-15: columns referenced by assistant mapper)
+  const chatMsgInfo = database.exec("PRAGMA table_info(chat_messages)")
+  if (chatMsgInfo.length > 0 && chatMsgInfo[0].values) {
+    const chatCols = chatMsgInfo[0].values.map(col => col[1])
+    const chatRepairs = [
+      { name: 'edited_at', def: 'TEXT' },
+      { name: 'original_content', def: 'TEXT' },
+      { name: 'created_output_id', def: 'TEXT' },
+      { name: 'saved_as_insight_id', def: 'TEXT' }
+    ]
+    for (const col of chatRepairs) {
+      if (!chatCols.includes(col.name)) {
+        console.log(`[Database] Repairing chat_messages: adding ${col.name}`)
+        try { database.run(`ALTER TABLE chat_messages ADD COLUMN ${col.name} ${col.def}`) } catch (e) {}
+      }
+    }
+  }
+}
+
+/**
+ * Shared SQLite engine, configured with this app's schema, version, migrations,
+ * and structural-repair callback. Owns the sql.js lifecycle and the 4-phase boot.
+ */
+const engine = new DatabaseEngine({
+  betterSqlite3: Database,
+  dbPathProvider: getDatabasePath,
+  schemaVersion: SCHEMA_VERSION,
+  schema: SCHEMA,
+  migrations: MIGRATIONS,
+  repairPhase,
+  // Safety net (P0 knowledge_captures loss): refuse any single statement that
+  // would wipe >50% of these entity tables (when >20 rows), and keep the last
+  // 3 daily on-boot backups before migrations run. Intentional bulk purges use
+  // runWithMassDeleteAllowed().
+  protectedTables: ['knowledge_captures', 'transcripts', 'recordings', 'meetings', 'contacts'],
+  backupOnBoot: { keep: 3 },
+})
+
+/**
+ * Run `fn` with the mass-delete tripwire suspended — for legitimate bulk deletes
+ * (migrations, explicit user-confirmed purges). Restores the guard afterwards.
+ */
+export function runWithMassDeleteAllowed<T>(fn: () => T): T {
+  return engine.runWithMassDeleteAllowed(fn)
+}
+
+/**
+ * Safe database initialization. Delegates the 4-phase boot sequence
+ * (core tables → structural repair → migrations → full schema/indexes) to the
+ * shared @hidock/database engine, configured above with this app's schema,
+ * version, migrations, and repairPhase.
+ */
+export async function initializeDatabase(): Promise<void> {
+  await engine.initialize()
 }
 
 export function saveDatabase(): void {
-  if (db && dbPath) {
-    const data = db.export()
-    const buffer = Buffer.from(data)
-    writeFileSync(dbPath, buffer)
-  }
+  engine.saveDatabase()
 }
 
 export function getDatabase(): SqlJsDatabase {
-  if (!db) {
-    throw new Error('Database not initialized')
-  }
-  return db
+  return engine.getDatabase()
 }
 
 export function closeDatabase(): void {
-  if (db) {
-    saveDatabase()
-    db.close()
-    db = null
-  }
+  engine.closeDatabase()
 }
 
 /**
@@ -1565,33 +2479,22 @@ export function updateKnowledgeCaptureTitle(recordingId: string, titleSuggestion
 }
 
 // Generic query helpers
+// Generic query helpers — delegate to the shared engine.
 export function queryAll<T>(sql: string, params: any[] = []): T[] {
-  const stmt = getDatabase().prepare(sql)
-  stmt.bind(params)
-
-  const results: T[] = []
-  while (stmt.step()) {
-    const row = stmt.getAsObject()
-    results.push(row as T)
-  }
-  stmt.free()
-
-  return results
+  return engine.queryAll<T>(sql, params)
 }
 
 export function queryOne<T>(sql: string, params: any[] = []): T | undefined {
-  const results = queryAll<T>(sql, params)
-  return results[0]
+  return engine.queryOne<T>(sql, params)
 }
 
 export function run(sql: string, params: any[] = []): void {
-  getDatabase().run(sql, params)
-  saveDatabase()
+  engine.run(sql, params)
 }
 
 // Internal run that doesn't auto-save (for use within transactions)
 function runNoSave(sql: string, params: any[] = []): void {
-  getDatabase().run(sql, params)
+  engine.runNoSave(sql, params)
 }
 
 /**
@@ -1600,28 +2503,60 @@ function runNoSave(sql: string, params: any[] = []): void {
  * Use this for operations that must be atomic (all-or-nothing).
  */
 export function runInTransaction<T>(fn: () => T): T {
-  const database = getDatabase()
-  database.run('BEGIN TRANSACTION')
-  try {
-    const result = fn()
-    database.run('COMMIT')
-    saveDatabase()
-    return result
-  } catch (error) {
-    database.run('ROLLBACK')
-    throw error
-  }
+  return engine.runInTransaction(fn)
 }
 
 export function runMany(sql: string, items: any[][]): void {
-  const stmt = getDatabase().prepare(sql)
-  for (const item of items) {
-    stmt.bind(item)
-    stmt.step()
-    stmt.reset()
+  engine.runMany(sql, items)
+}
+
+/**
+ * Base UID of a meeting occurrence id: `uid::slotISO` → `uid`; a bare `uid` is
+ * returned unchanged. Every occurrence of one recurring ICS series shares a base
+ * uid, so this is the family key used to reconcile occurrences across id schemes.
+ */
+export function meetingBaseUid(id: string): string {
+  const i = id.indexOf('::')
+  return i === -1 ? id : id.slice(0, i)
+}
+
+/**
+ * Remap incoming occurrence ids onto an existing canonical row that already
+ * describes the SAME real slot under a different id (same base uid + same
+ * start_time). This pins a recurring-series occurrence to the row already
+ * carrying its foreign keys (recordings.meeting_id, meeting_contacts,
+ * meeting_projects) instead of inserting an id-scheme twin.
+ *
+ * This is the sync-time half of the duplicate-occurrence fix: a stale
+ * pre-expansion bare-uid row (`uid`) and a new expanded row (`uid::slotISO`)
+ * describe the same meeting; without this remap, every sync would re-insert the
+ * `uid::slotISO` twin next to the bare-uid row the cleanup pass keeps.
+ *
+ * Pure: `existing` is a snapshot of {id, start_time}. An incoming id that already
+ * matches an existing row is left as-is (it will UPDATE that row in place).
+ * Exported for unit testing.
+ */
+export function remapOccurrenceIdsToExisting<T extends { id: string; start_time: string }>(
+  incoming: T[],
+  existing: Array<{ id: string; start_time: string }>
+): T[] {
+  const existingIds = new Set(existing.map((e) => e.id))
+  // (baseUid, start_time) → canonical existing id. Prefer a bare-uid row as the
+  // canonical target so this matches the cleanup keeper preference and converges.
+  const SEP = ' '
+  const canonicalBySlot = new Map<string, string>()
+  for (const e of existing) {
+    const key = meetingBaseUid(e.id) + SEP + e.start_time
+    const current = canonicalBySlot.get(key)
+    if (current === undefined || (current.includes('::') && !e.id.includes('::'))) {
+      canonicalBySlot.set(key, e.id)
+    }
   }
-  stmt.free()
-  saveDatabase()
+  return incoming.map((m) => {
+    if (existingIds.has(m.id)) return m
+    const canonical = canonicalBySlot.get(meetingBaseUid(m.id) + SEP + m.start_time)
+    return canonical && canonical !== m.id ? { ...m, id: canonical } : m
+  })
 }
 
 /**
@@ -1632,8 +2567,15 @@ export function runMany(sql: string, items: any[][]): void {
 export function upsertMeetingsBatch(meetings: Omit<Meeting, 'created_at' | 'updated_at'>[]): void {
   if (meetings.length === 0) return
 
+  // Reconcile occurrence ids against existing rows so a recurring occurrence
+  // updates the row already holding its FKs rather than inserting a twin.
+  const existingSlots = queryAll<{ id: string; start_time: string }>(
+    'SELECT id, start_time FROM meetings'
+  )
+  const reconciled = remapOccurrenceIdsToExisting(meetings, existingSlots)
+
   runInTransaction(() => {
-    for (const meeting of meetings) {
+    for (const meeting of reconciled) {
       const existing = getMeetingById(meeting.id)
 
       if (existing) {
@@ -1642,7 +2584,7 @@ export function upsertMeetingsBatch(meetings: Omit<Meeting, 'created_at' | 'upda
             subject = ?, start_time = ?, end_time = ?, location = ?,
             organizer_name = ?, organizer_email = ?, attendees = ?,
             description = ?, is_recurring = ?, recurrence_rule = ?,
-            meeting_url = ?, updated_at = CURRENT_TIMESTAMP
+            meeting_url = ?, is_all_day = ?, all_day_date = ?, updated_at = CURRENT_TIMESTAMP
           WHERE id = ?`,
           [
             meeting.subject,
@@ -1656,14 +2598,17 @@ export function upsertMeetingsBatch(meetings: Omit<Meeting, 'created_at' | 'upda
             meeting.is_recurring,
             meeting.recurrence_rule ?? null,
             meeting.meeting_url ?? null,
+            meeting.is_all_day ?? 0,
+            meeting.all_day_date ?? null,
             meeting.id
           ]
         )
       } else {
         runNoSave(
           `INSERT INTO meetings (id, subject, start_time, end_time, location, organizer_name,
-            organizer_email, attendees, description, is_recurring, recurrence_rule, meeting_url)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            organizer_email, attendees, description, is_recurring, recurrence_rule, meeting_url,
+            is_all_day, all_day_date)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             meeting.id,
             meeting.subject,
@@ -1676,7 +2621,9 @@ export function upsertMeetingsBatch(meetings: Omit<Meeting, 'created_at' | 'upda
             meeting.description ?? null,
             meeting.is_recurring,
             meeting.recurrence_rule ?? null,
-            meeting.meeting_url ?? null
+            meeting.meeting_url ?? null,
+            meeting.is_all_day ?? 0,
+            meeting.all_day_date ?? null
           ]
         )
       }
@@ -1692,14 +2639,18 @@ export interface Meeting {
   subject: string
   start_time: string
   end_time: string
-  location?: string
-  organizer_name?: string
-  organizer_email?: string
+  location?: string | null
+  organizer_name?: string | null
+  organizer_email?: string | null
   attendees?: string
-  description?: string
+  description?: string | null
   is_recurring: number
   recurrence_rule?: string
   meeting_url?: string
+  /** 1 for a calendar-DATE (all-day/holiday) event, 0 otherwise (v32). */
+  is_all_day?: number
+  /** Named calendar day (YYYY-MM-DD) for all-day events; null for timed (v32). */
+  all_day_date?: string | null
   created_at: string
   updated_at: string
 }
@@ -1728,7 +2679,7 @@ export function getMeetingById(id: string): Meeting | undefined {
   return queryOne<Meeting>('SELECT * FROM meetings WHERE id = ?', [id])
 }
 
-export function updateMeeting(id: string, updates: Partial<Pick<Meeting, 'subject' | 'start_time' | 'end_time' | 'location' | 'description'>>): void {
+export function updateMeeting(id: string, updates: Partial<Pick<Meeting, 'subject' | 'start_time' | 'end_time' | 'location' | 'description' | 'organizer_name' | 'organizer_email'>>): void {
   const fields: string[] = []
   const params: unknown[] = []
 
@@ -1737,6 +2688,8 @@ export function updateMeeting(id: string, updates: Partial<Pick<Meeting, 'subjec
   if (updates.end_time !== undefined) { fields.push('end_time = ?'); params.push(updates.end_time); }
   if (updates.location !== undefined) { fields.push('location = ?'); params.push(updates.location); }
   if (updates.description !== undefined) { fields.push('description = ?'); params.push(updates.description); }
+  if (updates.organizer_name !== undefined) { fields.push('organizer_name = ?'); params.push(updates.organizer_name); }
+  if (updates.organizer_email !== undefined) { fields.push('organizer_email = ?'); params.push(updates.organizer_email); }
 
   if (fields.length === 0) return
 
@@ -1791,7 +2744,7 @@ export function upsertMeeting(meeting: Omit<Meeting, 'created_at' | 'updated_at'
           subject = ?, start_time = ?, end_time = ?, location = ?,
           organizer_name = ?, organizer_email = ?, attendees = ?,
           description = ?, is_recurring = ?, recurrence_rule = ?,
-          meeting_url = ?, updated_at = CURRENT_TIMESTAMP
+          meeting_url = ?, is_all_day = ?, all_day_date = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?`,
         [
           meeting.subject,
@@ -1805,14 +2758,17 @@ export function upsertMeeting(meeting: Omit<Meeting, 'created_at' | 'updated_at'
           meeting.is_recurring,
           meeting.recurrence_rule ?? null,
           meeting.meeting_url ?? null,
+          meeting.is_all_day ?? 0,
+          meeting.all_day_date ?? null,
           meeting.id
         ]
       )
     } else {
       runNoSave(
         `INSERT INTO meetings (id, subject, start_time, end_time, location, organizer_name,
-          organizer_email, attendees, description, is_recurring, recurrence_rule, meeting_url)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          organizer_email, attendees, description, is_recurring, recurrence_rule, meeting_url,
+          is_all_day, all_day_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           meeting.id,
           meeting.subject,
@@ -1825,7 +2781,9 @@ export function upsertMeeting(meeting: Omit<Meeting, 'created_at' | 'updated_at'
           meeting.description ?? null,
           meeting.is_recurring,
           meeting.recurrence_rule ?? null,
-          meeting.meeting_url ?? null
+          meeting.meeting_url ?? null,
+          meeting.is_all_day ?? 0,
+          meeting.all_day_date ?? null
         ]
       )
     }
@@ -1930,14 +2888,490 @@ export interface Recording {
   migration_status?: 'pending' | 'migrated' | 'skipped' | 'error' | null
   migrated_to_capture_id?: string | null
   migrated_at?: string | null
+  // Privacy / lifecycle (v38)
+  personal?: number  // 1 = user-marked "ignore" (kept, but out of AI + default surfaces)
+  deleted_at?: string | null  // soft-delete tombstone; hidden everywhere, restorable
 }
 
+/**
+ * All live recordings for the Library, newest first. Excludes soft-deleted rows
+ * (deleted_at set) — those are hidden until restored or hard-purged. Personal
+ * ("ignored") recordings ARE returned so the Library can show them behind a
+ * filter chip; every AI pipeline uses getActiveRecordingIdsForProcessing()
+ * instead, which excludes both personal and soft-deleted.
+ */
 export function getRecordings(): Recording[] {
-  return queryAll<Recording>('SELECT * FROM recordings ORDER BY date_recorded DESC')
+  return queryAll<Recording>('SELECT * FROM recordings WHERE deleted_at IS NULL ORDER BY date_recorded DESC')
 }
 
 export function getRecordingById(id: string): Recording | undefined {
   return queryOne<Recording>('SELECT * FROM recordings WHERE id = ?', [id])
+}
+
+// =============================================================================
+// Privacy source-deletion (v38): personal ("ignore") flag, soft/hard delete
+// cascade, and participant recompute. See the deletion service + IPC for the
+// coordinating file removal and the UI confirm dialog.
+// =============================================================================
+
+/**
+ * Mark / unmark a recording as "personal" (ignored). Non-destructive and fully
+ * reversible: the file and all derived rows stay, but the recording is pulled
+ * from every AI pipeline (transcription queue, graph ingest, vector indexing,
+ * RAG results, Today) and hidden from the Library default view. Returns the new
+ * flag state, or undefined if the recording does not exist.
+ */
+export function setRecordingPersonal(id: string, personal: boolean): boolean | undefined {
+  const rec = getRecordingById(id)
+  if (!rec) return undefined
+  runInTransaction(() => {
+    runNoSave('UPDATE recordings SET personal = ? WHERE id = ?', [personal ? 1 : 0, id])
+    if (personal) {
+      // Pull it out of the transcription queue immediately (a queued personal
+      // recording must not be processed). Leaves completed history intact.
+      runNoSave("DELETE FROM transcription_queue WHERE recording_id = ? AND status IN ('pending', 'failed')", [id])
+    }
+  })
+  return personal
+}
+
+/**
+ * Recording ids that must be excluded from AI processing and RAG surfaces:
+ * every recording flagged `personal` OR soft-deleted (`deleted_at` set). The
+ * vector store filters search results against this set so that marking a
+ * recording personal instantly pulls its chunks from the assistant's answers
+ * WITHOUT re-indexing (reversible), and soft-deleted recordings never surface.
+ */
+export function getExcludedRecordingIds(): Set<string> {
+  const rows = queryAll<{ id: string }>(
+    'SELECT id FROM recordings WHERE personal = 1 OR deleted_at IS NOT NULL'
+  )
+  return new Set(rows.map((r) => r.id))
+}
+
+/** All knowledge_capture ids owned by a recording (via source link or migration). */
+function getCaptureIdsForRecording(recordingId: string): string[] {
+  const rec = queryOne<{ migrated_to_capture_id?: string | null }>(
+    'SELECT migrated_to_capture_id FROM recordings WHERE id = ?',
+    [recordingId]
+  )
+  const rows = queryAll<{ id: string }>(
+    'SELECT id FROM knowledge_captures WHERE source_recording_id = ?',
+    [recordingId]
+  )
+  const ids = new Set(rows.map((r) => r.id))
+  if (rec?.migrated_to_capture_id) ids.add(rec.migrated_to_capture_id)
+  return Array.from(ids)
+}
+
+export interface RecordingDeletionImpact {
+  recordingId: string
+  filename: string
+  transcripts: number
+  actionItems: number
+  embeddings: number
+  captures: number
+  artifacts: number
+  meetingLinks: number
+  hasAudioFile: boolean
+}
+
+/**
+ * Read-only count of everything a hard purge of this recording would remove, so
+ * the confirm dialog can state it plainly ("transcript, N action items,
+ * embeddings, and the audio file"). Counts both transcript embeddings and vector
+ * chunks. Returns undefined if the recording does not exist.
+ */
+export function getRecordingDeletionImpact(recordingId: string): RecordingDeletionImpact | undefined {
+  const rec = getRecordingById(recordingId)
+  if (!rec) return undefined
+
+  const captureIds = getCaptureIdsForRecording(recordingId)
+  const capPlaceholders = captureIds.map(() => '?').join(',')
+
+  const transcripts = queryAll<{ id: string }>(
+    'SELECT id FROM transcripts WHERE recording_id = ?',
+    [recordingId]
+  )
+  const transcriptIds = transcripts.map((t) => t.id)
+  const tPlaceholders = transcriptIds.map(() => '?').join(',')
+
+  // Resilient count: vector_embeddings is created lazily by the vector store, so
+  // a count against it can hit "no such table" on a fresh DB — treat as 0.
+  const count = (sql: string, params: any[]): number => {
+    try {
+      const row = queryOne<{ c: number }>(sql, params)
+      return Number(row?.c ?? 0)
+    } catch {
+      return 0
+    }
+  }
+
+  const transcriptEmbeddings = transcriptIds.length
+    ? count(`SELECT COUNT(1) AS c FROM embeddings WHERE transcript_id IN (${tPlaceholders})`, transcriptIds)
+    : 0
+  const vectorChunks = count('SELECT COUNT(1) AS c FROM vector_embeddings WHERE recording_id = ?', [recordingId])
+  const actionItems = captureIds.length
+    ? count(`SELECT COUNT(1) AS c FROM action_items WHERE knowledge_capture_id IN (${capPlaceholders})`, captureIds)
+    : 0
+  const artifacts = captureIds.length
+    ? count(`SELECT COUNT(1) AS c FROM artifacts WHERE knowledge_capture_id IN (${capPlaceholders})`, captureIds)
+    : 0
+  const meetingLinks = rec.meeting_id
+    ? count('SELECT COUNT(1) AS c FROM meeting_contacts WHERE meeting_id = ?', [rec.meeting_id])
+    : 0
+
+  return {
+    recordingId,
+    filename: rec.filename,
+    transcripts: transcripts.length,
+    actionItems,
+    embeddings: transcriptEmbeddings + vectorChunks,
+    captures: captureIds.length,
+    artifacts,
+    meetingLinks,
+    hasAudioFile: !!(rec.file_path && rec.on_local)
+  }
+}
+
+/**
+ * Recompute a meeting's participant links after a linked recording is removed.
+ * A meeting_contacts row is kept only if the contact is still justified by
+ * either the meeting's own calendar attendees (organizer/attendees email) OR a
+ * REMAINING (non-deleted, non-excluded) recording's speaker/turn assignment for
+ * that meeting. Unjustified links — those contributed solely by the removed
+ * recording — are unlinked (the CONTACT itself is never deleted; shared contacts
+ * that appear elsewhere keep every other link). Runs inside the caller's
+ * transaction. Returns the number of links removed.
+ */
+function recomputeMeetingParticipants(meetingId: string, excludeRecordingId: string): number {
+  const meeting = queryOne<{ organizer_email?: string | null; attendees?: string | null }>(
+    'SELECT organizer_email, attendees FROM meetings WHERE id = ?',
+    [meetingId]
+  )
+  if (!meeting) return 0
+
+  const justifiedEmails = new Set<string>()
+  if (meeting.organizer_email) justifiedEmails.add(meeting.organizer_email.toLowerCase())
+  if (meeting.attendees) {
+    try {
+      const parsed = JSON.parse(meeting.attendees) as Array<{ email?: string }>
+      for (const a of parsed) if (a?.email) justifiedEmails.add(a.email.toLowerCase())
+    } catch {
+      /* invalid attendees JSON — ignore */
+    }
+  }
+
+  const justified = new Set<string>()
+  if (justifiedEmails.size > 0) {
+    const emailRows = queryAll<{ id: string; email?: string | null }>(
+      'SELECT id, email FROM contacts WHERE email IS NOT NULL'
+    )
+    for (const c of emailRows) {
+      if (c.email && justifiedEmails.has(c.email.toLowerCase())) justified.add(c.id)
+    }
+  }
+
+  // Contacts still justified by remaining recordings linked to this meeting.
+  const speakerContacts = queryAll<{ contact_id: string }>(
+    `SELECT DISTINCT contact_id FROM transcript_speakers
+      WHERE recording_id IN (
+        SELECT id FROM recordings
+         WHERE meeting_id = ? AND id != ? AND deleted_at IS NULL
+      )`,
+    [meetingId, excludeRecordingId]
+  )
+  for (const r of speakerContacts) justified.add(r.contact_id)
+  const turnContacts = queryAll<{ contact_id: string }>(
+    `SELECT DISTINCT contact_id FROM turn_speaker_overrides
+      WHERE recording_id IN (
+        SELECT id FROM recordings
+         WHERE meeting_id = ? AND id != ? AND deleted_at IS NULL
+      )`,
+    [meetingId, excludeRecordingId]
+  )
+  for (const r of turnContacts) justified.add(r.contact_id)
+
+  const current = queryAll<{ contact_id: string }>(
+    'SELECT contact_id FROM meeting_contacts WHERE meeting_id = ?',
+    [meetingId]
+  )
+  let removed = 0
+  for (const link of current) {
+    if (!justified.has(link.contact_id)) {
+      runNoSave('DELETE FROM meeting_contacts WHERE meeting_id = ? AND contact_id = ?', [
+        meetingId,
+        link.contact_id
+      ])
+      recomputeContactMeetingCount(link.contact_id)
+      removed++
+    }
+  }
+  return removed
+}
+
+export interface RecordingDeletionResult {
+  mode: 'soft' | 'hard'
+  recordingId: string
+  filename: string
+  originalFilename?: string
+  filePath?: string | null
+  /** Artifact blob paths on disk to unlink (hard purge only). */
+  artifactPaths: string[]
+  removed: {
+    transcripts: number
+    embeddings: number
+    captures: number
+    actionItems: number
+    artifacts: number
+    speakerBindings: number
+    candidates: number
+    meetingLinksRemoved: number
+  }
+}
+
+/**
+ * Delete a recording and everything derived from it.
+ *
+ * Soft ({ hard: false }, the default): set `deleted_at`, snapshot the row into
+ * deletion_journal, hide it everywhere. Fully reversible via restoreRecording.
+ * No files are touched and no derived rows are removed — read-sites filter on
+ * deleted_at, so nothing surfaces.
+ *
+ * Hard ({ hard: true }): irreversibly remove ALL derived DB rows (transcripts +
+ * their embeddings, vector chunks, knowledge_captures and every child, first-
+ * class action items/decisions/follow-ups/outputs/artifacts, speaker bindings,
+ * turn overrides, splits, mention resolutions, meeting candidates,
+ * pre-assignments, synced_files, transcription/quality rows), recompute the
+ * linked meeting's participants from the remaining recordings, then delete the
+ * recording row. Returns the on-disk paths (audio + artifact blobs) for the
+ * caller to unlink. The scoped deletes touch protected tables, so the whole
+ * operation runs inside runWithMassDeleteAllowed — this is an intentional,
+ * bounded single-source purge, not a mass wipe.
+ *
+ * Returns undefined if the recording does not exist.
+ */
+export function deleteRecordingCascade(
+  recordingId: string,
+  opts: { hard?: boolean } = {}
+): RecordingDeletionResult | undefined {
+  const rec = getRecordingById(recordingId)
+  if (!rec) return undefined
+
+  const zero = {
+    transcripts: 0,
+    embeddings: 0,
+    captures: 0,
+    actionItems: 0,
+    artifacts: 0,
+    speakerBindings: 0,
+    candidates: 0,
+    meetingLinksRemoved: 0
+  }
+
+  if (!opts.hard) {
+    const now = new Date().toISOString()
+    runInTransaction(() => {
+      runNoSave('UPDATE recordings SET deleted_at = ? WHERE id = ?', [now, recordingId])
+      // Stop any in-flight/queued transcription for a hidden recording.
+      runNoSave("DELETE FROM transcription_queue WHERE recording_id = ? AND status IN ('pending', 'failed')", [recordingId])
+      runNoSave(
+        `INSERT INTO deletion_journal (id, recording_id, mode, recording_snapshot, created_at)
+         VALUES (?, ?, 'soft', ?, ?)`,
+        [randomUUID(), recordingId, JSON.stringify(rec), now]
+      )
+    })
+    return {
+      mode: 'soft',
+      recordingId,
+      filename: rec.filename,
+      originalFilename: rec.original_filename,
+      filePath: rec.file_path,
+      artifactPaths: [],
+      removed: { ...zero }
+    }
+  }
+
+  // Hard purge — bounded, intentional, single-source. Suspend the mass-delete
+  // tripwire (deletes hit protected tables like transcripts/knowledge_captures)
+  // for this scoped operation only.
+  return runWithMassDeleteAllowed(() =>
+    runInTransaction((): RecordingDeletionResult => {
+      const captureIds = getCaptureIdsForRecording(recordingId)
+      const capPlaceholders = captureIds.map(() => '?').join(',')
+
+      const transcriptRows = queryAll<{ id: string }>(
+        'SELECT id FROM transcripts WHERE recording_id = ?',
+        [recordingId]
+      )
+      const transcriptIds = transcriptRows.map((t) => t.id)
+      const tPlaceholders = transcriptIds.map(() => '?').join(',')
+
+      const countOf = (sql: string, params: any[]): number => {
+        try {
+          const row = queryOne<{ c: number }>(sql, params)
+          return Number(row?.c ?? 0)
+        } catch {
+          return 0 // e.g. vector_embeddings not yet created
+        }
+      }
+
+      // Snapshot counts + on-disk artifact paths BEFORE deleting.
+      const embeddingsCount =
+        (transcriptIds.length
+          ? countOf(`SELECT COUNT(1) AS c FROM embeddings WHERE transcript_id IN (${tPlaceholders})`, transcriptIds)
+          : 0) + countOf('SELECT COUNT(1) AS c FROM vector_embeddings WHERE recording_id = ?', [recordingId])
+      const actionItemsCount = captureIds.length
+        ? countOf(`SELECT COUNT(1) AS c FROM action_items WHERE knowledge_capture_id IN (${capPlaceholders})`, captureIds)
+        : 0
+      const artifactRows = captureIds.length
+        ? queryAll<{ storage_path?: string | null }>(
+            `SELECT storage_path FROM artifacts WHERE knowledge_capture_id IN (${capPlaceholders})`,
+            captureIds
+          )
+        : []
+      const speakerCount = countOf('SELECT COUNT(1) AS c FROM transcript_speakers WHERE recording_id = ?', [recordingId])
+      const candidateCount = countOf(
+        'SELECT COUNT(1) AS c FROM recording_meeting_candidates WHERE recording_id = ?',
+        [recordingId]
+      )
+
+      // 1. Transcript embeddings, then transcripts.
+      if (transcriptIds.length) {
+        runNoSave(`DELETE FROM embeddings WHERE transcript_id IN (${tPlaceholders})`, transcriptIds)
+      }
+      runNoSave('DELETE FROM transcripts WHERE recording_id = ?', [recordingId])
+
+      // 2. Vector chunks (DB rows; the service also clears the in-memory store).
+      //    Table is created lazily by the vector store, so tolerate its absence.
+      try {
+        runNoSave('DELETE FROM vector_embeddings WHERE recording_id = ?', [recordingId])
+      } catch {
+        /* vector_embeddings not yet created — nothing to remove */
+      }
+
+      // 3. Knowledge captures + every child (FKs are OFF, so delete explicitly).
+      if (captureIds.length) {
+        for (const child of [
+          'action_items',
+          'decisions',
+          'follow_ups',
+          'outputs',
+          'audio_sources',
+          'conversation_context',
+          'knowledge_projects',
+          'artifacts',
+          'actionables'
+        ]) {
+          const col = child === 'actionables' ? 'source_knowledge_id' : 'knowledge_capture_id'
+          runNoSave(`DELETE FROM ${child} WHERE ${col} IN (${capPlaceholders})`, captureIds)
+        }
+        runNoSave(`DELETE FROM knowledge_captures WHERE id IN (${capPlaceholders})`, captureIds)
+      }
+
+      // 4. Speaker/identity data keyed by recording.
+      runNoSave('DELETE FROM transcript_speakers WHERE recording_id = ?', [recordingId])
+      runNoSave('DELETE FROM turn_speaker_overrides WHERE recording_id = ?', [recordingId])
+      runNoSave('DELETE FROM speaker_splits WHERE recording_id = ?', [recordingId])
+      runNoSave('DELETE FROM mention_resolutions WHERE recording_id = ?', [recordingId])
+
+      // 5. Meeting candidates + processing/quality rows keyed by recording.
+      runNoSave('DELETE FROM recording_meeting_candidates WHERE recording_id = ?', [recordingId])
+      runNoSave('DELETE FROM transcription_queue WHERE recording_id = ?', [recordingId])
+      runNoSave('DELETE FROM quality_assessments WHERE recording_id = ?', [recordingId])
+
+      // 6. Pre-assignments (keyed by device filename) + synced_files (by filename).
+      runNoSave('DELETE FROM recording_preassignments WHERE filename = ?', [rec.filename])
+      if (rec.original_filename) {
+        runNoSave('DELETE FROM synced_files WHERE original_filename = ?', [rec.original_filename])
+      }
+      runNoSave('DELETE FROM synced_files WHERE local_filename = ? OR file_path = ?', [
+        rec.filename,
+        rec.file_path
+      ])
+
+      // 7. Recompute the linked meeting's participants from what remains.
+      let meetingLinksRemoved = 0
+      if (rec.meeting_id) {
+        meetingLinksRemoved = recomputeMeetingParticipants(rec.meeting_id, recordingId)
+      }
+
+      // 8. Finally the recording row itself, and an audit journal entry.
+      runNoSave('DELETE FROM recordings WHERE id = ?', [recordingId])
+      const removed = {
+        transcripts: transcriptRows.length,
+        embeddings: embeddingsCount,
+        captures: captureIds.length,
+        actionItems: actionItemsCount,
+        artifacts: artifactRows.length,
+        speakerBindings: speakerCount,
+        candidates: candidateCount,
+        meetingLinksRemoved
+      }
+      runNoSave(
+        `INSERT INTO deletion_journal (id, recording_id, mode, recording_snapshot, removed_counts, created_at)
+         VALUES (?, ?, 'hard', ?, ?, ?)`,
+        [randomUUID(), recordingId, JSON.stringify(rec), JSON.stringify(removed), new Date().toISOString()]
+      )
+
+      return {
+        mode: 'hard',
+        recordingId,
+        filename: rec.filename,
+        originalFilename: rec.original_filename,
+        filePath: rec.file_path,
+        artifactPaths: artifactRows
+          .map((a) => a.storage_path)
+          .filter((p): p is string => !!p),
+        removed
+      }
+    })
+  )
+}
+
+/**
+ * Restore a soft-deleted recording (undo). Clears `deleted_at` so it surfaces
+ * again everywhere, and marks the journal row restored. Returns true if a
+ * soft-deleted recording was restored, false otherwise. A hard-purged recording
+ * cannot be restored (its rows and files are gone) — this returns false.
+ */
+export function restoreRecording(recordingId: string): boolean {
+  const rec = queryOne<{ deleted_at?: string | null }>(
+    'SELECT deleted_at FROM recordings WHERE id = ?',
+    [recordingId]
+  )
+  if (!rec || !rec.deleted_at) return false
+  const now = new Date().toISOString()
+  runInTransaction(() => {
+    runNoSave('UPDATE recordings SET deleted_at = NULL WHERE id = ?', [recordingId])
+    runNoSave(
+      `UPDATE deletion_journal SET restored_at = ?
+        WHERE recording_id = ? AND mode = 'soft' AND restored_at IS NULL`,
+      [now, recordingId]
+    )
+  })
+  return true
+}
+
+/**
+ * Resolve an ID coming from the renderer to a recordings row.
+ * The renderer's unified view historically fell back to synced_files.id when
+ * no recordings row was matched, so IDs arriving over IPC may belong to the
+ * synced_files table. Resolve those to the real recording via filename.
+ */
+export function resolveRecordingId(id: string): Recording | undefined {
+  const direct = getRecordingById(id)
+  if (direct) return direct
+
+  const synced = queryOne<{ original_filename: string; local_filename: string; file_path: string }>(
+    'SELECT original_filename, local_filename, file_path FROM synced_files WHERE id = ?',
+    [id]
+  )
+  if (!synced) return undefined
+
+  const byLocal = getRecordingByFilenameVariants(synced.local_filename)
+  if (byLocal) return byLocal
+  return getRecordingByFilenameVariants(synced.original_filename)
 }
 
 export function getRecordingsForMeeting(meetingId: string): Recording[] {
@@ -2059,9 +3493,40 @@ export function getAllRecordingsUnified(): Recording[] {
   `)
 }
 
-// Mark recording as downloaded
-export function markRecordingDownloaded(filename: string, localPath: string): void {
-  const recording = getRecordingByFilename(filename)
+// Known audio extensions a recording may exist under (.hda on device, .wav/.mp3 locally)
+const RECORDING_EXTENSIONS = ['hda', 'wav', 'mp3', 'm4a']
+
+/**
+ * Find a recording row by filename, tolerating extension differences.
+ * Device files are .hda while downloads are saved as .wav/.mp3, so rows may
+ * exist under any variant of the same base name.
+ */
+export function getRecordingByFilenameVariants(filename: string): Recording | undefined {
+  const exact = getRecordingByFilename(filename)
+  if (exact) return exact
+
+  const base = filename.replace(/\.(hda|wav|mp3|m4a|aac|ogg|flac)$/i, '')
+  for (const ext of RECORDING_EXTENSIONS) {
+    const variant = `${base}.${ext}`
+    if (variant === filename) continue
+    const match = getRecordingByFilename(variant)
+    if (match) return match
+  }
+  return undefined
+}
+
+// Mark recording as downloaded.
+// Upserts: if no row exists yet (device scan didn't create one and the file
+// watcher hasn't fired), create it here so the download path never depends on
+// a race with other row-creation paths. Returns the recording id.
+export function markRecordingDownloaded(
+  filename: string,
+  localPath: string,
+  opts?: { fileSize?: number; dateRecorded?: string }
+): string {
+  const localBasename = localPath.replace(/^.*[\\/]/, '')
+  const recording = getRecordingByFilenameVariants(filename) ?? getRecordingByFilenameVariants(localBasename)
+
   if (recording) {
     const newLocation = recording.on_device ? 'both' : 'local-only'
     updateRecordingLifecycle(recording.id, {
@@ -2069,7 +3534,61 @@ export function markRecordingDownloaded(filename: string, localPath: string): vo
       on_local: 1,
       location: newLocation as Recording['location']
     })
+    return recording.id
   }
+
+  // No row exists — create one. A download implies the file was on the device.
+  const id = crypto.randomUUID()
+  const now = new Date().toISOString()
+  run(
+    `INSERT INTO recordings (id, filename, original_filename, file_path, file_size,
+      duration_seconds, date_recorded, status, location, transcription_status,
+      on_device, device_last_seen, on_local, source, is_imported)
+     VALUES (?, ?, ?, ?, ?, NULL, ?, 'none', 'both', 'none', 1, ?, 1, 'hidock', 0)`,
+    [id, localBasename, filename, localPath, opts?.fileSize ?? null, opts?.dateRecorded ?? now, now]
+  )
+  return id
+}
+
+// ---------------------------------------------------------------------------
+// Recording pre-assignments (v31) — in-advance attribution for the live capture.
+// Keyed by the device's in-progress filename. A NULL meeting_id means the user
+// explicitly marked the recording standalone (block time-overlap auto-link).
+// ---------------------------------------------------------------------------
+
+export interface RecordingPreassignment {
+  filename: string
+  meeting_id: string | null
+  created_at?: string
+}
+
+/** Store (or replace) the user's attribution choice for a live recording filename. */
+export function setRecordingPreassignment(filename: string, meetingId: string | null): void {
+  run(
+    `INSERT OR REPLACE INTO recording_preassignments (filename, meeting_id, created_at)
+     VALUES (?, ?, CURRENT_TIMESTAMP)`,
+    [filename, meetingId]
+  )
+}
+
+/** Read the attribution choice for a filename, or undefined when none is set. */
+export function getRecordingPreassignment(filename: string): RecordingPreassignment | undefined {
+  return queryOne<RecordingPreassignment>(
+    `SELECT filename, meeting_id, created_at FROM recording_preassignments WHERE filename = ?`,
+    [filename]
+  )
+}
+
+/** Remove an attribution choice (also called once it has been applied on download). */
+export function clearRecordingPreassignment(filename: string): void {
+  run(`DELETE FROM recording_preassignments WHERE filename = ?`, [filename])
+}
+
+/** All pending attribution choices — used by the auto-linker to consume them. */
+export function getAllRecordingPreassignments(): RecordingPreassignment[] {
+  return queryAll<RecordingPreassignment>(
+    `SELECT filename, meeting_id, created_at FROM recording_preassignments`
+  )
 }
 
 // Delete recording file from local storage (keeps metadata if transcribed)
@@ -2086,11 +3605,15 @@ export function deleteRecordingLocal(id: string): void {
 }
 
 export function insertRecording(recording: Omit<Recording, 'created_at'>): void {
+  // Lifecycle columns (location/on_device/on_local/...) must be written explicitly:
+  // the DDL defaults are device-oriented ('device-only', on_device=1, on_local=0),
+  // which silently mislabels locally-created rows if these fields are dropped.
   run(
     `INSERT INTO recordings (id, filename, original_filename, file_path, file_size,
       duration_seconds, date_recorded, meeting_id, correlation_confidence,
-      correlation_method, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      correlation_method, status, location, transcription_status, on_device,
+      on_local, source, is_imported)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       recording.id,
       recording.filename,
@@ -2102,7 +3625,13 @@ export function insertRecording(recording: Omit<Recording, 'created_at'>): void 
       recording.meeting_id ?? null,
       recording.correlation_confidence ?? null,
       recording.correlation_method ?? null,
-      recording.status
+      recording.status,
+      recording.location ?? (recording.file_path ? 'local-only' : 'device-only'),
+      recording.transcription_status ?? 'none',
+      recording.on_device ?? (recording.file_path ? 0 : 1),
+      recording.on_local ?? (recording.file_path ? 1 : 0),
+      recording.source ?? 'hidock',
+      recording.is_imported ?? 0
     ]
   )
 }
@@ -2113,6 +3642,208 @@ export function updateRecordingStatus(id: string, status: string): void {
 
 export function updateRecordingTranscriptionStatus(id: string, transcriptionStatus: string): void {
   run('UPDATE recordings SET transcription_status = ? WHERE id = ?', [transcriptionStatus, id])
+}
+
+/**
+ * BUG B self-heal (idempotent): advance recordings.status to 'complete' for any
+ * recording that already has a joined transcript with non-empty full_text but
+ * whose status drifted (stuck at its insert-time default because the pipeline
+ * historically only wrote transcription_status). The meeting-detail badge reads
+ * recordings.status, so a drifted row showed "Not transcribed" over a real
+ * transcript. Runs at boot (reconcileOrganization) and is exposed via IPC.
+ *
+ * Safe + idempotent: never touches deleted rows (status 'deleted' / deleted_at),
+ * never re-touches rows already 'complete', and a second run heals nothing.
+ * Returns the number of rows healed.
+ */
+export function healRecordingStatusFromTranscripts(): number {
+  const before = queryOne<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM recordings r
+       WHERE r.status IS NOT 'complete'
+         AND r.status IS NOT 'deleted'
+         AND r.deleted_at IS NULL
+         AND EXISTS (
+           SELECT 1 FROM transcripts t
+            WHERE t.recording_id = r.id
+              AND t.full_text IS NOT NULL
+              AND TRIM(t.full_text) != ''
+         )`
+  )
+  const count = before?.n ?? 0
+  if (count === 0) return 0
+
+  run(
+    `UPDATE recordings SET status = 'complete'
+       WHERE status IS NOT 'complete'
+         AND status IS NOT 'deleted'
+         AND deleted_at IS NULL
+         AND EXISTS (
+           SELECT 1 FROM transcripts t
+            WHERE t.recording_id = recordings.id
+              AND t.full_text IS NOT NULL
+              AND TRIM(t.full_text) != ''
+         )`
+  )
+  console.log(`[DB] healRecordingStatusFromTranscripts: advanced ${count} recording(s) to status='complete'`)
+  return count
+}
+
+/**
+ * Persist a recording's duration (seconds). Imported/watched local files are
+ * stored with duration_seconds = NULL; the renderer decodes the audio for the
+ * waveform and backfills the real duration here. Only writes when the value is
+ * a positive, finite number and differs from what's stored.
+ */
+export function updateRecordingDuration(id: string, durationSeconds: number): void {
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return
+  const rounded = Math.round(durationSeconds)
+  const existing = queryOne<{ duration_seconds: number | null }>(
+    'SELECT duration_seconds FROM recordings WHERE id = ?',
+    [id]
+  )
+  if (existing && existing.duration_seconds === rounded) return
+  run('UPDATE recordings SET duration_seconds = ? WHERE id = ?', [rounded, id])
+}
+
+/** Strip a trailing audio extension so a .wav download matches its .hda source. */
+function durationBaseFilename(filename: string): string {
+  return filename.replace(/\.(hda|wav|mp3|m4a|aac|ogg|flac|webm|opus|wma)$/i, '')
+}
+
+/**
+ * Largest segment end-time (seconds) in a stored `transcripts.speakers` JSON
+ * array of `{ start, end }` turns, used as a lower-bound duration fallback.
+ * Exported for unit testing. Returns 0 when the input has no usable timing.
+ */
+export function maxTranscriptSegmentEnd(speakersJson: string | null | undefined): number {
+  if (!speakersJson) return 0
+  try {
+    const segments = JSON.parse(speakersJson)
+    if (!Array.isArray(segments)) return 0
+    let max = 0
+    for (const seg of segments) {
+      const end = typeof seg?.end === 'number' ? seg.end : typeof seg?.start === 'number' ? seg.start : 0
+      if (Number.isFinite(end) && end > max) max = end
+    }
+    return max
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * One-time (idempotent) backfill of `recordings.duration_seconds` for rows the
+ * download/import paths stored as NULL. Uses the cheapest reliable sources that
+ * already live in the DB — no new dependency, no audio decode, works offline:
+ *
+ *   1. the device-file cache duration (matched by base filename), then
+ *   2. the transcript's last segment end (a lower bound).
+ *
+ * Persisting the value makes client-side sort/filter-by-duration in the Library
+ * work even when the device is disconnected (the UI reads duration_seconds into
+ * UnifiedRecording.duration). Safe to run on every Library mount:
+ * `updateRecordingDuration` no-ops when the value is unchanged.
+ */
+export function backfillRecordingDurations(): { scanned: number; updated: number } {
+  const rows = queryAll<{ id: string; filename: string }>(
+    `SELECT id, filename FROM recordings
+     WHERE (duration_seconds IS NULL OR duration_seconds <= 0) AND deleted_at IS NULL`
+  )
+  if (rows.length === 0) return { scanned: 0, updated: 0 }
+
+  // Index the device cache by base filename so .wav downloads match .hda sources.
+  const cacheRows = queryAll<{ filename: string; duration_seconds: number | null }>(
+    'SELECT filename, duration_seconds FROM device_files_cache WHERE duration_seconds IS NOT NULL AND duration_seconds > 0'
+  )
+  const cacheByBase = new Map<string, number>()
+  for (const c of cacheRows) {
+    if (c.duration_seconds && c.duration_seconds > 0) {
+      cacheByBase.set(durationBaseFilename(c.filename), c.duration_seconds)
+    }
+  }
+
+  let updated = 0
+  for (const row of rows) {
+    let seconds = cacheByBase.get(durationBaseFilename(row.filename)) ?? 0
+
+    if (seconds <= 0) {
+      const t = queryOne<{ speakers: string | null }>(
+        'SELECT speakers FROM transcripts WHERE recording_id = ? LIMIT 1',
+        [row.id]
+      )
+      seconds = maxTranscriptSegmentEnd(t?.speakers)
+    }
+
+    if (seconds > 0) {
+      updateRecordingDuration(row.id, seconds)
+      updated++
+    }
+  }
+
+  if (updated > 0) {
+    console.log(`[duration-backfill] populated duration_seconds for ${updated}/${rows.length} recording(s)`)
+  }
+  return { scanned: rows.length, updated }
+}
+
+/**
+ * Conservative "low-value" classifier so the Library's clean-up filter has data.
+ *
+ * Deliberately narrow to avoid mislabeling anything the user might want: a
+ * capture is marked `low-value` ONLY when its source recording is very short
+ * (< 20s, after the duration backfill) AND it carries no meaningful transcript
+ * (missing, or fewer than 20 words) AND it isn't linked to a calendar meeting.
+ * Everything ambiguous stays `unrated`. Never downgrades a rating the user set
+ * (only touches rows still at the default `unrated`). Idempotent.
+ *
+ * Returns the number of captures newly marked low-value. `valuable` is left to
+ * explicit user/AI action — we don't over-claim value automatically.
+ */
+export function classifyLowValueCaptures(): { scanned: number; markedLowValue: number } {
+  const rows = queryAll<{
+    id: string
+    duration_seconds: number | null
+    meeting_id: string | null
+    word_count: number | null
+    has_transcript: number
+  }>(
+    `SELECT kc.id AS id,
+            r.duration_seconds AS duration_seconds,
+            kc.meeting_id AS meeting_id,
+            t.word_count AS word_count,
+            CASE WHEN t.id IS NULL THEN 0 ELSE 1 END AS has_transcript
+     FROM knowledge_captures kc
+     JOIN recordings r ON r.id = kc.source_recording_id
+     LEFT JOIN transcripts t ON t.recording_id = kc.source_recording_id
+     WHERE kc.quality_rating = 'unrated'
+       AND kc.deleted_at IS NULL
+       AND COALESCE(r.personal, 0) = 0`
+  )
+  if (rows.length === 0) return { scanned: 0, markedLowValue: 0 }
+
+  let marked = 0
+  for (const row of rows) {
+    const duration = row.duration_seconds ?? 0
+    const words = row.word_count ?? 0
+    const isShort = duration > 0 && duration < 20
+    const negligibleTranscript = row.has_transcript === 0 || words < 20
+    const linkedToMeeting = !!row.meeting_id
+
+    if (isShort && negligibleTranscript && !linkedToMeeting) {
+      run(
+        `UPDATE knowledge_captures
+         SET quality_rating = 'low-value', quality_confidence = 0.6, quality_assessed_at = ?
+         WHERE id = ? AND quality_rating = 'unrated'`,
+        [new Date().toISOString(), row.id]
+      )
+      marked++
+    }
+  }
+
+  if (marked > 0) {
+    console.log(`[quality-classify] marked ${marked}/${rows.length} capture(s) low-value (short + no transcript)`)
+  }
+  return { scanned: rows.length, markedLowValue: marked }
 }
 
 export function linkRecordingToMeeting(
@@ -2237,6 +3968,77 @@ export function searchTranscripts(query: string): Transcript[] {
   )
 }
 
+/** One transcript excerpt where a name literally occurs — the primary source a
+ *  reviewer reads to decide identity. */
+export interface MentionSnippet {
+  recordingId: string
+  title: string
+  date: string | null
+  snippet: string
+}
+
+/** Result of {@link getMentionSnippets}: capped excerpts + the FULL set of recording
+ *  ids whose transcript contains the name (so co-presence can be intersected exactly). */
+export interface MentionResult {
+  snippets: MentionSnippet[]
+  recordingIds: string[]
+}
+
+/** Collapse whitespace and cut a ~`radius`-char window around the first case-insensitive
+ *  hit of `name`, adding ellipses. Falls back to the head of the text if no hit. */
+export function extractSnippet(text: string, name: string, radius = 60): string {
+  const clean = (text || '').replace(/\s+/g, ' ').trim()
+  if (!clean) return ''
+  const idx = clean.toLowerCase().indexOf(name.trim().toLowerCase())
+  if (idx < 0) {
+    return clean.length > radius * 2 ? clean.slice(0, radius * 2) + '…' : clean
+  }
+  const start = Math.max(0, idx - radius)
+  const end = Math.min(clean.length, idx + name.trim().length + radius)
+  return (start > 0 ? '…' : '') + clean.slice(start, end) + (end < clean.length ? '…' : '')
+}
+
+/**
+ * Primary-source evidence for a candidate name: transcript excerpts where the name
+ * literally occurs (capped at `limit`, newest first) plus the full set of recording
+ * ids that contain it. LIKE wildcards in the name are escaped ({@link escapeLikePattern}).
+ * The renderer intersects two names' `recordingIds` to detect co-presence (both names
+ * in one conversation → likely different people).
+ */
+export function getMentionSnippets(name: string, limit = 2): MentionResult {
+  const trimmed = (name || '').trim()
+  if (!trimmed) return { snippets: [], recordingIds: [] }
+  const pattern = `%${escapeLikePattern(trimmed)}%`
+
+  const idRows = queryAll<{ recording_id: string }>(
+    `SELECT recording_id FROM transcripts WHERE full_text LIKE ? ESCAPE '\\'`,
+    [pattern]
+  )
+  const recordingIds = idRows.map((r) => r.recording_id)
+
+  const cap = Math.max(1, Math.min(Math.floor(limit) || 2, 10))
+  const rows = queryAll<{ recording_id: string; full_text: string; title: string | null; date: string | null }>(
+    `SELECT t.recording_id AS recording_id, t.full_text AS full_text,
+            COALESCE(t.title_suggestion, m.subject, r.filename) AS title,
+            r.date_recorded AS date
+       FROM transcripts t
+       JOIN recordings r ON r.id = t.recording_id
+       LEFT JOIN meetings m ON m.id = r.meeting_id
+      WHERE t.full_text LIKE ? ESCAPE '\\'
+      ORDER BY r.date_recorded DESC
+      LIMIT ?`,
+    [pattern, cap]
+  )
+
+  const snippets = rows.map((row) => ({
+    recordingId: row.recording_id,
+    title: row.title ?? 'Untitled recording',
+    date: row.date,
+    snippet: extractSnippet(row.full_text, trimmed)
+  }))
+  return { snippets, recordingIds }
+}
+
 // Embedding queries
 export interface Embedding {
   id: string
@@ -2271,29 +4073,48 @@ export interface QueueItem {
   retry_count: number
   progress: number
   error_message?: string
+  provider?: string
   created_at: string
   started_at?: string
   completed_at?: string
 }
 
-export function addToQueue(recordingId: string): string {
+export function addToQueue(recordingId: string, provider?: string): string {
+  // Honor the privacy flags at the single enqueue chokepoint: a personal
+  // ("ignored") or soft-deleted recording is never transcribed. Every path
+  // (auto-transcribe, manual, bulk backlog) funnels through here.
+  const rec = queryOne<{ personal?: number; deleted_at?: string | null }>(
+    'SELECT personal, deleted_at FROM recordings WHERE id = ?',
+    [recordingId]
+  )
+  if (rec && (rec.personal === 1 || rec.deleted_at)) {
+    console.log(`[Transcription] Skipping enqueue of personal/deleted recording ${recordingId}`)
+    return ''
+  }
   const id = crypto.randomUUID()
-  run('INSERT INTO transcription_queue (id, recording_id) VALUES (?, ?)', [id, recordingId])
+  run(
+    'INSERT INTO transcription_queue (id, recording_id, provider) VALUES (?, ?, ?)',
+    [id, recordingId, provider ?? null]
+  )
   return id
 }
 
-export function getQueueItems(status?: string): (QueueItem & { filename?: string })[] {
-  // Sort by priority: lower retry_count first (fresh items before retries), then FIFO by created_at
+export function getQueueItems(status?: string): (QueueItem & { filename?: string; date_recorded?: string })[] {
+  // Recency-first: newest recording (date_recorded) first, so a fresh recording
+  // preempts a month-old backlog. Tiebreak FIFO by queue created_at. The
+  // transcription service re-orders pending items to hoist user-explicit
+  // requests ahead of this backlog (see orderPendingForProcessing); the
+  // date_recorded column is returned so it can do so without a second query.
   const sql = `
-    SELECT tq.*, r.filename
+    SELECT tq.*, r.filename, r.date_recorded
     FROM transcription_queue tq
     LEFT JOIN recordings r ON tq.recording_id = r.id
     ${status ? 'WHERE tq.status = ?' : ''}
-    ORDER BY tq.retry_count ASC, tq.created_at ASC`
+    ORDER BY r.date_recorded DESC, tq.created_at ASC`
   if (status) {
-    return queryAll<QueueItem & { filename?: string }>(sql, [status])
+    return queryAll<QueueItem & { filename?: string; date_recorded?: string }>(sql, [status])
   }
-  return queryAll<QueueItem & { filename?: string }>(sql)
+  return queryAll<QueueItem & { filename?: string; date_recorded?: string }>(sql)
 }
 
 export function updateQueueItem(id: string, status: string, errorMessage?: string): void {
@@ -2563,6 +4384,93 @@ export function getContactById(id: string): Contact | undefined {
   return queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [id])
 }
 
+/** Graph-neighborhood context for a person: closest co-attendees + topics/projects. */
+export interface PersonContext {
+  /** Co-attendee display names, most-shared-meetings first. */
+  people: string[]
+  /** Topic/project labels closest to the person. */
+  topics: string[]
+}
+
+/** queryAll that returns [] if the graph tables are absent (pre-first-ingest). */
+function safeGraphQuery<T>(sql: string, params: unknown[]): T[] {
+  try {
+    return queryAll<T>(sql, params)
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Compact graph-neighborhood context for the identity merge card (B7 symmetric
+ * context): the people this person most co-attends meetings with, and the
+ * topics/projects closest to them. Accepts a contact id OR a raw name (resolver-band
+ * candidates carry only a name). One cheap query set — resolve, co-attendees, then
+ * topics via the knowledge graph (person node → ATTENDED → meeting → ABOUT → topic/
+ * project), falling back to meeting_projects transitively before the graph exists.
+ */
+export function getPersonContext(idOrName: string, limit = 4): PersonContext {
+  const raw = (idOrName || '').trim()
+  if (!raw) return { people: [], topics: [] }
+  const cap = Math.max(1, Math.min(Math.floor(limit) || 4, 10))
+
+  // Resolve to a contact id + display name: id first, then exact normalized name.
+  let contact = getContactById(raw)
+  if (!contact) {
+    const norm = raw.toLowerCase().replace(/\s+/g, ' ')
+    contact = queryOne<Contact>('SELECT * FROM contacts WHERE LOWER(name) = ? LIMIT 1', [norm])
+  }
+  const contactId = contact?.id ?? null
+  const normKey = (contact?.name ?? raw).toLowerCase().trim().replace(/\s+/g, ' ')
+
+  const people = contactId
+    ? queryAll<{ name: string }>(
+        `SELECT c.name AS name, COUNT(*) AS shared
+           FROM meeting_contacts mc1
+           JOIN meeting_contacts mc2 ON mc2.meeting_id = mc1.meeting_id AND mc2.contact_id <> mc1.contact_id
+           JOIN contacts c ON c.id = mc2.contact_id
+          WHERE mc1.contact_id = ?
+          GROUP BY mc2.contact_id
+          ORDER BY shared DESC, c.name ASC
+          LIMIT ?`,
+        [contactId, cap]
+      )
+        .map((r) => r.name)
+        .filter(Boolean)
+    : []
+
+  // Topics via the graph; fall back to the person's meeting projects when empty.
+  let topics = safeGraphQuery<{ label: string }>(
+    `SELECT DISTINCT t.label AS label
+       FROM graph_nodes p
+       JOIN graph_edges ea ON ea.source_id = p.id AND ea.type = 'ATTENDED'
+       JOIN graph_nodes m  ON m.id = ea.target_id AND m.type = 'meeting'
+       JOIN graph_edges ab ON ab.source_id = m.id AND ab.type = 'ABOUT'
+       JOIN graph_nodes t  ON t.id = ab.target_id AND (t.type = 'topic' OR t.type = 'project')
+      WHERE p.type = 'person' AND p.norm_key = ?
+      LIMIT ?`,
+    [normKey, cap]
+  )
+    .map((r) => r.label)
+    .filter(Boolean)
+
+  if (topics.length === 0 && contactId) {
+    topics = safeGraphQuery<{ label: string }>(
+      `SELECT DISTINCT pr.name AS label
+         FROM meeting_contacts mc
+         JOIN meeting_projects mp ON mp.meeting_id = mc.meeting_id
+         JOIN projects pr ON pr.id = mp.project_id
+        WHERE mc.contact_id = ?
+        LIMIT ?`,
+      [contactId, cap]
+    )
+      .map((r) => r.label)
+      .filter(Boolean)
+  }
+
+  return { people, topics }
+}
+
 export function getContactByEmail(email: string): Contact | undefined {
   return queryOne<Contact>('SELECT * FROM contacts WHERE email = ?', [email])
 }
@@ -2636,6 +4544,56 @@ export function upsertContact(contact: Omit<Contact, 'created_at'>): Contact {
   }
 }
 
+/**
+ * Create a brand-new contact from explicit user input (the "Add Person" dialog).
+ * Unlike {@link upsertContact} — which folds attendee sightings into an existing
+ * email-matched row and bumps meeting_count — this always inserts a fresh row
+ * with meeting_count 0, since a manually added person has no interactions yet.
+ */
+export function createContact(input: {
+  name: string
+  email?: string | null
+  type?: string
+  role?: string | null
+  company?: string | null
+  notes?: string | null
+}): Contact {
+  const id = randomUUID()
+  const now = new Date().toISOString()
+  const contact: Contact = {
+    id,
+    name: input.name,
+    email: input.email ?? null,
+    type: input.type || 'unknown',
+    role: input.role ?? null,
+    company: input.company ?? null,
+    notes: input.notes ?? null,
+    tags: null,
+    first_seen_at: now,
+    last_seen_at: now,
+    meeting_count: 0,
+    created_at: now
+  }
+  run(
+    `INSERT INTO contacts (id, name, email, type, role, company, notes, tags, first_seen_at, last_seen_at, meeting_count)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      contact.id,
+      contact.name,
+      contact.email,
+      contact.type,
+      contact.role,
+      contact.company,
+      contact.notes,
+      contact.tags,
+      contact.first_seen_at,
+      contact.last_seen_at,
+      contact.meeting_count
+    ]
+  )
+  return contact
+}
+
 export function updateContact(id: string, updates: Partial<Contact>): void {
   const fields: string[] = []
   const params: unknown[] = []
@@ -2690,6 +4648,873 @@ export function linkContactToMeeting(meetingId: string, contactId: string, role:
   )
 }
 
+/** Parse a contact.tags JSON string into a string array (empty on malformed). */
+function parseContactTags(tags: string | null | undefined): string[] {
+  if (!tags) return []
+  try {
+    const parsed = JSON.parse(tags)
+    return Array.isArray(parsed) ? parsed.filter((t) => typeof t === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+/** Recompute a contact's meeting_count from its meeting_contacts links. */
+function recomputeContactMeetingCount(contactId: string): void {
+  runNoSave(
+    'UPDATE contacts SET meeting_count = (SELECT COUNT(1) FROM meeting_contacts WHERE contact_id = ?) WHERE id = ?',
+    [contactId, contactId]
+  )
+}
+
+// =============================================================================
+// Merge journal & unmerge (v30) — makes contact/project folds reversible
+// =============================================================================
+
+export type MergeKind = 'contact' | 'project'
+
+/** A repointed junction row (the role is kept where the table carries one). */
+interface RepointedLink {
+  key: string // the "other" PK column value (meeting_id / knowledge_capture_id)
+  role?: string
+}
+
+/** Contact-merge manifest: everything the fold touched, enough to reverse it. */
+interface ContactMergeManifest {
+  meetingContacts: { repointed: RepointedLink[]; collided: RepointedLink[] }
+  transcriptSpeakers: { repointed: string[] } // transcript_speakers.id values moved
+  createdAliasNorms: string[] // aliases the merge created (loser-name → keeper)
+  loserAliases: Array<{ alias_norm: string; source: string | null; confidence: number | null }>
+  keeperBefore: { meetingIds: string[]; speakerIds: string[] }
+}
+
+/** Project-merge manifest. */
+interface ProjectMergeManifest {
+  meetingProjects: { repointed: string[]; collided: string[] } // meeting_id values
+  knowledgeProjects: { repointed: string[]; collided: string[] } // knowledge_capture_id values
+  createdAliasNorms: string[]
+  loserAliases: Array<{ alias_norm: string; source: string | null; confidence: number | null }>
+  keeperBefore: { meetingIds: string[]; knowledgeIds: string[] }
+}
+
+/** A keeper link that appeared after the merge — the user must review it by hand. */
+export interface OrphanLink {
+  table: 'meeting_contacts' | 'transcript_speakers' | 'meeting_projects' | 'knowledge_projects'
+  key: string
+  label: string
+  date: string | null
+}
+
+/** Result of an unmerge: what was restored + links the user must reassign manually. */
+export interface UnmergeResult {
+  loserId: string
+  loserName: string
+  restored: {
+    meetingLinks: number
+    speakerLinks: number
+    knowledgeLinks: number
+    aliases: number
+    fieldsRestored: number
+    skipped: number // manifest rows that no longer exist / were reassigned since merge
+  }
+  orphanedSinceMerge: OrphanLink[]
+}
+
+/** A merge-journal row surfaced to the UI (loser name parsed from the snapshot). */
+export interface MergeJournalEntry {
+  id: string
+  kind: MergeKind
+  keeperId: string
+  loserId: string
+  loserName: string
+  createdAt: string
+  undoneAt: string | null
+  linkCount: number // repointed links recorded — a rough "size" of the merge
+}
+
+interface MergeJournalRow {
+  id: string
+  kind: MergeKind
+  keeper_id: string
+  loser_snapshot: string
+  repointed_manifest: string
+  folded_fields: string | null
+  created_at: string
+  undone_at: string | null
+}
+
+/**
+ * Count the links that anchor an entity, used by the high-stakes merge gate:
+ * merging two heavily-linked entities is the expensive mistake, so the UI warns
+ * (and requires typing the loser's name) when BOTH sides exceed the threshold.
+ * Contacts: meeting_contacts + transcript_speakers. Projects: meeting_projects +
+ * knowledge_projects.
+ */
+export function getEntityLinkCount(kind: MergeKind, id: string): number {
+  if (kind === 'contact') {
+    const mc = queryOne<{ n: number }>('SELECT COUNT(1) AS n FROM meeting_contacts WHERE contact_id = ?', [id])
+    const ts = queryOne<{ n: number }>('SELECT COUNT(1) AS n FROM transcript_speakers WHERE contact_id = ?', [id])
+    return (mc?.n ?? 0) + (ts?.n ?? 0)
+  }
+  const mp = queryOne<{ n: number }>('SELECT COUNT(1) AS n FROM meeting_projects WHERE project_id = ?', [id])
+  const kp = queryOne<{ n: number }>('SELECT COUNT(1) AS n FROM knowledge_projects WHERE project_id = ?', [id])
+  return (mp?.n ?? 0) + (kp?.n ?? 0)
+}
+
+/** Link counts for both sides of a proposed merge (for the pre-merge warning). */
+export function getMergeImpact(kind: MergeKind, keeperId: string, loserId: string): { keeper: number; loser: number } {
+  return { keeper: getEntityLinkCount(kind, keeperId), loser: getEntityLinkCount(kind, loserId) }
+}
+
+/**
+ * Merge two contacts into one. The keeper survives; the loser's relationships
+ * are repointed and its useful fields folded in, then the loser row is deleted.
+ * Runs atomically in a single transaction, which also writes a merge_journal row
+ * so the fold can be reversed via {@link unmergeContacts}.
+ *
+ * Folding rules (keeper wins): email/role/company/notes filled from the loser
+ * only when the keeper's is empty; type taken from the loser only when the
+ * keeper's is 'unknown'; tags = union; first/last_seen widened to span both;
+ * meeting_count recomputed from the merged meeting links.
+ *
+ * @throws if the ids are equal or either contact does not exist.
+ */
+export function mergeContacts(keeperId: string, loserId: string): Contact {
+  if (keeperId === loserId) {
+    throw new Error('Cannot merge a contact into itself')
+  }
+
+  let loserName = ''
+  let keeperName = ''
+  const merged = runInTransaction(() => {
+    const keeper = queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [keeperId])
+    const loser = queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [loserId])
+    if (!keeper) throw new Error(`Keeper contact ${keeperId} not found`)
+    if (!loser) throw new Error(`Loser contact ${loserId} not found`)
+    loserName = loser.name
+    keeperName = keeper.name
+
+    // --- Capture the manifest BEFORE mutating, so unmerge can reverse exactly. ---
+    const keeperMeetingIds = queryAll<{ meeting_id: string }>(
+      'SELECT meeting_id FROM meeting_contacts WHERE contact_id = ?',
+      [keeperId]
+    ).map((r) => r.meeting_id)
+    const keeperMeetingSet = new Set(keeperMeetingIds)
+    const loserLinks = queryAll<{ meeting_id: string; role: string }>(
+      'SELECT meeting_id, role FROM meeting_contacts WHERE contact_id = ?',
+      [loserId]
+    )
+    const mcRepointed: RepointedLink[] = []
+    const mcCollided: RepointedLink[] = []
+    for (const l of loserLinks) {
+      if (keeperMeetingSet.has(l.meeting_id)) mcCollided.push({ key: l.meeting_id, role: l.role })
+      else mcRepointed.push({ key: l.meeting_id, role: l.role })
+    }
+    const keeperSpeakerIds = queryAll<{ id: string }>(
+      'SELECT id FROM transcript_speakers WHERE contact_id = ?',
+      [keeperId]
+    ).map((r) => r.id)
+    const loserSpeakerIds = queryAll<{ id: string }>(
+      'SELECT id FROM transcript_speakers WHERE contact_id = ?',
+      [loserId]
+    ).map((r) => r.id)
+    const loserAliases = queryAll<{ alias_norm: string; source: string | null; confidence: number | null }>(
+      'SELECT alias_norm, source, confidence FROM contact_aliases WHERE contact_id = ?',
+      [loserId]
+    )
+    const createdAliasNorm = normalizeName(loser.name)
+
+    // Record the loser's name as a permanent alias of the keeper (v27) so a
+    // future mention of that name resolves straight to the survivor.
+    upsertContactAliasNoSave(keeperId, loser.name, 'merge', 1.0)
+
+    // Repoint meeting_contacts (PK: meeting_id, contact_id). Move links that
+    // won't collide with the keeper's, then drop leftover collisions.
+    runNoSave('UPDATE OR IGNORE meeting_contacts SET contact_id = ? WHERE contact_id = ?', [keeperId, loserId])
+    runNoSave('DELETE FROM meeting_contacts WHERE contact_id = ?', [loserId])
+
+    // Repoint transcript_speakers. Its UNIQUE is (recording_id, speaker_label),
+    // unaffected by contact_id, so a plain update never collides.
+    runNoSave('UPDATE transcript_speakers SET contact_id = ? WHERE contact_id = ?', [keeperId, loserId])
+
+    // Fold fields onto the keeper.
+    const notEmpty = (v: string | null | undefined) => !!(v && v.trim())
+    const email = notEmpty(keeper.email) ? keeper.email : loser.email ?? null
+    const role = notEmpty(keeper.role) ? keeper.role : loser.role ?? null
+    const company = notEmpty(keeper.company) ? keeper.company : loser.company ?? null
+    const notes = notEmpty(keeper.notes) ? keeper.notes : loser.notes ?? null
+    const type = keeper.type && keeper.type !== 'unknown' ? keeper.type : loser.type || 'unknown'
+    const tags = [...new Set([...parseContactTags(keeper.tags), ...parseContactTags(loser.tags)])]
+    const tagsJson = tags.length ? JSON.stringify(tags) : null
+    const firstSeen = [keeper.first_seen_at, loser.first_seen_at].filter(Boolean).sort()[0] ?? keeper.first_seen_at
+    const lastSeen = [keeper.last_seen_at, loser.last_seen_at].filter(Boolean).sort().slice(-1)[0] ?? keeper.last_seen_at
+
+    // Diff keeper's before/after so unmerge can restore only the folded fields
+    // (and only when the keeper still holds the folded value — no clobbering edits).
+    const foldedFields = diffFoldedFields(
+      {
+        email: keeper.email,
+        role: keeper.role,
+        company: keeper.company,
+        notes: keeper.notes,
+        type: keeper.type,
+        tags: keeper.tags,
+        first_seen_at: keeper.first_seen_at,
+        last_seen_at: keeper.last_seen_at
+      },
+      { email, role, company, notes, type, tags: tagsJson, first_seen_at: firstSeen, last_seen_at: lastSeen }
+    )
+
+    runNoSave(
+      `UPDATE contacts SET email = ?, role = ?, company = ?, notes = ?, type = ?, tags = ?,
+         first_seen_at = ?, last_seen_at = ? WHERE id = ?`,
+      [email, role, company, notes, type, tagsJson, firstSeen, lastSeen, keeperId]
+    )
+
+    runNoSave('DELETE FROM contacts WHERE id = ?', [loserId])
+    recomputeContactMeetingCount(keeperId)
+
+    const manifest: ContactMergeManifest = {
+      meetingContacts: { repointed: mcRepointed, collided: mcCollided },
+      transcriptSpeakers: { repointed: loserSpeakerIds },
+      createdAliasNorms: createdAliasNorm ? [createdAliasNorm] : [],
+      loserAliases,
+      keeperBefore: { meetingIds: keeperMeetingIds, speakerIds: keeperSpeakerIds }
+    }
+    writeMergeJournalNoSave('contact', keeperId, loser, manifest, foldedFields)
+
+    return queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [keeperId])!
+  })
+
+  // Living knowledge graph (v27): fold the loser's person node into the keeper's.
+  // Emitted after the tx commits; graph-sync does label-level surgery (no LLM).
+  try {
+    getEventBus().emitDomainEvent({
+      type: 'entity:contact-changed',
+      timestamp: new Date().toISOString(),
+      payload: { contactId: keeperId, change: 'merged', oldName: loserName, newName: keeperName }
+    })
+  } catch (e) {
+    console.warn('[mergeContacts] contact-changed emit failed:', e)
+  }
+
+  return merged
+}
+
+/**
+ * Diff a keeper's pre-merge column values against the folded (post-merge) values,
+ * returning only the fields the merge actually changed, as { field: {from, to} }.
+ * Unmerge restores `from` — but only where the keeper still holds `to` (so a newer
+ * user edit is never clobbered). Values are compared/stored as their raw SQL form.
+ */
+function diffFoldedFields(
+  before: Record<string, string | null>,
+  after: Record<string, string | null>
+): Record<string, { from: string | null; to: string | null }> {
+  const folded: Record<string, { from: string | null; to: string | null }> = {}
+  for (const key of Object.keys(after)) {
+    const from = before[key] ?? null
+    const to = after[key] ?? null
+    if (from !== to) folded[key] = { from, to }
+  }
+  return folded
+}
+
+/** Insert a merge_journal row inside the merge's transaction (no auto-save). */
+function writeMergeJournalNoSave(
+  kind: MergeKind,
+  keeperId: string,
+  loserRow: unknown,
+  manifest: ContactMergeManifest | ProjectMergeManifest,
+  foldedFields: Record<string, { from: string | null; to: string | null }>
+): void {
+  runNoSave(
+    `INSERT INTO merge_journal (id, kind, keeper_id, loser_snapshot, repointed_manifest, folded_fields, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
+      randomUUID(),
+      kind,
+      keeperId,
+      JSON.stringify(loserRow),
+      JSON.stringify(manifest),
+      Object.keys(foldedFields).length ? JSON.stringify(foldedFields) : null,
+      new Date().toISOString()
+    ]
+  )
+}
+
+/** Restore keeper columns to their pre-merge values, only where unchanged since. */
+function restoreFoldedFields(table: 'contacts' | 'projects', keeperId: string, foldedJson: string | null): number {
+  if (!foldedJson) return 0
+  let folded: Record<string, { from: string | null; to: string | null }>
+  try {
+    folded = JSON.parse(foldedJson)
+  } catch {
+    return 0
+  }
+  const current = queryOne<Record<string, string | null>>(`SELECT * FROM ${table} WHERE id = ?`, [keeperId])
+  if (!current) return 0
+  let restored = 0
+  for (const [field, { from, to }] of Object.entries(folded)) {
+    // Only revert if the keeper still holds exactly the folded value — otherwise
+    // the user edited this field after the merge and we must not clobber it.
+    if ((current[field] ?? null) === to) {
+      runNoSave(`UPDATE ${table} SET ${field} = ? WHERE id = ?`, [from, keeperId])
+      restored++
+    }
+  }
+  return restored
+}
+
+/** Fetch and validate an un-undone journal row of the given kind. @throws otherwise. */
+function loadOpenJournal(journalId: string, kind: MergeKind): MergeJournalRow {
+  const row = queryOne<MergeJournalRow>('SELECT * FROM merge_journal WHERE id = ?', [journalId])
+  if (!row) throw new Error(`Merge journal entry ${journalId} not found`)
+  if (row.kind !== kind) throw new Error(`Journal entry ${journalId} is a ${row.kind} merge, not ${kind}`)
+  if (row.undone_at) throw new Error('This merge has already been unmerged')
+  return row
+}
+
+/**
+ * Reverse a contact merge recorded in merge_journal. In one transaction:
+ *   1. Recreate the loser row from the snapshot (fails if its id is taken again).
+ *   2. Restore the loser's own aliases (they cascaded away when it was deleted).
+ *   3. Repoint the manifest's moved rows back keeper→loser; re-insert the loser
+ *      links the merge dropped as collisions. Manifest rows that no longer exist
+ *      (deleted or reassigned since the merge) are skipped and counted.
+ *   4. Delete the alias the merge created, restore folded keeper fields (only
+ *      where the keeper still holds the folded value), recompute both counts.
+ *   5. Report keeper links that appeared AFTER the merge (not in the keeper's
+ *      pre-merge set) — the "a meeting got wrongly attached, reassign it" list.
+ *   6. Stamp undone_at.
+ *
+ * @throws if the journal id is unknown, already undone, or the loser id is taken.
+ */
+export function unmergeContacts(journalId: string): UnmergeResult {
+  return runInTransaction(() => {
+    const row = loadOpenJournal(journalId, 'contact')
+    const keeperId = row.keeper_id
+    const loser = JSON.parse(row.loser_snapshot) as Contact
+    const manifest = JSON.parse(row.repointed_manifest) as ContactMergeManifest
+
+    if (queryOne('SELECT 1 FROM contacts WHERE id = ?', [loser.id])) {
+      throw new Error(`Cannot unmerge: a contact with id ${loser.id} already exists`)
+    }
+
+    // 1. Recreate the loser row from the snapshot.
+    runNoSave(
+      `INSERT INTO contacts (id, name, email, type, role, company, notes, tags, first_seen_at, last_seen_at, meeting_count, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        loser.id,
+        loser.name,
+        loser.email ?? null,
+        loser.type ?? 'unknown',
+        loser.role ?? null,
+        loser.company ?? null,
+        loser.notes ?? null,
+        loser.tags ?? null,
+        loser.first_seen_at,
+        loser.last_seen_at,
+        0,
+        loser.created_at
+      ]
+    )
+
+    // 2. Restore the loser's own aliases (skip any whose norm is now taken).
+    let aliasesRestored = 0
+    for (const a of manifest.loserAliases ?? []) {
+      if (queryOne('SELECT 1 FROM contact_aliases WHERE alias_norm = ?', [a.alias_norm])) continue
+      runNoSave(
+        `INSERT INTO contact_aliases (id, alias_norm, contact_id, source, confidence, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [randomUUID(), a.alias_norm, loser.id, a.source, a.confidence, new Date().toISOString()]
+      )
+      aliasesRestored++
+    }
+
+    let meetingLinks = 0
+    let speakerLinks = 0
+    let skipped = 0
+
+    // 3a. Move repointed meeting_contacts back keeper→loser (skip if gone).
+    for (const l of manifest.meetingContacts.repointed) {
+      const exists = queryOne('SELECT 1 FROM meeting_contacts WHERE meeting_id = ? AND contact_id = ?', [l.key, keeperId])
+      if (!exists) {
+        skipped++
+        continue
+      }
+      runNoSave('UPDATE OR IGNORE meeting_contacts SET contact_id = ? WHERE meeting_id = ? AND contact_id = ?', [
+        loser.id,
+        l.key,
+        keeperId
+      ])
+      meetingLinks++
+    }
+    // 3b. Re-insert the loser links the merge dropped as collisions (keeper keeps its own).
+    for (const l of manifest.meetingContacts.collided) {
+      if (!queryOne('SELECT 1 FROM meetings WHERE id = ?', [l.key])) {
+        skipped++
+        continue
+      }
+      runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)', [
+        l.key,
+        loser.id,
+        l.role ?? 'attendee'
+      ])
+      meetingLinks++
+    }
+
+    // 3c. Move repointed transcript_speakers back (skip if row gone or reassigned).
+    for (const tsId of manifest.transcriptSpeakers.repointed) {
+      const cur = queryOne<{ contact_id: string }>('SELECT contact_id FROM transcript_speakers WHERE id = ?', [tsId])
+      if (!cur || cur.contact_id !== keeperId) {
+        skipped++
+        continue
+      }
+      runNoSave('UPDATE transcript_speakers SET contact_id = ? WHERE id = ?', [loser.id, tsId])
+      speakerLinks++
+    }
+
+    // 4. Delete the alias(es) the merge created, restore folded keeper fields.
+    for (const norm of manifest.createdAliasNorms ?? []) {
+      runNoSave('DELETE FROM contact_aliases WHERE alias_norm = ? AND contact_id = ? AND source = ?', [
+        norm,
+        keeperId,
+        'merge'
+      ])
+    }
+    const fieldsRestored = restoreFoldedFields('contacts', keeperId, row.folded_fields)
+
+    recomputeContactMeetingCount(keeperId)
+    recomputeContactMeetingCount(loser.id)
+
+    // 5. Orphan report: keeper links not present before the merge (added since).
+    const beforeMeetings = new Set(manifest.keeperBefore.meetingIds)
+    const beforeSpeakers = new Set(manifest.keeperBefore.speakerIds)
+    const orphanedSinceMerge: OrphanLink[] = []
+    const nowMeetings = queryAll<{ meeting_id: string; subject: string | null; start_time: string | null }>(
+      `SELECT mc.meeting_id, m.subject, m.start_time
+       FROM meeting_contacts mc LEFT JOIN meetings m ON m.id = mc.meeting_id
+       WHERE mc.contact_id = ?`,
+      [keeperId]
+    )
+    for (const r of nowMeetings) {
+      if (!beforeMeetings.has(r.meeting_id)) {
+        orphanedSinceMerge.push({
+          table: 'meeting_contacts',
+          key: r.meeting_id,
+          label: r.subject || 'Untitled meeting',
+          date: r.start_time
+        })
+      }
+    }
+    const nowSpeakers = queryAll<{ id: string; recording_id: string; speaker_label: string }>(
+      'SELECT id, recording_id, speaker_label FROM transcript_speakers WHERE contact_id = ?',
+      [keeperId]
+    )
+    for (const r of nowSpeakers) {
+      if (!beforeSpeakers.has(r.id)) {
+        orphanedSinceMerge.push({
+          table: 'transcript_speakers',
+          key: r.id,
+          label: `${r.speaker_label} in recording ${r.recording_id}`,
+          date: null
+        })
+      }
+    }
+
+    // 6. Mark the journal undone.
+    runNoSave('UPDATE merge_journal SET undone_at = ? WHERE id = ?', [new Date().toISOString(), journalId])
+
+    return {
+      loserId: loser.id,
+      loserName: loser.name,
+      restored: { meetingLinks, speakerLinks, knowledgeLinks: 0, aliases: aliasesRestored, fieldsRestored, skipped },
+      orphanedSinceMerge
+    }
+  })
+}
+
+// =============================================================================
+// Transcript speaker identity (v25)
+// =============================================================================
+
+export interface SpeakerMapEntry {
+  speaker_label: string
+  contact_id: string
+  name: string
+}
+
+/** Speaker-label → contact map for a recording (joined to the contact name). */
+export function getSpeakerMap(recordingId: string): SpeakerMapEntry[] {
+  return queryAll<SpeakerMapEntry>(
+    `SELECT ts.speaker_label, ts.contact_id, c.name
+     FROM transcript_speakers ts
+     JOIN contacts c ON c.id = ts.contact_id
+     WHERE ts.recording_id = ?
+     ORDER BY ts.speaker_label`,
+    [recordingId]
+  )
+}
+
+/**
+ * Bind a transcript speaker label to a contact. Provide either an existing
+ * contactId or a newName (upserted by case-insensitive name). Writes the map
+ * row (replacing any prior binding for the label) and, when the recording is
+ * linked to a meeting, links the contact to that meeting. Returns the contact.
+ *
+ * @throws if neither contactId nor newName is usable, or contactId is unknown.
+ */
+export function assignSpeaker(
+  recordingId: string,
+  speakerLabel: string,
+  opts: { contactId?: string; newName?: string }
+): Contact {
+  return runInTransaction(() => {
+    let contact: Contact | undefined
+
+    if (opts.contactId) {
+      contact = queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [opts.contactId])
+      if (!contact) throw new Error(`Contact ${opts.contactId} not found`)
+    } else if (opts.newName && opts.newName.trim()) {
+      const name = opts.newName.trim()
+      contact = queryOne<Contact>('SELECT * FROM contacts WHERE LOWER(name) = LOWER(?)', [name])
+      if (!contact) {
+        const id = randomUUID()
+        const now = new Date().toISOString()
+        runNoSave(
+          `INSERT INTO contacts (id, name, type, first_seen_at, last_seen_at, meeting_count)
+           VALUES (?, ?, 'unknown', ?, ?, 0)`,
+          [id, name, now, now]
+        )
+        contact = queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [id])!
+      }
+    } else {
+      throw new Error('assignSpeaker requires a contactId or a newName')
+    }
+
+    // UNIQUE(recording_id, speaker_label) makes this an upsert of the binding.
+    runNoSave(
+      'INSERT OR REPLACE INTO transcript_speakers (id, recording_id, speaker_label, contact_id) VALUES (?, ?, ?, ?)',
+      [randomUUID(), recordingId, speakerLabel, contact.id]
+    )
+
+    // Alias memory (v27): a non-generic speaker label ("Javier", not "Speaker 2")
+    // is a real name the user just bound — remember it as an alias of the contact.
+    if (!isGenericSpeakerLabel(speakerLabel)) {
+      upsertContactAliasNoSave(contact.id, speakerLabel, 'speaker_assign', 0.95)
+    }
+
+    const rec = queryOne<{ meeting_id?: string | null }>('SELECT meeting_id FROM recordings WHERE id = ?', [recordingId])
+    if (rec?.meeting_id) {
+      runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)', [
+        rec.meeting_id,
+        contact.id,
+        'attendee'
+      ])
+      recomputeContactMeetingCount(contact.id)
+    }
+
+    return queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [contact.id])!
+  })
+}
+
+/** Remove a speaker-label → contact binding for a recording. */
+export function unassignSpeaker(recordingId: string, speakerLabel: string): void {
+  run('DELETE FROM transcript_speakers WHERE recording_id = ? AND speaker_label = ?', [recordingId, speakerLabel])
+}
+
+// =============================================================================
+// Per-turn speaker overrides + speaker splits (v37)
+// =============================================================================
+
+export interface TurnOverrideEntry {
+  turn_index: number
+  contact_id: string
+  name: string
+}
+
+export interface SpeakerSplitEntry {
+  base_label: string
+  from_turn_index: number
+  derived_label: string
+}
+
+/**
+ * Resolve a contact from either an existing id or a (case-insensitively upserted)
+ * name. Composes inside an enclosing transaction (uses runNoSave). Mirrors the
+ * contact-resolution used by assignSpeaker so per-turn overrides and splits bind
+ * identities the same way. @throws if neither is usable or the id is unknown.
+ */
+function resolveContactForBinding(opts: { contactId?: string; newName?: string }): Contact {
+  if (opts.contactId) {
+    const contact = queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [opts.contactId])
+    if (!contact) throw new Error(`Contact ${opts.contactId} not found`)
+    return contact
+  }
+  if (opts.newName && opts.newName.trim()) {
+    const name = opts.newName.trim()
+    const existing = queryOne<Contact>('SELECT * FROM contacts WHERE LOWER(name) = LOWER(?)', [name])
+    if (existing) return existing
+    const id = randomUUID()
+    const now = new Date().toISOString()
+    runNoSave(
+      `INSERT INTO contacts (id, name, type, first_seen_at, last_seen_at, meeting_count)
+       VALUES (?, ?, 'unknown', ?, ?, 0)`,
+      [id, name, now, now]
+    )
+    return queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [id])!
+  }
+  throw new Error('A contactId or a newName is required')
+}
+
+/** Per-turn override map for a recording (turn_index → contact), joined to the name. */
+export function getTurnOverrides(recordingId: string): TurnOverrideEntry[] {
+  return queryAll<TurnOverrideEntry>(
+    `SELECT tso.turn_index, tso.contact_id, c.name
+     FROM turn_speaker_overrides tso
+     JOIN contacts c ON c.id = tso.contact_id
+     WHERE tso.recording_id = ?
+     ORDER BY tso.turn_index`,
+    [recordingId]
+  )
+}
+
+/**
+ * Bind a single transcript turn to a contact, superseding the label→contact
+ * default for that turn only ("Just this turn"). Provide an existing contactId
+ * or a newName to upsert. Upserts on (recording_id, turn_index). Returns the
+ * contact. When the recording is linked to a meeting, links the contact to it.
+ */
+export function setTurnOverride(
+  recordingId: string,
+  turnIndex: number,
+  opts: { contactId?: string; newName?: string }
+): Contact {
+  return runInTransaction(() => {
+    const contact = resolveContactForBinding(opts)
+    runNoSave(
+      'INSERT OR REPLACE INTO turn_speaker_overrides (id, recording_id, turn_index, contact_id) VALUES (?, ?, ?, ?)',
+      [randomUUID(), recordingId, turnIndex, contact.id]
+    )
+    const rec = queryOne<{ meeting_id?: string | null }>('SELECT meeting_id FROM recordings WHERE id = ?', [recordingId])
+    if (rec?.meeting_id) {
+      runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)', [
+        rec.meeting_id,
+        contact.id,
+        'attendee'
+      ])
+      recomputeContactMeetingCount(contact.id)
+    }
+    return queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [contact.id])!
+  })
+}
+
+/** Remove a per-turn override, reverting the turn to its label/split default. */
+export function clearTurnOverride(recordingId: string, turnIndex: number): void {
+  run('DELETE FROM turn_speaker_overrides WHERE recording_id = ? AND turn_index = ?', [recordingId, turnIndex])
+}
+
+/** All speaker splits for a recording, ordered so the render can pick the last
+ * boundary at or before a turn. */
+export function getSpeakerSplits(recordingId: string): SpeakerSplitEntry[] {
+  return queryAll<SpeakerSplitEntry>(
+    `SELECT base_label, from_turn_index, derived_label
+     FROM speaker_splits
+     WHERE recording_id = ?
+     ORDER BY base_label, from_turn_index`,
+    [recordingId]
+  )
+}
+
+/** The next unused split suffix letter (B, C, D…) for a base label's derived
+ * labels, so a merge-back + re-split never collides with a live binding. */
+function nextSplitLetter(usedDerived: string[], baseLabel: string): string {
+  const used = new Set(usedDerived)
+  for (let code = 66 /* 'B' */; code < 91 /* 'Z'+1 */; code++) {
+    const candidate = `${baseLabel} · ${String.fromCharCode(code)}`
+    if (!used.has(candidate)) return candidate
+  }
+  // Exhausted A–Z (26 splits on one label is implausible): fall back to a uuid.
+  return `${baseLabel} · ${randomUUID().slice(0, 4)}`
+}
+
+/**
+ * Fork a diarization label into a new derived label from `fromTurnIndex` onward.
+ * Turns at or after the boundary that share `baseLabel` render (and are assigned)
+ * under the returned derived label, leaving earlier turns on the base label.
+ * Idempotent per boundary: an existing split at (recording, base, index) returns
+ * its derived label unchanged. Returns the derived label.
+ */
+export function splitSpeakerFrom(recordingId: string, baseLabel: string, fromTurnIndex: number): string {
+  return runInTransaction(() => {
+    const existing = queryOne<{ derived_label: string }>(
+      'SELECT derived_label FROM speaker_splits WHERE recording_id = ? AND base_label = ? AND from_turn_index = ?',
+      [recordingId, baseLabel, fromTurnIndex]
+    )
+    if (existing) return existing.derived_label
+
+    const priorDerived = queryAll<{ derived_label: string }>(
+      'SELECT derived_label FROM speaker_splits WHERE recording_id = ? AND base_label = ?',
+      [recordingId, baseLabel]
+    ).map((r) => r.derived_label)
+    const derivedLabel = nextSplitLetter(priorDerived, baseLabel)
+
+    runNoSave(
+      'INSERT INTO speaker_splits (id, recording_id, base_label, from_turn_index, derived_label) VALUES (?, ?, ?, ?, ?)',
+      [randomUUID(), recordingId, baseLabel, fromTurnIndex, derivedLabel]
+    )
+    return derivedLabel
+  })
+}
+
+/**
+ * Undo a split ("merge back"): remove the split boundary and drop any speaker
+ * binding attached to its derived label, so the affected turns revert to the
+ * base label's default.
+ */
+export function mergeSpeakerSplit(recordingId: string, baseLabel: string, fromTurnIndex: number): void {
+  runInTransaction(() => {
+    const row = queryOne<{ derived_label: string }>(
+      'SELECT derived_label FROM speaker_splits WHERE recording_id = ? AND base_label = ? AND from_turn_index = ?',
+      [recordingId, baseLabel, fromTurnIndex]
+    )
+    runNoSave('DELETE FROM speaker_splits WHERE recording_id = ? AND base_label = ? AND from_turn_index = ?', [
+      recordingId,
+      baseLabel,
+      fromTurnIndex
+    ])
+    if (row) {
+      runNoSave('DELETE FROM transcript_speakers WHERE recording_id = ? AND speaker_label = ?', [
+        recordingId,
+        row.derived_label
+      ])
+    }
+  })
+}
+
+/**
+ * "From here on": split the label at `fromTurnIndex` and bind the resulting
+ * derived label to a contact in one atomic step. Returns the derived label and
+ * the bound contact.
+ */
+export function assignSpeakerFromHere(
+  recordingId: string,
+  baseLabel: string,
+  fromTurnIndex: number,
+  opts: { contactId?: string; newName?: string }
+): { derivedLabel: string; contact: Contact } {
+  return runInTransaction(() => {
+    const derivedLabel = splitSpeakerFrom(recordingId, baseLabel, fromTurnIndex)
+    const contact = assignSpeaker(recordingId, derivedLabel, opts)
+    return { derivedLabel, contact }
+  })
+}
+
+// =============================================================================
+// Meeting attendee editing (v25)
+// =============================================================================
+
+/**
+ * Regenerate a meeting's attendees JSON as a projection of its meeting_contacts
+ * links (organizer-role rows excluded — the organizer lives in its own columns).
+ * Uses runNoSave so it can compose inside an enclosing transaction.
+ */
+function regenerateMeetingAttendeesJson(meetingId: string): void {
+  const rows = queryAll<{ name: string; email: string | null }>(
+    `SELECT c.name, c.email
+     FROM meeting_contacts mc
+     JOIN contacts c ON c.id = mc.contact_id
+     WHERE mc.meeting_id = ? AND mc.role != 'organizer'
+     ORDER BY c.name`,
+    [meetingId]
+  )
+  const attendees = rows.map((r) => ({ name: r.name, email: r.email ?? undefined }))
+  runNoSave('UPDATE meetings SET attendees = ?, updated_at = ? WHERE id = ?', [
+    JSON.stringify(attendees),
+    new Date().toISOString(),
+    meetingId
+  ])
+}
+
+/**
+ * Add an attendee to a meeting. Upserts the contact (matched by email first,
+ * then by case-insensitive name), propagating a newly-supplied email onto a
+ * name-matched contact that lacked one — and mirror-upgrading an email-matched
+ * placeholder's name (matching org-reconciler's upsertContactsFromMeetings).
+ * Links the contact via meeting_contacts and regenerates the attendees JSON.
+ *
+ * @throws if the meeting is missing or neither name nor email is provided.
+ */
+export function addMeetingAttendee(meetingId: string, payload: { name?: string; email?: string }): Contact {
+  return runInTransaction(() => {
+    const meeting = queryOne<{ id: string }>('SELECT id FROM meetings WHERE id = ?', [meetingId])
+    if (!meeting) throw new Error(`Meeting ${meetingId} not found`)
+
+    const email = payload.email?.trim().toLowerCase() || null
+    const name = payload.name?.trim() || null
+    if (!email && !name) throw new Error('addMeetingAttendee requires a name or an email')
+
+    let contact: Contact | undefined
+    if (email) {
+      contact = queryOne<Contact>('SELECT * FROM contacts WHERE LOWER(email) = ?', [email])
+    }
+    if (!contact && name) {
+      contact = queryOne<Contact>('SELECT * FROM contacts WHERE LOWER(name) = LOWER(?)', [name])
+    }
+
+    if (!contact) {
+      const id = randomUUID()
+      const now = new Date().toISOString()
+      runNoSave(
+        `INSERT INTO contacts (id, name, email, type, first_seen_at, last_seen_at, meeting_count)
+         VALUES (?, ?, ?, 'unknown', ?, ?, 0)`,
+        [id, name || (email ? email.split('@')[0] : 'Unknown'), email, now, now]
+      )
+      contact = queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [id])!
+    } else {
+      // Propagate newly-supplied identity onto the matched contact.
+      const patch: string[] = []
+      const params: unknown[] = []
+      if (email && !(contact.email && contact.email.trim())) {
+        patch.push('email = ?')
+        params.push(email)
+      }
+      const placeholderName = contact.email ? contact.email.split('@')[0] : null
+      const nameIsPlaceholder = !contact.name || (placeholderName !== null && contact.name === placeholderName)
+      if (name && name !== contact.name && nameIsPlaceholder) {
+        patch.push('name = ?')
+        params.push(name)
+      }
+      if (patch.length > 0) {
+        params.push(contact.id)
+        runNoSave(`UPDATE contacts SET ${patch.join(', ')} WHERE id = ?`, params)
+        contact = queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [contact.id])!
+      }
+    }
+
+    runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)', [
+      meetingId,
+      contact.id,
+      'attendee'
+    ])
+    regenerateMeetingAttendeesJson(meetingId)
+    recomputeContactMeetingCount(contact.id)
+
+    return queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [contact.id])!
+  })
+}
+
+/** Remove an attendee link from a meeting and regenerate its attendees JSON. */
+export function removeMeetingAttendee(meetingId: string, contactId: string): void {
+  runInTransaction(() => {
+    runNoSave('DELETE FROM meeting_contacts WHERE meeting_id = ? AND contact_id = ?', [meetingId, contactId])
+    regenerateMeetingAttendeesJson(meetingId)
+    recomputeContactMeetingCount(contactId)
+  })
+}
+
 // =============================================================================
 // Project queries
 // =============================================================================
@@ -2699,7 +5524,20 @@ export interface Project {
   name: string
   description: string | null
   status: string
+  folder_path: string | null
+  url: string | null
   created_at: string
+}
+
+/** One issue / risk / note tracked against a project (v29). */
+export interface ProjectNote {
+  id: string
+  project_id: string
+  kind: 'issue' | 'risk' | 'note'
+  content: string
+  status: 'open' | 'resolved'
+  created_at: string
+  resolved_at: string | null
 }
 
 export interface MeetingProject {
@@ -2742,29 +5580,45 @@ export function getProjectById(id: string): Project | undefined {
   return queryOne<Project>('SELECT * FROM projects WHERE id = ?', [id])
 }
 
-export function createProject(project: Omit<Project, 'created_at'>): Project {
+export function createProject(project: Omit<Project, 'created_at' | 'folder_path' | 'url'>): Project {
   run(
     'INSERT INTO projects (id, name, description, status) VALUES (?, ?, ?, ?)',
     [project.id, project.name, project.description, project.status || 'active']
   )
-  return { ...project, created_at: new Date().toISOString() }
+  return { ...project, folder_path: null, url: null, created_at: new Date().toISOString() }
 }
 
-export function updateProject(id: string, name?: string, description?: string, status?: string): void {
+export interface ProjectUpdateFields {
+  name?: string
+  description?: string | null
+  status?: string
+  folderPath?: string | null
+  url?: string | null
+}
+
+export function updateProject(id: string, fields: ProjectUpdateFields): void {
   const updates: string[] = []
   const params: unknown[] = []
 
-  if (name !== undefined) {
+  if (fields.name !== undefined) {
     updates.push('name = ?')
-    params.push(name)
+    params.push(fields.name)
   }
-  if (description !== undefined) {
+  if (fields.description !== undefined) {
     updates.push('description = ?')
-    params.push(description)
+    params.push(fields.description)
   }
-  if (status !== undefined) {
+  if (fields.status !== undefined) {
     updates.push('status = ?')
-    params.push(status)
+    params.push(fields.status)
+  }
+  if (fields.folderPath !== undefined) {
+    updates.push('folder_path = ?')
+    params.push(fields.folderPath)
+  }
+  if (fields.url !== undefined) {
+    updates.push('url = ?')
+    params.push(fields.url)
   }
 
   if (updates.length > 0) {
@@ -2809,16 +5663,20 @@ export function untagMeetingFromProject(meetingId: string, projectId: string): v
 }
 
 /**
- * Get knowledge capture IDs associated with a project via its meetings.
- * Path: project -> meeting_projects -> meetings -> recordings -> knowledge_captures
+ * Get knowledge capture IDs associated with a project. Unions two paths:
+ *  1. transitive: project -> meeting_projects -> meetings -> recordings -> knowledge_captures
+ *  2. direct: project -> knowledge_projects -> knowledge_captures (v26)
+ * DISTINCT + UNION dedupes captures reachable by both paths.
  */
 export function getKnowledgeIdsForProject(projectId: string): string[] {
   const rows = queryAll<{ id: string }>(
     `SELECT DISTINCT kc.id FROM knowledge_captures kc
      JOIN recordings r ON kc.source_recording_id = r.id
      JOIN meeting_projects mp ON r.meeting_id = mp.meeting_id
-     WHERE mp.project_id = ?`,
-    [projectId]
+     WHERE mp.project_id = ?
+     UNION
+     SELECT knowledge_capture_id AS id FROM knowledge_projects WHERE project_id = ?`,
+    [projectId, projectId]
   )
   return rows.map(r => r.id)
 }
@@ -2835,6 +5693,1117 @@ export function getPersonIdsForProject(projectId: string): string[] {
     [projectId]
   )
   return rows.map(r => r.contact_id)
+}
+
+/**
+ * Merge two projects into one. Mirrors mergeContacts: the keeper survives; the
+ * loser's meeting_projects and knowledge_projects links are repointed (OR IGNORE
+ * to skip collisions, then leftovers dropped), useful fields folded in
+ * (keeper wins, null-fill from loser), and the loser row deleted. One tx.
+ *
+ * @throws if the ids are equal or either project does not exist.
+ */
+export function mergeProjects(keeperId: string, loserId: string): Project {
+  if (keeperId === loserId) {
+    throw new Error('Cannot merge a project into itself')
+  }
+
+  return runInTransaction(() => {
+    const keeper = queryOne<Project>('SELECT * FROM projects WHERE id = ?', [keeperId])
+    const loser = queryOne<Project>('SELECT * FROM projects WHERE id = ?', [loserId])
+    if (!keeper) throw new Error(`Keeper project ${keeperId} not found`)
+    if (!loser) throw new Error(`Loser project ${loserId} not found`)
+
+    // --- Capture the manifest BEFORE mutating, so unmerge can reverse exactly. ---
+    const keeperMeetingIds = queryAll<{ meeting_id: string }>(
+      'SELECT meeting_id FROM meeting_projects WHERE project_id = ?',
+      [keeperId]
+    ).map((r) => r.meeting_id)
+    const keeperMeetingSet = new Set(keeperMeetingIds)
+    const mpRepointed: string[] = []
+    const mpCollided: string[] = []
+    for (const r of queryAll<{ meeting_id: string }>('SELECT meeting_id FROM meeting_projects WHERE project_id = ?', [
+      loserId
+    ])) {
+      if (keeperMeetingSet.has(r.meeting_id)) mpCollided.push(r.meeting_id)
+      else mpRepointed.push(r.meeting_id)
+    }
+    const keeperKnowledgeIds = queryAll<{ knowledge_capture_id: string }>(
+      'SELECT knowledge_capture_id FROM knowledge_projects WHERE project_id = ?',
+      [keeperId]
+    ).map((r) => r.knowledge_capture_id)
+    const keeperKnowledgeSet = new Set(keeperKnowledgeIds)
+    const kpRepointed: string[] = []
+    const kpCollided: string[] = []
+    for (const r of queryAll<{ knowledge_capture_id: string }>(
+      'SELECT knowledge_capture_id FROM knowledge_projects WHERE project_id = ?',
+      [loserId]
+    )) {
+      if (keeperKnowledgeSet.has(r.knowledge_capture_id)) kpCollided.push(r.knowledge_capture_id)
+      else kpRepointed.push(r.knowledge_capture_id)
+    }
+    const loserAliases = queryAll<{ alias_norm: string; source: string | null; confidence: number | null }>(
+      'SELECT alias_norm, source, confidence FROM project_aliases WHERE project_id = ?',
+      [loserId]
+    )
+    const createdAliasNorm = normalizeName(loser.name)
+
+    // Record the loser's name as a permanent alias of the keeper (v27).
+    upsertProjectAliasNoSave(keeperId, loser.name, 'merge', 1.0)
+
+    // Repoint meeting_projects (PK: meeting_id, project_id).
+    runNoSave('UPDATE OR IGNORE meeting_projects SET project_id = ? WHERE project_id = ?', [keeperId, loserId])
+    runNoSave('DELETE FROM meeting_projects WHERE project_id = ?', [loserId])
+
+    // Repoint knowledge_projects (PK: knowledge_capture_id, project_id).
+    runNoSave('UPDATE OR IGNORE knowledge_projects SET project_id = ? WHERE project_id = ?', [keeperId, loserId])
+    runNoSave('DELETE FROM knowledge_projects WHERE project_id = ?', [loserId])
+
+    // Fold fields onto the keeper (keeper wins; null-fill from loser).
+    const notEmpty = (v: string | null | undefined) => !!(v && v.trim())
+    const description = notEmpty(keeper.description) ? keeper.description : loser.description ?? null
+    const status = notEmpty(keeper.status) ? keeper.status : loser.status || 'active'
+    const foldedFields = diffFoldedFields(
+      { description: keeper.description, status: keeper.status },
+      { description, status }
+    )
+
+    runNoSave('UPDATE projects SET description = ?, status = ? WHERE id = ?', [description, status, keeperId])
+    runNoSave('DELETE FROM projects WHERE id = ?', [loserId])
+
+    const manifest: ProjectMergeManifest = {
+      meetingProjects: { repointed: mpRepointed, collided: mpCollided },
+      knowledgeProjects: { repointed: kpRepointed, collided: kpCollided },
+      createdAliasNorms: createdAliasNorm ? [createdAliasNorm] : [],
+      loserAliases,
+      keeperBefore: { meetingIds: keeperMeetingIds, knowledgeIds: keeperKnowledgeIds }
+    }
+    writeMergeJournalNoSave('project', keeperId, loser, manifest, foldedFields)
+
+    return queryOne<Project>('SELECT * FROM projects WHERE id = ?', [keeperId])!
+  })
+}
+
+/**
+ * Reverse a project merge recorded in merge_journal. Mirrors {@link unmergeContacts}:
+ * recreate the loser project + its aliases, repoint the manifest's meeting_projects
+ * and knowledge_projects back, re-insert dropped collisions, delete the merge-created
+ * alias, restore folded keeper fields, and report keeper links added since the merge.
+ *
+ * @throws if the journal id is unknown, already undone, or the loser id is taken.
+ */
+export function unmergeProjects(journalId: string): UnmergeResult {
+  return runInTransaction(() => {
+    const row = loadOpenJournal(journalId, 'project')
+    const keeperId = row.keeper_id
+    const loser = JSON.parse(row.loser_snapshot) as Project
+    const manifest = JSON.parse(row.repointed_manifest) as ProjectMergeManifest
+
+    if (queryOne('SELECT 1 FROM projects WHERE id = ?', [loser.id])) {
+      throw new Error(`Cannot unmerge: a project with id ${loser.id} already exists`)
+    }
+
+    // 1. Recreate the loser project from the snapshot.
+    runNoSave(
+      `INSERT INTO projects (id, name, description, status, folder_path, url, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        loser.id,
+        loser.name,
+        loser.description ?? null,
+        loser.status ?? 'active',
+        loser.folder_path ?? null,
+        loser.url ?? null,
+        loser.created_at
+      ]
+    )
+
+    // 2. Restore the loser's own aliases (skip any whose norm is now taken).
+    let aliasesRestored = 0
+    for (const a of manifest.loserAliases ?? []) {
+      if (queryOne('SELECT 1 FROM project_aliases WHERE alias_norm = ?', [a.alias_norm])) continue
+      runNoSave(
+        `INSERT INTO project_aliases (id, alias_norm, project_id, source, confidence, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [randomUUID(), a.alias_norm, loser.id, a.source, a.confidence, new Date().toISOString()]
+      )
+      aliasesRestored++
+    }
+
+    let meetingLinks = 0
+    let knowledgeLinks = 0
+    let skipped = 0
+
+    // 3a. Move repointed meeting_projects back keeper→loser (skip if gone).
+    for (const meetingId of manifest.meetingProjects.repointed) {
+      if (!queryOne('SELECT 1 FROM meeting_projects WHERE meeting_id = ? AND project_id = ?', [meetingId, keeperId])) {
+        skipped++
+        continue
+      }
+      runNoSave('UPDATE OR IGNORE meeting_projects SET project_id = ? WHERE meeting_id = ? AND project_id = ?', [
+        loser.id,
+        meetingId,
+        keeperId
+      ])
+      meetingLinks++
+    }
+    // 3b. Re-insert dropped meeting_projects collisions for the loser.
+    for (const meetingId of manifest.meetingProjects.collided) {
+      if (!queryOne('SELECT 1 FROM meetings WHERE id = ?', [meetingId])) {
+        skipped++
+        continue
+      }
+      runNoSave('INSERT OR IGNORE INTO meeting_projects (meeting_id, project_id) VALUES (?, ?)', [meetingId, loser.id])
+      meetingLinks++
+    }
+
+    // 3c. Move repointed knowledge_projects back keeper→loser (skip if gone).
+    for (const kcId of manifest.knowledgeProjects.repointed) {
+      if (
+        !queryOne('SELECT 1 FROM knowledge_projects WHERE knowledge_capture_id = ? AND project_id = ?', [kcId, keeperId])
+      ) {
+        skipped++
+        continue
+      }
+      runNoSave(
+        'UPDATE OR IGNORE knowledge_projects SET project_id = ? WHERE knowledge_capture_id = ? AND project_id = ?',
+        [loser.id, kcId, keeperId]
+      )
+      knowledgeLinks++
+    }
+    // 3d. Re-insert dropped knowledge_projects collisions for the loser.
+    for (const kcId of manifest.knowledgeProjects.collided) {
+      if (!queryOne('SELECT 1 FROM knowledge_captures WHERE id = ?', [kcId])) {
+        skipped++
+        continue
+      }
+      runNoSave('INSERT OR IGNORE INTO knowledge_projects (knowledge_capture_id, project_id) VALUES (?, ?)', [
+        kcId,
+        loser.id
+      ])
+      knowledgeLinks++
+    }
+
+    // 4. Delete the alias(es) the merge created, restore folded keeper fields.
+    for (const norm of manifest.createdAliasNorms ?? []) {
+      runNoSave('DELETE FROM project_aliases WHERE alias_norm = ? AND project_id = ? AND source = ?', [
+        norm,
+        keeperId,
+        'merge'
+      ])
+    }
+    const fieldsRestored = restoreFoldedFields('projects', keeperId, row.folded_fields)
+
+    // 5. Orphan report: keeper links not present before the merge (added since).
+    const beforeMeetings = new Set(manifest.keeperBefore.meetingIds)
+    const beforeKnowledge = new Set(manifest.keeperBefore.knowledgeIds)
+    const orphanedSinceMerge: OrphanLink[] = []
+    const nowMeetings = queryAll<{ meeting_id: string; subject: string | null; start_time: string | null }>(
+      `SELECT mp.meeting_id, m.subject, m.start_time
+       FROM meeting_projects mp LEFT JOIN meetings m ON m.id = mp.meeting_id
+       WHERE mp.project_id = ?`,
+      [keeperId]
+    )
+    for (const r of nowMeetings) {
+      if (!beforeMeetings.has(r.meeting_id)) {
+        orphanedSinceMerge.push({
+          table: 'meeting_projects',
+          key: r.meeting_id,
+          label: r.subject || 'Untitled meeting',
+          date: r.start_time
+        })
+      }
+    }
+    const nowKnowledge = queryAll<{ knowledge_capture_id: string }>(
+      'SELECT knowledge_capture_id FROM knowledge_projects WHERE project_id = ?',
+      [keeperId]
+    )
+    for (const r of nowKnowledge) {
+      if (!beforeKnowledge.has(r.knowledge_capture_id)) {
+        orphanedSinceMerge.push({
+          table: 'knowledge_projects',
+          key: r.knowledge_capture_id,
+          label: `Knowledge capture ${r.knowledge_capture_id}`,
+          date: null
+        })
+      }
+    }
+
+    // 6. Mark the journal undone.
+    runNoSave('UPDATE merge_journal SET undone_at = ? WHERE id = ?', [new Date().toISOString(), journalId])
+
+    return {
+      loserId: loser.id,
+      loserName: loser.name,
+      restored: { meetingLinks, speakerLinks: 0, knowledgeLinks, aliases: aliasesRestored, fieldsRestored, skipped },
+      orphanedSinceMerge
+    }
+  })
+}
+
+/**
+ * Merge-journal entries for an entity (keeper), newest first. By default only
+ * open (not-yet-undone) merges are returned — the ones that can still be undone.
+ */
+export function getMergeJournal(kind: MergeKind, keeperId: string, includeUndone = false): MergeJournalEntry[] {
+  const rows = queryAll<MergeJournalRow>(
+    `SELECT * FROM merge_journal WHERE kind = ? AND keeper_id = ?
+     ${includeUndone ? '' : 'AND undone_at IS NULL'}
+     ORDER BY created_at DESC`,
+    [kind, keeperId]
+  )
+  return rows.map((r) => {
+    let loserName = 'Unknown'
+    let loserId = ''
+    let linkCount = 0
+    try {
+      const loser = JSON.parse(r.loser_snapshot) as { id?: string; name?: string }
+      loserName = loser.name ?? 'Unknown'
+      loserId = loser.id ?? ''
+    } catch {
+      /* keep defaults */
+    }
+    try {
+      const m = JSON.parse(r.repointed_manifest)
+      if (kind === 'contact') {
+        const mm = m as ContactMergeManifest
+        linkCount =
+          (mm.meetingContacts?.repointed?.length ?? 0) +
+          (mm.meetingContacts?.collided?.length ?? 0) +
+          (mm.transcriptSpeakers?.repointed?.length ?? 0)
+      } else {
+        const pm = m as ProjectMergeManifest
+        linkCount =
+          (pm.meetingProjects?.repointed?.length ?? 0) +
+          (pm.meetingProjects?.collided?.length ?? 0) +
+          (pm.knowledgeProjects?.repointed?.length ?? 0) +
+          (pm.knowledgeProjects?.collided?.length ?? 0)
+      }
+    } catch {
+      /* keep default */
+    }
+    return {
+      id: r.id,
+      kind: r.kind,
+      keeperId: r.keeper_id,
+      loserId,
+      loserName,
+      createdAt: r.created_at,
+      undoneAt: r.undone_at,
+      linkCount
+    }
+  })
+}
+
+/**
+ * Replace the full set of projects directly assigned to a knowledge capture (v26).
+ * Deletes existing knowledge_projects rows for the capture and inserts the new
+ * set in one transaction. Passing an empty array clears all direct assignments.
+ */
+export function setKnowledgeProjects(knowledgeCaptureId: string, projectIds: string[]): void {
+  runInTransaction(() => {
+    runNoSave('DELETE FROM knowledge_projects WHERE knowledge_capture_id = ?', [knowledgeCaptureId])
+    const seen = new Set<string>()
+    for (const projectId of projectIds) {
+      if (seen.has(projectId)) continue
+      seen.add(projectId)
+      runNoSave('INSERT OR IGNORE INTO knowledge_projects (knowledge_capture_id, project_id) VALUES (?, ?)', [
+        knowledgeCaptureId,
+        projectId
+      ])
+    }
+  })
+}
+
+/** Projects directly assigned to a knowledge capture via knowledge_projects (v26). */
+export function getProjectsForKnowledge(knowledgeCaptureId: string): Project[] {
+  return queryAll<Project>(
+    `SELECT p.* FROM projects p
+     JOIN knowledge_projects kp ON p.id = kp.project_id
+     WHERE kp.knowledge_capture_id = ?
+     ORDER BY p.name`,
+    [knowledgeCaptureId]
+  )
+}
+
+// =============================================================================
+// Project notes: issues / risks / notes (v29)
+// =============================================================================
+
+/** Notes for a project, optionally filtered by kind. Open items first, newest first. */
+export function getProjectNotes(projectId: string, kind?: 'issue' | 'risk' | 'note'): ProjectNote[] {
+  if (kind) {
+    return queryAll<ProjectNote>(
+      `SELECT * FROM project_notes WHERE project_id = ? AND kind = ?
+       ORDER BY (status = 'open') DESC, created_at DESC`,
+      [projectId, kind]
+    )
+  }
+  return queryAll<ProjectNote>(
+    `SELECT * FROM project_notes WHERE project_id = ?
+     ORDER BY (status = 'open') DESC, created_at DESC`,
+    [projectId]
+  )
+}
+
+/** Add a note to a project. Returns the created row. */
+export function addProjectNote(projectId: string, kind: 'issue' | 'risk' | 'note', content: string): ProjectNote {
+  const id = randomUUID()
+  const createdAt = new Date().toISOString()
+  run(
+    `INSERT INTO project_notes (id, project_id, kind, content, status, created_at)
+     VALUES (?, ?, ?, ?, 'open', ?)`,
+    [id, projectId, kind, content, createdAt]
+  )
+  return queryOne<ProjectNote>('SELECT * FROM project_notes WHERE id = ?', [id])!
+}
+
+/**
+ * Update a project note's content and/or status. Setting status to 'resolved'
+ * stamps resolved_at; reopening clears it. Returns the updated row.
+ *
+ * @throws if the note does not exist.
+ */
+export function updateProjectNote(
+  id: string,
+  fields: { content?: string; status?: 'open' | 'resolved' }
+): ProjectNote {
+  const existing = queryOne<ProjectNote>('SELECT * FROM project_notes WHERE id = ?', [id])
+  if (!existing) throw new Error(`Project note ${id} not found`)
+
+  const updates: string[] = []
+  const params: unknown[] = []
+
+  if (fields.content !== undefined) {
+    updates.push('content = ?')
+    params.push(fields.content)
+  }
+  if (fields.status !== undefined) {
+    updates.push('status = ?')
+    params.push(fields.status)
+    updates.push('resolved_at = ?')
+    params.push(fields.status === 'resolved' ? new Date().toISOString() : null)
+  }
+
+  if (updates.length > 0) {
+    params.push(id)
+    run(`UPDATE project_notes SET ${updates.join(', ')} WHERE id = ?`, params)
+  }
+
+  return queryOne<ProjectNote>('SELECT * FROM project_notes WHERE id = ?', [id])!
+}
+
+/** Delete a project note. */
+export function deleteProjectNote(id: string): void {
+  run('DELETE FROM project_notes WHERE id = ?', [id])
+}
+
+/**
+ * Actionables whose source knowledge links to a project (v29). Reuses the same
+ * two-path union as getKnowledgeIdsForProject (transitive project→meeting→
+ * recording→capture, plus direct knowledge_projects), then selects actionables
+ * on source_knowledge_id. Newest first.
+ */
+export function getActionablesForProject(projectId: string): Record<string, unknown>[] {
+  return queryAll<Record<string, unknown>>(
+    `SELECT DISTINCT a.* FROM actionables a
+     WHERE a.source_knowledge_id IN (
+       SELECT kc.id FROM knowledge_captures kc
+       JOIN recordings r ON kc.source_recording_id = r.id
+       JOIN meeting_projects mp ON r.meeting_id = mp.meeting_id
+       WHERE mp.project_id = ?
+       UNION
+       SELECT knowledge_capture_id FROM knowledge_projects WHERE project_id = ?
+     )
+     ORDER BY a.created_at DESC`,
+    [projectId, projectId]
+  )
+}
+
+// =============================================================================
+// Action item assignee → contact (v26)
+// =============================================================================
+
+export interface ActionItem {
+  id: string
+  knowledge_capture_id: string
+  content: string
+  assignee: string | null
+  assignee_contact_id: string | null
+  due_date: string | null
+  priority: string
+  status: string
+}
+
+/**
+ * Bind (or clear) the canonical contact for an action item's assignee (v26).
+ * The raw `assignee` name string is left untouched — this only sets the id link.
+ * Pass null to clear the binding. Returns the updated row.
+ *
+ * @throws if the action item does not exist.
+ */
+export function setActionItemAssignee(actionItemId: string, contactId: string | null): ActionItem {
+  const item = queryOne<ActionItem>('SELECT * FROM action_items WHERE id = ?', [actionItemId])
+  if (!item) throw new Error(`Action item ${actionItemId} not found`)
+  run('UPDATE action_items SET assignee_contact_id = ?, updated_at = ? WHERE id = ?', [
+    contactId,
+    new Date().toISOString(),
+    actionItemId
+  ])
+  return queryOne<ActionItem>('SELECT * FROM action_items WHERE id = ?', [actionItemId])!
+}
+
+/**
+ * Resolve a contact by case-insensitive exact name (v26). Backs graph:resolvePerson
+ * so the renderer's name-based resolution has a direct path instead of scanning
+ * the full contact roster. Returns the first match or undefined.
+ */
+export function getContactByName(name: string): Contact | undefined {
+  return queryOne<Contact>('SELECT * FROM contacts WHERE LOWER(name) = LOWER(?) LIMIT 1', [name])
+}
+
+// =============================================================================
+// Alias memory + identity suggestions (v27, Round 4a)
+// =============================================================================
+
+export type AliasSource = 'merge' | 'speaker_assign' | 'manual' | 'inferred' | 'rejected'
+
+/** Upsert (INSERT OR REPLACE on the UNIQUE alias_norm) a contact alias, no auto-save. */
+function upsertContactAliasNoSave(contactId: string, aliasName: string, source: AliasSource, confidence: number): void {
+  const norm = normalizeName(aliasName)
+  if (!norm) return
+  runNoSave(
+    `INSERT OR REPLACE INTO contact_aliases (id, alias_norm, contact_id, source, confidence, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [randomUUID(), norm, contactId, source, confidence, new Date().toISOString()]
+  )
+}
+
+/** Upsert a contact alias (auto-saves). Public entry for callers outside a tx. */
+export function upsertContactAlias(contactId: string, aliasName: string, source: AliasSource, confidence: number): void {
+  const norm = normalizeName(aliasName)
+  if (!norm) return
+  run(
+    `INSERT OR REPLACE INTO contact_aliases (id, alias_norm, contact_id, source, confidence, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [randomUUID(), norm, contactId, source, confidence, new Date().toISOString()]
+  )
+}
+
+/** A stored alias for a contact (the "Also known as" names folded onto a person). */
+export interface ContactAlias {
+  alias: string
+  source: AliasSource | null
+  confidence: number | null
+  created_at: string
+}
+
+/**
+ * Every "also known as" alias for a contact, newest first, excluding rejected
+ * ('Different person…') blocks — those are negative memory, not a name the
+ * person is known by. Backs identity:getAliases for the PersonDetail chip row.
+ * Returns [] if the table is absent (pre-v27 on-disk DB) rather than throwing.
+ */
+export function getContactAliases(contactId: string): ContactAlias[] {
+  const id = (contactId || '').trim()
+  if (!id) return []
+  try {
+    return queryAll<ContactAlias>(
+      `SELECT alias_norm AS alias, source, confidence, created_at
+         FROM contact_aliases
+        WHERE contact_id = ? AND (source IS NULL OR source <> 'rejected')
+        ORDER BY created_at DESC`,
+      [id]
+    )
+  } catch {
+    return []
+  }
+}
+
+/** Upsert a project alias, no auto-save (for use inside a transaction). */
+function upsertProjectAliasNoSave(projectId: string, aliasName: string, source: AliasSource, confidence: number): void {
+  const norm = normalizeName(aliasName)
+  if (!norm) return
+  runNoSave(
+    `INSERT OR REPLACE INTO project_aliases (id, alias_norm, project_id, source, confidence, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [randomUUID(), norm, projectId, source, confidence, new Date().toISOString()]
+  )
+}
+
+/** Upsert a project alias (auto-saves). */
+export function upsertProjectAlias(projectId: string, aliasName: string, source: AliasSource, confidence: number): void {
+  const norm = normalizeName(aliasName)
+  if (!norm) return
+  run(
+    `INSERT OR REPLACE INTO project_aliases (id, alias_norm, project_id, source, confidence, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [randomUUID(), norm, projectId, source, confidence, new Date().toISOString()]
+  )
+}
+
+export interface IdentitySuggestion {
+  id: string
+  kind: 'person' | 'project'
+  candidate_name: string
+  target_id: string
+  confidence: number | null
+  evidence: string | null
+  status: 'pending' | 'accepted' | 'rejected'
+  created_at: string
+}
+
+/**
+ * Queue an identity suggestion (the 0.5–0.8 resolver band). INSERT OR IGNORE on
+ * UNIQUE(kind, candidate_name, target_id) so a settled pairing is never re-queued
+ * — a prior 'rejected'/'accepted' row for the same pairing wins. Uses run() so it
+ * composes with applyTranscriptEntities' existing run()-based transaction.
+ */
+export function insertIdentitySuggestion(
+  kind: 'person' | 'project',
+  candidateName: string,
+  targetId: string,
+  confidence: number,
+  evidence: Record<string, unknown>
+): void {
+  run(
+    `INSERT OR IGNORE INTO identity_suggestions (id, kind, candidate_name, target_id, confidence, evidence, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
+    [randomUUID(), kind, candidateName, targetId, confidence, JSON.stringify(evidence ?? {}), new Date().toISOString()]
+  )
+}
+
+/** List identity suggestions, optionally filtered by status. Highest confidence first. */
+export function getIdentitySuggestions(status?: 'pending' | 'accepted' | 'rejected'): IdentitySuggestion[] {
+  if (status) {
+    return queryAll<IdentitySuggestion>(
+      'SELECT * FROM identity_suggestions WHERE status = ? ORDER BY confidence DESC, created_at DESC',
+      [status]
+    )
+  }
+  return queryAll<IdentitySuggestion>('SELECT * FROM identity_suggestions ORDER BY confidence DESC, created_at DESC')
+}
+
+/** Outcome of accepting a suggestion — the row plus undo/cascade metadata. */
+export interface AcceptSuggestionResult extends IdentitySuggestion {
+  /** merge_journal id when the accept merged two existing entities (undo handle); null for alias-only accepts. */
+  mergeJournalId: string | null
+  /** How many other pending suggestions were auto-rejected because the merge deleted their loser/keeper. */
+  supersededCount: number
+}
+
+/** Every merge_journal id for a keeper — snapshot before a merge to spot the row it writes. */
+function mergeJournalIdsFor(kind: MergeKind, keeperId: string): Set<string> {
+  return new Set(
+    queryAll<{ id: string }>('SELECT id FROM merge_journal WHERE kind = ? AND keeper_id = ?', [kind, keeperId]).map(
+      (r) => r.id
+    )
+  )
+}
+
+/**
+ * Auto-reject the OTHER pending suggestions a just-completed merge rendered moot:
+ * any suggestion that targets the now-deleted `loserId` (its keeper is gone) or
+ * proposes merging that same loser again (evidence.loserId). Flips them to
+ * 'rejected' with evidence.superseded=true — a status change ONLY, never a
+ * rejected-alias block, so a legitimate future pairing is not poisoned. Excludes
+ * `exceptId` (the suggestion being accepted). Caller runs this inside a transaction.
+ */
+export function supersedeSuggestionsForMergedLoser(
+  kind: 'person' | 'project',
+  loserId: string,
+  exceptId: string
+): number {
+  const table = kind === 'person' ? 'contacts' : 'projects'
+  const pending = queryAll<IdentitySuggestion>(
+    "SELECT * FROM identity_suggestions WHERE status = 'pending' AND kind = ? AND id != ?",
+    [kind, exceptId]
+  )
+  let superseded = 0
+  for (const s of pending) {
+    let ev: Record<string, unknown> = {}
+    try {
+      ev = s.evidence ? (JSON.parse(s.evidence) as Record<string, unknown>) : {}
+    } catch {
+      ev = {}
+    }
+    // Keeper-death cascade: also drop a suggestion whose keeper (target_id) is gone —
+    // a merge may have absorbed the keeper itself, not just the reviewed loser.
+    const targetGone = !queryOne<{ id: string }>(`SELECT id FROM ${table} WHERE id = ?`, [s.target_id])
+    if (s.target_id !== loserId && ev.loserId !== loserId && !targetGone) continue
+    ev.superseded = true
+    runNoSave("UPDATE identity_suggestions SET status = 'rejected', evidence = ? WHERE id = ?", [
+      JSON.stringify(ev),
+      s.id
+    ])
+    superseded++
+  }
+  return superseded
+}
+
+/**
+ * Keeper-death cascade for merges performed OUTSIDE the accept flow (the "merge into
+ * someone else" third door, a direction swap, or a group-canonical batch). Any of
+ * those can absorb a suggestion's keeper (target_id) into a different entity, leaving
+ * sibling suggestions pointing at a keeper row that no longer exists. This flips every
+ * such orphaned pending suggestion to 'rejected' with evidence.superseded=true (status
+ * only — no rejected-alias block, so a legitimate future pairing is not poisoned).
+ * Standalone + transactional; returns the number superseded.
+ */
+export function supersedeOrphanedSuggestions(kind?: 'person' | 'project'): number {
+  return runInTransaction(() => {
+    const pending = kind
+      ? queryAll<IdentitySuggestion>("SELECT * FROM identity_suggestions WHERE status = 'pending' AND kind = ?", [kind])
+      : queryAll<IdentitySuggestion>("SELECT * FROM identity_suggestions WHERE status = 'pending'")
+    let superseded = 0
+    for (const s of pending) {
+      const table = s.kind === 'person' ? 'contacts' : 'projects'
+      if (queryOne<{ id: string }>(`SELECT id FROM ${table} WHERE id = ?`, [s.target_id])) continue
+      let ev: Record<string, unknown> = {}
+      try {
+        ev = s.evidence ? (JSON.parse(s.evidence) as Record<string, unknown>) : {}
+      } catch {
+        ev = {}
+      }
+      ev.superseded = true
+      runNoSave("UPDATE identity_suggestions SET status = 'rejected', evidence = ? WHERE id = ?", [
+        JSON.stringify(ev),
+        s.id
+      ])
+      superseded++
+    }
+    return superseded
+  })
+}
+
+/**
+ * Accept an identity suggestion. Two shapes:
+ *
+ *  - **Discovery** (evidence carries a `loserId` for a real, still-present entity):
+ *    the suggestion pairs two existing entities (keeper = `target_id`), so accepting
+ *    MERGES the loser into the keeper via {@link mergeContacts}/{@link mergeProjects}.
+ *    The merge writes a merge_journal row — its id is returned as `mergeJournalId`
+ *    so the UI can offer Undo — and any sibling suggestions the merge invalidated are
+ *    superseded ({@link supersedeSuggestionsForMergedLoser}).
+ *
+ *  - **Alias** (no resolvable loser — a raw mention): write `candidate_name` as a
+ *    'manual' alias (confidence 1.0) of the target and attach the evidence meeting.
+ *    `mergeJournalId` is null.
+ *
+ * Sets the suggestion status to 'accepted'.
+ *
+ * @throws if the suggestion does not exist.
+ */
+export function acceptIdentitySuggestion(id: string): AcceptSuggestionResult {
+  const s = queryOne<IdentitySuggestion>('SELECT * FROM identity_suggestions WHERE id = ?', [id])
+  if (!s) throw new Error(`Identity suggestion ${id} not found`)
+
+  let evidence: { meetingId?: string; loserId?: string } = {}
+  try {
+    evidence = s.evidence ? JSON.parse(s.evidence) : {}
+  } catch {
+    // malformed evidence — treat as a bare alias accept
+  }
+
+  const jkind: MergeKind = s.kind === 'person' ? 'contact' : 'project'
+  const loserId = evidence.loserId
+  const table = s.kind === 'person' ? 'contacts' : 'projects'
+  const loserExists =
+    !!loserId &&
+    loserId !== s.target_id &&
+    !!queryOne<{ id: string }>(`SELECT id FROM ${table} WHERE id = ?`, [loserId])
+
+  if (loserExists) {
+    const before = mergeJournalIdsFor(jkind, s.target_id)
+    if (s.kind === 'person') mergeContacts(s.target_id, loserId!)
+    else mergeProjects(s.target_id, loserId!)
+    const after = queryAll<{ id: string }>(
+      'SELECT id FROM merge_journal WHERE kind = ? AND keeper_id = ? ORDER BY created_at DESC',
+      [jkind, s.target_id]
+    )
+    const mergeJournalId = after.find((r) => !before.has(r.id))?.id ?? null
+
+    const { row, supersededCount } = runInTransaction(() => {
+      const count = supersedeSuggestionsForMergedLoser(s.kind, loserId!, id)
+      runNoSave("UPDATE identity_suggestions SET status = 'accepted' WHERE id = ?", [id])
+      return { row: queryOne<IdentitySuggestion>('SELECT * FROM identity_suggestions WHERE id = ?', [id])!, supersededCount: count }
+    })
+    return { ...row, mergeJournalId, supersededCount }
+  }
+
+  const row = runInTransaction(() => {
+    const meetingId = evidence.meetingId
+    if (s.kind === 'person') {
+      upsertContactAliasNoSave(s.target_id, s.candidate_name, 'manual', 1.0)
+      if (meetingId) {
+        runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)', [
+          meetingId,
+          s.target_id,
+          'attendee'
+        ])
+        recomputeContactMeetingCount(s.target_id)
+      }
+    } else {
+      upsertProjectAliasNoSave(s.target_id, s.candidate_name, 'manual', 1.0)
+      if (meetingId) {
+        runNoSave('INSERT OR IGNORE INTO meeting_projects (meeting_id, project_id) VALUES (?, ?)', [
+          meetingId,
+          s.target_id
+        ])
+      }
+    }
+    runNoSave("UPDATE identity_suggestions SET status = 'accepted' WHERE id = ?", [id])
+    return queryOne<IdentitySuggestion>('SELECT * FROM identity_suggestions WHERE id = ?', [id])!
+  })
+  return { ...row, mergeJournalId: null, supersededCount: 0 }
+}
+
+/**
+ * Reject an identity suggestion: write a 'rejected' alias so the resolver never
+ * links that name to that entity again, and set the suggestion status to
+ * 'rejected'. One transaction.
+ *
+ * @throws if the suggestion does not exist.
+ */
+export function rejectIdentitySuggestion(id: string): IdentitySuggestion {
+  return runInTransaction(() => {
+    const s = queryOne<IdentitySuggestion>('SELECT * FROM identity_suggestions WHERE id = ?', [id])
+    if (!s) throw new Error(`Identity suggestion ${id} not found`)
+
+    if (s.kind === 'person') {
+      upsertContactAliasNoSave(s.target_id, s.candidate_name, 'rejected', 0)
+    } else {
+      upsertProjectAliasNoSave(s.target_id, s.candidate_name, 'rejected', 0)
+    }
+
+    runNoSave("UPDATE identity_suggestions SET status = 'rejected' WHERE id = ?", [id])
+    return queryOne<IdentitySuggestion>('SELECT * FROM identity_suggestions WHERE id = ?', [id])!
+  })
+}
+
+// =============================================================================
+// Ambiguous mention buckets + per-recording resolution
+// =============================================================================
+//
+// A bare first name ("Sergio") linked to dozens of recordings is not a person — it
+// is an unresolved bucket denoting several real people (detectAmbiguousName). These
+// helpers surface those buckets and let a recording's mention be pinned to the real
+// contact it means, one recording at a time, without a corpus-wide merge/alias.
+
+export interface AmbiguousCandidate {
+  id: string
+  name: string
+}
+
+/** A recording that mentions a bucket name, with the system's best guess at who it is. */
+export interface BucketRecording {
+  recordingId: string
+  title: string
+  date: string | null
+  meetingId: string | null
+  /** False when the recording is not linked to any meeting (link it first). */
+  meetingLinked: boolean
+  /** Whether the linked meeting carries CALENDAR attendee data (attendees/organizer
+   *  email). Currently false for all meetings until the M365 connector backfills —
+   *  the card uses this to be honest that context is transcript-derived. */
+  meetingHasCalendarAttendees: boolean
+  /** Best-guess real contact for THIS recording (null when unclear). */
+  bestGuessId: string | null
+  bestGuessName: string | null
+  /** How the best guess was derived (see signal-tiers.ts for the hierarchy). */
+  method: 'attendee-email' | 'speaker-map' | 'attendee-context' | 'unclear'
+  /** Human phrase for the signal ("Hurtado was an attendee"). */
+  signal: string
+  /** Existing stored decision: contact id, or null when explicitly marked Unclear. */
+  resolvedContactId: string | null
+  /** The method of the existing stored decision (drives upgrade-only re-sweeps). */
+  resolvedMethod: string | null
+  resolved: boolean
+}
+
+export interface BucketResolution {
+  contactId: string
+  name: string
+  candidates: AmbiguousCandidate[]
+  recordings: BucketRecording[]
+}
+
+export interface AmbiguousBucket {
+  contactId: string
+  name: string
+  candidates: AmbiguousCandidate[]
+  recordingCount: number
+  resolvedCount: number
+  pendingCount: number
+}
+
+/** Build placeholders (?, ?, …) for an IN clause of `n` items. */
+function inPlaceholders(n: number): string {
+  return new Array(n).fill('?').join(',')
+}
+
+/** Compute the full per-recording resolution view for one bucket contact. */
+function buildBucketResolution(
+  contact: { id: string; name: string },
+  allContacts: Array<{ id: string; name: string }>
+): BucketResolution {
+  const amb = detectAmbiguousName(contact.name, allContacts, contact.id)
+  const candidates: AmbiguousCandidate[] = amb.matches.map((m) => ({ id: m.id, name: m.name }))
+  const candNameById = new Map(candidates.map((c) => [c.id, c.name]))
+  const candIds = candidates.map((c) => c.id)
+  const nameKey = normalizeName(contact.name)
+
+  const recRows =
+    candIds.length === 0
+      ? []
+      : queryAll<{ recordingId: string; filename: string | null; date: string | null; meetingId: string | null; subject: string | null }>(
+          `SELECT DISTINCT r.id AS recordingId, r.filename AS filename, r.date_recorded AS date,
+                  r.meeting_id AS meetingId, m.subject AS subject
+             FROM recordings r
+             JOIN meetings m ON m.id = r.meeting_id
+             JOIN meeting_contacts mc ON mc.meeting_id = m.id
+            WHERE mc.contact_id = ?
+              AND COALESCE(r.personal, 0) = 0 AND r.deleted_at IS NULL
+            ORDER BY r.date_recorded DESC`,
+          [contact.id]
+        )
+
+  const recIds = recRows.map((r) => r.recordingId)
+  const meetingIds = [...new Set(recRows.map((r) => r.meetingId).filter((x): x is string => !!x))]
+
+  // Which of these meetings carry CALENDAR attendee data (attendees JSON / organizer
+  // email) vs transcript-derived people only. Drives the attendee-email (tier 2) vs
+  // attendee-context (tier 4) distinction and the card's honest "no attendee list"
+  // message. Currently empty for all meetings until M365 backfills (see signal-tiers).
+  const calendarMeetings = new Set<string>()
+  if (meetingIds.length > 0) {
+    for (const row of queryAll<{ id: string; attendees: string | null; organizer_email: string | null }>(
+      `SELECT id, attendees, organizer_email FROM meetings WHERE id IN (${inPlaceholders(meetingIds.length)})`,
+      meetingIds
+    )) {
+      const hasOrganizer = !!(row.organizer_email && row.organizer_email.trim())
+      let hasAttendees = false
+      try {
+        const parsed = row.attendees ? (JSON.parse(row.attendees) as unknown[]) : []
+        hasAttendees = Array.isArray(parsed) && parsed.length > 0
+      } catch {
+        hasAttendees = false
+      }
+      if (hasOrganizer || hasAttendees) calendarMeetings.add(row.id)
+    }
+  }
+
+  // Batch the three signal sources so the whole bucket costs a fixed number of queries.
+  const speakerByRec = new Map<string, Set<string>>() // recording → candidate ids named as speakers
+  if (recIds.length > 0 && candIds.length > 0) {
+    for (const row of queryAll<{ recording_id: string; contact_id: string }>(
+      `SELECT DISTINCT recording_id, contact_id FROM transcript_speakers
+        WHERE recording_id IN (${inPlaceholders(recIds.length)}) AND contact_id IN (${inPlaceholders(candIds.length)})`,
+      [...recIds, ...candIds]
+    )) {
+      let s = speakerByRec.get(row.recording_id)
+      if (!s) speakerByRec.set(row.recording_id, (s = new Set()))
+      s.add(row.contact_id)
+    }
+  }
+
+  const attendeeByMeeting = new Map<string, Set<string>>() // meeting → candidate ids attending
+  if (meetingIds.length > 0 && candIds.length > 0) {
+    for (const row of queryAll<{ meeting_id: string; contact_id: string }>(
+      `SELECT meeting_id, contact_id FROM meeting_contacts
+        WHERE meeting_id IN (${inPlaceholders(meetingIds.length)}) AND contact_id IN (${inPlaceholders(candIds.length)})`,
+      [...meetingIds, ...candIds]
+    )) {
+      let s = attendeeByMeeting.get(row.meeting_id)
+      if (!s) attendeeByMeeting.set(row.meeting_id, (s = new Set()))
+      s.add(row.contact_id)
+    }
+  }
+
+  const resolutionByRec = new Map<string, { contactId: string | null; method: string | null }>()
+  if (recIds.length > 0) {
+    for (const row of queryAll<{ recording_id: string; resolved_contact_id: string | null; method: string | null }>(
+      `SELECT recording_id, resolved_contact_id, method FROM mention_resolutions
+        WHERE source_name = ? AND recording_id IN (${inPlaceholders(recIds.length)})`,
+      [nameKey, ...recIds]
+    )) {
+      resolutionByRec.set(row.recording_id, { contactId: row.resolved_contact_id, method: row.method })
+    }
+  }
+
+  const lastName = (n: string): string => {
+    const toks = (n || '').trim().split(/\s+/)
+    return toks.length > 1 ? toks[toks.length - 1] : n
+  }
+
+  const recordings: BucketRecording[] = recRows.map((r) => {
+    const meetingLinked = !!r.meetingId
+    const calendarBacked = !!r.meetingId && calendarMeetings.has(r.meetingId)
+    const spoken = speakerByRec.get(r.recordingId)
+    let bestGuessId: string | null = null
+    let method: BucketRecording['method'] = 'unclear'
+    let signal: string
+
+    if (!meetingLinked) {
+      signal = 'Not linked to a meeting — link it first for automatic resolution.'
+    } else {
+      signal = 'No attendee or speaker signal — assign manually.'
+    }
+
+    if (spoken && spoken.size === 1) {
+      // A user-confirmed speaker map is stronger than transcript co-presence.
+      bestGuessId = [...spoken][0]
+      method = 'speaker-map'
+      signal = `${lastName(candNameById.get(bestGuessId) || '')} named as a speaker`
+    } else {
+      const attending = r.meetingId ? attendeeByMeeting.get(r.meetingId) : undefined
+      if (attending && attending.size === 1) {
+        bestGuessId = [...attending][0]
+        const who = lastName(candNameById.get(bestGuessId) || '')
+        if (calendarBacked) {
+          method = 'attendee-email'
+          signal = `${who} was a calendar attendee`
+        } else {
+          // Meeting people are transcript-derived (no calendar attendees yet) — honest.
+          method = 'attendee-context'
+          signal = `${who} was in this meeting (from transcript)`
+        }
+      } else if (attending && attending.size > 1) {
+        signal = `${attending.size} candidates in this meeting — ambiguous`
+      } else if (meetingLinked && !calendarBacked) {
+        signal = 'No attendee list for this meeting — connect Microsoft 365 for automatic resolution.'
+      }
+    }
+
+    const stored = resolutionByRec.get(r.recordingId)
+    const decided = stored !== undefined
+
+    return {
+      recordingId: r.recordingId,
+      title: r.subject || r.filename || r.recordingId,
+      date: r.date,
+      meetingId: r.meetingId,
+      meetingLinked,
+      meetingHasCalendarAttendees: calendarBacked,
+      bestGuessId,
+      bestGuessName: bestGuessId ? candNameById.get(bestGuessId) ?? null : null,
+      method,
+      signal,
+      resolvedContactId: decided ? stored!.contactId : null,
+      resolvedMethod: decided ? stored!.method : null,
+      resolved: decided
+    }
+  })
+
+  return { contactId: contact.id, name: contact.name, candidates, recordings }
+}
+
+/** Every contact that is an ambiguous mention bucket, with resolution progress. */
+export function getAmbiguousBuckets(): AmbiguousBucket[] {
+  const contacts = queryAll<{ id: string; name: string }>('SELECT id, name FROM contacts')
+  const buckets: AmbiguousBucket[] = []
+  for (const c of contacts) {
+    const amb = detectAmbiguousName(c.name, contacts, c.id)
+    if (!amb.ambiguous) continue
+    const res = buildBucketResolution(c, contacts)
+    const resolvedCount = res.recordings.filter((r) => r.resolved).length
+    buckets.push({
+      contactId: c.id,
+      name: c.name,
+      candidates: res.candidates,
+      recordingCount: res.recordings.length,
+      resolvedCount,
+      pendingCount: res.recordings.length - resolvedCount
+    })
+  }
+  // Most recordings first — the biggest buckets are the most valuable to split.
+  buckets.sort((a, b) => b.recordingCount - a.recordingCount)
+  return buckets
+}
+
+/** Set of contact ids that are ambiguous buckets (for callers that must skip merges). */
+export function getAmbiguousBucketIds(): Set<string> {
+  const contacts = queryAll<{ id: string; name: string }>('SELECT id, name FROM contacts')
+  const ids = new Set<string>()
+  for (const c of contacts) {
+    if (detectAmbiguousName(c.name, contacts, c.id).ambiguous) ids.add(c.id)
+  }
+  return ids
+}
+
+/** Full per-recording resolution view for one bucket contact, or null if not a bucket. */
+export function getBucketResolution(contactId: string): BucketResolution | null {
+  const contacts = queryAll<{ id: string; name: string }>('SELECT id, name FROM contacts')
+  const contact = contacts.find((c) => c.id === contactId)
+  if (!contact) return null
+  const amb = detectAmbiguousName(contact.name, contacts, contact.id)
+  if (!amb.ambiguous) return null
+  return buildBucketResolution(contact, contacts)
+}
+
+/** A stored per-recording mention decision (decided=false ⇒ resolve normally). */
+export interface MentionDecision {
+  decided: boolean
+  /** Resolved contact id, or null when the user explicitly marked it Unclear. */
+  contactId: string | null
+}
+
+/** Look up a stored per-recording resolution for a raw mention name. */
+export function getMentionResolution(recordingId: string, sourceName: string): MentionDecision {
+  const row = queryOne<{ resolved_contact_id: string | null }>(
+    'SELECT resolved_contact_id FROM mention_resolutions WHERE recording_id = ? AND source_name = ?',
+    [recordingId, normalizeName(sourceName)]
+  )
+  return row ? { decided: true, contactId: row.resolved_contact_id } : { decided: false, contactId: null }
+}
+
+/** Upsert a per-recording mention resolution inside an existing transaction (no save). */
+export function recordMentionResolutionNoSave(
+  recordingId: string,
+  sourceName: string,
+  contactId: string | null,
+  method: string,
+  confidence: number
+): void {
+  const key = normalizeName(sourceName)
+  if (!recordingId || !key) return
+  runNoSave(
+    `INSERT OR REPLACE INTO mention_resolutions
+       (id, recording_id, source_name, resolved_contact_id, method, confidence, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [randomUUID(), recordingId, key, contactId, method, confidence, new Date().toISOString()]
+  )
+}
+
+/**
+ * Assign (or clear) the real contact a bucket mention denotes in one recording.
+ * Stores the decision and, when a contact is chosen, links that recording's meeting
+ * to them so the attribution follows. `contactId = null` records an explicit
+ * "Unclear" so the sweep and re-analysis leave that recording alone. Auto-saves.
+ */
+export function resolveMention(
+  recordingId: string,
+  sourceName: string,
+  contactId: string | null,
+  method = 'manual',
+  confidence = 1.0
+): void {
+  runInTransaction(() => {
+    recordMentionResolutionNoSave(recordingId, sourceName, contactId, method, confidence)
+    if (contactId) {
+      const rec = queryOne<{ meeting_id: string | null }>('SELECT meeting_id FROM recordings WHERE id = ?', [
+        recordingId
+      ])
+      if (rec?.meeting_id) {
+        runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)', [
+          rec.meeting_id,
+          contactId,
+          'attendee'
+        ])
+        recomputeContactMeetingCount(contactId)
+      }
+    }
+  })
 }
 
 /**
@@ -3021,6 +6990,8 @@ export interface MeetingCandidateWithDetails {
   matchReason: string | null
   isAiSelected: boolean
   isUserConfirmed: boolean
+  /** True for an all-day meeting — a WEAK time signal in match scoring. */
+  isAllDay: boolean
 }
 
 export function getCandidatesForRecordingWithDetails(recordingId: string): MeetingCandidateWithDetails[] {
@@ -3028,7 +6999,7 @@ export function getCandidatesForRecordingWithDetails(recordingId: string): Meeti
 
   const sql = `
     SELECT c.id, c.recording_id, c.meeting_id, c.confidence_score, c.match_reason,
-      c.is_ai_selected, c.is_user_confirmed, m.subject, m.start_time, m.end_time
+      c.is_ai_selected, c.is_user_confirmed, m.subject, m.start_time, m.end_time, m.is_all_day
     FROM recording_meeting_candidates c
     JOIN meetings m ON m.id = c.meeting_id
     WHERE c.recording_id = ?
@@ -3039,14 +7010,15 @@ export function getCandidatesForRecordingWithDetails(recordingId: string): Meeti
     const rows = queryAll<{
       id: string; recording_id: string; meeting_id: string; confidence_score: number
       match_reason: string | null; is_ai_selected: number; is_user_confirmed: number
-      subject: string; start_time: string; end_time: string
+      subject: string; start_time: string; end_time: string; is_all_day: number | null
     }>(sql, [recordingId])
 
     return rows.map(r => ({
       id: r.id, recordingId: r.recording_id, meetingId: r.meeting_id,
       subject: r.subject, startTime: r.start_time, endTime: r.end_time,
       confidenceScore: r.confidence_score, matchReason: r.match_reason,
-      isAiSelected: r.is_ai_selected === 1, isUserConfirmed: r.is_user_confirmed === 1
+      isAiSelected: r.is_ai_selected === 1, isUserConfirmed: r.is_user_confirmed === 1,
+      isAllDay: (r.is_all_day ?? 0) === 1
     }))
   } catch (error) {
     console.error('Failed to get candidates for recording:', error)

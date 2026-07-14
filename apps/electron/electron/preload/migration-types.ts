@@ -41,6 +41,30 @@ export interface MigrationProgress {
   error?: string
 }
 
+// BUG A — misbundled-recording repair (stale-data cleanup).
+export interface MisbundledRecording {
+  recordingId: string
+  filename: string | null
+  dateRecorded: string
+  currentMeetingId: string
+  currentMeetingSubject: string | null
+  currentMeetingStart: string
+  currentMeetingEnd: string
+  gapHours: number
+  action: 'rebundle' | 'unlink'
+  targetMeetingId: string | null
+  targetMeetingStart: string | null
+}
+
+export interface MisbundleRepairReport {
+  dryRun: boolean
+  totalCount: number
+  applied: number
+  sample: MisbundledRecording[]
+  sampleTruncated: boolean
+  error?: string
+}
+
 export interface MigrationAPI {
   previewCleanup: () => Promise<MigrationCleanupPreview>
   runCleanup: () => Promise<MigrationCleanupResult>
@@ -48,4 +72,8 @@ export interface MigrationAPI {
   rollbackV11: () => Promise<MigrationRollbackResult>
   getStatus: () => Promise<MigrationStatus>
   onProgress: (callback: (progress: MigrationProgress) => void) => () => void
+  /** BUG A: dry-run — returns count + sample of misbundled recordings, rewrites nothing. */
+  previewMisbundledRecordings: () => Promise<MisbundleRepairReport>
+  /** BUG A: applies the repair (rebundle onto matching sibling occurrence, or unlink). */
+  applyMisbundledRecordings: () => Promise<MisbundleRepairReport>
 }

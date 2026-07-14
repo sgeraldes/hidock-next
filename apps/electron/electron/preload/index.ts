@@ -1,4 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type {
+  ConnectorSummary,
+  ConnectorStatus,
+  ExternalPerson,
+  IngestionOutcome,
+  SourceContainer,
+} from '@hidock/connectors'
 
 /**
  * B-SET-004 / QAM-002: QA logging check via localStorage bridge.
@@ -57,6 +64,7 @@ import type {
   RAGStatus,
   GetContactsRequest,
   GetContactsResponse,
+  CreateContactRequest,
   UpdateContactRequest,
   GetProjectsRequest,
   GetProjectsResponse,
@@ -65,18 +73,193 @@ import type {
   TagMeetingRequest,
   OutputTemplate,
   GenerateOutputRequest,
-  GenerateOutputResponse
+  GenerateOutputResponse,
+  ArtifactsAPI
 } from '../main/types/api'
 import type { Contact, ContactWithMeetings, Project, ProjectWithMeetings } from '../main/types/database'
 import type { MigrationAPI } from './migration-types'
-import type { 
-  KnowledgeCapture, 
-  Actionable, 
-  Conversation, 
-  Message 
+import type {
+  KnowledgeCapture,
+  Actionable,
+  Conversation,
+  Message,
+  Person
 } from '../../src/types/knowledge'
+import type { PipelineState } from '../main/types/device-pipeline'
+
+/** A Context Graph node with its degree + click-through ids (mirrors the service DTO). */
+interface ContextGraphNode {
+  id: string
+  type: string
+  label: string
+  degree: number
+  contactId?: string
+  meetingId?: string
+  projectId?: string
+}
+
+/** A Context Graph payload: nodes + edges (+ the focused center, if any). */
+interface ContextGraphData {
+  center: string | null
+  nodes: ContextGraphNode[]
+  edges: Array<{ id: string; source: string; target: string; type: string; weight: number }>
+}
+
+/** A lens node: a graph node annotated with its stratum band + effective date. */
+interface ContextLensNode extends ContextGraphNode {
+  stratum: 'strategic' | 'operational' | 'people' | 'evidence'
+  dateMs: number | null
+}
+
+/** Per-stratum totals-in-scope vs. shown after the lens node budget. */
+interface ContextLensStratumCount {
+  stratum: 'strategic' | 'operational' | 'people' | 'evidence'
+  total: number
+  shown: number
+}
+
+/** A stratified, time-aware lens payload. */
+interface ContextLensData {
+  center: string | null
+  nodes: ContextLensNode[]
+  edges: Array<{ id: string; source: string; target: string; type: string; weight: number }>
+  referenceMs: number | null
+  strata: ContextLensStratumCount[]
+}
+
+/** A one-line entity descriptor (lens center / provenance node). */
+interface LensCenter {
+  id: string
+  type: string
+  label: string
+  contactId?: string
+  meetingId?: string
+  projectId?: string
+}
+
+type ProvenanceEntityDTO = LensCenter & { dateMs: number | null }
+
+/** The evidence path + narrative behind a decision / risk / action. */
+interface ProvenanceDTO {
+  node: ProvenanceEntityDTO | null
+  meetings: ProvenanceEntityDTO[]
+  people: ProvenanceEntityDTO[]
+  projects: ProvenanceEntityDTO[]
+  actions: ProvenanceEntityDTO[]
+  pathIds: string[]
+  narrative: string
+  dateMs: number | null
+}
+
+/** Rich detail for the node inspector — identity, contact facts, graph stats. */
+interface NodeDetailDTO {
+  node: LensCenter | null
+  linked: boolean
+  contactId: string | null
+  pronouns: string | null
+  role: string | null
+  company: string | null
+  email: string | null
+  meetingCount: number
+  firstSeenMs: number | null
+  lastSeenMs: number | null
+  peopleCount: number
+  projectCount: number
+  degree: number
+  aliases: string[]
+  narrative: string
+}
+
+/** Blast-radius preview for a two-node merge. */
+interface MergePreviewDTO {
+  a: { id: string; label: string; type: string; edges: number } | null
+  b: { id: string; label: string; type: string; edges: number } | null
+  shared: number
+  resulting: number
+  contactMerge: boolean
+  contactImpact?: { keeper: number; loser: number }
+}
+
+/** Project issue / risk / note (v29). */
+interface ProjectNote {
+  id: string
+  project_id: string
+  kind: 'issue' | 'risk' | 'note'
+  content: string
+  status: 'open' | 'resolved'
+  created_at: string
+  resolved_at: string | null
+}
+
+/** Actionable linked to a project (v29). */
+interface ProjectActionable {
+  id: string
+  type: string
+  title: string
+  description: string | null
+  sourceKnowledgeId: string
+  status: string
+  confidence: number | null
+  createdAt: string
+}
+
+/** A keeper link that appeared after a merge — surfaced by unmerge for manual review (v30). */
+interface OrphanLink {
+  table: 'meeting_contacts' | 'transcript_speakers' | 'meeting_projects' | 'knowledge_projects'
+  key: string
+  label: string
+  date: string | null
+}
+
+/** Result of an unmerge: restore counts + links the user must reassign by hand (v30). */
+interface UnmergeResult {
+  loserId: string
+  loserName: string
+  restored: {
+    meetingLinks: number
+    speakerLinks: number
+    knowledgeLinks: number
+    aliases: number
+    fieldsRestored: number
+    skipped: number
+  }
+  orphanedSinceMerge: OrphanLink[]
+}
+
+/** One merge-journal entry surfaced in an entity's "Merge history" (v30). */
+interface MergeJournalEntry {
+  id: string
+  kind: 'contact' | 'project'
+  keeperId: string
+  loserId: string
+  loserName: string
+  createdAt: string
+  undoneAt: string | null
+  linkCount: number
+}
+
+/** Snapshot of the main-process transcription queue processor (dock reflects this). */
+export interface TranscriptionQueueState {
+  paused: boolean
+  isProcessing: boolean
+  processingId: string | null
+  pendingCount: number
+  processingCount: number
+}
 
 // Type definitions for the API
+/** Result of a clipboard screenshot capture (mirrors main/services/clipboard-capture.ts). */
+export interface ClipboardCaptureResult {
+  ok: boolean
+  reason?: 'no-image' | 'duplicate' | 'error'
+  captureId?: string
+  artifactId?: string
+  title?: string
+  sourceType?: 'image'
+  deduped?: boolean
+  error?: string
+}
+
 export interface ElectronAPI {
   // App
   app: {
@@ -95,6 +278,7 @@ export interface ElectronAPI {
     set: (config: any) => Promise<any>
     updateSection: (section: string, values: any) => Promise<any>
     getValue: (key: string) => Promise<any>
+    listGeminiModels: () => Promise<any>
   }
 
   // Database - Meetings
@@ -103,15 +287,20 @@ export interface ElectronAPI {
     getById: (id: string) => Promise<any>
     getByIds: (ids: string[]) => Promise<Record<string, any>>
     getDetails: (id: string) => Promise<any>
-    update: (request: { id: string; subject?: string; start_time?: string; end_time?: string; location?: string | null; description?: string | null }) => Promise<Result<any>>
+    update: (request: { id: string; subject?: string; start_time?: string; end_time?: string; location?: string | null; description?: string | null; organizer_name?: string | null; organizer_email?: string | null }) => Promise<Result<any>>
+    addAttendee: (request: { meetingId: string; name?: string; email?: string }) => Promise<Result<Contact>>
+    removeAttendee: (request: { meetingId: string; contactId: string }) => Promise<Result<void>>
   }
 
   // Contacts
   contacts: {
     getAll: (request?: GetContactsRequest) => Promise<Result<GetContactsResponse>>
     getById: (id: string) => Promise<Result<ContactWithMeetings>>
+    create: (request: CreateContactRequest) => Promise<Result<Person>>
     update: (request: UpdateContactRequest) => Promise<Result<Contact>>
     delete: (id: string) => Promise<Result<void>>
+    merge: (request: { keeperId: string; loserId: string }) => Promise<Result<Person>>
+    unmerge: (journalId: string) => Promise<Result<UnmergeResult>>
     getForMeeting: (meetingId: string) => Promise<Result<Contact[]>>
   }
 
@@ -125,6 +314,15 @@ export interface ElectronAPI {
     tagMeeting: (request: TagMeetingRequest) => Promise<Result<void>>
     untagMeeting: (request: TagMeetingRequest) => Promise<Result<void>>
     getForMeeting: (meetingId: string) => Promise<Result<Project[]>>
+    merge: (request: { keeperId: string; loserId: string }) => Promise<Result<Project>>
+    unmerge: (journalId: string) => Promise<Result<UnmergeResult>>
+    getForKnowledge: (knowledgeCaptureId: string) => Promise<Result<Project[]>>
+    getNotes: (request: { projectId: string; kind?: 'issue' | 'risk' | 'note' }) => Promise<Result<ProjectNote[]>>
+    addNote: (request: { projectId: string; kind: 'issue' | 'risk' | 'note'; content: string }) => Promise<Result<ProjectNote>>
+    updateNote: (request: { id: string; content?: string; status?: 'open' | 'resolved' }) => Promise<Result<ProjectNote>>
+    deleteNote: (request: { id: string }) => Promise<Result<void>>
+    getActionables: (projectId: string) => Promise<Result<ProjectActionable[]>>
+    openFolder: (projectId: string) => Promise<Result<void>>
   }
 
   // Database - Recordings
@@ -135,6 +333,8 @@ export interface ElectronAPI {
     updateStatus: (id: string, status: string) => Promise<any>
     updateRecordingStatus: (id: string, status: string) => Promise<{ success: boolean; data?: any; error?: string }>
     updateTranscriptionStatus: (id: string, status: string) => Promise<{ success: boolean; data?: any; error?: string }>
+    updateDuration: (id: string, durationSeconds: number) => Promise<{ success: boolean; error?: string }>
+    backfillDurations: () => Promise<{ success: boolean; scanned?: number; updated?: number; markedLowValue?: number; error?: string }>
     linkToMeeting: (recordingId: string, meetingId: string, confidence: number, method: string) => Promise<any>
     delete: (id: string) => Promise<boolean>
     deleteBatch: (ids: string[]) => Promise<{
@@ -143,22 +343,78 @@ export interface ElectronAPI {
       failed: number
       errors: Array<{ id: string; error: string }>
     }>
+    // Privacy source-deletion (v38)
+    markPersonal: (id: string, personal: boolean) => Promise<{ success: boolean; personal?: boolean; error?: string }>
+    deletionImpact: (id: string) => Promise<{
+      success: boolean
+      data?: {
+        recordingId: string
+        filename: string
+        transcripts: number
+        actionItems: number
+        embeddings: number
+        captures: number
+        artifacts: number
+        meetingLinks: number
+        hasAudioFile: boolean
+      }
+      error?: string
+    }>
+    deleteCascade: (id: string, hard: boolean) => Promise<{
+      success: boolean
+      mode?: 'soft' | 'hard'
+      removed?: {
+        transcripts: number
+        embeddings: number
+        captures: number
+        actionItems: number
+        artifacts: number
+        speakerBindings: number
+        candidates: number
+        meetingLinksRemoved: number
+      }
+      filesRemoved?: { audio: boolean; wikiPages: number; artifactBlobs: number }
+      error?: string
+    }>
+    restore: (id: string) => Promise<{ success: boolean }>
     // Recording-Meeting linking dialog methods
     getCandidates: (recordingId: string) => Promise<{ success: boolean; data: any[]; error?: string }>
     getMeetingsNearDate: (date: string) => Promise<{ success: boolean; data: any[]; error?: string }>
     selectMeeting: (recordingId: string, meetingId: string | null) => Promise<{ success: boolean; error?: string }>
+    // Live-recording pre-assignment (attribution set IN ADVANCE, keyed by device filename)
+    preassign: (filename: string, meetingId: string | null) => Promise<{ success: boolean; error?: string }>
+    getPreassignment: (filename: string) => Promise<{ success: boolean; data: { filename: string; meeting_id: string | null; created_at?: string } | null; error?: string }>
+    clearPreassignment: (filename: string) => Promise<{ success: boolean; error?: string }>
     // External file import
     addExternal: () => Promise<{ success: boolean; recording?: any; error?: string }>
     addExternalByPath: (filePath: string) => Promise<{ success: boolean; recording?: any; error?: string }>
     // Transcription
     transcribe: (recordingId: string) => Promise<void>
-    addToQueue: (recordingId: string) => Promise<string | false>
+    addToQueue: (recordingId: string, priority?: boolean) => Promise<string | false>
+    reprocessWith: (recordingId: string, provider: 'gemini' | 'local-asr' | 'vibevoice') => Promise<{ success: boolean; queueItemId?: string; error?: string }>
+    reDiarize: (recordingId: string) => Promise<{ success: boolean; queueItemId?: string; cleared?: { clearedLabelBindings: number; clearedMentions: number; clearedMarkers: number }; error?: string }>
+    // Meeting-timeline data (v39): windowed sentiment + action/decision markers.
+    getTimelineAnalysis: (recordingId: string) => Promise<{
+      sentimentSegments: Array<{ startSec: number; endSec: number; score: number }>
+      eventMarkers: Array<{ id: string; kind: 'action' | 'decision'; atSec: number; label: string; refId: string }>
+    }>
+    analyzeTimeline: (recordingId: string) => Promise<{
+      sentimentSegments: Array<{ startSec: number; endSec: number; score: number }>
+      eventMarkers: Array<{ id: string; kind: 'action' | 'decision'; atSec: number; label: string; refId: string }>
+    }>
     processQueue: () => Promise<boolean>
     getTranscriptionStatus: () => Promise<{ isProcessing: boolean; pendingCount: number; processingCount: number }>
     getTranscriptionQueue: () => Promise<any[]>
     cancelTranscription: (recordingId: string) => Promise<{ success: boolean }>
     cancelAllTranscriptions: () => Promise<{ success: boolean; count: number }>
     updateQueueItem: (id: string, status: string, errorMessage?: string) => Promise<boolean>
+    // Queue-level control (main-process queue processor). Pause stops dequeuing
+    // new items (an in-flight item finishes); reorder applies a prioritize (up) /
+    // deprioritize (down) intent. All return the fresh queue state.
+    pauseTranscriptionQueue: () => Promise<TranscriptionQueueState>
+    resumeTranscriptionQueue: () => Promise<TranscriptionQueueState>
+    reorderTranscription: (recordingId: string, direction: 'up' | 'down') => Promise<TranscriptionQueueState>
+    getTranscriptionQueueState: () => Promise<TranscriptionQueueState>
   }
 
   // Database - Transcripts
@@ -166,6 +422,61 @@ export interface ElectronAPI {
     getByRecordingId: (recordingId: string) => Promise<any>
     getByRecordingIds: (recordingIds: string[]) => Promise<Record<string, any>>
     search: (query: string) => Promise<any[]>
+    assignSpeaker: (request: { recordingId: string; speakerLabel: string; contactId?: string; newName?: string }) => Promise<Result<Contact>>
+    getSpeakerMap: (request: { recordingId: string }) => Promise<Result<Array<{ speaker_label: string; contact_id: string; name: string }>>>
+    unassignSpeaker: (request: { recordingId: string; speakerLabel: string }) => Promise<Result<void>>
+  }
+
+  // Old-transcript triage + text reformat (Library "Upgrade Transcripts")
+  transcriptUpgrade: {
+    scan: (req?: { threshold?: number }) => Promise<Result<any>>
+    run: (req?: { threshold?: number }) => Promise<Result<any>>
+    getStatus: (req?: { threshold?: number }) => Promise<Result<any>>
+    getRecommended: () => Promise<Result<string[]>>
+  }
+
+  // Speaker self-identification (bind "Speaker N" to a self-stated name)
+  selfId: {
+    scan: () => Promise<Result<any>>
+    runForRecording: (request: { recordingId: string; force?: boolean }) => Promise<Result<any>>
+    backfill: () => Promise<Result<any>>
+    getStatus: () => Promise<Result<any>>
+    getMergeSuspected: () => Promise<Result<Array<{ label: string; names: string[] }>>>
+  }
+
+  // Per-turn speaker overrides + speaker splits (v37): fix a single turn, or
+  // fork a merged diarization label into an independently-assignable half.
+  turnSpeakers: {
+    getOverrides: (request: { recordingId: string }) => Promise<Result<Array<{ turn_index: number; contact_id: string; name: string }>>>
+    setOverride: (request: { recordingId: string; turnIndex: number; contactId?: string; newName?: string }) => Promise<Result<Contact>>
+    clearOverride: (request: { recordingId: string; turnIndex: number }) => Promise<Result<void>>
+    getSplits: (request: { recordingId: string }) => Promise<Result<Array<{ base_label: string; from_turn_index: number; derived_label: string }>>>
+    split: (request: { recordingId: string; baseLabel: string; fromTurnIndex: number }) => Promise<Result<{ derivedLabel: string }>>
+    mergeSplit: (request: { recordingId: string; baseLabel: string; fromTurnIndex: number }) => Promise<Result<void>>
+    assignFromHere: (request: { recordingId: string; baseLabel: string; fromTurnIndex: number; contactId?: string; newName?: string }) => Promise<Result<{ derivedLabel: string; contact: Contact }>>
+    getMergeHints: (request: { recordingId: string }) => Promise<Result<Array<{ label: string; names: string[] }>>>
+  }
+
+  // Today briefing (single round-trip payload for the Today page)
+  briefing: {
+    get: () => Promise<{ success: boolean; data?: any; error?: string }>
+  }
+
+  // Today's git commits (CODE moments for the Today agenda) — read-only.
+  commits: {
+    today: (repoPaths?: string[]) => Promise<{
+      success: boolean
+      commits: Array<{
+        repo: string
+        repoPath: string
+        branch: string
+        hash: string
+        shortHash: string
+        subject: string
+        authoredAt: string
+      }>
+      error?: string
+    }>
   }
 
   // Database - Queue
@@ -179,6 +490,12 @@ export interface ElectronAPI {
     getById: (id: string) => Promise<KnowledgeCapture | null>
     getByIds: (ids: string[]) => Promise<KnowledgeCapture[]> // B-CHAT-004
     update: (id: string, updates: Partial<KnowledgeCapture>) => Promise<{ success: boolean; error?: string }>
+    setProjects: (request: { knowledgeCaptureId: string; projectIds: string[] }) => Promise<Result<void>>
+  }
+
+  // Action items (first-class action_items table)
+  actionItems: {
+    setAssignee: (request: { actionItemId: string; contactId: string | null }) => Promise<Result<any>>
   }
 
   // Actionables
@@ -224,6 +541,7 @@ export interface ElectronAPI {
   storage: {
     getInfo: () => Promise<any>
     openFolder: (folder: 'recordings' | 'transcripts' | 'data') => Promise<boolean>
+    selectFolder?: (currentPath?: string) => Promise<{ success: boolean; data?: string | null; error?: string }>
     openFile: (filePath: string) => Promise<{ success: boolean; error?: string }>
     revealInFolder: (filePath: string) => Promise<{ success: boolean; error?: string }>
     readRecording: (filePath: string) => Promise<{ success: boolean; data?: string; error?: string }>
@@ -262,6 +580,14 @@ export interface ElectronAPI {
     getByActionableId: (actionableId: string) => Promise<Result<GenerateOutputResponse | null>>
     copyToClipboard: (content: string) => Promise<Result<void>>
     saveToFile: (content: string, suggestedName?: string) => Promise<Result<string>>
+    openInFolder: (filePath: string) => Promise<Result<void>>
+    launchClaudeCode: (args: {
+      filePath?: string
+      content?: string
+      templateId?: string
+      actionableId?: string
+      cwd?: string
+    }) => Promise<Result<{ launched: boolean; needsFolder?: boolean; cwd?: string }>>
   }
 
   // RAG Chatbot (extended with Result pattern)
@@ -359,6 +685,7 @@ export interface ElectronAPI {
     getStats: () => Promise<{ totalSynced: number; pendingInQueue: number; failedInQueue: number }>
     checkStalled: () => Promise<number>
     cancelActive: (reason?: string) => Promise<number>
+    notifyCompletion: (stats: { completed: number; failed: number; aborted: boolean }) => Promise<unknown>
     onStateUpdate: (callback: (state: any) => void) => () => void
   }
 
@@ -440,6 +767,34 @@ export interface ElectronAPI {
     onProgress: (callback: (progress: { message: string; progress: number }) => void) => () => void
   }
 
+  // Artifacts - entity-type foundation (C0): import files as captures
+  artifacts: ArtifactsAPI
+
+  // Clipboard screenshot capture — paste-to-add + optional auto-watch
+  clipboardCapture: {
+    captureImage: () => Promise<ClipboardCaptureResult>
+    setAutoWatch: (enabled: boolean) => Promise<{ active: boolean }>
+    isWatchActive: () => Promise<{ active: boolean }>
+  }
+
+  // Connectors (Layer 2) — Settings → Connectors UI bridge
+  connectors: {
+    list: () => Promise<ConnectorSummary[]>
+    get: (id: string) => Promise<ConnectorSummary>
+    configure: (id: string, values: Record<string, string | number | boolean>) => Promise<ConnectorSummary>
+    connect: (id: string, authMode?: 'auth-code' | 'device-code') => Promise<ConnectorSummary>
+    disconnect: (id: string) => Promise<ConnectorSummary>
+    // Multi-instance: add / remove / rename accounts of a connector type.
+    addInstance: (type: string, label?: string) => Promise<ConnectorSummary>
+    removeInstance: (id: string) => Promise<ConnectorSummary[]>
+    setInstanceLabel: (id: string, label: string) => Promise<ConnectorSummary>
+    listContainers: (id: string) => Promise<SourceContainer[]>
+    setSourceEnabled: (id: string, containerId: string, enabled: boolean) => Promise<ConnectorSummary>
+    sync: (id: string, containerId?: string) => Promise<IngestionOutcome>
+    searchPeople: (query: string) => Promise<ExternalPerson[]>
+    onStatusChanged: (callback: (payload: { id: string; status: ConnectorStatus }) => void) => () => void
+  }
+
   // Migration - Database schema migration to V11 (Knowledge Captures)
   migration: MigrationAPI
 
@@ -485,6 +840,226 @@ export interface ElectronAPI {
     onDownloadProgress: (callback: (data: { filename: string; bytesReceived: number; totalBytes: number }) => void) => () => void
     onDownloadChunk: (callback: (data: { filename: string; data: Uint8Array }) => void) => () => void
     onScanProgress: (callback: (data: { current: number; total: number }) => void) => () => void
+    onRecordingChanged: (callback: (data: { recording: string | null }) => void) => () => void
+  }
+
+  // Device Pipeline API (Slice 4) — INERT main→renderer state projection.
+  // Built + unit-tested but NOT consumed by any page yet; cutover is a later slice.
+  devicePipeline: {
+    getState: () => Promise<PipelineState>
+    getFiles: () => Promise<any[]>
+    connect: () => Promise<boolean>
+    disconnect: () => Promise<void>
+    sync: () => Promise<void>
+    cancel: () => Promise<void>
+    deleteFile: (filename: string) => Promise<{ result: string } | null>
+    format: () => Promise<{ result: string } | null>
+    onState: (callback: (state: PipelineState) => void) => () => void
+    onFiles: (callback: (files: any[]) => void) => () => void
+  }
+
+  // Knowledge Graph API
+  graph: {
+    stats: () => Promise<{ success: boolean; data?: { nodes: number; edges: number; nodesByType: Record<string, number> }; error?: string }>
+    ingestAll: () => Promise<{ success: boolean; data?: { ingested: number; skipped: number; errors: Array<{ transcriptId: string; error: string }> }; error?: string }>
+    ingestFolder: (folderPath: string) => Promise<{ success: boolean; data?: { ingested: number; skipped: number; errors: Array<{ transcriptId: string; error: string }> }; error?: string }>
+    topAttendees: (name: string) => Promise<{ success: boolean; data?: Array<{ person: string; personId: string; meetings: number }>; error?: string }>
+    topSkill: (skill: string) => Promise<{ success: boolean; data?: Array<{ person: string; personId: string; weight: number }>; error?: string }>
+    personProfile: (name: string) => Promise<{ success: boolean; data?: { personId: string; personLabel: string; meetings: any[]; skills: any[]; actionItems: any[] } | undefined; error?: string }>
+    meetingGraph: (meetingId: string) => Promise<{ success: boolean; data?: { meeting: any; nodes: any[]; edges: any[] }; error?: string }>
+    listNodes: (type?: string) => Promise<{ success: boolean; data?: any[]; error?: string }>
+    resolvePerson: (name: string) => Promise<{ success: boolean; data?: Contact | null; error?: string }>
+  }
+
+  // Context Graph — interactive visualization + neighborhood retrieval
+  contextGraph: {
+    getGraph: (limit?: number) => Promise<{ success: boolean; data?: ContextGraphData; error?: string }>
+    getNeighborhood: (
+      entityId: string,
+      hops?: number
+    ) => Promise<{ success: boolean; data?: ContextGraphData; error?: string }>
+    search: (query: string) => Promise<{ success: boolean; data?: ContextGraphNode[]; error?: string }>
+    rekey: () => Promise<{
+      success: boolean
+      data?: { rekeyed: number; merged: number; skipped: number }
+      error?: string
+    }>
+    prune: () => Promise<{
+      success: boolean
+      data?: { removedNodes: number; removedEdges: number }
+      error?: string
+    }>
+    getLens: (
+      centerId: string | null,
+      hops?: number,
+      windowDays?: number | null,
+      cap?: number
+    ) => Promise<{ success: boolean; data?: ContextLensData; error?: string }>
+    defaultCenter: (
+      ownerContactId?: string | null
+    ) => Promise<{ success: boolean; data?: LensCenter | null; error?: string }>
+    provenance: (
+      entityId: string
+    ) => Promise<{ success: boolean; data?: ProvenanceDTO; error?: string }>
+    nodeDetail: (
+      entityId: string
+    ) => Promise<{ success: boolean; data?: NodeDetailDTO; error?: string }>
+    rename: (
+      entityId: string,
+      newLabel: string
+    ) => Promise<{
+      success: boolean
+      data?: { outcome: 'noop' | 'renamed' | 'merged'; scope: 'contact' | 'graph'; nodeId: string | null }
+      error?: string
+    }>
+    convertToContact: (
+      entityId: string,
+      opts?: { role?: string | null; company?: string | null; email?: string | null }
+    ) => Promise<{
+      success: boolean
+      data?: { contactId: string; outcome: 'linked' | 'merged'; nodeId: string; reusedExisting?: boolean }
+      error?: string
+    }>
+    linkContact: (
+      entityId: string,
+      contactId: string
+    ) => Promise<{
+      success: boolean
+      data?: { contactId: string; outcome: 'linked' | 'merged'; nodeId: string; reusedExisting?: boolean }
+      error?: string
+    }>
+    setPronouns: (
+      entityId: string,
+      pronouns: string
+    ) => Promise<{ success: boolean; data?: boolean; error?: string }>
+    mergePreview: (
+      keeperId: string,
+      loserId: string
+    ) => Promise<{ success: boolean; data?: MergePreviewDTO; error?: string }>
+    mergeNodes: (
+      keeperId: string,
+      loserId: string
+    ) => Promise<{
+      success: boolean
+      data?: { keeperId: string; movedEdges: number; path: 'contact' | 'graph' }
+      error?: string
+    }>
+    deleteNode: (
+      entityId: string
+    ) => Promise<{ success: boolean; data?: { removed: boolean; removedEdges: number }; error?: string }>
+  }
+
+  // Identity suggestions (Round 4a) — the resolver's 0.5–0.8 review queue
+  identity: {
+    getSuggestions: (
+      status?: 'pending' | 'accepted' | 'rejected'
+    ) => Promise<{ success: boolean; data?: any[]; error?: string }>
+    acceptSuggestion: (
+      id: string
+    ) => Promise<{
+      success: boolean
+      data?: { id: string; status: string; mergeJournalId?: string | null; supersededCount?: number }
+      error?: string
+    }>
+    rejectSuggestion: (id: string) => Promise<{ success: boolean; data?: any; error?: string }>
+    supersedeOrphaned: (
+      kind?: 'person' | 'project'
+    ) => Promise<{ success: boolean; data?: { superseded: number }; error?: string }>
+    discoverContacts: () => Promise<{
+      success: boolean
+      data?: { candidatePairs: number; suggestionsCreated: number; autoMergeable: number }
+      error?: string
+    }>
+    discoverProjects: () => Promise<{
+      success: boolean
+      data?: { candidatePairs: number; suggestionsCreated: number; autoMergeable: number }
+      error?: string
+    }>
+    getMergeJournal: (
+      request: { kind: 'contact' | 'project'; keeperId: string }
+    ) => Promise<Result<MergeJournalEntry[]>>
+    getMergeImpact: (
+      request: { kind: 'contact' | 'project'; keeperId: string; loserId: string }
+    ) => Promise<Result<{ keeper: number; loser: number }>>
+    getMentionSnippets: (
+      name: string,
+      limit?: number
+    ) => Promise<{
+      success: boolean
+      data?: {
+        snippets: Array<{ recordingId: string; title: string; date: string | null; snippet: string }>
+        recordingIds: string[]
+      }
+      error?: string
+    }>
+    getPersonContext: (
+      idOrName: string
+    ) => Promise<{
+      success: boolean
+      data?: { people: string[]; topics: string[] }
+      error?: string
+    }>
+    getAliases: (
+      contactId: string
+    ) => Promise<{
+      success: boolean
+      data?: Array<{
+        alias: string
+        source: 'merge' | 'speaker_assign' | 'manual' | 'inferred' | 'rejected' | null
+        confidence: number | null
+        created_at: string
+      }>
+      error?: string
+    }>
+    getAmbiguousBuckets: () => Promise<{
+      success: boolean
+      data?: Array<{
+        contactId: string
+        name: string
+        candidates: Array<{ id: string; name: string }>
+        recordingCount: number
+        resolvedCount: number
+        pendingCount: number
+      }>
+      error?: string
+    }>
+    getBucketResolution: (
+      contactId: string
+    ) => Promise<{
+      success: boolean
+      data?: {
+        contactId: string
+        name: string
+        candidates: Array<{ id: string; name: string }>
+        recordings: Array<{
+          recordingId: string
+          title: string
+          date: string | null
+          meetingId: string | null
+          meetingLinked: boolean
+          meetingHasCalendarAttendees: boolean
+          bestGuessId: string | null
+          bestGuessName: string | null
+          method: 'attendee-email' | 'speaker-map' | 'attendee-context' | 'unclear'
+          signal: string
+          resolvedContactId: string | null
+          resolvedMethod: string | null
+          resolved: boolean
+        }>
+      } | null
+      error?: string
+    }>
+    resolveMention: (request: {
+      recordingId: string
+      sourceName: string
+      contactId: string | null
+      method?: string
+    }) => Promise<{ success: boolean; data?: { ok: true }; error?: string }>
+    autoSplitBuckets: () => Promise<{
+      success: boolean
+      data?: { buckets: number; resolved: number }
+      error?: string
+    }>
   }
 
   // Domain Events - Event-driven architecture
@@ -493,6 +1068,9 @@ export interface ElectronAPI {
   // Recording Watcher Events
   onRecordingAdded: (callback: (data: { recording: any }) => void) => () => void
 
+  // Clipboard auto-watch push — emitted when a background clipboard image is auto-added
+  onClipboardCaptured: (callback: (result: ClipboardCaptureResult) => void) => () => void
+
   // Transcription Events
   onTranscriptionStarted: (callback: (data: { queueItemId?: string; recordingId: string }) => void) => () => void
   onTranscriptionProgress: (callback: (data: { queueItemId: string; progress: number; stage: string }) => void) => () => void
@@ -500,6 +1078,7 @@ export interface ElectronAPI {
   onTranscriptionFailed: (callback: (data: { queueItemId?: string; recordingId: string; error: string }) => void) => () => void
   onTranscriptionCancelled: (callback: (data: { recordingId: string }) => void) => () => void
   onTranscriptionAllCancelled: (callback: (data: { count: number }) => void) => () => void
+  onTranscriptionQueueState: (callback: (state: TranscriptionQueueState) => void) => () => void
 
   // Security Warning Events
   onSecurityWarning: (callback: (data: { type: string; message: string }) => void) => () => void
@@ -519,7 +1098,8 @@ const electronAPI: ElectronAPI = {
     get: () => callIPC('config:get'),
     set: (config) => callIPC('config:set', config),
     updateSection: (section, values) => callIPC('config:update-section', section, values),
-    getValue: (key) => callIPC('config:get-value', key)
+    getValue: (key) => callIPC('config:get-value', key),
+    listGeminiModels: () => callIPC('config:listGeminiModels')
   },
 
   meetings: {
@@ -527,14 +1107,19 @@ const electronAPI: ElectronAPI = {
     getById: (id) => callIPC('db:get-meeting', id),
     getByIds: (ids) => callIPC('db:get-meetings-by-ids', ids),
     getDetails: (id) => callIPC('db:get-meeting-details', id),
-    update: (request) => callIPC('meetings:update', request)
+    update: (request) => callIPC('meetings:update', request),
+    addAttendee: (request) => callIPC('meetings:addAttendee', request),
+    removeAttendee: (request) => callIPC('meetings:removeAttendee', request)
   },
 
   contacts: {
     getAll: (request) => callIPC('contacts:getAll', request),
     getById: (id) => callIPC('contacts:getById', id),
+    create: (request) => callIPC('contacts:create', request),
     update: (request) => callIPC('contacts:update', request),
     delete: (id) => callIPC('contacts:delete', id),
+    merge: (request) => callIPC('contacts:merge', request),
+    unmerge: (journalId) => callIPC('contacts:unmerge', journalId),
     getForMeeting: (meetingId) => callIPC('contacts:getForMeeting', meetingId)
   },
 
@@ -546,7 +1131,16 @@ const electronAPI: ElectronAPI = {
     delete: (id) => callIPC('projects:delete', id),
     tagMeeting: (request) => callIPC('projects:tagMeeting', request),
     untagMeeting: (request) => callIPC('projects:untagMeeting', request),
-    getForMeeting: (meetingId) => callIPC('projects:getForMeeting', meetingId)
+    getForMeeting: (meetingId) => callIPC('projects:getForMeeting', meetingId),
+    merge: (request) => callIPC('projects:merge', request),
+    unmerge: (journalId) => callIPC('projects:unmerge', journalId),
+    getForKnowledge: (knowledgeCaptureId) => callIPC('projects:getForKnowledge', knowledgeCaptureId),
+    getNotes: (request) => callIPC('projects:getNotes', request),
+    addNote: (request) => callIPC('projects:addNote', request),
+    updateNote: (request) => callIPC('projects:updateNote', request),
+    deleteNote: (request) => callIPC('projects:deleteNote', request),
+    getActionables: (projectId) => callIPC('projects:getActionables', projectId),
+    openFolder: (projectId) => callIPC('projects:openFolder', projectId)
   },
 
   recordings: {
@@ -556,32 +1150,87 @@ const electronAPI: ElectronAPI = {
     updateStatus: (id, status) => callIPC('db:update-recording-status', id, status),
     updateRecordingStatus: (id, status) => callIPC('recordings:updateStatus', id, status),
     updateTranscriptionStatus: (id, status) => callIPC('recordings:updateTranscriptionStatus', id, status),
+    updateDuration: (id, durationSeconds) => callIPC('recordings:updateDuration', id, durationSeconds),
+    backfillDurations: () => callIPC('recordings:backfillDurations'),
     linkToMeeting: (recordingId, meetingId, confidence, method) =>
       callIPC('db:link-recording-to-meeting', recordingId, meetingId, confidence, method),
     delete: (id) => callIPC('recordings:delete', id),
     deleteBatch: (ids) => callIPC('recordings:deleteBatch', ids),
+    markPersonal: (id, personal) => callIPC('recordings:markPersonal', id, personal),
+    deletionImpact: (id) => callIPC('recordings:deletionImpact', id),
+    deleteCascade: (id, hard) => callIPC('recordings:deleteCascade', id, hard),
+    restore: (id) => callIPC('recordings:restore', id),
     // Recording-Meeting linking dialog methods
     getCandidates: (recordingId) => callIPC('recordings:getCandidates', recordingId),
     getMeetingsNearDate: (date) => callIPC('recordings:getMeetingsNearDate', date),
     selectMeeting: (recordingId, meetingId) => callIPC('recordings:selectMeeting', recordingId, meetingId),
+    // Live-recording pre-assignment
+    preassign: (filename: string, meetingId: string | null) => callIPC('recordings:preassign', filename, meetingId),
+    getPreassignment: (filename: string) => callIPC('recordings:getPreassignment', filename),
+    clearPreassignment: (filename: string) => callIPC('recordings:clearPreassignment', filename),
     // External file import
     addExternal: () => callIPC('recordings:addExternal'),
     addExternalByPath: (filePath: string) => callIPC('recordings:addExternalByPath', filePath),
     // Transcription
     transcribe: (recordingId) => callIPC('recordings:transcribe', recordingId),
-    addToQueue: (recordingId) => callIPC('recordings:addToQueue', recordingId),
+    addToQueue: (recordingId, priority) => callIPC('recordings:addToQueue', recordingId, priority),
+    reprocessWith: (recordingId, provider) => callIPC('recordings:reprocessWith', { recordingId, provider }),
+    reDiarize: (recordingId) => callIPC('recordings:reDiarize', recordingId),
+    getTimelineAnalysis: (recordingId) => callIPC('recordings:getTimelineAnalysis', recordingId),
+    analyzeTimeline: (recordingId) => callIPC('recordings:analyzeTimeline', recordingId),
     processQueue: () => callIPC('recordings:processQueue'),
     getTranscriptionStatus: () => callIPC('recordings:getTranscriptionStatus'),
     getTranscriptionQueue: () => callIPC('transcription:getQueue'),
     cancelTranscription: (recordingId: string) => callIPC('transcription:cancel', recordingId),
     cancelAllTranscriptions: () => callIPC('transcription:cancelAll'),
     updateQueueItem: (id: string, status: string, errorMessage?: string) => callIPC('transcription:updateQueueItem', id, status, errorMessage),
+    pauseTranscriptionQueue: () => callIPC('transcription:pause'),
+    resumeTranscriptionQueue: () => callIPC('transcription:resume'),
+    reorderTranscription: (recordingId: string, direction: 'up' | 'down') => callIPC('transcription:reorder', { recordingId, direction }),
+    getTranscriptionQueueState: () => callIPC('transcription:queueState'),
   },
 
   transcripts: {
     getByRecordingId: (recordingId) => callIPC('db:get-transcript', recordingId),
     getByRecordingIds: (recordingIds) => callIPC('db:get-transcripts-by-recording-ids', recordingIds),
-    search: (query) => callIPC('db:search-transcripts', query)
+    search: (query) => callIPC('db:search-transcripts', query),
+    assignSpeaker: (request) => callIPC('transcripts:assignSpeaker', request),
+    getSpeakerMap: (request) => callIPC('transcripts:getSpeakerMap', request),
+    unassignSpeaker: (request) => callIPC('transcripts:unassignSpeaker', request)
+  },
+
+  transcriptUpgrade: {
+    scan: (req) => callIPC('transcript-upgrade:scan', req),
+    run: (req) => callIPC('transcript-upgrade:run', req),
+    getStatus: (req) => callIPC('transcript-upgrade:getStatus', req),
+    getRecommended: () => callIPC('transcript-upgrade:getRecommended')
+  },
+
+  selfId: {
+    scan: () => callIPC('self-id:scan'),
+    runForRecording: (request) => callIPC('self-id:runForRecording', request),
+    backfill: () => callIPC('self-id:backfill'),
+    getStatus: () => callIPC('self-id:getStatus'),
+    getMergeSuspected: () => callIPC('self-id:getMergeSuspected')
+  },
+
+  turnSpeakers: {
+    getOverrides: (request) => callIPC('turn-speakers:getOverrides', request),
+    setOverride: (request) => callIPC('turn-speakers:setOverride', request),
+    clearOverride: (request) => callIPC('turn-speakers:clearOverride', request),
+    getSplits: (request) => callIPC('turn-speakers:getSplits', request),
+    split: (request) => callIPC('turn-speakers:split', request),
+    mergeSplit: (request) => callIPC('turn-speakers:mergeSplit', request),
+    assignFromHere: (request) => callIPC('turn-speakers:assignFromHere', request),
+    getMergeHints: (request) => callIPC('turn-speakers:getMergeHints', request)
+  },
+
+  briefing: {
+    get: () => callIPC('briefing:get')
+  },
+
+  commits: {
+    today: (repoPaths?: string[]) => callIPC('commits:today', repoPaths)
   },
 
   queue: {
@@ -592,7 +1241,12 @@ const electronAPI: ElectronAPI = {
     getAll: (options) => callIPC('knowledge:getAll', options),
     getById: (id) => callIPC('knowledge:getById', id),
     getByIds: (ids) => callIPC('knowledge:getByIds', ids), // B-CHAT-004
-    update: (id, updates) => callIPC('knowledge:update', id, updates)
+    update: (id, updates) => callIPC('knowledge:update', id, updates),
+    setProjects: (request) => callIPC('knowledge:setProjects', request)
+  },
+
+  actionItems: {
+    setAssignee: (request) => callIPC('actionItems:setAssignee', request)
   },
 
   actionables: {
@@ -633,6 +1287,7 @@ const electronAPI: ElectronAPI = {
   storage: {
     getInfo: () => callIPC('storage:get-info'),
     openFolder: (folder) => callIPC('storage:open-folder', folder),
+    selectFolder: (currentPath) => callIPC('storage:select-folder', currentPath),
     openFile: (filePath) => callIPC('storage:open-file', filePath),
     revealInFolder: (filePath) => callIPC('storage:reveal-in-folder', filePath),
     readRecording: (filePath) => callIPC('storage:read-recording', filePath),
@@ -656,12 +1311,47 @@ const electronAPI: ElectronAPI = {
     clear: () => callIPC('deviceCache:clear')
   },
 
+  artifacts: {
+    import: (filePaths) => callIPC('artifacts:import', filePaths),
+    pickAndImport: () => callIPC('artifacts:pickAndImport'),
+    getForCapture: (knowledgeCaptureId) => callIPC('artifacts:getForCapture', knowledgeCaptureId),
+    openInFolder: (id) => callIPC('artifacts:openInFolder', id)
+  },
+
+  clipboardCapture: {
+    captureImage: () => callIPC('clipboard:captureImage'),
+    setAutoWatch: (enabled: boolean) => callIPC('clipboard:setAutoWatch', enabled),
+    isWatchActive: () => callIPC('clipboard:isWatchActive')
+  },
+
+  connectors: {
+    list: () => callIPC('connectors:list'),
+    get: (id) => callIPC('connectors:get', id),
+    configure: (id, values) => callIPC('connectors:configure', id, values),
+    connect: (id, authMode) => callIPC('connectors:connect', id, authMode),
+    disconnect: (id) => callIPC('connectors:disconnect', id),
+    addInstance: (type, label) => callIPC('connectors:addInstance', type, label),
+    removeInstance: (id) => callIPC('connectors:removeInstance', id),
+    setInstanceLabel: (id, label) => callIPC('connectors:setInstanceLabel', id, label),
+    listContainers: (id) => callIPC('connectors:listContainers', id),
+    setSourceEnabled: (id, containerId, enabled) => callIPC('connectors:setSourceEnabled', id, containerId, enabled),
+    sync: (id, containerId) => callIPC('connectors:sync', id, containerId),
+    searchPeople: (query) => callIPC('connectors:searchPeople', query),
+    onStatusChanged: (callback) => {
+      const handler = (_e: unknown, payload: { id: string; status: ConnectorStatus }) => callback(payload)
+      ipcRenderer.on('connectors:status-changed', handler)
+      return () => ipcRenderer.removeListener('connectors:status-changed', handler)
+    }
+  },
+
   migration: {
     previewCleanup: () => callIPC('migration:previewCleanup'),
     runCleanup: () => callIPC('migration:runCleanup'),
     runV11: () => callIPC('migration:runV11'),
     rollbackV11: () => callIPC('migration:rollbackV11'),
     getStatus: () => callIPC('migration:getStatus'),
+    previewMisbundledRecordings: () => callIPC('repair:previewMisbundled'),
+    applyMisbundledRecordings: () => callIPC('repair:applyMisbundled'),
     onProgress: (callback) => {
       const handler = (_event: any, progress: any) => callback(progress)
       ipcRenderer.on('migration:progress', handler)
@@ -676,7 +1366,9 @@ const electronAPI: ElectronAPI = {
     generate: (request) => callIPC('outputs:generate', request),
     getByActionableId: (actionableId) => callIPC('outputs:getByActionableId', actionableId),
     copyToClipboard: (content) => callIPC('outputs:copyToClipboard', content),
-    saveToFile: (content, suggestedName) => callIPC('outputs:saveToFile', content, suggestedName)
+    saveToFile: (content, suggestedName) => callIPC('outputs:saveToFile', content, suggestedName),
+    openInFolder: (filePath) => callIPC('outputs:openInFolder', filePath),
+    launchClaudeCode: (args) => callIPC('outputs:launchClaudeCode', args)
   },
 
   rag: {
@@ -834,6 +1526,98 @@ const electronAPI: ElectronAPI = {
       ipcRenderer.on('jensen:scan-progress', handler)
       return () => ipcRenderer.removeListener('jensen:scan-progress', handler)
     },
+    // Live-recording signal: `recording` is the in-progress capture's filename, or
+    // null when the device goes idle / disconnects. Pushed by the main-process poll.
+    onRecordingChanged: (callback: (data: { recording: string | null }) => void) => {
+      const handler = (_event: any, data: any) => callback(data)
+      ipcRenderer.on('jensen:recording-changed', handler)
+      return () => ipcRenderer.removeListener('jensen:recording-changed', handler)
+    },
+  },
+
+  // Device Pipeline API (Slice 4) — INERT main→renderer state projection.
+  devicePipeline: {
+    getState: () => callIPC('device-pipeline:get-state'),
+    getFiles: () => callIPC('device-pipeline:get-files'),
+    connect: () => callIPC('device-pipeline:connect'),
+    disconnect: () => callIPC('device-pipeline:disconnect'),
+    sync: () => callIPC('device-pipeline:sync'),
+    cancel: () => callIPC('device-pipeline:cancel'),
+    deleteFile: (filename: string) => callIPC('device-pipeline:delete-file', { filename }),
+    format: () => callIPC('device-pipeline:format'),
+    onState: (callback: (state: any) => void) => {
+      const handler = (_event: any, state: any) => callback(state)
+      ipcRenderer.on('device-pipeline:state', handler)
+      return () => ipcRenderer.removeListener('device-pipeline:state', handler)
+    },
+    onFiles: (callback: (files: any[]) => void) => {
+      const handler = (_event: any, files: any[]) => callback(files)
+      ipcRenderer.on('device-pipeline:files', handler)
+      return () => ipcRenderer.removeListener('device-pipeline:files', handler)
+    }
+  },
+
+  graph: {
+    stats: () => callIPC('graph:stats'),
+    ingestAll: () => callIPC('graph:ingestAll'),
+    ingestFolder: (folderPath: string) => callIPC('graph:ingestFolder', folderPath),
+    topAttendees: (name: string) => callIPC('graph:topAttendees', name),
+    topSkill: (skill: string) => callIPC('graph:topSkill', skill),
+    personProfile: (name: string) => callIPC('graph:personProfile', name),
+    meetingGraph: (meetingId: string) => callIPC('graph:meetingGraph', meetingId),
+    listNodes: (type?: string) => callIPC('graph:listNodes', type),
+    resolvePerson: (name: string) => callIPC('graph:resolvePerson', name),
+  },
+
+  // Context Graph — interactive visualization + neighborhood retrieval
+  contextGraph: {
+    getGraph: (limit?: number) => callIPC('contextGraph:getGraph', limit),
+    getNeighborhood: (entityId: string, hops?: number) =>
+      callIPC('contextGraph:getNeighborhood', entityId, hops),
+    search: (query: string) => callIPC('contextGraph:search', query),
+    rekey: () => callIPC('contextGraph:rekey'),
+    prune: () => callIPC('contextGraph:prune'),
+    getLens: (centerId: string | null, hops?: number, windowDays?: number | null, cap?: number) =>
+      callIPC('contextGraph:getLens', centerId, hops, windowDays, cap),
+    defaultCenter: (ownerContactId?: string | null) =>
+      callIPC('contextGraph:defaultCenter', ownerContactId),
+    provenance: (entityId: string) => callIPC('contextGraph:provenance', entityId),
+    nodeDetail: (entityId: string) => callIPC('contextGraph:nodeDetail', entityId),
+    rename: (entityId: string, newLabel: string) => callIPC('contextGraph:rename', entityId, newLabel),
+    convertToContact: (
+      entityId: string,
+      opts?: { role?: string | null; company?: string | null; email?: string | null }
+    ) => callIPC('contextGraph:convertToContact', entityId, opts),
+    linkContact: (entityId: string, contactId: string) =>
+      callIPC('contextGraph:linkContact', entityId, contactId),
+    setPronouns: (entityId: string, pronouns: string) =>
+      callIPC('contextGraph:setPronouns', entityId, pronouns),
+    mergePreview: (keeperId: string, loserId: string) =>
+      callIPC('contextGraph:mergePreview', keeperId, loserId),
+    mergeNodes: (keeperId: string, loserId: string) =>
+      callIPC('contextGraph:mergeNodes', keeperId, loserId),
+    deleteNode: (entityId: string) => callIPC('contextGraph:deleteNode', entityId),
+  },
+
+  // Identity suggestions (Round 4a)
+  identity: {
+    getSuggestions: (status?: 'pending' | 'accepted' | 'rejected') => callIPC('identity:getSuggestions', status),
+    acceptSuggestion: (id: string) => callIPC('identity:acceptSuggestion', id),
+    rejectSuggestion: (id: string) => callIPC('identity:rejectSuggestion', id),
+    supersedeOrphaned: (kind?: 'person' | 'project') => callIPC('identity:supersedeOrphaned', kind),
+    discoverContacts: () => callIPC('identity:discoverContacts'),
+    discoverProjects: () => callIPC('identity:discoverProjects'),
+    getMergeJournal: (request) => callIPC('identity:getMergeJournal', request),
+    getMergeImpact: (request) => callIPC('identity:getMergeImpact', request),
+    getMentionSnippets: (name: string, limit?: number) =>
+      callIPC('identity:getMentionSnippets', { name, limit }),
+    getPersonContext: (idOrName: string) => callIPC('identity:getPersonContext', idOrName),
+    getAliases: (contactId: string) => callIPC('identity:getAliases', contactId),
+    getAmbiguousBuckets: () => callIPC('identity:getAmbiguousBuckets'),
+    getBucketResolution: (contactId: string) => callIPC('identity:getBucketResolution', contactId),
+    resolveMention: (request: { recordingId: string; sourceName: string; contactId: string | null; method?: string }) =>
+      callIPC('identity:resolveMention', request),
+    autoSplitBuckets: () => callIPC('identity:autoSplitBuckets')
   },
 
   // Domain Event Listener
@@ -851,6 +1635,15 @@ const electronAPI: ElectronAPI = {
     ipcRenderer.on('recording:new', handler)
     return () => {
       ipcRenderer.removeListener('recording:new', handler)
+    }
+  },
+
+  // Clipboard auto-watch push listener
+  onClipboardCaptured: (callback: (result: ClipboardCaptureResult) => void) => {
+    const handler = (_event: any, result: ClipboardCaptureResult) => callback(result)
+    ipcRenderer.on('clipboard:captured', handler)
+    return () => {
+      ipcRenderer.removeListener('clipboard:captured', handler)
     }
   },
 
@@ -900,6 +1693,14 @@ const electronAPI: ElectronAPI = {
     ipcRenderer.on('transcription:all-cancelled', handler)
     return () => {
       ipcRenderer.removeListener('transcription:all-cancelled', handler)
+    }
+  },
+
+  onTranscriptionQueueState: (callback: (state: TranscriptionQueueState) => void) => {
+    const handler = (_event: any, state: TranscriptionQueueState) => callback(state)
+    ipcRenderer.on('transcription:queueState', handler)
+    return () => {
+      ipcRenderer.removeListener('transcription:queueState', handler)
     }
   },
 

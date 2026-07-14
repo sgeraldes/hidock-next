@@ -9,6 +9,7 @@ export type SettingsKey =
   | "screenshots.includeInNotes"
   | "screenshots.maxPerSession"
   // Calendar
+  | "calendar.source"
   | "calendar.preNotificationSeconds"
   | "calendar.enabled"
   | "calendar.pollIntervalMinutes"
@@ -85,6 +86,7 @@ export interface SettingsMap {
   "screenshots.includeInNotes": boolean;
   "screenshots.maxPerSession": number;
   // Calendar
+  "calendar.source": string;
   "calendar.preNotificationSeconds": number;
   "calendar.enabled": boolean;
   "calendar.pollIntervalMinutes": number;

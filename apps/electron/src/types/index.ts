@@ -29,6 +29,7 @@
 
 export * from './stores'
 export type { Actionable } from './knowledge'
+import type { Actionable } from './knowledge'
 
 // =============================================================================
 // Existing Types
@@ -49,6 +50,10 @@ export interface Meeting {
   meeting_url: string | null
   created_at: string
   updated_at: string
+  /** 1 for an all-day calendar-DATE event (v32); a WEAK recording-match signal. */
+  is_all_day?: number
+  /** Named calendar day (YYYY-MM-DD) for all-day events; timezone-independent (v32). */
+  all_day_date?: string | null
 }
 
 export interface MeetingAttendee {
@@ -156,13 +161,20 @@ export interface AppConfig {
   version: string
   storage: {
     dataPath: string
+    recordingsPath?: string
+    transcriptsPath?: string
     maxRecordingsGB: number
   }
   calendar: CalendarSettings
   transcription: {
-    provider: 'gemini'
+    provider: 'gemini' | 'local-asr' | 'vibevoice'
     geminiApiKey: string
     geminiModel: string
+    localAsrPath: string
+    localAsrHfToken: string
+    localAsrVocabularyFile: string
+    localAsrDiarize: boolean
+    localAsrNumBeams: number
     autoTranscribe: boolean
     language: string
   }
@@ -280,7 +292,7 @@ export interface MeetingWithAssociations extends Meeting {
 /**
  * Available output template identifiers
  */
-export type OutputTemplateId = 'meeting_minutes' | 'interview_feedback' | 'project_status' | 'action_items'
+export type OutputTemplateId = 'meeting_minutes' | 'interview_feedback' | 'project_status' | 'action_items' | 'claude_code_prompt'
 
 /**
  * Output template definition

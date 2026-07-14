@@ -1,16 +1,20 @@
 import { useEffect, Suspense } from 'react'
-import { Routes, Route, Navigate } from 'react-router-dom'
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { Layout } from '@/components/layout/Layout'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { SecurityWarningBanner } from '@/components/SecurityWarningBanner'
 import { LoadingSpinner } from '@/components/LoadingSpinner'
 import { ToastProvider } from '@/components/ui/toaster'
+import { FloatingAssistant } from '@/components/assistant/FloatingAssistant'
 import { getHiDockDeviceService } from '@/services/hidock-device'
 import { NavigationLogger, initInteractionLogger, initErrorLogger, cleanupQAMonitor } from '@/services/qa-monitor'
 import { lazyWithRetry } from '@/lib/lazyWithRetry'
+import { useTheme } from '@/hooks/useTheme'
+import { ClipboardCapture } from '@/hooks/useClipboardCapture'
 
 // Lazy load all page components for code splitting
 // Each page becomes a separate chunk, reducing initial bundle size
+const Today = lazyWithRetry(() => import('@/pages/Today'))
 const Calendar = lazyWithRetry(() => import('@/pages/Calendar'))
 const MeetingDetail = lazyWithRetry(() => import('@/pages/MeetingDetail'))
 const Chat = lazyWithRetry(() => import('@/pages/Chat'))
@@ -22,8 +26,39 @@ const PersonDetail = lazyWithRetry(() => import('@/pages/PersonDetail'))
 const Projects = lazyWithRetry(() => import('@/pages/Projects'))
 const Actionables = lazyWithRetry(() => import('@/pages/Actionables'))
 const Settings = lazyWithRetry(() => import('@/pages/Settings'))
+const ContextGraph = lazyWithRetry(() => import('@/pages/ContextGraph'))
+
+/**
+ * Global floating AI assistant — makes the assistant bubble reachable on EVERY
+ * page (Today, People, Projects, …), not just the Library.
+ *
+ * The Library route renders its own assistant inside TriPaneLayout (a floating
+ * bubble when placement is `floating`, or a docked pane when `embedded`), so we
+ * skip the global mount there to avoid two bubbles. On every other route we mount
+ * the floating bubble regardless of the Settings "Chat Placement": `floating`
+ * shows the bubble directly, and `embedded` — which has no tri-pane to dock into
+ * off-Library — falls back to the same floating bubble rather than showing nothing.
+ *
+ * FloatingAssistant only renders its children (the Chat) while the overlay is
+ * open, so the Chat is not initialized until the user actually opens the bubble.
+ */
+export function GlobalAssistant(): React.ReactElement | null {
+  const location = useLocation()
+  // Library owns its assistant (TriPaneLayout) in both placement modes.
+  if (location.pathname === '/library') return null
+  return (
+    <FloatingAssistant title="Assistant">
+      <Suspense fallback={<LoadingSpinner message="Loading assistant..." />}>
+        <Chat />
+      </Suspense>
+    </FloatingAssistant>
+  )
+}
 
 function App(): React.ReactElement {
+  // Keep the applied theme reconciled with the persisted preference + OS.
+  useTheme()
+
   // Initialize QA monitoring and auto-connect
   useEffect(() => {
     // Initialize QA Monitoring
@@ -72,11 +107,22 @@ function App(): React.ReactElement {
 
   return (
     <ToastProvider>
+      <ClipboardCapture />
       <SecurityWarningBanner />
       <Layout>
         <NavigationLogger />
         <Routes>
-          <Route path="/" element={<Navigate to="/library" replace />} />
+          <Route path="/" element={<Navigate to="/today" replace />} />
+          <Route
+            path="/today"
+            element={
+              <ErrorBoundary>
+                <Suspense fallback={<LoadingSpinner message="Loading your day..." />}>
+                  <Today />
+                </Suspense>
+              </ErrorBoundary>
+            }
+          />
           <Route
             path="/calendar"
             element={
@@ -187,7 +233,22 @@ function App(): React.ReactElement {
               </ErrorBoundary>
             }
           />
+          <Route
+            path="/context-graph"
+            element={
+              <ErrorBoundary>
+                <Suspense fallback={<LoadingSpinner message="Loading context graph..." />}>
+                  <ContextGraph />
+                </Suspense>
+              </ErrorBoundary>
+            }
+          />
+          {/* Legacy path — the surface was renamed Knowledge Graph → Context Graph. */}
+          <Route path="/knowledge-graph" element={<Navigate to="/context-graph" replace />} />
         </Routes>
+        {/* Floating AI assistant, reachable on every page except Library (which
+            renders its own assistant inside TriPaneLayout). */}
+        <GlobalAssistant />
       </Layout>
     </ToastProvider>
   )

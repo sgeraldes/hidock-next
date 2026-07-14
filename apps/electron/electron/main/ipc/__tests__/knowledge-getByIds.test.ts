@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { registerKnowledgeHandlers } from '../knowledge-handlers'
 import { ipcMain } from 'electron'
-import { queryAll, queryOne, run } from '../../services/database'
+import { queryAll } from '../../services/database'
 
 // Mock electron ipcMain
 vi.mock('electron', () => ({

@@ -1,6 +1,7 @@
 export type {
   CalendarAttendee,
   CalendarEvent,
+  CalendarOrganizer,
   CalendarWatcherOptions,
   CorrelationOptions,
   CorrelationRecommendation,
@@ -8,6 +9,6 @@ export type {
   MeetingMatch
 } from './types.js'
 
-export { parseICS } from './ics-parser.js'
+export { parseICS, unescapeIcsText } from './ics-parser.js'
 export { CalendarWatcher } from './calendar-watcher.js'
 export { correlate } from './meeting-correlator.js'

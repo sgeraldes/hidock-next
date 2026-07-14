@@ -1,5 +1,12 @@
 # USB Device Pipeline — Design Specification
 
+> **Why this matters (ADR-0005).** Four device bugs fixed in 2026-06 — auto-connect
+> and auto-transcribe ignoring their toggles, the DL-button double-fire, and the
+> download size-mismatch — were traced (via `graphify-out/`) to one root: device
+> actions have multiple entry points and policy is enforced at scattered call
+> sites instead of one funnel. This pipeline is the structural cure. See
+> `.claude/architecture-decisions/ADR-0005-device-actions-flow-through-coordinators.md`.
+
 ## Problem
 
 The HiDock Electron app has 4 independent systems competing for the USB bus:
@@ -212,10 +219,23 @@ class DevicePipelineService {
 1. If all init commands fail → USB reset → reconnect → retry pipeline once
 2. If still failing → disconnect cleanly → phase = 'error' with message "Please unplug and reconnect"
 
-**Auto-connect:**
-- On app startup, if config has `device.autoConnect = true`, call `tryConnect()`
-- On USB plug event (`usb` package device-added event), attempt `tryConnect()`
-- On disconnect, if auto-connect enabled, listen for re-plug
+**Auto-connect:** see the [Auto-Connect Flow](#auto-connect-flow) section — the
+plug-event handler re-checks `config.device.autoConnect` at event time.
+
+**Single-funnel invariants (ADR-0005).** Each device action has exactly one
+initiator, and each user setting is enforced once, at that funnel:
+- **Downloads:** every download — Sync *and* the per-file DL button — goes
+  through `DevicePipelineService`/`DownloadService`. There is no direct
+  `storage:save-recording` download path. One queue, one integrity check, one
+  progress/state. (Interim DL guard: commit `eccbeab8`.)
+- **Transcription:** exactly **one** ingestion funnel queues transcription —
+  `RecordingWatcher` detecting the saved file on disk. `download-service` and
+  `storage:save-recording` must **not** call `addToQueue`; the auto-transcribe
+  preference is checked only in that one place. (Interim duplicate-gate fix:
+  commit `11ce9830`.)
+- **State:** authoritative download/connection/device state lives in main
+  (`PipelineState`) and is projected to the renderer via one subscription; the
+  renderer holds no second queue or connection FSM.
 
 ### 3. IPC Contract
 
@@ -412,24 +432,23 @@ For `tryConnect()` (auto-connect with previously authorized device), `node-usb`'
 
 ## Auto-Connect Flow
 
+**Policy is checked at event time, not at registration.** The earlier
+implementation registered the USB-plug listener only when auto-connect was on at
+startup, and the listener then auto-connected on every plug **without
+re-reading the preference** — so toggling auto-connect off did not stop power-on
+reconnects (shipped interim fix: `setAutoConnectChecker`, commit `25d6c22e`; see
+ADR-0005 category C). The listener must always be registered and must consult
+`config.device.autoConnect` **inside** the handler, every time it fires.
+
 ```typescript
 // In DevicePipelineService constructor or init
 async initAutoConnect(): Promise<void> {
-  const config = getConfig()
-  if (!config.device?.autoConnect) return
-
-  // Try connecting to any authorized HiDock device
-  const devices = await this.webusb.getDevices()
-  const hidock = devices.find(d => isHiDockDevice(d))
-  if (hidock) {
-    await this.connect(hidock)  // → runPipeline()
-  }
-
-  // Listen for USB plug events
+  // The plug/disconnect listeners are ALWAYS registered. The auto-connect
+  // PREFERENCE is re-checked at event time so toggling it takes effect live.
   this.webusb.addEventListener('connect', (event) => {
-    if (isHiDockDevice(event.device)) {
-      this.connect(event.device)
-    }
+    if (!isHiDockDevice(event.device)) return
+    if (!getConfig().device?.autoConnect) return  // ← event-time policy gate
+    this.connect(event.device)                     // → runPipeline()
   })
 
   this.webusb.addEventListener('disconnect', (event) => {
@@ -437,8 +456,17 @@ async initAutoConnect(): Promise<void> {
       this.handleDisconnect()
     }
   })
+
+  // Startup: only auto-connect to an already-attached device if enabled now.
+  if (!getConfig().device?.autoConnect) return
+  const devices = await this.webusb.getDevices()
+  const hidock = devices.find(d => isHiDockDevice(d))
+  if (hidock) await this.connect(hidock)  // → runPipeline()
 }
 ```
+
+Manual connect (the "Connect Device" button → `connect()`) never passes through
+this gate, so it always works regardless of the preference.
 
 ## Error Handling
 
@@ -492,3 +520,95 @@ The `usb` package requires native compilation. electron-builder handles this via
 - Windows: WinUSB driver (already working for WebUSB)
 - macOS: libusb (auto-installed by usb package)
 - Linux: libusb-1.0 + udev rules (existing setup script handles this)
+
+---
+
+## Phased Rollout (added 2026-06-25)
+
+Sequenced so each slice is independently shippable, leaves the tree green, and
+the USB-locking blast radius is contained. Motivated by ADR-0005 and the live
+"download one → downloads all 52" bug (one global queue with drain-all-on-pending
+semantics; `useDownloadOrchestrator` line 377 → `processDownloadQueue` line 184).
+
+**Acceptance criteria (the defects that must die):**
+1. Download exactly what's requested — selecting 1 file downloads 1, regardless of what else is pending.
+2. auto-connect / auto-download / auto-transcribe each honored, checked at action time, in one place.
+3. One queue, one progress/state, projected read-only to the renderer.
+4. No binary round-trips the renderer.
+
+**Verification policy (overnight constraint):** USB-flow slices are gated by the
+mock test harness + typecheck + full build + full Vitest suite (+ app boot smoke
+where safe). **Live hardware verification is DEFERRED** to a supervised session
+(one clean connect, power-cycle available) — never run unattended (device-safety
+rules in CLAUDE.md override). Each slice's QA notes carry a `HARDWARE: DEFERRED` stamp.
+
+### Slice 0 — Safety net (test-only, no behavior change)
+- Mock WebUSB/Jensen harness reusable across services (no hardware in tests).
+- Characterization tests pinning current connect / scan / download / transcribe behavior.
+- **Files:** `electron/main/services/__tests__/*`, test utils.
+
+### Slice 1 — Scoped downloads + queue hygiene (fixes the P0 "downloads all" bug)
+- `DownloadService.requestDownloads(files)` is the single entry; `processDownloadQueue(scope?)` downloads only the requested filenames.
+- Auto-resume of persisted pending gated by `config.device.autoDownload`; prune stale/orphaned queue rows on load.
+- Manual Sync / Download-selected / single / DL button all route through the scoped entry.
+- **Files:** `download-service.ts`, `useDownloadOrchestrator.ts`, `useOperations.ts`, `Library.tsx`, `DeviceFileList.tsx`.
+
+### Slice 2 — Single ingestion funnel (fixes auto-transcribe duplication)
+- `RecordingWatcher` becomes the sole post-save → transcription funnel; remove `addToQueue` from `download-service` and `storage:save-recording`. `autoTranscribe` checked once.
+- **Files:** `recording-watcher.ts`, `download-service.ts`, `storage-handlers.ts`.
+- **⚠ Refinement (found 2026-06-25, do NOT skip):** `processNewRecording` currently
+  **returns early (recording-watcher.ts:156–165) for files that already have a DB
+  row** — and every *downloaded* device file already has a row (device scan /
+  `storage:save-recording` inserts it). So simply removing the other `addToQueue`
+  calls would **silently break auto-transcribe for all downloaded files** (the
+  watcher skips them). Slice 2 must move the gated transcription trigger into the
+  watcher's **existing-row branch** too: when a download sets `file_path`
+  (file becomes locally available), run the single `autoTranscribe`-gated queue
+  there. Net funnel = "a recording's file became locally available → gated queue,
+  exactly once."
+- **Verification:** requires an integration/hardware run (download → watcher
+  detects 'add' → `file_path` set → queued exactly once; confirm no double-queue
+  and no missed-queue). **HARDWARE: DEFERRED** — do not ship blind.
+
+### Slice 3 — DevicePipelineService coordinator (main)
+- One owner of `JensenDevice` + `DownloadService`; connect→scan→reconcile→download phase machine; auto-connect plug handler re-checks config at event time. Becomes the sole initiator, replacing the 4 competing renderer callers.
+- **Files:** new `device-pipeline.ts`, `index.ts`, `jensen.ts`, ipc handlers.
+
+### Slice 4 — Single state projection
+- `PipelineState` in main is authoritative; renderer subscribes via one channel; no second queue/FSM in the renderer. Removes the reload "stuck connecting" desync + dual download-queue.
+- **Files:** `device-pipeline.ts`, `hidock-device.ts`, `useDeviceSubscriptions.ts`, `useDownloadOrchestrator.ts`, `useAppStore.ts`.
+
+### Slice 5 — Binary stays in main
+- Download + save in one main pass; renderer gets progress events only. Removes the chunk-drain workaround in `jensen-ipc-client.ts`.
+- **Files:** `device-pipeline.ts`, `download-service.ts`, `jensen-handlers.ts`, `jensen-ipc-client.ts`.
+
+### Slice 6 — Delete dead paths + interim patches
+- Retire the renderer auto-connect cluster on `HiDockDeviceService`, the direct `storage:save-recording` download path, and the interim patches (`cfdeb3fa`/`25d6c22e`/`11ce9830`/`eccbeab8`) once their slice subsumes them.
+
+**Disposition of interim patches:** keep each until its slice subsumes it (Slice 1 ⊃ DL guard; Slice 2 ⊃ auto-transcribe gate; Slice 3 ⊃ auto-connect checker; Slice 5 ⊃ chunk drain).
+
+---
+
+## Build Status & Cutover Plan (2026-06-25 overnight run)
+
+**The entire new device stack is built and unit-tested (green); only activation remains.**
+
+| Slice | Status |
+|-------|--------|
+| 1 — Scoped downloads | ✅ Shipped & working (fixes "download one → all"). Reviewed. |
+| 2 — Single transcription funnel | ✅ Shipped (`queueTranscriptionIfEnabled`). |
+| 3 — DevicePipelineService coordinator | ✅ Built additive + 35 unit tests (`device-pipeline.ts`). Not yet the device owner. |
+| 4 — IPC bridge + `useDevicePipeline` hook | ✅ Built inert + 24 unit tests. Not consumed by pages. |
+| 5 — Binary in main | ✅ Realized by the coordinator's `downloadOne` (accumulates in main, saves via `processDownload`, no renderer round-trip). |
+| 6 — Cutover / activation | ⛔ **DEFERRED — requires supervised hardware verification.** |
+
+**Why Slice 6 is hardware-gated, not blind-shippable:** activating the coordinator means it becomes the **sole** USB owner. It cannot run alongside the old path (`jensen.setupUsbConnectListener` auto-connect, `useDeviceSubscriptions`, `useDownloadOrchestrator`, `handleConnect`) — two USB owners contend on the bus and can lock the device (the #1 device-safety hazard). So cutover = retire the old path in the same step. Mock tests verify the coordinator's *logic*, but only a real device + the live UI can verify it actually drives the hardware and that every device-consuming component still works. Flipping it blind would almost certainly break the app — exactly what the device-safety + real-delivery-gate rules forbid.
+
+### Cutover checklist (≈30 min, supervised, device on hand)
+1. **Main:** in `index.ts`, call `getDevicePipelineService().initAutoConnect()`; stop registering the old `setupUsbConnectListener` auto-connect (or have it no-op). Keep `getJensenDevice()` as the shared transport.
+2. **Renderer:** replace the device-state consumers (`handleConnect` flow, `useDeviceSubscriptions`, `useDownloadOrchestrator`, the device parts of `useUnifiedRecordings`) with `useDevicePipeline()`. Wire Device.tsx connect/sync/cancel/delete/format and the connection/scan/download status to the pipeline state.
+3. **Downloads:** route the Library/Calendar/DL-button downloads through `device-pipeline:sync`/scoped actions; retire the renderer queue-drain path and the `jensen-ipc-client` chunk-drain (no longer needed — binary stays in main).
+4. **Transcription:** the funnel already lands via `queueTranscriptionIfEnabled` from the coordinator's `downloadOne`.
+5. **Delete (Slice 6 cleanup):** old auto-connect cluster on `HiDockDeviceService`, the direct `storage:save-recording` download path, and the now-subsumed interim patches (`cfdeb3fa`/`25d6c22e`/`11ce9830`/`eccbeab8`).
+6. **Update tests** that mock the retired hooks; keep `npm run typecheck` + `npm run test:run` green.
+7. **HARDWARE VERIFY (the irreducible step):** clean connect → SN/firmware/storage populate → download one file (only that one) → Sync all → power-cycle with auto-connect off (no reconnect) → auto-transcribe respects toggle. Power-cycle available throughout.

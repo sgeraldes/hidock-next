@@ -1,5 +1,6 @@
 import { Badge } from '../ui/badge'
 import type { Screenshot } from '../../types/models'
+import { safeTimeString } from '../../lib/date-format'
 
 interface ScreenshotCardProps {
   screenshot: Screenshot
@@ -7,7 +8,7 @@ interface ScreenshotCardProps {
 }
 
 function formatTimestamp(ts: number): string {
-  return new Date(ts).toLocaleTimeString([], {
+  return safeTimeString(ts, {
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',

@@ -1,0 +1,195 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { ipcMain } from 'electron'
+import { registerBriefingHandlers } from '../briefing-handlers'
+
+vi.mock('electron', () => ({
+  ipcMain: {
+    handle: vi.fn()
+  }
+}))
+
+vi.mock('../../services/database', () => ({
+  getMeetings: vi.fn(),
+  queryAll: vi.fn()
+}))
+
+vi.mock('../../services/config', () => ({
+  getConfig: vi.fn()
+}))
+
+/**
+ * Routes a queryAll call to a canned result by matching a distinctive fragment
+ * of its SQL, so each query in the handler can be asserted independently.
+ */
+function routeQueryAll(routes: Array<{ match: RegExp; rows: unknown[] }>) {
+  return (sql: string) => {
+    for (const route of routes) {
+      if (route.match.test(sql)) return route.rows
+    }
+    return []
+  }
+}
+
+describe('Briefing IPC Handlers', () => {
+  let handlers: Record<string, Function> = {}
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    handlers = {}
+    vi.mocked(ipcMain.handle).mockImplementation((channel: string, handler: Function) => {
+      handlers[channel] = handler
+      return undefined as any
+    })
+    const { getConfig } = await import('../../services/config')
+    vi.mocked(getConfig).mockReturnValue({
+      calendar: { icsUrl: 'https://example.com/cal.ics', syncEnabled: true, lastSyncAt: null }
+    } as any)
+    registerBriefingHandlers()
+  })
+
+  it('registers the briefing:get handler', () => {
+    expect(ipcMain.handle).toHaveBeenCalledWith('briefing:get', expect.any(Function))
+  })
+
+  it("lists today's follow-ups newest-first with calendar meeting subject + time", async () => {
+    const { queryAll, getMeetings } = await import('../../services/database')
+    vi.mocked(getMeetings).mockReturnValue([])
+    vi.mocked(queryAll).mockImplementation(
+      routeQueryAll([
+        // recentKnowledge (LEFT JOIN, no day filter)
+        { match: /LEFT JOIN recordings r ON r\.id = t\.recording_id/, rows: [] },
+        // todayFollowUps (JOIN recordings, day-scoped) — backend already orders newest-first
+        {
+          match: /JOIN recordings r ON r\.id = t\.recording_id\s+LEFT JOIN meetings m/,
+          rows: [
+            {
+              recording_id: 'rec-late',
+              title_suggestion: 'Integración WebRTC Gateway',
+              summary: 'Late summary',
+              action_items: '["Ship it","Review PR"]',
+              word_count: 4200,
+              filename: 'REC-late.wav',
+              date_recorded: '2026-07-09T19:02:00Z',
+              meeting_id: 'm-1',
+              meeting_subject: 'Daily Reto Connect - Gateway',
+              meeting_start: '2026-07-09T19:02:00Z',
+              meeting_end: '2026-07-09T19:30:00Z'
+            },
+            {
+              recording_id: 'rec-early',
+              title_suggestion: 'Standup notes',
+              summary: 'Early summary',
+              action_items: '[]',
+              word_count: 900,
+              filename: 'REC-early.wav',
+              date_recorded: '2026-07-09T09:00:00Z',
+              meeting_id: 'm-2',
+              meeting_subject: 'Morning Standup',
+              meeting_start: '2026-07-09T09:00:00Z',
+              meeting_end: '2026-07-09T09:15:00Z'
+            }
+          ]
+        },
+        { match: /SELECT COUNT\(1\) AS n FROM recordings r/, rows: [{ n: 0 }] },
+        { match: /FROM actionables/, rows: [] },
+        { match: /FROM transcripts WHERE/, rows: [{ n: 2 }] },
+        { match: /FROM vector_embeddings/, rows: [{ n: 0 }] }
+      ])
+    )
+
+    const res = await handlers['briefing:get']()
+    expect(res.success).toBe(true)
+    const followUps = res.data.todayFollowUps
+    expect(followUps).toHaveLength(2)
+    // Newest first (order preserved from the DESC query).
+    expect(followUps[0].recordingId).toBe('rec-late')
+    expect(followUps[0].meetingSubject).toBe('Daily Reto Connect - Gateway')
+    expect(followUps[0].meetingStart).toBe('2026-07-09T19:02:00Z')
+    expect(followUps[0].actionItems).toEqual(['Ship it', 'Review PR'])
+    expect(followUps[1].recordingId).toBe('rec-early')
+    expect(res.data.todayRecordingsPending).toBe(0)
+  })
+
+  it('surfaces the honest unlinked state (no meeting fields) for a follow-up with no meeting', async () => {
+    const { queryAll, getMeetings } = await import('../../services/database')
+    vi.mocked(getMeetings).mockReturnValue([])
+    vi.mocked(queryAll).mockImplementation(
+      routeQueryAll([
+        { match: /LEFT JOIN recordings r ON r\.id = t\.recording_id/, rows: [] },
+        {
+          match: /JOIN recordings r ON r\.id = t\.recording_id\s+LEFT JOIN meetings m/,
+          rows: [
+            {
+              recording_id: 'rec-orphan',
+              title_suggestion: 'Random note',
+              summary: null,
+              action_items: '[]',
+              word_count: 120,
+              filename: 'REC-orphan.wav',
+              date_recorded: '2026-07-09T14:00:00Z',
+              meeting_id: null,
+              meeting_subject: null,
+              meeting_start: null,
+              meeting_end: null
+            }
+          ]
+        },
+        { match: /SELECT COUNT\(1\) AS n FROM recordings r/, rows: [{ n: 0 }] },
+        { match: /FROM actionables/, rows: [] },
+        { match: /FROM transcripts WHERE/, rows: [{ n: 1 }] },
+        { match: /FROM vector_embeddings/, rows: [{ n: 0 }] }
+      ])
+    )
+
+    const res = await handlers['briefing:get']()
+    const item = res.data.todayFollowUps[0]
+    expect(item.recordingId).toBe('rec-orphan')
+    expect(item.meetingId).toBeUndefined()
+    expect(item.meetingSubject).toBeUndefined()
+    expect(item.meetingStart).toBeUndefined()
+    expect(item.title).toBe('Random note')
+  })
+
+  it('reports the count of today\'s recordings still awaiting a transcript', async () => {
+    const { queryAll, getMeetings } = await import('../../services/database')
+    vi.mocked(getMeetings).mockReturnValue([])
+    vi.mocked(queryAll).mockImplementation(
+      routeQueryAll([
+        { match: /LEFT JOIN recordings r ON r\.id = t\.recording_id/, rows: [] },
+        { match: /JOIN recordings r ON r\.id = t\.recording_id\s+LEFT JOIN meetings m/, rows: [] },
+        { match: /SELECT COUNT\(1\) AS n FROM recordings r/, rows: [{ n: 3 }] },
+        { match: /FROM actionables/, rows: [] },
+        { match: /FROM transcripts WHERE/, rows: [{ n: 0 }] },
+        { match: /FROM vector_embeddings/, rows: [{ n: 0 }] }
+      ])
+    )
+
+    const res = await handlers['briefing:get']()
+    expect(res.data.todayFollowUps).toHaveLength(0)
+    expect(res.data.todayRecordingsPending).toBe(3)
+  })
+
+  it('day-scopes follow-ups and the pending count with the same day bounds', async () => {
+    const { queryAll, getMeetings } = await import('../../services/database')
+    vi.mocked(getMeetings).mockReturnValue([])
+    const calls: Array<{ sql: string; params?: unknown[] }> = []
+    vi.mocked(queryAll).mockImplementation((sql: string, params?: unknown[]) => {
+      calls.push({ sql, params })
+      if (/SELECT COUNT\(1\) AS n FROM recordings r/.test(sql)) return [{ n: 0 }]
+      if (/FROM transcripts WHERE/.test(sql)) return [{ n: 0 }]
+      return []
+    })
+
+    await handlers['briefing:get']()
+
+    const dayScoped = calls.filter((c) => Array.isArray(c.params) && c.params.length === 2)
+    // todayFollowUps + todayRecordingsPending both carry [dayStart, dayEnd].
+    expect(dayScoped.length).toBeGreaterThanOrEqual(2)
+    const [dayStart, dayEnd] = dayScoped[0].params as [string, string]
+    expect(new Date(dayEnd).getTime()).toBeGreaterThan(new Date(dayStart).getTime())
+    // Every day-scoped query uses the SAME bounds.
+    for (const c of dayScoped) {
+      expect(c.params).toEqual([dayStart, dayEnd])
+    }
+  })
+})

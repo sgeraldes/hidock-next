@@ -20,6 +20,8 @@ interface DatabaseRecording {
   // FL-001: transcription_status is the authoritative column; status is the legacy fallback
   transcription_status?: string
   status: string
+  // v38: personal ("ignored") flag — 1 = kept but excluded from AI + default surfaces
+  personal?: number
 }
 
 interface SyncedFile {
@@ -211,7 +213,8 @@ function buildRecordingMap(
         quality: capture?.quality,
         category: capture?.category ?? undefined,
         status: capture?.status ?? undefined,
-        summary: capture?.summary ?? undefined
+        summary: capture?.summary ?? undefined,
+        personal: !!dbRec?.personal
       }
       recordingMap.set(baseName, recording)
       processedBaseNames.add(baseName)
@@ -255,7 +258,9 @@ function buildRecordingMap(
         size: dbRec.file_size,
         duration: dbRec.duration_seconds || 0,
         dateRecorded,
-        transcriptionStatus: mapTranscriptionStatus(dbRec.status, capture?.status ?? undefined),
+        // FL-001: prefer the authoritative transcription_status column; fall back
+        // to the legacy status only when it's absent (matches the 'both' branch).
+        transcriptionStatus: mapTranscriptionStatus(dbRec.transcription_status ?? dbRec.status, capture?.status ?? undefined),
         meetingId: dbRec.meeting_id,
         location: 'local-only',
         localPath: dbRec.file_path,
@@ -266,7 +271,8 @@ function buildRecordingMap(
         quality: capture?.quality,
         category: capture?.category ?? undefined,
         status: capture?.status ?? undefined,
-        summary: capture?.summary ?? undefined
+        summary: capture?.summary ?? undefined,
+        personal: !!dbRec?.personal
       }
       recordingMap.set(baseName, recording)
       processedBaseNames.add(baseName)
@@ -299,6 +305,36 @@ function buildRecordingMap(
         processedBaseNames.add(baseName)
       }
     }
+  }
+
+  // Surface capture-only items (C0 artifacts): knowledge captures with no source
+  // recording — e.g. imported PDFs/images/notes — have no device/local audio row,
+  // so emit a synthetic local-only entry keyed by capture id. Captures tied to a
+  // recording (sourceRecordingId set) are already represented above.
+  for (const capture of knowledgeCaptures) {
+    if (capture.sourceRecordingId) continue
+    const key = `capture:${capture.id}`
+    if (recordingMap.has(key)) continue
+    const dateSource = capture.capturedAt || capture.createdAt || new Date().toISOString()
+    const recording: LocalOnlyRecording = {
+      id: capture.id,
+      filename: capture.title || 'Untitled',
+      size: 0,
+      duration: 0,
+      dateRecorded: new Date(dateSource),
+      transcriptionStatus: mapTranscriptionStatus(undefined, capture.status ?? undefined),
+      location: 'local-only',
+      localPath: '',
+      syncStatus: 'synced',
+      isImported: true,
+      knowledgeCaptureId: capture.id,
+      title: capture.title,
+      quality: capture.quality,
+      category: capture.category ?? undefined,
+      status: capture.status ?? undefined,
+      summary: capture.summary ?? undefined
+    }
+    recordingMap.set(key, recording)
   }
 
   // Sort by date (newest first)

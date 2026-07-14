@@ -117,32 +117,19 @@ function SourceRow({ path, onRemove }: SourceRowProps) {
 
 // ── Knowledge Base Page ───────────────────────────────────────────────────────
 
-// Track sources in local state — the store doesn't expose a list yet
-// so we maintain one client-side (backed by IPC calls on the store).
-const SOURCES_KEY = 'kb_sources_v1'
-
-function loadSources(): string[] {
-  try {
-    const raw = localStorage.getItem(SOURCES_KEY)
-    return raw ? (JSON.parse(raw) as string[]) : []
-  } catch {
-    return []
-  }
-}
-
-function saveSources(sources: string[]) {
-  localStorage.setItem(SOURCES_KEY, JSON.stringify(sources))
-}
-
 export default function KnowledgeBase() {
-  const { searchResults, indexing, indexProgress, addSource, removeSource, search, reindex } =
+  const { searchResults, indexing, indexProgress, sources, addSource, removeSource, search, reindex, loadSources } =
     useKnowledgeStore()
 
   const [query, setQuery] = useState('')
-  const [sources, setSources] = useState<string[]>(loadSources)
   const [addingSource, setAddingSource] = useState(false)
 
   const debouncedQuery = useDebounce(query, 400)
+
+  // Load sources from DB on mount
+  useEffect(() => {
+    loadSources()
+  }, [loadSources])
 
   // Search whenever debounced query changes
   useEffect(() => {
@@ -157,7 +144,7 @@ export default function KnowledgeBase() {
 
     setAddingSource(true)
     try {
-      const paths = await (api as unknown as { dialog: { openFile: (opts?: unknown) => Promise<string[] | null> } }).dialog.openFile({
+      const paths = await api.dialog.openFile({
         title: 'Select files or folders for Knowledge Base',
         properties: ['openFile', 'openDirectory', 'multiSelections'],
         filters: [
@@ -169,13 +156,7 @@ export default function KnowledgeBase() {
 
       for (const path of paths) {
         await addSource(path)
-        if (!sources.includes(path)) {
-          sources.push(path)
-        }
       }
-      const updated = [...sources]
-      setSources(updated)
-      saveSources(updated)
     } finally {
       setAddingSource(false)
     }
@@ -183,9 +164,6 @@ export default function KnowledgeBase() {
 
   async function handleRemoveSource(path: string) {
     await removeSource(path)
-    const updated = sources.filter((s) => s !== path)
-    setSources(updated)
-    saveSources(updated)
   }
 
   function handleSearch() {
@@ -205,6 +183,7 @@ export default function KnowledgeBase() {
           <span className="font-mono text-sm text-muted-foreground">{sources.length} source{sources.length !== 1 ? 's' : ''}</span>
         )}
       </div>
+
 
       {/* Search bar */}
       <div className="flex gap-2 shrink-0">
@@ -263,8 +242,8 @@ export default function KnowledgeBase() {
           {/* Sources list */}
           {sources.length > 0 ? (
             <div className="flex flex-col gap-1.5">
-              {sources.map((path) => (
-                <SourceRow key={path} path={path} onRemove={handleRemoveSource} />
+              {sources.map((src) => (
+                <SourceRow key={src.path} path={src.path} onRemove={handleRemoveSource} />
               ))}
             </div>
           ) : (

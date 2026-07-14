@@ -23,6 +23,9 @@ interface DownloadQueueItem {
   progress: number
   status: 'pending' | 'downloading' | 'completed' | 'failed' | 'cancelled'
   error?: string
+  // Original recording date (from the device), used for recency-first ordering.
+  // Arrives over IPC as a Date (structured clone) or an ISO string.
+  recordingDate?: Date | string | null
 }
 
 // DL-14: Module-level abort controller ref so cancelDownloads can be called from outside the hook
@@ -31,6 +34,114 @@ let _downloadAbortControllerRef: AbortController | null = null
 let _cancelInProgress = false
 let _cancelEpoch = 0
 let _lastProcessedEpoch = 0
+
+// Slice 1 (ADR-0005): explicit per-action download scope.
+// Every download path funnels into one persisted queue that the orchestrator
+// used to drain entirely on any pending item — so "download this one file"
+// pulled in every other pending/stale item (the "download one → all 52" bug).
+// When auto-download is OFF, the orchestrator now processes ONLY filenames a
+// user action explicitly registered here. When auto-download is ON, it keeps
+// the bulk "drain all pending" behavior (that is what the toggle means).
+// Register intent BEFORE enqueueing so the state-update subscription sees it.
+const _requestedDownloads = new Set<string>()
+
+export function requestScopedDownloads(filenames: string[]): void {
+  for (const f of filenames) _requestedDownloads.add(f)
+}
+
+// Defect C (recency ordering): user-explicit SINGLE downloads jump the queue and
+// drain FIFO among themselves; everything else (bulk / auto-sync backlog) drains
+// newest-first. Populated by useOperations.queueDownload (single) only — bulk and
+// auto-sync deliberately do NOT mark priority so they sort by recording date.
+// Mirrors the transcription queue's userPriorityIds (transcription.ts).
+const _priorityDownloads = new Set<string>()
+
+export function markDownloadPriority(filenames: string[]): void {
+  for (const f of filenames) _priorityDownloads.add(f)
+}
+
+export function clearDownloadPriority(filename: string): void {
+  _priorityDownloads.delete(filename)
+}
+
+/**
+ * Pure selector for which pending items to process. Exported for unit tests.
+ * - auto-download ON  → all pending (bulk auto-sync semantics)
+ * - auto-download OFF → only items the user explicitly requested
+ */
+export function selectDownloadsToProcess<T extends { filename: string }>(
+  pending: T[],
+  requested: Set<string>,
+  autoDownload: boolean
+): T[] {
+  return autoDownload ? pending : pending.filter((p) => requested.has(p.filename))
+}
+
+export interface OrderableDownload {
+  filename: string
+  recordingDate?: Date | string | null
+}
+
+/**
+ * Recency-first download ordering. Pure + deterministic so the dequeue loop can
+ * re-run it on every iteration (mirrors transcription.ts orderPendingForProcessing):
+ *
+ *   1. User-explicit single downloads first, FIFO among themselves.
+ *   2. Everything else by the recording's content date (recordingDate) DESC, so
+ *      today's recording beats last month's regardless of enqueue order. Undated
+ *      recordings sort last. Tiebreak: original (enqueue) order = FIFO.
+ *
+ * Because it re-runs per dequeue, a newer file detected mid-backlog preempts the
+ * older waiting items automatically. Relies on Array.prototype.sort being stable
+ * (ES2019+) for the FIFO tiebreaks.
+ */
+export function orderDownloadsForProcessing<T extends OrderableDownload>(
+  pending: T[],
+  priority: Set<string>
+): T[] {
+  const ms = (v?: Date | string | null): number => {
+    if (!v) return Number.NEGATIVE_INFINITY // undated → smallest → sorts last under DESC
+    const t = v instanceof Date ? v.getTime() : new Date(v).getTime()
+    return Number.isFinite(t) ? t : Number.NEGATIVE_INFINITY
+  }
+  return [...pending].sort((a, b) => {
+    const aPri = priority.has(a.filename) ? 0 : 1
+    const bPri = priority.has(b.filename) ? 0 : 1
+    if (aPri !== bPri) return aPri - bPri
+    if (aPri === 0) return 0 // both user-explicit → FIFO (stable sort keeps input order)
+    const da = ms(a.recordingDate)
+    const db = ms(b.recordingDate)
+    if (da !== db) return db - da // recordingDate DESC (newest first)
+    return 0 // FIFO tiebreak (stable sort)
+  })
+}
+
+// Defect A (queued-while-disconnected fires on connect): the orchestrator owns the
+// USB download loop; useDeviceSubscriptions calls this AFTER the file-list scan has
+// completed on device-ready, so already-queued (scoped) pending items drain without
+// racing the scan on the USB bus. No-op until the orchestrator has mounted.
+let _drainQueueFn: (() => void) | null = null
+
+export function drainDownloadQueue(): void {
+  _drainQueueFn?.()
+}
+
+/**
+ * Hard connectivity gate for STARTING a download session. A download must NEVER
+ * touch the USB bus unless the device is genuinely connected AND past initialization
+ * (step === 'ready'). Queuing while disconnected must persist the item as pending and
+ * start nothing — processing then resumes automatically on connect (drainDownloadQueue).
+ *
+ * Both conditions are required:
+ *  - isConnected() alone is insufficient: it can read true during early init steps
+ *    before the device is usable (see DL-001).
+ *  - step === 'ready' alone is insufficient: the store step can be stale after an
+ *    undetected unplug, which is exactly how a "download" went active against a
+ *    disconnected device and starved the app.
+ */
+export function canStartDownloadSession(isConnected: boolean, connectionStep: string): boolean {
+  return isConnected && connectionStep === 'ready'
+}
 
 /**
  * Cancel in-progress downloads by aborting the USB transfer.
@@ -180,13 +291,42 @@ export function useDownloadOrchestrator() {
     // DL-008: Set lock before first await to prevent double-processing
     isProcessingDownloads.current = true
 
+    // Hard connectivity gate: never start a session while disconnected. Queuing while
+    // disconnected persists the item as pending and starts nothing; processing resumes
+    // on connect via drainDownloadQueue(). Bail BEFORE mutating any sync/queue state.
+    if (!canStartDownloadSession(deviceService.isConnected(), useAppStore.getState().connectionStatus.step)) {
+      if (shouldLogQa()) console.log('[useDownloadOrchestrator] Not starting downloads — device not connected/ready')
+      isProcessingDownloads.current = false
+      return
+    }
+
     const state = await window.electronAPI.downloadService.getState()
-    const pendingItems = state.queue.filter((item: DownloadQueueItem) => item.status === 'pending')
+    const allPending = state.queue.filter((item: DownloadQueueItem) => item.status === 'pending')
+
+    // Slice 1: scope to the user's explicit request when auto-download is off,
+    // so a single download never drains unrelated/stale pending items.
+    let autoDownload = false
+    try {
+      const result = await window.electronAPI.config.get()
+      const cfg = result?.success ? (result.data as { device?: { autoDownload?: boolean } }) : null
+      autoDownload = cfg?.device?.autoDownload === true
+    } catch {
+      autoDownload = false
+    }
+    // Recency-first: order the batch newest-first (user-explicit requests jump ahead).
+    const pendingItems = orderDownloadsForProcessing(
+      selectDownloadsToProcess(allPending, _requestedDownloads, autoDownload),
+      _priorityDownloads
+    )
 
     if (pendingItems.length === 0 || !deviceService.isConnected()) {
       isProcessingDownloads.current = false
       return
     }
+    // NOTE: scope entries are removed only after a SUCCESSFUL download (below),
+    // so a failed item stays in scope and is retried (e.g. on reconnect) instead
+    // of being silently dropped. The isProcessingDownloads mutex already prevents
+    // concurrent reprocessing.
     downloadAbortControllerRef.current = new AbortController()
     // DL-14: Sync module-level ref so cancelDownloads() can abort from outside
     _downloadAbortControllerRef = downloadAbortControllerRef.current
@@ -214,8 +354,15 @@ export function useDownloadOrchestrator() {
     let failed = 0
     let aborted = false
     let bytesDownloaded = 0
+    const initialTotal = pendingItems.length
+    // Guards against re-selecting an item that already failed this run (failed items
+    // stay 'pending' in the queue so they retry on the NEXT session, not this one).
+    const processedThisRun = new Set<string>()
 
-    for (const item of pendingItems) {
+    // Re-select the next item from fresh queue state on every dequeue so a
+    // newly-detected newer recording — or a user-explicit request — preempts the
+    // remaining backlog immediately (recency-first, mirroring the transcription queue).
+    while (true) {
       // User-initiated cancel via cancelDownloads() — abort entire queue
       if (_cancelInProgress) {
         if (shouldLogQa()) console.log('[useDownloadOrchestrator] Download cancelled by user')
@@ -244,9 +391,20 @@ export function useDownloadOrchestrator() {
         _downloadAbortControllerRef = downloadAbortControllerRef.current
       }
 
+      // Fresh snapshot → scope → recency order → first not-yet-attempted item.
+      const freshState = await window.electronAPI.downloadService.getState()
+      const freshPending = freshState.queue.filter((i: DownloadQueueItem) => i.status === 'pending')
+      const ordered = orderDownloadsForProcessing(
+        selectDownloadsToProcess(freshPending, _requestedDownloads, autoDownload),
+        _priorityDownloads
+      )
+      const item = ordered.find((i) => !processedThisRun.has(i.filename))
+      if (!item) break
+      processedThisRun.add(item.filename)
+
       setDeviceSyncState({
         deviceFileDownloading: item.filename,
-        deviceSyncProgress: { current: completed, total: pendingItems.length },
+        deviceSyncProgress: { current: completed, total: Math.max(initialTotal, completed + failed + 1) },
         deviceFileProgress: 0
       })
 
@@ -256,6 +414,10 @@ export function useDownloadOrchestrator() {
       if (success) {
         completed++
         bytesDownloaded += item.fileSize || 0
+        // Consume the scope/priority entries only once the file is actually downloaded;
+        // failed items stay scoped so a retry re-processes them (auto-download OFF).
+        _requestedDownloads.delete(item.filename)
+        clearDownloadPriority(item.filename)
       } else {
         failed++
       }
@@ -332,6 +494,12 @@ export function useDownloadOrchestrator() {
     _cancelEpoch = 0
     _lastProcessedEpoch = 0
 
+    // Defect A: expose the queue drain so useDeviceSubscriptions can fire already-queued
+    // pending downloads once the device is ready and the file-list scan has completed.
+    _drainQueueFn = () => {
+      if (!isProcessingDownloads.current) processDownloadQueueRef.current()
+    }
+
     const isElectron = !!window.electronAPI?.downloadService
 
     // Subscribe to download service state updates
@@ -371,10 +539,11 @@ export function useDownloadOrchestrator() {
           }
 
           const hasPending = state.queue.some((item: DownloadQueueItem) => item.status === 'pending')
-          // DL-001: Use store connection step instead of deviceService.isConnected() — the service
-          // returns true during early init steps before the device is fully ready
-          const isDeviceReady = useAppStore.getState().connectionStatus.step === 'ready'
-          if (hasPending && !isProcessingDownloads.current && isDeviceReady) {
+          // Strict connectivity gate (DL-001 + disconnected-download evidence): require BOTH
+          // a live connection AND step === 'ready'. A pending item queued while disconnected
+          // must NOT start here — it waits for the connect-driven drain instead.
+          const step = useAppStore.getState().connectionStatus.step
+          if (hasPending && !isProcessingDownloads.current && canStartDownloadSession(deviceService.isConnected(), step)) {
             processDownloadQueueRef.current()
           }
         })
@@ -414,6 +583,7 @@ export function useDownloadOrchestrator() {
 
     return () => {
       downloadAbortControllerRef.current?.abort()
+      _drainQueueFn = null
       unsubDownloads()
       unsubDevice()
       // SM-002: Do NOT reset orchestratorInitialized.current here.

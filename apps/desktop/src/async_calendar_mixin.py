@@ -28,6 +28,15 @@ except ImportError:
 class AsyncCalendarMixin:
     """Async calendar integration mixin for the main GUI."""
 
+    def __init__(self, gui=None):
+        """Create the async calendar collaborator.
+
+        Args:
+            gui: The HiDockToolGUI instance. May be None for isolated construction; GUI-dependent
+                methods (those touching self.gui) raise AttributeError if called with gui=None.
+        """
+        self.gui = gui
+
     def _ensure_async_calendar_initialized(self):
         """Initialize async calendar system (lazy initialization)."""
         if not hasattr(self, "_async_calendar_initialized"):
@@ -129,7 +138,7 @@ class AsyncCalendarMixin:
         self._calendar_processed_files = 0
 
         # Update GUI status
-        self.after(0, self._update_calendar_sync_gui_status, "Syncing calendar data...", 0.0)
+        self.gui.after(0, self._update_calendar_sync_gui_status, "Syncing calendar data...", 0.0)
 
         logger.info("AsyncCalendar", "sync", f"Starting batch async sync for {len(files_dict)} files")
 
@@ -139,14 +148,14 @@ class AsyncCalendarMixin:
         self._calendar_sync_status = "complete"
 
         # Clear sync status after a delay to prevent "Syncing..." from sticking
-        self.after(2000, self._clear_sync_status)
+        self.gui.after(2000, self._clear_sync_status)
 
         # Callback to GUI with results
         if callback:
-            self.after(0, callback, enhanced_files)
+            self.gui.after(0, callback, enhanced_files)
 
         # Update GUI status
-        self.after(
+        self.gui.after(
             0, self._update_calendar_sync_gui_status, f"Calendar sync complete ({len(enhanced_files)} files)", 1.0
         )
 
@@ -166,7 +175,7 @@ class AsyncCalendarMixin:
         self._calendar_processed_files = 0
 
         # Update GUI status
-        self.after(0, self._update_calendar_sync_gui_status, "Syncing single file...", 0.0)
+        self.gui.after(0, self._update_calendar_sync_gui_status, "Syncing single file...", 0.0)
 
         logger.info(
             "AsyncCalendar", "single_file_sync", f"Starting single file sync for {file_data.get('name', 'unknown')}"
@@ -178,11 +187,11 @@ class AsyncCalendarMixin:
             self._calendar_processed_files = 1
 
             # Update GUI status
-            self.after(0, self._update_calendar_sync_gui_status, "Single file sync complete", 1.0)
+            self.gui.after(0, self._update_calendar_sync_gui_status, "Single file sync complete", 1.0)
 
             # Callback with single file result
             if callback:
-                self.after(0, callback, [enhanced_file])
+                self.gui.after(0, callback, [enhanced_file])
 
             logger.info(
                 "AsyncCalendar",
@@ -197,12 +206,12 @@ class AsyncCalendarMixin:
             enhanced_file.update(self._create_empty_meeting_fields())
 
             if callback:
-                self.after(0, callback, [enhanced_file])
+                self.gui.after(0, callback, [enhanced_file])
 
         self._calendar_sync_status = "complete"
 
         # Clear sync status after a delay to prevent "Syncing..." from sticking
-        self.after(2000, self._clear_sync_status)
+        self.gui.after(2000, self._clear_sync_status)
 
     def _clear_sync_status(self):
         """Clear sync status to ensure 'Syncing...' doesn't stick around."""
@@ -351,10 +360,10 @@ class AsyncCalendarMixin:
             display_text = ""
         # During connection when loading cached files, NEVER show "Syncing..."
         elif (
-            hasattr(self, "device_manager")
-            and self.device_manager
-            and hasattr(self.device_manager, "device_interface")
-            and self.device_manager.device_interface.is_connected()
+            hasattr(self.gui, "device_manager")
+            and self.gui.device_manager
+            and hasattr(self.gui.device_manager, "device_interface")
+            and self.gui.device_manager.device_interface.is_connected()
         ):
             # Device is connected, so don't show sync status for files that already have cached state
             display_text = ""
@@ -503,7 +512,7 @@ class AsyncCalendarMixin:
                 )
 
                 # Update GUI status
-                self.after(
+                self.gui.after(
                     0,
                     self._update_calendar_sync_gui_status,
                     f"Processed {self._calendar_processed_files}/{self._calendar_total_files} files",
@@ -816,25 +825,25 @@ class AsyncCalendarMixin:
         """Update GUI with calendar sync status."""
         try:
             # Update calendar status indicator
-            if hasattr(self, "calendar_status_label_header") and self.calendar_status_label_header.winfo_exists():
-                self.calendar_status_label_header.configure(text=f"Calendar: {status_text}")
+            if hasattr(self.gui, "calendar_status_label_header") and self.gui.calendar_status_label_header.winfo_exists():
+                self.gui.calendar_status_label_header.configure(text=f"Calendar: {status_text}")
 
             # Update progress bar if it exists
-            if hasattr(self, "calendar_sync_progress_bar") and self.calendar_sync_progress_bar.winfo_exists():
-                self.calendar_sync_progress_bar.set(progress)
+            if hasattr(self.gui, "calendar_sync_progress_bar") and self.gui.calendar_sync_progress_bar.winfo_exists():
+                self.gui.calendar_sync_progress_bar.set(progress)
                 if progress >= 1.0:
                     # Hide progress bar when complete - use safer method
                     def hide_progress_bar():
                         try:
                             if (
-                                hasattr(self, "calendar_sync_progress_bar")
-                                and self.calendar_sync_progress_bar.winfo_exists()
+                                hasattr(self.gui, "calendar_sync_progress_bar")
+                                and self.gui.calendar_sync_progress_bar.winfo_exists()
                             ):
-                                self.calendar_sync_progress_bar.pack_forget()
+                                self.gui.calendar_sync_progress_bar.pack_forget()
                         except:
                             pass  # Ignore errors if widget is destroyed
 
-                    self.after(2000, hide_progress_bar)
+                    self.gui.after(2000, hide_progress_bar)
         except Exception as e:
             logger.debug("AsyncCalendar", "update_gui_status", f"Error updating GUI status: {e}")
 
@@ -994,7 +1003,7 @@ class AsyncCalendarMixin:
 
                 if callback:
                     # Call callback with empty list to indicate no files
-                    self.after(0, callback, [])
+                    self.gui.after(0, callback, [])
 
         except Exception as e:
             logger.error("AsyncCalendar", "force_refresh", f"Error during force refresh: {e}")
@@ -1006,7 +1015,7 @@ class AsyncCalendarMixin:
             # On error, still call callback with empty list to unblock GUI
             callback = work_item.get("callback")
             if callback:
-                self.after(0, callback, [])
+                self.gui.after(0, callback, [])
 
     def get_calendar_cache_statistics(self) -> Dict[str, Any]:
         """Get calendar cache statistics for monitoring."""
@@ -1130,3 +1139,4 @@ class AsyncCalendarMixin:
             logger.warning("AsyncCalendar", "enhance_cached_only", f"Error enhancing {filename} with cached data: {e}")
             enhanced_file.update(self._create_empty_meeting_fields())
             return enhanced_file
+

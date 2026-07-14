@@ -43,11 +43,32 @@ module.exports = {
         lg: 'var(--radius)',
         md: 'calc(var(--radius) - 2px)',
         sm: 'calc(var(--radius) - 4px)'
+      },
+      // Elevation scale wired to the theme-aware tokens in index.css — real
+      // y-offset, faintly ink-tinted in light, black-based in dark.
+      boxShadow: {
+        sm: 'var(--shadow-sm)',
+        DEFAULT: 'var(--shadow-md)',
+        md: 'var(--shadow-md)',
+        lg: 'var(--shadow-lg)'
+      },
+      transitionTimingFunction: {
+        'out-soft': 'var(--ease-out)'
+      },
+      keyframes: {
+        'rise-in': {
+          from: { opacity: '0', transform: 'translateY(10px)' },
+          to: { opacity: '1', transform: 'none' }
+        }
+      },
+      animation: {
+        'rise-in': 'rise-in var(--dur-entrance) var(--ease-out) both'
       }
     }
   },
   plugins: [
     require('tailwindcss-animate'),
-    require('@tailwindcss/container-queries')
+    require('@tailwindcss/container-queries'),
+    require('@tailwindcss/typography')
   ]
 }

@@ -12,6 +12,7 @@ export const CHANNELS = {
     end: "session:end",
     delete: "session:delete",
     linkMeeting: "session:linkMeeting",
+    stats: "session:stats",
     // Push events (main -> renderer)
     onCreated: "session:created",
     onUpdated: "session:updated",
@@ -78,8 +79,24 @@ export const CHANNELS = {
     removeSource: "kb:removeSource",
     search: "kb:search",
     reindex: "kb:reindex",
+    listSources: "kb:listSources",
     // Push events
     onIndexProgress: "kb:indexProgress",
     onIndexComplete: "kb:indexComplete",
+  },
+
+  audio: {
+    // Invoke channels
+    chunk: "audio:chunk",
+    // Push events (main -> renderer)
+    onStartCapture: "audio:startCapture",
+    onStopCapture: "audio:stopCapture",
+  },
+
+  meeting: {
+    // Push events (main -> renderer)
+    upcoming: "meeting:upcoming",
+    micDetected: "meeting:micDetected",
+    correlation: "meeting:correlation",
   },
 } as const;

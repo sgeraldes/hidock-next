@@ -12,6 +12,8 @@ import type { SettingsKey } from "../services/settings-types";
 import * as credentialStore from "../services/credential-store";
 import { SENSITIVE_SETTING_KEYS } from "../services/sensitive-keys";
 import { getSetting, setSetting } from "../services/database-settings";
+import { getOrchestrator } from "../services/session-orchestrator";
+import { broadcastToAllWindows } from "./broadcast";
 
 /**
  * Return the real (decrypted) value of a sensitive setting for use within the
@@ -60,9 +62,29 @@ export function registerSettingsHandlers(): void {
         const plaintext = String(value);
         const encryptedBase64 = credentialStore.store(key, plaintext);
         setSetting(key, encryptedBase64, "string", "credentials");
+
+        // Cascade sensitive key changes (e.g. ai.apiKey) to orchestrator
+        const orchestrator = getOrchestrator();
+        if (orchestrator) {
+          orchestrator.onSettingsChanged(key).catch((err) =>
+            console.error('[Settings] Failed to cascade change:', err),
+          );
+        }
+
         return null;
       }
       settingsStore.set(key as SettingsKey, value as never);
+      console.log(`[Settings] Updated: ${key} = ${JSON.stringify(value)}`)
+      broadcastToAllWindows('settings:changed', { key, value: SENSITIVE_SETTING_KEYS.has(key) ? '***' : value })
+
+      // Cascade settings change to orchestrator services (AI provider, MeetingDetector, etc.)
+      const orchestrator = getOrchestrator();
+      if (orchestrator) {
+        orchestrator.onSettingsChanged(key).catch((err) =>
+          console.error('[Settings] Failed to cascade change:', err),
+        );
+      }
+
       return null;
     },
   });
@@ -87,8 +109,42 @@ export function registerSettingsHandlers(): void {
   createHandler({
     channel: CHANNELS.settings.testConnection,
     schema: SettingsTestConnectionInput,
-    handler: () => {
-      return { success: false, error: "Not implemented" };
+    handler: async () => {
+      try {
+        const provider = settingsStore.get("ai.provider") as string ?? "ollama";
+        const model = settingsStore.get("ai.model") as string ?? "llama3.2";
+        const apiKey = getDecryptedSetting("ai.apiKey") ?? undefined;
+
+        const { createProvider } = await import("@hidock/ai-providers");
+
+        type ProviderConfig = Parameters<typeof createProvider>[0];
+        let config: ProviderConfig;
+        switch (provider) {
+          case "openai":
+            config = { provider: "openai", model, apiKey: apiKey ?? "" };
+            break;
+          case "anthropic":
+            config = { provider: "anthropic", model, apiKey: apiKey ?? "" };
+            break;
+          case "google":
+            config = { provider: "google", model, apiKey: apiKey ?? "" };
+            break;
+          case "bedrock":
+            config = { provider: "bedrock", model };
+            break;
+          case "ollama":
+          default:
+            config = { provider: "ollama", model };
+            break;
+        }
+
+        const { generateText } = await import("ai");
+        const result = createProvider(config);
+        await generateText({ model: result.model, prompt: 'Reply with "ok"' });
+        return { success: true };
+      } catch (error) {
+        return { success: false, error: (error as Error).message };
+      }
     },
   });
 

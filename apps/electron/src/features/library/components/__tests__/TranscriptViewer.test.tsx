@@ -1,0 +1,576 @@
+/**
+ * Tests for TranscriptViewer transcript parsing/rendering.
+ *
+ * Focus: speaker-label handling for transcripts WITHOUT timestamps, especially
+ * markdown-bold labels (**Name:**) produced by the transcription pipeline, which
+ * previously rendered with literal asterisks.
+ */
+
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
+import { TranscriptViewer } from '../TranscriptViewer'
+
+vi.mock('@/components/ui/toaster', () => ({
+  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() }
+}))
+
+const mockNavigate = vi.fn()
+vi.mock('react-router-dom', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-router-dom')>()
+  return { ...actual, useNavigate: () => mockNavigate }
+})
+
+const noop = () => {}
+
+describe('TranscriptViewer speaker parsing', () => {
+  it('renders markdown-bold **Name:** labels as speaker names without asterisks', () => {
+    const transcript = [
+      '**Vanessa:** Hola a todos, ¿cómo están?',
+      '',
+      '**Jorge:** Bien, gracias. Empecemos.',
+    ].join('\n')
+
+    render(<TranscriptViewer transcript={transcript} onSeek={noop} />)
+
+    // Speaker names appear as their own elements (no surrounding ** markers)
+    expect(screen.getByText('Vanessa')).toBeInTheDocument()
+    expect(screen.getByText('Jorge')).toBeInTheDocument()
+
+    // The literal markdown markers must not survive into the rendered output
+    expect(screen.queryByText(/\*\*/)).not.toBeInTheDocument()
+
+    // Spoken text is preserved
+    expect(screen.getByText(/Hola a todos/)).toBeInTheDocument()
+    expect(screen.getByText(/Empecemos/)).toBeInTheDocument()
+  })
+
+  it('handles **Name**: (colon outside the bold) too', () => {
+    render(<TranscriptViewer transcript={'**Kevin**: Listo, gracias.'} onSeek={noop} />)
+    expect(screen.getByText('Kevin')).toBeInTheDocument()
+    expect(screen.getByText(/Listo, gracias\./)).toBeInTheDocument()
+    expect(screen.queryByText(/\*\*/)).not.toBeInTheDocument()
+  })
+
+  it('still renders plain "Name:" speaker labels', () => {
+    render(<TranscriptViewer transcript={'Sebastián: Perfecto, quedamos así.'} onSeek={noop} />)
+    expect(screen.getByText('Sebastián')).toBeInTheDocument()
+    expect(screen.getByText(/quedamos así/)).toBeInTheDocument()
+  })
+
+  it('renders a transcript with no speaker labels as plain text', () => {
+    render(<TranscriptViewer transcript={'Just some narration without any speaker labels.'} onSeek={noop} />)
+    expect(screen.getByText(/Just some narration/)).toBeInTheDocument()
+  })
+
+  it('breaks a long unstructured blob into multiple paragraphs (not one wall)', () => {
+    // A single line with no newlines and many sentences (an old-style transcript).
+    const blob = Array.from({ length: 20 }, (_, i) => `This is sentence number ${i} in the call.`).join(' ')
+    const { container } = render(<TranscriptViewer transcript={blob} onSeek={noop} />)
+    // The plain-text fallback should emit more than one <p> for a long blob.
+    const paragraphs = container.querySelectorAll('p.whitespace-pre-wrap')
+    expect(paragraphs.length).toBeGreaterThan(1)
+  })
+})
+
+describe('TranscriptViewer stored segments', () => {
+  it('renders structured turns from the segments prop with speaker labels', () => {
+    const segments = [
+      { speaker: 'Speaker 1', start: 3, end: 7, text: 'Hola, buenos días.' },
+      { speaker: 'Speaker 2', start: 7, end: 12, text: 'Buenos días a todos.' }
+    ]
+    render(<TranscriptViewer transcript={'ignored plain text'} segments={segments} onSeek={noop} />)
+    expect(screen.getByText('Speaker 1')).toBeInTheDocument()
+    expect(screen.getByText('Speaker 2')).toBeInTheDocument()
+    expect(screen.getByText(/Hola, buenos días/)).toBeInTheDocument()
+    expect(screen.getByText(/Buenos días a todos/)).toBeInTheDocument()
+    // The plain transcript text must not be used when segments are present.
+    expect(screen.queryByText('ignored plain text')).not.toBeInTheDocument()
+  })
+
+  it('splits a legacy single segment with inline [MM:SS] Speaker N: markers into separate turns', () => {
+    // Pre-fix data: a whole chunk stored as ONE segment with inline markers.
+    const segments = [
+      {
+        speaker: 'Speaker 1',
+        start: 0,
+        end: 600,
+        text: '[00:03] Speaker 1: Hola, buenos días. [00:09] Speaker 2: Buenos días a todos. [05:32] Speaker 3: Perdón la demora.'
+      }
+    ]
+    render(<TranscriptViewer transcript={'ignored'} segments={segments} onSeek={noop} />)
+
+    // Each embedded speaker becomes its own labelled turn.
+    expect(screen.getByText('Speaker 1')).toBeInTheDocument()
+    expect(screen.getByText('Speaker 2')).toBeInTheDocument()
+    expect(screen.getByText('Speaker 3')).toBeInTheDocument()
+    expect(screen.getByText('Hola, buenos días.')).toBeInTheDocument()
+    expect(screen.getByText('Buenos días a todos.')).toBeInTheDocument()
+    expect(screen.getByText('Perdón la demora.')).toBeInTheDocument()
+    // The raw marker text must not survive glued together in one box.
+    expect(screen.queryByText(/\[00:09\] Speaker 2:/)).not.toBeInTheDocument()
+  })
+})
+
+describe('TranscriptViewer speaker assignment (recordingId)', () => {
+  const mockGetSpeakerMap = vi.fn()
+  const mockGetAll = vi.fn()
+  const mockGetById = vi.fn()
+  const mockAssignSpeaker = vi.fn()
+  const mockUnassignSpeaker = vi.fn()
+  const mockGetOverrides = vi.fn()
+  const mockSetOverride = vi.fn()
+  const mockClearOverride = vi.fn()
+  const mockGetSplits = vi.fn()
+  const mockSplit = vi.fn()
+  const mockMergeSplit = vi.fn()
+  const mockAssignFromHere = vi.fn()
+  const mockGetMergeHints = vi.fn()
+
+  const segments = [{ speaker: 'Speaker 1', start: 0, end: 5, text: 'Hello there, everyone.' }]
+
+  function renderViewer(props: Partial<React.ComponentProps<typeof TranscriptViewer>> = {}) {
+    return render(
+      <MemoryRouter>
+        <TranscriptViewer transcript="x" segments={segments} recordingId="rec1" onSeek={noop} {...props} />
+      </MemoryRouter>
+    )
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockGetSpeakerMap.mockResolvedValue({ success: true, data: [] })
+    mockGetOverrides.mockResolvedValue({ success: true, data: [] })
+    mockSetOverride.mockResolvedValue({ success: true, data: { id: 'c1', name: 'Alice' } })
+    mockClearOverride.mockResolvedValue({ success: true })
+    mockGetSplits.mockResolvedValue({ success: true, data: [] })
+    mockSplit.mockResolvedValue({ success: true, data: { derivedLabel: 'Speaker 1 · B' } })
+    mockMergeSplit.mockResolvedValue({ success: true })
+    mockAssignFromHere.mockResolvedValue({ success: true, data: { derivedLabel: 'Speaker 1 · B', contact: { id: 'c1', name: 'Alice' } } })
+    mockGetMergeHints.mockResolvedValue({ success: true, data: [] })
+    mockGetAll.mockResolvedValue({
+      success: true,
+      data: {
+        contacts: [
+          {
+            id: 'c1',
+            name: 'Alice',
+            email: 'alice@example.com',
+            type: 'team',
+            role: 'Engineer',
+            company: 'Acme',
+            interactionCount: 12,
+            tags: []
+          },
+          { id: 'c2', name: 'Bob', email: null, type: 'unknown', tags: [] }
+        ],
+        total: 2
+      }
+    })
+    mockGetById.mockResolvedValue({
+      success: true,
+      data: {
+        contact: {
+          id: 'c1',
+          name: 'Alice',
+          email: 'alice@example.com',
+          type: 'team',
+          role: 'Engineer',
+          company: 'Acme',
+          interactionCount: 12,
+          lastSeenAt: '2026-05-01T10:00:00Z',
+          tags: []
+        }
+      }
+    })
+    mockAssignSpeaker.mockResolvedValue({ success: true, data: { id: 'c1', name: 'Alice' } })
+    mockUnassignSpeaker.mockResolvedValue({ success: true })
+    ;(window as any).electronAPI = {
+      transcripts: {
+        getSpeakerMap: mockGetSpeakerMap,
+        assignSpeaker: mockAssignSpeaker,
+        unassignSpeaker: mockUnassignSpeaker
+      },
+      turnSpeakers: {
+        getOverrides: mockGetOverrides,
+        setOverride: mockSetOverride,
+        clearOverride: mockClearOverride,
+        getSplits: mockGetSplits,
+        split: mockSplit,
+        mergeSplit: mockMergeSplit,
+        assignFromHere: mockAssignFromHere,
+        getMergeHints: mockGetMergeHints
+      },
+      contacts: { getAll: mockGetAll, getById: mockGetById }
+    }
+  })
+
+  it('renders the speaker label as an assign button and loads the speaker map', async () => {
+    renderViewer()
+    await waitFor(() => expect(mockGetSpeakerMap).toHaveBeenCalledWith({ recordingId: 'rec1' }))
+    expect(screen.getByRole('button', { name: /Assign speaker Speaker 1/i })).toBeInTheDocument()
+  })
+
+  it('assigns an existing contact when picked from the popover', async () => {
+    renderViewer()
+    await waitFor(() => expect(mockGetSpeakerMap).toHaveBeenCalled())
+
+    fireEvent.click(screen.getByRole('button', { name: /Assign speaker Speaker 1/i }))
+
+    // Popover opening lazily loads the contacts list.
+    await waitFor(() => expect(mockGetAll).toHaveBeenCalled())
+
+    fireEvent.click(await screen.findByText('Alice'))
+
+    await waitFor(() =>
+      expect(mockAssignSpeaker).toHaveBeenCalledWith({
+        recordingId: 'rec1',
+        speakerLabel: 'Speaker 1',
+        contactId: 'c1'
+      })
+    )
+  })
+
+  it('renders rich picker rows with role · company and meeting count', async () => {
+    renderViewer()
+    await waitFor(() => expect(mockGetSpeakerMap).toHaveBeenCalled())
+
+    fireEvent.click(screen.getByRole('button', { name: /Assign speaker Speaker 1/i }))
+    await waitFor(() => expect(mockGetAll).toHaveBeenCalled())
+
+    // Secondary line combines role and company; interactionCount renders as meetings.
+    expect(await screen.findByText('Engineer · Acme')).toBeInTheDocument()
+    expect(screen.getByText('12 meetings')).toBeInTheDocument()
+  })
+
+  it('creates a new person from a typed name', async () => {
+    renderViewer()
+    await waitFor(() => expect(mockGetSpeakerMap).toHaveBeenCalled())
+
+    fireEvent.click(screen.getByRole('button', { name: /Assign speaker Speaker 1/i }))
+    const input = await screen.findByLabelText('Search or create person')
+    fireEvent.change(input, { target: { value: 'Charlie' } })
+    fireEvent.click(screen.getByText(/Create/))
+
+    await waitFor(() =>
+      expect(mockAssignSpeaker).toHaveBeenCalledWith({
+        recordingId: 'rec1',
+        speakerLabel: 'Speaker 1',
+        newName: 'Charlie'
+      })
+    )
+  })
+
+  it('shows an unidentified hint when hovering an unassigned label', async () => {
+    renderViewer()
+    await waitFor(() => expect(mockGetSpeakerMap).toHaveBeenCalled())
+
+    fireEvent.mouseEnter(screen.getByRole('button', { name: /Assign speaker Speaker 1/i }))
+    expect(await screen.findByText('Unidentified speaker')).toBeInTheDocument()
+  })
+
+  it('shows the assigned person metadata when hovering an assigned label', async () => {
+    mockGetSpeakerMap.mockResolvedValue({
+      success: true,
+      data: [{ speaker_label: 'Speaker 1', contact_id: 'c1', name: 'Alice' }]
+    })
+    renderViewer()
+
+    const nameButton = await screen.findByRole('button', { name: /Speaker: Alice/i })
+    fireEvent.mouseEnter(nameButton)
+
+    // PersonHoverCard lazily fetches the contact and shows its metadata.
+    await waitFor(() => expect(mockGetById).toHaveBeenCalledWith('c1'))
+    expect(await screen.findByText('alice@example.com')).toBeInTheDocument()
+    expect(screen.getByText(/Engineer · Acme/)).toBeInTheDocument()
+  })
+
+  it('resets an assigned speaker to unidentified', async () => {
+    mockGetSpeakerMap.mockResolvedValue({
+      success: true,
+      data: [{ speaker_label: 'Speaker 1', contact_id: 'c1', name: 'Alice' }]
+    })
+    renderViewer()
+
+    // Once resolved, the label button shows the person's name.
+    const nameButton = await screen.findByRole('button', { name: /Speaker: Alice/i })
+    fireEvent.click(nameButton)
+
+    // The assigned popover shows actions rather than the picker by default.
+    fireEvent.click(await screen.findByText(/Reset to unidentified/i))
+
+    await waitFor(() =>
+      expect(mockUnassignSpeaker).toHaveBeenCalledWith({ recordingId: 'rec1', speakerLabel: 'Speaker 1' })
+    )
+  })
+
+  it('navigates to the person page from the assigned popover', async () => {
+    mockGetSpeakerMap.mockResolvedValue({
+      success: true,
+      data: [{ speaker_label: 'Speaker 1', contact_id: 'c1', name: 'Alice' }]
+    })
+    renderViewer()
+
+    fireEvent.click(await screen.findByRole('button', { name: /Speaker: Alice/i }))
+    fireEvent.click(await screen.findByText('View person'))
+
+    expect(mockNavigate).toHaveBeenCalledWith('/person/c1')
+  })
+
+  it('reveals the picker via "Change identity" for an assigned speaker', async () => {
+    mockGetSpeakerMap.mockResolvedValue({
+      success: true,
+      data: [{ speaker_label: 'Speaker 1', contact_id: 'c1', name: 'Alice' }]
+    })
+    renderViewer()
+
+    fireEvent.click(await screen.findByRole('button', { name: /Speaker: Alice/i }))
+    // Picker is hidden until "Change identity" is chosen.
+    expect(screen.queryByLabelText('Search or create person')).not.toBeInTheDocument()
+
+    fireEvent.click(await screen.findByText(/Change identity/i))
+    expect(await screen.findByLabelText('Search or create person')).toBeInTheDocument()
+  })
+
+  it('opens the same popover on right-click (no native context menu)', async () => {
+    renderViewer()
+    await waitFor(() => expect(mockGetSpeakerMap).toHaveBeenCalled())
+
+    fireEvent.contextMenu(screen.getByRole('button', { name: /Assign speaker Speaker 1/i }))
+    // Right-click routes through the open path, so contacts load lazily too.
+    await waitFor(() => expect(mockGetAll).toHaveBeenCalled())
+    expect(await screen.findByLabelText('Search or create person')).toBeInTheDocument()
+  })
+
+  it('renders labels as plain text (no button) when recordingId is absent', () => {
+    render(
+      <MemoryRouter>
+        <TranscriptViewer transcript="x" segments={segments} onSeek={noop} />
+      </MemoryRouter>
+    )
+    expect(screen.getByText('Speaker 1')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Assign speaker/i })).not.toBeInTheDocument()
+  })
+
+  // --- v37: per-turn overrides + splits ------------------------------------
+
+  // Two turns that share the same diarization label — the merged-speaker case.
+  const twoTurns = [
+    { speaker: 'Speaker 1', start: 0, end: 5, text: 'Memo speaking early on.' },
+    { speaker: 'Speaker 1', start: 5, end: 10, text: 'Sebastian speaking later.' }
+  ]
+
+  it('per-turn override supersedes the label assignment at render', async () => {
+    // Label map says Alice, but turn 0 is overridden to Bob → Bob wins for turn 0.
+    mockGetSpeakerMap.mockResolvedValue({
+      success: true,
+      data: [{ speaker_label: 'Speaker 1', contact_id: 'c1', name: 'Alice' }]
+    })
+    mockGetOverrides.mockResolvedValue({ success: true, data: [{ turn_index: 0, contact_id: 'c2', name: 'Bob' }] })
+    renderViewer({ segments: twoTurns })
+
+    // Turn 0 shows the override (Bob); turn 1 shows the label default (Alice).
+    expect(await screen.findByRole('button', { name: /Speaker: Bob/i })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /Speaker: Alice/i })).toBeInTheDocument()
+  })
+
+  it('assigns just this turn without touching the label (scope = Just this turn)', async () => {
+    renderViewer({ segments: twoTurns })
+    await waitFor(() => expect(mockGetOverrides).toHaveBeenCalled())
+
+    // Open the FIRST turn's popover.
+    fireEvent.click(screen.getAllByRole('button', { name: /Assign speaker Speaker 1/i })[0])
+    await waitFor(() => expect(mockGetAll).toHaveBeenCalled())
+
+    // Choose the "Just this turn" scope, then pick Alice.
+    fireEvent.click(screen.getByRole('radio', { name: /Just this turn/i }))
+    fireEvent.click(await screen.findByText('Alice'))
+
+    await waitFor(() =>
+      expect(mockSetOverride).toHaveBeenCalledWith({ recordingId: 'rec1', turnIndex: 0, contactId: 'c1' })
+    )
+    // The label-level binding must be untouched — siblings keep their default.
+    expect(mockAssignSpeaker).not.toHaveBeenCalled()
+  })
+
+  it('splits the speaker from a later turn (forks only that turn onward)', async () => {
+    renderViewer({ segments: twoTurns })
+    await waitFor(() => expect(mockGetSplits).toHaveBeenCalled())
+
+    // The SECOND turn can split (a preceding turn shares the base label).
+    fireEvent.click(screen.getAllByRole('button', { name: /Assign speaker Speaker 1/i })[1])
+    fireEvent.click(await screen.findByText(/Split speaker from here/i))
+
+    await waitFor(() =>
+      expect(mockSplit).toHaveBeenCalledWith({ recordingId: 'rec1', baseLabel: 'Speaker 1', fromTurnIndex: 1 })
+    )
+  })
+
+  it('assigns from here on by splitting + binding in one step (scope = From here on)', async () => {
+    renderViewer({ segments: twoTurns })
+    await waitFor(() => expect(mockGetSplits).toHaveBeenCalled())
+
+    fireEvent.click(screen.getAllByRole('button', { name: /Assign speaker Speaker 1/i })[1])
+    await waitFor(() => expect(mockGetAll).toHaveBeenCalled())
+
+    fireEvent.click(screen.getByRole('radio', { name: /From here on/i }))
+    fireEvent.click(await screen.findByText('Alice'))
+
+    await waitFor(() =>
+      expect(mockAssignFromHere).toHaveBeenCalledWith({
+        recordingId: 'rec1',
+        baseLabel: 'Speaker 1',
+        fromTurnIndex: 1,
+        contactId: 'c1'
+      })
+    )
+  })
+
+  it('renders a split as a derived label and offers merge-back that restores it', async () => {
+    mockGetSplits.mockResolvedValue({
+      success: true,
+      data: [{ base_label: 'Speaker 1', from_turn_index: 1, derived_label: 'Speaker 1 · B' }]
+    })
+    renderViewer({ segments: twoTurns })
+
+    // Turn 1 now renders under the derived label.
+    const derived = await screen.findByRole('button', { name: /Assign speaker Speaker 1 · B/i })
+    fireEvent.click(derived)
+
+    fireEvent.click(await screen.findByText(/Merge back into Speaker 1/i))
+    await waitFor(() =>
+      expect(mockMergeSplit).toHaveBeenCalledWith({ recordingId: 'rec1', baseLabel: 'Speaker 1', fromTurnIndex: 1 })
+    )
+  })
+
+  it('surfaces a merge-suspected hint on a flagged label', async () => {
+    mockGetMergeHints.mockResolvedValue({ success: true, data: [{ label: 'Speaker 1', names: ['Memo', 'Sebastian'] }] })
+    renderViewer({ segments: twoTurns })
+    await waitFor(() => expect(mockGetMergeHints).toHaveBeenCalled())
+
+    // Open the second (splittable) turn — the hint nudges toward a split.
+    fireEvent.click(screen.getAllByRole('button', { name: /Assign speaker Speaker 1/i })[1])
+    expect(await screen.findByText(/This speaker may be two people/i)).toBeInTheDocument()
+  })
+})
+
+describe('TranscriptViewer auto-scroll (follow playback)', () => {
+  // Two timestamped turns so currentTimeMs can select which one is "current".
+  const timedSegments = [
+    { speaker: 'Speaker 1', start: 0, end: 10, text: 'First turn near the start.' },
+    { speaker: 'Speaker 2', start: 10, end: 20, text: 'Second turn later on.' }
+  ]
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    // scrollIntoView is mocked in test/setup.ts; reset its call history.
+    ;(window.HTMLElement.prototype.scrollIntoView as ReturnType<typeof vi.fn>).mockClear()
+  })
+
+  it('scrolls the active turn into view as currentTimeMs advances', () => {
+    const scrollSpy = window.HTMLElement.prototype.scrollIntoView as ReturnType<typeof vi.fn>
+    const { rerender } = render(
+      <TranscriptViewer transcript="x" segments={timedSegments} currentTimeMs={1000} onSeek={noop} />
+    )
+    // Initial active segment (turn 1) scrolls into view.
+    expect(scrollSpy).toHaveBeenCalled()
+
+    scrollSpy.mockClear()
+    // Advance playback into the second turn → it becomes active and scrolls.
+    rerender(
+      <TranscriptViewer transcript="x" segments={timedSegments} currentTimeMs={12000} onSeek={noop} />
+    )
+    expect(scrollSpy).toHaveBeenCalled()
+  })
+
+  it('stops following after a manual scroll, then resumes when the "Follow" button is clicked', () => {
+    const scrollSpy = window.HTMLElement.prototype.scrollIntoView as ReturnType<typeof vi.fn>
+    const { container, rerender } = render(
+      <TranscriptViewer transcript="x" segments={timedSegments} currentTimeMs={1000} onSeek={noop} />
+    )
+    expect(scrollSpy).toHaveBeenCalled()
+
+    // User scrolls the transcript manually (wheel) → auto-follow pauses.
+    const scrollContainer = container.querySelector('.mt-2.pr-1') as HTMLElement
+    expect(scrollContainer).toBeTruthy()
+    fireEvent.wheel(scrollContainer)
+
+    // A "Follow" affordance appears once following is paused.
+    const followBtn = screen.getByRole('button', { name: /Follow/i })
+    expect(followBtn).toBeInTheDocument()
+
+    scrollSpy.mockClear()
+    // Advancing playback must NOT yank the view while following is paused.
+    rerender(
+      <TranscriptViewer transcript="x" segments={timedSegments} currentTimeMs={12000} onSeek={noop} />
+    )
+    expect(scrollSpy).not.toHaveBeenCalled()
+
+    // Clicking "Follow" resumes auto-scroll immediately.
+    fireEvent.click(followBtn)
+    expect(scrollSpy).toHaveBeenCalled()
+    // The button disappears once following is active again.
+    expect(screen.queryByRole('button', { name: /Follow/i })).not.toBeInTheDocument()
+  })
+
+  it('resumes following on the next play (currentTimeMs restart) after a manual scroll', () => {
+    const scrollSpy = window.HTMLElement.prototype.scrollIntoView as ReturnType<typeof vi.fn>
+    const { container, rerender } = render(
+      <TranscriptViewer transcript="x" segments={timedSegments} currentTimeMs={12000} onSeek={noop} />
+    )
+
+    // Pause following via manual scroll.
+    const scrollContainer = container.querySelector('.mt-2.pr-1') as HTMLElement
+    fireEvent.wheel(scrollContainer)
+    expect(screen.getByRole('button', { name: /Follow/i })).toBeInTheDocument()
+
+    scrollSpy.mockClear()
+    // Next play: position resets toward the start → following resumes automatically.
+    rerender(
+      <TranscriptViewer transcript="x" segments={timedSegments} currentTimeMs={200} onSeek={noop} />
+    )
+    expect(scrollSpy).toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: /Follow/i })).not.toBeInTheDocument()
+  })
+})
+
+describe('TranscriptViewer follow-when-not-playing (isPlaying=false)', () => {
+  const timedSegments = [
+    { speaker: 'Speaker 1', start: 0, end: 10, text: 'First turn near the start.' },
+    { speaker: 'Speaker 2', start: 10, end: 20, text: 'Second turn later on.' }
+  ]
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    ;(window.HTMLElement.prototype.scrollIntoView as ReturnType<typeof vi.fn>).mockClear()
+  })
+
+  it('does NOT auto-scroll to a stale segment while nothing is playing', () => {
+    const scrollSpy = window.HTMLElement.prototype.scrollIntoView as ReturnType<typeof vi.fn>
+    // currentTimeMs sits past the whole transcript (would resolve to the LAST
+    // segment) — but isPlaying=false must suppress the auto-scroll entirely.
+    render(
+      <TranscriptViewer transcript="x" segments={timedSegments} currentTimeMs={999999} isPlaying={false} onSeek={noop} />
+    )
+    expect(scrollSpy).not.toHaveBeenCalled()
+  })
+
+  it('"Follow" jumps to the TOP of the transcript (position 0) when not playing', () => {
+    const scrollSpy = window.HTMLElement.prototype.scrollIntoView as ReturnType<typeof vi.fn>
+    const { container } = render(
+      <TranscriptViewer transcript="x" segments={timedSegments} currentTimeMs={999999} isPlaying={false} onSeek={noop} />
+    )
+
+    // Reveal the "Follow" affordance by pausing follow with a manual scroll.
+    const scrollContainer = container.querySelector('.mt-2.pr-1') as HTMLElement
+    fireEvent.wheel(scrollContainer)
+    const followBtn = screen.getByRole('button', { name: /Follow/i })
+
+    scrollSpy.mockClear()
+    fireEvent.click(followBtn)
+
+    // Jump to top ⇒ scrollIntoView called with block:'start' (not 'center',
+    // which is how a live "current segment" would be centered).
+    expect(scrollSpy).toHaveBeenCalledWith(expect.objectContaining({ block: 'start' }))
+  })
+})

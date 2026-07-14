@@ -23,6 +23,8 @@ export const SessionLinkMeetingInput = z.object({
   meetingId: z.string(),
 });
 
+export const SessionStatsInput = z.void();
+
 // ── Transcript ───────────────────────────────────────────────────────────────
 
 export const TranscriptGetSegmentsInput = z.object({
@@ -107,6 +109,8 @@ export const KnowledgeSearchInput = z.object({
 
 export const KnowledgeReindexInput = z.void();
 
+export const KnowledgeListSourcesInput = z.void();
+
 // ── Settings ─────────────────────────────────────────────────────────────────
 
 export const SettingsGetInput = z.object({
@@ -125,3 +129,14 @@ export const SettingsGetCategoryInput = z.object({
 });
 
 export const SettingsTestConnectionInput = z.void();
+
+// ── Audio ─────────────────────────────────────────────────────────────────────
+
+export const AudioChunkInput = z.object({
+  data: z.any().refine(
+    (v) => ArrayBuffer.isView(v) || Buffer.isBuffer(v),
+    { message: 'Expected Uint8Array or Buffer' },
+  ),
+  timestamp: z.number(),
+  index: z.number().int().nonnegative(),
+});

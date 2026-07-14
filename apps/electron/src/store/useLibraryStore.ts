@@ -13,11 +13,22 @@ import {
   SemanticLocationFilter,
   ExclusiveLocationFilter
 } from '@/types/unified-recording'
+import type { SourceTypeFilter } from '@/features/library/utils/sourceType'
+import type { DurationPreset } from '@/features/library/utils/durationFilter'
 import { LibraryError } from '@/features/library/utils/errorHandling'
 import { validateId } from '@/lib/utils'
 
 export type SortBy = 'date' | 'duration' | 'name' | 'quality'
 export type SortOrder = 'asc' | 'desc'
+
+/**
+ * How the source-scoped AI assistant is docked in the Library.
+ * - `pinned`: permanent third pane (the classic 3-pane layout).
+ * - `floating`: 2-pane layout with the assistant open as a right-docked overlay.
+ * - `collapsed`: 2-pane layout with the assistant reduced to an icon rail.
+ * Persisted so the choice survives navigation and restart.
+ */
+export type AssistantDock = 'pinned' | 'floating' | 'collapsed'
 
 interface LibraryState {
   // View preferences (persisted)
@@ -32,7 +43,18 @@ interface LibraryState {
   categoryFilter: string | null
   qualityFilter: string | null
   statusFilter: string | null
+  sourceTypeFilter: SourceTypeFilter
+  durationPreset: DurationPreset
   searchQuery: string
+
+  // Source-scoped AI assistant docking (persisted)
+  assistantDock: AssistantDock
+
+  // Whether the reader's full-mode waveform timeline is PINNED open (persisted).
+  // A pin keeps the rich meeting timeline (colored bars, markers, sentiment)
+  // expanded across recordings and restarts, unlike the transient per-recording
+  // expand toggle. Docked pill ↔ pinned full timeline.
+  waveformPinned: boolean
 
   // Selection state (transient - not persisted)
   selectedIds: Set<string>
@@ -45,6 +67,16 @@ interface LibraryState {
 
   // Panel state (persisted)
   panelSizes: number[]
+  // The list/left-column width (percent of the desktop pane group). Persisted on
+  // its own so the resizable split the user sets is REMEMBERED across navigation
+  // and restart, independent of the assistant dock mode (which reshapes the
+  // pane group). This is the single source of truth for "the list column width".
+  listPaneSize: number
+  // Whether the list pane is collapsed to a thin icon rail (like the dockable
+  // assistant). Lets the reader reclaim the full width when the list is a narrow
+  // rail; one click on the rail brings the list back. Persisted so the choice
+  // survives navigation and restart.
+  listCollapsed: boolean
   selectedSourceId: string | null
 
   // Error state (transient - not persisted)
@@ -71,8 +103,17 @@ interface LibraryActions {
   setCategoryFilter: (filter: string | null) => void
   setQualityFilter: (filter: string | null) => void
   setStatusFilter: (filter: string | null) => void
+  setSourceTypeFilter: (filter: SourceTypeFilter) => void
+  setDurationPreset: (preset: DurationPreset) => void
   setSearchQuery: (query: string) => void
   clearFilters: () => void
+
+  // Assistant docking
+  setAssistantDock: (dock: AssistantDock) => void
+
+  // Waveform timeline pin
+  setWaveformPinned: (pinned: boolean) => void
+  toggleWaveformPinned: () => void
 
   // Selection
   selectSingle: (id: string) => void
@@ -98,6 +139,9 @@ interface LibraryActions {
 
   // Panel state
   setPanelSizes: (sizes: number[]) => void
+  setListPaneSize: (size: number) => void
+  setListCollapsed: (collapsed: boolean) => void
+  toggleListCollapsed: () => void
   setSelectedSourceId: (id: string | null) => void
 
   // Scroll
@@ -116,11 +160,20 @@ const initialState: LibraryState = {
   categoryFilter: null,
   qualityFilter: null,
   statusFilter: null,
+  sourceTypeFilter: 'all',
+  durationPreset: 'all',
   searchQuery: '',
+  // Default to the two-pane layout with the assistant collapsed to an icon rail.
+  assistantDock: 'collapsed',
+  // Compact by default: remember the user's pin, but don't force the full
+  // timeline open until they ask for it.
+  waveformPinned: false,
   selectedIds: new Set(),
   expandedRowIds: new Set(),
   expandedTranscripts: new Set(),
   panelSizes: [25, 45, 30],
+  listPaneSize: 25,
+  listCollapsed: false,
   selectedSourceId: null,
   recordingErrors: new Map(),
   scrollOffset: 0
@@ -128,7 +181,7 @@ const initialState: LibraryState = {
 
 export const useLibraryStore = create<LibraryStore>()(
   persist(
-    (set, get) => ({
+    (set, _get) => ({
       ...initialState,
 
       // View mode
@@ -147,6 +200,8 @@ export const useLibraryStore = create<LibraryStore>()(
       setCategoryFilter: (filter) => set({ categoryFilter: filter }),
       setQualityFilter: (filter) => set({ qualityFilter: filter }),
       setStatusFilter: (filter) => set({ statusFilter: filter }),
+      setSourceTypeFilter: (filter) => set({ sourceTypeFilter: filter }),
+      setDurationPreset: (preset) => set({ durationPreset: preset }),
       setSearchQuery: (query) => set({ searchQuery: query }),
       clearFilters: () =>
         set({
@@ -156,10 +211,19 @@ export const useLibraryStore = create<LibraryStore>()(
           categoryFilter: null,
           qualityFilter: null,
           statusFilter: null,
+          sourceTypeFilter: 'all',
+          durationPreset: 'all',
           searchQuery: '',
           // C-005: Clear stale expansion state when filters reset to prevent accumulation
           expandedTranscripts: new Set()
         }),
+
+      // Assistant docking
+      setAssistantDock: (dock) => set({ assistantDock: dock }),
+
+      // Waveform timeline pin
+      setWaveformPinned: (pinned) => set({ waveformPinned: pinned }),
+      toggleWaveformPinned: () => set((state) => ({ waveformPinned: !state.waveformPinned })),
 
       // Selection
       selectSingle: (id) =>
@@ -271,6 +335,9 @@ export const useLibraryStore = create<LibraryStore>()(
 
       // Panel state
       setPanelSizes: (sizes) => set({ panelSizes: sizes }),
+      setListPaneSize: (size) => set({ listPaneSize: size }),
+      setListCollapsed: (collapsed) => set({ listCollapsed: collapsed }),
+      toggleListCollapsed: () => set((state) => ({ listCollapsed: !state.listCollapsed })),
       setSelectedSourceId: (id) => set({ selectedSourceId: id }),
 
       // Scroll
@@ -290,7 +357,13 @@ export const useLibraryStore = create<LibraryStore>()(
         categoryFilter: state.categoryFilter,
         qualityFilter: state.qualityFilter,
         statusFilter: state.statusFilter,
-        panelSizes: state.panelSizes
+        sourceTypeFilter: state.sourceTypeFilter,
+        durationPreset: state.durationPreset,
+        assistantDock: state.assistantDock,
+        waveformPinned: state.waveformPinned,
+        panelSizes: state.panelSizes,
+        listPaneSize: state.listPaneSize,
+        listCollapsed: state.listCollapsed
         // searchQuery intentionally not persisted - should start fresh
         // selectedIds intentionally not persisted - transient
         // expandedRowIds intentionally not persisted - transient
@@ -309,3 +382,5 @@ export const useLibrarySorting = () =>
     sortBy: state.sortBy,
     sortOrder: state.sortOrder
   })))
+export const useLibraryAssistantDock = () => useLibraryStore((state) => state.assistantDock)
+export const useWaveformPinned = () => useLibraryStore((state) => state.waveformPinned)

@@ -5,15 +5,30 @@ import {
   getRecordingsForMeeting,
   updateRecordingStatus,
   updateRecordingTranscriptionStatus,
+  updateRecordingDuration,
+  backfillRecordingDurations,
+  classifyLowValueCaptures,
   linkRecordingToMeeting,
   getTranscriptByRecordingId,
   getCandidatesForRecordingWithDetails,
   getMeetingsNearDate,
   insertRecording,
+  resolveRecordingId,
+  setRecordingPreassignment,
+  getRecordingPreassignment,
+  clearRecordingPreassignment,
   type Recording,
-  type Transcript
+  type Transcript,
+  type RecordingPreassignment
 } from '../services/database'
 import { getRecordingFiles, deleteRecording as deleteRecordingFile, getRecordingsPath } from '../services/file-storage'
+import {
+  scoreMeetingCandidates,
+  deriveTranscriptTitle,
+  deriveTranscriptSummary,
+  countTranscriptSpeakers,
+  buildContentText
+} from '../services/recording-match-scoring'
 import { copyFileSync, existsSync, statSync } from 'fs'
 import { basename, join, extname } from 'path'
 import { randomUUID } from 'crypto'
@@ -29,7 +44,8 @@ import {
   stopTranscriptionProcessor,
   cancelTranscription,
   cancelAllTranscriptions,
-  processQueueManually
+  processQueueManually,
+  markUserPriority
 } from '../services/transcription'
 import { getQueueItems, addToQueue, updateQueueItem } from '../services/database'
 import { getConfig } from '../services/config'
@@ -246,6 +262,19 @@ export function registerRecordingHandlers(): void {
         throw new Error(result.error.issues[0]?.message || 'Invalid request')
       }
 
+      // Same provider prerequisite gate as recordings:addToQueue — fail with a
+      // clean, actionable error instead of throwing deep inside the engine.
+      const config = getConfig()
+      if ((config.transcription.provider || 'gemini') === 'gemini' && !config.transcription.geminiApiKey) {
+        throw new Error('Transcription API key not configured. Please add your API key in Settings.')
+      }
+      if (config.transcription.provider === 'local-asr') {
+        const runnerPath = join(config.transcription.localAsrPath || '', 'mcp_runner.py')
+        if (!config.transcription.localAsrPath || !existsSync(runnerPath)) {
+          throw new Error('Local ASR runner not found. Check the ASR MCP path in Settings.')
+        }
+      }
+
       await transcribeManually(result.data.recordingId)
     } catch (error) {
       console.error('recordings:transcribe error:', error)
@@ -335,16 +364,102 @@ export function registerRecordingHandlers(): void {
     return getRecordingFiles()
   })
 
-  // Get meeting candidates for a recording (for manual linking)
+  // Get meeting candidates for a recording (for manual linking).
+  //
+  // Returns candidates re-scored at fetch time (see recording-match-scoring.ts):
+  // stored candidates are unioned with meetings near the recording so a content
+  // match can surface a meeting the auto-correlator never scored, every candidate
+  // gets an honest time+content score with a human-readable reason, and the field
+  // is sorted (overlaps first, then by score). `recordingContext` carries the
+  // transcript-derived title/summary/speaker count so the dialog can show what
+  // the recording is actually about.
   ipcMain.handle('recordings:getCandidates', async (_, recordingId: unknown) => {
     try {
-      const result = GetRecordingByIdSchema.safeParse({ id: recordingId })
-      if (!result.success) {
-        console.error('recordings:getCandidates validation error:', result.error)
+      if (typeof recordingId !== 'string' || !recordingId) {
         return { success: false, data: [], error: 'Invalid recording ID' }
       }
-      const data = getCandidatesForRecordingWithDetails(result.data.id)
-      return { success: true, data }
+      // Device-only entries carry synthetic (non-UUID) ids and have no DB row —
+      // resolve what we can and return an empty candidate list otherwise so the
+      // link dialog can still offer meetings near the recording's date.
+      const recording = resolveRecordingId(recordingId)
+      if (!recording) {
+        return { success: true, data: [], recordingContext: null }
+      }
+
+      const transcript = getTranscriptByRecordingId(recording.id)
+      const recordingContext = {
+        title: deriveTranscriptTitle(transcript),
+        summary: deriveTranscriptSummary(transcript),
+        speakerCount: countTranscriptSpeakers(transcript),
+        hasTranscript: !!transcript
+      }
+
+      // Union the stored candidates with meetings near the recording, keyed by
+      // meeting id (stored rows win — they carry the real candidate id and any
+      // user confirmation). Nearby-only meetings get a synthetic id.
+      const byMeeting = new Map<string, ReturnType<typeof getCandidatesForRecordingWithDetails>[number]>()
+      for (const candidate of getCandidatesForRecordingWithDetails(recording.id)) {
+        byMeeting.set(candidate.meetingId, candidate)
+      }
+      try {
+        for (const meeting of getMeetingsNearDate(recording.date_recorded)) {
+          if (!byMeeting.has(meeting.id)) {
+            byMeeting.set(meeting.id, {
+              id: `nearby_${meeting.id}`,
+              recordingId: recording.id,
+              meetingId: meeting.id,
+              subject: meeting.subject,
+              startTime: meeting.start_time,
+              endTime: meeting.end_time,
+              confidenceScore: 0,
+              matchReason: null,
+              isAiSelected: false,
+              isUserConfirmed: false,
+              isAllDay: (meeting.is_all_day ?? 0) === 1
+            })
+          }
+        }
+      } catch (nearbyError) {
+        // Nearby meetings are best-effort enrichment — never fail the dialog for it.
+        console.error('recordings:getCandidates nearby lookup failed:', nearbyError)
+      }
+
+      const candidates = Array.from(byMeeting.values())
+      const scored = scoreMeetingCandidates(
+        {
+          dateRecorded: recording.date_recorded,
+          durationSeconds: recording.duration_seconds,
+          contentText: buildContentText(transcript)
+        },
+        candidates.map((c) => ({
+          meetingId: c.meetingId,
+          subject: c.subject,
+          startTime: c.startTime,
+          endTime: c.endTime,
+          isAllDay: c.isAllDay
+        }))
+      )
+      const scoreByMeeting = new Map(scored.map((s) => [s.meetingId, s]))
+
+      const data = candidates
+        .map((candidate) => {
+          const score = scoreByMeeting.get(candidate.meetingId)
+          if (!score) return candidate
+          return {
+            ...candidate,
+            confidenceScore: score.confidenceScore,
+            matchReason: score.matchReason,
+            isAiSelected: score.isBestMatch
+          }
+        })
+        .sort((a, b) => {
+          const sa = scoreByMeeting.get(a.meetingId)
+          const sb = scoreByMeeting.get(b.meetingId)
+          const overlapDelta = (sb?.hasOverlap ? 1 : 0) - (sa?.hasOverlap ? 1 : 0)
+          return overlapDelta !== 0 ? overlapDelta : b.confidenceScore - a.confidenceScore
+        })
+
+      return { success: true, data, recordingContext }
     } catch (error) {
       console.error('recordings:getCandidates error:', error)
       return { success: false, data: [], error: error instanceof Error ? error.message : 'Unknown error' }
@@ -534,20 +649,43 @@ export function registerRecordingHandlers(): void {
     }
   })
 
-  // Add a recording to the transcription queue
-  ipcMain.handle('recordings:addToQueue', async (_, recordingId: string) => {
+  // Add a recording to the transcription queue.
+  // `priority` is set by the single-click "Transcribe" path (one recording, an
+  // explicit user request) so it jumps ahead of the recency-ordered backlog.
+  // Bulk enqueue omits it, so bulk items sort purely by recording date.
+  ipcMain.handle('recordings:addToQueue', async (_, recordingId: string, priority?: boolean) => {
     try {
-      // Validate API key is configured before queueing
+      // Validate provider prerequisites before queueing
       const config = getConfig()
-      if (!config.transcription.geminiApiKey) {
+      if ((config.transcription.provider || 'gemini') === 'gemini' && !config.transcription.geminiApiKey) {
         return {
           success: false,
           error: 'Transcription API key not configured. Please add your API key in Settings.'
         }
       }
+      if (config.transcription.provider === 'local-asr') {
+        const runnerPath = join(config.transcription.localAsrPath || '', 'mcp_runner.py')
+        if (!config.transcription.localAsrPath || !existsSync(runnerPath)) {
+          return {
+            success: false,
+            error: `Local ASR runner not found. Check the ASR MCP path in Settings.`
+          }
+        }
+      }
 
-      const queueItemId = addToQueue(recordingId)
-      updateRecordingTranscriptionStatus(recordingId, 'queued')
+      // Resolve renderer-supplied IDs (may be a synced_files id from the
+      // unified view) to the real recordings row before queueing.
+      const recording = resolveRecordingId(recordingId)
+      if (!recording) {
+        return {
+          success: false,
+          error: `Recording not found: ${recordingId}. Try refreshing the library.`
+        }
+      }
+
+      const queueItemId = addToQueue(recording.id)
+      if (priority) markUserPriority(recording.id)
+      updateRecordingTranscriptionStatus(recording.id, 'queued')
       // spec-005: Trigger immediate queue processing after adding
       processQueueManually()
       return queueItemId
@@ -556,6 +694,55 @@ export function registerRecordingHandlers(): void {
       return false
     }
   })
+
+  // Re-transcribe a recording with a specific provider (e.g. VibeVoice),
+  // without changing the global default provider. Used for re-processing.
+  ipcMain.handle(
+    'recordings:reprocessWith',
+    async (_, payload: { recordingId?: string; provider?: string }) => {
+      try {
+        const recordingId = payload?.recordingId
+        const provider = payload?.provider
+        if (!recordingId || typeof recordingId !== 'string') {
+          return { success: false, error: 'recordingId is required' }
+        }
+        if (provider !== 'gemini' && provider !== 'local-asr' && provider !== 'vibevoice') {
+          return { success: false, error: `Unsupported provider: ${provider}` }
+        }
+
+        const config = getConfig()
+        if (provider === 'gemini' && !config.transcription.geminiApiKey) {
+          return {
+            success: false,
+            error: 'Gemini API key not configured. Please add your API key in Settings.'
+          }
+        }
+        if (provider === 'local-asr' || provider === 'vibevoice') {
+          const runnerPath = join(config.transcription.localAsrPath || '', 'mcp_runner.py')
+          if (!config.transcription.localAsrPath || !existsSync(runnerPath)) {
+            return {
+              success: false,
+              error: 'Local ASR runner not found. Check the ASR MCP path in Settings.'
+            }
+          }
+        }
+
+        const recording = resolveRecordingId(recordingId)
+        if (!recording) {
+          return { success: false, error: `Recording not found: ${recordingId}. Try refreshing the library.` }
+        }
+
+        const queueItemId = addToQueue(recording.id, provider)
+        markUserPriority(recording.id) // explicit single-recording reprocess
+        updateRecordingTranscriptionStatus(recording.id, 'queued')
+        processQueueManually()
+        return { success: true, queueItemId }
+      } catch (error) {
+        console.error('recordings:reprocessWith error:', error)
+        return { success: false, error: (error as Error).message }
+      }
+    }
+  )
 
   // Start processing the transcription queue
   ipcMain.handle('recordings:processQueue', async () => {
@@ -577,8 +764,14 @@ export function registerRecordingHandlers(): void {
         return { success: false, error: result.error.issues[0]?.message || 'Invalid request' }
       }
 
-      const queueItemId = addToQueue(result.data.recordingId)
-      updateRecordingTranscriptionStatus(result.data.recordingId, 'pending')
+      const recording = resolveRecordingId(result.data.recordingId)
+      if (!recording) {
+        return { success: false, error: `Recording not found: ${result.data.recordingId}` }
+      }
+
+      const queueItemId = addToQueue(recording.id)
+      markUserPriority(recording.id) // explicit user retry jumps the backlog
+      updateRecordingTranscriptionStatus(recording.id, 'pending')
       processQueueManually()
       return { success: true, queueItemId }
     } catch (error) {
@@ -626,6 +819,100 @@ export function registerRecordingHandlers(): void {
       return { success: false, error: error instanceof Error ? error.message : 'Unknown error occurred' }
     }
   })
+
+  // Backfill duration discovered by the renderer when it decodes audio for the
+  // waveform. Imported/watched local files have no duration until this runs.
+  ipcMain.handle('recordings:updateDuration', async (_, id: unknown, durationSeconds: unknown): Promise<{ success: boolean; error?: string }> => {
+    try {
+      if (typeof id !== 'string' || !id) {
+        return { success: false, error: 'Invalid recording id' }
+      }
+      if (typeof durationSeconds !== 'number' || !Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+        return { success: false, error: 'Invalid duration' }
+      }
+      updateRecordingDuration(id, durationSeconds)
+      return { success: true }
+    } catch (error) {
+      console.error('recordings:updateDuration error:', error)
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error occurred' }
+    }
+  })
+
+  // One-time idempotent backfill of duration_seconds for rows the download/import
+  // paths stored as NULL. Uses device-cache + transcript timing already in the DB
+  // so the Library can sort/filter by length offline. Called on Library mount.
+  ipcMain.handle('recordings:backfillDurations', async (): Promise<{ success: boolean; scanned?: number; updated?: number; markedLowValue?: number; error?: string }> => {
+    try {
+      const result = backfillRecordingDurations()
+      // Classify AFTER the duration backfill so the low-value heuristic can use
+      // the freshly-populated duration_seconds.
+      const quality = classifyLowValueCaptures()
+      return { success: true, ...result, markedLowValue: quality.markedLowValue }
+    } catch (error) {
+      console.error('recordings:backfillDurations error:', error)
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error occurred' }
+    }
+  })
+
+  // -------------------------------------------------------------------------
+  // Recording pre-assignments (v31) — in-advance attribution for the live capture.
+  // The Today "Recording now" card writes these keyed by the device's in-progress
+  // filename; autoLinkRecordingsToMeetings consumes them when the file is downloaded.
+  // -------------------------------------------------------------------------
+
+  // Set (or clear, when meetingId is explicitly null) the attribution for a live
+  // recording filename. meetingId === null means "force standalone".
+  ipcMain.handle(
+    'recordings:preassign',
+    async (_, filename: unknown, meetingId: unknown): Promise<{ success: boolean; error?: string }> => {
+      try {
+        if (typeof filename !== 'string' || !filename) {
+          return { success: false, error: 'Invalid filename' }
+        }
+        if (meetingId !== null && (typeof meetingId !== 'string' || !meetingId)) {
+          return { success: false, error: 'Invalid meetingId (expected string or null)' }
+        }
+        setRecordingPreassignment(filename, meetingId as string | null)
+        return { success: true }
+      } catch (error) {
+        console.error('recordings:preassign error:', error)
+        return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
+      }
+    }
+  )
+
+  // Read the current attribution for a filename (null data = none set).
+  ipcMain.handle(
+    'recordings:getPreassignment',
+    async (_, filename: unknown): Promise<{ success: boolean; data: RecordingPreassignment | null; error?: string }> => {
+      try {
+        if (typeof filename !== 'string' || !filename) {
+          return { success: false, data: null, error: 'Invalid filename' }
+        }
+        return { success: true, data: getRecordingPreassignment(filename) ?? null }
+      } catch (error) {
+        console.error('recordings:getPreassignment error:', error)
+        return { success: false, data: null, error: error instanceof Error ? error.message : 'Unknown error' }
+      }
+    }
+  )
+
+  // Remove an attribution (e.g. user reverts to automatic time-overlap linking).
+  ipcMain.handle(
+    'recordings:clearPreassignment',
+    async (_, filename: unknown): Promise<{ success: boolean; error?: string }> => {
+      try {
+        if (typeof filename !== 'string' || !filename) {
+          return { success: false, error: 'Invalid filename' }
+        }
+        clearRecordingPreassignment(filename)
+        return { success: true }
+      } catch (error) {
+        console.error('recordings:clearPreassignment error:', error)
+        return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
+      }
+    }
+  )
 
   console.log('Recording IPC handlers registered')
 }

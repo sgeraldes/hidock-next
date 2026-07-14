@@ -134,6 +134,39 @@ class TestHiDockJensenFileListOperations:
 
         assert result is not None
 
+    def test_list_files_runaway_transfer_is_bounded(self, jensen_device):
+        """A device that streams endless non-empty chunks must not loop forever.
+
+        Regression for the 19GB-log incident: each non-empty CMD_GET_FILE_LIST chunk
+        resets the timeout counter, so without a sanity bound the accumulation loop
+        never terminates. The runaway guard must abort and return a result.
+        """
+        # First chunk carries the header (0xFF 0xFF + count) so expected_file_count is set,
+        # then the device keeps sending small junk chunks that never terminate.
+        header = bytearray([0xFF, 0xFF])
+        header.extend(struct.pack(">I", 2))  # device claims only 2 files
+        header.extend(b"\x00" * 78)
+
+        def endless_chunks():
+            seq = 0
+            yield {"id": CMD_GET_FILE_LIST, "sequence": seq, "body": bytes(header)}
+            while True:
+                seq += 1
+                yield {"id": CMD_GET_FILE_LIST, "sequence": seq, "body": b"\x00" * 84}
+
+        with patch.object(jensen_device, "_send_command", return_value=1):
+            with patch.object(jensen_device, "_receive_response") as mock_receive:
+                mock_receive.side_effect = endless_chunks()
+
+                result = jensen_device.list_files()
+
+        # The guard must have stopped the loop with a bounded number of receives,
+        # not millions. expected=2 → ceiling ~16KB → a few hundred 84-byte chunks.
+        assert result is not None
+        assert mock_receive.call_count < 5000, (
+            f"runaway guard did not bound the loop: {mock_receive.call_count} receives"
+        )
+
     def test_is_file_list_streaming(self, jensen_device):
         """Test is_file_list_streaming method - covering lines 1371-1373."""
         # Test default state

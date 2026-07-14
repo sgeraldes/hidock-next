@@ -5,24 +5,33 @@
  */
 
 import { ipcMain } from 'electron'
+import { z } from 'zod'
 import {
   getContacts,
   getContactById,
+  getContactByName,
+  createContact,
   updateContact,
   deleteContact,
   getMeetingsForContact,
   getContactsForMeeting,
+  mergeContacts,
+  unmergeContacts,
+  UnmergeResult,
   Contact
 } from '../services/database'
+import { getEventBus } from '../services/event-bus'
 import { success, error, Result } from '../types/api'
 import {
   GetContactsRequestSchema,
   GetContactByIdRequestSchema,
+  CreateContactRequestSchema,
   UpdateContactRequestSchema,
-  DeleteContactRequestSchema
+  DeleteContactRequestSchema,
+  MergeContactsRequestSchema
 } from '../validation/contacts'
 import type { Person } from '@/types/knowledge'
-import type { Meeting } from '@/types'
+import type { Meeting } from '../services/database'
 
 export function registerContactsHandlers(): void {
   /**
@@ -91,6 +100,45 @@ export function registerContactsHandlers(): void {
   )
 
   /**
+   * Create a new contact (manual "Add Person"). Guards against an exact
+   * (case-insensitive) name collision so the user opens the existing contact
+   * rather than silently minting a twin — the renderer surfaces the existing id.
+   */
+  ipcMain.handle(
+    'contacts:create',
+    async (_, request: unknown): Promise<Result<Person>> => {
+      try {
+        const parsed = CreateContactRequestSchema.safeParse(request)
+        if (!parsed.success) {
+          return error('VALIDATION_ERROR', 'Invalid create request', parsed.error.format())
+        }
+
+        const name = parsed.data.name.trim()
+        const existing = getContactByName(name)
+        if (existing) {
+          return error('DUPLICATE_ENTRY', `A contact named ${existing.name} already exists`, {
+            existingId: existing.id,
+            existingName: existing.name
+          })
+        }
+
+        const created = createContact({
+          name,
+          email: parsed.data.email ?? null,
+          type: parsed.data.type,
+          role: parsed.data.role ?? null,
+          company: parsed.data.company ?? null
+        })
+
+        return success(mapToPerson(created))
+      } catch (err) {
+        console.error('contacts:create error:', err)
+        return error('DATABASE_ERROR', 'Failed to create contact', err)
+      }
+    }
+  )
+
+  /**
    * Update contact
    */
   ipcMain.handle(
@@ -122,6 +170,25 @@ export function registerContactsHandlers(): void {
         updateContact(id, updates)
 
         const updatedContact = getContactById(id)
+
+        // Living knowledge graph (v27): a rename re-keys the person's graph node.
+        if (name !== undefined && updatedContact && contact.name !== updatedContact.name) {
+          try {
+            getEventBus().emitDomainEvent({
+              type: 'entity:contact-changed',
+              timestamp: new Date().toISOString(),
+              payload: {
+                contactId: id,
+                change: 'updated',
+                oldName: contact.name,
+                newName: updatedContact.name
+              }
+            })
+          } catch (e) {
+            console.warn('[contacts:update] contact-changed emit failed:', e)
+          }
+        }
+
         return success(mapToPerson(updatedContact!))
       } catch (err) {
         console.error('contacts:update error:', err)
@@ -156,6 +223,57 @@ export function registerContactsHandlers(): void {
       }
     }
   )
+
+  /**
+   * Merge one contact into another. The keeper survives; the loser's links are
+   * repointed, useful fields folded in, and the loser row deleted.
+   */
+  ipcMain.handle(
+    'contacts:merge',
+    async (_, request: unknown): Promise<Result<Person>> => {
+      try {
+        const parsed = MergeContactsRequestSchema.safeParse(request)
+        if (!parsed.success) {
+          return error('VALIDATION_ERROR', 'Invalid merge request', parsed.error.format())
+        }
+
+        const { keeperId, loserId } = parsed.data
+        if (keeperId === loserId) {
+          return error('VALIDATION_ERROR', 'Cannot merge a contact into itself')
+        }
+        if (!getContactById(keeperId)) {
+          return error('NOT_FOUND', `Keeper contact ${keeperId} not found`)
+        }
+        if (!getContactById(loserId)) {
+          return error('NOT_FOUND', `Loser contact ${loserId} not found`)
+        }
+
+        const merged = mergeContacts(keeperId, loserId)
+        return success(mapToPerson(merged))
+      } catch (err) {
+        console.error('contacts:merge error:', err)
+        return error('DATABASE_ERROR', 'Failed to merge contacts', err)
+      }
+    }
+  )
+
+  /**
+   * Reverse a contact merge from its merge_journal id. Recreates the loser,
+   * repoints the journaled links back, and returns restore counts plus the list
+   * of links that appeared after the merge for the user to reassign by hand.
+   */
+  ipcMain.handle('contacts:unmerge', async (_, journalId: unknown): Promise<Result<UnmergeResult>> => {
+    try {
+      const parsed = z.string().min(1).max(200).safeParse(journalId)
+      if (!parsed.success) {
+        return error('VALIDATION_ERROR', 'Invalid journal id', parsed.error.format())
+      }
+      return success(unmergeContacts(parsed.data))
+    } catch (err) {
+      console.error('contacts:unmerge error:', err)
+      return error('DATABASE_ERROR', err instanceof Error ? err.message : 'Failed to unmerge contacts', err)
+    }
+  })
 
   /**
    * Get contacts for a specific meeting

@@ -25,11 +25,17 @@ import {
 
 // Mock window.electronAPI to prevent errors in retry()
 // B-TXN-004: updateQueueItem must return true for retry to update local store state
+const QUEUE_STATE = { paused: false, isProcessing: false, processingId: null, pendingCount: 0, processingCount: 0 }
+
 beforeEach(() => {
   ;(window as any).electronAPI = {
     recordings: {
       updateQueueItem: vi.fn().mockResolvedValue(true),
-      processQueue: vi.fn().mockResolvedValue(true)
+      processQueue: vi.fn().mockResolvedValue(true),
+      reorderTranscription: vi.fn().mockResolvedValue({ ...QUEUE_STATE }),
+      pauseTranscriptionQueue: vi.fn().mockResolvedValue({ ...QUEUE_STATE, paused: true }),
+      resumeTranscriptionQueue: vi.fn().mockResolvedValue({ ...QUEUE_STATE, paused: false }),
+      getTranscriptionQueueState: vi.fn().mockResolvedValue({ ...QUEUE_STATE })
     }
   }
 })
@@ -37,6 +43,7 @@ beforeEach(() => {
 // Reset store before each test
 beforeEach(() => {
   useTranscriptionStore.getState().clear()
+  useTranscriptionStore.setState({ paused: false, processingId: null })
 })
 
 describe('useTranscriptionStore', () => {
@@ -599,6 +606,34 @@ describe('useTranscriptionStore', () => {
         expect(result.current[1].id).toBe('q-2')
         expect(result.current[1].retryCount).toBe(1)
       })
+
+      it('prioritize() moves a pending item to the front of the queue view', () => {
+        const store = useTranscriptionStore.getState()
+        store.addToQueue('q-1', 'rec-1', 'a.wav')
+        store.addToQueue('q-2', 'rec-2', 'b.wav')
+
+        // Default order (FIFO by insertion): q-1 first.
+        let { result } = renderHook(() => usePendingTranscriptions())
+        expect(result.current.map((i) => i.id)).toEqual(['q-1', 'q-2'])
+
+        // Prioritize q-2 → it jumps ahead.
+        store.prioritize('q-2')
+        ;({ result } = renderHook(() => usePendingTranscriptions()))
+        expect(result.current.map((i) => i.id)).toEqual(['q-2', 'q-1'])
+        expect(result.current[0].priority).toBeGreaterThan(result.current[1].priority)
+      })
+
+      it('deprioritize() pushes a pending item to the back of the queue view', () => {
+        const store = useTranscriptionStore.getState()
+        store.addToQueue('q-1', 'rec-1', 'a.wav')
+        store.addToQueue('q-2', 'rec-2', 'b.wav')
+
+        // Deprioritize q-1 → q-2 now leads.
+        store.deprioritize('q-1')
+        const { result } = renderHook(() => usePendingTranscriptions())
+        expect(result.current.map((i) => i.id)).toEqual(['q-2', 'q-1'])
+        expect(result.current[1].priority).toBeLessThan(result.current[0].priority)
+      })
     })
 
     describe('useProcessingTranscriptions', () => {
@@ -780,6 +815,72 @@ describe('useTranscriptionStore', () => {
       // markFailed does not reset progress (retry does)
       expect(item!.progress).toBe(75)
       expect(item!.status).toBe('failed')
+    })
+  })
+
+  describe('Queue control (pause/resume + reorder IPC)', () => {
+    const flush = () => new Promise((r) => setTimeout(r, 0))
+
+    it('prioritize() sends a reorder "up" intent to main with the recordingId', () => {
+      const store = useTranscriptionStore.getState()
+      store.addToQueue('q-1', 'rec-1', 'a.wav')
+
+      store.prioritize('q-1')
+
+      expect(window.electronAPI.recordings.reorderTranscription).toHaveBeenCalledWith('rec-1', 'up')
+    })
+
+    it('deprioritize() sends a reorder "down" intent to main with the recordingId', () => {
+      const store = useTranscriptionStore.getState()
+      store.addToQueue('q-1', 'rec-1', 'a.wav')
+
+      store.deprioritize('q-1')
+
+      expect(window.electronAPI.recordings.reorderTranscription).toHaveBeenCalledWith('rec-1', 'down')
+    })
+
+    it('pauseQueue() flips paused and calls the pause IPC', async () => {
+      const store = useTranscriptionStore.getState()
+
+      store.pauseQueue()
+
+      expect(useTranscriptionStore.getState().paused).toBe(true)
+      expect(window.electronAPI.recordings.pauseTranscriptionQueue).toHaveBeenCalled()
+      await flush()
+      // Echoed queue state confirms paused.
+      expect(useTranscriptionStore.getState().paused).toBe(true)
+    })
+
+    it('resumeQueue() clears paused and calls the resume IPC', async () => {
+      const store = useTranscriptionStore.getState()
+      store.pauseQueue()
+      await flush()
+
+      store.resumeQueue()
+
+      expect(useTranscriptionStore.getState().paused).toBe(false)
+      expect(window.electronAPI.recordings.resumeTranscriptionQueue).toHaveBeenCalled()
+      await flush()
+      expect(useTranscriptionStore.getState().paused).toBe(false)
+    })
+
+    it('pauseQueue() reverts the optimistic flip if the IPC rejects', async () => {
+      ;(window.electronAPI.recordings.pauseTranscriptionQueue as any) = vi.fn().mockRejectedValue(new Error('nope'))
+      const store = useTranscriptionStore.getState()
+
+      store.pauseQueue()
+      expect(useTranscriptionStore.getState().paused).toBe(true) // optimistic
+      await flush()
+      expect(useTranscriptionStore.getState().paused).toBe(false) // reverted
+    })
+
+    it('applyQueueState() mirrors paused + processingId from main', () => {
+      const store = useTranscriptionStore.getState()
+
+      store.applyQueueState({ paused: true, isProcessing: true, processingId: 'rec-9', pendingCount: 3, processingCount: 1 })
+
+      expect(useTranscriptionStore.getState().paused).toBe(true)
+      expect(useTranscriptionStore.getState().processingId).toBe('rec-9')
     })
   })
 })

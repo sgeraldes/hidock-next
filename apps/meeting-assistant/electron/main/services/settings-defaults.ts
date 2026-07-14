@@ -53,6 +53,12 @@ export const SETTING_DEFINITIONS: SettingDefinition<any>[] = [
 
   // ── Calendar ─────────────────────────────────────────────────────────────
   {
+    key: "calendar.source",
+    type: "string",
+    category: "calendar",
+    default: "",
+  },
+  {
     key: "calendar.preNotificationSeconds",
     type: "number",
     category: "calendar",

@@ -12,6 +12,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { cn, formatDuration, formatTime, formatDateTime } from '@/lib/utils'
+import { sortMeetingsByProximity } from '@/lib/calendar-utils'
 import { toast } from '@/components/ui/toaster'
 import type { Recording, Meeting, MeetingCandidate } from '@/types'
 
@@ -30,6 +31,16 @@ export function RecordingLinkDialog({
   onClose,
   onResolved
 }: RecordingLinkDialogProps) {
+  // Transcript-derived context fetched alongside candidates, so the header can
+  // say what the recording is ABOUT (title/summary/speakers) even when the
+  // opener (e.g. the Calendar) only had the filename to hand.
+  const [recordingContext, setRecordingContext] = useState<{
+    title: string | null
+    summary: string | null
+    speakerCount: number | null
+    hasTranscript: boolean
+  } | null>(null)
+
   // Link section state
   const [candidates, setCandidates] = useState<MeetingCandidate[]>([])
   const [nearbyMeetings, setNearbyMeetings] = useState<Meeting[]>([])
@@ -54,6 +65,7 @@ export function RecordingLinkDialog({
     if (!recording || !open) {
       setCandidates([])
       setNearbyMeetings([])
+      setRecordingContext(null)
       setSelectedId(null)
       setLinkError(null)
       setEditingSubject(false)
@@ -87,7 +99,12 @@ export function RecordingLinkDialog({
         }
 
         setCandidates(candidatesResult.data)
-        setNearbyMeetings(nearbyResult.success ? nearbyResult.data : [])
+        setRecordingContext(candidatesResult.recordingContext ?? null)
+        // Rank the fallback list nearest-in-time first, so the closest meeting
+        // to the recording is the top candidate to assign.
+        setNearbyMeetings(
+          nearbyResult.success ? sortMeetingsByProximity(nearbyResult.data, recording.date_recorded) : []
+        )
 
         if (meetingRecordings) {
           setLinkedRecordings((meetingRecordings as Recording[]).filter(r => r.id !== recording.id))
@@ -190,6 +207,19 @@ export function RecordingLinkDialog({
 
   if (!recording) return null
 
+  // Header context comes from the transcript (fetched with the candidates). The
+  // filename, duration and speaker count drop to a quiet metadata line beneath.
+  const headlineTitle = recordingContext?.title ?? null
+  const headlineSummary = recordingContext?.summary ?? null
+  const speakerCount = recordingContext?.speakerCount ?? null
+  const metaLine = [
+    recording.filename,
+    recording.duration_seconds ? formatDuration(recording.duration_seconds) : null,
+    speakerCount ? `${speakerCount} speaker${speakerCount === 1 ? '' : 's'}` : null
+  ]
+    .filter(Boolean)
+    .join('  ·  ')
+
   const hasCandidates = candidates.length > 0
   const options: MeetingCandidate[] = hasCandidates
     ? candidates
@@ -214,11 +244,20 @@ export function RecordingLinkDialog({
             {meeting ? 'Meeting Details' : (hasCandidates ? 'Verify Recording Match' : 'Link Recording to Meeting')}
           </DialogTitle>
           <DialogDescription className="text-sm space-y-1">
-            <span className="font-medium block truncate">{recording.filename}</span>
-            {recording.duration_seconds && (
-              <span className="text-muted-foreground">
-                Duration: {formatDuration(recording.duration_seconds)}
-              </span>
+            {/* Lead with what the recording IS (transcript-derived title/summary)
+                when known; the raw filename, duration and speaker count drop to a
+                quiet metadata line. The fetched context wins over the props so the
+                header is right even when the opener only had a filename. */}
+            {headlineTitle ? (
+              <>
+                <span className="font-medium block leading-snug text-foreground">{headlineTitle}</span>
+                {headlineSummary && (
+                  <span className="text-muted-foreground line-clamp-2 block">{headlineSummary}</span>
+                )}
+                <span className="text-xs text-muted-foreground/70 block truncate">{metaLine}</span>
+              </>
+            ) : (
+              <span className="text-muted-foreground block truncate">{metaLine}</span>
             )}
           </DialogDescription>
         </DialogHeader>
@@ -389,7 +428,10 @@ export function RecordingLinkDialog({
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2">
                         {option.isAiSelected && (
-                          <Star className="h-4 w-4 text-yellow-500 flex-shrink-0" />
+                          <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-primary flex-shrink-0">
+                            <Star className="h-3.5 w-3.5 fill-current" aria-hidden="true" />
+                            Best match
+                          </span>
                         )}
                         <span className="font-medium truncate">{option.subject}</span>
                       </div>
@@ -397,7 +439,7 @@ export function RecordingLinkDialog({
                         {formatTime(option.startTime)} - {formatTime(option.endTime)}
                       </div>
                       {option.matchReason && (
-                        <div className="text-xs text-muted-foreground mt-1 italic truncate">
+                        <div className="text-xs text-muted-foreground mt-1 italic truncate" title={option.matchReason}>
                           {option.matchReason}
                         </div>
                       )}
@@ -405,13 +447,15 @@ export function RecordingLinkDialog({
                     {hasCandidates && option.confidenceScore > 0 && (
                       <span
                         className={cn(
-                          'text-xs px-2 py-0.5 rounded-full flex-shrink-0',
-                          option.confidenceScore > 0.7 && 'bg-green-100 text-green-800',
+                          'text-xs px-2 py-0.5 rounded-full flex-shrink-0 font-medium',
+                          option.confidenceScore > 0.7 &&
+                            'bg-green-100 text-green-800 dark:bg-green-500/15 dark:text-green-300',
                           option.confidenceScore > 0.4 &&
                             option.confidenceScore <= 0.7 &&
-                            'bg-yellow-100 text-yellow-800',
-                          option.confidenceScore <= 0.4 && 'bg-gray-100 text-gray-600'
+                            'bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-300',
+                          option.confidenceScore <= 0.4 && 'bg-muted text-muted-foreground'
                         )}
+                        title="Match confidence"
                       >
                         {Math.round(option.confidenceScore * 100)}%
                       </span>

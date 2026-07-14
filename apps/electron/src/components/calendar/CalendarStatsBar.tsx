@@ -5,6 +5,7 @@
 import { memo } from 'react'
 import { Cloud, HardDrive, Check } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { CalendarLegend } from './CalendarLegend'
 
 type LocationFilter = 'all' | 'device-only' | 'local-only' | 'both'
 type SortOption = 'date-desc' | 'date-asc' | 'name-asc' | 'name-desc' | 'size-desc'
@@ -104,6 +105,9 @@ export const CalendarStatsBar = memo(function CalendarStatsBar({
 
       {/* Spacer */}
       <div className="flex-1" />
+
+      {/* Legend - the calendar's visual key (only meaningful in calendar view) */}
+      {!showListView && <CalendarLegend />}
 
       {/* Sort dropdown - only in list view */}
       {showListView && (

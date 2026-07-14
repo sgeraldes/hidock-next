@@ -1,92 +1,14 @@
+import { parseICS, correlate } from '@hidock/calendar-sync'
+import type { CalendarEvent } from '@hidock/calendar-sync'
 import ICAL from 'ical.js'
 import { join } from 'path'
 import { getCachePath } from './file-storage'
 import { upsertMeetingsBatch, Meeting } from './database'
 import { getConfig, updateConfig } from './config'
 
-/**
- * Windows timezone names to UTC offset in seconds.
- * Used as fallback when VTIMEZONE component is missing from ICS.
- * Offsets are for standard time (not DST).
- */
-const WINDOWS_TIMEZONE_OFFSETS: Record<string, number> = {
-  // Americas
-  'Pacific Standard Time': -8 * 3600,
-  'Mountain Standard Time': -7 * 3600,
-  'Central Standard Time': -6 * 3600,
-  'Central Standard Time (Mexico)': -6 * 3600,
-  'Central America Standard Time': -6 * 3600, // Guatemala, Costa Rica, etc.
-  'Eastern Standard Time': -5 * 3600,
-  'SA Pacific Standard Time': -5 * 3600, // Colombia, Peru, Ecuador
-  'Venezuela Standard Time': -4 * 3600,
-  'SA Western Standard Time': -4 * 3600, // Bolivia, Guyana
-  'Atlantic Standard Time': -4 * 3600,
-  'Paraguay Standard Time': -4 * 3600,
-  'Pacific SA Standard Time': -3 * 3600, // Chile (Santiago)
-  'SA Eastern Standard Time': -3 * 3600, // Brazil (Brasilia), French Guiana
-  'Argentina Standard Time': -3 * 3600,
-  'E. South America Standard Time': -3 * 3600, // Brazil (Brasilia)
-  'Greenland Standard Time': -3 * 3600,
-  'Montevideo Standard Time': -3 * 3600, // Uruguay
-  'Newfoundland Standard Time': -3.5 * 3600,
-
-  // Europe & Africa
-  'GMT Standard Time': 0,
-  'Greenwich Standard Time': 0,
-  'UTC': 0,
-  'W. Europe Standard Time': 1 * 3600,
-  'Central Europe Standard Time': 1 * 3600,
-  'Central European Standard Time': 1 * 3600,
-  'Romance Standard Time': 1 * 3600, // France, Belgium, Spain
-  'W. Central Africa Standard Time': 1 * 3600,
-  'E. Europe Standard Time': 2 * 3600,
-  'GTB Standard Time': 2 * 3600, // Greece, Turkey, Bulgaria
-  'FLE Standard Time': 2 * 3600, // Finland, Lithuania, Estonia
-  'South Africa Standard Time': 2 * 3600,
-  'Israel Standard Time': 2 * 3600,
-  'Egypt Standard Time': 2 * 3600,
-  'Jordan Standard Time': 3 * 3600,
-  'Arabic Standard Time': 3 * 3600, // Iraq
-  'Arab Standard Time': 3 * 3600, // Kuwait, Riyadh
-  'E. Africa Standard Time': 3 * 3600,
-  'Russian Standard Time': 3 * 3600,
-  'Iran Standard Time': 3.5 * 3600,
-
-  // Asia & Pacific
-  'Arabian Standard Time': 4 * 3600, // Abu Dhabi, Dubai
-  'Azerbaijan Standard Time': 4 * 3600,
-  'Georgian Standard Time': 4 * 3600,
-  'Afghanistan Standard Time': 4.5 * 3600,
-  'West Asia Standard Time': 5 * 3600, // Pakistan
-  'Pakistan Standard Time': 5 * 3600,
-  'India Standard Time': 5.5 * 3600,
-  'Sri Lanka Standard Time': 5.5 * 3600,
-  'Nepal Standard Time': 5.75 * 3600,
-  'Central Asia Standard Time': 6 * 3600, // Kazakhstan
-  'Bangladesh Standard Time': 6 * 3600,
-  'Myanmar Standard Time': 6.5 * 3600,
-  'SE Asia Standard Time': 7 * 3600, // Thailand, Vietnam
-  'North Asia Standard Time': 7 * 3600,
-  'China Standard Time': 8 * 3600,
-  'Singapore Standard Time': 8 * 3600,
-  'W. Australia Standard Time': 8 * 3600,
-  'Taipei Standard Time': 8 * 3600,
-  'Korea Standard Time': 9 * 3600,
-  'Tokyo Standard Time': 9 * 3600,
-  'AUS Central Standard Time': 9.5 * 3600,
-  'Cen. Australia Standard Time': 9.5 * 3600,
-  'AUS Eastern Standard Time': 10 * 3600,
-  'E. Australia Standard Time': 10 * 3600,
-  'West Pacific Standard Time': 10 * 3600,
-  'Tasmania Standard Time': 10 * 3600,
-  'Central Pacific Standard Time': 11 * 3600,
-  'New Zealand Standard Time': 12 * 3600,
-  'Fiji Standard Time': 12 * 3600,
-  'Tonga Standard Time': 13 * 3600,
-
-  // Additional common names
-  'Customized Time Zone': -5 * 3600, // Default to something reasonable
-}
+// Re-export package types and correlate for consumers (e.g. recording-watcher)
+export { correlate }
+export type { CalendarEvent }
 
 // B-CAL-004: Error category for calendar sync failures
 // CS-003: Added 'auth' category for 401/403 errors
@@ -247,7 +169,7 @@ function validateCalendarUrl(url: string): { valid: boolean; error?: string } {
     }
 
     return { valid: true }
-  } catch (e) {
+  } catch {
     return { valid: false, error: 'Invalid URL format' }
   }
 }
@@ -259,162 +181,383 @@ function yieldToEventLoop(): Promise<void> {
 }
 
 /**
- * Register all VTIMEZONE components from a calendar with ICAL.TimezoneService.
- * This is critical for proper timezone conversion - without registration,
- * toJSDate() ignores TZID parameters and returns incorrect times.
+ * URL patterns used to extract meeting links from event description/location.
+ * Kept here (electron-specific) so the shared package stays provider-agnostic.
  */
-function registerTimezones(vcalendar: ICAL.Component): void {
-  const vtimezones = vcalendar.getAllSubcomponents('vtimezone')
+const MEETING_URL_PATTERNS = [
+  /https:\/\/teams\.microsoft\.com\/[^\s<>]+/i,
+  /https:\/\/[\w-]+\.zoom\.us\/[^\s<>]+/i,
+  /https:\/\/meet\.google\.com\/[^\s<>]+/i,
+  /https:\/\/[\w-]+\.webex\.com\/[^\s<>]+/i,
+]
 
-  for (const vtimezone of vtimezones) {
-    try {
-      const tzid = vtimezone.getFirstPropertyValue('tzid')
-      if (tzid && typeof tzid === 'string') {
-        const tz = new ICAL.Timezone(vtimezone)
-        // @ts-ignore - ICAL type definitions are sometimes incomplete
-        ICAL.TimezoneService.register(tzid, tz)
-      }
-    } catch (e) {
-      console.warn('[Calendar] Failed to register timezone:', e)
-    }
-  }
+/**
+ * Adapter: convert a package CalendarEvent to the electron DB meeting row shape.
+ *
+ * The shared @hidock/calendar-sync package now preserves every field electron
+ * relied on before the migration:
+ *  - organizer: parsed from the ICS ORGANIZER property (CN + mailto)
+ *  - isRecurring / recurrence: parsed from the ICS RRULE property
+ *  - Windows/Exchange timezone names (e.g. "Eastern Standard Time") that ship
+ *    no VTIMEZONE block are converted to correct UTC inside parseICS()
+ *
+ * This adapter maps those into the DB column shape:
+ *  - organizer.name/email  → organizer_name / organizer_email
+ *  - isRecurring/recurrence → is_recurring / recurrence_rule
+ *  - attendees: CalendarAttendee[] → JSON string (DB stores attendees as text)
+ *  - meeting_url: electron-specific extraction from description/location
+ */
+function calendarEventToMeetingRow(
+  event: CalendarEvent
+): Omit<Meeting, 'created_at' | 'updated_at'> {
+  return buildMeetingRow(event, {
+    id: event.uid,
+    startTime: event.startTime,
+    endTime: event.endTime,
+    isRecurring: !!event.isRecurring,
+    recurrenceRule: event.recurrence,
+  })
 }
 
 /**
- * Safely convert ICAL.Time to JavaScript Date with proper timezone handling.
- *
- * ICAL.js's toJSDate() has known issues with some timezones, even when registered.
- * This function uses toUnixTime() which is more reliable as it directly calculates
- * the UTC offset using the registered timezone's rules.
- *
- * For floating times (no timezone), we check if there's a TZID parameter that
- * wasn't recognized and use our Windows timezone fallback map.
- *
- * @param icalTime - The ICAL.Time object to convert
- * @param tzidHint - Optional TZID hint from the property (for fallback when zone is floating)
+ * Build a DB meeting row from a CalendarEvent, allowing the identity, times and
+ * recurrence flags to be overridden per occurrence. Attendee/organizer/URL/
+ * subject/description all come from the source event; the expander supplies the
+ * occurrence-specific id, start/end, and recurrence metadata.
  */
-function safeToJSDate(icalTime: ICAL.Time | null | undefined, tzidHint?: string): Date | null {
-  if (!icalTime) return null
+function buildMeetingRow(
+  event: CalendarEvent,
+  overrides: { id: string; startTime: Date; endTime: Date; isRecurring: boolean; recurrenceRule?: string }
+): Omit<Meeting, 'created_at' | 'updated_at'> {
+  // All-day handling: an all-day event names a calendar DAY, not an instant.
+  // The parser stores its DTSTART as UTC midnight of that named day, so a feed
+  // date like 2026-07-09 becomes 2026-07-09T00:00Z — which is the *previous*
+  // local day in any negative-offset timezone, leaking a holiday onto the wrong
+  // day. Re-anchor all-day rows to LOCAL midnight of the named date (derived
+  // from the slot's UTC Y/M/D, which equals the named day), and record both the
+  // is_all_day flag and the timezone-independent named date so the UI can match
+  // by local calendar date rather than by the stored instant.
+  let startIso = overrides.startTime.toISOString()
+  let endIso = overrides.endTime.toISOString()
+  let isAllDay = 0
+  let allDayDate: string | undefined
+  if (event.isAllDay) {
+    const y = overrides.startTime.getUTCFullYear()
+    const m = overrides.startTime.getUTCMonth()
+    const d = overrides.startTime.getUTCDate()
+    const spanDays = Math.max(
+      1,
+      Math.round((overrides.endTime.getTime() - overrides.startTime.getTime()) / DAY_MS)
+    )
+    startIso = new Date(y, m, d).toISOString()
+    endIso = new Date(y, m, d + spanDays).toISOString()
+    isAllDay = 1
+    allDayDate = `${y.toString().padStart(4, '0')}-${(m + 1).toString().padStart(2, '0')}-${d
+      .toString()
+      .padStart(2, '0')}`
+  }
 
-  try {
-    // Check if this is a date-only value (all-day event)
-    if (icalTime.isDate) {
-      // For all-day events, use local date at midnight
-      return new Date(icalTime.year, icalTime.month - 1, icalTime.day, 0, 0, 0, 0)
-    }
-
-    // Get the timezone
-    const zone = icalTime.zone
-
-    // For floating time (no timezone specified), check for fallback
-    if (!zone || zone.tzid === 'floating' || zone === ICAL.Timezone.localTimezone) {
-      // Try to use the tzidHint if we have one and it's in our fallback map
-      if (tzidHint && WINDOWS_TIMEZONE_OFFSETS[tzidHint] !== undefined) {
-        const utcOffset = WINDOWS_TIMEZONE_OFFSETS[tzidHint]
-
-        // Build the local time as if it were UTC
-        const localTimeAsUtc = Date.UTC(
-          icalTime.year,
-          icalTime.month - 1,
-          icalTime.day,
-          icalTime.hour,
-          icalTime.minute,
-          icalTime.second
-        )
-
-        // Subtract the UTC offset to get actual UTC time
-        const utcTime = localTimeAsUtc - (utcOffset * 1000)
-        const jsDate = new Date(utcTime)
-
-        // console.log(`[Calendar] Fallback timezone conversion: ${icalTime.year}-${icalTime.month}-${icalTime.day} ${icalTime.hour}:${icalTime.minute} (${tzidHint}, offset=${utcOffset}s) -> UTC: ${jsDate.toISOString()} (local: ${jsDate.toLocaleTimeString()})`)
-
-        return jsDate
-      }
-
-      // No fallback available, use local time
-      return new Date(
-        icalTime.year,
-        icalTime.month - 1,
-        icalTime.day,
-        icalTime.hour,
-        icalTime.minute,
-        icalTime.second
-      )
-    }
-
-    // For UTC timezone, construct UTC date directly
-    if (zone === ICAL.Timezone.utcTimezone || zone.tzid === 'UTC') {
-      return new Date(Date.UTC(
-        icalTime.year,
-        icalTime.month - 1,
-        icalTime.day,
-        icalTime.hour,
-        icalTime.minute,
-        icalTime.second
-      ))
-    }
-
-    // For named timezones, get the UTC offset from the timezone definition
-    // Then construct the proper UTC time
-    try {
-      // Get the UTC offset for this specific time in this timezone
-      // The offset is in seconds (negative = west of UTC)
-      const utcOffset = zone.utcOffset(icalTime)
-
-      // Build the local time as a Date (treating it as UTC first)
-      const localTimeAsUtc = Date.UTC(
-        icalTime.year,
-        icalTime.month - 1,
-        icalTime.day,
-        icalTime.hour,
-        icalTime.minute,
-        icalTime.second
-      )
-
-      // Subtract the UTC offset to get actual UTC time
-      // If Lima is UTC-5, offset is -18000 seconds
-      // Local 12:00 - (-18000s) = Local 12:00 + 18000s = UTC 17:00 ✓
-      const utcTime = localTimeAsUtc - (utcOffset * 1000)
-      const jsDate = new Date(utcTime)
-
-      // console.debug(`[Calendar] Time conversion: ${icalTime.year}-${icalTime.month}-${icalTime.day} ${icalTime.hour}:${icalTime.minute} (${zone.tzid}, offset=${utcOffset}s) -> UTC: ${jsDate.toISOString()} (local: ${jsDate.toLocaleTimeString()})`)
-
-      return jsDate
-    } catch (offsetError) {
-      console.warn(`[Calendar] Failed to get UTC offset for ${zone.tzid}, falling back to toUnixTime:`, offsetError)
-
-      // Fallback to toUnixTime() which may or may not work correctly
-      const unixTime = icalTime.toUnixTime()
-      const jsDate = new Date(unixTime * 1000)
-
-      // Sanity check: year should match
-      const yearDiff = Math.abs(jsDate.getFullYear() - icalTime.year)
-      if (yearDiff > 1) {
-        console.warn(`[Calendar] toUnixTime() conversion failed for ${zone.tzid} (year off by ${yearDiff}), using local time interpretation`)
-        return new Date(
-          icalTime.year,
-          icalTime.month - 1,
-          icalTime.day,
-          icalTime.hour,
-          icalTime.minute,
-          icalTime.second
-        )
-      }
-
-      return jsDate
-    }
-  } catch (e) {
-    console.warn('[Calendar] Error converting time, using local:', e)
-    // Fallback to local time interpretation
-    return new Date(
-      icalTime.year,
-      icalTime.month - 1,
-      icalTime.day,
-      icalTime.hour || 0,
-      icalTime.minute || 0,
-      icalTime.second || 0
+  // Attendees: map CalendarAttendee[] → JSON string (DB stores as text)
+  let attendeesJson: string | undefined
+  if (event.attendees.length > 0) {
+    attendeesJson = JSON.stringify(
+      event.attendees.map((a) => ({
+        ...(a.name !== undefined && { name: a.name }),
+        email: a.email,
+      }))
     )
   }
+
+  // Extract meeting URL from description and location
+  let meetingUrl: string | undefined
+  const textToSearch = `${event.description ?? ''} ${event.location ?? ''}`
+  for (const pattern of MEETING_URL_PATTERNS) {
+    const match = textToSearch.match(pattern)
+    if (match) {
+      meetingUrl = match[0]
+      break
+    }
+  }
+
+  return {
+    id: overrides.id,
+    subject: event.title || 'Untitled Meeting',
+    start_time: startIso,
+    end_time: endIso,
+    location: event.location ?? undefined,
+    // Organizer restored from the package's parsed ORGANIZER property
+    organizer_name: event.organizer?.name ?? undefined,
+    organizer_email: event.organizer?.email ?? undefined,
+    attendees: attendeesJson,
+    description: event.description ?? undefined,
+    is_recurring: overrides.isRecurring ? 1 : 0,
+    recurrence_rule: overrides.recurrenceRule ?? undefined,
+    meeting_url: meetingUrl,
+    is_all_day: isAllDay,
+    all_day_date: allDayDate,
+  }
+}
+
+// Recurrence expansion window, measured from sync time.
+const RECURRENCE_WINDOW_BACK_DAYS = 60
+const RECURRENCE_WINDOW_FORWARD_DAYS = 90
+const DAY_MS = 24 * 60 * 60 * 1000
+// Cap emitted occurrences per series per window; a pathological RRULE (e.g. an
+// hourly rule with no COUNT/UNTIL) is truncated with a warning rather than
+// materializing unbounded rows.
+const MAX_OCCURRENCES_PER_SERIES = 400
+// Hard safety bound on iterator steps regardless of window, so a series anchored
+// far in the past cannot spin indefinitely before reaching the window.
+const MAX_ITERATOR_STEPS = 20000
+
+/**
+ * Stable per-occurrence meeting id.
+ *
+ * The occurrence at the series master's own DTSTART keeps the bare `uid` — this
+ * is exactly what the pre-expansion code stored for a recurring master, so the
+ * existing single-instance row (and any recordings / contacts / projects linked
+ * to it) is UPDATEd in place rather than orphaned. Every other occurrence is
+ * keyed `${uid}::${slotISO}` on its scheduled-slot instant, which is stable
+ * across re-syncs (the master DTSTART does not move), so repeated syncs UPSERT
+ * instead of duplicating.
+ */
+function occurrenceId(uid: string, slotMs: number, masterStartMs: number): string {
+  return slotMs === masterStartMs ? uid : `${uid}::${new Date(slotMs).toISOString()}`
+}
+
+/**
+ * Expand a recurring master (plus its RECURRENCE-ID overrides and EXDATE
+ * exclusions) into per-occurrence meeting rows within the sync window.
+ *
+ * `materializedInstances` are same-UID VEVENTs that carry neither an RRULE nor a
+ * RECURRENCE-ID — some Outlook-published ICS feeds emit a standalone VEVENT for a
+ * near-term occurrence *in addition* to the master's RRULE. They are folded into
+ * the per-slot map keyed on their DTSTART so a slot the RRULE already covers
+ * yields ONE row (preferring the materialized data), never a bare-uid twin.
+ */
+function expandMaster(
+  master: CalendarEvent,
+  overrides: CalendarEvent[],
+  windowStartMs: number,
+  windowEndMs: number,
+  materializedInstances: CalendarEvent[] = []
+): Omit<Meeting, 'created_at' | 'updated_at'>[] {
+  const rows: Omit<Meeting, 'created_at' | 'updated_at'>[] = []
+  const uid = master.uid
+  const masterStartMs = master.startTime.getTime()
+  const durationMs = master.endTime.getTime() - master.startTime.getTime()
+  const recurrenceRule = master.recurrence
+
+  const exdateSet = new Set((master.exdates ?? []).map((d) => d.getTime()))
+  const overrideBySlot = new Map<number, CalendarEvent>()
+  for (const o of overrides) {
+    if (o.recurrenceId) overrideBySlot.set(o.recurrenceId.getTime(), o)
+  }
+  // Materialized instances are keyed on their DTSTART. A RECURRENCE-ID override
+  // for the same slot always wins over a bare materialized instance.
+  const materializedBySlot = new Map<number, CalendarEvent>()
+  for (const mi of materializedInstances) {
+    const slot = mi.startTime.getTime()
+    if (!overrideBySlot.has(slot)) materializedBySlot.set(slot, mi)
+  }
+
+  // Returns the next occurrence instant, or null when the rule is exhausted.
+  // ical.js types iterator.next() as always returning a Time, but at runtime it
+  // yields a falsy value once COUNT/UNTIL (or the internal limit) is reached.
+  let nextOccurrence: () => Date | null
+  try {
+    const recur = ICAL.Recur.fromString(master.recurrence as string)
+    const icalStart = ICAL.Time.fromJSDate(master.startTime, true)
+    const iter = recur.iterator(icalStart)
+    nextOccurrence = () => {
+      const t = iter.next() as unknown as { toJSDate(): Date } | null | undefined
+      return t ? t.toJSDate() : null
+    }
+  } catch (e) {
+    // RRULE we can't parse: fall back to the pre-expansion behavior (emit the
+    // master once) so the series never disappears, then still apply overrides.
+    console.warn(`[calendar-sync] Failed to expand RRULE for ${uid}; emitting master only:`, e)
+    rows.push(calendarEventToMeetingRow(master))
+    for (const o of overrides) {
+      if (!o.recurrenceId) continue
+      rows.push(
+        buildMeetingRow(o, {
+          id: occurrenceId(uid, o.recurrenceId.getTime(), masterStartMs),
+          startTime: o.startTime,
+          endTime: o.endTime,
+          isRecurring: true,
+          recurrenceRule,
+        })
+      )
+    }
+    for (const [slot, mi] of materializedBySlot) {
+      rows.push(
+        buildMeetingRow(mi, {
+          id: occurrenceId(uid, slot, masterStartMs),
+          startTime: mi.startTime,
+          endTime: mi.endTime,
+          isRecurring: true,
+          recurrenceRule,
+        })
+      )
+    }
+    return rows
+  }
+
+  const emittedSlots = new Set<number>()
+  let inWindowCount = 0
+  let steps = 0
+  let capped = false
+
+  let occurrence = nextOccurrence()
+  while (occurrence) {
+    if (++steps > MAX_ITERATOR_STEPS) {
+      capped = true
+      break
+    }
+    const slotMs = occurrence.getTime()
+    if (slotMs > windowEndMs) break
+
+    if (slotMs >= windowStartMs && !exdateSet.has(slotMs)) {
+      if (inWindowCount >= MAX_OCCURRENCES_PER_SERIES) {
+        capped = true
+        break
+      }
+      // Prefer a RECURRENCE-ID override, then a bare materialized instance, then
+      // the plain RRULE projection — so a slot described by several VEVENTs still
+      // yields exactly one row (the most specific data wins).
+      const override = overrideBySlot.get(slotMs)
+      const materialized = materializedBySlot.get(slotMs)
+      if (override) {
+        rows.push(
+          buildMeetingRow(override, {
+            id: occurrenceId(uid, slotMs, masterStartMs),
+            startTime: override.startTime,
+            endTime: override.endTime,
+            isRecurring: true,
+            recurrenceRule,
+          })
+        )
+      } else if (materialized) {
+        rows.push(
+          buildMeetingRow(materialized, {
+            id: occurrenceId(uid, slotMs, masterStartMs),
+            startTime: materialized.startTime,
+            endTime: materialized.endTime,
+            isRecurring: true,
+            recurrenceRule,
+          })
+        )
+      } else {
+        rows.push(
+          buildMeetingRow(master, {
+            id: occurrenceId(uid, slotMs, masterStartMs),
+            startTime: new Date(slotMs),
+            endTime: new Date(slotMs + durationMs),
+            isRecurring: true,
+            recurrenceRule,
+          })
+        )
+      }
+      emittedSlots.add(slotMs)
+      inWindowCount++
+    }
+    occurrence = nextOccurrence()
+  }
+
+  // Overrides whose original slot the iterator never produced (e.g. a moved
+  // instance, or a slot outside the stepped range) still need a row when their
+  // actual time lands inside the window — otherwise a rescheduled occurrence
+  // would vanish.
+  for (const o of overrides) {
+    if (!o.recurrenceId) continue
+    const slotMs = o.recurrenceId.getTime()
+    if (emittedSlots.has(slotMs)) continue
+    const oStartMs = o.startTime.getTime()
+    if (oStartMs >= windowStartMs && oStartMs <= windowEndMs) {
+      rows.push(
+        buildMeetingRow(o, {
+          id: occurrenceId(uid, slotMs, masterStartMs),
+          startTime: o.startTime,
+          endTime: o.endTime,
+          isRecurring: true,
+          recurrenceRule,
+        })
+      )
+      emittedSlots.add(slotMs)
+    }
+  }
+
+  // Materialized instances the iterator never landed on (their DTSTART is not on
+  // the RRULE cadence, or lies past the stepped range) still need a row when in
+  // window — keyed on their DTSTART so they dedupe with any RRULE slot.
+  for (const [slotMs, mi] of materializedBySlot) {
+    if (emittedSlots.has(slotMs)) continue
+    if (slotMs >= windowStartMs && slotMs <= windowEndMs && !exdateSet.has(slotMs)) {
+      rows.push(
+        buildMeetingRow(mi, {
+          id: occurrenceId(uid, slotMs, masterStartMs),
+          startTime: mi.startTime,
+          endTime: mi.endTime,
+          isRecurring: true,
+          recurrenceRule,
+        })
+      )
+      emittedSlots.add(slotMs)
+    }
+  }
+
+  if (capped) {
+    console.warn(
+      `[calendar-sync] Recurring series ${uid} hit the occurrence cap ` +
+        `(${MAX_OCCURRENCES_PER_SERIES}/window); remaining occurrences were truncated.`
+    )
+  }
+
+  return rows
+}
+
+/**
+ * Expand parsed calendar events into DB meeting rows, materializing recurring
+ * series into individual occurrences. Non-recurring events pass through
+ * unchanged (id === uid). Exported for unit testing.
+ */
+export function expandMeetingOccurrences(
+  events: CalendarEvent[],
+  now: Date = new Date()
+): Omit<Meeting, 'created_at' | 'updated_at'>[] {
+  const windowStartMs = now.getTime() - RECURRENCE_WINDOW_BACK_DAYS * DAY_MS
+  const windowEndMs = now.getTime() + RECURRENCE_WINDOW_FORWARD_DAYS * DAY_MS
+
+  // Group VEVENTs sharing a UID: a recurring series is one master (has RRULE,
+  // no RECURRENCE-ID) plus zero or more overrides (each has RECURRENCE-ID).
+  const groups = new Map<string, CalendarEvent[]>()
+  for (const event of events) {
+    const arr = groups.get(event.uid)
+    if (arr) arr.push(event)
+    else groups.set(event.uid, [event])
+  }
+
+  const rows: Omit<Meeting, 'created_at' | 'updated_at'>[] = []
+  for (const group of groups.values()) {
+    const master = group.find((e) => e.recurrence && !e.recurrenceId)
+    if (!master) {
+      // No recurring master in this group → emit every event unchanged, exactly
+      // as before expansion existed. Preserves non-recurring behavior.
+      for (const e of group) rows.push(calendarEventToMeetingRow(e))
+      continue
+    }
+
+    const overrides = group.filter((e) => e.recurrenceId)
+    // Same-uid VEVENTs that are neither the master nor RECURRENCE-ID overrides
+    // are materialized single-instance occurrences the feed emitted alongside the
+    // RRULE. Fold them into the expansion (keyed by slot) so they never produce a
+    // bare-uid twin of an occurrence the RRULE already covers.
+    const materializedInstances = group.filter((e) => e !== master && !e.recurrenceId)
+    rows.push(...expandMaster(master, overrides, windowStartMs, windowEndMs, materializedInstances))
+  }
+
+  return rows
 }
 
 export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> {
@@ -452,7 +595,7 @@ export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> 
     // Yield before heavy parsing
     await yieldToEventLoop()
 
-    // Parse ICS (yields internally for large calendars)
+    // Parse ICS using shared package, then adapt to DB meeting shape
     const meetings = await parseICSAsync(icsData)
 
     // Yield before heavy database work
@@ -467,6 +610,15 @@ export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> 
       throw new Error(`Database error: ${dbError instanceof Error ? dbError.message : 'Unknown database error'}`)
     }
 
+    // Tie the new meetings into the rest of the app: auto-link overlapping
+    // recordings and create People from attendees. Non-fatal.
+    try {
+      const { reconcileOrganization } = await import('./org-reconciler')
+      reconcileOrganization()
+    } catch (reconcileError) {
+      console.error('Post-sync reconciliation failed:', reconcileError)
+    }
+
     // Update last sync time in config and persist it
     const now = new Date().toISOString()
     try {
@@ -478,6 +630,21 @@ export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> 
 
     console.log(`Calendar sync complete: ${meetings.length} meetings`)
     emitActivityLog('success', 'Calendar sync complete', `Loaded ${meetings.length} meetings`)
+
+    // Signal the renderer that meetings changed so surfaces that loaded their
+    // meeting list once (Today briefing, Calendar view) can refetch. Without
+    // this, a boot/background sync silently leaves those views showing the
+    // pre-sync list. Non-fatal — a failed emit must never fail the sync.
+    try {
+      const { getEventBus } = await import('./event-bus')
+      getEventBus().emitDomainEvent({
+        type: 'calendar:synced',
+        timestamp: now,
+        payload: { meetingsCount: meetings.length }
+      })
+    } catch (emitError) {
+      console.error('Failed to emit calendar:synced event:', emitError)
+    }
 
     return {
       success: true,
@@ -497,136 +664,22 @@ export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> 
   }
 }
 
-// Async version that yields to event loop periodically to prevent UI blocking
+/**
+ * Parse ICS content using the shared @hidock/calendar-sync package, yielding to
+ * the event loop periodically to keep the UI responsive for large calendars.
+ *
+ * Returns DB meeting rows (Omit<Meeting, 'created_at' | 'updated_at'>).
+ */
 export async function parseICSAsync(icsData: string): Promise<Omit<Meeting, 'created_at' | 'updated_at'>[]> {
-  const jcalData = ICAL.parse(icsData)
-  const vcalendar = new ICAL.Component(jcalData)
+  // Parse using shared package (synchronous, but fast for typical feeds)
+  const events = parseICS(icsData)
 
-  // Register timezones BEFORE processing events (critical for correct time conversion)
-  registerTimezones(vcalendar)
+  // Yield before expansion so a large feed doesn't block the parse→expand gap.
+  await yieldToEventLoop()
 
-  const vevents = vcalendar.getAllSubcomponents('vevent')
-
-  const meetings: Omit<Meeting, 'created_at' | 'updated_at'>[] = []
-  const YIELD_INTERVAL = 5 // Yield every N events to keep UI responsive
-
-  for (let eventIndex = 0; eventIndex < vevents.length; eventIndex++) {
-    // Yield periodically to keep UI responsive
-    if (eventIndex > 0 && eventIndex % YIELD_INTERVAL === 0) {
-      await yieldToEventLoop()
-    }
-
-    const vevent = vevents[eventIndex]
-    const event = new ICAL.Event(vevent)
-
-    // CS-008: Use ICAL.js vevent property API — event.status is not a real ICAL.Event property
-    const eventStatus = vevent.getFirstPropertyValue('status') as string | null
-    if (eventStatus === 'CANCELLED') {
-      continue
-    }
-
-    // Get basic properties
-    const uid = event.uid
-    const summary = event.summary || 'Untitled Meeting'
-
-    // Get TZID hints from DTSTART/DTEND properties for fallback timezone handling
-    // when VTIMEZONE component is missing from ICS
-    const dtStartProp = vevent.getFirstProperty('dtstart')
-    const dtEndProp = vevent.getFirstProperty('dtend')
-    const startTzid = dtStartProp?.getParameter('tzid') as string | undefined
-    const endTzid = dtEndProp?.getParameter('tzid') as string | undefined
-
-    const startDate = safeToJSDate(event.startDate, startTzid)
-    const endDate = safeToJSDate(event.endDate, endTzid)
-
-    if (!uid || !startDate || !endDate) {
-      continue
-    }
-
-    // Get optional properties
-    const location = event.location || undefined
-    const description = event.description || undefined
-
-    // Get organizer
-    const organizerProp = vevent.getFirstProperty('organizer')
-    let organizerName: string | undefined
-    let organizerEmail: string | undefined
-
-    if (organizerProp) {
-      organizerName = organizerProp.getParameter('cn') as string | undefined
-      const mailto = organizerProp.getFirstValue()
-      if (typeof mailto === 'string' && mailto.startsWith('mailto:')) {
-        organizerEmail = mailto.substring(7)
-      }
-    }
-
-    // Get attendees
-    const attendeeProps = vevent.getAllProperties('attendee')
-    const attendees: { name?: string; email?: string; status?: string }[] = []
-
-    for (const attendee of attendeeProps) {
-      const name = attendee.getParameter('cn') as string | undefined
-      const mailto = attendee.getFirstValue()
-      const partstat = attendee.getParameter('partstat') as string | undefined
-
-      let email: string | undefined
-      if (typeof mailto === 'string' && mailto.startsWith('mailto:')) {
-        email = mailto.substring(7)
-      }
-
-      if (name || email) {
-        attendees.push({ name, email, status: partstat })
-      }
-    }
-
-    // Check for recurring event
-    const isRecurring = !!vevent.getFirstProperty('rrule')
-
-
-
-    // Extract meeting URL from description or location
-    let meetingUrl: string | undefined
-    const urlPatterns = [
-      /https:\/\/teams\.microsoft\.com\/[^\s<>]+/i,
-      /https:\/\/[\w-]+\.zoom\.us\/[^\s<>]+/i,
-      /https:\/\/meet\.google\.com\/[^\s<>]+/i,
-      /https:\/\/[\w-]+\.webex\.com\/[^\s<>]+/i
-    ]
-
-    const textToSearch = `${description || ''} ${location || ''}`
-    for (const pattern of urlPatterns) {
-      const match = textToSearch.match(pattern)
-      if (match) {
-        meetingUrl = match[0]
-        break
-      }
-    }
-
-    // Handle recurring events - expand occurrences
-    // Check for exceptions to recurring series
-    // If this is an exception, use the exception's properties
-    if (isRecurring && (event as any).isRecurrenceException === true) {
-      // Logic for handling recurring exceptions can be added here if needed
-    } else {
-      meetings.push({
-        id: uid,
-        subject: summary,
-        start_time: startDate.toISOString(),
-        end_time: endDate.toISOString(),
-        location,
-        organizer_name: organizerName,
-        organizer_email: organizerEmail,
-        attendees: attendees.length > 0 ? JSON.stringify(attendees) : undefined,
-        description,
-        // CS-005: Use actual isRecurring flag instead of hardcoded 0
-        is_recurring: isRecurring ? 1 : 0,
-        recurrence_rule: undefined,
-        meeting_url: meetingUrl
-      })
-    }
-  }
-
-  return meetings
+  // Expand recurring series into individual occurrences within the sync window.
+  // Non-recurring events pass through unchanged.
+  return expandMeetingOccurrences(events)
 }
 
 export function getLastSyncTime(): string | null {

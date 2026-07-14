@@ -70,6 +70,64 @@ describe('parseICS', () => {
     expect(events[1].title).toBe('Meeting 2')
   })
 
+  it('flags a VALUE=DATE all-day event and exposes its named calendar date', () => {
+    const ics = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'BEGIN:VEVENT',
+      'UID:holiday@example.com',
+      'SUMMARY:Feriado',
+      'DTSTART;VALUE=DATE:20260709',
+      'DTEND;VALUE=DATE:20260710',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n')
+
+    const events = parseICS(ics)
+    expect(events).toHaveLength(1)
+    expect(events[0].isAllDay).toBe(true)
+    expect(events[0].allDayDate).toBe('2026-07-09')
+    // The instant is still UTC-midnight of the named day (electron re-anchors it
+    // to local midnight when it builds the DB row).
+    expect(events[0].startTime).toEqual(new Date(Date.UTC(2026, 6, 9)))
+  })
+
+  it('flags a bare-date (no VALUE param) DTSTART as all-day', () => {
+    const ics = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'BEGIN:VEVENT',
+      'UID:bare-date@example.com',
+      'SUMMARY:All Day',
+      'DTSTART:20260709',
+      'DTEND:20260710',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n')
+
+    const events = parseICS(ics)
+    expect(events[0].isAllDay).toBe(true)
+    expect(events[0].allDayDate).toBe('2026-07-09')
+  })
+
+  it('does NOT flag a timed (date-time) event as all-day', () => {
+    const ics = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'BEGIN:VEVENT',
+      'UID:timed@example.com',
+      'SUMMARY:Standup',
+      'DTSTART:20260709T140000Z',
+      'DTEND:20260709T150000Z',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n')
+
+    const events = parseICS(ics)
+    expect(events[0].isAllDay).toBeUndefined()
+    expect(events[0].allDayDate).toBeUndefined()
+  })
+
   it('parses attendees with CN and mailto', () => {
     const ics = [
       'BEGIN:VCALENDAR',
@@ -260,5 +318,315 @@ describe('parseICS', () => {
     const events = parseICS(ics)
     expect(events).toHaveLength(1)
     expect(events[0].title).toBe('')
+  })
+
+  describe('ORGANIZER extraction', () => {
+    it('parses ORGANIZER with CN and mailto', () => {
+      const ics = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:uid-org',
+        'SUMMARY:With Organizer',
+        'DTSTART:20260329T090000Z',
+        'DTEND:20260329T100000Z',
+        'ORGANIZER;CN=Carol Manager:mailto:carol@example.com',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n')
+
+      const events = parseICS(ics)
+      expect(events).toHaveLength(1)
+      expect(events[0].organizer).toEqual({ name: 'Carol Manager', email: 'carol@example.com' })
+    })
+
+    it('parses ORGANIZER with quoted CN', () => {
+      const ics = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:uid-org-q',
+        'SUMMARY:Quoted Organizer',
+        'DTSTART:20260329T090000Z',
+        'DTEND:20260329T100000Z',
+        'ORGANIZER;CN="Dave O\'Brien":mailto:dave@example.com',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n')
+
+      const events = parseICS(ics)
+      expect(events).toHaveLength(1)
+      expect(events[0].organizer).toEqual({ name: "Dave O'Brien", email: 'dave@example.com' })
+    })
+
+    it('parses ORGANIZER with mailto only (no CN)', () => {
+      const ics = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:uid-org-noname',
+        'SUMMARY:No Name Organizer',
+        'DTSTART:20260329T090000Z',
+        'DTEND:20260329T100000Z',
+        'ORGANIZER:mailto:org@example.com',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n')
+
+      const events = parseICS(ics)
+      expect(events).toHaveLength(1)
+      expect(events[0].organizer).toEqual({ email: 'org@example.com' })
+    })
+
+    it('leaves organizer undefined when ORGANIZER property is absent', () => {
+      const ics = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:uid-no-org',
+        'SUMMARY:No Organizer',
+        'DTSTART:20260329T090000Z',
+        'DTEND:20260329T100000Z',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n')
+
+      const events = parseICS(ics)
+      expect(events).toHaveLength(1)
+      expect(events[0].organizer).toBeUndefined()
+    })
+  })
+
+  describe('Windows timezone fallback (no VTIMEZONE)', () => {
+    it('applies the Windows offset for a recognized Exchange TZID', () => {
+      // Eastern Standard Time = UTC-5. A wall-clock of 09:00 local must become 14:00 UTC.
+      const ics = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:uid-est',
+        'SUMMARY:Eastern Meeting',
+        'DTSTART;TZID=Eastern Standard Time:20260115T090000',
+        'DTEND;TZID=Eastern Standard Time:20260115T100000',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n')
+
+      const events = parseICS(ics)
+      expect(events).toHaveLength(1)
+      // 09:00 EST (UTC-5) -> 14:00 UTC
+      expect(events[0].startTime).toEqual(new Date('2026-01-15T14:00:00Z'))
+      expect(events[0].endTime).toEqual(new Date('2026-01-15T15:00:00Z'))
+    })
+
+    it('applies a positive Windows offset (China Standard Time, UTC+8)', () => {
+      const ics = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:uid-cst',
+        'SUMMARY:Beijing Meeting',
+        'DTSTART;TZID=China Standard Time:20260115T090000',
+        'DTEND;TZID=China Standard Time:20260115T100000',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n')
+
+      const events = parseICS(ics)
+      expect(events).toHaveLength(1)
+      // 09:00 CST (UTC+8) -> 01:00 UTC
+      expect(events[0].startTime).toEqual(new Date('2026-01-15T01:00:00Z'))
+      expect(events[0].endTime).toEqual(new Date('2026-01-15T02:00:00Z'))
+    })
+
+    it('treats an unrecognized IANA TZID as UTC (unchanged behavior)', () => {
+      const ics = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:uid-iana',
+        'SUMMARY:IANA Event',
+        'DTSTART;TZID=America/New_York:20260329T090000',
+        'DTEND;TZID=America/New_York:20260329T100000',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n')
+
+      const events = parseICS(ics)
+      expect(events).toHaveLength(1)
+      // IANA name not in Windows map -> treated as UTC
+      expect(events[0].startTime).toEqual(new Date('2026-03-29T09:00:00Z'))
+      expect(events[0].endTime).toEqual(new Date('2026-03-29T10:00:00Z'))
+    })
+
+    it('does not apply offset when value already carries Z', () => {
+      const ics = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:uid-est-z',
+        'SUMMARY:Already UTC',
+        'DTSTART;TZID=Eastern Standard Time:20260115T090000Z',
+        'DTEND;TZID=Eastern Standard Time:20260115T100000Z',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n')
+
+      const events = parseICS(ics)
+      expect(events).toHaveLength(1)
+      // Explicit Z wins -> stays 09:00 UTC
+      expect(events[0].startTime).toEqual(new Date('2026-01-15T09:00:00Z'))
+    })
+  })
+
+  describe('RRULE / recurrence', () => {
+    it('sets isRecurring and recurrence from RRULE', () => {
+      const ics = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:uid-rrule',
+        'SUMMARY:Weekly Standup',
+        'DTSTART:20260329T090000Z',
+        'DTEND:20260329T093000Z',
+        'RRULE:FREQ=WEEKLY;BYDAY=MO',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n')
+
+      const events = parseICS(ics)
+      expect(events).toHaveLength(1)
+      expect(events[0].isRecurring).toBe(true)
+      expect(events[0].recurrence).toBe('FREQ=WEEKLY;BYDAY=MO')
+    })
+
+    it('leaves recurrence undefined and isRecurring unset for non-recurring events', () => {
+      const ics = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:uid-once',
+        'SUMMARY:One-off',
+        'DTSTART:20260329T090000Z',
+        'DTEND:20260329T100000Z',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n')
+
+      const events = parseICS(ics)
+      expect(events).toHaveLength(1)
+      expect(events[0].recurrence).toBeUndefined()
+      expect(events[0].isRecurring).toBeUndefined()
+    })
+  })
+
+  describe('EXDATE', () => {
+    it('parses a single EXDATE instant on a recurring master', () => {
+      const ics = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:uid-exdate',
+        'SUMMARY:Daily',
+        'DTSTART:20260701T220000Z',
+        'DTEND:20260701T223000Z',
+        'RRULE:FREQ=DAILY',
+        'EXDATE:20260703T220000Z',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n')
+
+      const events = parseICS(ics)
+      expect(events).toHaveLength(1)
+      expect(events[0].exdates).toEqual([new Date('2026-07-03T22:00:00Z')])
+    })
+
+    it('parses multiple comma-separated EXDATE values', () => {
+      const ics = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:uid-exdate-multi',
+        'DTSTART:20260701T220000Z',
+        'DTEND:20260701T223000Z',
+        'RRULE:FREQ=DAILY',
+        'EXDATE:20260703T220000Z,20260705T220000Z',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n')
+
+      const events = parseICS(ics)
+      expect(events[0].exdates).toEqual([
+        new Date('2026-07-03T22:00:00Z'),
+        new Date('2026-07-05T22:00:00Z'),
+      ])
+    })
+
+    it('applies a shared TZID to EXDATE values (Windows/Exchange zone)', () => {
+      const ics = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:uid-exdate-tz',
+        'DTSTART;TZID=Eastern Standard Time:20260701T170000',
+        'DTEND;TZID=Eastern Standard Time:20260701T173000',
+        'RRULE:FREQ=DAILY',
+        'EXDATE;TZID=Eastern Standard Time:20260703T170000',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n')
+
+      const events = parseICS(ics)
+      // Eastern Standard Time = -5h → 17:00 local = 22:00 UTC
+      expect(events[0].exdates).toEqual([new Date('2026-07-03T22:00:00Z')])
+    })
+
+    it('leaves exdates undefined when there is no EXDATE', () => {
+      const ics = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:uid-no-exdate',
+        'DTSTART:20260701T220000Z',
+        'DTEND:20260701T223000Z',
+        'RRULE:FREQ=DAILY',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n')
+
+      const events = parseICS(ics)
+      expect(events[0].exdates).toBeUndefined()
+    })
+  })
+
+  describe('RECURRENCE-ID', () => {
+    it('parses RECURRENCE-ID on an override VEVENT', () => {
+      const ics = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:uid-series',
+        'DTSTART:20260701T220000Z',
+        'DTEND:20260701T223000Z',
+        'RRULE:FREQ=DAILY',
+        'END:VEVENT',
+        'BEGIN:VEVENT',
+        'UID:uid-series',
+        'RECURRENCE-ID:20260704T220000Z',
+        'DTSTART:20260704T230000Z',
+        'DTEND:20260704T233000Z',
+        'SUMMARY:Moved instance',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n')
+
+      const events = parseICS(ics)
+      expect(events).toHaveLength(2)
+      const master = events.find((e) => e.recurrence && !e.recurrenceId)
+      const override = events.find((e) => e.recurrenceId)
+      expect(master?.recurrenceId).toBeUndefined()
+      expect(override?.recurrenceId).toEqual(new Date('2026-07-04T22:00:00Z'))
+      expect(override?.startTime).toEqual(new Date('2026-07-04T23:00:00Z'))
+    })
+
+    it('leaves recurrenceId undefined for a normal (non-override) event', () => {
+      const ics = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:uid-plain',
+        'DTSTART:20260701T220000Z',
+        'DTEND:20260701T223000Z',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n')
+
+      const events = parseICS(ics)
+      expect(events[0].recurrenceId).toBeUndefined()
+    })
   })
 })

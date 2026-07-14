@@ -182,6 +182,8 @@ export interface Project {
   name: string
   description: string | null
   status: 'active' | 'archived'
+  folderPath?: string | null
+  url?: string | null
   created_at: string
 }
 

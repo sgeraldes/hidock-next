@@ -34,23 +34,73 @@ export const CreateProjectRequestSchema = z.object({
 })
 
 /**
- * Update project request
+ * Update project request. folderPath / url (v29) accept an empty string or null
+ * to clear the value.
  */
 export const UpdateProjectRequestSchema = z.object({
   id: UUIDSchema,
   name: NonEmptyStringSchema.optional(),
   description: OptionalStringSchema,
-  status: z.enum(['active', 'archived']).optional()
+  status: z.enum(['active', 'archived']).optional(),
+  folderPath: z.string().nullable().optional(),
+  url: z.string().nullable().optional()
 }).refine(
-  (data) => data.name !== undefined || data.description !== undefined || data.status !== undefined,
-  { message: 'At least one field (name, description, or status) must be provided' }
+  (data) =>
+    data.name !== undefined ||
+    data.description !== undefined ||
+    data.status !== undefined ||
+    data.folderPath !== undefined ||
+    data.url !== undefined,
+  { message: 'At least one field (name, description, status, folderPath, or url) must be provided' }
 )
+
+// =============================================================================
+// Project notes (v29): issues / risks / notes
+// =============================================================================
+
+const ProjectNoteKindSchema = z.enum(['issue', 'risk', 'note'])
+
+/** Get notes for a project, optionally filtered by kind. */
+export const GetProjectNotesRequestSchema = z.object({
+  projectId: UUIDSchema,
+  kind: ProjectNoteKindSchema.optional()
+})
+
+/** Add a note to a project. */
+export const AddProjectNoteRequestSchema = z.object({
+  projectId: UUIDSchema,
+  kind: ProjectNoteKindSchema,
+  content: NonEmptyStringSchema
+})
+
+/** Update a note's content and/or status. */
+export const UpdateProjectNoteRequestSchema = z.object({
+  id: UUIDSchema,
+  content: NonEmptyStringSchema.optional(),
+  status: z.enum(['open', 'resolved']).optional()
+}).refine(
+  (data) => data.content !== undefined || data.status !== undefined,
+  { message: 'At least one field (content or status) must be provided' }
+)
+
+/** Delete a note by id. */
+export const DeleteProjectNoteRequestSchema = z.object({
+  id: UUIDSchema
+})
 
 /**
  * Delete project request
  */
 export const DeleteProjectRequestSchema = z.object({
   id: UUIDSchema
+})
+
+/**
+ * Merge projects request — fold the loser into the keeper.
+ */
+export const MergeProjectsRequestSchema = z.object({
+  keeperId: UUIDSchema,
+  loserId: UUIDSchema
 })
 
 /**
@@ -95,7 +145,12 @@ export type GetProjectByIdRequest = z.infer<typeof GetProjectByIdRequestSchema>
 export type CreateProjectRequest = z.infer<typeof CreateProjectRequestSchema>
 export type UpdateProjectRequest = z.infer<typeof UpdateProjectRequestSchema>
 export type DeleteProjectRequest = z.infer<typeof DeleteProjectRequestSchema>
+export type MergeProjectsRequest = z.infer<typeof MergeProjectsRequestSchema>
 export type TagMeetingRequest = z.infer<typeof TagMeetingRequestSchema>
 export type UntagMeetingRequest = z.infer<typeof UntagMeetingRequestSchema>
 export type ProjectCreate = z.infer<typeof ProjectCreateSchema>
 export type MeetingProject = z.infer<typeof MeetingProjectSchema>
+export type GetProjectNotesRequest = z.infer<typeof GetProjectNotesRequestSchema>
+export type AddProjectNoteRequest = z.infer<typeof AddProjectNoteRequestSchema>
+export type UpdateProjectNoteRequest = z.infer<typeof UpdateProjectNoteRequestSchema>
+export type DeleteProjectNoteRequest = z.infer<typeof DeleteProjectNoteRequestSchema>

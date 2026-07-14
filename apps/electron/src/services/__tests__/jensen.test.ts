@@ -9,6 +9,7 @@ import {
   EP_IN,
   JensenDevice,
   getJensenDevice,
+  JensenIpcClient,
 } from '../jensen'
 
 // ============================================================
@@ -622,32 +623,30 @@ describe('JensenDevice', () => {
   // ============================================================
 
   describe('USB connect listener', () => {
-    it('sets up onconnect handler on navigator.usb', () => {
+    it('registers a connect listener on navigator.usb', () => {
       const mockUSB = setupNavigatorUSB()
 
       device.setupUsbConnectListener()
-      expect(mockUSB.onconnect).not.toBeNull()
+      expect(mockUSB.addEventListener).toHaveBeenCalledWith('connect', expect.any(Function))
     })
 
-    it('removes onconnect handler on cleanup', () => {
+    it('removes the connect listener on cleanup', () => {
       const mockUSB = setupNavigatorUSB()
 
       device.setupUsbConnectListener()
-      expect(mockUSB.onconnect).not.toBeNull()
-
       device.removeUsbConnectListener()
-      expect(mockUSB.onconnect).toBeNull()
+      expect(mockUSB.removeEventListener).toHaveBeenCalledWith('connect', expect.any(Function))
     })
 
     it('does not set up duplicate listeners', () => {
       const mockUSB = setupNavigatorUSB()
 
       device.setupUsbConnectListener()
-      const firstHandler = mockUSB.onconnect
-
       device.setupUsbConnectListener()
-      // Should be the same handler (not re-assigned)
-      expect(mockUSB.onconnect).toBe(firstHandler)
+      // The dedup guard means addEventListener('connect', …) runs only once
+      const connectCalls = (mockUSB.addEventListener as unknown as { mock: { calls: unknown[][] } }).mock.calls
+        .filter((c) => c[0] === 'connect')
+      expect(connectCalls).toHaveLength(1)
     })
   })
 
@@ -656,14 +655,15 @@ describe('JensenDevice', () => {
   // ============================================================
 
   describe('getJensenDevice', () => {
-    it('returns a JensenDevice instance', () => {
-      setupNavigatorUSB()
+    it('returns a JensenIpcClient instance (IPC-backed renderer singleton)', () => {
+      // getJensenDevice() now returns a JensenIpcClient that delegates all
+      // device calls to the main process via window.electronAPI.jensen.*.
+      // WebUSB (navigator.usb) is no longer used in the renderer.
       const singleton = getJensenDevice()
-      expect(singleton).toBeInstanceOf(JensenDevice)
+      expect(singleton).toBeInstanceOf(JensenIpcClient)
     })
 
     it('returns the same instance on subsequent calls', () => {
-      setupNavigatorUSB()
       const first = getJensenDevice()
       const second = getJensenDevice()
       expect(first).toBe(second)

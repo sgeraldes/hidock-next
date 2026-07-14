@@ -1,6 +1,6 @@
 
 import { ipcMain } from 'electron'
-import { queryAll, queryOne, run } from '../services/database'
+import { queryAll, run } from '../services/database'
 import type { Actionable } from '@/types/knowledge'
 
 export function registerActionablesHandlers(): void {
@@ -33,6 +33,15 @@ export function registerActionablesHandlers(): void {
       const actionable = queryAll<any>('SELECT * FROM actionables WHERE id = ?', [id])[0]
       if (!actionable) {
         return { success: false, error: `Actionable ${id} not found` }
+      }
+
+      // Idempotent: setting the status it already has is a no-op success. The
+      // approve flow calls updateStatus('generated') as a safety net after
+      // outputs:generate has already set 'generated' inside its transaction;
+      // without this, that redundant call hit the "generated → generated"
+      // invalid-transition branch and returned a spurious error.
+      if (actionable.status === status) {
+        return { success: true }
       }
 
       // C-ACT-001: Relaxed status transition validation

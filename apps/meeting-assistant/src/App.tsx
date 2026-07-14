@@ -17,6 +17,9 @@ import {
   initKnowledgeStore,
   initScreenshotStore,
 } from './stores'
+import { useMainNavigation } from './hooks'
+import { useAudioCapture } from './hooks/use-audio-capture'
+import { toast } from './hooks/use-toast'
 
 const PAGE_NAMES: Record<string, string> = {
   '/': 'Dashboard',
@@ -29,6 +32,9 @@ const PAGE_NAMES: Record<string, string> = {
 function ShellLayout() {
   const location = useLocation()
   const pageName = PAGE_NAMES[location.pathname] ?? 'Meeting Assistant'
+
+  // Listen for navigation requests from the main process (e.g. tray Settings click)
+  useMainNavigation()
 
   useEffect(() => {
     const cleanups = [
@@ -58,6 +64,15 @@ function ShellLayout() {
 }
 
 export default function App() {
+  // Mount audio capture hook at root so it is always active regardless of route
+  const { error: audioError } = useAudioCapture()
+
+  useEffect(() => {
+    if (audioError) {
+      toast({ title: 'Audio Capture Error', description: audioError, variant: 'destructive' })
+    }
+  }, [audioError])
+
   return (
     <Routes>
       <Route element={<ShellLayout />}>

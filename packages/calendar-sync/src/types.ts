@@ -3,6 +3,11 @@ export interface CalendarAttendee {
   email: string
 }
 
+export interface CalendarOrganizer {
+  name?: string
+  email?: string
+}
+
 export interface CalendarEvent {
   uid: string
   title: string
@@ -11,6 +16,35 @@ export interface CalendarEvent {
   attendees: CalendarAttendee[]
   location?: string
   description?: string
+  /** Event organizer (parsed from the ICS ORGANIZER property), if present. */
+  organizer?: CalendarOrganizer
+  /**
+   * True when DTSTART is a calendar DATE (RFC 5545 `VALUE=DATE`, e.g. a holiday
+   * or full-day event) rather than a date-time. All-day events name a calendar
+   * day, not an instant, so they must be matched by local calendar date — never
+   * by the UTC instant they happen to be stored at.
+   */
+  isAllDay?: boolean
+  /**
+   * For an all-day event, the named calendar date in `YYYY-MM-DD` form (from the
+   * ICS DATE value, timezone-independent). Present only when {@link isAllDay}.
+   */
+  allDayDate?: string
+  /** True when the event carries an RRULE (recurring series). */
+  isRecurring?: boolean
+  /** Raw RRULE string (e.g. "FREQ=WEEKLY;BYDAY=MO"), if present. */
+  recurrence?: string
+  /**
+   * Excluded occurrence instants parsed from EXDATE properties (RFC 5545 §3.8.5.1).
+   * Present only on recurring masters that carry at least one EXDATE.
+   */
+  exdates?: Date[]
+  /**
+   * The instant of the original occurrence this VEVENT overrides, parsed from
+   * RECURRENCE-ID (RFC 5545 §3.8.4.4). Present only on override VEVENTs — the
+   * per-instance edits Outlook/Exchange publish alongside a recurring master.
+   */
+  recurrenceId?: Date
 }
 
 export interface CalendarWatcherOptions {

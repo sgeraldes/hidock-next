@@ -1,8 +1,9 @@
 import { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { RefreshCw, AlertCircle } from 'lucide-react'
+import { RefreshCw, AlertCircle, EyeOff } from 'lucide-react'
 import { toast } from '@/components/ui/toaster'
+import { getHiDockDeviceService } from '@/services/hidock-device'
 import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
 import {
   UnifiedRecording,
@@ -20,6 +21,7 @@ import {
   LibraryFilters,
   SourceRow,
   SourceCard,
+  StatusLegend,
   EmptyState,
   DeviceDisconnectBanner,
   BulkActionsBar,
@@ -31,6 +33,9 @@ import {
 } from '@/features/library/components'
 import { useSourceSelection, useKeyboardNavigation, useTransitionFilters } from '@/features/library/hooks'
 import { buildSearchCorpus } from '@/features/library/utils/buildSearchCorpus'
+import { getSourceType, matchesSourceTypeFilter } from '@/features/library/utils/sourceType'
+import { matchesDurationPreset } from '@/features/library/utils/durationFilter'
+import type { TypeCounts } from '@/features/library/components/LibraryFilters'
 import { useLibraryStore, useLibrarySorting } from '@/store/useLibraryStore'
 import { useOperations } from '@/hooks/useOperations'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
@@ -43,11 +48,11 @@ export function Library() {
   // Selected source for center panel
   const selectedSourceId = useLibraryStore((state) => state.selectedSourceId)
   const setSelectedSourceId = useLibraryStore((state) => state.setSelectedSourceId)
-  const selectSingle = useLibraryStore((state) => state.selectSingle)
 
   // Centralized operations (downloads + transcriptions)
   const {
     queueTranscription,
+    reprocessWithVibeVoice,
     queueBulkTranscriptions,
     queueDownload,
     queueBulkDownloads,
@@ -91,6 +96,14 @@ export function Library() {
   } = useTransitionFilters()
   const deferredSearchQuery = useDeferredValue(searchQuery)
 
+  // Source-type + duration filters (new) — read/set directly from the store.
+  const sourceTypeFilter = useLibraryStore((state) => state.sourceTypeFilter)
+  const setSourceTypeFilter = useLibraryStore((state) => state.setSourceTypeFilter)
+  const durationPreset = useLibraryStore((state) => state.durationPreset)
+  const setDurationPreset = useLibraryStore((state) => state.setDurationPreset)
+  const clearAllFilters = useLibraryStore((state) => state.clearFilters)
+
+
   // Sort state
   const { sortBy, sortOrder } = useLibrarySorting()
   const setSortBy = useLibraryStore((state) => state.setSortBy)
@@ -105,7 +118,7 @@ export function Library() {
   useEffect(() => {
     enrichmentAbortController.current.abort()
     enrichmentAbortController.current = new AbortController()
-  }, [filterMode, semanticFilter, exclusiveFilter, categoryFilter, qualityFilter, statusFilter, searchQuery])
+  }, [filterMode, semanticFilter, exclusiveFilter, categoryFilter, qualityFilter, statusFilter, sourceTypeFilter, durationPreset, searchQuery])
 
   // Drag-and-drop state for file import
   const [isDragOver, setIsDragOver] = useState(false)
@@ -189,6 +202,9 @@ export function Library() {
   const [bulkProcessing, setBulkProcessing] = useState(false)
   const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0 })
   const [deleting, setDeleting] = useState<string | null>(null)
+  // Personal ("ignored") recordings are hidden from the Library by default; this
+  // chip reveals them (they still never enter AI processing). (v38)
+  const [showPersonal, setShowPersonal] = useState(false)
 
   // B-LIB-006: Confirm dialog state (replaces window.confirm)
   const [confirmDialog, setConfirmDialog] = useState<{
@@ -259,9 +275,78 @@ export function Library() {
     }
   }, [refresh])
 
+  // One-shot backfill: populate recordings.duration_seconds (NULL on the
+  // download/import paths) from device-cache + transcript timing already in the
+  // DB, and mark clearly-junk captures low-value. Idempotent server-side. Runs
+  // once per mount, after the first data load, then refreshes so the newly
+  // persisted durations/ratings drive sort/filter even when offline.
+  const backfillRanRef = useRef(false)
+  useEffect(() => {
+    if (backfillRanRef.current) return
+    if (loading || recordings.length === 0) return
+    if (!window.electronAPI?.recordings?.backfillDurations) return
+    backfillRanRef.current = true
+    void (async () => {
+      try {
+        const result = await window.electronAPI.recordings.backfillDurations()
+        if (result?.success && ((result.updated ?? 0) > 0 || (result.markedLowValue ?? 0) > 0)) {
+          await refresh(false)
+        }
+      } catch (e) {
+        console.error('[Library] Duration backfill failed:', e)
+      }
+    })()
+  }, [loading, recordings.length, refresh])
+
   // Enrichment: Load transcripts and meetings for recordings
   const [transcripts, setTranscripts] = useState<Map<string, Transcript>>(new Map())
   const [meetings, setMeetings] = useState<Map<string, Meeting>>(new Map())
+
+  const refreshCompletedTranscription = useCallback(async (recordingId: string) => {
+    try {
+      await refresh(false)
+
+      const transcriptsObj = await window.electronAPI.transcripts.getByRecordingIds([recordingId])
+      const transcript = transcriptsObj?.[recordingId]
+      if (!transcript) return
+
+      setTranscripts((previous) => {
+        const next = new Map(previous)
+        next.set(recordingId, transcript)
+        return next
+      })
+    } catch (e) {
+      console.error('[Library] Failed to refresh completed transcription:', e)
+    }
+  }, [refresh])
+
+  useEffect(() => {
+    const unsubscribers: Array<() => void> = []
+
+    if (window.electronAPI.onTranscriptionCompleted) {
+      unsubscribers.push(window.electronAPI.onTranscriptionCompleted((data) => {
+        void refreshCompletedTranscription(data.recordingId)
+      }))
+    }
+
+    if (window.electronAPI.onTranscriptionFailed) {
+      unsubscribers.push(window.electronAPI.onTranscriptionFailed(() => {
+        void refresh(false)
+      }))
+    }
+
+    if (window.electronAPI.onTranscriptionCancelled) {
+      unsubscribers.push(window.electronAPI.onTranscriptionCancelled(() => {
+        void refresh(false)
+      }))
+    }
+
+    return () => {
+      for (const unsubscribe of unsubscribers) {
+        unsubscribe()
+      }
+    }
+  }, [refresh, refreshCompletedTranscription])
 
   // Memoize recording IDs that need enrichment to avoid unnecessary re-fetches
   const enrichmentKey = useMemo(() => {
@@ -320,19 +405,55 @@ export function Library() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enrichmentKey])
 
-  // Filter recordings based on location and search
-  const filteredRecordings = useMemo(() => {
-    const filtered = recordings.filter((rec) => {
-      // Use dual-mode filter matching (semantic or exclusive)
+  // Stage 1: base population — location + personal visibility only. This is the
+  // set the source-type segmented control counts describe.
+  const baseRecordings = useMemo(() => {
+    return recordings.filter((rec) => {
       const locationMatches =
         filterMode === 'semantic'
           ? matchesSemanticFilter(rec.location, semanticFilter)
           : matchesExclusiveFilter(rec.location, exclusiveFilter)
-
       if (!locationMatches) return false
+      if (rec.personal && !showPersonal) return false
+      return true
+    })
+  }, [recordings, filterMode, semanticFilter, exclusiveFilter, showPersonal])
+
+  // Per-type counts for the segmented control (over the location-scoped base).
+  const typeCounts = useMemo<TypeCounts>(() => {
+    const counts: TypeCounts = { all: baseRecordings.length, audio: 0, image: 0, pdf: 0, note: 0 }
+    for (const rec of baseRecordings) {
+      const type = getSourceType(rec)
+      if (type === 'audio') counts.audio++
+      else if (type === 'image') counts.image++
+      else if (type === 'pdf') counts.pdf++
+      else if (type === 'note' || type === 'data') counts.note++
+    }
+    return counts
+  }, [baseRecordings])
+
+  // Whether any capture is actually rated — drives the honest Quality empty state.
+  const ratedCount = useMemo(
+    () => recordings.filter((r) => r.quality && r.quality !== 'unrated').length,
+    [recordings]
+  )
+
+  // Stage 2: scoped set — apply source-type, duration, category, quality, status
+  // (everything EXCEPT the list search). filterableCount = this length.
+  const scopedRecordings = useMemo(() => {
+    return baseRecordings.filter((rec) => {
+      if (!matchesSourceTypeFilter(getSourceType(rec), sourceTypeFilter)) return false
+      if (!matchesDurationPreset(rec, durationPreset)) return false
       if (categoryFilter !== null && rec.category !== categoryFilter) return false
       if (qualityFilter !== null && rec.quality !== qualityFilter) return false
       if (statusFilter !== null && rec.status !== statusFilter) return false
+      return true
+    })
+  }, [baseRecordings, sourceTypeFilter, durationPreset, categoryFilter, qualityFilter, statusFilter])
+
+  // Filter recordings based on scoped set + search, then sort.
+  const filteredRecordings = useMemo(() => {
+    const filtered = scopedRecordings.filter((rec) => {
       if (deferredSearchQuery) {
         const tokens = deferredSearchQuery
           .toLowerCase()
@@ -387,7 +508,10 @@ export function Library() {
     })
 
     return filtered
-  }, [recordings, filterMode, semanticFilter, exclusiveFilter, categoryFilter, qualityFilter, statusFilter, deferredSearchQuery, sortBy, sortOrder])
+  }, [scopedRecordings, deferredSearchQuery, meetings, transcripts, sortBy, sortOrder])
+
+  // Count of personal ("ignored") recordings, to decide whether to show the chip.
+  const personalCount = useMemo(() => recordings.filter((r) => r.personal).length, [recordings])
 
   // Announce filter result changes (after filteredRecordings is declared)
   useEffect(() => {
@@ -398,6 +522,22 @@ export function Library() {
 
   // Memoize the list of IDs for keyboard navigation
   const itemIds = useMemo(() => filteredRecordings.map((r) => r.id), [filteredRecordings])
+
+  // Are all currently-shown rows selected? Drives the header select-all/deselect-all
+  // toggle label + behavior. Only meaningful once selection mode is active.
+  const allShownSelected = useMemo(
+    () => filteredRecordings.length > 0 && filteredRecordings.every((r) => selectedIds.has(r.id)),
+    [filteredRecordings, selectedIds]
+  )
+
+  // Header toggle: select every shown row, or clear when they're all already selected.
+  const toggleSelectAllShown = useCallback(() => {
+    if (allShownSelected) {
+      clearSelection()
+    } else {
+      selectAll(filteredRecordings.map((r) => r.id))
+    }
+  }, [allShownSelected, clearSelection, selectAll, filteredRecordings])
 
   // C-005: Ref to hold the latest openDetail handler, wired to handleRowClick below
   const openDetailRef = useRef<(id: string) => void>(() => {})
@@ -454,6 +594,19 @@ export function Library() {
       }
     } catch (e) {
       console.error('Failed to import recording:', e)
+    }
+  }
+
+  const handleImportFile = async () => {
+    try {
+      const result = await window.electronAPI.artifacts.pickAndImport()
+      if (result.success) {
+        if (result.data.length > 0) await refresh(false)
+      } else {
+        console.error('Failed to import file:', result.error)
+      }
+    } catch (e) {
+      console.error('Failed to import file:', e)
     }
   }
 
@@ -530,13 +683,24 @@ export function Library() {
     const errors: Array<{ filename: string; error: any }> = []
 
     try {
-      // Step 1: Delete all recordings on server FIRST
+      // Step 1: Delete all recordings on server FIRST.
+      // Device-only entries have a synthetic (non-UUID) id and no local file —
+      // recordings.delete() silently no-ops for them, so they must be deleted
+      // over USB by device filename instead.
+      const deviceService = getHiDockDeviceService()
       for (let i = 0; i < selectedRecordings.length; i++) {
         const recording = selectedRecordings[i]
         setBulkProgress({ current: i + 1, total: selectedRecordings.length })
 
         try {
-          await window.electronAPI.recordings.delete(recording.id)
+          if (isDeviceOnly(recording)) {
+            const ok = await deviceService.deleteRecording(recording.deviceFilename)
+            if (!ok) throw new Error('Device deletion failed')
+          } else {
+            // Soft cascade delete: hides + pulls from AI, restorable, no data leak.
+            const res = await window.electronAPI.recordings.deleteCascade(recording.id, false)
+            if (!res?.success) throw new Error(res?.error || 'Delete failed')
+          }
         } catch (e) {
           console.error('Failed to delete:', recording.filename, e)
           errors.push({ filename: recording.filename, error: e })
@@ -590,11 +754,39 @@ export function Library() {
     })
   }, [filteredRecordings, selectedIds, executeBulkDelete])
 
-  // B-LIB-006: Extracted device delete execution
+  // Bulk "mark personal" — flags every eligible (non device-only) selected
+  // recording as ignored. Reversible per-row afterwards.
+  const handleSelectedMarkPersonal = useCallback(async () => {
+    const targets = filteredRecordings.filter((r) => selectedIds.has(r.id) && !isDeviceOnly(r))
+    if (targets.length === 0) return
+    let ok = 0
+    for (const rec of targets) {
+      try {
+        const res = await window.electronAPI.recordings.markPersonal(rec.id, true)
+        if (res?.success) ok++
+      } catch (e) {
+        console.error('Failed to mark personal:', rec.filename, e)
+      }
+    }
+    if (ok > 0) await refresh(false)
+    clearSelection()
+    import('@/components/ui/toaster').then(({ toast }) => {
+      toast.success('Marked personal', `${ok} recording${ok > 1 ? 's' : ''} excluded from AI processing and default views.`)
+    })
+  }, [filteredRecordings, selectedIds, refresh, clearSelection])
+
+  // B-LIB-006: Extracted device delete execution.
+  // Deletes over USB by device filename — recordings.delete() only removes the
+  // LOCAL file and silently no-ops on device-only synthetic ids, so it must
+  // never be the device-deletion path.
   const executeDeleteFromDevice = useCallback(async (recording: UnifiedRecording) => {
+    if (!('deviceFilename' in recording)) return
     setDeleting(recording.id)
     try {
-      await window.electronAPI.recordings.delete(recording.id)
+      const ok = await getHiDockDeviceService().deleteRecording(recording.deviceFilename)
+      if (!ok) throw new Error('Device deletion failed')
+      // Local copies are intentionally kept — the next device scan reconciles
+      // the row to local-only via markRecordingsNotOnDevice.
       await refresh(false)
     } catch (e) {
       console.error('Failed to delete from device:', e)
@@ -620,12 +812,26 @@ export function Library() {
     })
   }, [deviceConnected, executeDeleteFromDevice])
 
-  // B-LIB-006: Extracted local delete execution
+  // Soft delete (default): hide the recording (restorable) and pull it from every
+  // AI pipeline + surface. Nothing is removed from disk until "Delete permanently".
   const executeDeleteLocal = useCallback(async (recording: UnifiedRecording) => {
     setDeleting(recording.id)
     try {
-      await window.electronAPI.recordings.delete(recording.id)
+      const res = await window.electronAPI.recordings.deleteCascade(recording.id, false)
+      if (!res?.success) throw new Error(res?.error || 'Delete failed')
       await refresh(false)
+      import('@/components/ui/toaster').then(({ toast }) => {
+        toast.success('Moved to Trash', `"${recording.filename}" is hidden and excluded from processing.`, {
+          duration: 8000,
+          action: {
+            label: 'Undo',
+            onClick: async () => {
+              await window.electronAPI.recordings.restore(recording.id)
+              await refresh(false)
+            }
+          }
+        })
+      })
     } catch (e) {
       console.error('Failed to delete local file:', e)
       import('@/components/ui/toaster').then(({ toast }) => {
@@ -636,22 +842,95 @@ export function Library() {
     }
   }, [refresh])
 
-  // PESSIMISTIC UPDATE: Server-first delete with confirmation dialog
+  // Soft-delete flow: a light confirm, then hide with an Undo toast (reversible).
   const handleDeleteLocal = useCallback(async (recording: UnifiedRecording) => {
     if (!hasLocalPath(recording)) return
-    const hasTranscript = transcripts.has(recording.id)
-    const description = hasTranscript
-      ? `Delete local file and transcript for "${recording.filename}"? The transcript data will be lost.`
-      : `Delete local file "${recording.filename}"?`
-
     setConfirmDialog({
       open: true,
-      title: 'Delete Local File',
-      description,
+      title: 'Delete recording',
+      description:
+        `Move "${recording.filename}" to Trash? It will be hidden and excluded from all AI ` +
+        `processing. Nothing is erased — you can restore it, or delete it permanently later.`,
       actionLabel: 'Delete',
       onConfirm: () => executeDeleteLocal(recording)
     })
-  }, [transcripts, executeDeleteLocal])
+  }, [executeDeleteLocal])
+
+  // Hard purge (privacy): irreversibly remove ALL derived data + files. Confirm
+  // dialog states exactly what will be removed (decidability).
+  const executeDeletePermanent = useCallback(async (recording: UnifiedRecording) => {
+    setDeleting(recording.id)
+    try {
+      const res = await window.electronAPI.recordings.deleteCascade(recording.id, true)
+      if (!res?.success) throw new Error(res?.error || 'Permanent delete failed')
+      await refresh(false)
+      import('@/components/ui/toaster').then(({ toast }) => {
+        toast.success('Deleted permanently', `"${recording.filename}" and all derived data were removed.`)
+      })
+    } catch (e) {
+      console.error('Failed to permanently delete:', e)
+      import('@/components/ui/toaster').then(({ toast }) => {
+        toast.error('Delete Failed', `Failed to permanently delete "${recording.filename}".`)
+      })
+    } finally {
+      setDeleting(null)
+    }
+  }, [refresh])
+
+  const handleDeletePermanent = useCallback(async (recording: UnifiedRecording) => {
+    if (recording.location === 'device-only') return
+    // Fetch the exact impact so the dialog can name what is removed.
+    let removes = 'the audio file and any transcript'
+    try {
+      const imp = await window.electronAPI.recordings.deletionImpact(recording.id)
+      if (imp?.success && imp.data) {
+        const d = imp.data
+        const parts: string[] = []
+        if (d.transcripts) parts.push(`${d.transcripts} transcript${d.transcripts > 1 ? 's' : ''}`)
+        if (d.actionItems) parts.push(`${d.actionItems} action item${d.actionItems > 1 ? 's' : ''}`)
+        if (d.embeddings) parts.push(`${d.embeddings} embedding${d.embeddings > 1 ? 's' : ''}`)
+        if (d.artifacts) parts.push(`${d.artifacts} artifact${d.artifacts > 1 ? 's' : ''}`)
+        if (d.hasAudioFile) parts.push('the audio file')
+        if (parts.length > 0) {
+          removes = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
+        }
+      }
+    } catch {
+      /* fall back to the generic wording */
+    }
+    setConfirmDialog({
+      open: true,
+      title: 'Delete permanently',
+      description:
+        `Permanently delete "${recording.filename}"? This removes ${removes}, plus its embeddings ` +
+        `from the assistant. This CANNOT be undone. The copy on the device (if any) is not touched.`,
+      actionLabel: 'Delete permanently',
+      onConfirm: () => executeDeletePermanent(recording)
+    })
+  }, [executeDeletePermanent])
+
+  // Mark / unmark a recording "personal" (ignore) — reversible, non-destructive.
+  const handleMarkPersonal = useCallback(async (recording: UnifiedRecording) => {
+    const next = !recording.personal
+    try {
+      const res = await window.electronAPI.recordings.markPersonal(recording.id, next)
+      if (!res?.success) throw new Error(res?.error || 'Failed')
+      await refresh(false)
+      import('@/components/ui/toaster').then(({ toast }) => {
+        toast.success(
+          next ? 'Marked personal' : 'Unmarked personal',
+          next
+            ? `"${recording.filename}" is kept but excluded from AI processing and default views.`
+            : `"${recording.filename}" is back in AI processing and views.`
+        )
+      })
+    } catch (e) {
+      console.error('Failed to toggle personal:', e)
+      import('@/components/ui/toaster').then(({ toast }) => {
+        toast.error('Action Failed', `Could not update "${recording.filename}".`)
+      })
+    }
+  }, [refresh])
 
   const handleDelete = useCallback(
     (recording: UnifiedRecording) => {
@@ -676,11 +955,6 @@ export function Library() {
     audioControls.stop()
   }, [audioControls])
 
-  const handleClosePlayer = useCallback(() => {
-    audioControls.stop()
-    setSelectedSourceId(null)
-  }, [audioControls, setSelectedSourceId])
-
   const handleNavigateToMeeting = useCallback(
     (meetingId: string) => {
       navigate(`/meeting/${meetingId}`)
@@ -701,6 +975,20 @@ export function Library() {
       handleDelete(recording)
     },
     [handleDelete]
+  )
+
+  const handleDeletePermanentCallback = useCallback(
+    (recording: UnifiedRecording) => {
+      handleDeletePermanent(recording)
+    },
+    [handleDeletePermanent]
+  )
+
+  const handleMarkPersonalCallback = useCallback(
+    (recording: UnifiedRecording) => {
+      handleMarkPersonal(recording)
+    },
+    [handleMarkPersonal]
   )
 
   const handleAskAssistantCallback = useCallback(
@@ -724,16 +1012,21 @@ export function Library() {
     [toggleTranscript]
   )
 
-  // Handle row click for tri-pane layout
+  // Handle row click for tri-pane layout.
+  // Clicking a row OPENS/VIEWS it — it sets the ACTIVE source only. It must NOT
+  // enter bulk-selection mode. Bulk selection (the checkboxes) is a separate
+  // action toggled by clicking a row's checkbox. Keeping "active/viewing source"
+  // decoupled from "selected for bulk" is what stops a plain view-click from
+  // revealing every row's checkbox (the "annoying selection checkbox" bug).
   const handleRowClick = useCallback((recording: UnifiedRecording) => {
     audioControls.stop()
-    selectSingle(recording.id)
+    setSelectedSourceId(recording.id)
 
     const { waveformLoadedForId } = useUIStore.getState()
     if (hasLocalPath(recording) && waveformLoadedForId !== recording.id) {
       audioControls.loadWaveformOnly(recording.id, recording.localPath)
     }
-  }, [selectSingle, audioControls])
+  }, [setSelectedSourceId, audioControls])
 
   // C-005: Keep openDetailRef in sync with handleRowClick + filteredRecordings
   openDetailRef.current = (id: string) => {
@@ -764,6 +1057,26 @@ export function Library() {
     estimateSize,
     overscan: 5
   })
+
+  // Reveal-on-open: when a source becomes the active/opened one (via row click,
+  // deep-link navigation, search result, or programmatic open), scroll the
+  // virtualized list so that row is in view. Without this, opening an old
+  // recording (e.g. #1500 of 1911) leaves the user scrolling the whole list to
+  // find what they just opened. We scroll once per newly-selected id (tracked in
+  // a ref) so unrelated re-renders and filter changes don't yank the scroll, and
+  // `align: 'auto'` only moves the list when the row isn't already visible.
+  const lastScrolledSourceIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!selectedSourceId) {
+      lastScrolledSourceIdRef.current = null
+      return
+    }
+    if (lastScrolledSourceIdRef.current === selectedSourceId) return
+    const index = filteredRecordings.findIndex((r) => r.id === selectedSourceId)
+    if (index < 0) return // not in the current (possibly filtered) list yet — retry when it appears
+    lastScrolledSourceIdRef.current = selectedSourceId
+    rowVirtualizer.scrollToIndex(index, { align: 'auto' })
+  }, [selectedSourceId, filteredRecordings, rowVirtualizer])
 
   // Loading state — show skeleton layout instead of bare spinner
   if (loading && recordings.length === 0) {
@@ -825,6 +1138,7 @@ export function Library() {
         bulkProcessing={bulkProcessing}
         bulkProgress={bulkProgress}
         onAddRecording={handleAddRecording}
+        onImportFile={handleImportFile}
         onOpenFolder={openRecordingsFolder}
         onBulkDownload={handleBulkDownload}
         onBulkProcess={handleBulkProcess}
@@ -841,16 +1155,21 @@ export function Library() {
       />
 
       {/* Filters */}
-      <div className="px-2 sm:px-4 lg:px-6 relative">
+      <div className="px-2 sm:px-4 lg:px-6 pb-3 border-b border-border relative">
         <div className={isFilterPending ? 'opacity-70 pointer-events-none transition-opacity' : 'transition-opacity'}>
           <LibraryFilters
             stats={stats}
+            filterableCount={scopedRecordings.length}
+            typeCounts={typeCounts}
+            hasRatedQuality={ratedCount > 0}
             filterMode={filterMode}
             semanticFilter={semanticFilter}
             exclusiveFilter={exclusiveFilter}
             categoryFilter={categoryFilter ?? 'all'}
             qualityFilter={qualityFilter ?? 'all'}
             statusFilter={statusFilter ?? 'all'}
+            sourceTypeFilter={sourceTypeFilter}
+            durationPreset={durationPreset}
             searchQuery={searchQuery}
             sortBy={sortBy}
             sortOrder={sortOrder}
@@ -860,10 +1179,31 @@ export function Library() {
             onCategoryFilterChange={(filter) => setCategoryFilter(filter === 'all' ? null : filter)}
             onQualityFilterChange={(filter) => setQualityFilter(filter === 'all' ? null : filter)}
             onStatusFilterChange={(filter) => setStatusFilter(filter === 'all' ? null : filter)}
+            onSourceTypeFilterChange={setSourceTypeFilter}
+            onDurationPresetChange={setDurationPreset}
             onSearchQueryChange={setSearchQuery}
             onSortByChange={setSortBy}
             onSortOrderChange={setSortOrder}
+            onClearFilters={clearAllFilters}
           />
+          {personalCount > 0 && (
+            <div className="mt-2 flex items-center">
+              <button
+                type="button"
+                onClick={() => setShowPersonal((v) => !v)}
+                aria-pressed={showPersonal}
+                className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors ${
+                  showPersonal
+                    ? 'border-primary/40 bg-primary/10 text-primary'
+                    : 'border-border bg-muted/40 text-muted-foreground hover:text-foreground'
+                }`}
+                title="Personal recordings are kept but excluded from AI processing and hidden by default"
+              >
+                <EyeOff className="h-3 w-3" aria-hidden="true" />
+                {showPersonal ? `Showing ${personalCount} personal` : `Show ${personalCount} personal`}
+              </button>
+            </div>
+          )}
         </div>
         {isFilterPending && (
           <div className="absolute top-2 right-2 pointer-events-none">
@@ -884,6 +1224,7 @@ export function Library() {
         onDownload={handleSelectedDownload}
         onProcess={handleSelectedProcess}
         onDelete={handleSelectedDelete}
+        onMarkPersonal={handleSelectedMarkPersonal}
       />
 
       {/* Error display */}
@@ -909,21 +1250,65 @@ export function Library() {
                 // @ts-expect-error - Ref callback pattern for multiple refs
                 containerRef.current = el
               }}
-              className="h-full overflow-auto p-2 sm:p-4 lg:p-6 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-inset"
+              className="h-full overflow-y-auto overflow-x-hidden py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-inset"
               onKeyDown={handleKeyDown}
               tabIndex={0}
               role="application"
               aria-label="Recording list navigation. Use arrow keys to navigate, Space to select, Enter to open."
               data-testid="library-list"
             >
-        <div className={`lg:max-w-4xl lg:mx-auto transition-opacity ${isFilterPending ? 'opacity-60' : 'opacity-100'}`}>
+        {/* min-w-0 so the list content always shrinks to the pane width and NEVER
+            scrolls horizontally — rows truncate instead. The pane itself has a
+            sensible minimum (TriPaneLayout) so the title/date can't be starved. */}
+        <div className={`w-full min-w-0 transition-opacity ${isFilterPending ? 'opacity-60' : 'opacity-100'}`}>
           {filteredRecordings.length === 0 ? (
-            <EmptyState
-              hasRecordings={recordings.length > 0}
-              onNavigateToDevice={() => navigate('/device')}
-              onAddRecording={handleAddRecording}
-            />
+            qualityFilter !== null && qualityFilter !== 'unrated' && ratedCount === 0 ? (
+              // Honest empty state: the quality filter isn't broken, there's just
+              // no rated data yet. Say so, rather than a bare "no matches".
+              <div className="text-center py-12 px-6 max-w-md mx-auto" role="status">
+                <p className="text-base font-medium text-foreground">No captures are classified yet</p>
+                <p className="mt-1.5 text-sm text-muted-foreground">
+                  Nothing has a “{qualityFilter.replace('-', ' ')}” rating — every capture is still
+                  “Unrated”. Ratings appear as captures are assessed.
+                </p>
+                <button
+                  onClick={() => setQualityFilter(null)}
+                  className="mt-4 inline-flex items-center rounded-md border border-input bg-background px-3 py-1.5 text-xs font-medium hover:bg-muted transition-colors"
+                >
+                  Clear quality filter
+                </button>
+              </div>
+            ) : (
+              <EmptyState
+                hasRecordings={recordings.length > 0}
+                onNavigateToDevice={() => navigate('/device')}
+                onAddRecording={handleAddRecording}
+              />
+            )
           ) : (
+            <div className="animate-rise-in">
+              {compactView && (
+                <div className="mb-2 flex items-center justify-between px-3">
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs text-muted-foreground">
+                      {filteredRecordings.length} shown
+                    </span>
+                    {/* Select-all / deselect-all appears only once selection mode is
+                        active (≥1 row selected), toggling every currently-shown row. */}
+                    {selectedCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={toggleSelectAllShown}
+                        aria-pressed={allShownSelected}
+                        className="text-xs font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 rounded"
+                      >
+                        {allShownSelected ? 'Deselect all' : 'Select all'}
+                      </button>
+                    )}
+                  </div>
+                  <StatusLegend />
+                </div>
+              )}
             <div
               style={{
                 height: `${rowVirtualizer.getTotalSize()}px`,
@@ -936,7 +1321,7 @@ export function Library() {
             >
               {compactView ? (
                 // Compact List View - LB-19 fix: Add focus indicator support
-                <div key="compact-view" className="border rounded-lg overflow-hidden">
+                <div key="compact-view">
                   {rowVirtualizer.getVirtualItems().map((virtualRow) => {
                     const recording = filteredRecordings[virtualRow.index]
                     const meeting = recording.meetingId ? meetings.get(recording.meetingId) : undefined
@@ -965,24 +1350,20 @@ export function Library() {
                           recording={recording}
                           meeting={meeting}
                           transcript={transcripts.get(recording.id)}
-                          isPlaying={currentlyPlayingId === recording.id}
                           isSelected={selectedIds.has(recording.id)}
+                          anySelected={selectedCount > 0}
                           isActiveSource={selectedSourceId === recording.id}
                           searchQuery={deferredSearchQuery}
                           onSelectionChange={(id, shiftKey) =>
                             handleSelectionClick(id, shiftKey, filteredRecordings.map((r) => r.id))
                           }
                           onClick={() => handleRowClick(recording)}
-                          onPlay={() => {
-                            if (hasLocalPath(recording)) {
-                              setSelectedSourceId(recording.id)
-                              handlePlayCallback(recording.id, recording.localPath)
-                            }
-                          }}
-                          onStop={handleStopCallback}
                           onDownload={() => handleDownloadCallback(recording)}
                           onDelete={() => handleDeleteCallback(recording)}
+                          onDeletePermanent={() => handleDeletePermanentCallback(recording)}
+                          onMarkPersonal={() => handleMarkPersonalCallback(recording)}
                           onTranscribe={() => queueTranscription(recording)}
+                          onReprocessVibeVoice={() => reprocessWithVibeVoice(recording)}
                           onAskAssistant={() => handleAskAssistantCallback(recording)}
                           onGenerateOutput={() => handleGenerateOutputCallback(recording)}
                           isDownloading={isDeviceOnly(recording) && isDownloading(recording.deviceFilename)}
@@ -1046,7 +1427,9 @@ export function Library() {
                           onStop={handleStopCallback}
                           onDownload={() => handleDownloadCallback(recording)}
                           onDelete={() => handleDeleteCallback(recording)}
+                          onMarkPersonal={() => handleMarkPersonalCallback(recording)}
                           onTranscribe={() => queueTranscription(recording)}
+                          onReprocessVibeVoice={() => reprocessWithVibeVoice(recording)}
                           onAskAssistant={() => handleAskAssistantCallback(recording)}
                           onGenerateOutput={() => handleGenerateOutputCallback(recording)}
                           onToggleTranscript={() => handleToggleTranscriptCallback(recording.id)}
@@ -1057,6 +1440,7 @@ export function Library() {
                   })}
                 </div>
               )}
+            </div>
             </div>
           )}
         </div>
@@ -1088,8 +1472,17 @@ export function Library() {
               onTranscribe={() => {
                 if (selectedRecording) queueTranscription(selectedRecording)
               }}
+              onReprocessVibeVoice={() => {
+                if (selectedRecording) reprocessWithVibeVoice(selectedRecording)
+              }}
               onDelete={() => {
                 if (selectedRecording) handleDeleteCallback(selectedRecording)
+              }}
+              onDeletePermanent={() => {
+                if (selectedRecording) handleDeletePermanentCallback(selectedRecording)
+              }}
+              onMarkPersonal={() => {
+                if (selectedRecording) handleMarkPersonalCallback(selectedRecording)
               }}
               // State for button disabling
               deviceConnected={deviceConnected}
@@ -1104,6 +1497,13 @@ export function Library() {
               onNavigateToMeeting={handleNavigateToMeeting}
               // Metadata editing
               onMetadataEdited={() => refresh(false)}
+              // Reveal the assistant: open the floating overlay, or expand the
+              // embedded pane if it's collapsed to a rail (honors chat placement).
+              onAskAboutSource={() => {
+                const ui = useUIStore.getState()
+                if (ui.chatPlacement === 'embedded') ui.setChatEmbeddedCollapsed(false)
+                else ui.setChatOpen(true)
+              }}
             />
           }
           rightPanel={

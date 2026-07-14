@@ -44,6 +44,15 @@ export { useProjectsStore } from './domain/useProjectsStore'
 export { useTranscriptionStore, usePendingTranscriptions, useProcessingTranscriptions, useFailedTranscriptions, useTranscriptionStats } from './features/useTranscriptionStore'
 export type { TranscriptionQueueStore, TranscriptionItem, TranscriptionStatus } from './features/useTranscriptionStore'
 
+// Actionables: shared source of truth for the page AND the sidebar nav badge.
+// `useActionablesPendingCount()` is the EXACT (uncapped) pending count for the badge.
+export {
+  useActionablesStore,
+  useActionablesCounts,
+  useActionablesPendingCount
+} from './features/useActionablesStore'
+export type { ActionablesStore, ActionableCounts } from './features/useActionablesStore'
+
 // =============================================================================
 // UI Stores - User Interface State
 // =============================================================================

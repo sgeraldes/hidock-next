@@ -1,5 +1,7 @@
 import { ipcMain } from 'electron'
-import { getConfig, saveConfig, updateConfig, AppConfig } from '../services/config'
+import { getConfig, saveConfig, updateConfig, AppConfig, RETIRED_GEMINI_MODELS } from '../services/config'
+import { initializeFileStorage } from '../services/file-storage'
+import { listGeminiTranscriptionModels } from '../services/gemini-models'
 import { success, error as errorResult } from '../types/api'
 import { emitActivityLog } from '../services/activity-log'
 
@@ -41,6 +43,9 @@ export function registerConfigHandlers(): void {
     async <K extends keyof AppConfig>(_, section: K, values: Partial<AppConfig[K]>) => {
       try {
         await updateConfig(section, values)
+        if (section === 'storage') {
+          await initializeFileStorage()
+        }
         emitActivityLog('info', `Settings updated: ${String(section)}`)
         return success(getConfig())
       } catch (err) {
@@ -54,6 +59,23 @@ export function registerConfigHandlers(): void {
       }
     }
   )
+
+  // List the audio-transcription-capable Gemini models available to the saved
+  // API key (live from the API; falls back to a concrete list when unreachable).
+  ipcMain.handle('config:listGeminiModels', async () => {
+    try {
+      const key = getConfig().transcription.geminiApiKey
+      const result = await listGeminiTranscriptionModels(key, RETIRED_GEMINI_MODELS)
+      return success(result)
+    } catch (err) {
+      console.error('[config:listGeminiModels] Error:', err)
+      return errorResult(
+        'SERVICE_UNAVAILABLE',
+        err instanceof Error ? err.message : 'Failed to list Gemini models',
+        err
+      )
+    }
+  })
 
   // Get specific value
   ipcMain.handle('config:get-value', async <K extends keyof AppConfig>(_, key: K) => {

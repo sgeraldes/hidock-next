@@ -62,3 +62,19 @@
 **Symptom:** First auto-connect fails all commands, manual reconnect works.
 **Root cause:** 300ms stabilization delay not always enough. USB subsystem timing varies.
 **Files:** `jensen.ts` (setup delay), `hidock-device.ts` (handleConnect retry)
+
+## Architectural — root cause of a recurring bug class (ADR-0005)
+
+The 2026-06 device fixes below were each patched at the symptom site, but share
+one root: device actions have multiple entry points and user-preference policy
+is enforced at scattered call sites instead of one funnel. The structural cure
+is the DevicePipeline coordinator (`docs/superpowers/specs/2026-03-26-usb-device-pipeline-design.md`).
+Full analysis + graph traces: `.claude/architecture-decisions/ADR-0005-device-actions-flow-through-coordinators.md`.
+
+### BUG-R13: Device actions lack single coordinators / policy funnels
+**Instances (all fixed as interim patches; collapse into DevicePipeline):**
+- Auto-connect ignored toggle — main USB-plug trigger never read the preference (`25d6c22e`). Cat. C.
+- Auto-transcribe ignored toggle — `storage:save-recording` queued unconditionally; 3 duplicate gates exist (`11ce9830`). Cat. A/B. **Cure:** RecordingWatcher is the sole transcription funnel; remove `addToQueue` from `download-service` + `storage-handlers`.
+- DL button double-fire / no indicator — DL path bypasses `DownloadService` (`eccbeab8`). Cat. B/D. **Cure:** route all downloads through the coordinator.
+- Download size mismatch — binary round-trips main→renderer→main (`cfdeb3fa`). Cat. E. **Cure:** download+save in one main pass.
+**Files:** `device-pipeline.ts` (new), `download-service.ts`, `storage-handlers.ts`, `recording-watcher.ts`, `jensen.ts`, `hidock-device.ts`, `DeviceFileList.tsx`

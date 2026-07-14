@@ -3,12 +3,36 @@
  */
 
 import { memo } from 'react'
-import { Mic, Cloud, HardDrive, Check } from 'lucide-react'
+import { Mic, Cloud, HardDrive, Check, Link2Off } from 'lucide-react'
 import { cn, formatTime } from '@/lib/utils'
 import type { CalendarRecording, CalendarMeetingOverlay, CalendarMeeting } from '@/lib/calendar-utils'
 import { formatDurationStr as formatDuration } from '@/lib/calendar-utils'
+import { useMeetingParticipants, participantFirstName } from '@/lib/meeting-participants'
 
 type RecordingLocation = 'device-only' | 'local-only' | 'both'
+
+const TOOLTIP_PARTICIPANT_LIMIT = 4
+
+/**
+ * Compact "Participants:" line fed by the known contacts for a meeting. Fetches
+ * lazily when the tooltip mounts (results cached module-side); renders nothing
+ * when the meeting id is missing or has no known participants.
+ */
+const ParticipantsLine = memo(function ParticipantsLine({ meetingId }: { meetingId: string | undefined }) {
+  const { participants } = useMeetingParticipants(meetingId)
+  if (!meetingId || participants.length === 0) return null
+  const names = participants.slice(0, TOOLTIP_PARTICIPANT_LIMIT).map(participantFirstName)
+  const extra = participants.length - names.length
+  return (
+    <div className="flex items-start gap-2">
+      <span className="text-muted-foreground">Participants:</span>
+      <span className="truncate">
+        {names.join(', ')}
+        {extra > 0 ? ` +${extra}` : ''}
+      </span>
+    </div>
+  )
+})
 
 /**
  * Status icon for recording location
@@ -28,10 +52,20 @@ export const StatusIcon = memo(function StatusIcon({ location }: { location: Rec
  * Recording-centric tooltip (RECORDING INFO FIRST, meeting as metadata)
  */
 export const RecordingTooltipContent = memo(function RecordingTooltipContent({ recording }: { recording: CalendarRecording }) {
+  const title = recording.title?.trim()
+  const summary = recording.summary?.trim()
   return (
     <div className="space-y-2 max-w-[280px]">
-      {/* RECORDING INFO - PRIMARY */}
-      <div className="space-y-1">
+      {/* WHAT IT IS - lead with the transcript-derived identity when known */}
+      {(title || summary) && (
+        <div className="space-y-1 pb-1">
+          {title && <div className="font-semibold text-foreground leading-snug">{title}</div>}
+          {summary && <div className="text-xs text-muted-foreground line-clamp-2">{summary}</div>}
+        </div>
+      )}
+
+      {/* RECORDING INFO */}
+      <div className={cn('space-y-1', (title || summary) && 'border-t pt-2')}>
         <div className="font-semibold text-foreground flex items-center gap-2">
           <Mic className="h-4 w-4 text-emerald-500" />
           Recording
@@ -102,17 +136,23 @@ export const RecordingTooltipContent = memo(function RecordingTooltipContent({ r
             {recording.linkedMeeting.organizer && (
               <div className="text-muted-foreground truncate">By: {recording.linkedMeeting.organizer}</div>
             )}
+            <ParticipantsLine meetingId={recording.linkedMeeting.id} />
           </div>
         </div>
       )}
 
       {!recording.linkedMeeting && (
         <div className="pt-2 border-t border-dashed">
-          <div className="text-xs text-muted-foreground italic">No matching meeting found</div>
+          <div className="flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
+            <Link2Off className="h-3 w-3" aria-hidden="true" />
+            Not linked to a meeting
+          </div>
         </div>
       )}
 
-      <div className="text-xs text-muted-foreground pt-1 border-t">Click for details</div>
+      <div className="text-xs text-muted-foreground pt-1 border-t">
+        {recording.linkedMeeting ? 'Click to open meeting' : 'Click to review · assign to a meeting'}
+      </div>
     </div>
   )
 })
@@ -124,7 +164,12 @@ export const MeetingOverlayTooltipContent = memo(function MeetingOverlayTooltipC
   const duration = (meeting.endTime.getTime() - meeting.startTime.getTime()) / 1000
   return (
     <div className="space-y-2 max-w-[280px]">
-      <div className="font-semibold text-muted-foreground">{meeting.subject}</div>
+      {/* Names the dashed ghost state up front (mirrors the legend entry). */}
+      <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">
+        <span className="h-2 w-2 rounded-full border border-dashed border-slate-400" aria-hidden="true" />
+        Scheduled — not recorded
+      </div>
+      <div className="font-semibold text-foreground">{meeting.subject}</div>
       <div className="text-xs space-y-1">
         <div className="flex items-center gap-2">
           <span className="text-muted-foreground">Scheduled:</span>
@@ -142,7 +187,7 @@ export const MeetingOverlayTooltipContent = memo(function MeetingOverlayTooltipC
             <span className="truncate">{meeting.organizer}</span>
           </div>
         )}
-        <div className="text-amber-500 italic mt-1">No recording captured</div>
+        <ParticipantsLine meetingId={meeting.id} />
       </div>
     </div>
   )

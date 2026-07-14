@@ -15,6 +15,15 @@ import type {
   SettingsCategoryGroup,
 } from "./models";
 
+export interface KbSourceRecord {
+  id: number;
+  path: string;
+  status: 'pending' | 'indexing' | 'indexed' | 'error';
+  chunk_count: number;
+  added_at: number;
+  indexed_at: number | null;
+}
+
 type Unsubscribe = () => void;
 
 export interface ElectronAPI {
@@ -36,6 +45,7 @@ export interface ElectronAPI {
     end: (sessionId: string) => Promise<Session | null>;
     delete: (sessionId: string) => Promise<null>;
     linkMeeting: (sessionId: string, meetingId: string) => Promise<Session | null>;
+    stats: () => Promise<{ totalSessions: number; totalRecordingMinutes: number; notesCount: number }>;
     onCreated: (callback: (data: Session) => void) => Unsubscribe;
     onUpdated: (callback: (data: Session) => void) => Unsubscribe;
     onDeleted: (callback: (data: { sessionId: string }) => void) => Unsubscribe;
@@ -94,8 +104,29 @@ export interface ElectronAPI {
     removeSource: (sourcePath: string) => Promise<null>;
     search: (query: string, topK?: number) => Promise<KnowledgeSearchResult[]>;
     reindex: () => Promise<null>;
+    listSources: () => Promise<KbSourceRecord[]>;
     onIndexProgress: (callback: (data: KnowledgeIndexProgress) => void) => Unsubscribe;
     onIndexComplete: (callback: (data: KnowledgeIndexComplete) => void) => Unsubscribe;
+  };
+
+  audio: {
+    sendChunk: (data: Uint8Array, timestamp: number, index: number) => Promise<{ ok: boolean; reason?: string }>;
+    onStartCapture: (cb: (data: { sessionId: string }) => void) => Unsubscribe;
+    onStopCapture: (cb: () => void) => Unsubscribe;
+  };
+
+  meeting: {
+    onUpcoming: (callback: (data: unknown) => void) => Unsubscribe;
+    onMicDetected: (callback: (data: unknown) => void) => Unsubscribe;
+    onCorrelation: (callback: (data: unknown) => void) => Unsubscribe;
+  };
+
+  dialog: {
+    openFile: (opts?: {
+      title?: string;
+      properties?: string[];
+      filters?: Array<{ name: string; extensions: string[] }>;
+    }) => Promise<string[] | null>;
   };
 }
 

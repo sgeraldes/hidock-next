@@ -1,24 +1,40 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 import { Library } from '../Library'
+
+// Shared harness for the "reveal opened source" behavior: a STABLE scrollToIndex
+// spy (so we can assert across renders) and a mutable selectedSourceId the store
+// mock reads at call time. Defaults keep existing tests unaffected.
+const scrollHarness = vi.hoisted(() => ({
+  scrollToIndex: vi.fn(),
+  selectedSourceId: null as string | null
+}))
 
 // Mock hooks
 vi.mock('@/hooks/useUnifiedRecordings', () => ({
   useUnifiedRecordings: vi.fn()
 }))
 
-vi.mock('@/store/useUIStore', () => ({
-  useUIStore: vi.fn((selector) => {
-    const state = {
-      currentlyPlayingId: null,
-      setCurrentlyPlayingId: vi.fn(),
-      recordingsCompactView: true,
-      setRecordingsCompactView: vi.fn()
-    }
-    return typeof selector === 'function' ? selector(state) : state
-  })
-}))
+vi.mock('@/store/useUIStore', () => {
+  const state = {
+    currentlyPlayingId: null,
+    setCurrentlyPlayingId: vi.fn(),
+    recordingsCompactView: true,
+    setRecordingsCompactView: vi.fn(),
+    // Waveform-preload fields read by SourceReader's preload effect via getState().
+    waveformLoadedForId: null,
+    waveformLoadingId: null,
+    setWaveformLoadedForId: vi.fn(),
+    setWaveformLoadingId: vi.fn()
+  }
+  const useUIStore = vi.fn((selector?: (s: typeof state) => unknown) =>
+    typeof selector === 'function' ? selector(state) : state
+  ) as unknown as { (selector?: (s: typeof state) => unknown): unknown; getState: () => typeof state; setState: ReturnType<typeof vi.fn> }
+  useUIStore.getState = () => state
+  useUIStore.setState = vi.fn()
+  return { useUIStore }
+})
 
 vi.mock('@/store/useAppStore', () => ({
   useAppStore: vi.fn((selector) => {
@@ -67,7 +83,7 @@ vi.mock('@tanstack/react-virtual', () => ({
       key: String(index)
     })),
     getTotalSize: () => count * 64,
-    scrollToIndex: vi.fn(),
+    scrollToIndex: scrollHarness.scrollToIndex,
     measureElement: vi.fn(),
     measure: vi.fn()
   })
@@ -79,6 +95,9 @@ vi.mock('@/store/useLibraryStore', () => ({
       viewMode: 'card',
       sortBy: 'date',
       sortOrder: 'desc',
+      sourceTypeFilter: 'all',
+      durationPreset: 'all',
+      assistantDock: 'collapsed',
       selectedIds: new Set(),
       recordingErrors: new Map(),
       scrollOffset: 0,
@@ -87,6 +106,10 @@ vi.mock('@/store/useLibraryStore', () => ({
       setSortBy: vi.fn(),
       setSortOrder: vi.fn(),
       toggleSortOrder: vi.fn(),
+      setSourceTypeFilter: vi.fn(),
+      setDurationPreset: vi.fn(),
+      setAssistantDock: vi.fn(),
+      clearFilters: vi.fn(),
       setScrollOffset: vi.fn(),
       setRecordingError: vi.fn(),
       clearRecordingError: vi.fn(),
@@ -95,7 +118,7 @@ vi.mock('@/store/useLibraryStore', () => ({
       clearSelection: vi.fn(),
       panelSizes: [25, 45, 30],
       setPanelSizes: vi.fn(),
-      selectedSourceId: null,
+      selectedSourceId: scrollHarness.selectedSourceId,
       setSelectedSourceId: vi.fn(),
       expandedRowIds: new Set(),
       expandedTranscripts: new Set(),
@@ -156,6 +179,11 @@ vi.mock('@/features/library/hooks', () => ({
   }))
 }))
 
+const mockRefresh = vi.fn()
+const transcriptionCompletedListeners: Array<(data: { recordingId: string }) => void> = []
+const transcriptionFailedListeners: Array<() => void> = []
+const transcriptionCancelledListeners: Array<() => void> = []
+
 // Mock electronAPI
 global.window.electronAPI = {
   transcripts: { getByRecordingIds: vi.fn().mockResolvedValue({}) },
@@ -164,11 +192,27 @@ global.window.electronAPI = {
   recordings: {
     addExternal: vi.fn(),
     delete: vi.fn(),
-    updateStatus: vi.fn()
+    updateStatus: vi.fn(),
+    markPersonal: vi.fn().mockResolvedValue({ success: true, personal: true }),
+    deletionImpact: vi.fn().mockResolvedValue({ success: true, data: { transcripts: 0, actionItems: 0, embeddings: 0, artifacts: 0, hasAudioFile: true } }),
+    deleteCascade: vi.fn().mockResolvedValue({ success: true, mode: 'soft' }),
+    restore: vi.fn().mockResolvedValue({ success: true })
   },
   downloadService: {
     queueDownloads: vi.fn()
-  }
+  },
+  onTranscriptionCompleted: vi.fn((callback) => {
+    transcriptionCompletedListeners.push(callback)
+    return vi.fn()
+  }),
+  onTranscriptionFailed: vi.fn((callback) => {
+    transcriptionFailedListeners.push(callback)
+    return vi.fn()
+  }),
+  onTranscriptionCancelled: vi.fn((callback) => {
+    transcriptionCancelledListeners.push(callback)
+    return vi.fn()
+  })
 } as any
 
 import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
@@ -190,11 +234,19 @@ const mockRecording = {
 describe('Library', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    scrollHarness.scrollToIndex.mockClear()
+    scrollHarness.selectedSourceId = null
+    mockRefresh.mockReset()
+    transcriptionCompletedListeners.length = 0
+    transcriptionFailedListeners.length = 0
+    transcriptionCancelledListeners.length = 0
+    vi.mocked(window.electronAPI.transcripts.getByRecordingIds).mockResolvedValue({})
+    vi.mocked(window.electronAPI.meetings.getByIds).mockResolvedValue({})
     vi.mocked(useUnifiedRecordings).mockReturnValue({
       recordings: [],
       loading: false,
       error: null,
-      refresh: vi.fn(),
+      refresh: mockRefresh,
       deviceConnected: false,
       stats: { total: 0, deviceOnly: 0, localOnly: 0, both: 0, synced: 0, unsynced: 0, onSource: 0, locallyAvailable: 0 }
     })
@@ -207,6 +259,54 @@ describe('Library', () => {
       </MemoryRouter>
     )
   }
+
+  describe('Reveal opened source (select + scroll into view)', () => {
+    const makeRecs = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({
+        ...mockRecording,
+        id: `rec-${i}`,
+        filename: `rec-${i}.wav`,
+        title: `Recording ${i}`,
+        // Descending dates so the default date-desc sort preserves index order.
+        dateRecorded: new Date(Date.now() - i * 60_000)
+      }))
+
+    it('scrolls the virtualized list to the opened recording', async () => {
+      vi.mocked(useUnifiedRecordings).mockReturnValue({
+        recordings: makeRecs(6) as any,
+        loading: false,
+        error: null,
+        refresh: mockRefresh,
+        deviceConnected: false,
+        stats: { total: 6, deviceOnly: 0, localOnly: 6, both: 0, synced: 6, unsynced: 0, onSource: 0, locallyAvailable: 6 }
+      })
+      // The 4th recording (index 3) is the one being opened.
+      scrollHarness.selectedSourceId = 'rec-3'
+
+      renderLibrary()
+
+      await waitFor(() => {
+        expect(scrollHarness.scrollToIndex).toHaveBeenCalledWith(3, { align: 'auto' })
+      })
+    })
+
+    it('does not scroll when nothing is selected', async () => {
+      vi.mocked(useUnifiedRecordings).mockReturnValue({
+        recordings: makeRecs(4) as any,
+        loading: false,
+        error: null,
+        refresh: mockRefresh,
+        deviceConnected: false,
+        stats: { total: 4, deviceOnly: 0, localOnly: 4, both: 0, synced: 4, unsynced: 0, onSource: 0, locallyAvailable: 4 }
+      })
+      scrollHarness.selectedSourceId = null
+
+      renderLibrary()
+
+      await waitFor(() => expect(screen.getByText('Recording 0')).toBeInTheDocument())
+      expect(scrollHarness.scrollToIndex).not.toHaveBeenCalled()
+    })
+  })
 
   describe('Loading State', () => {
     it('renders loading state initially', () => {
@@ -321,8 +421,10 @@ describe('Library', () => {
   describe('Filters', () => {
     it('renders filter controls', () => {
       renderLibrary()
-      // Search input should be present in LibraryFilters
-      const searchInput = screen.getByPlaceholderText(/search/i)
+      // The list-scoped filter input should be present in LibraryFilters. It is
+      // deliberately labelled "Filter … captures in this list" (not "Search") to
+      // distinguish it from the global top-bar search.
+      const searchInput = screen.getByPlaceholderText(/filter .* captures in this list/i)
       expect(searchInput).toBeInTheDocument()
     })
   })
@@ -345,6 +447,46 @@ describe('Library', () => {
         expect(screen.getByText(/add capture/i)).toBeInTheDocument()
         expect(screen.getByText(/open folder/i)).toBeInTheDocument()
         expect(screen.getByText(/refresh/i)).toBeInTheDocument()
+      })
+    })
+  })
+
+  describe('Transcription Events', () => {
+    it('refreshes recording metadata and loads the finished transcript after completion', async () => {
+      vi.mocked(useUnifiedRecordings).mockReturnValue({
+        recordings: [{ ...mockRecording, transcriptionStatus: 'processing' }],
+        loading: false,
+        error: null,
+        refresh: mockRefresh,
+        deviceConnected: false,
+        stats: { total: 1, deviceOnly: 0, localOnly: 1, both: 0, synced: 1, unsynced: 0, onSource: 0, locallyAvailable: 1 }
+      })
+      vi.mocked(window.electronAPI.transcripts.getByRecordingIds).mockResolvedValue({
+        'test-123': {
+          id: 'transcript-1',
+          recordingId: 'test-123',
+          text: 'Completed local ASR transcript',
+          segments: [],
+          speakers: [],
+          summary: 'Summary',
+          actionables: [],
+          createdAt: new Date()
+        }
+      })
+
+      renderLibrary()
+
+      await waitFor(() => {
+        expect(window.electronAPI.onTranscriptionCompleted).toHaveBeenCalled()
+      })
+
+      await act(async () => {
+        transcriptionCompletedListeners[0]({ recordingId: 'test-123' })
+      })
+
+      await waitFor(() => {
+        expect(mockRefresh).toHaveBeenCalledWith(false)
+        expect(window.electronAPI.transcripts.getByRecordingIds).toHaveBeenCalledWith(['test-123'])
       })
     })
   })
