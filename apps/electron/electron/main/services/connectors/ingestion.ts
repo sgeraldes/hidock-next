@@ -161,8 +161,12 @@ export class ConnectorIngestionSink implements IngestionSink {
     const filePath = join(dir, `${safeName}.${extensionForItem(item)}`)
 
     if (item.text != null) {
-      writeFileSync(filePath, item.text, 'utf-8')
-      return filePath
+      try {
+        writeFileSync(filePath, item.text, 'utf-8')
+        return filePath
+      } catch {
+        return discard()
+      }
     }
     if (item.url) {
       try {
