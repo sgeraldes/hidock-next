@@ -9,6 +9,16 @@ import { deleteEdgesCleanly, type KnowledgeGraphStore } from './graph-store.js'
  * THIS recording contribute, and can it be precisely un-contributed?").
  */
 
+/**
+ * Every field here is computed from a single in-memory PLAN built from reads
+ * taken BEFORE any write. A `dryRun` call returns the identical numbers a
+ * later real run would produce IF the graph stays quiescent in between; if
+ * anything else writes to it first (another recording's ingest or cleanup),
+ * the dryRun numbers are only an ESTIMATE (AR2-5) — not a committed count.
+ * The F17 impact dialog (and any other dryRun caller) must present every
+ * field below as approximate, not as an exact pre-count of what a subsequent
+ * real run will do.
+ */
 export interface RecordingProvenanceRemoval {
   /** Sole-source (fully attributed to this recording) edges removed. */
   edgesRemoved: number
@@ -93,15 +103,19 @@ export function removeRecordingProvenance(
   const dryRun = !!opts.dryRun
   const isProjectProtected = opts.isProjectProtected ?? (() => true)
 
-  // Step 1: edges this recording actually asserted (with their current
-  // weight, needed by step 3's full-attribution check). The JOIN drops any
-  // source row whose edge_id no longer exists (a residual not yet swept by
-  // pruneOrphanEdgeSources) — never phantom-counted or -deleted.
-  const attributedEdges = db.queryAll<{ edge_id: string; weight: number }>(
-    `SELECT DISTINCT s.edge_id AS edge_id, e.weight AS weight
+  // Step 1: edges this recording actually asserted, with their current
+  // weight (needed by step 3's full-attribution check) and this recording's
+  // own summed assertion_count per edge (`removed`, destructured below as
+  // `removedForE`) — batched via GROUP BY instead of a per-edge SUM subquery
+  // (/simplify S3). The JOIN drops any source row whose edge_id no longer
+  // exists (a residual not yet swept by pruneOrphanEdgeSources) — never
+  // phantom-counted or -deleted.
+  const attributedEdges = db.queryAll<{ edge_id: string; weight: number; removed: number }>(
+    `SELECT s.edge_id AS edge_id, e.weight AS weight, COALESCE(SUM(s.assertion_count), 0) AS removed
        FROM graph_edge_sources s
        JOIN graph_edges e ON e.id = s.edge_id
-      WHERE s.recording_id = ?`,
+      WHERE s.recording_id = ?
+      GROUP BY s.edge_id, e.weight`,
     [recordingId]
   )
 
@@ -112,6 +126,26 @@ export function removeRecordingProvenance(
       'SELECT COUNT(*) AS c FROM graph_edge_sources WHERE recording_id = ?',
       [recordingId]
     )?.c ?? 0
+
+  // Step 2b (/simplify S3): how many OTHER recordings' source rows each
+  // attributed edge has — one GROUP BY query covering every edge at once
+  // instead of a per-edge COUNT subquery. An edge_id with zero other-recording
+  // rows simply has no row in the result, so the lookup below defaults to 0 —
+  // exactly matching the per-edge COUNT(*) it replaces (COUNT(*) never
+  // returns no-rows; it always returns exactly one row, with c=0).
+  const remainingByEdgeId = new Map<string, number>()
+  if (attributedEdges.length > 0) {
+    const edgeIds = attributedEdges.map((e) => e.edge_id)
+    const placeholders = edgeIds.map(() => '?').join(',')
+    const remainingRows = db.queryAll<{ edge_id: string; c: number }>(
+      `SELECT edge_id, COUNT(*) AS c
+         FROM graph_edge_sources
+        WHERE recording_id <> ? AND edge_id IN (${placeholders})
+        GROUP BY edge_id`,
+      [recordingId, ...edgeIds]
+    )
+    for (const row of remainingRows) remainingByEdgeId.set(row.edge_id, row.c)
+  }
 
   // Step 3: classify each attributed edge. Deletable ⇔ no OTHER recording's
   // source rows AND this recording's summed assertion_count accounts for the
@@ -129,17 +163,8 @@ export function removeRecordingProvenance(
   let sharedEdgesKept = 0
   let unattributedResidueKept = 0
   const weightDecrements: Array<{ edgeId: string; amount: number }> = []
-  for (const { edge_id: edgeId, weight } of attributedEdges) {
-    const remaining =
-      db.queryOne<{ c: number }>(
-        'SELECT COUNT(*) AS c FROM graph_edge_sources WHERE edge_id = ? AND recording_id <> ?',
-        [edgeId, recordingId]
-      )?.c ?? 0
-    const removedForE =
-      db.queryOne<{ s: number }>(
-        'SELECT COALESCE(SUM(assertion_count), 0) AS s FROM graph_edge_sources WHERE edge_id = ? AND recording_id = ?',
-        [edgeId, recordingId]
-      )?.s ?? 0
+  for (const { edge_id: edgeId, weight, removed: removedForE } of attributedEdges) {
+    const remaining = remainingByEdgeId.get(edgeId) ?? 0
     if (remaining === 0) {
       if (removedForE >= weight) {
         soleSourceEdgeIds.push(edgeId)
@@ -193,11 +218,30 @@ export function removeRecordingProvenance(
   const deletedIncidentCount = (nodeId: string): number =>
     edgeRows.reduce((n, e) => n + (e.source_id === nodeId || e.target_id === nodeId ? 1 : 0), 0)
 
-  const currentIncidentCount = (nodeId: string): number =>
-    db.queryOne<{ c: number }>(
-      'SELECT COUNT(*) AS c FROM graph_edges WHERE source_id = ? OR target_id = ?',
-      [nodeId, nodeId]
-    )?.c ?? 0
+  // /simplify S3: current (pre-write) incident-edge count for every node this
+  // run might touch — every orphan candidate, plus the meeting node if any —
+  // batched into ONE query instead of a per-node COUNT subquery. The inner
+  // UNION (not UNION ALL) de-duplicates the (edge id, node id) pair a
+  // self-loop edge emits from both the source_id and target_id branches, so a
+  // self-loop still counts once per node, matching `WHERE source_id = ? OR
+  // target_id = ?` row-for-row (including that edge case).
+  const incidentCountByNodeId = new Map<string, number>()
+  const incidentNodeIds = new Set(candidateIds)
+  if (meetingNodeId) incidentNodeIds.add(meetingNodeId)
+  if (incidentNodeIds.size > 0) {
+    const ids = Array.from(incidentNodeIds)
+    const placeholders = ids.map(() => '?').join(',')
+    const incidentRows = db.queryAll<{ node_id: string; c: number }>(
+      `SELECT node_id, COUNT(*) AS c FROM (
+         SELECT id AS edge_id, source_id AS node_id FROM graph_edges WHERE source_id IN (${placeholders})
+         UNION
+         SELECT id AS edge_id, target_id AS node_id FROM graph_edges WHERE target_id IN (${placeholders})
+       ) GROUP BY node_id`,
+      [...ids, ...ids]
+    )
+    for (const row of incidentRows) incidentCountByNodeId.set(row.node_id, row.c)
+  }
+  const currentIncidentCount = (nodeId: string): number => incidentCountByNodeId.get(nodeId) ?? 0
 
   // Post-plan incidence = current (pre-write) incidence minus what this run's
   // planned deletes will remove — computed from reads only, so dry-run and a

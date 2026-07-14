@@ -453,11 +453,23 @@ export interface RemoveRecordingFromGraphOptions {
   transcriptIds?: string[]
 }
 
+/**
+ * Every count field below — `markersRemoved` through `unattributedResidueKept`
+ * (incl. `orphanNodesByType`) — is computed from a single in-memory PLAN taken
+ * BEFORE any write (both here and in the package's `removeRecordingProvenance`
+ * that this spreads in). When `dryRun` is true, these numbers are therefore an
+ * ESTIMATE (AR2-5): accurate only if the graph stays quiescent between the dry
+ * run and a later real run. Anything else that writes to the graph in between
+ * (another recording's ingest or cleanup) can change them — F17's impact
+ * dialog must present them as approximate ("~N graph links"), never as an
+ * exact pre-count of what the real purge will do. A non-dryRun result's counts
+ * are the actual committed numbers.
+ */
 export interface RemoveRecordingFromGraphResult {
   ok: boolean
   recordingId: string
   dryRun: boolean
-  /** graph_ingested_transcripts markers removed (an ESTIMATE on dryRun — AR2-5). */
+  /** graph_ingested_transcripts markers removed. */
   markersRemoved: number
   edgesRemoved: number
   edgeSourceRowsRemoved: number
