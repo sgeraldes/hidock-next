@@ -20,6 +20,7 @@ vi.mock('electron', () => ({
 vi.mock('../../services/database', () => ({
   getRecordings: vi.fn(),
   getRecordingById: vi.fn(),
+  getTrashedRecordings: vi.fn(),
   getRecordingsForMeeting: vi.fn(),
   updateRecordingStatus: vi.fn(),
   updateRecordingTranscriptionStatus: vi.fn(),
@@ -172,6 +173,7 @@ describe('Recording IPC Handlers', () => {
   it('should register all expected handlers', () => {
     const expectedChannels = [
       'recordings:getAll',
+      'recordings:getTrash',
       'recordings:getById',
       'recordings:getForMeeting',
       'recordings:getAllWithTranscripts',
@@ -231,6 +233,34 @@ describe('Recording IPC Handlers', () => {
       })
 
       const result = await handlers['recordings:getAll'](null)
+
+      expect(result).toEqual([])
+    })
+  })
+
+  // spec-005/F17 T5 §D1 step 2 — mirrors recordings:getAll's try/catch → [] shape.
+  describe('recordings:getTrash', () => {
+    it('should return all soft-deleted recordings from the database', async () => {
+      const { getTrashedRecordings } = await import('../../services/database')
+      const mockTrashed = [
+        { id: 'rec-1', filename: 'meeting-01.wav', deleted_at: '2026-01-02T00:00:00.000Z' },
+        { id: 'rec-2', filename: 'meeting-02.wav', deleted_at: '2026-01-01T00:00:00.000Z' }
+      ]
+      vi.mocked(getTrashedRecordings).mockReturnValue(mockTrashed as any)
+
+      const result = await handlers['recordings:getTrash'](null)
+
+      expect(getTrashedRecordings).toHaveBeenCalled()
+      expect(result).toEqual(mockTrashed)
+    })
+
+    it('should return empty array on error', async () => {
+      const { getTrashedRecordings } = await import('../../services/database')
+      vi.mocked(getTrashedRecordings).mockImplementation(() => {
+        throw new Error('Database error')
+      })
+
+      const result = await handlers['recordings:getTrash'](null)
 
       expect(result).toEqual([])
     })

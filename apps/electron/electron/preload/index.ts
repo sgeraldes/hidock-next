@@ -393,6 +393,10 @@ export interface ElectronAPI {
   // Database - Recordings
   recordings: {
     getAll: () => Promise<any[]>
+    // Soft-deleted (tombstoned) recordings feeding the Trash UI (spec-005/F17
+    // T5). Renderer casts the rows to its DatabaseRecording shape (same as
+    // getAll — the main-process Recording type isn't importable here).
+    getTrash: () => Promise<any[]>
     getById: (id: string) => Promise<any>
     getForMeeting: (meetingId: string) => Promise<any[]>
     updateStatus: (id: string, status: string) => Promise<any>
@@ -1291,6 +1295,7 @@ const electronAPI: ElectronAPI = {
 
   recordings: {
     getAll: () => callIPC('db:get-recordings'),
+    getTrash: () => callIPC('recordings:getTrash'),
     getById: (id) => callIPC('db:get-recording', id),
     getForMeeting: (meetingId) => callIPC('db:get-recordings-for-meeting', meetingId),
     updateStatus: (id, status) => callIPC('db:update-recording-status', id, status),

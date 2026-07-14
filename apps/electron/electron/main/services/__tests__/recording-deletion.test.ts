@@ -34,6 +34,7 @@ import {
   runWithMassDeleteAllowed,
   getRecordings,
   getRecordingById,
+  getTrashedRecordings,
   setRecordingPersonal,
   getExcludedRecordingIds,
   getRecordingDeletionImpact,
@@ -230,6 +231,59 @@ describe('Privacy source-deletion (v38)', () => {
   })
 
   // -------------------------------------------------------------------------
+  // Trash surface (spec-005/F17 T5 §D1) — getTrashedRecordings()
+  // -------------------------------------------------------------------------
+  describe('getTrashedRecordings', () => {
+    it('returns only tombstoned (deleted_at IS NOT NULL) rows, live rows excluded', () => {
+      seedRecording('r1')
+      seedRecording('r2')
+      deleteRecordingCascade('r1', { hard: false })
+
+      const trashed = getTrashedRecordings()
+      expect(trashed.map((r) => r.id)).toEqual(['r1'])
+      expect(getRecordings().map((r) => r.id)).toEqual(['r2'])
+    })
+
+    it('orders newest-tombstone-first', () => {
+      seedRecording('r1')
+      seedRecording('r2')
+      seedRecording('r3')
+      deleteRecordingCascade('r1', { hard: false })
+      deleteRecordingCascade('r2', { hard: false })
+      deleteRecordingCascade('r3', { hard: false })
+      // Stamp explicit, unambiguous deleted_at values — three sequential
+      // real-clock calls can land in the same millisecond and make the ORDER BY
+      // non-deterministic; this isolates the test from that timing race.
+      run('UPDATE recordings SET deleted_at = ? WHERE id = ?', ['2026-01-01T10:00:00.000Z', 'r1'])
+      run('UPDATE recordings SET deleted_at = ? WHERE id = ?', ['2026-01-01T11:00:00.000Z', 'r2'])
+      run('UPDATE recordings SET deleted_at = ? WHERE id = ?', ['2026-01-01T12:00:00.000Z', 'r3'])
+
+      const trashed = getTrashedRecordings()
+      expect(trashed.map((r) => r.id)).toEqual(['r3', 'r2', 'r1'])
+    })
+
+    it('excludes personal (but not deleted) recordings — personal and trashed are independent', () => {
+      seedRecording('r1', { personal: 1 })
+      seedRecording('r2')
+      deleteRecordingCascade('r2', { hard: false })
+
+      const trashed = getTrashedRecordings()
+      expect(trashed.map((r) => r.id)).toEqual(['r2'])
+    })
+
+    it('a hard-purged recording never appears in Trash (it no longer exists)', () => {
+      seedRecording('r1')
+      deleteRecordingCascade('r1', { hard: true })
+      expect(getTrashedRecordings()).toEqual([])
+    })
+
+    it('returns an empty array when nothing is soft-deleted', () => {
+      seedRecording('r1')
+      expect(getTrashedRecordings()).toEqual([])
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // hard purge cascade
   // -------------------------------------------------------------------------
   describe('hard purge cascade', () => {
@@ -329,6 +383,22 @@ describe('Privacy source-deletion (v38)', () => {
     it('returns undefined for an unknown recording', () => {
       expect(deleteRecordingCascade('ghost', { hard: true })).toBeUndefined()
     })
+
+    // AC#9 (spec-005/F17 T5) — permanent-delete FROM Trash: hard-purging a
+    // recording that is currently soft-deleted (tombstoned) must still work,
+    // since getRecordingById doesn't filter deleted_at.
+    it('hard-purges a recording that is already soft-deleted (permanent-delete from Trash)', () => {
+      seedRecording('r1')
+      seedTranscript('t1', 'r1')
+      deleteRecordingCascade('r1', { hard: false })
+      expect(getTrashedRecordings().map((r) => r.id)).toEqual(['r1'])
+
+      const res = deleteRecordingCascade('r1', { hard: true })
+
+      expect(res?.mode).toBe('hard')
+      expect(getRecordingById('r1')).toBeUndefined()
+      expect(getTrashedRecordings()).toEqual([]) // it leaves the visible Trash list too
+    })
   })
 
   // -------------------------------------------------------------------------
@@ -403,6 +473,21 @@ describe('Privacy source-deletion (v38)', () => {
 
     it('returns undefined for an unknown recording', () => {
       expect(getRecordingDeletionImpact('ghost')).toBeUndefined()
+    })
+
+    // AC#9 (spec-005/F17 T5) — the Trash-mode "Delete permanently…" path depends
+    // on getRecordingById NOT filtering deleted_at (verified anchor), so a
+    // soft-deleted (tombstoned) recording must still resolve here.
+    it('reports impact for a soft-deleted (tombstoned) recording', () => {
+      seedRecording('r1', { file_path: '/data/r1.wav' })
+      seedTranscript('t1', 'r1')
+      deleteRecordingCascade('r1', { hard: false })
+      expect(getRecordings().find((r) => r.id === 'r1')).toBeUndefined() // confirms it's really hidden
+
+      const impact = getRecordingDeletionImpact('r1')
+      expect(impact).toBeTruthy()
+      expect(impact?.transcripts).toBe(1)
+      expect(impact?.hasAudioFile).toBe(true)
     })
   })
 })

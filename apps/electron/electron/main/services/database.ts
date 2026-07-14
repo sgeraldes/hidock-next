@@ -3079,6 +3079,18 @@ export function getRecordingById(id: string): Recording | undefined {
   return queryOne<Recording>('SELECT * FROM recordings WHERE id = ?', [id])
 }
 
+/**
+ * All soft-deleted (tombstoned) recordings, newest-tombstone-first — feeds the
+ * Trash UI (spec-005/F17 T5). Read-only and isolated from every exclusion
+ * invariant elsewhere: `getExcludedRecordingIds()` (above) and the graph base
+ * query already hide `deleted_at IS NOT NULL` rows everywhere else; this is the
+ * ONLY path that surfaces them, and it changes nothing about how they're
+ * excluded from RAG/graph/default surfaces.
+ */
+export function getTrashedRecordings(): Recording[] {
+  return queryAll<Recording>('SELECT * FROM recordings WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC')
+}
+
 // =============================================================================
 // Privacy source-deletion (v38): personal ("ignore") flag, soft/hard delete
 // cascade, and participant recompute. See the deletion service + IPC for the

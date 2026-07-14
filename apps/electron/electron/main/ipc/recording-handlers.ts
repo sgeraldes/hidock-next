@@ -2,6 +2,7 @@ import { ipcMain, dialog, BrowserWindow } from 'electron'
 import {
   getRecordings,
   getRecordingById,
+  getTrashedRecordings,
   getRecordingsForMeeting,
   updateRecordingStatus,
   updateRecordingTranscriptionStatus,
@@ -71,6 +72,16 @@ export function registerRecordingHandlers(): void {
       return getRecordings()
     } catch (error) {
       console.error('recordings:getAll error:', error)
+      return []
+    }
+  })
+
+  // Get all soft-deleted (tombstoned) recordings — feeds the Trash UI (spec-005/F17 T5).
+  ipcMain.handle('recordings:getTrash', async (): Promise<Recording[]> => {
+    try {
+      return getTrashedRecordings()
+    } catch (error) {
+      console.error('recordings:getTrash error:', error)
       return []
     }
   })
