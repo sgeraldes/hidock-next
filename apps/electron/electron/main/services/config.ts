@@ -117,6 +117,12 @@ export interface AppConfig {
     // later via the standalone backfill (separate complete() call, no
     // summary-call blast radius). See phase-1-architecture-review.md A1.
     valueClassificationEnabled: boolean
+    // Codex adversarial review (AR-2a): a downgrade (low->low-value,
+    // none->garbage) only persists when the model's own confidence meets this
+    // floor; below it, applyCaptureValueClassification writes nothing at all
+    // (defense-in-depth against a low-confidence/injected misclassification).
+    // high/normal are never gated by this (they never downgrade regardless).
+    valueClassificationMinConfidence: number
   }
   embeddings: {
     provider: 'ollama'
@@ -190,7 +196,8 @@ const DEFAULT_CONFIG: AppConfig = {
     vibevoiceAttn: process.env.VIBEVOICE_ATTN || 'sdpa', // VibeVoice-ASR supports neither flash_attention_2 (not built on Windows) nor flex_attention (unsupported arch); both silently fall back to sdpa, so use it directly
     autoTranscribe: true,
     language: 'es',
-    valueClassificationEnabled: true
+    valueClassificationEnabled: true,
+    valueClassificationMinConfidence: 0.6
   },
   embeddings: {
     provider: 'ollama',
