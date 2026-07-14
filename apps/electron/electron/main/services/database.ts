@@ -6,8 +6,9 @@ import { getDatabasePath } from './file-storage'
 import { DatabaseEngine, getTableColumns, type SqlJsDatabase } from '@hidock/database'
 import { normalizeName, isGenericSpeakerLabel, detectAmbiguousName } from './entity-normalize'
 import { getEventBus } from './event-bus'
+import type { QualityRating } from '@/types/knowledge'
 
-const SCHEMA_VERSION = 42
+const SCHEMA_VERSION = 43
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -638,6 +639,25 @@ CREATE TABLE IF NOT EXISTS project_discovery_rejections (
     original_name TEXT NOT NULL,
     source_meeting_id TEXT,
     rejected_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Resumable value-classification backfill cursor (v43/F16/spec-003). Durable
+-- per-capture marker so the ~1,900-capture backfill can be cancelled/resumed
+-- across runs (and across app restarts) without re-billing an LLM call for a
+-- capture already classified. status: 'in_progress' (reserved, mid-attempt) |
+-- 'classified' (done) | 'failed' (parked after MAX_ATTEMPTS). run_id
+-- disambiguates a stale 'in_progress' row left by a crashed/killed run from
+-- one belonging to the CURRENT run (Codex adversarial review AR-3). attempts
+-- increments ONCE per durable attempt, at reserve time (AR-4) — in-run
+-- transient retries (backoff/429) do not touch it. See value-backfill.ts.
+CREATE TABLE IF NOT EXISTS value_backfill_state (
+    capture_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    result_rating TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    run_id TEXT,
+    last_error TEXT,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Identity suggestion queue (v27). The 0.5–0.8 resolver band lands here as
@@ -2165,6 +2185,34 @@ const MIGRATIONS: Record<number, () => void> = {
       }
     }
     console.log('Migration v42 complete')
+  },
+
+  43: () => {
+    // v43: value_backfill_state — resumable cursor for the F16/spec-003 value
+    // backfill (see value-backfill.ts). CREATE TABLE IF NOT EXISTS is
+    // idempotent, and this table is ALSO created via the SCHEMA string (Phase
+    // 1, every boot) and lazily at runner start (mirrors
+    // knowledge-graph-service.ts's _ensureIngestTrackingTable) — belt-and-
+    // suspenders, since repairPhase only force-adds missing COLUMNS, not new
+    // tables, so a brand-new table must not rely on this migration alone.
+    console.log('Running migration to schema v43: value_backfill_state')
+    const database = getDatabase()
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS value_backfill_state (
+          capture_id TEXT PRIMARY KEY,
+          status TEXT NOT NULL,
+          result_rating TEXT,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          run_id TEXT,
+          last_error TEXT,
+          updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+      `)
+    } catch (e) {
+      console.warn('[Migration v43] create value_backfill_state failed:', e)
+    }
+    console.log('Migration v43 complete')
   }
 
 }
@@ -3171,6 +3219,42 @@ function getCaptureIdsForRecording(recordingId: string): string[] {
   const ids = new Set(rows.map((r) => r.id))
   if (rec?.migrated_to_capture_id) ids.add(rec.migrated_to_capture_id)
   return Array.from(ids)
+}
+
+/**
+ * F16/spec-003 — manual per-row value-rating override, the write path behind
+ * `recordings:setValueRating`. Explicit user action: unlike
+ * applyCaptureValueClassification's guarded AI write, this ALWAYS applies —
+ * there is no never-downgrade check, because the user IS the authority the
+ * guard exists to protect. Stamps quality_source='user' (so a later AI
+ * re-analysis never touches it), full confidence, and clears any AI reason
+ * tags (they justified the OLD rating, not this one). Every capture owned by
+ * the recording is updated in one transaction. Returns success:false when the
+ * recording has no knowledge_captures yet (nothing to rate).
+ */
+export function setKnowledgeCaptureRatingByRecording(
+  recordingId: string,
+  rating: QualityRating
+): { success: boolean; rating?: QualityRating } {
+  const captureIds = getCaptureIdsForRecording(recordingId)
+  if (captureIds.length === 0) {
+    return { success: false }
+  }
+
+  const now = new Date().toISOString()
+  runInTransaction(() => {
+    for (const captureId of captureIds) {
+      runNoSave(
+        `UPDATE knowledge_captures
+            SET quality_rating = ?, quality_confidence = 1.0, quality_assessed_at = ?,
+                quality_source = 'user', quality_reasons = NULL, updated_at = ?
+          WHERE id = ?`,
+        [rating, now, now, captureId]
+      )
+    }
+  })
+
+  return { success: true, rating }
 }
 
 export interface RecordingDeletionImpact {
