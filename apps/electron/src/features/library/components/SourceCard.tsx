@@ -22,6 +22,7 @@ import { AudioPlayer } from '@/components/AudioPlayer'
 import { formatDateTime, formatDuration, formatBytes } from '@/lib/utils'
 import { parseJsonArray, Transcript, Meeting } from '@/types'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly, isRecordingBacked } from '@/types/unified-recording'
+import { LABEL_DELETE_FROM_DEVICE, LABEL_MOVE_TO_TRASH } from '@/features/library/utils/deletionCopy'
 import { StatusIcon } from './StatusIcon'
 import { TranscriptionStatusBadge } from './TranscriptionStatusBadge'
 import { useLibraryStore } from '@/store/useLibraryStore'
@@ -260,7 +261,7 @@ export const SourceCard = memo(function SourceCard({
                 }
                 onClick={onDelete}
                 disabled={(recording.location === 'device-only' && !deviceConnected) || isDeleting}
-                title={recording.location === 'device-only' ? 'Delete from device' : 'Move to Trash'}
+                title={recording.location === 'device-only' ? LABEL_DELETE_FROM_DEVICE : LABEL_MOVE_TO_TRASH}
               >
                 {isDeleting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
               </Button>

@@ -472,6 +472,12 @@ export const SourceRow = memo(function SourceRow({
     prevProps.meeting?.id === nextProps.meeting?.id &&
     prevProps.meeting?.subject === nextProps.meeting?.subject &&
     prevProps.searchQuery === nextProps.searchQuery &&
+    // OP-F-LOW-1 (spec-005 fix round): deviceConnected drives the device-delete
+    // items' disabled state + "Device not connected" scope line. Today a fresh
+    // inline onClick makes this comparator return false every render anyway,
+    // but if onClick is ever stabilized for perf, this keeps the honesty-
+    // critical affordance from silently going stale.
+    prevProps.deviceConnected === nextProps.deviceConnected &&
     // Include callback props to detect when they change
     prevProps.onClick === nextProps.onClick
   )
