@@ -64,6 +64,7 @@ const DATA_TABLES = [
   'recording_meeting_candidates',
   'recording_preassignments',
   'meeting_contacts',
+  'value_backfill_state',
   'knowledge_captures',
   'quality_assessments',
   'deletion_journal',
@@ -293,6 +294,36 @@ describe('Privacy source-deletion (v38)', () => {
       const res = deleteRecordingCascade('r1', { hard: true })
       expect(res?.filePath).toBe('/data/r1.wav')
       expect(res?.artifactPaths).toContain('/data/artifacts/r1.pdf')
+    })
+
+    // CX-T3-3 (F16/spec-003 fix round): the v43 value-backfill classification
+    // markers are part of the purge contract — a hard-purged recording must
+    // not leave its captures' bookkeeping behind (FKs are OFF; every capture
+    // child is deleted explicitly).
+    it('removes value-backfill classification markers for the purged captures (CX-T3-3)', () => {
+      seedRecording('r1')
+      run('INSERT INTO knowledge_captures (id, title, captured_at, source_recording_id) VALUES (?, ?, ?, ?)', [
+        'r1-c', 'Cap', '2026-01-01T10:00:00.000Z', 'r1'
+      ])
+      run(
+        `INSERT INTO value_backfill_state (capture_id, status, result_rating, attempts)
+         VALUES ('r1-c', 'classified', 'garbage', 1)`
+      )
+      // An unrelated recording's marker must survive the scoped purge.
+      seedRecording('r2')
+      run('INSERT INTO knowledge_captures (id, title, captured_at, source_recording_id) VALUES (?, ?, ?, ?)', [
+        'r2-c', 'Cap2', '2026-01-01T10:00:00.000Z', 'r2'
+      ])
+      run(
+        `INSERT INTO value_backfill_state (capture_id, status, result_rating, attempts)
+         VALUES ('r2-c', 'classified', 'unrated', 1)`
+      )
+
+      const res = deleteRecordingCascade('r1', { hard: true })
+
+      expect(res?.mode).toBe('hard')
+      expect(queryAll('SELECT capture_id FROM value_backfill_state WHERE capture_id = ?', ['r1-c']).length).toBe(0)
+      expect(queryAll('SELECT capture_id FROM value_backfill_state WHERE capture_id = ?', ['r2-c']).length).toBe(1)
     })
 
     it('returns undefined for an unknown recording', () => {

@@ -3559,6 +3559,16 @@ export function deleteRecordingCascade(
           const col = child === 'actionables' ? 'source_knowledge_id' : 'knowledge_capture_id'
           runNoSave(`DELETE FROM ${child} WHERE ${col} IN (${capPlaceholders})`, captureIds)
         }
+        // Value-backfill classification markers (v43/F16, keyed by capture id) —
+        // part of the purge contract: a hard-purged recording must not leave
+        // its captures' classification bookkeeping behind. The table is
+        // triple-placed (SCHEMA/migration/lazy-create) so it should always
+        // exist, but tolerate its absence like vector_embeddings above.
+        try {
+          runNoSave(`DELETE FROM value_backfill_state WHERE capture_id IN (${capPlaceholders})`, captureIds)
+        } catch {
+          /* value_backfill_state not yet created — nothing to remove */
+        }
         runNoSave(`DELETE FROM knowledge_captures WHERE id IN (${capPlaceholders})`, captureIds)
       }
 
