@@ -67,8 +67,14 @@ function makeNodeId(type: string, normKey: string): string {
   return `${type}:${slug}`
 }
 
+/**
+ * Deterministic edge id from the (source, target, type) triple. The triple is
+ * folded to lowercase before slugging so the UPPERCASE edge type survives the
+ * a-z character class — the type must stay distinguishable in the id, or every
+ * type between the same pair would collapse to one '_' and collide.
+ */
 function makeEdgeId(sourceId: string, targetId: string, type: string): string {
-  const combined = `${sourceId}|||${targetId}|||${type}`
+  const combined = `${sourceId}|||${targetId}|||${type}`.toLowerCase()
   const slug = combined.replace(/[^a-z0-9_|:]+/g, '_').slice(0, 120)
   return `edge:${slug}`
 }
@@ -186,14 +192,15 @@ export class KnowledgeGraphStore {
       return existing.id
     }
 
-    // New edge. The id is a lossy slug of (source, target, type): the 120-char
-    // truncation and uppercase types collapsing to '_' mean two DISTINCT triples
-    // can produce the same id. Same failure class as upsertNode above — the
-    // triple lookup misses, then the INSERT collides on the primary key
-    // ("UNIQUE constraint failed: graph_edges.id", which aborted transcript
-    // ingest forever). Derive stable hashed candidates in a CHECKED loop — a
-    // single unchecked suffix can itself collide (hash collision, or a natural
-    // id equal to the derived one), which would recreate the crash.
+    // New edge. The id slug now preserves the edge type, but it is still lossy:
+    // the 120-char truncation (and case-folding of the node ids) means two
+    // DISTINCT triples can produce the same id. Same failure class as
+    // upsertNode above — the triple lookup misses, then the INSERT collides on
+    // the primary key ("UNIQUE constraint failed: graph_edges.id", which
+    // aborted transcript ingest forever). Derive stable hashed candidates in a
+    // CHECKED loop — a single unchecked suffix can itself collide (hash
+    // collision, or a natural id equal to the derived one), which would
+    // recreate the crash.
     const combined = `${sourceId}|||${targetId}|||${type}`
     let edgeId = makeEdgeId(sourceId, targetId, type)
     for (let n = 0; ; n++) {
