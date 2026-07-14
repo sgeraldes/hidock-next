@@ -630,13 +630,29 @@ export function Library() {
   // C-005: Ref to hold the latest openDetail handler, wired to handleRowClick below
   const openDetailRef = useRef<(id: string) => void>(() => {})
 
+  // CX-T5-1 (spec-005 fix round): bulk selection has no meaning in Trash —
+  // trash rows never wire onSelectionChange, and BulkActionsBar's handlers all
+  // operate on filteredRecordings (the LIVE list), so a Space/Ctrl+A selection
+  // made in Trash would show misleading counts over no-op actions. Gate the
+  // selection-mutating keyboard shortcuts on !showTrash (arrow/Home/End/Enter
+  // navigation stays available); the bulk bar itself is hidden below.
+  const guardedToggleSelection = useCallback((id: string) => {
+    if (showTrash) return
+    toggleSelection(id)
+  }, [showTrash, toggleSelection])
+
+  const guardedSelectAll = useCallback((ids: string[]) => {
+    if (showTrash) return
+    selectAll(ids)
+  }, [showTrash, selectAll])
+
   // Keyboard navigation for accessibility - LB-19 fix: Use focusedIndex and containerRef
   const { handleKeyDown, focusedIndex, containerRef } = useKeyboardNavigation({
     items: itemIds,
     selectedIds,
     expandedIds: new Set<string>(), // No expansion - keep for compatibility
-    onToggleSelection: toggleSelection,
-    onSelectAll: selectAll,
+    onToggleSelection: guardedToggleSelection,
+    onSelectAll: guardedSelectAll,
     onClearSelection: clearSelection,
     onOpenDetail: useCallback((id: string) => openDetailRef.current(id), []), // C-005: Enter opens detail panel
     onToggleExpand: () => {}, // No-op - expansion removed
@@ -769,6 +785,7 @@ export function Library() {
     setBulkProgress({ current: 0, total: selectedRecordings.length })
 
     const errors: Array<{ filename: string; error: any }> = []
+    const deletedIds = new Set<string>()
 
     try {
       // Step 1: Delete all recordings on server FIRST.
@@ -789,6 +806,7 @@ export function Library() {
             const res = await window.electronAPI.recordings.deleteCascade(recording.id, false)
             if (!res?.success) throw new Error(res?.error || 'Delete failed')
           }
+          deletedIds.add(recording.id)
         } catch (e) {
           console.error('Failed to delete:', recording.filename, e)
           errors.push({ filename: recording.filename, error: e })
@@ -799,6 +817,19 @@ export function Library() {
       const successCount = selectedRecordings.length - errors.length
       if (successCount > 0) {
         await refresh(false)
+        // CX-T5-2 (spec-005 fix round): bulk soft-deletes just moved rows into
+        // Trash — reload it so the "Trash (N)" badge and (if open) the Trash
+        // list don't go stale, same as every single-item delete path.
+        await loadTrash()
+        // OP-F-LOW-4 (AR3-5 parity with executeDeleteLocal): if one of the
+        // deleted rows was playing or selected in the reader, stop/clear
+        // immediately rather than leaving audio of a tombstoned row running.
+        if (currentlyPlayingId && deletedIds.has(currentlyPlayingId)) {
+          audioControls.stop()
+        }
+        if (selectedSourceId && deletedIds.has(selectedSourceId)) {
+          setSelectedSourceId(null)
+        }
       }
 
       // Step 3: Clear selection ONLY after successful refresh
@@ -814,7 +845,7 @@ export function Library() {
       setBulkProcessing(false)
       setBulkProgress({ current: 0, total: 0 })
     }
-  }, [refresh, clearSelection])
+  }, [refresh, loadTrash, clearSelection, currentlyPlayingId, audioControls, selectedSourceId, setSelectedSourceId])
 
   // PESSIMISTIC UPDATE: Server-first bulk delete with confirmation dialog
   const handleSelectedDelete = useCallback(async () => {
@@ -1428,20 +1459,26 @@ export function Library() {
         )}
       </div>
 
-      {/* Bulk Actions Bar */}
-      <BulkActionsBar
-        selectedCount={selectedCount}
-        totalCount={filteredRecordings.length}
-        deviceConnected={deviceConnected}
-        isProcessing={bulkProcessing}
-        progress={bulkProgress.total > 0 ? bulkProgress : undefined}
-        onSelectAll={() => selectAll(filteredRecordings.map((r) => r.id))}
-        onDeselectAll={clearSelection}
-        onDownload={handleSelectedDownload}
-        onProcess={handleSelectedProcess}
-        onDelete={handleSelectedDelete}
-        onMarkPersonal={handleSelectedMarkPersonal}
-      />
+      {/* Bulk Actions Bar — hidden in Trash mode (CX-T5-1): its handlers all
+          operate on filteredRecordings (the live list), so surfacing it over
+          the Trash corpus would show misleading counts / no-op actions. The
+          keyboard selection shortcuts are equally gated (guardedToggleSelection
+          above), and handleToggleTrash clears any prior selection on entry. */}
+      {!showTrash && (
+        <BulkActionsBar
+          selectedCount={selectedCount}
+          totalCount={filteredRecordings.length}
+          deviceConnected={deviceConnected}
+          isProcessing={bulkProcessing}
+          progress={bulkProgress.total > 0 ? bulkProgress : undefined}
+          onSelectAll={() => selectAll(filteredRecordings.map((r) => r.id))}
+          onDeselectAll={clearSelection}
+          onDownload={handleSelectedDownload}
+          onProcess={handleSelectedProcess}
+          onDelete={handleSelectedDelete}
+          onMarkPersonal={handleSelectedMarkPersonal}
+        />
+      )}
 
       {/* Error display */}
       {error && (

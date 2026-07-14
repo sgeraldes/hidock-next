@@ -14,7 +14,7 @@
  *    but unusable for "was THIS spy called" assertions across re-renders).
  */
 
-import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 import { Library } from '../Library'
@@ -26,6 +26,8 @@ afterEach(() => {
 const harness = vi.hoisted(() => ({
   selectedSourceId: null as string | null,
   currentlyPlayingId: null as string | null,
+  /** Bulk-selection ids surfaced through the mocked useSourceSelection (fix round). */
+  selectedIds: new Set<string>(),
 }))
 
 const setSelectedSourceId = vi.hoisted(() => vi.fn())
@@ -38,6 +40,15 @@ const audioControlsMock = vi.hoisted(() => ({
   isPlaying: false,
   currentTime: 0,
   duration: 0
+}))
+
+// Stable selection spies (fix round, CX-T5-1/CX-T5-2): assertable across renders,
+// read live by the mocked useSourceSelection below.
+const selectionSpies = vi.hoisted(() => ({
+  toggleSelection: vi.fn(),
+  selectAll: vi.fn(),
+  clearSelection: vi.fn(),
+  handleSelectionClick: vi.fn()
 }))
 
 // Only the HOOK is mocked — trashRowToUnified (features/library/utils/trashRow.ts)
@@ -180,39 +191,43 @@ vi.mock('@/hooks/useOperations', () => ({
   }))
 }))
 
-vi.mock('@/features/library/hooks', () => ({
-  useSourceSelection: vi.fn(() => ({
-    selectedIds: new Set(),
-    selectedCount: 0,
-    toggleSelection: vi.fn(),
-    selectAll: vi.fn(),
-    clearSelection: vi.fn(),
-    handleSelectionClick: vi.fn()
-  })),
-  useKeyboardNavigation: vi.fn(() => ({
-    handleKeyDown: vi.fn(),
-    focusedIndex: -1,
-    containerRef: { current: null }
-  })),
-  useTransitionFilters: vi.fn(() => ({
-    filterMode: 'semantic',
-    semanticFilter: 'all',
-    exclusiveFilter: 'all',
-    categoryFilter: null,
-    qualityFilter: null,
-    statusFilter: null,
-    searchQuery: '',
-    setFilterMode: vi.fn(),
-    setSemanticFilter: vi.fn(),
-    setExclusiveFilter: vi.fn(),
-    setCategoryFilter: vi.fn(),
-    setQualityFilter: vi.fn(),
-    setStatusFilter: vi.fn(),
-    setSearchQuery: vi.fn(),
-    isPending: false
-  })),
-  useValueSuggestionToasts: vi.fn()
-}))
+// Partial mock (fix round): useKeyboardNavigation is the REAL hook so the
+// CX-T5-1 tests exercise the actual Space/Ctrl+A code path (the shortcut gate
+// lives in Library.tsx's guarded callbacks, not in the hook). useSourceSelection
+// stays mocked but reads harness.selectedIds live, so tests can stage a
+// selection and assert against the stable selectionSpies.
+vi.mock('@/features/library/hooks', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/features/library/hooks')>()
+  return {
+    ...actual,
+    useSourceSelection: vi.fn(() => ({
+      selectedIds: harness.selectedIds,
+      selectedCount: harness.selectedIds.size,
+      toggleSelection: selectionSpies.toggleSelection,
+      selectAll: selectionSpies.selectAll,
+      clearSelection: selectionSpies.clearSelection,
+      handleSelectionClick: selectionSpies.handleSelectionClick
+    })),
+    useTransitionFilters: vi.fn(() => ({
+      filterMode: 'semantic',
+      semanticFilter: 'all',
+      exclusiveFilter: 'all',
+      categoryFilter: null,
+      qualityFilter: null,
+      statusFilter: null,
+      searchQuery: '',
+      setFilterMode: vi.fn(),
+      setSemanticFilter: vi.fn(),
+      setExclusiveFilter: vi.fn(),
+      setCategoryFilter: vi.fn(),
+      setQualityFilter: vi.fn(),
+      setStatusFilter: vi.fn(),
+      setSearchQuery: vi.fn(),
+      isPending: false
+    })),
+    useValueSuggestionToasts: vi.fn()
+  }
+})
 
 const mockRefresh = vi.fn()
 
@@ -310,6 +325,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   harness.selectedSourceId = null
   harness.currentlyPlayingId = null
+  harness.selectedIds = new Set()
   setElectronAPI()
   vi.mocked(useUnifiedRecordings).mockReturnValue({
     recordings: liveRecordings as any,
@@ -571,5 +587,111 @@ describe('Confirm-dialog copy matches §D2 exactly', () => {
     expect(await screen.findByText(/move "live-0\.wav" to trash\?/i)).toBeInTheDocument()
     expect(screen.getByText(/restore it from trash, or delete it permanently later/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^move to trash$/i })).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Fix round (Opus APPROVED-with-LOWs + /codex:review 3×P2, 2026-07-14)
+// ---------------------------------------------------------------------------
+
+describe('CX-T5-3 — null-file_path recording stays restorable in Trash', () => {
+  it('a trash row with a null file_path still shows Restore + Delete permanently', async () => {
+    // The stranded-in-Trash vector the explicit sourceKind stamp closes: a real
+    // recording whose nullable file_path is null, soft-deleted (e.g. via bulk
+    // delete, which has no hasLocalPath guard), then mapped into Trash.
+    getTrashMock.mockResolvedValue([{
+      ...trashRow1,
+      id: 'trash-nullpath',
+      filename: 'null-path.wav',
+      file_path: null
+    }])
+    renderLibrary()
+    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (1)'))
+    fireEvent.click(trashToggleButton())
+    await screen.findByText(/null-path\.wav/i)
+
+    openRowMenu(0)
+    expect(await screen.findByRole('menuitem', { name: /^restore/i })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: /delete permanently/i })).toBeInTheDocument()
+  })
+})
+
+describe('CX-T5-1 — Trash mode disables bulk selection', () => {
+  it('Space (and Ctrl+A) in Trash select nothing; the same keys select in the live list', async () => {
+    renderLibrary()
+    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    const list = screen.getByTestId('library-list')
+
+    // Control (live list): ArrowDown focuses row 0, Space toggles its selection.
+    fireEvent.keyDown(list, { key: 'ArrowDown' })
+    fireEvent.keyDown(list, { key: ' ' })
+    expect(selectionSpies.toggleSelection).toHaveBeenCalledWith('live-0')
+    selectionSpies.toggleSelection.mockClear()
+    selectionSpies.selectAll.mockClear()
+
+    // Trash mode: the same shortcuts are inert (guarded in Library.tsx).
+    fireEvent.click(trashToggleButton())
+    await screen.findByText(/trashed-newer\.wav/i)
+    fireEvent.keyDown(list, { key: 'ArrowDown' })
+    fireEvent.keyDown(list, { key: ' ' })
+    fireEvent.keyDown(list, { key: 'a', ctrlKey: true })
+    expect(selectionSpies.toggleSelection).not.toHaveBeenCalled()
+    expect(selectionSpies.selectAll).not.toHaveBeenCalled()
+    expect(screen.queryByRole('toolbar', { name: /bulk actions/i })).not.toBeInTheDocument()
+  })
+
+  it('the BulkActionsBar never renders in Trash, even with a staged selection', async () => {
+    // Defensive render gate: even if a selection somehow existed while in
+    // Trash, the bar (whose handlers all operate on the LIVE list) must not show.
+    harness.selectedIds = new Set(['live-0'])
+    renderLibrary()
+    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    expect(screen.getByRole('toolbar', { name: /bulk actions/i })).toBeInTheDocument()
+
+    fireEvent.click(trashToggleButton())
+    await screen.findByText(/trashed-newer\.wav/i)
+    expect(screen.queryByRole('toolbar', { name: /bulk actions/i })).not.toBeInTheDocument()
+    // Entering Trash also clears whatever selection existed (handleToggleTrash).
+    expect(selectionSpies.clearSelection).toHaveBeenCalled()
+  })
+})
+
+describe('CX-T5-2 + OP-F-LOW-4 — bulk soft-delete refreshes Trash and clears playback/reader (AR3-5)', () => {
+  it('bulk-deleting the playing/selected row re-runs loadTrash, stops playback, and clears the reader', async () => {
+    harness.selectedIds = new Set(['live-0'])
+    harness.currentlyPlayingId = 'live-0'
+    harness.selectedSourceId = 'live-0'
+    renderLibrary()
+    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+
+    // Bulk bar → Delete → shared confirm dialog → confirm.
+    const toolbar = screen.getByRole('toolbar', { name: /bulk actions/i })
+    fireEvent.click(within(toolbar).getByTitle('Delete selected'))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(within(dialog).getByText(/delete selected items/i)).toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('button', { name: /^delete$/i }))
+
+    await waitFor(() => expect(window.electronAPI.recordings.deleteCascade).toHaveBeenCalledWith('live-0', false))
+    // CX-T5-2: the Trash badge/list reloads (mount + post-bulk-delete).
+    await waitFor(() => expect(getTrashMock).toHaveBeenCalledTimes(2))
+    // OP-F-LOW-4: AR3-5 parity with the single-row path.
+    await waitFor(() => expect(audioControlsMock.stop).toHaveBeenCalled())
+    await waitFor(() => expect(setSelectedSourceId).toHaveBeenCalledWith(null))
+  })
+
+  it('bulk-deleting a NON-playing row leaves playback alone (and still refreshes Trash)', async () => {
+    harness.selectedIds = new Set(['live-1'])
+    harness.currentlyPlayingId = 'live-0'
+    renderLibrary()
+    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+
+    const toolbar = screen.getByRole('toolbar', { name: /bulk actions/i })
+    fireEvent.click(within(toolbar).getByTitle('Delete selected'))
+    const dialog = await screen.findByRole('alertdialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: /^delete$/i }))
+
+    await waitFor(() => expect(window.electronAPI.recordings.deleteCascade).toHaveBeenCalledWith('live-1', false))
+    await waitFor(() => expect(getTrashMock).toHaveBeenCalledTimes(2))
+    expect(audioControlsMock.stop).not.toHaveBeenCalled()
   })
 })
