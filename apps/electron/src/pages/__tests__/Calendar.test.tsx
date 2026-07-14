@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { getWeekDates } from '@/lib/calendar-utils'
 
@@ -25,6 +25,8 @@ vi.mock('@/components/RecordingLinkDialog', () => ({ RecordingLinkDialog: () => 
 vi.mock('@/components/ui/toaster', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 
 let meetingsFixture: any[] = []
+// Mutable so individual tests can flip UI config (e.g. showListView) before render.
+let configFixture: Record<string, any> = {}
 
 const appActions = {
   navigateWeek: vi.fn(),
@@ -52,7 +54,7 @@ vi.mock('@/store/useAppStore', () => ({
 
 vi.mock('@/store/domain/useConfigStore', () => ({
   useConfigStore: vi.fn((selector: (s: any) => any) =>
-    selector({ config: {}, loadConfig: vi.fn().mockResolvedValue(undefined), updateConfig: vi.fn().mockResolvedValue(undefined) })
+    selector({ config: configFixture, loadConfig: vi.fn().mockResolvedValue(undefined), updateConfig: vi.fn().mockResolvedValue(undefined) })
   )
 }))
 
@@ -61,7 +63,19 @@ vi.mock('@/store/useUIStore', () => ({
 }))
 
 import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
+import { toast } from '@/components/ui/toaster'
 import { Calendar } from '../Calendar'
+
+// The renderer talks to the main process only through window.electronAPI —
+// jsdom has none, so provide the recording surface the Calendar page uses.
+const electronAPI = {
+  recordings: {
+    delete: vi.fn().mockResolvedValue(true),
+    deleteCascade: vi.fn().mockResolvedValue({ success: true, mode: 'soft' }),
+    restore: vi.fn().mockResolvedValue({ success: true })
+  }
+}
+;(window as any).electronAPI = electronAPI
 
 // A viewDate the component will key on; anchoring recording times to it keeps
 // the UTC-based day grouping deterministic across timezones.
@@ -103,6 +117,8 @@ function renderCalendar(recordings: any[], meetings: any[] = []) {
 beforeEach(() => {
   vi.clearAllMocks()
   meetingsFixture = []
+  configFixture = {}
+  window.confirm = vi.fn(() => true)
 })
 
 describe('Calendar — design language', () => {
@@ -156,5 +172,110 @@ describe('Calendar — design language', () => {
     fireEvent.click(screen.getByRole('button', { name: /calendar legend/i }))
     expect(screen.getByText('Recurring / team')).toBeInTheDocument()
     expect(screen.getByText('Not linked to a meeting — click to assign')).toBeInTheDocument()
+  })
+})
+
+// ── Honest deletion (spec-005/F17 T5 §D3b + AR3-4) ──────────────────────────
+// Calendar is a FOURTH delete surface (card grid + compact list), found outside
+// the base spec's enumeration. Its non-device delete buttons must say what they
+// do — soft "Move to Trash" via recordings.deleteCascade(id, false) — and must
+// never route to the legacy permanent recordings.delete IPC (unlinkSync under
+// the hood). AR3-4 (binding): capture-only synthetic rows (localPath === '')
+// render no delete affordance at all.
+
+/** Renders the recordings list page (showListView) instead of the week grid. */
+function renderListView(recordings: any[]) {
+  configFixture = { ui: { showListView: true } }
+  return renderCalendar(recordings)
+}
+
+describe('Calendar — honest deletion (spec-005/F17 T5 §D3b + AR3-4)', () => {
+  it('labels a local-only row "Move to Trash" in the compact list, never "Delete local file"', () => {
+    renderListView([recording({ id: 'r-local', location: 'local-only', localPath: '/x' })])
+
+    expect(screen.getByTitle('Move to Trash')).toBeInTheDocument()
+    expect(screen.queryByTitle('Delete local file')).not.toBeInTheDocument()
+  })
+
+  it('labels a synced (both) row "Move to Trash" in the compact list, never "Delete local copy (keeps on device)"', () => {
+    renderListView([recording({ id: 'r-both', location: 'both', localPath: '/x', deviceFilename: 'rec.hda' })])
+
+    expect(screen.getByTitle('Move to Trash')).toBeInTheDocument()
+    expect(screen.queryByTitle(/Delete local copy/)).not.toBeInTheDocument()
+  })
+
+  it('labels local-only and synced rows "Move to Trash" in the card view too', () => {
+    renderListView([
+      recording({ id: 'r-local', location: 'local-only', localPath: '/x' }),
+      recording({ id: 'r-both', location: 'both', localPath: '/y', deviceFilename: 'rec.hda', dateRecorded: at(11) })
+    ])
+    fireEvent.click(screen.getByTitle('Card view'))
+
+    expect(screen.getAllByTitle('Move to Trash')).toHaveLength(2)
+    expect(screen.queryByTitle('Delete local file')).not.toBeInTheDocument()
+    expect(screen.queryByTitle(/Delete local copy/)).not.toBeInTheDocument()
+  })
+
+  it('keeps the accurate "Delete from device" label for device-only rows', () => {
+    renderListView([recording({ id: 'r-dev', location: 'device-only', localPath: undefined, deviceFilename: 'rec.hda' })])
+
+    expect(screen.getByTitle('Delete from device')).toBeInTheDocument()
+    expect(screen.queryByTitle('Move to Trash')).not.toBeInTheDocument()
+  })
+
+  it('AR3-4: a capture-only synthetic row (no source recording) renders no delete affordance', () => {
+    renderListView([
+      recording({
+        id: 'cap-1',
+        location: 'local-only',
+        localPath: '', // the capture-only marker (see buildRecordingMap)
+        knowledgeCaptureId: 'cap-1',
+        isImported: true,
+        title: 'Imported PDF'
+      })
+    ])
+
+    expect(screen.queryByTitle('Move to Trash')).not.toBeInTheDocument()
+    expect(screen.queryByTitle('Delete local file')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByTitle('Card view'))
+    expect(screen.queryByTitle('Move to Trash')).not.toBeInTheDocument()
+    expect(screen.queryByTitle('Delete local file')).not.toBeInTheDocument()
+  })
+
+  it('routes "Move to Trash" through the soft deleteCascade IPC — never the legacy permanent recordings.delete', async () => {
+    renderListView([recording({ id: 'r-local', location: 'local-only', localPath: '/x' })])
+
+    fireEvent.click(screen.getByTitle('Move to Trash'))
+
+    await waitFor(() => expect(electronAPI.recordings.deleteCascade).toHaveBeenCalledWith('r-local', false))
+    expect(electronAPI.recordings.delete).not.toHaveBeenCalled()
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('to Trash?'))
+  })
+
+  it('shows a "Moved to Trash" toast whose Undo action restores the recording', async () => {
+    renderListView([recording({ id: 'r-undo', location: 'local-only', localPath: '/x' })])
+
+    fireEvent.click(screen.getByTitle('Move to Trash'))
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalled())
+    const [title, , opts] = (toast.success as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(title).toBe('Moved to Trash')
+
+    await act(async () => {
+      await opts.action.onClick()
+    })
+    expect(electronAPI.recordings.restore).toHaveBeenCalledWith('r-undo')
+  })
+
+  it('does nothing when the Trash confirm is declined', async () => {
+    ;(window.confirm as ReturnType<typeof vi.fn>).mockReturnValueOnce(false)
+    renderListView([recording({ id: 'r-keep', location: 'local-only', localPath: '/x' })])
+
+    fireEvent.click(screen.getByTitle('Move to Trash'))
+
+    await act(async () => {}) // flush any pending microtasks
+    expect(electronAPI.recordings.deleteCascade).not.toHaveBeenCalled()
+    expect(electronAPI.recordings.delete).not.toHaveBeenCalled()
   })
 })
