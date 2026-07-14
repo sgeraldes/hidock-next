@@ -226,4 +226,53 @@ describe('Settings Page', () => {
     expect(screen.getByRole('button', { name: 'Embedded' })).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getByRole('button', { name: 'Left' })).toHaveAttribute('aria-pressed', 'true')
   })
+
+  // S-1 (Phase-1 integration review) — the valueClassificationEnabled
+  // kill-switch gates only the live path; the Settings-triggered backfill
+  // ignores it by design, so the card shows a one-line hint when it's off.
+  it('shows a kill-switch hint on the value-classification card when valueClassificationEnabled is false', async () => {
+    const { useConfigStore } = await import('@/store/domain/useConfigStore')
+    const mockedUseConfigStore = vi.mocked(useConfigStore)
+    // Settings re-renders (e.g. once loadStorageInfo's promise resolves), so
+    // useConfigStore is called more than once during this test — a persistent
+    // mockImplementation (not ...Once) is needed for every render to see the
+    // override; restored in `finally` so it never leaks into later tests.
+    const originalImpl = mockedUseConfigStore.getMockImplementation()
+    mockedUseConfigStore.mockImplementation((selector?: any) => {
+      const state = {
+        config: {
+          calendar: {
+            icsUrl: 'https://example.com/cal.ics',
+            syncEnabled: true,
+            syncIntervalMinutes: 15,
+            lastSyncAt: '2026-03-01T10:00:00Z'
+          },
+          transcription: {
+            geminiApiKey: 'AIzaTestKey12345',
+            geminiModel: 'gemini-3-pro-preview',
+            valueClassificationEnabled: false
+          },
+          chat: { provider: 'gemini' as const },
+          embeddings: { ollamaBaseUrl: 'http://localhost:11434' }
+        },
+        loadConfig: mockLoadConfig,
+        updateConfig: mockUpdateConfig,
+        configLoading: false
+      }
+      if (typeof selector === 'function') return selector(state)
+      return state
+    })
+
+    try {
+      render(<Settings />)
+      expect(screen.getByText(/Live classification is off/)).toBeInTheDocument()
+    } finally {
+      if (originalImpl) mockedUseConfigStore.mockImplementation(originalImpl)
+    }
+  })
+
+  it('hides the kill-switch hint when valueClassificationEnabled is not explicitly false', async () => {
+    render(<Settings />)
+    expect(screen.queryByText(/Live classification is off/)).not.toBeInTheDocument()
+  })
 })

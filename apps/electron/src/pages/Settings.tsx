@@ -1089,6 +1089,11 @@ export function Settings() {
               {!hasValueProvider && (
                 <p className="text-xs text-muted-foreground">Configure an AI provider above to enable.</p>
               )}
+              {config?.transcription.valueClassificationEnabled === false && (
+                <p className="text-xs text-muted-foreground">
+                  Live classification is off (config kill-switch); this manual backfill still runs.
+                </p>
+              )}
               <div className="flex items-center gap-2">
                 <Button
                   onClick={handleStartValueBackfill}
