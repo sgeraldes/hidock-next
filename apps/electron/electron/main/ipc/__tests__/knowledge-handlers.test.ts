@@ -90,7 +90,7 @@ describe('Knowledge IPC Handlers', () => {
           captured_at: '2025-01-01T10:00:00Z'
         }
       ]
-      // @ts-ignore
+      // @ts-ignore - mockReturnValue's arg is untyped in this test's minimal row fixtures
       queryAll.mockReturnValue(mockRows)
 
       const result = await handlers['knowledge:getAll']({})
@@ -105,7 +105,7 @@ describe('Knowledge IPC Handlers', () => {
       const mockRows = [
         { id: '1', title: 'Corrupt row', quality_rating: 'unrated', quality_reasons: 'not-valid-json{{', quality_source: null, captured_at: '2025-01-01T10:00:00Z' }
       ]
-      // @ts-ignore
+      // @ts-ignore - mockReturnValue's arg is untyped in this test's minimal row fixtures
       queryAll.mockReturnValue(mockRows)
 
       const result = await handlers['knowledge:getAll']({})
@@ -118,7 +118,7 @@ describe('Knowledge IPC Handlers', () => {
       const mockRows = [
         { id: '1', title: 'No reasons', quality_rating: 'unrated', quality_reasons: null, quality_source: null, captured_at: '2025-01-01T10:00:00Z' }
       ]
-      // @ts-ignore
+      // @ts-ignore - mockReturnValue's arg is untyped in this test's minimal row fixtures
       queryAll.mockReturnValue(mockRows)
 
       const result = await handlers['knowledge:getAll']({})
