@@ -16,7 +16,9 @@ import { UNKNOWN_DATE, isUnknownDate } from '@/lib/unknownDate'
 // can import the predicate without pulling this hook's React/store/device deps.
 export { UNKNOWN_DATE, isUnknownDate }
 
-interface DatabaseRecording {
+// Exported (spec-005/F17 T5 §D5) so features/library/utils/trashRow.ts can type
+// the recordings:getTrash row shape without duplicating this interface.
+export interface DatabaseRecording {
   id: string
   filename: string
   file_path: string
@@ -797,7 +799,9 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
 /**
  * Map database status to transcription status
  */
-function mapTranscriptionStatus(status?: string, captureStatus?: string): UnifiedRecording['transcriptionStatus'] {
+// Exported (spec-005/F17 T5 §D5) so the Trash-row mapper can reuse the exact
+// same status mapping instead of duplicating it.
+export function mapTranscriptionStatus(status?: string, captureStatus?: string): UnifiedRecording['transcriptionStatus'] {
   if (captureStatus) {
     if (captureStatus === 'ready' || captureStatus === 'enriched') return 'complete'
     if (captureStatus === 'processing') return 'processing'

@@ -188,3 +188,26 @@ export function hasLocalPath(rec: UnifiedRecording): rec is LocalOnlyRecording |
 export function hasDeviceFile(rec: UnifiedRecording): rec is DeviceOnlyRecording | BothLocationsRecording {
   return rec.location === 'device-only' || rec.location === 'both'
 }
+
+/**
+ * True when this row is backed by an actual `recordings`-table row (a real
+ * audio file on the device or disk) — as opposed to a synthetic "capture-only"
+ * row synthesized for a knowledge_capture with no source recording (imported
+ * PDF/image/note; see buildRecordingMap's capture-only branch, which stamps
+ * `location: 'local-only'` + `localPath: ''` and never 'device-only'/'both').
+ *
+ * Uses `hasDeviceFile` (not `isDeviceOnly`) so a `'both'` row is always
+ * recording-backed even in the pathological case where its local half's path
+ * ended up empty — it still carries a real `deviceFilename`. Only a
+ * `'local-only'` row with an empty `localPath` (the capture-only marker) is
+ * excluded.
+ *
+ * spec-005/F17 AR3-4 (adversarial amendment, binding): ALL recording-deletion
+ * affordances (Move to Trash, Delete from device, Delete permanently, Trash
+ * inclusion) gate on this — a capture-only row must render NO deletion items
+ * on ANY surface (row, reader, card). F20 (backlog) owns their future
+ * deletion/Trash contract.
+ */
+export function isRecordingBacked(rec: UnifiedRecording): boolean {
+  return hasDeviceFile(rec) || hasLocalPath(rec)
+}

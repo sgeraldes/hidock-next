@@ -12,6 +12,7 @@ import {
   isDeviceOnly,
   isLocalOnly,
   isBothLocations,
+  isRecordingBacked,
   matchesSemanticFilter,
   matchesExclusiveFilter,
   type UnifiedRecording,
@@ -243,6 +244,36 @@ describe('type narrowing', () => {
         }
       }
     }
+  })
+})
+
+// ============================================================
+// isRecordingBacked (spec-005/F17 T5 AR3-4) — the gate that hides ALL
+// deletion affordances on capture-only synthetic rows (no source recording;
+// buildRecordingMap's capture-only branch: location 'local-only', localPath: '').
+// ============================================================
+
+describe('isRecordingBacked', () => {
+  it('returns true for device-only recordings', () => {
+    expect(isRecordingBacked(deviceOnlyRecording)).toBe(true)
+  })
+
+  it('returns true for local-only recordings with a real localPath', () => {
+    expect(isRecordingBacked(localOnlyRecording)).toBe(true)
+  })
+
+  it('returns true for both-locations recordings', () => {
+    expect(isRecordingBacked(bothLocationsRecording)).toBe(true)
+  })
+
+  it('returns false for a capture-only synthetic row (local-only, empty localPath)', () => {
+    const captureOnly: LocalOnlyRecording = { ...localOnlyRecording, localPath: '' }
+    expect(isRecordingBacked(captureOnly)).toBe(false)
+  })
+
+  it('returns true for a both-locations row even with a pathologically empty localPath (still has a real deviceFilename)', () => {
+    const emptyPath: BothLocationsRecording = { ...bothLocationsRecording, localPath: '' }
+    expect(isRecordingBacked(emptyPath)).toBe(true)
   })
 })
 
