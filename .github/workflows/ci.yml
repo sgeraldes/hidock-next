@@ -26,10 +26,13 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Use Node.js 20
+    # Node 22: better-sqlite3 12.x ships win32 Node prebuilds only for
+    # ABI >= 127 (Node 22+); on Node 20 prebuild-install falls back to a
+    # node-gyp compile that the runner's VS 18 image breaks.
+    - name: Use Node.js 22
       uses: actions/setup-node@v4
       with:
-        node-version: 20
+        node-version: 22
         cache: 'npm'
         cache-dependency-path: |
           apps/electron/package-lock.json
