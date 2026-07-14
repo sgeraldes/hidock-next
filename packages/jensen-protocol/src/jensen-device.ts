@@ -1236,7 +1236,12 @@ export class JensenDevice {
     this.currentCommandTag = tag
     this.currentOperationName = entry.operationName
 
-    if (shouldLog()) console.log(`[Jensen] sendNext: ${entry.operationName} (${tag})`)
+    // GET_RECORDING_FILE is a 20s background poll (live-recording detection) —
+    // logging every probe drowns the console; state CHANGES are logged by the
+    // poll's owner instead.
+    if (shouldLog() && entry.msg.command !== CMD.GET_RECORDING_FILE) {
+      console.log(`[Jensen] sendNext: ${entry.operationName} (${tag})`)
+    }
 
     // Set parse delay based on command type
     // jensen.js: g.timewait = d.command == 5 || d.command == G ? 1e3 : 10
@@ -1533,7 +1538,7 @@ export class JensenDevice {
         consumed += parsed.length
         const msg = parsed.message
 
-        if (shouldLog() && msg.id !== CMD.TRANSFER_FILE) {
+        if (shouldLog() && msg.id !== CMD.TRANSFER_FILE && msg.id !== CMD.GET_RECORDING_FILE) {
           console.log(`[Jensen] recv: cmd=${msg.id}, seq=${msg.sequence}, bodyLen=${msg.body.length}`)
         }
 
