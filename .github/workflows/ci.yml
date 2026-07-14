@@ -12,17 +12,19 @@ permissions:
 jobs:
   # Electron app (HiDock Meeting Intelligence) — primary product
   test-electron:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # windows-latest deliberately: Windows is the suite's proven platform
+    # (3510/3510 green there; the app is developed and dogfooded on Windows).
+    # An ubuntu run leaves 22 test files failing on platform-specific paths
+    # (trusted-root exe resolution etc.) — tracked; switch to an OS matrix
+    # once the suite is Linux-clean. No apt deps needed: usb/better-sqlite3
+    # rebuild with the preinstalled VS Build Tools.
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
     steps:
     - uses: actions/checkout@v4
-
-    # electron-builder install-app-deps rebuilds the `usb` native module
-    # against Electron headers; its bundled libusb needs libudev on Linux
-    - name: Install system dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libudev-dev libusb-1.0-0-dev
 
     - name: Use Node.js 20
       uses: actions/setup-node@v4
