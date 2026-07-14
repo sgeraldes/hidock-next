@@ -50,13 +50,13 @@ describe('GeminiApiBrain', () => {
   describe('key resolution', () => {
     it('prefers the credential-store secret over the plaintext config key', () => {
       mockGetSecret.mockReturnValue('store-key')
-      mockConfig.transcription.geminiApiKey = 'config-key'
+      mockConfig.transcription.geminiApiKey = 'config-key' // pragma: allowlist secret
       expect(resolveGeminiApiKey()).toBe('store-key')
     })
 
     it('falls back to the plaintext config key when no secret is stored', () => {
       mockGetSecret.mockReturnValue(null)
-      mockConfig.transcription.geminiApiKey = 'config-key'
+      mockConfig.transcription.geminiApiKey = 'config-key' // pragma: allowlist secret
       expect(resolveGeminiApiKey()).toBe('config-key')
     })
 
@@ -85,14 +85,14 @@ describe('GeminiApiBrain', () => {
     it('is configured only when a key resolves', async () => {
       mockConfig.transcription.geminiApiKey = ''
       expect((await brain.authStatus()).configured).toBe(false)
-      mockConfig.transcription.geminiApiKey = 'key-1'
+      mockConfig.transcription.geminiApiKey = 'key-1' // pragma: allowlist secret
       expect((await brain.authStatus()).configured).toBe(true)
     })
   })
 
   describe('generate', () => {
     beforeEach(() => {
-      mockConfig.transcription.geminiApiKey = 'key-1'
+      mockConfig.transcription.geminiApiKey = 'key-1' // pragma: allowlist secret
     })
 
     it('throws when no key is configured', async () => {
@@ -127,7 +127,7 @@ describe('GeminiApiBrain', () => {
 
   describe('chat', () => {
     beforeEach(() => {
-      mockConfig.transcription.geminiApiKey = 'key-1'
+      mockConfig.transcription.geminiApiKey = 'key-1' // pragma: allowlist secret
     })
 
     it('uses config.chat.geminiModel, maps assistant→model and strips leading model turns', async () => {
@@ -162,7 +162,7 @@ describe('GeminiApiBrain', () => {
     })
 
     it('batch-embeds with gemini-embedding-001 and maps values', async () => {
-      mockConfig.transcription.geminiApiKey = 'key-1'
+      mockConfig.transcription.geminiApiKey = 'key-1' // pragma: allowlist secret
       const out = await brain.embed(['a'])
       expect(mockGetGenerativeModel).toHaveBeenCalledWith({ model: 'gemini-embedding-001' })
       expect(out).toEqual([[1, 2, 3]])

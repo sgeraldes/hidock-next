@@ -124,7 +124,7 @@ describe('KiroCliBrain', () => {
       const spawn = makeFakeSpawn({ stdout: WHOAMI_STDOUT, code: 0 })
       const brain = new KiroCliBrain({
         spawn: asSpawn(spawn.fn),
-        env: { KIRO_API_KEY: 'kk' },
+        env: { KIRO_API_KEY: 'kk' }, // pragma: allowlist secret
         getStoredKey: () => '',
       })
       const status = await brain.authStatus()
@@ -136,7 +136,7 @@ describe('KiroCliBrain', () => {
       const spawn = makeFakeSpawn(NOT_LOGGED_IN)
       const brain = new KiroCliBrain({
         spawn: asSpawn(spawn.fn),
-        env: { KIRO_API_KEY: 'kk' },
+        env: { KIRO_API_KEY: 'kk' }, // pragma: allowlist secret
         getStoredKey: () => '',
       })
       const status = await brain.authStatus()
