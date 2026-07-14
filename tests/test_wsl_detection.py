@@ -1,11 +1,12 @@
+import importlib
 import shutil
 import sys
 import types
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:  # pragma: no cover - import only for type checking tools
-    import setup  # noqa: F401
+# The venv-selection surface lives in scripts.support.env (moved there from
+# the monolithic setup.py / setup_support during the repo reorganization).
+MODULE_PATH = "scripts.support.env"
 
 BASE = Path("apps/desktop")
 
@@ -30,8 +31,8 @@ def test_wsl_detection(monkeypatch):
     monkeypatch.setattr("platform.system", lambda: "Linux")
     monkeypatch.setattr("platform.uname", lambda: types.SimpleNamespace(release="6.1.0-microsoft-standard"))
     _reset()
-    if "setup" in sys.modules:
-        del sys.modules["setup"]
-    import setup as s  # noqa: F401  # pylint: disable=import-outside-toplevel,unused-import
+    if MODULE_PATH in sys.modules:
+        del sys.modules[MODULE_PATH]
+    m = importlib.import_module(MODULE_PATH)
 
-    assert s.DESKTOP_VENV_NAME in {".venv.wsl", ".venv"}, "Expected WSL-tagged venv name when in WSL kernel"
+    assert m.DESKTOP_VENV_NAME in {".venv.wsl", ".venv"}, "Expected WSL-tagged venv name when in WSL kernel"

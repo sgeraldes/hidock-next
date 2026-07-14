@@ -6,7 +6,7 @@ from pathlib import Path
 
 # Dynamically reload env module each test (cleared from sys.modules)
 
-MODULE_PATH = "setup_support.env"
+MODULE_PATH = "scripts.support.env"
 BASE = Path("apps/desktop")
 
 
