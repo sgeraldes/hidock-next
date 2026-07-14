@@ -97,7 +97,12 @@ vi.mock('../database', () => ({
   clearStaleTranscriptionLock: vi.fn(), // Called on startTranscriptionProcessor()
   resetStuckTranscriptions: vi.fn().mockReturnValue({ recordingsReset: 0, queueItemsReset: 0 }), // Called on startTranscriptionProcessor()
   run: vi.fn(),
-  queryOne: vi.fn()
+  queryOne: vi.fn(),
+  // F16/spec-002 (T2): the inline actionable-detection block gates on this.
+  // Default false (not excluded) — this suite doesn't exercise the value
+  // gate itself (covered by value-gates.test.ts); keeps the mock's surface in
+  // sync with the real module so the new call site doesn't throw.
+  isValueExcludedRecording: vi.fn(() => false)
 }))
 
 // Mock electron

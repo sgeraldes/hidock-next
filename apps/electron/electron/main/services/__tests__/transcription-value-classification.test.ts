@@ -103,7 +103,13 @@ vi.mock('../database', () => ({
   runInTransaction: (fn: () => unknown) => fn(),
   saveDatabase: vi.fn(),
   queryAll: (...args: any[]) => mockQueryAll(...args),
-  queryOne: (...args: any[]) => mockQueryOne(...args)
+  queryOne: (...args: any[]) => mockQueryOne(...args),
+  // F16/spec-002 (T2): the inline actionable-detection block gates on this.
+  // Default false (not excluded) — none of this file's tests exercise the
+  // value-gate itself (that's covered by value-gates.test.ts); this just
+  // keeps the mock's surface in sync with the real module so the new call
+  // site doesn't throw.
+  isValueExcludedRecording: vi.fn(() => false)
 }))
 
 vi.mock('electron', () => ({

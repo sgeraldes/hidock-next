@@ -109,6 +109,7 @@ import {
   saveDatabase,
   queryOne,
   queryAll,
+  isValueExcludedRecording,
   acquireTranscriptionLock,
   releaseTranscriptionLock,
   clearStaleTranscriptionLock,
@@ -1736,55 +1737,69 @@ Meeting ${i + 1}: "${m.subject}"
 
   progressCallback?.('detecting_actionables', 75) // spec-014: progress reporting
 
-  // Detect actionables from transcript
-  try {
-    const knowledgeCapture = queryOne<{ id: string }>(
-      'SELECT id FROM knowledge_captures WHERE source_recording_id = ?',
-      [recordingId]
+  // Detect actionables from transcript.
+  // F16/spec-002 (T2): gated on an INDEPENDENT fresh read (Codex adversarial
+  // review AR-3/A3 — do NOT reuse T1's block-scoped apply-result variable
+  // above, which is out of scope by this point). The rating T1 wrote (if any)
+  // earlier in this same function is already committed to the DB, so this
+  // read sees it. Skipping here leaves the transcript's own action_items/
+  // key_points JSON (already written into the transcript row above) and the
+  // timeline pass below untouched — those are display data, not an
+  // intelligence surface.
+  if (isValueExcludedRecording(recordingId)) {
+    console.log(
+      `[Actionable Detection] Skipped value-excluded recording ${recordingId} (no actionables extracted)`
     )
-    const sourceKnowledgeId = knowledgeCapture?.id || recordingId
-
-    const detections = await detectActionables(fullText, sourceKnowledgeId, {
-      title: analysis.title_suggestion,
-      questions: analysis.question_suggestions
-    })
-
-    // Create actionable entries with TEXT IDs
-    const VALID_TEMPLATE_IDS = ['meeting_minutes', 'interview_feedback', 'project_status', 'action_items', 'claude_code_prompt']
-
-    for (const detection of detections) {
-      const actionableId = `act_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`
-
-      // Sanitize template ID: fall back to 'meeting_minutes' if AI suggests an invalid one
-      const sanitizedTemplate = detection.suggestedTemplate && VALID_TEMPLATE_IDS.includes(detection.suggestedTemplate)
-        ? detection.suggestedTemplate
-        : 'meeting_minutes'
-
-      run(
-        `INSERT INTO actionables (
-          id, source_knowledge_id, type, title, description, status,
-          confidence, suggested_template, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          actionableId,
-          sourceKnowledgeId, // source_knowledge_id references knowledge_captures.id
-          detection.type,
-          detection.suggestedTitle,
-          detection.reason,
-          'pending',
-          detection.confidence,
-          sanitizedTemplate,
-          new Date().toISOString()
-        ]
+  } else {
+    try {
+      const knowledgeCapture = queryOne<{ id: string }>(
+        'SELECT id FROM knowledge_captures WHERE source_recording_id = ?',
+        [recordingId]
       )
-    }
+      const sourceKnowledgeId = knowledgeCapture?.id || recordingId
 
-    if (detections.length > 0) {
-      console.log(`[Actionable Detection] Created ${detections.length} actionables for ${recordingId}`)
+      const detections = await detectActionables(fullText, sourceKnowledgeId, {
+        title: analysis.title_suggestion,
+        questions: analysis.question_suggestions
+      })
+
+      // Create actionable entries with TEXT IDs
+      const VALID_TEMPLATE_IDS = ['meeting_minutes', 'interview_feedback', 'project_status', 'action_items', 'claude_code_prompt']
+
+      for (const detection of detections) {
+        const actionableId = `act_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`
+
+        // Sanitize template ID: fall back to 'meeting_minutes' if AI suggests an invalid one
+        const sanitizedTemplate = detection.suggestedTemplate && VALID_TEMPLATE_IDS.includes(detection.suggestedTemplate)
+          ? detection.suggestedTemplate
+          : 'meeting_minutes'
+
+        run(
+          `INSERT INTO actionables (
+            id, source_knowledge_id, type, title, description, status,
+            confidence, suggested_template, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            actionableId,
+            sourceKnowledgeId, // source_knowledge_id references knowledge_captures.id
+            detection.type,
+            detection.suggestedTitle,
+            detection.reason,
+            'pending',
+            detection.confidence,
+            sanitizedTemplate,
+            new Date().toISOString()
+          ]
+        )
+      }
+
+      if (detections.length > 0) {
+        console.log(`[Actionable Detection] Created ${detections.length} actionables for ${recordingId}`)
+      }
+    } catch (error) {
+      console.error('[Actionable Detection] Failed to create actionables:', error)
+      // Don't fail the transcription if actionable detection fails
     }
-  } catch (error) {
-    console.error('[Actionable Detection] Failed to create actionables:', error)
-    // Don't fail the transcription if actionable detection fails
   }
 
   // Meeting-timeline data (v39): windowed sentiment + action/decision markers.
