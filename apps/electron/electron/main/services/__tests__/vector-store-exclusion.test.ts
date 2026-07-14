@@ -58,4 +58,34 @@ describe('VectorStore.search exclusion', () => {
     const results = await store.search('q', 5)
     expect(results.length).toBe(1)
   })
+
+  // F16/spec-002 (T2): getExcludedRecordingIds() now also unions in
+  // value-excluded recordings (rated garbage/low-value) — see
+  // getValueExcludedRecordingIds in database.ts. At this mock boundary the
+  // exclusion source is indistinguishable from the personal/deleted case
+  // above (the store only ever sees the merged Set), so this mirrors that
+  // test to document the same instant, reversible, query-time-only filtering
+  // applies identically to a value-excluded id.
+  it('returns chunks from a normal recording but omits a value-excluded one (garbage/low-value rating)', async () => {
+    const store = new VectorStore()
+    await store.addDocument('normal content', { recordingId: 'r-ok', chunkIndex: 0 })
+    await store.addDocument('low-value content', { recordingId: 'r-value-excluded', chunkIndex: 0 })
+
+    // No exclusions yet — both are searchable.
+    let results = await store.search('anything', 10)
+    expect(results.map((r) => r.document.metadata.recordingId).sort()).toEqual(['r-ok', 'r-value-excluded'])
+
+    // Rating flips to garbage/low-value — getExcludedRecordingIds's union now includes it.
+    deps.excluded = new Set(['r-value-excluded'])
+    results = await store.search('anything', 10)
+    const ids = results.map((r) => r.document.metadata.recordingId)
+    expect(ids).toContain('r-ok')
+    expect(ids).not.toContain('r-value-excluded')
+
+    // Rating upgraded back (e.g. to valuable/unrated) — instantly retrievable
+    // again WITHOUT re-indexing.
+    deps.excluded = new Set()
+    results = await store.search('anything', 10)
+    expect(results.map((r) => r.document.metadata.recordingId).sort()).toEqual(['r-ok', 'r-value-excluded'])
+  })
 })
