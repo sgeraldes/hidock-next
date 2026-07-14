@@ -3,13 +3,33 @@
  *
  * @vitest-environment node
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest'
 import { tmpdir } from 'os'
+import { join } from 'path'
+import { mkdirSync, rmSync } from 'fs'
 
-vi.mock('electron', () => ({
-  app: { getPath: () => tmpdir() },
-  safeStorage: { isEncryptionAvailable: () => false },
-}))
+// Isolated per-process userData dir — see config-features-default.test.ts:
+// sharing the tmpdir ROOT leaked %TEMP%/config.json and coupled the real-fs
+// config suites to each other across parallel workers and runs.
+function testUserDataDir(): string {
+  return join(tmpdir(), `hidock-config-brains-migration-test-${process.pid}`)
+}
+
+vi.mock('electron', () => {
+  // config.ts resolves its paths as soon as it is imported — the dir must
+  // exist (and be empty) before that happens.
+  const dir = testUserDataDir()
+  rmSync(dir, { recursive: true, force: true })
+  mkdirSync(dir, { recursive: true })
+  return {
+    app: { getPath: () => testUserDataDir() },
+    safeStorage: { isEncryptionAvailable: () => false },
+  }
+})
+
+afterAll(() => {
+  rmSync(testUserDataDir(), { recursive: true, force: true })
+})
 
 // Stateful credential-store mock. `storeState` mirrors the on-disk secret map so
 // getSecret/setSecret behave like the real store, and `setSecretShouldFail`

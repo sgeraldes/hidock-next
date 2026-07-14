@@ -147,6 +147,16 @@ export class ConnectorIngestionSink implements IngestionSink {
   /** Stage an artifact item to a temp file; returns the path or null if unfetchable. */
   private async stageArtifact(item: SourceItem): Promise<string | null> {
     const dir = mkdtempSync(join(tmpdir(), 'hidock-conn-'))
+    // The dir exists before we know the item is fetchable — every null return
+    // must discard it or unfetchable items strand hidock-conn-* dirs in TEMP.
+    const discard = (): null => {
+      try {
+        rmSync(dir, { recursive: true, force: true })
+      } catch {
+        /* best-effort temp cleanup */
+      }
+      return null
+    }
     const safeName = (item.externalId || randomUUID()).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64)
     const filePath = join(dir, `${safeName}.${extensionForItem(item)}`)
 
@@ -159,14 +169,14 @@ export class ConnectorIngestionSink implements IngestionSink {
         const headers: Record<string, string> = {}
         if (item.fetchAuthorization) headers.Authorization = item.fetchAuthorization
         const res = await fetch(item.url, { headers })
-        if (!res.ok) return null
+        if (!res.ok) return discard()
         writeFileSync(filePath, Buffer.from(await res.arrayBuffer()))
         return filePath
       } catch {
-        return null
+        return discard()
       }
     }
-    return null
+    return discard()
   }
 }
 
