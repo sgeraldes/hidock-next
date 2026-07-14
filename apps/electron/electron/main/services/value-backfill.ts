@@ -260,6 +260,17 @@ function finalizeFailure(captureId: string, runId: string, error: unknown): void
   const message = error instanceof Error ? error.message : String(error)
   const now = new Date().toISOString()
   runInTransaction(() => {
+    // CX-T3-8: same existence guard as the classified finalize — a
+    // concurrent hard purge removed the capture AND its marker rows; a
+    // failure park must not resurrect an orphaned marker for it.
+    const exists = queryOne<{ one: number }>(
+      'SELECT 1 AS one FROM knowledge_captures WHERE id = ?',
+      [captureId]
+    )
+    if (!exists) {
+      console.log(`[ValueBackfill] capture=${captureId} purged mid-run — failure not parked, no marker written`)
+      return
+    }
     run(
       `INSERT INTO value_backfill_state (capture_id, status, result_rating, attempts, run_id, last_error, updated_at)
        VALUES (?, 'failed', NULL, 1, ?, ?, ?)
@@ -358,6 +369,15 @@ export function _getYieldCountForTests(): number {
 type ProcessOutcome = 'marked' | 'unmarked' | 'skipped' | 'failed'
 
 async function processOneCapture(captureId: string, runId: string): Promise<ProcessOutcome> {
+  // CX-T3-6: the rate-limit wait comes FIRST — it can park this item for up
+  // to MIN_INTERVAL_MS, and a privacy flag landing during that wait must be
+  // honored. So the fresh privacy check (CX-T3-2) runs AFTER the throttle,
+  // with nothing but the synchronous reserve between it and the LLM call —
+  // no await separates the check from the first send. (In-run retries
+  // re-send the same already-checked content within seconds of that first
+  // call; they expose nothing the first send didn't.)
+  await throttleBeforeCall()
+
   // CX-T3-2: fresh privacy read BEFORE any durable write or LLM call — the
   // eligible-id snapshot can be minutes stale by the time this item's turn
   // comes. Blocked ⇒ skip entirely: no reserve, no attempt consumed, no marker.
@@ -370,7 +390,6 @@ async function processOneCapture(captureId: string, runId: string): Promise<Proc
 
   let raw: RawClassificationResult
   try {
-    await throttleBeforeCall()
     raw = await callWithInRunRetries(captureId)
   } catch (e) {
     finalizeFailure(captureId, runId, e)
@@ -383,11 +402,36 @@ async function processOneCapture(captureId: string, runId: string): Promise<Proc
   // (never-downgrade / confidence floor), in which case its `rating` already
   // reports the row's real current state, not our intended target.
   let resultRating: string = raw.skipped ? raw.currentRating : 'unrated'
+  let captureGone = false
   try {
     runInTransaction(() => {
+      // CX-T3-8: a concurrent hard purge (deleteRecordingCascade; FKs are
+      // OFF) may have deleted the capture — and its marker rows — while the
+      // LLM call was in flight. Writing the marker now would resurrect an
+      // orphaned row for a purged capture. Verify existence INSIDE the txn
+      // so the decision and the write are atomic against the purge's own
+      // transaction.
+      const exists = queryOne<{ one: number }>(
+        'SELECT 1 AS one FROM knowledge_captures WHERE id = ?',
+        [captureId]
+      )
+      if (!exists) {
+        captureGone = true
+        return
+      }
       if (!raw.skipped) {
         const applied = applyCaptureValueClassification(captureId, raw.classification)
         resultRating = applied.rating
+        // CX-T3-7: apply is deliberately non-throwing — a DB failure inside
+        // it surfaces as reason:'error' with NO write performed. Marking
+        // that 'classified' would permanently exclude a never-classified
+        // capture from retries; abort the txn instead so the catch below
+        // parks it as 'failed' (retryable under the attempts cap). Legit
+        // non-writes (below-floor, not-eligible) keep finalizing as
+        // 'classified' — distinguished by reason.
+        if (applied.reason === 'error') {
+          throw new Error(`applyCaptureValueClassification failed (reason=error) for capture=${captureId}`)
+        }
       }
       finalizeClassifiedInTransaction(captureId, runId, resultRating)
     })
@@ -411,6 +455,11 @@ async function processOneCapture(captureId: string, runId: string): Promise<Proc
       )
     }
     return 'failed'
+  }
+
+  if (captureGone) {
+    console.log(`[ValueBackfill] capture=${captureId} purged mid-run — skipped, no marker written`)
+    return 'skipped'
   }
 
   if (raw.skipped) return 'skipped'

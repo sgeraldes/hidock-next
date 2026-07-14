@@ -897,6 +897,131 @@ describe('value-backfill', () => {
       expect(classifyCaptureValueRawMock).toHaveBeenCalledWith('cap-second')
       expect(getBackfillStateRow('cap-second')).toMatchObject({ status: 'classified', attempts: 1 })
     })
+
+    // CX-T3-6: the rate-limit throttle (up to MIN_INTERVAL_MS) sits between
+    // an item's turn and its LLM call — a privacy flag landing DURING that
+    // wait must be honored, so the fresh check runs AFTER the throttle with
+    // no await between it and the call.
+    it('a privacy flip DURING the throttle wait is honored: zero LLM calls for that item (CX-T3-6)', async () => {
+      seedEligible('cap-first', '2026-06-01T00:00:00.000Z') // processed first, never throttles
+      seedEligible('cap-second', '2026-01-01T00:00:00.000Z') // throttles before its call
+      _setValueBackfillConfigForTests({
+        minIntervalMs: 60000, // force the second item to actually wait
+        delayFn: async () => {
+          // The only delayFn invocation in this test IS item 2's throttle
+          // wait (item 1 has no prior call to space from; no in-run retries
+          // fire — the classifier resolves). The user marks item 2's
+          // recording personal exactly inside this window.
+          run('UPDATE recordings SET personal = 1 WHERE id = ?', ['rec-cap-second'])
+        }
+      })
+
+      const result = await startValueBackfill()
+
+      expect(result.total).toBe(2)
+      expect(classifyCaptureValueRawMock).toHaveBeenCalledTimes(1) // item 1 only
+      expect(classifyCaptureValueRawMock).not.toHaveBeenCalledWith('cap-second')
+      expect(getBackfillStateRow('cap-second')).toBeUndefined() // no reserve either
+      expect(getCaptureRow('cap-second')?.quality_rating).toBe('unrated')
+    })
+  })
+
+  // ---------------------------------------------------------------------
+  // Concurrent hard purge vs in-flight item (CX-T3-8) — the purge deletes
+  // the capture AND its marker rows while the LLM call is in flight; the
+  // finalize must not resurrect an orphaned marker for a purged capture.
+  // ---------------------------------------------------------------------
+
+  describe('concurrent purge vs in-flight finalize (CX-T3-8)', () => {
+    it('a capture hard-purged between call and finalize leaves NO orphaned marker row', async () => {
+      seedEligible('cap-1')
+      const { win, send } = FAKE_WINDOW_FACTORY()
+      setMainWindowForValueBackfill(win)
+      classifyCaptureValueRawMock.mockImplementation(async () => {
+        // Concurrent hard purge lands while the LLM call is in flight: the
+        // cascade removes the capture AND its marker rows (incl. our reserve).
+        runWithMassDeleteAllowed(() => {
+          run(`DELETE FROM value_backfill_state WHERE capture_id = 'cap-1'`)
+          run(`DELETE FROM knowledge_captures WHERE id = 'cap-1'`)
+        })
+        return successReply('none', 0.9)
+      })
+
+      const result = await startValueBackfill()
+
+      expect(result).toEqual({ started: true, total: 1 })
+      expect(getBackfillStateRow('cap-1')).toBeUndefined() // no orphan resurrected
+      const completeCall = send.mock.calls.find((c) => c[0] === 'value:backfill-complete')
+      // Counted as skipped: processed, but neither marked nor failed.
+      expect(completeCall?.[1]).toMatchObject({ processed: 1, marked: 0, failed: 0 })
+    })
+
+    it('a FAILING call for a mid-flight-purged capture parks nothing (finalizeFailure existence guard)', async () => {
+      seedEligible('cap-1')
+      classifyCaptureValueRawMock.mockImplementation(async () => {
+        runWithMassDeleteAllowed(() => {
+          run(`DELETE FROM value_backfill_state WHERE capture_id = 'cap-1'`)
+          run(`DELETE FROM knowledge_captures WHERE id = 'cap-1'`)
+        })
+        throw new Error('provider exploded')
+      })
+
+      const result = await startValueBackfill()
+
+      expect(result.started).toBe(true)
+      expect(getBackfillStateRow('cap-1')).toBeUndefined() // failure park skipped too
+    })
+  })
+
+  // ---------------------------------------------------------------------
+  // Apply-error parking (CX-T3-7) — applyCaptureValueClassification is
+  // deliberately non-throwing; its reason:'error' result (DB failure, no
+  // write performed) must park the item as retryable, never mark it
+  // 'classified'.
+  // ---------------------------------------------------------------------
+
+  describe('apply-error parking (CX-T3-7)', () => {
+    it('an apply-layer DB error (reason:error, non-throwing) parks the item as failed — retryable, never classified', async () => {
+      seedEligible('cap-1')
+      classifyCaptureValueRawMock.mockResolvedValue(successReply('none', 0.9))
+      // Simulate the real function's internal catch path: a DB failure inside
+      // apply surfaces as {applied:false, reason:'error'} WITHOUT throwing.
+      applyCaptureValueClassificationMock.mockReturnValue({ applied: false, rating: 'unrated', reason: 'error' })
+
+      const result = await startValueBackfill()
+
+      expect(result).toEqual({ started: true, total: 1 })
+      const row = getBackfillStateRow('cap-1')
+      expect(row).toMatchObject({ status: 'failed', attempts: 1 }) // parked, NOT classified
+      expect(row?.last_error).toContain('reason=error')
+      expect(getCaptureRow('cap-1')?.quality_rating).toBe('unrated')
+
+      // Retryable: a later run (apply healthy again) classifies it.
+      applyCaptureValueClassificationMock.mockImplementation((...args: unknown[]) => applySeam.actual!(...args))
+      classifyCaptureValueRawMock.mockClear()
+      classifyCaptureValueRawMock.mockResolvedValue(successReply('none', 0.9))
+
+      const second = await startValueBackfill()
+
+      expect(second.total).toBe(1)
+      expect(getBackfillStateRow('cap-1')).toMatchObject({
+        status: 'classified',
+        attempts: 2,
+        result_rating: 'garbage'
+      })
+      expect(getCaptureRow('cap-1')?.quality_rating).toBe('garbage')
+    })
+
+    it('legit non-writes (below-floor) still finalize as classified — only reason:error parks', async () => {
+      seedEligible('cap-1')
+      // Below the 0.6 confidence floor: the REAL apply declines the downgrade
+      // (reason:'below-floor', no write) — deliberate, must NOT be re-billed.
+      classifyCaptureValueRawMock.mockResolvedValue(successReply('none', 0.3))
+
+      await startValueBackfill()
+
+      expect(getBackfillStateRow('cap-1')).toMatchObject({ status: 'classified', result_rating: 'unrated' })
+    })
   })
 
   // ---------------------------------------------------------------------
