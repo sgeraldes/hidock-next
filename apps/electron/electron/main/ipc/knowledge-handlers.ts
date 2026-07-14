@@ -12,7 +12,7 @@ const SetKnowledgeProjectsRequestSchema = z.object({
 })
 
 // B-CHAT-007: Explicit column list instead of SELECT *
-const KNOWLEDGE_CAPTURE_COLUMNS = `id, title, summary, category, status, quality_rating, quality_confidence, quality_assessed_at, storage_tier, retention_days, expires_at, meeting_id, correlation_confidence, correlation_method, source_recording_id, captured_at, created_at, updated_at, deleted_at`
+const KNOWLEDGE_CAPTURE_COLUMNS = `id, title, summary, category, status, quality_rating, quality_confidence, quality_assessed_at, quality_reasons, quality_source, storage_tier, retention_days, expires_at, meeting_id, correlation_confidence, correlation_method, source_recording_id, captured_at, created_at, updated_at, deleted_at`
 
 export function registerKnowledgeHandlers(): void {
   // Get all knowledge captures
@@ -91,7 +91,16 @@ export function registerKnowledgeHandlers(): void {
       if (updates.summary !== undefined) { fields.push('summary = ?'); values.push(updates.summary); }
       if (updates.category !== undefined) { fields.push('category = ?'); values.push(updates.category); }
       if (updates.status !== undefined) { fields.push('status = ?'); values.push(updates.status); }
-      if (updates.quality !== undefined) { fields.push('quality_rating = ?'); values.push(updates.quality); }
+      if (updates.quality !== undefined) {
+        fields.push('quality_rating = ?')
+        values.push(updates.quality)
+        // F16/spec-001: stamp this as a user-set rating (never overwrite an
+        // assessed_at implicitly) so the AI value classifier's never-downgrade
+        // guard leaves it alone on any later re-analysis.
+        fields.push('quality_source = ?')
+        values.push('user')
+        fields.push('quality_assessed_at = CURRENT_TIMESTAMP')
+      }
       if (updates.storageTier !== undefined) { fields.push('storage_tier = ?'); values.push(updates.storageTier); }
       
       if (fields.length === 0) return { success: true }
@@ -136,6 +145,19 @@ export function registerKnowledgeHandlers(): void {
   )
 }
 
+// F16/spec-001: quality_reasons is persisted as a JSON array of fixed tags
+// (see VALUE_REASON_TAGS in value-classification.ts). Parse defensively so one
+// corrupted row can't take down an entire knowledge:getAll response.
+function safeParseReasons(raw: string | null): string[] | null {
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
 // Mapper from DB snake_case to Interface camelCase
 function mapToKnowledgeCapture(row: any): KnowledgeCapture {
   return {
@@ -147,6 +169,8 @@ function mapToKnowledgeCapture(row: any): KnowledgeCapture {
     quality: row.quality_rating,
     qualityConfidence: row.quality_confidence,
     qualityAssessedAt: row.quality_assessed_at,
+    qualityReasons: safeParseReasons(row.quality_reasons),
+    qualitySource: row.quality_source,
     storageTier: row.storage_tier,
     retentionDays: row.retention_days,
     expiresAt: row.expires_at,

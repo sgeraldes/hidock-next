@@ -77,6 +77,53 @@ describe('Knowledge IPC Handlers', () => {
       const result = await handlers['knowledge:getAll']({})
       expect(result).toEqual([])
     })
+
+    // F16/spec-001: surface quality_reasons/quality_source to the renderer.
+    it('parses quality_reasons JSON and surfaces quality_source', async () => {
+      const mockRows = [
+        {
+          id: '1',
+          title: 'Cooking chatter',
+          quality_rating: 'garbage',
+          quality_reasons: JSON.stringify(['personal_family', 'background_ambient']),
+          quality_source: 'ai',
+          captured_at: '2025-01-01T10:00:00Z'
+        }
+      ]
+      // @ts-ignore
+      queryAll.mockReturnValue(mockRows)
+
+      const result = await handlers['knowledge:getAll']({})
+
+      expect(result[0]).toEqual(expect.objectContaining({
+        qualityReasons: ['personal_family', 'background_ambient'],
+        qualitySource: 'ai'
+      }))
+    })
+
+    it('degrades gracefully on malformed quality_reasons JSON (does not throw)', async () => {
+      const mockRows = [
+        { id: '1', title: 'Corrupt row', quality_rating: 'unrated', quality_reasons: 'not-valid-json{{', quality_source: null, captured_at: '2025-01-01T10:00:00Z' }
+      ]
+      // @ts-ignore
+      queryAll.mockReturnValue(mockRows)
+
+      const result = await handlers['knowledge:getAll']({})
+
+      expect(result).toHaveLength(1)
+      expect(result[0].qualityReasons).toBeNull()
+    })
+
+    it('maps a NULL quality_reasons to null (not an empty array)', async () => {
+      const mockRows = [
+        { id: '1', title: 'No reasons', quality_rating: 'unrated', quality_reasons: null, quality_source: null, captured_at: '2025-01-01T10:00:00Z' }
+      ]
+      // @ts-ignore
+      queryAll.mockReturnValue(mockRows)
+
+      const result = await handlers['knowledge:getAll']({})
+      expect(result[0].qualityReasons).toBeNull()
+    })
   })
 
   describe('knowledge:getById', () => {
@@ -100,22 +147,57 @@ describe('Knowledge IPC Handlers', () => {
   })
 
   describe('knowledge:update', () => {
-    it('should construct correct update query', async () => {
-      const result = await handlers['knowledge:update']({}, '1', { title: 'New Title', quality: 'archived' })
+    it('should construct correct update query for non-quality fields', async () => {
+      const result = await handlers['knowledge:update']({}, '1', { title: 'New Title' })
 
       expect(run).toHaveBeenCalledWith(
-        expect.stringContaining('UPDATE knowledge_captures SET title = ?, quality_rating = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'),
-        ['New Title', 'archived', '1']
+        expect.stringContaining('UPDATE knowledge_captures SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'),
+        ['New Title', '1']
       )
       expect(result).toEqual({ success: true })
     })
 
     it('should return error on failure', async () => {
+      // mockImplementationOnce (not mockImplementation): clearAllMocks() in
+      // beforeEach only resets call history, not a persistent implementation,
+      // so a lasting throw here would leak into every later test in this file.
       // @ts-ignore
-      run.mockImplementation(() => { throw new Error('Update failed') })
+      run.mockImplementationOnce(() => { throw new Error('Update failed') })
       const result = await handlers['knowledge:update']({}, '1', { title: 'X' })
       expect(result.success).toBe(false)
       expect(result.error).toBe('Update failed')
+    })
+
+    // F16/spec-001: a manual quality edit must stamp quality_source='user' +
+    // quality_assessed_at, so the AI value classifier's never-downgrade guard
+    // never overwrites it on a later re-analysis.
+    it('stamps quality_source=user and quality_assessed_at when quality is updated', async () => {
+      const result = await handlers['knowledge:update']({}, '1', { title: 'New Title', quality: 'archived' })
+
+      expect(run).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'UPDATE knowledge_captures SET title = ?, quality_rating = ?, quality_source = ?, quality_assessed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+        ),
+        ['New Title', 'archived', 'user', '1']
+      )
+      expect(result).toEqual({ success: true })
+    })
+
+    it('stamps quality_source=user even when quality is the ONLY field updated', async () => {
+      await handlers['knowledge:update']({}, '2', { quality: 'garbage' })
+
+      expect(run).toHaveBeenCalledWith(
+        expect.stringContaining('quality_rating = ?, quality_source = ?, quality_assessed_at = CURRENT_TIMESTAMP'),
+        ['garbage', 'user', '2']
+      )
+    })
+
+    it('does NOT touch quality_source when quality is not part of the update', async () => {
+      await handlers['knowledge:update']({}, '3', { summary: 'New summary' })
+
+      const [sql] = vi.mocked(run).mock.calls[0]
+      expect(sql).not.toContain('quality_source')
+      expect(sql).not.toContain('quality_rating')
     })
   })
 })
