@@ -970,10 +970,6 @@ export function Library() {
       const res = await window.electronAPI.recordings.deleteCascade(recording.id, true)
       if (!res?.success) throw new Error(res?.error || 'Permanent delete failed')
       await refresh(false)
-      // spec-005/F17 T5 §D1 step 7 — a purged row must leave the visible Trash
-      // list too (executeDeletePermanent only reloads the default pipeline via
-      // refresh(false); the Trash array is T5-owned).
-      await loadTrash()
       import('@/components/ui/toaster').then(({ toast }) => {
         toast.success('Deleted permanently', `"${recording.filename}" and all derived data were removed.`)
       })
@@ -985,7 +981,7 @@ export function Library() {
     } finally {
       setDeleting(null)
     }
-  }, [refresh, loadTrash])
+  }, [refresh])
 
   // spec-005/F17 T5 §D6 — fetches the impact and opens the dedicated
   // DeletePermanentDialog (replaces the shared confirmDialog for this flow;
@@ -1021,7 +1017,12 @@ export function Library() {
     setDeletePermanentDialog((prev) => ({ ...prev, open: false }))
     if (!recording) return
     await executeDeletePermanent(recording, opts)
-  }, [deletePermanentDialog.recording, executeDeletePermanent])
+    // spec-005/F17 T5 §D1 step 7 — a purged row must leave the visible Trash
+    // list too. Owned HERE (the T5 onConfirm wrapper), not inside
+    // executeDeletePermanent — that function is T6's extension point
+    // (alsoDeleteFromDevice), so Trash-list bookkeeping stays out of it.
+    await loadTrash()
+  }, [deletePermanentDialog.recording, executeDeletePermanent, loadTrash])
 
   // spec-005/F17 T5 §D1 step 7 — undo a soft-delete from the Trash surface.
   // Refreshes BOTH the default pipeline (so the row reappears there) and the
