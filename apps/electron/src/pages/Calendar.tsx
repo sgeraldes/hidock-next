@@ -987,7 +987,7 @@ export function Calendar() {
                             onClick={() => handleDeleteFromDevice(recording)}
                             disabled={!deviceConnected || deleting === recording.id}
                             title="Delete from device">
-                            <Trash2 className="h-3 w-3" />
+                            {deleting === recording.id ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
                           </Button>
                         )}
                         {/* Move to Trash — soft delete (spec-005/F17 T5 §D3b). AR3-4: the
@@ -998,7 +998,7 @@ export function Calendar() {
                             onClick={() => handleDeleteLocal(recording)}
                             disabled={deleting === recording.id}
                             title="Move to Trash">
-                            <Trash2 className="h-3 w-3" />
+                            {deleting === recording.id ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
                           </Button>
                         )}
                         {/* Move to Trash for synced rows — device copy is untouched */}
@@ -1007,7 +1007,7 @@ export function Calendar() {
                             onClick={() => handleDeleteLocal(recording)}
                             disabled={deleting === recording.id}
                             title="Move to Trash">
-                            <Trash2 className="h-3 w-3" />
+                            {deleting === recording.id ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
                           </Button>
                         )}
                       </div>
@@ -1123,7 +1123,7 @@ export function Calendar() {
                             onClick={(e) => { e.stopPropagation(); handleDeleteLocal(recording) }}
                             disabled={deleting === recording.id}
                             title="Move to Trash">
-                            <Trash2 className="h-3 w-3" />
+                            {deleting === recording.id ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
                           </Button>
                         )}
                         {/* Move to Trash for synced rows — device copy is untouched */}
