@@ -77,6 +77,21 @@ export interface CalendarSyncedEvent extends DomainEvent {
   }
 }
 
+/** A capture's content-based VALUE classification (F16/spec-001) resolved to
+ *  'low-value' or 'garbage' — the suggestion-toast trigger. Emitted ONLY for
+ *  low/none (never for high/normal, which don't change the rating). Reason
+ *  tags are the fixed allowlist vocabulary (see VALUE_REASON_TAGS in
+ *  value-classification.ts) — no PII. */
+export interface CaptureValueClassifiedEvent extends DomainEvent {
+  type: 'capture:value-classified'
+  payload: {
+    recordingId: string
+    captureId: string
+    rating: 'low-value' | 'garbage'
+    reasons: string[]
+  }
+}
+
 export type KnownDomainEvent =
   | QualityAssessedEvent
   | StorageTierAssignedEvent
@@ -85,6 +100,7 @@ export type KnownDomainEvent =
   | TranscriptReadyEvent
   | ArtifactReadyEvent
   | CalendarSyncedEvent
+  | CaptureValueClassifiedEvent
 
 /**
  * Sanitize event payload before broadcasting to renderer process

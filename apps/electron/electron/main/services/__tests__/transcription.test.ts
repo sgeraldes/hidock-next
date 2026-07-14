@@ -526,6 +526,50 @@ describe('extractAnalysisJson — Gemini JSON repair', () => {
     expect(extractAnalysisJson('')).toBeNull()
     expect(extractAnalysisJson('{ "summary": ')).toBeNull()
   })
+
+  // F16/spec-001: the value/value_reasons/value_confidence fields ride the
+  // SAME analysis JSON payload — extractAnalysisJson needs no parser change
+  // for them to flow through (TranscriptAnalysis just gained three optional
+  // fields), but this proves it end-to-end rather than assuming it.
+  it('passes value/value_reasons/value_confidence through unchanged when present', async () => {
+    const { extractAnalysisJson } = await import('../transcription')
+    const payload = JSON.stringify({
+      summary: 'Charla informal en la cocina.',
+      language: 'es',
+      value: 'none',
+      value_reasons: ['personal_family', 'background_ambient'],
+      value_confidence: 0.87
+    })
+    const parsed = extractAnalysisJson(payload)
+    expect(parsed).not.toBeNull()
+    expect(parsed?.value).toBe('none')
+    expect(parsed?.value_reasons).toEqual(['personal_family', 'background_ambient'])
+    expect(parsed?.value_confidence).toBe(0.87)
+  })
+
+  it('leaves value fields absent (not defaulted) when the model omits them', async () => {
+    const { extractAnalysisJson } = await import('../transcription')
+    const payload = JSON.stringify({ summary: 'Reunion de trabajo.', language: 'es' })
+    const parsed = extractAnalysisJson(payload)
+    expect(parsed).not.toBeNull()
+    expect(parsed?.value).toBeUndefined()
+    expect(parsed?.value_reasons).toBeUndefined()
+    expect(parsed?.value_confidence).toBeUndefined()
+  })
+
+  it('survives the same unescaped-inner-quote repair pass alongside value fields', async () => {
+    const { extractAnalysisJson } = await import('../transcription')
+    const payload = `{
+  "summary": "El cliente dijo "no" y el equipo siguio adelante",
+  "value": "low",
+  "value_reasons": ["off_topic_chatter"],
+  "value_confidence": 0.4
+}`
+    const parsed = extractAnalysisJson(payload)
+    expect(parsed).not.toBeNull()
+    expect(parsed?.value).toBe('low')
+    expect(parsed?.value_reasons).toEqual(['off_topic_chatter'])
+  })
 })
 
 describe('repairJsonString — bracket balancing (ISSUE-9)', () => {

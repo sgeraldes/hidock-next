@@ -118,6 +118,7 @@ import {
 import { BrowserWindow } from 'electron'
 import { getVectorStore } from './vector-store'
 import { ensureKnowledgeCaptureForRecording } from './knowledge-capture-backfill'
+import { applyCaptureValueClassification, parseValueClassification } from './value-classification'
 
 let mainWindow: BrowserWindow | null = null
 let isProcessing = false
@@ -752,6 +753,13 @@ interface TranscriptAnalysis {
   participants?: Array<{ name: string; role?: string }>
   /** Project this meeting belongs to — matched against existing projects or proposed new. */
   project?: { name: string; is_new?: boolean }
+  /** Content-based VALUE classification (F16/spec-001) — how much lasting,
+   *  useful knowledge this recording holds, judged from the transcript
+   *  content. Absent when transcription.valueClassificationEnabled is false,
+   *  or when no Gemini key is configured (the local-ASR stub never sets it). */
+  value?: 'high' | 'normal' | 'low' | 'none'
+  value_reasons?: string[]
+  value_confidence?: number
 }
 
 async function transcribeWithGemini(
@@ -1114,6 +1122,33 @@ ${candidateMeetings.map((m, i) => `   ${i + 1}. "${m.subject}" (ID: ${m.id})`).j
     `SELECT name FROM projects WHERE status = 'active' ORDER BY name LIMIT 50`
   ).map((p) => p.name)
 
+  // F16/spec-001 kill-switch (architecture review amendment A1): when disabled,
+  // both of these stay '' so the prompt below is byte-identical to pre-F16
+  // behavior — no value write/emit occurs downstream either (see
+  // transcribeRecording / reanalyzeFailedTranscripts). Existing captures can
+  // still be classified later via the standalone backfill.
+  const valueClassificationEnabled = config.transcription.valueClassificationEnabled !== false
+  const valuePromptSection = valueClassificationEnabled
+    ? `
+9. Value: how much LASTING, USEFUL KNOWLEDGE this recording holds — judged from
+   the CONTENT, not its length or language. Exactly one of:
+   - "high": substantive work/meeting content (decisions, plans, information worth keeping)
+   - "normal": ordinary conversation with some useful content
+   - "low": little useful content — mostly small talk, ambient/background chatter, or off-topic
+   - "none": no useful content — a personal/family conversation, cooking/household chatter,
+             only a greeting with nobody present ("hello? is anyone there?"), background noise,
+             or an accidental recording
+   Also "value_reasons": zero or more of EXACTLY these tags, no others:
+   ["personal_family","greeting_only_no_show","background_ambient","no_substance","off_topic_chatter"]
+   And "value_confidence": 0.0 to 1.0. A long recording can still be "none".`
+    : ''
+  const valueJsonTemplate = valueClassificationEnabled
+    ? `,
+  "value": "high|normal|low|none",
+  "value_reasons": ["..."],
+  "value_confidence": 0.0`
+    : ''
+
   const analysisPrompt = `Analyze this meeting transcript and provide:
 1. A brief summary (2-3 sentences)
 2. A list of action items mentioned (as a JSON array of strings)
@@ -1130,7 +1165,7 @@ ${candidateMeetings.map((m, i) => `   ${i + 1}. "${m.subject}" (ID: ${m.id})`).j
 8. Project: which project/initiative this meeting belongs to.
    ${existingProjects.length > 0 ? `Existing projects (match one of these EXACTLY if it fits): ${existingProjects.join(' | ')}` : 'No projects exist yet.'}
    If none fits, propose a short new project name (2-5 words, e.g. "DFX5 Gateway" or client name) and set is_new true.
-   If the call is personal or clearly not project work, omit the project field.
+   If the call is personal or clearly not project work, omit the project field.${valuePromptSection}
 
 IMPORTANT: Respond in the SAME LANGUAGE as the transcript. If the transcript is in Spanish, write the summary, action items, topics, key points, title, and questions in Spanish. If English, respond in English.
 ${meetingSelectionSection}
@@ -1151,7 +1186,7 @@ Respond in JSON format:
   "project": {"name": "...", "is_new": false}${candidateMeetings.length > 0 ? `,
   "selected_meeting_id": "...",
   "meeting_confidence": 0.0,
-  "selection_reason": "..."` : ''}
+  "selection_reason": "..."` : ''}${valueJsonTemplate}
 }`
 
   // Two-attempt strategy (both disable thinking: the thinking model intermittently
@@ -1486,6 +1521,22 @@ export async function reanalyzeFailedTranscripts(limit = 3): Promise<number> {
         updateKnowledgeCaptureTitle(row.recording_id, analysis.title_suggestion)
       }
 
+      // F16/spec-001: re-analysis can refresh an AI-set value classification
+      // (including correcting a prior mislabel) — gated by the same
+      // kill-switch as the live path. Non-fatal; no event emit here (only the
+      // fresh-transcription path in transcribeRecording announces a new
+      // low-value/garbage classification).
+      if (getConfig().transcription.valueClassificationEnabled !== false) {
+        try {
+          const captureId = ensureKnowledgeCaptureForRecording(row.recording_id)
+          if (captureId) {
+            applyCaptureValueClassification(captureId, parseValueClassification(analysis))
+          }
+        } catch (e) {
+          console.warn('[ValueClassification] reanalysis apply failed (non-fatal):', e)
+        }
+      }
+
       // Re-export the wiki page from the now-healed row (new file name may
       // differ from any earlier filename-slug page; acceptable). Non-fatal.
       try {
@@ -1614,10 +1665,33 @@ Meeting ${i + 1}: "${m.subject}"
   // This is the canonical capture creator — without it the captures table stays
   // empty on a device-first library. Idempotent + non-fatal; it also sets
   // recordings.migrated_to_capture_id so updateKnowledgeCaptureTitle() below works.
+  let captureId: string | null = null
   try {
-    ensureKnowledgeCaptureForRecording(recordingId)
+    captureId = ensureKnowledgeCaptureForRecording(recordingId)
   } catch (e) {
     console.warn('[KnowledgeCapture] ensure failed (non-fatal):', e)
+  }
+  // F16/spec-001: apply the content-based value classification the SAME
+  // analysis call above already returned (no extra API round-trip). Gated by
+  // the same kill-switch as the prompt append — off means no write, no emit.
+  // Only when the mapped rating is low-value/garbage (value was low/none) do
+  // we emit capture:value-classified for T3's suggestion toast; high/normal
+  // results (which leave the capture unrated) emit nothing.
+  if (captureId && config.transcription.valueClassificationEnabled !== false) {
+    try {
+      const cls = parseValueClassification(analysis)
+      const applied = applyCaptureValueClassification(captureId, cls)
+      if (applied.applied && (applied.rating === 'low-value' || applied.rating === 'garbage')) {
+        const { getEventBus } = await import('./event-bus')
+        getEventBus().emitDomainEvent({
+          type: 'capture:value-classified',
+          timestamp: new Date().toISOString(),
+          payload: { recordingId, captureId, rating: applied.rating, reasons: cls.reasons }
+        })
+      }
+    } catch (e) {
+      console.warn('[ValueClassification] apply/emit failed (non-fatal):', e)
+    }
   }
   // AI-13: Use standard enum value 'complete' (not 'transcribed')
   updateRecordingTranscriptionStatus(recordingId, 'complete')
