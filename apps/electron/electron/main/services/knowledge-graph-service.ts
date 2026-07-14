@@ -46,8 +46,7 @@ import type {
   Provenance,
 } from '@hidock/knowledge-graph'
 import { complete } from '@hidock/ai-providers'
-import type { ProviderConfig } from '@hidock/ai-providers'
-import { getConfig } from './config'
+import { getProviderConfigFromSettings } from './ai-provider-config'
 import {
   run,
   queryAll,
@@ -112,26 +111,6 @@ function _ensureIngestTrackingTable(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Provider config — reads from app config
-// ---------------------------------------------------------------------------
-
-function providerConfigFromSettings(): ProviderConfig | null {
-  const cfg = getConfig()
-
-  // Use gemini if api key is set
-  if (cfg.chat.provider === 'gemini' && cfg.transcription.geminiApiKey) {
-    return {
-      provider: 'google',
-      model: cfg.chat.geminiModel || 'gemini-3.5-flash',
-      apiKey: cfg.transcription.geminiApiKey,
-    }
-  }
-
-  // No valid provider configured
-  return null
-}
-
-// ---------------------------------------------------------------------------
 // Person identity resolution (R4c — key person nodes by contact id)
 // ---------------------------------------------------------------------------
 
@@ -179,7 +158,7 @@ export interface IngestResult {
 }
 
 export async function ingestFromDbTranscripts(): Promise<IngestResult> {
-  const providerConfig = providerConfigFromSettings()
+  const providerConfig = getProviderConfigFromSettings()
   if (!providerConfig) {
     throw new Error('No AI provider configured. Please set a provider API key in Settings.')
   }
@@ -278,7 +257,7 @@ export async function ingestFromFolder(folderPath: string): Promise<IngestResult
     throw new Error(`Path is not a directory: ${resolved}`)
   }
 
-  const providerConfig = providerConfigFromSettings()
+  const providerConfig = getProviderConfigFromSettings()
   if (!providerConfig) {
     throw new Error('No AI provider configured. Please set a provider API key in Settings.')
   }
