@@ -22,3 +22,18 @@ ONE flow can remove a capture from: device, local disk, all derived data, RAG, a
 ## Constraints
 - **USB SAFETY (absolute)**: implementation + tests NEVER touch real hardware — mocks only; do not add retries/probing around DELETE_FILE; reuse the existing single-command service path unchanged.
 - Fixture/temp DBs only; non-interactive commands; graph cleanup failure is non-fatal to the purge (guarded, reported).
+
+## PHASE-2 CONTRACT SUPERSEDE (2026-07-14 — BINDING, overrides §2/§3 above per AR2-2)
+F18 landed with a STRONGER contract than this todo describes. The T6 spec MUST use:
+- Hard purge calls `removeRecordingProvenanceCore(...)` (transaction-neutral, exported from
+  knowledge-graph-service.ts with the embedding contract in its jsdoc) INSIDE
+  deleteRecordingCascade's runInTransaction, passing meetingId + transcriptIds captured BEFORE the
+  cascade deletes those rows. Graph cleanup is atomic with the purge — ALL-OR-NOTHING; a graph
+  failure aborts (rolls back) the entire purge. The old "non-fatal post-step + keep marker-delete in
+  cascade for safety" wording above is OBSOLETE (the core deletes markers itself, inside the txn).
+- Impact dialog uses `removeRecordingFromGraph(id, { dryRun: true })`; ALL its dryRun counts are
+  ESTIMATES (AR2-5) — dialog copy says "~N graph links"; the completion toast reports the committed
+  actuals returned by the real purge.
+- N2 note (Opus T4 review): the core triggers idempotent DDL via getKnowledgeGraphStore() when
+  embedded in the cascade txn — benign, but T6's tests should cover the embedded call path
+  explicitly (crash-rollback inside the cascade).
