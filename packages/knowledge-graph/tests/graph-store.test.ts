@@ -4,24 +4,34 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { existsSync, rmSync } from 'fs'
-import initSqlJs from 'sql.js'
+import { createRequire } from 'node:module'
 import { DatabaseEngine } from '@hidock/database'
 import { KnowledgeGraphStore } from '../src/graph-store.js'
 
+// The engine requires the app-owned better-sqlite3 native module. Resolve the
+// database package's OWN copy (the one CI's "npm rebuild better-sqlite3"
+// Node-ABI restore step targets) so resolution never depends on hoisting.
+const requireFromDatabase = createRequire(new URL('../../database/package.json', import.meta.url))
+const BetterSqlite3 = requireFromDatabase('better-sqlite3')
+
+/** Engines opened by makeStore — closed in afterEach so temp DBs can be deleted. */
+const openEngines: DatabaseEngine[] = []
+
 function tempPath(name: string) {
-  return join(tmpdir(), `hidock-kg-store-${name}.sqlite`)
+  return join(tmpdir(), `hidock-kg-store-${name}-${Date.now()}-${Math.random().toString(36).slice(2)}.sqlite`)
 }
 
 async function makeStore(name: string) {
   const dbPath = tempPath(name)
   const engine = new DatabaseEngine({
-    initSqlJs,
+    betterSqlite3: BetterSqlite3,
     dbPathProvider: () => dbPath,
     schemaVersion: 1,
     schema: 'CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)',
     migrations: {},
   })
   await engine.initialize()
+  openEngines.push(engine)
   const store = new KnowledgeGraphStore(engine)
   store.initSchema()
   return { store, engine, dbPath }
@@ -31,8 +41,16 @@ describe('KnowledgeGraphStore', () => {
   const paths: string[] = []
 
   afterEach(() => {
+    // better-sqlite3 holds the DB file open — close engines first, or rmSync
+    // EPERMs on Windows and stale state leaks into the next run.
+    for (const e of openEngines) {
+      try { e.closeDatabase() } catch { /* already closed */ }
+    }
+    openEngines.length = 0
     for (const p of paths) {
-      if (existsSync(p)) rmSync(p, { force: true })
+      for (const f of [p, `${p}-wal`, `${p}-shm`]) {
+        if (existsSync(f)) rmSync(f, { force: true })
+      }
     }
     paths.length = 0
   })
@@ -158,5 +176,64 @@ describe('KnowledgeGraphStore', () => {
     const people = store.findNodes({ type: 'person' })
     expect(people).toHaveLength(2)
     expect(people.every((n) => n.type === 'person')).toBe(true)
+  })
+
+  // --- Edge id collisions --------------------------------------------------
+  // makeEdgeId() is a lossy slug of (source, target, type): uppercase types
+  // collapse to '_' runs and the id truncates at 120 chars, so two DISTINCT
+  // triples can slug identically. Without clash handling this threw
+  // "UNIQUE constraint failed: graph_edges.id" and permanently aborted
+  // transcript ingest (14 transcripts stuck in production, each retried with
+  // a fresh LLM extraction every cycle).
+
+  it('same (source,target) pair with different UPPERCASE types → two distinct edges', async () => {
+    const { store, engine, dbPath } = await makeStore('edge-type-collide')
+    paths.push(dbPath)
+
+    // 'ABOUT' and 'OWNS' both slugify to '_' — identical makeEdgeId output.
+    const meetingId = store.upsertNode({ type: 'meeting', label: 'Sync' })
+    const topicId = store.upsertNode({ type: 'topic', label: 'Roadmap' })
+    const e1 = store.upsertEdge({ sourceId: meetingId, targetId: topicId, type: 'ABOUT' })
+    const e2 = store.upsertEdge({ sourceId: meetingId, targetId: topicId, type: 'OWNS' })
+
+    expect(e1).not.toBe(e2)
+    expect(engine.queryAll('SELECT id FROM graph_edges')).toHaveLength(2)
+  })
+
+  it('triples differing only beyond the 120-char id truncation → two distinct edges', async () => {
+    const { store, engine, dbPath } = await makeStore('edge-truncate-collide')
+    paths.push(dbPath)
+
+    // source(109) + '|||' fills the slug to char 112; the targets' distinguishing
+    // suffix falls past the 120-char cut, so both triples slug identically.
+    const longSource = `decision:${'x'.repeat(100)}`
+    const e1 = store.upsertEdge({ sourceId: longSource, targetId: 'meeting:aaa1', type: 'MADE_IN' })
+    const e2 = store.upsertEdge({ sourceId: longSource, targetId: 'meeting:aaa2', type: 'MADE_IN' })
+
+    expect(e1).not.toBe(e2)
+    // Both rows kept their true triple — nothing was folded into the other edge.
+    const rows = engine.queryAll<{ target_id: string }>(
+      'SELECT target_id FROM graph_edges ORDER BY target_id'
+    )
+    expect(rows.map((r) => r.target_id)).toEqual(['meeting:aaa1', 'meeting:aaa2'])
+  })
+
+  it('two long same-prefix decisions in one meeting both keep their MADE_IN edge', async () => {
+    const { store, engine, dbPath } = await makeStore('edge-prod-repro')
+    paths.push(dbPath)
+
+    // Distinct decision texts sharing a 64+ char prefix: upsertNode already
+    // disambiguates the node ids; the edges built from them must both survive.
+    const prefix = 'a compromise will be made to update and validate the current process '
+    const d1 = store.upsertNode({ type: 'decision', label: `${prefix}for humano` })
+    const d2 = store.upsertNode({ type: 'decision', label: `${prefix}for mibanco` })
+    expect(d1).not.toBe(d2)
+
+    const meetingId = store.upsertNode({ type: 'meeting', label: '38a08773-39d2-43ee-a94e-b45946eb9999' })
+    const e1 = store.upsertEdge({ sourceId: d1, targetId: meetingId, type: 'MADE_IN' })
+    const e2 = store.upsertEdge({ sourceId: d2, targetId: meetingId, type: 'MADE_IN' })
+
+    expect(e1).not.toBe(e2)
+    expect(engine.queryAll('SELECT id FROM graph_edges')).toHaveLength(2)
   })
 })

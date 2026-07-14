@@ -50,6 +50,7 @@ import type { ProviderConfig } from '@hidock/ai-providers'
 import { getConfig } from './config'
 import {
   run,
+  runInTransaction,
   queryAll,
   queryOne,
   getContactById,
@@ -222,16 +223,22 @@ export async function ingestFromDbTranscripts(): Promise<IngestResult> {
         date: row.date_recorded ?? undefined,
       }
       const extraction = await extractGraphFromTranscript(row.full_text, meta, llm)
-      ingestExtraction(store, extraction, meta, {
-        now: new Date().toISOString(),
-        resolvePerson: makePersonResolver(row.meeting_id ?? undefined),
-      })
+      // Graph writes + the ingested marker commit atomically. Without this, a
+      // mid-ingest failure half-committed nodes/edges and the retry on the next
+      // cycle re-incremented every already-written edge weight — the LLM
+      // extraction above stays OUTSIDE the transaction (it's async and slow).
+      runInTransaction(() => {
+        ingestExtraction(store, extraction, meta, {
+          now: new Date().toISOString(),
+          resolvePerson: makePersonResolver(row.meeting_id ?? undefined),
+        })
 
-      // Mark as ingested
-      run(
-        'INSERT OR IGNORE INTO graph_ingested_transcripts (transcript_id, ingested_at) VALUES (?, ?)',
-        [row.id, new Date().toISOString()]
-      )
+        // Mark as ingested
+        run(
+          'INSERT OR IGNORE INTO graph_ingested_transcripts (transcript_id, ingested_at) VALUES (?, ?)',
+          [row.id, new Date().toISOString()]
+        )
+      })
       result.ingested++
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)

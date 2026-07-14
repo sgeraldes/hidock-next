@@ -167,7 +167,6 @@ export class KnowledgeGraphStore {
    * Returns the edge id.
    */
   upsertEdge({ sourceId, targetId, type, props, now = '' }: UpsertEdgeInput): string {
-    const edgeId = makeEdgeId(sourceId, targetId, type)
     const propsJson = props != null ? JSON.stringify(props) : null
 
     const existing = this.db.queryOne<{ id: string; weight: number }>(
@@ -178,6 +177,21 @@ export class KnowledgeGraphStore {
     if (existing) {
       this.db.run('UPDATE graph_edges SET weight = ? WHERE id = ?', [existing.weight + 1, existing.id])
       return existing.id
+    }
+
+    // New edge. The id is a lossy slug of (source, target, type): the 120-char
+    // truncation and uppercase types collapsing to '_' mean two DISTINCT triples
+    // can produce the same id. Same failure class as upsertNode above — the
+    // triple lookup misses, then the INSERT collides on the primary key
+    // ("UNIQUE constraint failed: graph_edges.id", which aborted transcript
+    // ingest forever). Detect a taken id and derive a stable, hashed variant.
+    let edgeId = makeEdgeId(sourceId, targetId, type)
+    const clash = this.db.queryOne<{ source_id: string; target_id: string; type: string }>(
+      'SELECT source_id, target_id, type FROM graph_edges WHERE id = ?',
+      [edgeId]
+    )
+    if (clash && (clash.source_id !== sourceId || clash.target_id !== targetId || clash.type !== type)) {
+      edgeId = `${edgeId}__${shortHash(`${sourceId}|||${targetId}|||${type}`)}`
     }
 
     this.db.run(
