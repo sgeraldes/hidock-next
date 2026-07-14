@@ -118,7 +118,7 @@ import {
 import { BrowserWindow } from 'electron'
 import { getVectorStore } from './vector-store'
 import { ensureKnowledgeCaptureForRecording } from './knowledge-capture-backfill'
-import { applyCaptureValueClassification, parseValueClassification } from './value-classification'
+import { applyCaptureValueClassification, parseValueClassification, neutralizeDelimiters } from './value-classification'
 
 let mainWindow: BrowserWindow | null = null
 let isProcessing = false
@@ -1155,8 +1155,14 @@ ${candidateMeetings.map((m, i) => `   ${i + 1}. "${m.subject}" (ID: ${m.id})`).j
   // Codex adversarial review AR-2b: only wrap the transcript in explicit
   // untrusted-data delimiters when value classification is actually judging
   // it — kill-switch off means byte-identical to pre-F16 (verified by an
-  // exact-string test), same as the two additions above.
-  const transcriptForPrompt = valueClassificationEnabled ? `<transcript-data>\n${fullText}\n</transcript-data>` : fullText
+  // exact-string test), same as the two additions above. CX-T1-3: the
+  // content is delimiter-neutralized first (shared sanitizer) so a
+  // transcript containing a literal "</transcript-data>" can't close the
+  // block early and land the remainder outside the untrusted boundary; when
+  // disabled, fullText stays UNSANITIZED raw — byte-identical to pre-F16.
+  const transcriptForPrompt = valueClassificationEnabled
+    ? `<transcript-data>\n${neutralizeDelimiters(fullText)}\n</transcript-data>`
+    : fullText
 
   const analysisPrompt = `Analyze this meeting transcript and provide:
 1. A brief summary (2-3 sentences)
