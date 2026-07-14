@@ -394,6 +394,11 @@ describe('Library Accessibility', () => {
   })
 
   it('should have no color contrast violations', async () => {
+    // NOTE: jsdom has no paint/layout, so axe can only evaluate the computable
+    // subset of color-contrast here (inline/stylesheet colors; text metrics and
+    // pseudo-element backgrounds are stubbed — see src/test/setup.ts). Treat a
+    // pass as "no violations axe could compute", not full WCAG 1.4.3 coverage;
+    // authoritative contrast verification needs a real browser (E2E).
     const { container } = render(
       <MemoryRouter>
         <Library />
