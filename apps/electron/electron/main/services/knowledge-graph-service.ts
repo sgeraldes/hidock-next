@@ -170,6 +170,11 @@ export async function ingestFromDbTranscripts(): Promise<IngestResult> {
   const llm: LlmExtractor = (prompt: string) => complete(prompt, providerConfig)
 
   // Get all transcripts with recording + meeting meta
+  // Cross-reference (/simplify S-5, database.ts's getExcludedRecordingIds):
+  // personal/deleted exclusion is composed differently here than in the RAG
+  // path — filtered directly in this base query, then layered with
+  // value-exclusion below (pre-filter Set + fresh point-read), rather than
+  // unioned into one Set. Same net effect; deliberate, not drift.
   const rows = queryAll<TranscriptRow>(`
     SELECT
       t.id,

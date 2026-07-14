@@ -55,8 +55,6 @@ export const VALUE_REASON_TAGS = [
   'off_topic_chatter'
 ] as const
 
-export type ValueReason = (typeof VALUE_REASON_TAGS)[number]
-
 export interface ValueClassification {
   value: CaptureValue
   reasons: string[]

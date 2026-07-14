@@ -3122,6 +3122,23 @@ const VALUE_EXCLUDED_RATINGS = ['garbage', 'low-value'] as const
 const VALUE_KEEP_RATINGS = ['valuable', 'archived'] as const
 
 /**
+ * Shared value-exclusion predicate (/simplify S-3) — factored out of
+ * {@link getValueExcludedRecordingIds} (Set form) and
+ * {@link isValueExcludedRecording} (point-read form) so the placeholder-build
+ * and the `NOT EXISTS` keep-clause can never drift apart between the two.
+ * Assumes the enclosing query aliases the outer knowledge_captures row `kc`.
+ * Both callers bind params in the same order this fragment references them:
+ * `[...VALUE_EXCLUDED_RATINGS, ...VALUE_KEEP_RATINGS]` (optionally prefixed
+ * with the point-read's own `recordingId`).
+ */
+const VALUE_EXCLUSION_PREDICATE = `kc.quality_rating IN (${VALUE_EXCLUDED_RATINGS.map(() => '?').join(',')})
+        AND NOT EXISTS (
+          SELECT 1 FROM knowledge_captures k2
+           WHERE k2.source_recording_id = kc.source_recording_id
+             AND k2.deleted_at IS NULL
+             AND k2.quality_rating IN (${VALUE_KEEP_RATINGS.map(() => '?').join(',')}))`
+
+/**
  * Recording ids value-excluded from downstream intelligence surfaces (RAG
  * retrieval via getExcludedRecordingIds, graph ingest, actionable
  * extraction). This is a cheap once-per-call PRE-FILTER ONLY (Codex
@@ -3134,19 +3151,12 @@ const VALUE_KEEP_RATINGS = ['valuable', 'archived'] as const
  * (e.g. the RAG union below).
  */
 export function getValueExcludedRecordingIds(): Set<string> {
-  const excludedPlaceholders = VALUE_EXCLUDED_RATINGS.map(() => '?').join(',')
-  const keepPlaceholders = VALUE_KEEP_RATINGS.map(() => '?').join(',')
   const rows = queryAll<{ id: string }>(
     `SELECT DISTINCT kc.source_recording_id AS id
        FROM knowledge_captures kc
       WHERE kc.deleted_at IS NULL
         AND kc.source_recording_id IS NOT NULL
-        AND kc.quality_rating IN (${excludedPlaceholders})
-        AND NOT EXISTS (
-          SELECT 1 FROM knowledge_captures k2
-           WHERE k2.source_recording_id = kc.source_recording_id
-             AND k2.deleted_at IS NULL
-             AND k2.quality_rating IN (${keepPlaceholders}))`,
+        AND ${VALUE_EXCLUSION_PREDICATE}`,
     [...VALUE_EXCLUDED_RATINGS, ...VALUE_KEEP_RATINGS]
   )
   return new Set(rows.map((r) => r.id))
@@ -3162,19 +3172,12 @@ export function getValueExcludedRecordingIds(): Set<string> {
  * rating written at any point up to the moment of persistence is honored.
  */
 export function isValueExcludedRecording(recordingId: string): boolean {
-  const excludedPlaceholders = VALUE_EXCLUDED_RATINGS.map(() => '?').join(',')
-  const keepPlaceholders = VALUE_KEEP_RATINGS.map(() => '?').join(',')
   const row = queryOne<{ id: string }>(
     `SELECT kc.source_recording_id AS id
        FROM knowledge_captures kc
       WHERE kc.deleted_at IS NULL
         AND kc.source_recording_id = ?
-        AND kc.quality_rating IN (${excludedPlaceholders})
-        AND NOT EXISTS (
-          SELECT 1 FROM knowledge_captures k2
-           WHERE k2.source_recording_id = kc.source_recording_id
-             AND k2.deleted_at IS NULL
-             AND k2.quality_rating IN (${keepPlaceholders}))
+        AND ${VALUE_EXCLUSION_PREDICATE}
       LIMIT 1`,
     [recordingId, ...VALUE_EXCLUDED_RATINGS, ...VALUE_KEEP_RATINGS]
   )
@@ -3192,6 +3195,14 @@ export function isValueExcludedRecording(recordingId: string): boolean {
  * capture garbage/low-value) instantly pulls its chunks from the assistant's
  * answers WITHOUT re-indexing (reversible), and soft-deleted recordings never
  * surface.
+ *
+ * Cross-reference (/simplify S-5): the graph ingest (knowledge-graph-service.ts
+ * ingestFromDbTranscripts) composes the SAME two exclusions differently — its
+ * base query filters `COALESCE(r.personal,0)=0 AND r.deleted_at IS NULL`
+ * directly, then layers value-exclusion on top via the pre-filter Set /
+ * point-read pair above, rather than unioning everything into one Set like
+ * this function does for RAG. Same net effect (both exclusions always apply
+ * either way); this is a deliberate difference in composition, not drift.
  */
 export function getExcludedRecordingIds(): Set<string> {
   const rows = queryAll<{ id: string }>(

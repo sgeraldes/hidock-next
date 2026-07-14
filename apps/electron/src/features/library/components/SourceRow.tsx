@@ -27,6 +27,10 @@ import { formatValueReasons } from '@/features/library/utils/valueReasons'
  * (never valuable/archived/unrated). Lives in the row's `shrink-0` right
  * cluster so the H17 no-scroll invariant holds: no text label, so the
  * `flex-1 min-w-0` title always truncates before this cluster can grow.
+ *
+ * Relies on the single `<TooltipProvider>` SourceRow mounts around its whole
+ * return value (/simplify S-6 — one provider per row, not one per tooltip
+ * consumer) rather than mounting its own.
  */
 function ValueBadge({ recording }: { recording: UnifiedRecording }) {
   if (recording.quality !== 'low-value' && recording.quality !== 'garbage') return null
@@ -38,23 +42,21 @@ function ValueBadge({ recording }: { recording: UnifiedRecording }) {
   const secondLine = reasonsText || (recording.qualitySource === 'user' ? 'Set by you' : 'AI-assessed')
 
   return (
-    <TooltipProvider>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span
-            className={`inline-flex shrink-0 ${isGarbage ? 'text-red-600 dark:text-red-400' : 'text-amber-600 dark:text-amber-400'}`}
-            role="img"
-            aria-label={label}
-          >
-            <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-          </span>
-        </TooltipTrigger>
-        <TooltipContent>
-          <p>{label}</p>
-          <p className="text-xs text-muted-foreground mt-0.5">{secondLine}</p>
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          className={`inline-flex shrink-0 ${isGarbage ? 'text-red-600 dark:text-red-400' : 'text-amber-600 dark:text-amber-400'}`}
+          role="img"
+          aria-label={label}
+        >
+          <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>
+        <p>{label}</p>
+        <p className="text-xs text-muted-foreground mt-0.5">{secondLine}</p>
+      </TooltipContent>
+    </Tooltip>
   )
 }
 
@@ -137,72 +139,72 @@ export const SourceRow = memo(function SourceRow({
   const secondaryTitle = titleIsFilename ? undefined : recording.filename
 
   return (
-    <div
-      className={[
-        '@container flex items-start justify-between gap-2 py-2.5 px-3 cursor-pointer',
-        'transition-[background-color,box-shadow] duration-150',
-        // Hover reads as a gentle elevation (bg + inner ring — the row list is
-        // overflow-clipped, so an inset ring conveys lift where a drop shadow can't).
-        'hover:bg-muted/60 hover:ring-1 hover:ring-inset hover:ring-border',
-        // Selection/active state shown via background tint + inset accent ring
-        // (no side-stripe border, per the design rules).
-        isActiveSource
-          ? 'bg-primary/15 ring-1 ring-inset ring-primary/30'
-          : isSelected
-            ? 'bg-primary/10 ring-1 ring-inset ring-primary/20'
-            : ''
-      ].filter(Boolean).join(' ')}
-      role="option"
-      onClick={handleRowClick}
-      aria-selected={isSelected}
-      tabIndex={0}
-    >
-      <div className="flex items-start gap-2 min-w-0 flex-1">
-        {/* Content area — flex-1 to fill remaining space. Status icons moved to the
-            right cluster so the title starts flush-left with no wasted gutter. */}
-        <div className="flex-1 min-w-0">
-          <div className="flex items-start gap-1.5 min-w-0">
-            <p className="font-medium text-sm line-clamp-2 text-foreground leading-tight min-w-0" title={primaryText}>
-              {searchQuery ? highlightText(primaryText, searchQuery) : primaryText}
-            </p>
-            {/* Personal ("ignored") badge — this recording is kept but pulled out of
-                all AI processing and default surfaces (v38). */}
-            {recording.personal && (
-              <span
-                className="mt-[2px] inline-flex shrink-0 items-center gap-1 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
-                role="img"
-                aria-label="Personal — excluded from AI processing"
-                title="Personal — kept on disk but excluded from AI processing and default surfaces"
-              >
-                <EyeOff className="h-2.5 w-2.5" aria-hidden="true" />
-                Personal
+    <TooltipProvider>
+      <div
+        className={[
+          '@container flex items-start justify-between gap-2 py-2.5 px-3 cursor-pointer',
+          'transition-[background-color,box-shadow] duration-150',
+          // Hover reads as a gentle elevation (bg + inner ring — the row list is
+          // overflow-clipped, so an inset ring conveys lift where a drop shadow can't).
+          'hover:bg-muted/60 hover:ring-1 hover:ring-inset hover:ring-border',
+          // Selection/active state shown via background tint + inset accent ring
+          // (no side-stripe border, per the design rules).
+          isActiveSource
+            ? 'bg-primary/15 ring-1 ring-inset ring-primary/30'
+            : isSelected
+              ? 'bg-primary/10 ring-1 ring-inset ring-primary/20'
+              : ''
+        ].filter(Boolean).join(' ')}
+        role="option"
+        onClick={handleRowClick}
+        aria-selected={isSelected}
+        tabIndex={0}
+      >
+        <div className="flex items-start gap-2 min-w-0 flex-1">
+          {/* Content area — flex-1 to fill remaining space. Status icons moved to the
+              right cluster so the title starts flush-left with no wasted gutter. */}
+          <div className="flex-1 min-w-0">
+            <div className="flex items-start gap-1.5 min-w-0">
+              <p className="font-medium text-sm line-clamp-2 text-foreground leading-tight min-w-0" title={primaryText}>
+                {searchQuery ? highlightText(primaryText, searchQuery) : primaryText}
+              </p>
+              {/* Personal ("ignored") badge — this recording is kept but pulled out of
+                  all AI processing and default surfaces (v38). */}
+              {recording.personal && (
+                <span
+                  className="mt-[2px] inline-flex shrink-0 items-center gap-1 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+                  role="img"
+                  aria-label="Personal — excluded from AI processing"
+                  title="Personal — kept on disk but excluded from AI processing and default surfaces"
+                >
+                  <EyeOff className="h-2.5 w-2.5" aria-hidden="true" />
+                  Personal
+                </span>
+              )}
+            </div>
+            <p className="flex items-center gap-1 text-xs text-muted-foreground truncate leading-tight mt-0.5">
+              <TypeIcon
+                className="h-3 w-3 shrink-0 text-muted-foreground/70"
+                aria-label={`${sourceTypeLabel(sourceType)} source`}
+              />
+              <span className="truncate" title={secondaryTitle}>
+                {searchQuery ? highlightText(secondaryText, searchQuery) : secondaryText}
               </span>
-            )}
+            </p>
           </div>
-          <p className="flex items-center gap-1 text-xs text-muted-foreground truncate leading-tight mt-0.5">
-            <TypeIcon
-              className="h-3 w-3 shrink-0 text-muted-foreground/70"
-              aria-label={`${sourceTypeLabel(sourceType)} source`}
-            />
-            <span className="truncate" title={secondaryTitle}>
-              {searchQuery ? highlightText(secondaryText, searchQuery) : secondaryText}
-            </span>
-          </p>
         </div>
-      </div>
 
-      {/* Right cluster — status + meeting link + error + overflow menu, aligned at
-          the row's top line. The two status icons live here (not a left column) so
-          the title starts flush-left. Playback lives in the mid-panel player. */}
-      <div className="flex items-center gap-1.5 shrink-0">
-        {/* Value badge (F16/spec-003) — icon-only, low-value/garbage only. Sits
-            before the meeting chip so the two provenance/quality glyphs read
-            left-to-right in the same tight cluster. */}
-        <ValueBadge recording={recording} />
-        {/* Meeting-link (calendar) provenance — the system knows this row maps to a
-            calendar event; the status icons align with it. */}
-        {meeting && (
-          <TooltipProvider>
+        {/* Right cluster — status + meeting link + error + overflow menu, aligned at
+            the row's top line. The two status icons live here (not a left column) so
+            the title starts flush-left. Playback lives in the mid-panel player. */}
+        <div className="flex items-center gap-1.5 shrink-0">
+          {/* Value badge (F16/spec-003) — icon-only, low-value/garbage only. Sits
+              before the meeting chip so the two provenance/quality glyphs read
+              left-to-right in the same tight cluster. */}
+          <ValueBadge recording={recording} />
+          {/* Meeting-link (calendar) provenance — the system knows this row maps to a
+              calendar event; the status icons align with it. */}
+          {meeting && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <span
@@ -218,13 +220,11 @@ export const SourceRow = memo(function SourceRow({
                 <p className="text-xs text-muted-foreground mt-0.5">{formatDateTime(meeting.start_time)}</p>
               </TooltipContent>
             </Tooltip>
-          </TooltipProvider>
-        )}
-        <StatusIcon recording={recording} />
-        <TranscriptionStatusBadge status={recording.transcriptionStatus} compact />
-        {/* Error indicator */}
-        {error && (
-          <TooltipProvider>
+          )}
+          <StatusIcon recording={recording} />
+          <TranscriptionStatusBadge status={recording.transcriptionStatus} compact />
+          {/* Error indicator */}
+          {error && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <AlertCircle className="h-3.5 w-3.5 text-destructive shrink-0" aria-label="Processing error" />
@@ -234,141 +234,141 @@ export const SourceRow = memo(function SourceRow({
                 {error.details && <p className="text-xs text-muted-foreground mt-1">{error.details}</p>}
               </TooltipContent>
             </Tooltip>
-          </TooltipProvider>
-        )}
+          )}
 
-        {/* Download progress (device-only, in flight) */}
-        {recording.location === 'device-only' && isDownloading && (
-          <div className="flex items-center gap-1 text-xs text-muted-foreground px-2" aria-live="polite">
-            <RefreshCw className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-            <span>{downloadProgress ?? 0}%</span>
-          </div>
-        )}
+          {/* Download progress (device-only, in flight) */}
+          {recording.location === 'device-only' && isDownloading && (
+            <div className="flex items-center gap-1 text-xs text-muted-foreground px-2" aria-live="polite">
+              <RefreshCw className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+              <span>{downloadProgress ?? 0}%</span>
+            </div>
+          )}
 
-        {/* Secondary actions: overflow menu (labeled, keeps the row uncluttered) */}
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onClick={(e) => e.stopPropagation()}
-              aria-label="More actions"
-            >
-              <MoreHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-56">
-            {onAskAssistant && (
-              <DropdownMenuItem onClick={(e) => { e.stopPropagation(); onAskAssistant(); }}>
-                <Sparkles className="h-4 w-4" aria-hidden="true" />
-                Ask Assistant
-              </DropdownMenuItem>
-            )}
-            {onGenerateOutput && (
-              <DropdownMenuItem onClick={(e) => { e.stopPropagation(); onGenerateOutput(); }}>
-                <FileText className="h-4 w-4" aria-hidden="true" />
-                Generate output
-              </DropdownMenuItem>
-            )}
-            {hasLocalPath(recording) && recording.transcriptionStatus !== 'complete' && onTranscribe && (
-              <DropdownMenuItem
-                onClick={(e) => { e.stopPropagation(); onTranscribe(); }}
-                disabled={recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing'}
+          {/* Secondary actions: overflow menu (labeled, keeps the row uncluttered) */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={(e) => e.stopPropagation()}
+                aria-label="More actions"
               >
-                {recording.transcriptionStatus === 'processing'
-                  ? <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />
-                  : <Wand2 className="h-4 w-4" aria-hidden="true" />}
-                {recording.transcriptionStatus === 'pending' ? 'Transcription queued'
-                  : recording.transcriptionStatus === 'processing' ? 'Transcribing…'
-                    : 'Transcribe'}
-              </DropdownMenuItem>
-            )}
-            {hasLocalPath(recording) && onReprocessVibeVoice && (
-              <DropdownMenuItem
-                onClick={(e) => { e.stopPropagation(); onReprocessVibeVoice(); }}
-                disabled={recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing'}
-              >
-                <AudioLines className="h-4 w-4" aria-hidden="true" />
-                Re-transcribe (VibeVoice)
-              </DropdownMenuItem>
-            )}
-            {recording.location === 'device-only' && onDownload && !isDownloading && (
-              <DropdownMenuItem
-                onClick={(e) => { e.stopPropagation(); onDownload(); }}
-                disabled={!deviceConnected}
-              >
-                <Download className="h-4 w-4" aria-hidden="true" />
-                {deviceConnected ? 'Download to computer' : 'Device not connected'}
-              </DropdownMenuItem>
-            )}
-            {onMarkPersonal && recording.location !== 'device-only' && (
-              <>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  onClick={(e) => { e.stopPropagation(); onMarkPersonal(); }}
-                >
-                  {recording.personal
-                    ? <><Eye className="h-4 w-4" aria-hidden="true" />Unmark personal</>
-                    : <><EyeOff className="h-4 w-4" aria-hidden="true" />Mark personal (ignore)</>}
+                <MoreHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56">
+              {onAskAssistant && (
+                <DropdownMenuItem onClick={(e) => { e.stopPropagation(); onAskAssistant(); }}>
+                  <Sparkles className="h-4 w-4" aria-hidden="true" />
+                  Ask Assistant
                 </DropdownMenuItem>
-              </>
-            )}
-            {/* Manual value-rating override (F16/spec-003) — capture-backed,
-                non-device rows only. Explicit user action always applies (the
-                never-downgrade guard only protects against a lower-confidence
-                AI re-classification, never against the user's own rating). */}
-            {onSetValueRating && recording.location !== 'device-only' && recording.knowledgeCaptureId && (
-              <>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  onClick={(e) => { e.stopPropagation(); onSetValueRating('low-value'); }}
-                >
-                  <TrendingDown className="h-4 w-4" aria-hidden="true" />
-                  Mark low-value
+              )}
+              {onGenerateOutput && (
+                <DropdownMenuItem onClick={(e) => { e.stopPropagation(); onGenerateOutput(); }}>
+                  <FileText className="h-4 w-4" aria-hidden="true" />
+                  Generate output
                 </DropdownMenuItem>
+              )}
+              {hasLocalPath(recording) && recording.transcriptionStatus !== 'complete' && onTranscribe && (
                 <DropdownMenuItem
-                  onClick={(e) => { e.stopPropagation(); onSetValueRating('garbage'); }}
+                  onClick={(e) => { e.stopPropagation(); onTranscribe(); }}
+                  disabled={recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing'}
                 >
-                  <Ban className="h-4 w-4" aria-hidden="true" />
-                  Mark garbage
+                  {recording.transcriptionStatus === 'processing'
+                    ? <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />
+                    : <Wand2 className="h-4 w-4" aria-hidden="true" />}
+                  {recording.transcriptionStatus === 'pending' ? 'Transcription queued'
+                    : recording.transcriptionStatus === 'processing' ? 'Transcribing…'
+                      : 'Transcribe'}
                 </DropdownMenuItem>
-                {recording.quality && recording.quality !== 'unrated' && (
+              )}
+              {hasLocalPath(recording) && onReprocessVibeVoice && (
+                <DropdownMenuItem
+                  onClick={(e) => { e.stopPropagation(); onReprocessVibeVoice(); }}
+                  disabled={recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing'}
+                >
+                  <AudioLines className="h-4 w-4" aria-hidden="true" />
+                  Re-transcribe (VibeVoice)
+                </DropdownMenuItem>
+              )}
+              {recording.location === 'device-only' && onDownload && !isDownloading && (
+                <DropdownMenuItem
+                  onClick={(e) => { e.stopPropagation(); onDownload(); }}
+                  disabled={!deviceConnected}
+                >
+                  <Download className="h-4 w-4" aria-hidden="true" />
+                  {deviceConnected ? 'Download to computer' : 'Device not connected'}
+                </DropdownMenuItem>
+              )}
+              {onMarkPersonal && recording.location !== 'device-only' && (
+                <>
+                  <DropdownMenuSeparator />
                   <DropdownMenuItem
-                    onClick={(e) => { e.stopPropagation(); onSetValueRating('unrated'); }}
+                    onClick={(e) => { e.stopPropagation(); onMarkPersonal(); }}
                   >
-                    <RotateCcw className="h-4 w-4" aria-hidden="true" />
-                    Clear rating
+                    {recording.personal
+                      ? <><Eye className="h-4 w-4" aria-hidden="true" />Unmark personal</>
+                      : <><EyeOff className="h-4 w-4" aria-hidden="true" />Mark personal (ignore)</>}
                   </DropdownMenuItem>
-                )}
-              </>
-            )}
-            {onDelete && (
-              <>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  onClick={(e) => { e.stopPropagation(); onDelete(); }}
-                  className="text-destructive focus:text-destructive"
-                >
-                  <Trash2 className="h-4 w-4" aria-hidden="true" />
-                  {recording.location === 'device-only' ? 'Delete from device'
-                    : recording.location === 'local-only' ? 'Delete from computer'
-                      : 'Delete everywhere'}
-                </DropdownMenuItem>
-                {onDeletePermanent && recording.location !== 'device-only' && (
+                </>
+              )}
+              {/* Manual value-rating override (F16/spec-003) — capture-backed,
+                  non-device rows only. Explicit user action always applies (the
+                  never-downgrade guard only protects against a lower-confidence
+                  AI re-classification, never against the user's own rating). */}
+              {onSetValueRating && recording.location !== 'device-only' && recording.knowledgeCaptureId && (
+                <>
+                  <DropdownMenuSeparator />
                   <DropdownMenuItem
-                    onClick={(e) => { e.stopPropagation(); onDeletePermanent(); }}
+                    onClick={(e) => { e.stopPropagation(); onSetValueRating('low-value'); }}
+                  >
+                    <TrendingDown className="h-4 w-4" aria-hidden="true" />
+                    Mark low-value
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={(e) => { e.stopPropagation(); onSetValueRating('garbage'); }}
+                  >
+                    <Ban className="h-4 w-4" aria-hidden="true" />
+                    Mark garbage
+                  </DropdownMenuItem>
+                  {recording.quality && recording.quality !== 'unrated' && (
+                    <DropdownMenuItem
+                      onClick={(e) => { e.stopPropagation(); onSetValueRating('unrated'); }}
+                    >
+                      <RotateCcw className="h-4 w-4" aria-hidden="true" />
+                      Clear rating
+                    </DropdownMenuItem>
+                  )}
+                </>
+              )}
+              {onDelete && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onClick={(e) => { e.stopPropagation(); onDelete(); }}
                     className="text-destructive focus:text-destructive"
                   >
                     <Trash2 className="h-4 w-4" aria-hidden="true" />
-                    Delete permanently…
+                    {recording.location === 'device-only' ? 'Delete from device'
+                      : recording.location === 'local-only' ? 'Delete from computer'
+                        : 'Delete everywhere'}
                   </DropdownMenuItem>
-                )}
-              </>
-            )}
-          </DropdownMenuContent>
-        </DropdownMenu>
+                  {onDeletePermanent && recording.location !== 'device-only' && (
+                    <DropdownMenuItem
+                      onClick={(e) => { e.stopPropagation(); onDeletePermanent(); }}
+                      className="text-destructive focus:text-destructive"
+                    >
+                      <Trash2 className="h-4 w-4" aria-hidden="true" />
+                      Delete permanently…
+                    </DropdownMenuItem>
+                  )}
+                </>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </div>
-    </div>
+    </TooltipProvider>
   )
 }, (prevProps, nextProps) => {
   // Custom comparison for performance

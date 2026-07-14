@@ -2,8 +2,10 @@
  * Human-readable labels for the fixed value-classification reason tags
  * (F16/spec-001 VALUE_REASON_TAGS, electron/main/services/value-classification.ts).
  *
- * Deliberately does NOT import the main-process `ValueReason` type — this is a
- * renderer-only util, and the reasons arriving over IPC are already plain
+ * Deliberately does NOT share a type with the main process (which has no
+ * exported reason-tag type of its own, only the VALUE_REASON_TAGS runtime
+ * array) — this is a renderer-only util, and the reasons arriving over IPC
+ * are already plain
  * `string[]` (JSON round-tripped, see mapToKnowledgeCapture's safeParseReasons).
  * The local union below mirrors the fixed vocabulary for exhaustive labeling,
  * while `formatValueReasons` stays defensive against any unrecognized tag (a

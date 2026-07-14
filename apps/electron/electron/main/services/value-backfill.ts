@@ -154,6 +154,34 @@ let running = false
 let cancelled = false
 
 // ---------------------------------------------------------------------------
+// Shared SQL fragments (/simplify S-4) — getEligibleCaptureIds (the
+// eligibility denominator) and getValueBackfillStatus (the status
+// denominator) MUST stay in lockstep (CX-T3-4): a capture that drops out of
+// scope for one (privacy change, cap reached) must drop out of the other on
+// the exact same call. Hoisting both the privacy predicate and the parked-
+// attempt predicate into one shared constant each makes that structural
+// instead of a matter of keeping two hand-written WHERE clauses in sync.
+// Both fragments assume the enclosing query aliases knowledge_captures `kc`,
+// recordings `r`, transcripts `t`, and (parked predicate only) joins
+// value_backfill_state as `vbs`.
+// ---------------------------------------------------------------------------
+
+/** Not soft-deleted, not user-rated (an explicit user rating/clear is
+ *  authoritative and out of scope for both eligibility and status), owning
+ *  recording not personal/deleted, and a non-blank transcript exists. */
+const VALUE_BACKFILL_PRIVACY_WHERE = `kc.deleted_at IS NULL
+        AND COALESCE(kc.quality_source, '') != 'user'
+        AND COALESCE(r.personal, 0) = 0
+        AND r.deleted_at IS NULL
+        AND t.full_text IS NOT NULL
+        AND TRIM(t.full_text) != ''`
+
+/** Durable retry cap exhausted — applies identically to a terminally-'failed'
+ *  row and a crashed-and-never-finalized 'in_progress' row (AR-3 / Opus review
+ *  M1). Binds exactly one `?` param (MAX_DURABLE_ATTEMPTS). */
+const VALUE_BACKFILL_PARKED_PREDICATE = `vbs.status IN ('failed', 'in_progress') AND vbs.attempts >= ?`
+
+// ---------------------------------------------------------------------------
 // Eligible-set query — re-run at the START of every startValueBackfill() call
 // (the durable cursor is value_backfill_state itself, not an in-memory Set
 // carried across runs). A capture is eligible when it has a non-blank
@@ -183,18 +211,12 @@ function getEligibleCaptureIds(order: 'newest' | 'oldest'): string[] {
        FROM knowledge_captures kc
        JOIN transcripts t ON t.recording_id = kc.source_recording_id
        LEFT JOIN recordings r ON r.id = kc.source_recording_id
-      WHERE kc.deleted_at IS NULL
+      WHERE ${VALUE_BACKFILL_PRIVACY_WHERE}
         AND kc.quality_rating = 'unrated'
-        AND COALESCE(kc.quality_source, '') != 'user'
-        AND COALESCE(r.personal, 0) = 0
-        AND r.deleted_at IS NULL
-        AND t.full_text IS NOT NULL
-        AND TRIM(t.full_text) != ''
         AND NOT EXISTS (
           SELECT 1 FROM value_backfill_state vbs
            WHERE vbs.capture_id = kc.id
-             AND (vbs.status = 'classified'
-                  OR (vbs.status IN ('failed', 'in_progress') AND vbs.attempts >= ?))
+             AND (vbs.status = 'classified' OR (${VALUE_BACKFILL_PARKED_PREDICATE}))
         )
       ORDER BY kc.captured_at ${orderClause}`,
     [MAX_DURABLE_ATTEMPTS]
@@ -643,18 +665,12 @@ export function getValueBackfillStatus(): ValueBackfillStatus {
             COUNT(DISTINCT CASE WHEN vbs.status = 'classified' THEN kc.id END) AS done,
             COUNT(DISTINCT CASE WHEN vbs.status = 'classified'
                                  AND vbs.result_rating IN ('low-value', 'garbage') THEN kc.id END) AS marked,
-            COUNT(DISTINCT CASE WHEN vbs.status IN ('failed', 'in_progress')
-                                 AND vbs.attempts >= ? THEN kc.id END) AS failed
+            COUNT(DISTINCT CASE WHEN ${VALUE_BACKFILL_PARKED_PREDICATE} THEN kc.id END) AS failed
        FROM knowledge_captures kc
        JOIN transcripts t ON t.recording_id = kc.source_recording_id
        LEFT JOIN recordings r ON r.id = kc.source_recording_id
        LEFT JOIN value_backfill_state vbs ON vbs.capture_id = kc.id
-      WHERE kc.deleted_at IS NULL
-        AND COALESCE(kc.quality_source, '') != 'user'
-        AND COALESCE(r.personal, 0) = 0
-        AND r.deleted_at IS NULL
-        AND t.full_text IS NOT NULL
-        AND TRIM(t.full_text) != ''
+      WHERE ${VALUE_BACKFILL_PRIVACY_WHERE}
         AND (kc.quality_rating = 'unrated' OR vbs.capture_id IS NOT NULL)`,
     [MAX_DURABLE_ATTEMPTS]
   )
