@@ -20,8 +20,13 @@ import { join } from 'path'
 const source = readFileSync(join(__dirname, '..', 'database.ts'), 'utf-8')
 
 describe('schema v42: knowledge_captures.quality_reasons + quality_source (content-based value classification)', () => {
-  it('bumps SCHEMA_VERSION to 42 (current)', () => {
-    expect(source).toMatch(/const SCHEMA_VERSION = 42\b/)
+  it('bumps SCHEMA_VERSION to at least 42', () => {
+    // Floor, not exact pin: later schema bumps (v43+, F16/spec-003's
+    // value_backfill_state) must not break this v42 contract test. The CURRENT
+    // version is pinned by the newest migration test (value-backfill-migration-v43.test.ts).
+    const m = source.match(/const SCHEMA_VERSION = (\d+)\b/)
+    expect(m).not.toBeNull()
+    expect(Number(m![1])).toBeGreaterThanOrEqual(42)
   })
 
   it('fresh schema adds quality_reasons + quality_source to the knowledge_captures CREATE block', () => {
