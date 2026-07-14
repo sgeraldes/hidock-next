@@ -653,19 +653,40 @@ export function Calendar() {
     }
   }, [refreshRecordings])
 
-  // Delete local recording (memoized)
+  // Move to Trash — soft delete (spec-005/F17 T5 §D3b, memoized). Routes through
+  // the cascade IPC that hides the recording (restorable) and pulls it from AI
+  // processing; nothing is erased from disk. The legacy recordings.delete IPC
+  // (permanent unlinkSync that keeps derived data) is intentionally NOT used —
+  // permanent deletion is Library's explicit "Delete permanently…" flow only.
+  // Confirm/toast copy mirrors Library's (deletionCopy.ts consolidation lands
+  // with the T5 branch).
   const handleDeleteLocal = useCallback(async (recording: UnifiedRecording) => {
     if (!hasLocalPath(recording)) return
 
-    const confirmed = window.confirm(`Delete "${recording.filename}" from local storage? This cannot be undone.`)
+    const confirmed = window.confirm(
+      `Move "${recording.filename}" to Trash? It will be hidden and excluded from all AI processing. ` +
+        'Nothing is erased — restore it from Trash, or delete it permanently later.'
+    )
     if (!confirmed) return
 
     setDeleting(recording.id)
     try {
-      await window.electronAPI.recordings.delete(recording.id)
+      const res = await window.electronAPI.recordings.deleteCascade(recording.id, false)
+      if (!res?.success) throw new Error(res?.error || 'Delete failed')
       await refreshRecordings(false)
+      toast.success('Moved to Trash', `"${recording.filename}" is hidden and excluded from processing.`, {
+        duration: 8000,
+        action: {
+          label: 'Undo',
+          onClick: async () => {
+            await window.electronAPI.recordings.restore(recording.id)
+            await refreshRecordings(false)
+          }
+        }
+      })
     } catch (e) {
       console.error('Delete failed:', e)
+      toast.error('Delete Failed', `Failed to move "${recording.filename}" to Trash. Please try again.`)
     } finally {
       setDeleting(null)
     }
@@ -966,25 +987,27 @@ export function Calendar() {
                             onClick={() => handleDeleteFromDevice(recording)}
                             disabled={!deviceConnected || deleting === recording.id}
                             title="Delete from device">
-                            <Trash2 className="h-3 w-3" />
+                            {deleting === recording.id ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
                           </Button>
                         )}
-                        {/* Delete - local-only: delete local file */}
-                        {recording.location === 'local-only' && (
+                        {/* Move to Trash — soft delete (spec-005/F17 T5 §D3b). AR3-4: the
+                            hasLocalPath gate keeps capture-only synthetic rows (localPath
+                            === '') from rendering any delete affordance. */}
+                        {recording.location === 'local-only' && hasLocalPath(recording) && (
                           <Button variant="ghost" size="icon" className="h-6 w-6 text-orange-500 hover:text-orange-600"
                             onClick={() => handleDeleteLocal(recording)}
                             disabled={deleting === recording.id}
-                            title="Delete local file">
-                            <Trash2 className="h-3 w-3" />
+                            title="Move to Trash">
+                            {deleting === recording.id ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
                           </Button>
                         )}
-                        {/* Delete - both: delete local copy only */}
+                        {/* Move to Trash for synced rows — device copy is untouched */}
                         {recording.location === 'both' && (
                           <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-orange-500"
                             onClick={() => handleDeleteLocal(recording)}
                             disabled={deleting === recording.id}
-                            title="Delete local copy">
-                            <Trash2 className="h-3 w-3" />
+                            title="Move to Trash">
+                            {deleting === recording.id ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
                           </Button>
                         )}
                       </div>
@@ -1092,21 +1115,23 @@ export function Calendar() {
                             {deleting === recording.id ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
                           </Button>
                         )}
-                        {/* Delete local - only for local-only recordings */}
-                        {recording.location === 'local-only' && (
+                        {/* Move to Trash — soft delete (spec-005/F17 T5 §D3b). AR3-4: the
+                            hasLocalPath gate keeps capture-only synthetic rows (localPath
+                            === '') from rendering any delete affordance. */}
+                        {recording.location === 'local-only' && hasLocalPath(recording) && (
                           <Button variant="ghost" size="icon" className="h-6 w-6 text-orange-500 hover:text-orange-600"
                             onClick={(e) => { e.stopPropagation(); handleDeleteLocal(recording) }}
                             disabled={deleting === recording.id}
-                            title="Delete local file">
-                            <Trash2 className="h-3 w-3" />
+                            title="Move to Trash">
+                            {deleting === recording.id ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
                           </Button>
                         )}
-                        {/* Delete for synced recordings (both locations) - deletes local copy only */}
+                        {/* Move to Trash for synced rows — device copy is untouched */}
                         {recording.location === 'both' && (
                           <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-orange-500"
                             onClick={(e) => { e.stopPropagation(); handleDeleteLocal(recording) }}
                             disabled={deleting === recording.id}
-                            title="Delete local copy (keeps on device)">
+                            title="Move to Trash">
                             {deleting === recording.id ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
                           </Button>
                         )}
