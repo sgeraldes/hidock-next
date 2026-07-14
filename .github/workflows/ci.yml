@@ -17,6 +17,13 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    # electron-builder install-app-deps rebuilds the `usb` native module
+    # against Electron headers; its bundled libusb needs libudev on Linux
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libudev-dev libusb-1.0-0-dev
+
     - name: Use Node.js 20
       uses: actions/setup-node@v4
       with:
