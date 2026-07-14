@@ -43,6 +43,24 @@ interface RecordingBase {
   summary?: string
   /** v38: user-marked "personal" (ignored) — kept, but out of AI + default surfaces. */
   personal?: boolean
+  /**
+   * What actually backs this row (CX-T5-3, spec-005/F17 fix round):
+   *  - 'recording' — a real `recordings`-table row (device and/or disk audio).
+   *  - 'capture'   — a synthetic row synthesized for a knowledge_capture with
+   *    NO source recording (imported PDF/image/note). buildRecordingMap's
+   *    capture-only branch is the ONLY producer of this value.
+   *
+   * This is an EXPLICIT discriminator, replacing the old path-shape inference
+   * (`hasDeviceFile || hasLocalPath`): `recordings.file_path` is NULLABLE, so a
+   * real DB recording can legitimately surface as local-only with an empty
+   * path — inferring "capture-only" from that misclassified it and stripped
+   * its deletion/restore affordances (stranding it in Trash after a bulk
+   * soft-delete). Optional for constructor-site compatibility; an absent value
+   * means 'recording' (the fail-safe direction: a mis-stamped capture-only row
+   * shows affordances whose IPCs fail honestly with "Recording not found",
+   * whereas the inverse strands real user data).
+   */
+  sourceKind?: 'recording' | 'capture'
 }
 
 /**
@@ -193,14 +211,15 @@ export function hasDeviceFile(rec: UnifiedRecording): rec is DeviceOnlyRecording
  * True when this row is backed by an actual `recordings`-table row (a real
  * audio file on the device or disk) — as opposed to a synthetic "capture-only"
  * row synthesized for a knowledge_capture with no source recording (imported
- * PDF/image/note; see buildRecordingMap's capture-only branch, which stamps
- * `location: 'local-only'` + `localPath: ''` and never 'device-only'/'both').
+ * PDF/image/note).
  *
- * Uses `hasDeviceFile` (not `isDeviceOnly`) so a `'both'` row is always
- * recording-backed even in the pathological case where its local half's path
- * ended up empty — it still carries a real `deviceFilename`. Only a
- * `'local-only'` row with an empty `localPath` (the capture-only marker) is
- * excluded.
+ * Keys on the EXPLICIT `sourceKind` discriminator stamped at every synthesis
+ * site (buildRecordingMap's five branches + trashRowToUnified) — NOT on path
+ * shape. The old `hasDeviceFile || hasLocalPath` inference misclassified a
+ * real DB recording whose nullable `file_path` was empty as capture-only,
+ * stripping its restore/purge affordances and stranding it in Trash after a
+ * bulk soft-delete (CX-T5-3). An absent `sourceKind` counts as 'recording'
+ * (fail-safe: see the field's doc on RecordingBase).
  *
  * spec-005/F17 AR3-4 (adversarial amendment, binding): ALL recording-deletion
  * affordances (Move to Trash, Delete from device, Delete permanently, Trash
@@ -209,5 +228,5 @@ export function hasDeviceFile(rec: UnifiedRecording): rec is DeviceOnlyRecording
  * deletion/Trash contract.
  */
 export function isRecordingBacked(rec: UnifiedRecording): boolean {
-  return hasDeviceFile(rec) || hasLocalPath(rec)
+  return rec.sourceKind !== 'capture'
 }

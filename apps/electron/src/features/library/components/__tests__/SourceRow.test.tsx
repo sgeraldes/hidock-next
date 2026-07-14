@@ -311,8 +311,9 @@ describe('SourceRow AR3-4 — capture-only rows show no delete affordances', () 
     ...baseRecording,
     id: 'capture-1',
     location: 'local-only',
-    localPath: '', // the buildRecordingMap capture-only synthesis marker
-    syncStatus: 'synced'
+    localPath: '',
+    syncStatus: 'synced',
+    sourceKind: 'capture' // the explicit buildRecordingMap capture-only stamp (CX-T5-3)
   }
 
   it('renders no destructive menu items even when every delete handler is wired', async () => {
@@ -335,16 +336,38 @@ describe('SourceRow AR3-4 — capture-only rows show no delete affordances', () 
     expect(screen.queryByRole('menuitem', { name: /delete permanently/i })).not.toBeInTheDocument()
     expect(screen.queryByRole('menuitem', { name: /^restore/i })).not.toBeInTheDocument()
   })
+
+  it('CX-T5-3: a REAL recording with an empty localPath (nullable file_path) KEEPS its delete affordances', async () => {
+    render(
+      <SourceRow
+        recording={{
+          ...baseRecording,
+          id: 'null-path-rec',
+          location: 'local-only',
+          localPath: '',
+          syncStatus: 'synced',
+          sourceKind: 'recording'
+        }}
+        onDelete={vi.fn()}
+        onDeletePermanent={vi.fn()}
+      />
+    )
+    openMenu()
+    expect(await screen.findByRole('menuitem', { name: /move to trash/i })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: /delete permanently/i })).toBeInTheDocument()
+  })
 })
 
 // spec-005/F17 T5 §D1 — Trash-mode reuse: Library passes ONLY onRestore +
 // onDeletePermanent for trashed rows, and every other item is onX &&-guarded.
 describe('SourceRow Trash-mode menu (spec-005/F17 §D1)', () => {
+  // Mirrors trashRowToUnified's output shape (incl. the CX-T5-3 stamp).
   const trashedRecording: UnifiedRecording = {
     ...baseRecording,
     location: 'local-only',
     localPath: '/data/trashed.wav',
-    syncStatus: 'synced'
+    syncStatus: 'synced',
+    sourceKind: 'recording'
   }
 
   it('renders exactly Restore + Delete permanently…, nothing else destructive', async () => {
@@ -391,5 +414,21 @@ describe('SourceRow Trash-mode menu (spec-005/F17 §D1)', () => {
     await screen.findByRole('menu')
     expect(screen.queryByRole('menuitem', { name: /^restore/i })).not.toBeInTheDocument()
     expect(screen.queryByRole('menuitem', { name: /delete permanently/i })).not.toBeInTheDocument()
+  })
+
+  it('CX-T5-3: a trash row with an EMPTY localPath (null file_path) still shows Restore + Delete permanently', async () => {
+    // The stranded-in-Trash vector: a real recording with a nullable/empty
+    // file_path, bulk-soft-deleted, then mapped by trashRowToUnified. Its
+    // sourceKind stamp — not its path — must keep the restore/purge menu alive.
+    render(
+      <SourceRow
+        recording={{ ...trashedRecording, localPath: '' }}
+        onRestore={vi.fn()}
+        onDeletePermanent={vi.fn()}
+      />
+    )
+    openMenu()
+    expect(await screen.findByRole('menuitem', { name: /^restore/i })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: /delete permanently/i })).toBeInTheDocument()
   })
 })

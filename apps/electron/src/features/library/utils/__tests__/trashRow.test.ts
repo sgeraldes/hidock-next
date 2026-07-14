@@ -31,6 +31,14 @@ describe('trashRowToUnified', () => {
     expect(unified.syncStatus).toBe('synced')
   })
 
+  it('CX-T5-3: sourceKind is ALWAYS "recording" — even with an empty/missing file_path', () => {
+    // Trash rows come from the recordings table by construction; the explicit
+    // stamp (not path shape) is what keeps an empty-path tombstone restorable.
+    expect(trashRowToUnified(makeRow()).sourceKind).toBe('recording')
+    expect(trashRowToUnified(makeRow({ file_path: '' })).sourceKind).toBe('recording')
+    expect(trashRowToUnified(makeRow({ file_path: undefined as unknown as string })).sourceKind).toBe('recording')
+  })
+
   it('sets localPath from file_path', () => {
     const unified = trashRowToUnified(makeRow({ file_path: '/data/custom.wav' }))
     expect(unified.localPath).toBe('/data/custom.wav')

@@ -221,6 +221,7 @@ export function buildRecordingMap(
         dateRecorded,
         transcriptionStatus: mapTranscriptionStatus(dbRec?.transcription_status ?? dbRec?.status, capture?.status ?? undefined),
         meetingId: dbRec?.meeting_id,
+        sourceKind: 'recording',
         location: 'both',
         deviceFilename: deviceRec.filename,
         localPath: synced?.file_path || dbRec?.file_path || '',
@@ -249,6 +250,7 @@ export function buildRecordingMap(
         duration: deviceRec.duration,
         dateRecorded,
         transcriptionStatus: 'none',
+        sourceKind: 'recording',
         location: 'device-only',
         deviceFilename: deviceRec.filename,
         syncStatus: 'not-synced'
@@ -281,6 +283,10 @@ export function buildRecordingMap(
         // to the legacy status only when it's absent (matches the 'both' branch).
         transcriptionStatus: mapTranscriptionStatus(dbRec.transcription_status ?? dbRec.status, capture?.status ?? undefined),
         meetingId: dbRec.meeting_id,
+        // CX-T5-3: explicit — this is a REAL recordings-table row even when its
+        // nullable file_path is empty (the old path inference misread that as
+        // capture-only and stripped its deletion/restore affordances).
+        sourceKind: 'recording',
         location: 'local-only',
         localPath: dbRec.file_path,
         syncStatus: 'synced',
@@ -318,6 +324,7 @@ export function buildRecordingMap(
           duration: cached.duration_seconds || 0,
           dateRecorded,
           transcriptionStatus: 'none',
+          sourceKind: 'recording',
           location: 'device-only',
           deviceFilename: cached.filename,
           syncStatus: 'not-synced'
@@ -344,6 +351,10 @@ export function buildRecordingMap(
       duration: 0,
       dateRecorded: new Date(dateSource),
       transcriptionStatus: mapTranscriptionStatus(undefined, capture.status ?? undefined),
+      // CX-T5-3: the ONLY 'capture' producer in the app — this synthetic row has
+      // no recordings-table backing, so isRecordingBacked() hides every
+      // recording-deletion affordance on it (AR3-4; F20 owns its future contract).
+      sourceKind: 'capture',
       location: 'local-only',
       localPath: '',
       syncStatus: 'synced',

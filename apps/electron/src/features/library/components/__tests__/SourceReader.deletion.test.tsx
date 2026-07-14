@@ -180,7 +180,7 @@ describe('SourceReader AR3-4 — capture-only rows show no delete affordances', 
   it('renders no destructive menu items for a capture-only (non-recording-backed) row', async () => {
     render(
       <SourceReader
-        recording={makeRecording({ location: 'local-only', localPath: '' } as any)}
+        recording={makeRecording({ location: 'local-only', localPath: '', sourceKind: 'capture' } as any)}
         onDelete={vi.fn()}
         onDeletePermanent={vi.fn()}
         onDeleteFromDevice={vi.fn()}
@@ -192,5 +192,18 @@ describe('SourceReader AR3-4 — capture-only rows show no delete affordances', 
     expect(screen.queryByRole('menuitem', { name: /move to trash/i })).not.toBeInTheDocument()
     expect(screen.queryByRole('menuitem', { name: /delete from device/i })).not.toBeInTheDocument()
     expect(screen.queryByRole('menuitem', { name: /delete permanently/i })).not.toBeInTheDocument()
+  })
+
+  it('CX-T5-3: a REAL recording with an empty localPath (nullable file_path) KEEPS its delete menu', async () => {
+    render(
+      <SourceReader
+        recording={makeRecording({ location: 'local-only', localPath: '', sourceKind: 'recording' } as any)}
+        onDelete={vi.fn()}
+        onDeletePermanent={vi.fn()}
+      />
+    )
+    openMenu()
+    expect(await screen.findByRole('menuitem', { name: /move to trash/i })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: /delete permanently/i })).toBeInTheDocument()
   })
 })

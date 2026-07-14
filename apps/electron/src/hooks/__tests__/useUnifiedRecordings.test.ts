@@ -223,6 +223,87 @@ describe('useUnifiedRecordings', () => {
   })
 
   // ============================================================
+  // sourceKind stamps (CX-T5-3, spec-005/F17 fix round) — the explicit
+  // discriminator every deletion affordance gates on. buildRecordingMap's
+  // capture-only branch is the ONLY 'capture' producer; every row built
+  // from a recordings-table row is 'recording' EVEN when its nullable
+  // file_path is null/empty (the old path inference misread that).
+  // ============================================================
+
+  describe('sourceKind stamps (CX-T5-3)', () => {
+    it('stamps a DB recording "recording" even when its file_path is null', async () => {
+      const mockRecs = [{
+        id: 'rec-null-path',
+        filename: 'no-path.wav',
+        file_path: null,
+        file_size: 100,
+        status: 'complete',
+        date_recorded: '2025-01-01T10:00:00Z'
+      }]
+      // @ts-ignore
+      window.electronAPI.recordings.getAll.mockResolvedValue(mockRecs)
+      // @ts-ignore
+      window.electronAPI.knowledge.getAll.mockResolvedValue([])
+
+      renderHook(() => useUnifiedRecordings())
+
+      await waitFor(() => {
+        expect(storeState.setUnifiedRecordings).toHaveBeenCalledWith(expect.arrayContaining([
+          expect.objectContaining({ id: 'rec-null-path', sourceKind: 'recording' })
+        ]))
+      })
+    })
+
+    it('stamps a capture-only synthetic row "capture" (the ONLY capture producer)', async () => {
+      // @ts-ignore
+      window.electronAPI.recordings.getAll.mockResolvedValue([])
+      // @ts-ignore
+      window.electronAPI.knowledge.getAll.mockResolvedValue([{
+        id: 'cap-standalone',
+        title: 'Imported PDF',
+        status: 'ready'
+        // no sourceRecordingId — the capture-only synthesis branch
+      }])
+
+      renderHook(() => useUnifiedRecordings())
+
+      await waitFor(() => {
+        expect(storeState.setUnifiedRecordings).toHaveBeenCalledWith(expect.arrayContaining([
+          expect.objectContaining({ id: 'cap-standalone', sourceKind: 'capture' })
+        ]))
+      })
+    })
+
+    it('stamps a recording-backed capture row "recording" (sourceRecordingId set)', async () => {
+      const mockRecs = [{
+        id: 'rec-1',
+        filename: 'test.wav',
+        file_path: '/recordings/test.wav',
+        file_size: 100,
+        status: 'complete',
+        date_recorded: '2025-01-01T10:00:00Z'
+      }]
+      // @ts-ignore
+      window.electronAPI.recordings.getAll.mockResolvedValue(mockRecs)
+      // @ts-ignore
+      window.electronAPI.knowledge.getAll.mockResolvedValue([{
+        id: 'cap-1',
+        sourceRecordingId: 'rec-1',
+        title: 'Backed capture',
+        status: 'ready'
+      }])
+
+      renderHook(() => useUnifiedRecordings())
+
+      await waitFor(() => {
+        expect(storeState.setUnifiedRecordings).toHaveBeenCalledWith(expect.arrayContaining([
+          expect.objectContaining({ id: 'rec-1', sourceKind: 'recording' })
+        ]))
+      })
+    })
+  })
+
+  // ============================================================
   // Stats computation
   // ============================================================
 

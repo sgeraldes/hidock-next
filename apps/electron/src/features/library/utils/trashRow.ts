@@ -30,6 +30,12 @@ export function trashRowToUnified(rec: DatabaseRecording): LocalOnlyRecording {
     duration: rec.duration_seconds ?? 0,
     dateRecorded: getBestDate(rec.filename, dbDate, UNKNOWN_DATE),
     transcriptionStatus: mapTranscriptionStatus(rec.transcription_status ?? rec.status, undefined),
+    // CX-T5-3: every trash row comes from the recordings TABLE by construction
+    // (getTrashedRecordings), so it is ALWAYS recording-backed — even when its
+    // nullable file_path is empty. Stamped explicitly, never inferred from path
+    // shape; without this an empty-path tombstone would lose its Restore /
+    // Delete-permanently menu and be stranded in Trash.
+    sourceKind: 'recording',
     location: 'local-only',
     localPath: rec.file_path ?? '', // REQUIRED by the type; soft-delete keeps the file on disk
     syncStatus: 'synced', // REQUIRED by the type

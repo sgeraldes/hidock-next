@@ -112,11 +112,24 @@ describe('SourceCard AR3-4 — capture-only rows show no delete affordance', () 
     const captureOnly: UnifiedRecording = {
       ...baseRecording,
       location: 'local-only',
-      localPath: '', // buildRecordingMap's capture-only synthesis marker
-      syncStatus: 'synced'
+      localPath: '',
+      syncStatus: 'synced',
+      sourceKind: 'capture' // the explicit buildRecordingMap capture-only stamp (CX-T5-3)
     }
     render(<SourceCard {...makeProps({ recording: captureOnly })} />)
     expect(screen.queryByTitle('Move to Trash')).not.toBeInTheDocument()
     expect(screen.queryByTitle('Delete from device')).not.toBeInTheDocument()
+  })
+
+  it('CX-T5-3: a REAL recording with an empty localPath (nullable file_path) KEEPS its delete button', () => {
+    const nullPathRecording: UnifiedRecording = {
+      ...baseRecording,
+      location: 'local-only',
+      localPath: '',
+      syncStatus: 'synced',
+      sourceKind: 'recording'
+    }
+    render(<SourceCard {...makeProps({ recording: nullPathRecording })} />)
+    expect(screen.getByTitle('Move to Trash')).toBeInTheDocument()
   })
 })
