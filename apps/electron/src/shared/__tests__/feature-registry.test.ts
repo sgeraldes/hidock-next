@@ -263,7 +263,7 @@ describe('channelFeature (IPC ownership map)', () => {
       'knowledge:getAll',
       'storage:get-info',
       'integrity:run-scan',
-      'recordings:delete', // library reads/deletes stay open
+      'recordings:deleteCascade', // library reads/deletes stay open
       'artifacts:import',
       'waveform:getCache',
       'outputs:generate',
