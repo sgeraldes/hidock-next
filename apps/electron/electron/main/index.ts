@@ -37,6 +37,7 @@ import { getRAGService } from './services/rag'
 import { setMainWindowForEventBus } from './services/event-bus'
 import { getStoragePolicyService } from './services/storage-policy'
 import { setMainWindowForMigration } from './ipc/migration-handlers'
+import { setMainWindowForValueBackfill } from './services/value-backfill'
 import { getIntegrityService } from './services/integrity-service'
 import { acquireSingleInstanceLock } from './single-instance'
 import { startBootScheduler } from './services/boot-scheduler'
@@ -354,6 +355,7 @@ app.whenReady().then(async () => {
     setMainWindowForTranscription(mainWindow)
     setMainWindowForEventBus(mainWindow)
     setMainWindowForMigration(mainWindow)
+    setMainWindowForValueBackfill(mainWindow)
   }
 
   // The recording watcher is cheap and powers auto-refresh — start it now.

@@ -16,7 +16,7 @@
 
 import { ipcMain } from 'electron'
 import { z } from 'zod'
-import { resolveRecordingId } from '../services/database'
+import { resolveRecordingId, setKnowledgeCaptureRatingByRecording } from '../services/database'
 import {
   markRecordingPersonal,
   getDeletionImpact,
@@ -27,6 +27,13 @@ import {
 const RecordingIdSchema = z.string().min(1).max(200)
 const MarkPersonalSchema = z.object({ id: RecordingIdSchema, personal: z.boolean() })
 const DeleteCascadeSchema = z.object({ id: RecordingIdSchema, hard: z.boolean() })
+// F16/spec-003: manual per-row value-rating override. Validated + capture-scoped
+// (resolved from the recording id) — distinct from the unvalidated knowledge:update
+// handler, and distinct from quality:set (the separate quality_assessments system).
+const SetValueRatingSchema = z.object({
+  id: RecordingIdSchema,
+  rating: z.enum(['valuable', 'archived', 'low-value', 'garbage', 'unrated'])
+})
 
 export function registerRecordingDeletionHandlers(): void {
   // Mark / unmark a recording personal ("ignore").
@@ -41,6 +48,27 @@ export function registerRecordingDeletionHandlers(): void {
       return markRecordingPersonal(rec.id, parsed.data.personal)
     } catch (e) {
       console.error('recordings:markPersonal error:', e)
+      return { success: false, error: e instanceof Error ? e.message : 'Unknown error' }
+    }
+  })
+
+  // Manual value-rating override (F16/spec-003) — explicit user action always
+  // applies (no never-downgrade guard; that guard only protects a user rating
+  // FROM the AI classifier, never the other way around). Capture-scoped via
+  // resolveRecordingId, so it cannot mutate an arbitrary knowledge_captures row.
+  ipcMain.handle('recordings:setValueRating', async (_, id: unknown, rating: unknown) => {
+    try {
+      const parsed = SetValueRatingSchema.safeParse({ id, rating })
+      if (!parsed.success) {
+        return { success: false, error: parsed.error.issues[0]?.message || 'Invalid request' }
+      }
+      const rec = resolveRecordingId(parsed.data.id)
+      if (!rec) return { success: false, error: 'Recording not found' }
+      const result = setKnowledgeCaptureRatingByRecording(rec.id, parsed.data.rating)
+      if (!result.success) return { success: false, error: 'No knowledge capture for this recording' }
+      return { success: true, rating: result.rating }
+    } catch (e) {
+      console.error('recordings:setValueRating error:', e)
       return { success: false, error: e instanceof Error ? e.message : 'Unknown error' }
     }
   })

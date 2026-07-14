@@ -442,6 +442,11 @@ export interface ElectronAPI {
       error?: string
     }>
     restore: (id: string) => Promise<{ success: boolean }>
+    // F16/spec-003: manual per-row value-rating override (validated, capture-scoped).
+    setValueRating: (
+      id: string,
+      rating: 'valuable' | 'archived' | 'low-value' | 'garbage' | 'unrated'
+    ) => Promise<{ success: boolean; rating?: string; error?: string }>
     // Recording-Meeting linking dialog methods
     getCandidates: (recordingId: string) => Promise<{ success: boolean; data: any[]; error?: string }>
     getMeetingsNearDate: (date: string) => Promise<{ success: boolean; data: any[]; error?: string }>
@@ -916,6 +921,24 @@ export interface ElectronAPI {
     }) => Promise<Result<HandoverRunAgentResult>>
   }
 
+  // Value-classification backfill (F16/spec-003) — resumable, user-triggered
+  // ONLY from the Settings card; never auto-started (see value-backfill.ts).
+  valueBackfill: {
+    start: (order?: 'newest' | 'oldest') => Promise<{ success: boolean; started?: boolean; reason?: string; error?: string }>
+    cancel: () => Promise<{ success: boolean; cancelled?: boolean; error?: string }>
+    getStatus: () => Promise<{
+      success: boolean
+      data?: { running: boolean; total: number; done: number; marked: number; failed: number; remaining: number }
+      error?: string
+    }>
+    onProgress: (
+      callback: (progress: { processed: number; total: number; marked: number; failed: number }) => void
+    ) => () => void
+    onComplete: (
+      callback: (result: { processed: number; total: number; marked: number; failed: number; cancelled: boolean }) => void
+    ) => () => void
+  }
+
   // Migration - Database schema migration to V11 (Knowledge Captures)
   migration: MigrationAPI
 
@@ -1283,6 +1306,7 @@ const electronAPI: ElectronAPI = {
     deletionImpact: (id) => callIPC('recordings:deletionImpact', id),
     deleteCascade: (id, hard) => callIPC('recordings:deleteCascade', id, hard),
     restore: (id) => callIPC('recordings:restore', id),
+    setValueRating: (id, rating) => callIPC('recordings:setValueRating', id, rating),
     // Recording-Meeting linking dialog methods
     getCandidates: (recordingId) => callIPC('recordings:getCandidates', recordingId),
     getMeetingsNearDate: (date) => callIPC('recordings:getMeetingsNearDate', date),
@@ -1486,6 +1510,26 @@ const electronAPI: ElectronAPI = {
   handover: {
     createBundle: (args) => callIPC('handover:createBundle', args),
     runAgent: (args) => callIPC('handover:runAgent', args)
+  },
+
+  valueBackfill: {
+    start: (order) => callIPC('value:startBackfill', order ? { order } : undefined),
+    cancel: () => callIPC('value:cancelBackfill'),
+    getStatus: () => callIPC('value:getBackfillStatus'),
+    onProgress: (callback) => {
+      const handler = (_event: any, progress: any) => callback(progress)
+      ipcRenderer.on('value:backfill-progress', handler)
+      return () => {
+        ipcRenderer.removeListener('value:backfill-progress', handler)
+      }
+    },
+    onComplete: (callback) => {
+      const handler = (_event: any, result: any) => callback(result)
+      ipcRenderer.on('value:backfill-complete', handler)
+      return () => {
+        ipcRenderer.removeListener('value:backfill-complete', handler)
+      }
+    }
   },
 
   migration: {
