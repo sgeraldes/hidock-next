@@ -155,6 +155,47 @@ describe('useUnifiedRecordings', () => {
       })
     })
 
+    // F16/spec-003 Part A — qualityReasons/qualitySource must thread through
+    // to the UnifiedRecording, alongside `quality`, so SourceRow's value
+    // badge/tooltip has the data it needs.
+    it('threads qualityReasons and qualitySource from the knowledge capture', async () => {
+      const mockRecs = [{
+        id: 'rec-1',
+        filename: 'test.wav',
+        file_path: '/recordings/test.wav',
+        file_size: 100,
+        status: 'complete',
+        date_recorded: '2025-01-01T10:00:00Z'
+      }]
+      const mockCaptures = [{
+        id: 'cap-1',
+        sourceRecordingId: 'rec-1',
+        title: 'Low value capture',
+        quality: 'low-value',
+        qualityReasons: ['personal_family', 'background_ambient'],
+        qualitySource: 'ai',
+        status: 'ready'
+      }]
+
+      // @ts-ignore
+      window.electronAPI.recordings.getAll.mockResolvedValue(mockRecs)
+      // @ts-ignore
+      window.electronAPI.knowledge.getAll.mockResolvedValue(mockCaptures)
+
+      renderHook(() => useUnifiedRecordings())
+
+      await waitFor(() => {
+        expect(storeState.setUnifiedRecordings).toHaveBeenCalledWith(expect.arrayContaining([
+          expect.objectContaining({
+            id: 'rec-1',
+            quality: 'low-value',
+            qualityReasons: ['personal_family', 'background_ambient'],
+            qualitySource: 'ai'
+          })
+        ]))
+      })
+    })
+
     it('leaves title undefined when no knowledge capture exists', async () => {
       const mockRecs = [{
         id: 'rec-1',

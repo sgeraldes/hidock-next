@@ -32,6 +32,12 @@ interface RecordingBase {
   knowledgeCaptureId?: string
   title?: string
   quality?: QualityRating
+  /** F16/spec-001: fixed tags explaining an AI content-based value classification
+   *  (see VALUE_REASON_TAGS in electron/main/services/value-classification.ts). */
+  qualityReasons?: string[]
+  /** Distinguishes an AI-set rating from one the user set by hand (F16/spec-003
+   *  manual override always stamps 'user'). */
+  qualitySource?: 'ai' | 'user'
   category?: string
   status?: string
   summary?: string
