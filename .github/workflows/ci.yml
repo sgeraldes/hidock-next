@@ -26,13 +26,24 @@ jobs:
           apps/electron/package-lock.json
           packages/*/package-lock.json
 
-    # file:-linked @hidock/* packages install first; packages/database also
-    # provides the Node-ABI better-sqlite3 copy the vitest DB shim resolves to
+    # file:-linked @hidock/* packages. --ignore-scripts avoids npm running a
+    # linked sibling's `prepare` (tsup) before that sibling has its devDeps
+    # (connectors-slack -> file:../connectors). npm rebuild restores the
+    # skipped native install scripts (better-sqlite3 Node-ABI copy in
+    # packages/database, usb prebuilds). Alphabetical build order already
+    # places connectors before connectors-slack.
     - name: Install workspace packages
       run: |
         for d in packages/*/; do
           echo "== npm ci: $d"
-          (cd "$d" && npm ci)
+          (cd "$d" && npm ci --ignore-scripts && npm rebuild)
+        done
+
+    - name: Build workspace packages
+      run: |
+        for d in packages/*/; do
+          echo "== build: $d"
+          (cd "$d" && npm run build --if-present)
         done
 
     - name: Install electron app dependencies
