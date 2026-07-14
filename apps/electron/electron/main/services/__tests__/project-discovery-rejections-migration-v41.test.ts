@@ -17,8 +17,13 @@ import { join } from 'path'
 const source = readFileSync(join(__dirname, '..', 'database.ts'), 'utf-8')
 
 describe('schema v41: project_discovery_rejections (durable discovered-project dismissal)', () => {
-  it('bumps SCHEMA_VERSION to 41 (current)', () => {
-    expect(source).toMatch(/const SCHEMA_VERSION = 41\b/)
+  it('bumps SCHEMA_VERSION to at least 41', () => {
+    // Floor, not exact pin (same convention as the v40 test): later schema
+    // bumps (v42+) must not break the v41 contract test. The CURRENT version
+    // is pinned by the newest migration test.
+    const m = source.match(/const SCHEMA_VERSION = (\d+)\b/)
+    expect(m).not.toBeNull()
+    expect(Number(m![1])).toBeGreaterThanOrEqual(41)
   })
 
   it('fresh schema creates the project_discovery_rejections table keyed by normalized name', () => {

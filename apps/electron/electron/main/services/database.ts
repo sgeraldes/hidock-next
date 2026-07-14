@@ -7,7 +7,7 @@ import { DatabaseEngine, getTableColumns, type SqlJsDatabase } from '@hidock/dat
 import { normalizeName, isGenericSpeakerLabel, detectAmbiguousName } from './entity-normalize'
 import { getEventBus } from './event-bus'
 
-const SCHEMA_VERSION = 41
+const SCHEMA_VERSION = 42
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -80,6 +80,13 @@ CREATE TABLE IF NOT EXISTS knowledge_captures (
     quality_rating TEXT CHECK(quality_rating IN ('valuable', 'archived', 'low-value', 'garbage', 'unrated')) DEFAULT 'unrated',
     quality_confidence REAL,
     quality_assessed_at TEXT,
+    -- Content-based VALUE classification, v42/F16. quality_reasons is a JSON
+    -- array of fixed tags, see VALUE_REASON_TAGS in value-classification.ts.
+    -- quality_source distinguishes an AI-set rating from a user-set one so
+    -- re-analysis can safely refresh an AI rating without ever touching a
+    -- rating the user set by hand, see applyCaptureValueClassification.
+    quality_reasons TEXT,
+    quality_source TEXT CHECK(quality_source IN ('ai', 'user')),
 
     -- Storage tier and retention
     storage_tier TEXT CHECK(storage_tier IN ('hot', 'cold', 'expiring', 'deleted')) DEFAULT 'hot',
@@ -2131,6 +2138,33 @@ const MIGRATIONS: Record<number, () => void> = {
       console.warn('[Migration v41] create project_discovery_rejections failed:', e)
     }
     console.log('Migration v41 complete')
+  },
+
+  42: () => {
+    // v42: knowledge_captures.quality_reasons + quality_source — content-based
+    // VALUE classification (F16/spec-001). quality_reasons is a JSON array of
+    // fixed tags (see VALUE_REASON_TAGS in value-classification.ts);
+    // quality_source distinguishes an AI-set rating ('ai') from a user-set one
+    // ('user') so re-analysis can safely refresh an AI rating without ever
+    // touching a rating the user set by hand. Idempotent: guarded ALTERs.
+    console.log('Running migration to schema v42: knowledge_captures.quality_reasons + quality_source')
+    const database = getDatabase()
+    const cols = getTableColumns(database, 'knowledge_captures')
+    if (cols.length > 0 && !cols.includes('quality_reasons')) {
+      try {
+        database.run('ALTER TABLE knowledge_captures ADD COLUMN quality_reasons TEXT')
+      } catch (e) {
+        console.warn('[Migration v42] add quality_reasons failed:', e)
+      }
+    }
+    if (cols.length > 0 && !cols.includes('quality_source')) {
+      try {
+        database.run("ALTER TABLE knowledge_captures ADD COLUMN quality_source TEXT CHECK(quality_source IN ('ai','user'))")
+      } catch (e) {
+        console.warn('[Migration v42] add quality_source failed:', e)
+      }
+    }
+    console.log('Migration v42 complete')
   }
 
 }
@@ -2196,7 +2230,13 @@ function repairPhase(): void {
     { name: 'meeting_id', def: "meeting_id TEXT REFERENCES meetings(id)" },
     { name: 'correlation_confidence', def: "correlation_confidence REAL" },
     { name: 'correlation_method', def: "correlation_method TEXT" },
-    { name: 'source_recording_id', def: "source_recording_id TEXT REFERENCES recordings(id)" }
+    { name: 'source_recording_id', def: "source_recording_id TEXT REFERENCES recordings(id)" },
+    // v42 (F16/spec-001) — NOTE: unlike the repairs above, this loop runs
+    // `ADD COLUMN ${col.def}` (not `${col.name} ${col.def}`), so def MUST
+    // embed the column name itself or the ALTER becomes `ADD COLUMN TEXT`
+    // (syntax error, silently swallowed by the try/catch below).
+    { name: 'quality_reasons', def: 'quality_reasons TEXT' },
+    { name: 'quality_source', def: "quality_source TEXT CHECK(quality_source IN ('ai','user'))" }
   ]
   if (capCols.length > 0) {
     for (const col of knowledgeRepairs) {
@@ -2563,6 +2603,16 @@ export function queryOne<T>(sql: string, params: any[] = []): T | undefined {
 
 export function run(sql: string, params: any[] = []): void {
   engine.run(sql, params)
+}
+
+/** Rows modified by the most recent run()/runInTransaction() write — lets a
+ *  guarded UPDATE (WHERE clause acting as a permission check) tell whether it
+ *  actually took effect, without a separate SELECT. See
+ *  applyCaptureValueClassification (value-classification.ts) for the
+ *  motivating use: the never-downgrade guard's WHERE clause IS the write
+ *  permission, so "0 rows changed" means "blocked by the guard". */
+export function getRowsModified(): number {
+  return engine.getRowsModified()
 }
 
 // Internal run that doesn't auto-save (for use within transactions)
@@ -3903,9 +3953,13 @@ export function classifyLowValueCaptures(): { scanned: number; markedLowValue: n
     const linkedToMeeting = !!row.meeting_id
 
     if (isShort && negligibleTranscript && !linkedToMeeting) {
+      // quality_source='ai' (v42/F16) keeps all AI-set rows uniform, consistent
+      // with applyCaptureValueClassification; this classifier's own guard
+      // (quality_rating = 'unrated') is unaffected, since it never depends on
+      // quality_source.
       run(
         `UPDATE knowledge_captures
-         SET quality_rating = 'low-value', quality_confidence = 0.6, quality_assessed_at = ?
+         SET quality_rating = 'low-value', quality_confidence = 0.6, quality_assessed_at = ?, quality_source = 'ai'
          WHERE id = ? AND quality_rating = 'unrated'`,
         [new Date().toISOString(), row.id]
       )

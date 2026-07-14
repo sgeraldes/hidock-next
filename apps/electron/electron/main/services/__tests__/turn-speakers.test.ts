@@ -80,9 +80,9 @@ describe('migration v37 objects', () => {
     expect(info).toHaveLength(1)
   })
 
-  it('is at schema version 40', () => {
+  it('is at schema version 42', () => {
     const row = queryOne<{ version: number }>('SELECT version FROM schema_version ORDER BY version DESC LIMIT 1')
-    expect(row?.version).toBe(41)
+    expect(row?.version).toBe(42)
   })
 })
 
