@@ -176,7 +176,11 @@ vi.mock('@/features/library/hooks', () => ({
     setStatusFilter: vi.fn(),
     setSearchQuery: vi.fn(),
     isPending: false
-  }))
+  })),
+  // F16/spec-003 Part F — mounted once on the Library page; no-op here since
+  // this suite doesn't exercise the suggestion-toast behavior (see
+  // useValueSuggestionToasts.test.tsx for that coverage).
+  useValueSuggestionToasts: vi.fn()
 }))
 
 const mockRefresh = vi.fn()

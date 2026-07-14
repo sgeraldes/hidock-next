@@ -163,7 +163,9 @@ vi.mock('@/features/library/hooks', () => ({
     setStatusFilter: vi.fn(),
     setSearchQuery: vi.fn(),
     isPending: false
-  }))
+  })),
+  // F16/spec-003 Part F — mounted once on the Library page; no-op here.
+  useValueSuggestionToasts: vi.fn()
 }))
 
 vi.mock('@tanstack/react-virtual', () => ({

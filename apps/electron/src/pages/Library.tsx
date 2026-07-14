@@ -13,6 +13,7 @@ import {
   matchesExclusiveFilter
 } from '@/types/unified-recording'
 import { Transcript, Meeting } from '@/types'
+import type { QualityRating } from '@/types/knowledge'
 import { useAudioControls } from '@/components/OperationController'
 import { useUIStore } from '@/store/useUIStore'
 import { useDownloadQueue } from '@/store/useAppStore'
@@ -31,7 +32,7 @@ import {
   SourceReader,
   AssistantPanel
 } from '@/features/library/components'
-import { useSourceSelection, useKeyboardNavigation, useTransitionFilters } from '@/features/library/hooks'
+import { useSourceSelection, useKeyboardNavigation, useTransitionFilters, useValueSuggestionToasts } from '@/features/library/hooks'
 import { buildSearchCorpus } from '@/features/library/utils/buildSearchCorpus'
 import { getSourceType, matchesSourceTypeFilter } from '@/features/library/utils/sourceType'
 import { matchesDurationPreset } from '@/features/library/utils/durationFilter'
@@ -95,6 +96,14 @@ export function Library() {
     isPending: isFilterPending
   } = useTransitionFilters()
   const deferredSearchQuery = useDeferredValue(searchQuery)
+
+  // F16/spec-003 Part F — coalesced live-classification suggestion toasts.
+  // Mounted once here (the Library page). The backfill runner never emits
+  // these events (progress/summary only), so a large batch can't spam it.
+  useValueSuggestionToasts({
+    refresh,
+    onReview: () => setQualityFilter('low-value')
+  })
 
   // Source-type + duration filters (new) — read/set directly from the store.
   const sourceTypeFilter = useLibraryStore((state) => state.sourceTypeFilter)
@@ -511,7 +520,9 @@ export function Library() {
           return a.filename.localeCompare(b.filename) * sortMultiplier
         case 'quality': {
           // C-005: Use actual quality rating values from KnowledgeCapture type
-          const qualityOrder: Record<string, number> = { valuable: 3, archived: 2, 'low-value': 1, unrated: 0 }
+          // F16/spec-003: garbage made explicit (was an implicit ?? -1 fallback) —
+          // still sorts last, but no longer relies on an unlisted key falling through.
+          const qualityOrder: Record<string, number> = { valuable: 4, archived: 3, unrated: 2, 'low-value': 1, garbage: 0 }
           const aQ = qualityOrder[a.quality || ''] ?? -1
           const bQ = qualityOrder[b.quality || ''] ?? -1
           return (aQ - bQ) * sortMultiplier
@@ -946,6 +957,29 @@ export function Library() {
     }
   }, [refresh])
 
+  // Manual per-row value-rating override (F16/spec-003) — live update (no
+  // re-index needed, mirrors handleMarkPersonal's refresh(false) pattern).
+  const handleSetValueRating = useCallback(async (recording: UnifiedRecording, rating: QualityRating) => {
+    try {
+      const res = await window.electronAPI.recordings.setValueRating(recording.id, rating)
+      if (!res?.success) throw new Error(res?.error || 'Failed')
+      await refresh(false)
+      import('@/components/ui/toaster').then(({ toast }) => {
+        toast.success(
+          rating === 'unrated' ? 'Rating cleared' : 'Rating updated',
+          rating === 'unrated'
+            ? `"${recording.filename}" rating was cleared.`
+            : `"${recording.filename}" marked ${rating.replace('-', ' ')}.`
+        )
+      })
+    } catch (e) {
+      console.error('Failed to set value rating:', e)
+      import('@/components/ui/toaster').then(({ toast }) => {
+        toast.error('Action Failed', `Could not update the rating for "${recording.filename}".`)
+      })
+    }
+  }, [refresh])
+
   const handleDelete = useCallback(
     (recording: UnifiedRecording) => {
       if (recording.location === 'device-only') {
@@ -1003,6 +1037,13 @@ export function Library() {
       handleMarkPersonal(recording)
     },
     [handleMarkPersonal]
+  )
+
+  const handleSetValueRatingCallback = useCallback(
+    (recording: UnifiedRecording, rating: QualityRating) => {
+      handleSetValueRating(recording, rating)
+    },
+    [handleSetValueRating]
   )
 
   const handleAskAssistantCallback = useCallback(
@@ -1376,6 +1417,7 @@ export function Library() {
                           onDelete={() => handleDeleteCallback(recording)}
                           onDeletePermanent={() => handleDeletePermanentCallback(recording)}
                           onMarkPersonal={() => handleMarkPersonalCallback(recording)}
+                          onSetValueRating={(rating) => handleSetValueRatingCallback(recording, rating)}
                           onTranscribe={() => queueTranscription(recording)}
                           onReprocessVibeVoice={() => reprocessWithVibeVoice(recording)}
                           onAskAssistant={() => handleAskAssistantCallback(recording)}
