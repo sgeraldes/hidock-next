@@ -30,6 +30,8 @@ import {
   deleteNode,
   setNodeProps,
   nodeGraphStats,
+  removeRecordingProvenance,
+  pruneOrphanEdgeSources,
   DEFAULT_OVERVIEW_NODE_LIMIT,
 } from '@hidock/knowledge-graph'
 import type {
@@ -53,7 +55,7 @@ import {
   queryAll,
   queryOne,
   getValueExcludedRecordingIds,
-  isValueExcludedRecording,
+  isRecordingGraphIngestable,
   getContactById,
   getContactByName,
   createContact,
@@ -242,30 +244,52 @@ export async function ingestFromDbTranscripts(): Promise<IngestResult> {
       // DB transaction open.
       const extraction = await extractGraphFromTranscript(row.full_text, meta, llm)
 
-      // F16/spec-002 (AR-1, layer 2 of 2): FINAL eligibility is decided with
-      // a FRESH point-read at persistence time, inside the SAME transaction
-      // as the graph writes + ingested-marker insert — the pre-filter Set
-      // above is only a run-start snapshot and can go stale across this
-      // loop's awaits. A rating written any time up to this instant —
-      // including while THIS row's extraction call was in flight — is
-      // honored: an excluded recording is skipped WITHOUT writing the marker
-      // (its rating is then in the NEXT run's pre-filter snapshot, so the
-      // one extraction this run paid for is the last), and a recording whose
-      // rating cleared mid-run still ingests. Wrapping ingest+marker in one
+      // F16/spec-002 (AR-1, layer 2 of 2) + F18 (spec-004, Step 6): FINAL
+      // eligibility is decided with a FRESH point-read at persistence time,
+      // inside the SAME transaction as the graph writes + ingested-marker
+      // insert — the pre-filter Set above is only a run-start snapshot and
+      // can go stale across this loop's awaits. isRecordingGraphIngestable is
+      // a strict superset of the old value-only check: it ALSO closes the
+      // purge/soft-delete-vs-ingest race (a hard-purged or soft-deleted
+      // recording is ineligible for re-ingest at this instant). A rating (or
+      // existence) written any time up to this instant — including while
+      // THIS row's extraction call was in flight — is honored: an ineligible
+      // recording is skipped WITHOUT writing the marker (a still-live
+      // exclusion is then in the NEXT run's pre-filter snapshot, so the one
+      // extraction this run paid for is the last), and a recording that
+      // became eligible mid-run still ingests. Wrapping ingest+marker in one
       // transaction also makes them atomic: a mid-ingest failure rolls back
       // both.
       runInTransaction(() => {
-        if (isValueExcludedRecording(row.recording_id)) {
+        if (!isRecordingGraphIngestable(row.recording_id)) {
           result.skipped++
           console.log(
-            `[KnowledgeGraph] Skipped value-excluded recording ${row.recording_id} (transcript ${row.id})`
+            `[KnowledgeGraph] Skipped non-ingestable recording ${row.recording_id} (transcript ${row.id})`
           )
+          return
+        }
+
+        // F18 (AR2-4): fresh in-txn marker re-check. The outer "already
+        // ingested" pre-check above runs OUTSIDE this transaction, so two
+        // overlapping ingest passes can both pass it before either commits.
+        // This point-read — taken inside the SAME transaction as the write —
+        // is what actually prevents a double-ingest / double weight-bump: the
+        // second pass to reach this line sees the first pass's marker and
+        // skips, rather than re-asserting every edge a second time.
+        const alreadyInTxn = queryOne<{ transcript_id: string }>(
+          'SELECT transcript_id FROM graph_ingested_transcripts WHERE transcript_id = ?',
+          [row.id]
+        )
+        if (alreadyInTxn) {
+          result.skipped++
           return
         }
 
         ingestExtraction(store, extraction, meta, {
           now: new Date().toISOString(),
           resolvePerson: makePersonResolver(row.meeting_id ?? undefined),
+          recordingId: row.recording_id,
+          transcriptId: row.id,
         })
 
         // Mark as ingested
@@ -290,6 +314,17 @@ export async function ingestFromDbTranscripts(): Promise<IngestResult> {
     }
   } catch (e) {
     console.warn('[KnowledgeGraph] Person re-key pass failed (non-fatal):', e)
+  }
+
+  // F18 (spec-004, Step 6.3): hygiene sweep for graph_edge_sources rows
+  // orphaned by a merge-collision repoint that had no keeper edge to
+  // transfer onto (a self-loop collapse — see mutations.ts::mergeNodes).
+  // Non-fatal; removeRecordingProvenance already tolerates orphaned rows via
+  // its own JOIN, so a failure here never affects correctness.
+  try {
+    pruneOrphanEdgeSources(store)
+  } catch (e) {
+    console.warn('[KnowledgeGraph] Orphan edge-source prune failed (non-fatal):', e)
   }
 
   return result
@@ -377,6 +412,185 @@ export async function ingestFromFolder(folderPath: string): Promise<IngestResult
   }
 
   return result
+}
+
+// ---------------------------------------------------------------------------
+// F18 (spec-004): per-recording graph-provenance cleanup
+//
+// removeRecordingProvenanceCore is the TRANSACTION-NEUTRAL removal engine
+// (AR2-2): plain sequential statements, NO runInTransaction of its own. Two
+// callers:
+//   (a) removeRecordingFromGraph — wraps the core in ITS OWN runInTransaction,
+//       for the impact dialog's dry-run and any standalone graph-reset caller.
+//   (b) F17/T6's hard-purge path (NOT implemented by T4) — calls the core
+//       directly, INSIDE deleteRecordingCascade's own runInTransaction,
+//       passing pre-captured meetingId/transcriptIds (captured BEFORE the
+//       cascade deletes the recordings/transcripts rows). That makes the graph
+//       cleanup commit atomically with the rest of the purge: one commit, no
+//       crash window between the cascade and the graph cleanup, no
+//       pending-cleanup journal. A thrown error there aborts the WHOLE purge
+//       (honest all-or-nothing) — this core function does not catch.
+// ---------------------------------------------------------------------------
+
+export interface RemoveRecordingFromGraphOptions {
+  /** Compute the plan without writing anything (F17's impact dialog). */
+  dryRun?: boolean
+  /**
+   * Pre-captured meeting id. F17/T6 calls the core AFTER
+   * deleteRecordingCascade has already deleted the `recordings` row, so
+   * self-resolution is no longer possible there — it must pass this. Omit for
+   * dry-run / standalone use (the recording still exists; self-resolved from
+   * `recordings.meeting_id ?? recordingId`, matching ingest's own meta.meetingId).
+   */
+  meetingId?: string
+  /**
+   * Pre-captured transcript ids (same reason as meetingId). Omit for
+   * dry-run / standalone use — self-resolved as the union of the live
+   * `transcripts` table and `graph_edge_sources.transcript_id` for this
+   * recording (self-heals a stale marker left by a re-transcribed-away
+   * transcript, §3.7).
+   */
+  transcriptIds?: string[]
+}
+
+export interface RemoveRecordingFromGraphResult {
+  ok: boolean
+  recordingId: string
+  dryRun: boolean
+  /** graph_ingested_transcripts markers removed (an ESTIMATE on dryRun — AR2-5). */
+  markersRemoved: number
+  edgesRemoved: number
+  edgeSourceRowsRemoved: number
+  meetingNodesRemoved: number
+  orphanNodesRemoved: number
+  orphanNodesByType: Record<string, number>
+  sharedEdgesKept: number
+  /** Populated on failure; the caller inspects this — never a silent catch (CX-T3-7). */
+  error?: string
+}
+
+/** A project node is protected (never GC'd) when it is linked to a real
+ *  `projects` DB row — matched by name, same as projectNameIndex() elsewhere
+ *  in this file (project graph nodes are name-keyed, not id-keyed). */
+function isProjectNodeProtected(node: { label: string }): boolean {
+  const row = queryOne<{ id: string }>('SELECT id FROM projects WHERE LOWER(name) = ?', [
+    (node.label || '').toLowerCase().trim(),
+  ])
+  return !!row
+}
+
+/**
+ * Transaction-neutral removal core (AR2-2) — see the section banner above for
+ * the full contract. Resolves meetingId/transcriptIds (preferring the
+ * caller's pre-captured values), deletes `graph_ingested_transcripts` markers
+ * FIRST (belt-and-suspenders; the real race fix is `isRecordingGraphIngestable`
+ * at ingest time), then delegates the graph surgery itself to the package's
+ * `removeRecordingProvenance`. Throws on failure — callers wrap in their own
+ * transaction and/or catch.
+ */
+export function removeRecordingProvenanceCore(
+  recordingId: string,
+  opts: RemoveRecordingFromGraphOptions = {}
+): RemoveRecordingFromGraphResult {
+  const store = getKnowledgeGraphStore()
+  const dryRun = !!opts.dryRun
+
+  let meetingId = opts.meetingId
+  if (meetingId === undefined) {
+    const rec = queryOne<{ meeting_id: string | null }>('SELECT meeting_id FROM recordings WHERE id = ?', [
+      recordingId,
+    ])
+    meetingId = rec?.meeting_id ?? recordingId
+  }
+
+  const liveTranscriptIds = queryAll<{ id: string }>('SELECT id FROM transcripts WHERE recording_id = ?', [
+    recordingId,
+  ]).map((r) => r.id)
+  const sourcedTranscriptIds = store.db
+    .queryAll<{ transcript_id: string }>(
+      'SELECT DISTINCT transcript_id FROM graph_edge_sources WHERE recording_id = ?',
+      [recordingId]
+    )
+    .map((r) => r.transcript_id)
+  const transcriptIds = [...new Set([...(opts.transcriptIds ?? []), ...liveTranscriptIds, ...sourcedTranscriptIds])]
+
+  // Markers FIRST (§3.3). Plan (which markers currently exist) then execute,
+  // so dryRun and a subsequent real run report the same count (AR2-5: the
+  // dryRun figure is an estimate for the impact dialog; the real run's is the
+  // committed count).
+  let markersRemoved = 0
+  if (transcriptIds.length > 0) {
+    const placeholders = transcriptIds.map(() => '?').join(',')
+    const existingMarkers = queryAll<{ transcript_id: string }>(
+      `SELECT transcript_id FROM graph_ingested_transcripts WHERE transcript_id IN (${placeholders})`,
+      transcriptIds
+    )
+    markersRemoved = existingMarkers.length
+    if (!dryRun) {
+      for (const tid of transcriptIds) {
+        run('DELETE FROM graph_ingested_transcripts WHERE transcript_id = ?', [tid])
+      }
+    }
+  }
+
+  const removal = removeRecordingProvenance(store, recordingId, {
+    dryRun,
+    meetingId,
+    isProjectProtected: isProjectNodeProtected,
+  })
+
+  return {
+    ok: true,
+    recordingId,
+    dryRun,
+    markersRemoved,
+    ...removal,
+  }
+}
+
+function emptyRemovalCounts(): Omit<
+  RemoveRecordingFromGraphResult,
+  'ok' | 'recordingId' | 'dryRun' | 'error'
+> {
+  return {
+    markersRemoved: 0,
+    edgesRemoved: 0,
+    edgeSourceRowsRemoved: 0,
+    meetingNodesRemoved: 0,
+    orphanNodesRemoved: 0,
+    orphanNodesByType: {},
+    sharedEdgesKept: 0,
+  }
+}
+
+/**
+ * Standalone/dry-run entry point: wraps `removeRecordingProvenanceCore` in its
+ * own `runInTransaction` for atomicity, and never throws to the caller —
+ * returns `{ ok: false, error }` on failure instead (CX-T3-7: no silent
+ * catch). Used by F17's impact dialog (`dryRun: true`) and any standalone
+ * graph-reset caller. The F17 hard-purge path does NOT call this function —
+ * it calls `removeRecordingProvenanceCore` directly, inside
+ * `deleteRecordingCascade`'s own transaction (AR2-2), so a graph failure
+ * aborts the whole purge instead of leaving a partial, uncommitted cleanup.
+ */
+export function removeRecordingFromGraph(
+  recordingId: string,
+  opts: RemoveRecordingFromGraphOptions = {}
+): RemoveRecordingFromGraphResult {
+  const dryRun = !!opts.dryRun
+  try {
+    return runInTransaction(() => removeRecordingProvenanceCore(recordingId, opts))
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e)
+    console.error(`[KnowledgeGraph] removeRecordingFromGraph(${recordingId}) failed:`, e)
+    return {
+      ok: false,
+      recordingId,
+      dryRun,
+      ...emptyRemovalCounts(),
+      error,
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -475,14 +689,11 @@ export function rekeyExistingPersonNodes(): { rekeyed: number; merged: number; s
     )
 
     if (keeper && keeper.id !== node.id) {
-      // Fold this node into the existing contact-keyed node. Repoint edges
-      // (UNIQUE(source,target,type) collisions are ignored → move what fits,
-      // drop the rest), then delete the loser.
-      db.run('UPDATE OR IGNORE graph_edges SET source_id = ? WHERE source_id = ?', [keeper.id, node.id])
-      db.run('DELETE FROM graph_edges WHERE source_id = ?', [node.id])
-      db.run('UPDATE OR IGNORE graph_edges SET target_id = ? WHERE target_id = ?', [keeper.id, node.id])
-      db.run('DELETE FROM graph_edges WHERE target_id = ?', [node.id])
-      db.run('DELETE FROM graph_nodes WHERE id = ?', [node.id])
+      // Fold this node into the existing contact-keyed node via the package's
+      // mergeNodes (repoints edges, drops a colliding one after transferring
+      // its graph_edge_sources rows + weight onto the survivor — AR2-1 — and
+      // cleans up any resulting self-loop), then delete the loser.
+      mergeNodes(store, keeper.id, node.id)
       result.merged++
     } else if (!keeper) {
       // No contact-keyed node yet — relabel this one in place. Edges reference

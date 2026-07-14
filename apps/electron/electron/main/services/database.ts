@@ -3185,6 +3185,24 @@ export function isValueExcludedRecording(recordingId: string): boolean {
 }
 
 /**
+ * F18 (spec-004): final transactional eligibility for graph ingest — the
+ * recording must still exist, be non-deleted, non-personal, AND not
+ * value-excluded. A strict superset of {@link isValueExcludedRecording}: it
+ * closes the purge/soft-delete-vs-ingest race (Codex adversarial review AR-1
+ * style) by making a hard-purged or soft-deleted recording ineligible for
+ * (re-)ingest at the exact persistence-time point-read, inside the same
+ * transaction as the graph write + ingested-marker insert.
+ */
+export function isRecordingGraphIngestable(recordingId: string): boolean {
+  const rec = queryOne<{ id: string }>(
+    'SELECT id FROM recordings WHERE id = ? AND deleted_at IS NULL AND COALESCE(personal,0) = 0',
+    [recordingId]
+  )
+  if (!rec) return false
+  return !isValueExcludedRecording(recordingId)
+}
+
+/**
  * Recording ids that must be excluded from AI processing and RAG surfaces:
  * every recording flagged `personal` OR soft-deleted (`deleted_at` set),
  * UNIONED (F16/spec-002) with {@link getValueExcludedRecordingIds} — a
