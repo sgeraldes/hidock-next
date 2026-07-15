@@ -492,16 +492,19 @@ export function routeFeature(pathname: string): FeatureId | null {
  * in `:`.
  *
  * NOTE: this is deliberately a prefix allowlist for namespaces that belong
- * entirely to core. Namespaces that MIX feature-owned and core channels (today
- * only `recordings:`) are NOT listed here — their core channels are exact-listed
- * in `CORE_CHANNELS` so a newly-added `recordings:*` trigger cannot silently
- * default to open; it stays `unclassified` until a human classifies it.
+ * entirely to core. Namespaces that MIX feature-owned and core channels, or
+ * carry feature side effects (today `recordings:` and `storage:`), are NOT
+ * listed here — their core channels are exact-listed in `CORE_CHANNELS` so a
+ * newly-added channel on those namespaces cannot silently default to open; it
+ * stays `unclassified` until a human classifies it.
  */
 export const CORE_CHANNEL_PREFIXES: string[] = [
   'app:',
   'config:',
   'db:',
-  'storage:',
+  // `storage:` is deliberately NOT a blanket prefix (adversarial round-2 [HIGH]):
+  // `storage:save-recording` carries a transcription side effect, so storage
+  // channels are exact-listed in CORE_CHANNELS instead.
   'integrity:',
   'migration:',
   'repair:',
@@ -518,13 +521,35 @@ export const CORE_CHANNEL_PREFIXES: string[] = [
 ]
 
 /**
- * Exact `core` channels that live on the SHARED `recordings:` namespace (Library
- * reads, deletes, imports, watcher control, meeting-linking, status reads/writes).
- * They stay open even when transcription is off. Transcription TRIGGERS and the
- * meeting-intelligence timeline channels on the same namespace are feature-owned
- * (see `FEATURES[*].ipcNamespaces`) and are NOT listed here.
+ * Exact `core` channels on namespaces that cannot be blanket-allowlisted:
+ *
+ * - `recordings:` MIXES Library floor channels (reads, deletes, imports, watcher
+ *   control, meeting-linking, status updates) with transcription triggers and
+ *   meeting-intelligence timeline channels. The feature-owned ones live in
+ *   `FEATURES[*].ipcNamespaces`; only the floor is listed here.
+ * - `storage:` channels are core (file storage is the product floor), but
+ *   `storage:save-recording` carries a transcription side effect — saving stays
+ *   core while the side effect itself is gated behind the transcription feature
+ *   inside `queueTranscriptionIfEnabled` (adversarial round-2 [HIGH]).
+ *
+ * Anything new on these namespaces is `unclassified` until explicitly added.
  */
 export const CORE_CHANNELS: string[] = [
+  'storage:assign-tier',
+  'storage:delete-recording',
+  'storage:execute-cleanup',
+  'storage:get-by-tier',
+  'storage:get-cleanup-suggestions',
+  'storage:get-cleanup-suggestions-for-tier',
+  'storage:get-info',
+  'storage:get-stats',
+  'storage:initialize-untiered',
+  'storage:open-file',
+  'storage:open-folder',
+  'storage:read-recording',
+  'storage:reveal-in-folder',
+  'storage:save-recording',
+  'storage:select-folder',
   'recordings:addExternal',
   'recordings:addExternalByPath',
   'recordings:backfillDurations',

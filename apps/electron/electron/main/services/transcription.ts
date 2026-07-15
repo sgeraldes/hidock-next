@@ -87,6 +87,7 @@ function spawnStreaming(
   })
 }
 import { getConfig } from './config'
+import { isFeatureEnabled } from './feature-gate'
 import {
   addToQueue,
   getRecordingById,
@@ -610,9 +611,18 @@ export async function processQueueManually(): Promise<void> {
  * auto-transcribe enabled". Consolidates the previously duplicated gate from
  * download-service, recording-watcher, and storage:save-recording (ADR-0005
  * category A). Returns true if the recording was queued, false otherwise.
+ *
+ * Track I (adversarial round-2 [HIGH]): also gated on the transcription FEATURE.
+ * Callers of this funnel are core/device flows (storage:save-recording, the
+ * download service, the recording watcher, the device pipeline) whose own
+ * channels are never transcription-gated — without this check, a core channel
+ * could start transcription background work (queue insert + processor kick)
+ * while the transcription feature is disabled, with only the legacy
+ * autoTranscribe setting standing in the way.
  */
 export function queueTranscriptionIfEnabled(recordingId: string): boolean {
   if (getConfig().transcription.autoTranscribe !== true) return false
+  if (!isFeatureEnabled('transcription')) return false
   addToQueue(recordingId)
   processQueueManually()
   return true

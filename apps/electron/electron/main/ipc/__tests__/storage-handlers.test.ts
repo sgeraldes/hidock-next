@@ -94,4 +94,25 @@ describe('storage:save-recording — auto-transcribe gating', () => {
     expect(transcription.queueTranscriptionIfEnabled).toHaveBeenCalledWith(recordingId)
     expect(inserted.transcription_status).toBe('pending')
   })
+
+  it('records transcription_status "none" when the transcription FEATURE is disabled, even with autoTranscribe on', async () => {
+    // Adversarial round-2 [HIGH]: storage:save-recording is a core channel, but
+    // its transcription side effect must respect the feature gate. With the
+    // feature disabled the inserted row must not claim a pending transcription
+    // (the funnel itself refuses to queue — covered by
+    // transcription-funnel-gate.test.ts against the REAL funnel).
+    ;(config.getConfig as ReturnType<typeof vi.fn>).mockReturnValue({
+      features: { preset: 'full', flags: { transcription: false } },
+      transcription: { autoTranscribe: true }
+    })
+    registerStorageHandlers()
+    const handler = getHandler('storage:save-recording')
+
+    const res = await handler({}, '2026Jun24-180500-Rec78.hda', [1, 2, 3])
+    await flushMicrotasks()
+
+    expect(res.success).toBe(true)
+    const inserted = (db.insertRecording as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    expect(inserted.transcription_status).toBe('none')
+  })
 })

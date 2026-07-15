@@ -101,4 +101,17 @@ describe('IPC channel registrar inventory', () => {
       expect(classifyChannel(ch), ch).toEqual({ kind: 'core' })
     }
   })
+
+  it('storage: is NOT a blanket core prefix — channels are exact-listed (round-2 [HIGH])', () => {
+    // Every REGISTERED storage channel is consciously core…
+    const storageChannels = ALL_CHANNELS.filter((c) => c.startsWith('storage:'))
+    expect(storageChannels.length).toBeGreaterThan(0)
+    for (const ch of storageChannels) {
+      expect(classifyChannel(ch), ch).toEqual({ kind: 'core' })
+    }
+    expect(classifyChannel('storage:save-recording')).toEqual({ kind: 'core' })
+    // …but an UNREGISTERED/new storage channel does not inherit openness: it is
+    // unclassified until a human adds it to CORE_CHANNELS (or maps it to a feature).
+    expect(classifyChannel('storage:some-future-channel')).toEqual({ kind: 'unclassified' })
+  })
 })
