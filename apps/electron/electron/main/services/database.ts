@@ -3298,6 +3298,54 @@ export function setKnowledgeCaptureRatingByRecording(
   return { success: true, rating }
 }
 
+// =============================================================================
+// F17/T6 (spec-006) — graph-provenance cleanup injection seam.
+//
+// database.ts is the lowest-level main-process module; knowledge-graph-service.ts
+// imports ~15 symbols FROM here, so a top-level import of the graph service here
+// would create a dependency cycle. This dependency-injection seam lets the hard
+// purge (below) call into the graph package's removal engine without database.ts
+// ever importing knowledge-graph-service. The seam is wired once, at startup, by
+// registerRecordingDeletionHandlers() (recording-deletion-handlers.ts) — see
+// main/index.ts's post-registration tripwire for the loud "unwired" guard.
+//
+// AR3-1 (Codex adversarial review, BINDING): the hard branch FAILS CLOSED —
+// when the seam is unregistered, the purge THROWS rather than silently
+// skipping graph cleanup, so it is refused end-to-end (nothing is deleted)
+// instead of leaving graph residue behind. Tests that don't want the graph
+// package involved wire an explicit no-op stub via setGraphProvenanceCleanup.
+// =============================================================================
+
+export interface GraphProvenanceCleanupResult {
+  ok: boolean
+  error?: string
+  markersRemoved: number
+  edgesRemoved: number
+  edgeSourceRowsRemoved: number
+  meetingNodesRemoved: number
+  orphanNodesRemoved: number
+}
+
+export type GraphProvenanceCleanupFn = (
+  recordingId: string,
+  opts: { meetingId?: string; transcriptIds?: string[] }
+) => GraphProvenanceCleanupResult
+
+let _graphProvenanceCleanup: GraphProvenanceCleanupFn | null = null
+
+/** Wire (or clear, passing null) the graph-provenance cleanup used by a hard
+ *  purge. Production wires this once at IPC-handler registration time; tests
+ *  wire an explicit stub (AR3-1 fail-closed means an unwired hard purge now
+ *  refuses rather than silently skipping cleanup). */
+export function setGraphProvenanceCleanup(fn: GraphProvenanceCleanupFn | null): void {
+  _graphProvenanceCleanup = fn
+}
+
+/** Startup tripwire support (main/index.ts) + the wiring-guard test. */
+export function isGraphProvenanceCleanupRegistered(): boolean {
+  return _graphProvenanceCleanup !== null
+}
+
 export interface RecordingDeletionImpact {
   recordingId: string
   filename: string
@@ -3308,6 +3356,28 @@ export interface RecordingDeletionImpact {
   artifacts: number
   meetingLinks: number
   hasAudioFile: boolean
+  /** F17/T6 (spec-006 D5): whether the recording is currently marked on-device
+   *  (rec.on_device). Gates the DeletePermanentDialog's "Also delete from
+   *  device" checkbox for a Trash row, which has no live UnifiedRecording
+   *  location signal (F-INFO-6 — trash rows always flatten to 'local-only'). */
+  onDevice: boolean
+  /** F17/T6 — the device's own filename for this recording (same value as
+   *  `filename`; device and local share one canonical name), or null when not
+   *  on device. Sourced from the DB row rather than the renderer's
+   *  UnifiedRecording, which loses this field entirely for Trash rows. */
+  deviceFilename: string | null
+  /**
+   * F17/T6 (spec-006 D5 + AR3-8): populated by the IPC handler layer
+   * (recording-deletion-handlers.ts), NOT by getRecordingDeletionImpact()
+   * itself — computing it requires a graph dry-run, and database.ts stays
+   * graph-free except for the cleanup seam above (no cycle). number = a
+   * point-in-time ESTIMATE ("~N graph links"); null = the graph dry-run
+   * explicitly failed (AR3-8: UNKNOWN, the dialog renders a warning, never a
+   * silent omission); absent only if the handler layer is bypassed entirely
+   * (shouldn't happen in production — every deletionImpact call goes through
+   * the handler).
+   */
+  graphEstimate?: number | null
 }
 
 /**
@@ -3364,7 +3434,13 @@ export function getRecordingDeletionImpact(recordingId: string): RecordingDeleti
     captures: captureIds.length,
     artifacts,
     meetingLinks,
-    hasAudioFile: !!(rec.file_path && rec.on_local)
+    hasAudioFile: !!(rec.file_path && rec.on_local),
+    // F17/T6 D5 + F-INFO-6: on_device/filename come straight from the DB row,
+    // available for BOTH a live and a soft-deleted (Trash) recording — unlike
+    // the renderer's UnifiedRecording, which loses deviceFilename entirely
+    // once a row is flattened into the Trash view.
+    onDevice: !!rec.on_device,
+    deviceFilename: rec.on_device ? rec.filename : null
   }
 }
 
@@ -3461,7 +3537,26 @@ export interface RecordingDeletionResult {
     speakerBindings: number
     candidates: number
     meetingLinksRemoved: number
+    // F17/T6 (spec-006 D1/D5) — actual (not estimated) graph-provenance
+    // cleanup counts, merged in from the injection seam's result. Zero for a
+    // soft delete (the graph is untouched) and for a hard delete that used
+    // the skipGraphCleanup escape hatch.
+    markersRemoved: number
+    edgesRemoved: number
+    edgeSourceRowsRemoved: number
+    meetingNodesRemoved: number
+    orphanNodesRemoved: number
   }
+  /** F17/T6 AR3-3(c) — true only when a hard purge used the explicit
+   *  skip-graph-cleanup escape hatch (a second, user-invoked action after a
+   *  fail-closed refusal). Always false for soft deletes and for a normal
+   *  hard purge. */
+  graphCleanupSkipped: boolean
+  /** F17/T6 AR3-2 — the deletion_journal row's own id (hard mode only), so the
+   *  post-commit file-cleanup step (recording-deletion-service.ts) can record
+   *  which on-disk targets it failed to remove, keyed precisely rather than by
+   *  a (possibly ambiguous) recording_id + mode lookup. */
+  journalId?: string
 }
 
 /**
@@ -3487,7 +3582,7 @@ export interface RecordingDeletionResult {
  */
 export function deleteRecordingCascade(
   recordingId: string,
-  opts: { hard?: boolean } = {}
+  opts: { hard?: boolean; skipGraphCleanup?: boolean } = {}
 ): RecordingDeletionResult | undefined {
   const rec = getRecordingById(recordingId)
   if (!rec) return undefined
@@ -3500,7 +3595,12 @@ export function deleteRecordingCascade(
     artifacts: 0,
     speakerBindings: 0,
     candidates: 0,
-    meetingLinksRemoved: 0
+    meetingLinksRemoved: 0,
+    markersRemoved: 0,
+    edgesRemoved: 0,
+    edgeSourceRowsRemoved: 0,
+    meetingNodesRemoved: 0,
+    orphanNodesRemoved: 0
   }
 
   if (!opts.hard) {
@@ -3522,7 +3622,8 @@ export function deleteRecordingCascade(
       originalFilename: rec.original_filename,
       filePath: rec.file_path,
       artifactPaths: [],
-      removed: { ...zero }
+      removed: { ...zero },
+      graphCleanupSkipped: false
     }
   }
 
@@ -3540,6 +3641,48 @@ export function deleteRecordingCascade(
       )
       const transcriptIds = transcriptRows.map((t) => t.id)
       const tPlaceholders = transcriptIds.map(() => '?').join(',')
+
+      // spec-006/F17 T6 D1 — graph-provenance cleanup, run early using the
+      // PRE-CAPTURED meetingId/transcriptIds (this recording's transcripts/
+      // recordings rows are deleted further down in this SAME transaction —
+      // by the time removeRecordingProvenanceCore would try to self-resolve
+      // them, they'd be gone; passing them explicitly keeps it correct
+      // regardless of statement order, and running it here keeps intent
+      // unmistakable). meetingId mirrors ingest's own meta.meetingId
+      // (knowledge-graph-service.ts ingestFromDbTranscripts).
+      //
+      // AR3-1 (Codex adversarial review, BINDING, fail-closed): an unwired
+      // seam THROWS here — the whole transaction rolls back, so the purge is
+      // REFUSED end-to-end rather than silently leaving graph residue behind.
+      // AR3-3(c): the caller-supplied skipGraphCleanup escape hatch bypasses
+      // the seam call entirely — reachable only as an explicit second user
+      // action after a fail-closed refusal (recording-deletion-handlers.ts /
+      // Library.tsx), never automatically.
+      const meetingId = rec.meeting_id ?? recordingId
+      const graphCleanupSkipped = !!opts.skipGraphCleanup
+      let graphRemoved = {
+        markersRemoved: 0,
+        edgesRemoved: 0,
+        edgeSourceRowsRemoved: 0,
+        meetingNodesRemoved: 0,
+        orphanNodesRemoved: 0
+      }
+      if (!graphCleanupSkipped) {
+        if (!_graphProvenanceCleanup) {
+          throw new Error('graph cleanup unavailable — purge refused (fail-closed)')
+        }
+        const g = _graphProvenanceCleanup(recordingId, { meetingId, transcriptIds })
+        if (!g.ok) {
+          throw new Error(g.error || 'Graph provenance cleanup failed')
+        }
+        graphRemoved = {
+          markersRemoved: g.markersRemoved,
+          edgesRemoved: g.edgesRemoved,
+          edgeSourceRowsRemoved: g.edgeSourceRowsRemoved,
+          meetingNodesRemoved: g.meetingNodesRemoved,
+          orphanNodesRemoved: g.orphanNodesRemoved
+        }
+      }
 
       const countOf = (sql: string, params: any[]): number => {
         try {
@@ -3650,12 +3793,30 @@ export function deleteRecordingCascade(
         artifacts: artifactRows.length,
         speakerBindings: speakerCount,
         candidates: candidateCount,
-        meetingLinksRemoved
+        meetingLinksRemoved,
+        // spec-006/F17 T6 D1/D5 — actual graph cleanup counts, merged in.
+        ...graphRemoved
       }
+      // AR3-7 (Codex adversarial review, BINDING — supersedes D4's "keep a
+      // minimized snapshot" ruling): a HARD journal row is privacy-sensitive
+      // and stores NO filenames, NO paths, and NO counts — only the opaque
+      // recording_id + mode + created_at (already columns on this table) plus,
+      // ONLY when the escape hatch was used, a `graph_cleanup_skipped` marker
+      // (AR3-3c) so an auditor can see cleanup was intentionally bypassed.
+      // AR3-2's post-commit pending_files record (recording-deletion-service.ts,
+      // via recordPendingFileCleanups) is a LATER UPDATE to this same row —
+      // this INSERT never writes it. The soft-delete journal above is
+      // UNCHANGED (full snapshot — restore fidelity requires it).
+      const journalId = randomUUID()
       runNoSave(
         `INSERT INTO deletion_journal (id, recording_id, mode, recording_snapshot, removed_counts, created_at)
-         VALUES (?, ?, 'hard', ?, ?, ?)`,
-        [randomUUID(), recordingId, JSON.stringify(rec), JSON.stringify(removed), new Date().toISOString()]
+         VALUES (?, ?, 'hard', ?, NULL, ?)`,
+        [
+          journalId,
+          recordingId,
+          graphCleanupSkipped ? JSON.stringify({ mode: 'hard', graph_cleanup_skipped: true }) : null,
+          new Date().toISOString()
+        ]
       )
 
       return {
@@ -3667,10 +3828,140 @@ export function deleteRecordingCascade(
         artifactPaths: artifactRows
           .map((a) => a.storage_path)
           .filter((p): p is string => !!p),
-        removed
+        removed,
+        graphCleanupSkipped,
+        journalId
       }
     })
   )
+}
+
+// =============================================================================
+// F17/T6 (spec-006 AR3-2) — post-commit file-cleanup partial-result ledger.
+//
+// A hard purge's DB rows are already committed by the time
+// recording-deletion-service.ts unlinks the audio file, wiki pages, artifact
+// blobs, and syncs the vector store — those are filesystem/in-memory side
+// effects OUTSIDE the cascade transaction, so a locked file or a transient I/O
+// error there must not (and cannot) roll back the DB purge. Instead of
+// silently swallowing that failure, the service durably records WHICH targets
+// still need cleanup, keyed by the hard journal row's own id (set on
+// RecordingDeletionResult.journalId above), and a bounded, non-fatal retry
+// sweep (recording-deletion-service.ts's retryPendingFileCleanups) re-attempts
+// them on every subsequent hard purge and on Trash-view entry.
+// =============================================================================
+
+export interface PendingCleanupTarget {
+  kind: 'audio' | 'wiki' | 'artifact' | 'vector'
+  /** On-disk path, for 'audio' | 'artifact' targets. 'wiki' | 'vector' retry
+   *  by recordingId instead (their cleanup functions operate on the whole
+   *  recording, not a single path). */
+  path?: string
+}
+
+/**
+ * Persist which post-commit file-cleanup targets failed for a hard purge,
+ * keyed by the journal row's own id. Merges with (rather than clobbers) any
+ * existing snapshot content — e.g. AR3-3(c)'s graph_cleanup_skipped flag,
+ * already written by the INSERT this UPDATEs. No-ops when there is nothing
+ * pending (AR3-7's NULL-by-default stays true when every target succeeded).
+ */
+export function recordPendingFileCleanups(journalId: string, targets: PendingCleanupTarget[]): void {
+  if (targets.length === 0) return
+  const row = queryOne<{ recording_snapshot: string | null }>(
+    'SELECT recording_snapshot FROM deletion_journal WHERE id = ?',
+    [journalId]
+  )
+  let snapshot: Record<string, unknown> = { mode: 'hard' }
+  if (row?.recording_snapshot) {
+    try {
+      snapshot = JSON.parse(row.recording_snapshot) as Record<string, unknown>
+    } catch {
+      snapshot = { mode: 'hard' }
+    }
+  }
+  snapshot.pending_files = targets
+  runNoSave('UPDATE deletion_journal SET recording_snapshot = ? WHERE id = ?', [JSON.stringify(snapshot), journalId])
+}
+
+export interface PendingCleanupJournalRow {
+  journalId: string
+  recordingId: string
+  targets: PendingCleanupTarget[]
+}
+
+/**
+ * Bounded scan for hard journal rows still carrying pending file-cleanup
+ * targets — the AR3-2 retry sweep's read side. Newest first, capped so a
+ * large backlog can't make a single sweep expensive. Tolerates a malformed
+ * snapshot (skips that row rather than crashing the sweep).
+ */
+export function getPendingFileCleanups(limit = 25): PendingCleanupJournalRow[] {
+  const rows = queryAll<{ id: string; recording_id: string; recording_snapshot: string | null }>(
+    `SELECT id, recording_id, recording_snapshot FROM deletion_journal
+      WHERE mode = 'hard' AND recording_snapshot LIKE '%pending_files%'
+      ORDER BY created_at DESC LIMIT ?`,
+    [limit]
+  )
+  const out: PendingCleanupJournalRow[] = []
+  for (const row of rows) {
+    if (!row.recording_snapshot) continue
+    try {
+      const snapshot = JSON.parse(row.recording_snapshot) as { pending_files?: PendingCleanupTarget[] }
+      if (snapshot.pending_files && snapshot.pending_files.length > 0) {
+        out.push({ journalId: row.id, recordingId: row.recording_id, targets: snapshot.pending_files })
+      }
+    } catch {
+      /* malformed snapshot — skip, don't crash the retry sweep */
+    }
+  }
+  return out
+}
+
+/**
+ * Write back the REMAINING pending targets after a retry attempt (the AR3-2
+ * sweep's write side). An empty `remaining` array clears pending_files while
+ * preserving any other snapshot field (e.g. graph_cleanup_skipped); if
+ * nothing else is left on the snapshot, nulls the whole column (AR3-7's
+ * privacy default).
+ */
+export function updatePendingFileCleanups(journalId: string, remaining: PendingCleanupTarget[]): void {
+  const row = queryOne<{ recording_snapshot: string | null }>(
+    'SELECT recording_snapshot FROM deletion_journal WHERE id = ?',
+    [journalId]
+  )
+  let snapshot: Record<string, unknown> = {}
+  if (row?.recording_snapshot) {
+    try {
+      snapshot = JSON.parse(row.recording_snapshot) as Record<string, unknown>
+    } catch {
+      snapshot = {}
+    }
+  }
+  if (remaining.length > 0) {
+    snapshot.pending_files = remaining
+  } else {
+    delete snapshot.pending_files
+  }
+  const hasOtherFields = Object.keys(snapshot).some((k) => k !== 'mode' && k !== 'pending_files')
+  const next = remaining.length > 0 || hasOtherFields ? JSON.stringify(snapshot) : null
+  runNoSave('UPDATE deletion_journal SET recording_snapshot = ? WHERE id = ?', [next, journalId])
+}
+
+/**
+ * F17/T6 AR3-6(b) — immediately reconcile a single recording's device
+ * presence after a CONFIRMED device delete (permanent-delete's device
+ * checkbox, and the synced-row "Delete from device" item), so the UI doesn't
+ * show a stale 'both'/on-device row until the next authoritative scan (which
+ * remains the source of truth and will re-confirm this). Mirrors
+ * markRecordingsNotOnDevice's per-row logic, targeted at one id instead of a
+ * full-scan diff. No-ops for an unknown or already-not-on-device recording.
+ */
+export function markRecordingNotOnDeviceById(id: string): void {
+  const rec = getRecordingById(id)
+  if (!rec || !rec.on_device) return
+  const newLocation = rec.on_local ? 'local-only' : 'deleted'
+  updateRecordingLifecycle(id, { on_device: 0, location: newLocation as Recording['location'] })
 }
 
 /**

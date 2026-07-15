@@ -15,6 +15,13 @@
  *
  * The DEVICE copy is intentionally never touched (USB safety); removing it is a
  * separate, explicit action out of scope here.
+ *
+ * F17/T6 (spec-006) additions: `opts.skipGraphCleanup` threads AR3-3(c)'s
+ * escape hatch through to the cascade; a hard purge's post-commit file
+ * cleanup now tracks PER-TARGET outcomes and durably records any failures
+ * (AR3-2) instead of only logging a warning, with a bounded, non-fatal retry
+ * sweep (retryPendingFileCleanups) piggybacked on every hard purge and
+ * available as its own IPC for a Trash-view-entry sweep.
  */
 
 import { existsSync, unlinkSync } from 'fs'
@@ -23,8 +30,12 @@ import {
   restoreRecording,
   setRecordingPersonal,
   getRecordingDeletionImpact,
+  recordPendingFileCleanups,
+  getPendingFileCleanups,
+  updatePendingFileCleanups,
   type RecordingDeletionResult,
-  type RecordingDeletionImpact
+  type RecordingDeletionImpact,
+  type PendingCleanupTarget
 } from './database'
 import { deleteRecording as deleteRecordingFile } from './file-storage'
 import { removeMeetingWiki } from './meeting-wiki'
@@ -37,11 +48,32 @@ export interface DeleteRecordingOutcome extends RecordingDeletionResult {
     wikiPages: number
     artifactBlobs: number
   }
+  /**
+   * F17/T6 AR3-2 — true only when EVERY file-cleanup target that needed
+   * removal was confirmed removed, including any the piggybacked retry sweep
+   * cleared before this call returned. The caller's completion toast must
+   * show plain success ONLY when this is true; otherwise an honest partial
+   * ("N couldn't be deleted; will retry automatically"). Always true for a
+   * soft delete (no files are touched).
+   */
+  allFilesRemoved: boolean
+  /** Kinds still pending after the retry sweep (empty when allFilesRemoved). */
+  pendingFileKinds: string[]
 }
 
 export interface DeletionServiceError {
   success: false
   error: string
+  /**
+   * F17/T6 AR3-1/AR3-3 — set when this specific failure means "the graph
+   * cleanup seam is unavailable" (the fail-closed seam-null throw inside the
+   * cascade transaction — AR3-1). The IPC handler layer's own
+   * ensureGraphReady() pre-flight (AR3-3a) short-circuits BEFORE this
+   * function is even called and sets the same flag on its own response.
+   * Either way, the caller uses this to offer the explicit skipGraphCleanup
+   * escape hatch — never automatically.
+   */
+  graphUnavailable?: boolean
 }
 
 /**
@@ -66,6 +98,13 @@ export function getDeletionImpact(recordingId: string): RecordingDeletionImpact 
   return getRecordingDeletionImpact(recordingId)
 }
 
+/** True when a cascade-throw message means "the graph cleanup seam itself is
+ *  unavailable" (AR3-1's fail-closed refusal), distinct from any other
+ *  cascade failure — matches the exact wording database.ts throws. */
+function isGraphUnavailableMessage(message: string): boolean {
+  return /graph cleanup unavailable/i.test(message)
+}
+
 /**
  * Delete a recording and everything derived from it. Soft by default (restorable
  * tombstone, no files removed); hard purge irreversibly removes derived rows +
@@ -73,19 +112,25 @@ export function getDeletionImpact(recordingId: string): RecordingDeletionImpact 
  */
 export async function deleteRecording(
   recordingId: string,
-  opts: { hard?: boolean } = {}
+  opts: { hard?: boolean; skipGraphCleanup?: boolean } = {}
 ): Promise<DeleteRecordingOutcome | DeletionServiceError> {
   let cascade: RecordingDeletionResult | undefined
   try {
     cascade = deleteRecordingCascade(recordingId, opts)
   } catch (e) {
-    return { success: false, error: e instanceof Error ? e.message : 'Cascade delete failed' }
+    const message = e instanceof Error ? e.message : 'Cascade delete failed'
+    return {
+      success: false,
+      error: message,
+      ...(isGraphUnavailableMessage(message) ? { graphUnavailable: true } : {})
+    }
   }
   if (!cascade) {
     return { success: false, error: `Recording ${recordingId} not found` }
   }
 
   const filesRemoved = { audio: false, wikiPages: 0, artifactBlobs: 0 }
+  const pendingTargets: PendingCleanupTarget[] = []
 
   if (cascade.mode === 'hard') {
     // Sync the in-memory vector store (its DB rows are already gone).
@@ -93,14 +138,22 @@ export async function deleteRecording(
       await getVectorStore().deleteByRecording(recordingId)
     } catch (e) {
       console.warn('[RecordingDeletion] vector store sync failed:', e)
+      pendingTargets.push({ kind: 'vector' })
     }
 
-    // Audio file on disk (data path). Never the device copy.
+    // Audio file on disk (data path). Never the device copy. A `false`
+    // return from deleteRecordingFile is only a REAL failure worth tracking
+    // when the file existed and the unlink attempt still didn't remove it —
+    // if it was already gone, there's nothing left to clean up.
     if (cascade.filePath) {
+      const pathExisted = existsSync(cascade.filePath)
       try {
         filesRemoved.audio = deleteRecordingFile(cascade.filePath)
       } catch (e) {
         console.warn('[RecordingDeletion] audio unlink failed:', e)
+      }
+      if (!filesRemoved.audio && pathExisted) {
+        pendingTargets.push({ kind: 'audio', path: cascade.filePath })
       }
     }
 
@@ -109,6 +162,7 @@ export async function deleteRecording(
       filesRemoved.wikiPages = removeMeetingWiki(recordingId)
     } catch (e) {
       console.warn('[RecordingDeletion] wiki purge failed:', e)
+      pendingTargets.push({ kind: 'wiki' })
     }
 
     // Artifact blobs.
@@ -120,11 +174,105 @@ export async function deleteRecording(
         }
       } catch (e) {
         console.warn(`[RecordingDeletion] artifact blob unlink failed for ${path}:`, e)
+        pendingTargets.push({ kind: 'artifact', path })
+      }
+    }
+
+    // AR3-2 — durably record any first-attempt failures against this purge's
+    // own journal row (deleteRecordingCascade always sets journalId for a
+    // hard purge).
+    if (pendingTargets.length > 0 && cascade.journalId) {
+      try {
+        recordPendingFileCleanups(cascade.journalId, pendingTargets)
+      } catch (e) {
+        console.warn('[RecordingDeletion] failed to record pending cleanups:', e)
       }
     }
   }
 
-  return { success: true, ...cascade, filesRemoved }
+  // AR3-2 — every hard purge piggybacks a bounded, non-fatal retry sweep of
+  // ANY pending file-cleanup backlog: this purge's own failures above, plus
+  // any older ones left by a previous purge. Never fatal to this call — a
+  // sweep failure just means the pre-sweep counts stand.
+  let allFilesRemoved = pendingTargets.length === 0
+  let pendingFileKinds: string[] = pendingTargets.map((t) => t.kind)
+  if (cascade.mode === 'hard') {
+    try {
+      const sweep = await retryPendingFileCleanups()
+      const stillPending = cascade.journalId ? sweep.stillPending[cascade.journalId] : undefined
+      if (stillPending !== undefined) {
+        allFilesRemoved = stillPending.length === 0
+        pendingFileKinds = stillPending
+      }
+    } catch (e) {
+      console.warn('[RecordingDeletion] pending-cleanup retry sweep failed (non-fatal):', e)
+    }
+  }
+
+  return { success: true, ...cascade, filesRemoved, allFilesRemoved, pendingFileKinds }
+}
+
+/**
+ * F17/T6 AR3-2 — bounded, non-fatal retry sweep for post-commit file-cleanup
+ * targets that failed on an earlier hard purge. Invoked from every hard
+ * `deleteRecording` call above, AND from a small standalone IPC
+ * (recordings:retryPendingCleanups) the renderer calls on Trash-view entry.
+ * Never throws — a failure here must never block or fail the caller's own
+ * action.
+ */
+export async function retryPendingFileCleanups(
+  limit = 25
+): Promise<{ attempted: number; cleared: number; stillPending: Record<string, string[]> }> {
+  const stillPending: Record<string, string[]> = {}
+  let attempted = 0
+  let cleared = 0
+  try {
+    const rows = getPendingFileCleanups(limit)
+    for (const row of rows) {
+      attempted++
+      const remaining: PendingCleanupTarget[] = []
+      for (const target of row.targets) {
+        const ok = await retryOneCleanupTarget(row.recordingId, target)
+        if (!ok) remaining.push(target)
+      }
+      updatePendingFileCleanups(row.journalId, remaining)
+      if (remaining.length === 0) {
+        cleared++
+      } else {
+        stillPending[row.journalId] = remaining.map((t) => t.kind)
+      }
+    }
+  } catch (e) {
+    console.warn('[RecordingDeletion] retryPendingFileCleanups failed (non-fatal):', e)
+  }
+  return { attempted, cleared, stillPending }
+}
+
+/** Re-attempt exactly one pending cleanup target. Returns true when it is now
+ *  confirmed clean (including "there was never anything there"). */
+async function retryOneCleanupTarget(recordingId: string, target: PendingCleanupTarget): Promise<boolean> {
+  try {
+    switch (target.kind) {
+      case 'audio':
+        return target.path ? deleteRecordingFile(target.path) : true
+      case 'artifact':
+        if (!target.path) return true
+        if (!existsSync(target.path)) return true
+        unlinkSync(target.path)
+        return true
+      case 'wiki':
+        removeMeetingWiki(recordingId)
+        return true
+      case 'vector':
+        await getVectorStore().deleteByRecording(recordingId)
+        return true
+      default:
+        return true
+    }
+  } catch (e) {
+    console.warn(`[RecordingDeletion] retry failed for ${target.kind}:`, e)
+    return false
+  }
 }
 
 /**

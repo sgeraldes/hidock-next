@@ -115,6 +115,30 @@ function _ensureIngestTrackingTable(): void {
   }
 }
 
+/**
+ * F17/T6 (spec-006) AR3-3(a) — graph-health pre-flight for a hard purge.
+ * Called from the IPC handler layer (recording-deletion-handlers.ts) BEFORE
+ * deleteCascade, so a broken graph store (corrupt DB, disk full, permission
+ * denied) is caught with an honest, fast failure OUTSIDE the delete
+ * transaction — never discovered only after a write transaction is already
+ * open. Runs store init (idempotent DDL — now surfaces real failures per
+ * AR3-3b) plus a 1-row sanity SELECT that proves the connection actually
+ * works, not just that initSchema() didn't throw. Never throws to the caller;
+ * the fail-closed refusal itself is the hard branch's own AR3-1 seam check
+ * inside deleteRecordingCascade — this is purely an earlier, cheaper warning.
+ */
+export function ensureGraphReady(): { ok: boolean; error?: string } {
+  try {
+    const store = getKnowledgeGraphStore()
+    store.db.queryOne('SELECT 1 AS ok')
+    return { ok: true }
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e)
+    console.error('[KnowledgeGraph] ensureGraphReady failed:', e)
+    return { ok: false, error }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Person identity resolution (R4c — key person nodes by contact id)
 // ---------------------------------------------------------------------------
