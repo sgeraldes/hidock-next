@@ -10,12 +10,19 @@ vi.mock('electron', () => ({
   }
 }))
 
-// Mock database
+// Mock database. ROUND-15 RESIDUAL: the handlers now route captures through the
+// shared eligibility boundary (recording-eligibility.ts → these DB helpers), so
+// they must be mocked too. Default: every recording is eligible/existing so the
+// gate is a no-op and these SQL/mapping unit assertions stay focused on the
+// query shape. Behavioral exclusion is covered by knowledge-handlers.eligibility.test.ts.
 vi.mock('../../services/database', () => ({
   queryAll: vi.fn(),
   queryOne: vi.fn(),
   run: vi.fn(),
-  runInTransaction: vi.fn((fn) => fn())
+  runInTransaction: vi.fn((fn) => fn()),
+  getEligibleRecordingIds: vi.fn((ids: Iterable<string>) => ({ eligible: new Set([...ids]), failClosed: false })),
+  getExistingRecordingIds: vi.fn((ids: Iterable<string>) => ({ ids: new Set([...ids]), failClosed: false })),
+  getExistingCaptureIds: vi.fn((ids: Iterable<string>) => ({ ids: new Set([...ids]), failClosed: false }))
 }))
 
 describe('Knowledge IPC Handlers', () => {
@@ -53,10 +60,12 @@ describe('Knowledge IPC Handlers', () => {
 
       const result = await handlers['knowledge:getAll']({}, { limit: 10, offset: 0 })
 
-      // B-CHAT-007: Should use explicit columns, not SELECT *
+      // B-CHAT-007: Should use explicit columns, not SELECT *.
+      // ROUND-15 RESIDUAL: getAll now over-fetches in batches (fill-until-limit),
+      // so the batch size is max(limit, 50) — here 50 — with the caller's offset.
       expect(queryAll).toHaveBeenCalledWith(
         expect.stringContaining('FROM knowledge_captures'),
-        [10, 0]
+        [50, 0]
       )
       // Verify it does NOT use SELECT *
       const calledSql = vi.mocked(queryAll).mock.calls[0][0]
@@ -87,7 +96,11 @@ describe('Knowledge IPC Handlers', () => {
           quality_rating: 'garbage',
           quality_reasons: JSON.stringify(['personal_family', 'background_ambient']),
           quality_source: 'ai',
-          captured_at: '2025-01-01T10:00:00Z'
+          captured_at: '2025-01-01T10:00:00Z',
+          // ROUND-15 RESIDUAL: a GARBAGE standalone capture would be gated out;
+          // give it an (eligible-by-mock) source recording so this test stays
+          // about quality_reasons parsing, not the value gate.
+          source_recording_id: 'rec-ok'
         }
       ]
       // @ts-ignore - mockReturnValue's arg is untyped in this test's minimal row fixtures

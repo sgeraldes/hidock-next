@@ -1,6 +1,7 @@
 
 import { ipcMain } from 'electron'
 import { queryAll, queryOne, run, setKnowledgeProjects } from '../services/database'
+import { filterEligibleRecordingIds, existingRecordings } from '../services/recording-eligibility'
 import type { KnowledgeCapture } from '@/types/knowledge'
 import { success, error, Result } from '../types/api'
 import { z } from 'zod'
@@ -14,65 +15,173 @@ const SetKnowledgeProjectsRequestSchema = z.object({
 // B-CHAT-007: Explicit column list instead of SELECT *
 const KNOWLEDGE_CAPTURE_COLUMNS = `id, title, summary, category, status, quality_rating, quality_confidence, quality_assessed_at, quality_reasons, quality_source, storage_tier, retention_days, expires_at, meeting_id, correlation_confidence, correlation_method, source_recording_id, captured_at, created_at, updated_at, deleted_at`
 
+// =============================================================================
+// ROUND-15 RESIDUAL (ADV14 follow-up) — knowledge-capture DISPLAY-tier gating.
+//
+// knowledge:getAll / getById / getByIds expose AI-derived capture summary+title
+// to NON-EXEMPT assistant / discovery surfaces (ContextPicker, Chat,
+// ActionableDetail, Projects). A capture DERIVED from an excluded recording
+// (personal / soft-deleted / value-excluded / hard-purged) must NOT surface its
+// summary/title there. Captures relate to a recording via `source_recording_id`;
+// value-exclusion for recording-derived captures lives on the RECORDING via the
+// shared positive allowlist (filterEligibleRecordingIds → getEligibleRecordingIds,
+// which UNIONs personal/deleted with the F16 capture value predicate). A
+// standalone (manual/artifact) capture has NO source recording and follows its
+// own lifecycle — excluded only when its OWN quality_rating is value-excluded.
+//
+// TWO TIERS (round-14 pattern):
+//  • DEFAULT (gated, assistant/DISPLAY-safe): recording-derived capture kept iff
+//    its source recording is ELIGIBLE; standalone kept unless its own rating is
+//    value-excluded; fail-closed → drop everything.
+//  • OWNER (knowledge:getAllOwner, owner Library): recording-derived capture kept
+//    iff its source recording ROW EXISTS (soft-deleted/personal/value-excluded
+//    allowed so the owner can still see+manage their own value badges; hard-purged
+//    / orphan dropped). Standalone handling is IDENTICAL to the gated tier — the
+//    owner store slice (useUnifiedRecordings) is ALSO read by an assistant DISPLAY
+//    surface (Today via useTodayCaptures, which surfaces standalone non-audio
+//    captures), so standalone results MUST match the gate to avoid a value-gate
+//    bypass on Today. The owner tier differs ONLY for recording-derived captures,
+//    which are audio and never shown on Today.
+// =============================================================================
+
+/** F16 value ratings that exclude a STANDALONE capture from assistant surfaces. */
+const CAPTURE_VALUE_EXCLUDED_RATINGS = new Set<string>(['garbage', 'low-value'])
+
+/** Raw capture row shape the eligibility gate needs (rest of the columns pass through). */
+type CaptureRow = { source_recording_id: string | null; quality_rating: string | null; [k: string]: unknown }
+
+/**
+ * Apply the capture eligibility gate to a batch of raw capture rows.
+ * Recording-derived captures resolve through the shared FAIL-CLOSED boundary
+ * (positive allowlist for 'gated', row-existence for 'owner'); standalone
+ * captures are value-checked identically in both tiers. Any eligibility-lookup
+ * failure → failClosed=true with an empty kept set.
+ */
+function applyCaptureEligibility(rows: CaptureRow[], tier: 'gated' | 'owner'): { kept: CaptureRow[]; failClosed: boolean } {
+  if (rows.length === 0) return { kept: [], failClosed: false }
+  const sourceIds = rows.map((r) => r.source_recording_id).filter((id): id is string => !!id)
+  let allowed: Set<string>
+  let failClosed: boolean
+  if (tier === 'owner') {
+    const res = existingRecordings(sourceIds)
+    allowed = res.ids
+    failClosed = res.failClosed
+  } else {
+    const res = filterEligibleRecordingIds(sourceIds)
+    allowed = res.eligible
+    failClosed = res.failClosed
+  }
+  if (failClosed) return { kept: [], failClosed: true }
+  const kept = rows.filter((r) =>
+    r.source_recording_id
+      ? allowed.has(r.source_recording_id)
+      : !CAPTURE_VALUE_EXCLUDED_RATINGS.has(r.quality_rating ?? '')
+  )
+  return { kept, failClosed: false }
+}
+
+interface CaptureQuery {
+  limit: number
+  offset: number
+  status?: string
+  quality?: string
+  category?: string
+  tier: 'gated' | 'owner'
+}
+
+/**
+ * Fetch up to `limit` ELIGIBLE captures (fill-until-limit, NO
+ * truncate-before-filter): excluded captures that precede eligible ones must not
+ * shrink the page. Over-fetches in batches from `offset` and applies the tier
+ * gate to each batch until `limit` eligible are collected or the source is
+ * exhausted (mirrors the round-9 briefing/globalSearch fill-until-limit pattern).
+ * Fail-closed → [].
+ */
+function collectEligibleCaptures(q: CaptureQuery): KnowledgeCapture[] {
+  const conditions: string[] = []
+  const params: (string | number)[] = []
+  if (q.status) { conditions.push('status = ?'); params.push(q.status) }
+  if (q.quality) { conditions.push('quality_rating = ?'); params.push(q.quality) }
+  if (q.category) { conditions.push('category = ?'); params.push(q.category) }
+  const where = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : ''
+  const sql = `SELECT ${KNOWLEDGE_CAPTURE_COLUMNS} FROM knowledge_captures${where} ORDER BY captured_at DESC LIMIT ? OFFSET ?`
+  try {
+    const kept: CaptureRow[] = []
+    const batchSize = Math.max(q.limit, 50)
+    let curOffset = q.offset
+    let scanned = 0
+    const MAX_SCAN = 10000 // safety bound against pathological all-excluded data
+    while (kept.length < q.limit && scanned < MAX_SCAN) {
+      const batch = queryAll<CaptureRow>(sql, [...params, batchSize, curOffset])
+      if (batch.length === 0) break
+      scanned += batch.length
+      const { kept: batchKept, failClosed } = applyCaptureEligibility(batch, q.tier)
+      if (failClosed) return []
+      for (const row of batchKept) {
+        kept.push(row)
+        if (kept.length >= q.limit) break
+      }
+      if (batch.length < batchSize) break // source exhausted
+      curOffset += batchSize
+    }
+    return kept.slice(0, q.limit).map(mapToKnowledgeCapture)
+  } catch (err) {
+    console.error('Failed to get knowledge captures:', err)
+    return []
+  }
+}
+
 export function registerKnowledgeHandlers(): void {
-  // Get all knowledge captures
+  // Get all knowledge captures — ROUND-15 RESIDUAL: DEFAULT (gated) tier. This is
+  // the assistant/DISPLAY-safe accessor: recording-derived captures of excluded
+  // recordings and value-excluded standalone captures are dropped (fail-closed),
+  // fill-until-limit so excluded rows can't shrink the page. ContextPicker / Chat
+  // / ActionableDetail / Projects inherit the gate transparently.
   ipcMain.handle('knowledge:getAll', async (_, { limit = 100, offset = 0, status, quality, category }: { limit?: number; offset?: number; status?: string; quality?: string; category?: string } = {}) => {
-    let sql = `SELECT ${KNOWLEDGE_CAPTURE_COLUMNS} FROM knowledge_captures`
-    const conditions: string[] = []
-    const params: (string | number)[] = []
-
-    if (status) {
-      conditions.push('status = ?')
-      params.push(status)
-    }
-    if (quality) {
-      conditions.push('quality_rating = ?')
-      params.push(quality)
-    }
-    if (category) {
-      conditions.push('category = ?')
-      params.push(category)
-    }
-
-    if (conditions.length > 0) {
-      sql += ` WHERE ${conditions.join(' AND ')}`
-    }
-
-    sql += ` ORDER BY captured_at DESC LIMIT ? OFFSET ?`
-    params.push(limit, offset)
-
-    try {
-      const captures = queryAll<any>(sql, params)
-      return captures.map(mapToKnowledgeCapture)
-    } catch (error) {
-      console.error('Failed to get knowledge captures:', error)
-      return []
-    }
+    return collectEligibleCaptures({ limit, offset, status, quality, category, tier: 'gated' })
   })
 
-  // B-CHAT-004: Get multiple knowledge captures by IDs
+  // ROUND-15 RESIDUAL — NARROW OWNER-MANAGEMENT accessor for the owner Library
+  // (useUnifiedRecordings). Recording-derived captures are kept when the source
+  // recording ROW EXISTS (existence-scoped: soft-deleted/personal/value-excluded
+  // allowed so the owner sees their own value badges; hard-purged/orphan dropped).
+  // Standalone captures use the SAME value gate as the default tier so the shared
+  // store slice's assistant DISPLAY consumer (Today) cannot leak value-excluded
+  // standalone captures. Only the owner Library may call this.
+  ipcMain.handle('knowledge:getAllOwner', async (_, { limit = 100, offset = 0, status, quality, category }: { limit?: number; offset?: number; status?: string; quality?: string; category?: string } = {}) => {
+    return collectEligibleCaptures({ limit, offset, status, quality, category, tier: 'owner' })
+  })
+
+  // B-CHAT-004: Get multiple knowledge captures by IDs — gated (ADV14 residual):
+  // omit ineligible ids (excluded source recording / value-excluded standalone);
+  // fail-closed → [].
   ipcMain.handle('knowledge:getByIds', async (_, ids: string[]) => {
     try {
       if (!Array.isArray(ids) || ids.length === 0) return []
       // Build parameterized WHERE IN clause
       const placeholders = ids.map(() => '?').join(',')
-      const captures = queryAll<any>(
+      const captures = queryAll<CaptureRow>(
         `SELECT ${KNOWLEDGE_CAPTURE_COLUMNS} FROM knowledge_captures WHERE id IN (${placeholders})`,
         ids
       )
-      return captures.map(mapToKnowledgeCapture)
+      const { kept, failClosed } = applyCaptureEligibility(captures, 'gated')
+      if (failClosed) return []
+      return kept.map(mapToKnowledgeCapture)
     } catch (error) {
       console.error('Failed to get knowledge captures by IDs:', error)
       return []
     }
   })
 
-  // Get by ID
+  // Get by ID — gated (ADV14 residual): null when the capture's source recording
+  // is ineligible / the standalone capture is value-excluded / lookup fails.
   ipcMain.handle('knowledge:getById', async (_, id: string) => {
     try {
-      const capture = queryOne<any>(`SELECT ${KNOWLEDGE_CAPTURE_COLUMNS} FROM knowledge_captures WHERE id = ?`, [id])
+      const capture = queryOne<CaptureRow>(`SELECT ${KNOWLEDGE_CAPTURE_COLUMNS} FROM knowledge_captures WHERE id = ?`, [id])
       if (!capture) return null
-      return mapToKnowledgeCapture(capture)
+      const { kept, failClosed } = applyCaptureEligibility([capture], 'gated')
+      if (failClosed || kept.length === 0) return null
+      return mapToKnowledgeCapture(kept[0])
     } catch (error) {
       console.error('Failed to get knowledge capture:', error)
       return null

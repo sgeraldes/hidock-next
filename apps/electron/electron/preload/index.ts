@@ -100,7 +100,7 @@ function isQaLogsEnabled(): boolean {
 
 // --- IPC Logging Wrapper ---
 const callIPC = async (channel: string, ...args: any[]) => {
-  const isPolling = ['recordings:getTranscriptionStatus', 'db:get-recordings', 'knowledge:getAll'].includes(channel);
+  const isPolling = ['recordings:getTranscriptionStatus', 'db:get-recordings', 'knowledge:getAll', 'knowledge:getAllOwner'].includes(channel);
 
   try {
     const start = performance.now();
@@ -624,6 +624,10 @@ export interface ElectronAPI {
   // Knowledge Captures
   knowledge: {
     getAll: (options?: { limit?: number; offset?: number; status?: string }) => Promise<KnowledgeCapture[]>
+    // ROUND-15 RESIDUAL — owner-management accessor (existence-scoped). ONLY the
+    // owner Library (useUnifiedRecordings) may call this; assistant/discovery
+    // surfaces use the gated getAll.
+    getAllOwner: (options?: { limit?: number; offset?: number; status?: string }) => Promise<KnowledgeCapture[]>
     getById: (id: string) => Promise<KnowledgeCapture | null>
     getByIds: (ids: string[]) => Promise<KnowledgeCapture[]> // B-CHAT-004
     update: (id: string, updates: Partial<KnowledgeCapture>) => Promise<{ success: boolean; error?: string }>
@@ -1442,6 +1446,7 @@ const electronAPI: ElectronAPI = {
 
   knowledge: {
     getAll: (options) => callIPC('knowledge:getAll', options),
+    getAllOwner: (options) => callIPC('knowledge:getAllOwner', options),
     getById: (id) => callIPC('knowledge:getById', id),
     getByIds: (ids) => callIPC('knowledge:getByIds', ids), // B-CHAT-004
     update: (id, updates) => callIPC('knowledge:update', id, updates),

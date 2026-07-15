@@ -34,7 +34,13 @@ function createMockElectronAPI() {
     recordings: { getAll: vi.fn().mockResolvedValue([]) },
     syncedFiles: { getAll: vi.fn().mockResolvedValue([]) },
     deviceCache: { getAll: vi.fn().mockResolvedValue([]), saveAll: vi.fn().mockResolvedValue(undefined) },
-    knowledge: { getAll: vi.fn().mockResolvedValue([]) },
+    // ROUND-15 RESIDUAL — the hook now calls the owner accessor. Alias getAll to
+    // the same fn so existing tests that drive/assert `knowledge.getAll` still
+    // resolve the value the hook consumes via getAllOwner.
+    knowledge: (() => {
+      const captures = vi.fn().mockResolvedValue([])
+      return { getAll: captures, getAllOwner: captures }
+    })(),
     onRecordingAdded: vi.fn(() => vi.fn())
   } as any
 }
@@ -75,7 +81,7 @@ describe('useUnifiedRecordings', () => {
       renderHook(() => useUnifiedRecordings())
 
       await waitFor(() => {
-        expect(window.electronAPI.knowledge.getAll).toHaveBeenCalled()
+        expect(window.electronAPI.knowledge.getAllOwner).toHaveBeenCalled()
         expect(window.electronAPI.recordings.getAll).toHaveBeenCalled()
       })
     })

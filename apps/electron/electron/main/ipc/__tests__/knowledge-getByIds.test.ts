@@ -10,12 +10,18 @@ vi.mock('electron', () => ({
   }
 }))
 
-// Mock database
+// Mock database. ROUND-15 RESIDUAL: getByIds now routes captures through the
+// eligibility boundary; mock its DB helpers so the gate is a no-op here (default
+// eligible/existing) and these assertions stay about the query shape. Exclusion
+// behavior is covered by knowledge-handlers.eligibility.test.ts.
 vi.mock('../../services/database', () => ({
   queryAll: vi.fn(),
   queryOne: vi.fn(),
   run: vi.fn(),
-  runInTransaction: vi.fn((fn) => fn())
+  runInTransaction: vi.fn((fn) => fn()),
+  getEligibleRecordingIds: vi.fn((ids: Iterable<string>) => ({ eligible: new Set([...ids]), failClosed: false })),
+  getExistingRecordingIds: vi.fn((ids: Iterable<string>) => ({ ids: new Set([...ids]), failClosed: false })),
+  getExistingCaptureIds: vi.fn((ids: Iterable<string>) => ({ ids: new Set([...ids]), failClosed: false }))
 }))
 
 describe('knowledge:getByIds handler (B-CHAT-004)', () => {

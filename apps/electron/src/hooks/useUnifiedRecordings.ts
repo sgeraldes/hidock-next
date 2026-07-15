@@ -508,7 +508,13 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
         window.electronAPI.recordings.getAll() as Promise<DatabaseRecording[]>,
         window.electronAPI.syncedFiles.getAll() as Promise<SyncedFile[]>,
         window.electronAPI.deviceCache.getAll() as Promise<CachedDeviceFile[]>,
-        window.electronAPI.knowledge.getAll() as Promise<KnowledgeCapture[]>
+        // ROUND-15 RESIDUAL — owner Library uses the existence-scoped OWNER
+        // accessor so the owner still sees+manages captures of their own
+        // excluded (personal / soft-deleted / value-excluded) recordings, incl.
+        // their value badges. Standalone captures are value-gated identically to
+        // the default tier, so Today (which reads this same store slice via
+        // useTodayCaptures) cannot surface a value-excluded standalone capture.
+        window.electronAPI.knowledge.getAllOwner() as Promise<KnowledgeCapture[]>
       ])
       console.log('[useUnifiedRecordings] Loaded: dbRecs:', dbRecs.length, 'syncedFiles:', syncedFiles.length, 'cachedDeviceFiles:', cachedDeviceFiles.length, 'knowledgeCaptures:', knowledgeCaptures?.length)
 
@@ -651,7 +657,13 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
         window.electronAPI.recordings.getAll() as Promise<DatabaseRecording[]>,
         window.electronAPI.syncedFiles.getAll() as Promise<SyncedFile[]>,
         window.electronAPI.deviceCache.getAll() as Promise<CachedDeviceFile[]>,
-        window.electronAPI.knowledge.getAll() as Promise<KnowledgeCapture[]>
+        // ROUND-15 RESIDUAL — owner Library uses the existence-scoped OWNER
+        // accessor so the owner still sees+manages captures of their own
+        // excluded (personal / soft-deleted / value-excluded) recordings, incl.
+        // their value badges. Standalone captures are value-gated identically to
+        // the default tier, so Today (which reads this same store slice via
+        // useTodayCaptures) cannot surface a value-excluded standalone capture.
+        window.electronAPI.knowledge.getAllOwner() as Promise<KnowledgeCapture[]>
       ])
       const memoryCachedDeviceRecs = isConnected ? deviceService.getCachedRecordings() : []
       const rebuilt = buildRecordingMap(
