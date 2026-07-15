@@ -151,3 +151,40 @@ describe('ADV11 — forged captureId cannot bypass the recording allowlist', () 
     expect(docs).toEqual([])
   })
 })
+
+describe('ADV23-1 (round-24) — null-provenance rows require POSITIVE provenance', () => {
+  it('a doc with NEITHER recordingId nor captureId is absent from search, searchByMeeting AND getAllDocuments', async () => {
+    const store = await newStore()
+    // A legacy null-provenance row (the removed optional-metadata index path could
+    // create these): no recordingId, no captureId — unassociable, so it survived
+    // every exclusion/hard-purge and still reached RAG + the chunk viewer.
+    await store.addDocument('legacy null-provenance content', {
+      meetingId: 'm-legacy',
+      chunkIndex: 0
+    })
+    // Absent everywhere: no positive provenance to prove eligibility.
+    expect(await store.search('anything', 10)).toEqual([])
+    expect(await store.searchByMeeting('m-legacy')).toEqual([])
+    expect(store.getAllDocuments()).toEqual([])
+  })
+
+  it('a genuine eligible transcript AND a genuine eligible artifact still surface', async () => {
+    seedRecording('rec-live')
+    seedCapture('cap-live', null) // standalone eligible capture
+    const store = await newStore()
+    await store.addDocument('a real transcript', { recordingId: 'rec-live', chunkIndex: 0 })
+    await store.addDocument('a real pdf artifact', {
+      recordingId: 'art-pdf',
+      captureId: 'cap-live',
+      sourceType: 'pdf',
+      chunkIndex: 0
+    })
+    // Both positive-provenance docs survive; the neither-id row (if any) would not.
+    await store.addDocument('legacy null-provenance content', { chunkIndex: 0 })
+
+    const recIds = store.getAllDocuments().map((d) => d.metadata.recordingId).sort()
+    expect(recIds).toEqual(['art-pdf', 'rec-live'])
+    const searchIds = (await store.search('anything', 10)).map((r) => r.document.metadata.recordingId).sort()
+    expect(searchIds).toEqual(['art-pdf', 'rec-live'])
+  })
+})

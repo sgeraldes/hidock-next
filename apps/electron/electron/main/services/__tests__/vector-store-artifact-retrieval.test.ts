@@ -203,12 +203,22 @@ describe('ADV10-P1 — artifact docs are discriminated by captureId, not sourceT
     expect(ids).toEqual([])
   })
 
-  it('fail-closed keeps a doc that has NO recordingId', async () => {
+  it('ADV23-1 — a doc with NEITHER recordingId nor captureId is DROPPED (positive provenance)', async () => {
+    // Round-24 flip: this previously asserted a neither-id doc is KEPT ("no
+    // recordingId ⇒ keep"), which encoded the ADV23-1 fail-open bug — a legacy
+    // null-provenance vector row (no recordingId, no captureId) survived every
+    // exclusion and still reached RAG. Positive provenance now DROPS it. A doc
+    // must resolve to an eligible recording OR an eligible capture to be served.
     const store = new VectorStore()
     await store.addDocument('a general standalone note', { chunkIndex: 0 })
 
+    // Healthy lookups: no recording, no capture ⇒ no positive provenance ⇒ dropped.
+    let contents = (await store.search('anything', 10)).map((r) => r.document.content)
+    expect(contents).toEqual([])
+
+    // And still dropped under fail-closed (never surfaces on a transient error).
     deps.throwOnExclusion = true
-    const contents = (await store.search('anything', 10)).map((r) => r.document.content)
-    expect(contents).toEqual(['a general standalone note'])
+    contents = (await store.search('anything', 10)).map((r) => r.document.content)
+    expect(contents).toEqual([])
   })
 })

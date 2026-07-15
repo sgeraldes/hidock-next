@@ -423,10 +423,20 @@ class VectorStore {
    * Round-6 (RE6-1) — THE single choke-point every vector read primitive routes
    * through, so all consumers (global chat, meeting-scoped chat, summarize-
    * Meeting, meeting-scoped findActionItems, the rag:get-chunks chunk viewer)
-   * inherit the same fail-closed eligibility policy. A doc with a recordingId is
-   * kept only when that recording is eligible (not personal/deleted/value-
-   * excluded); on any exclusion-lookup failure ALL recording-backed docs are
-   * dropped (fail closed). Non-recording docs (no recordingId) always pass.
+   * inherit the same fail-closed eligibility policy.
+   *
+   * ADV23-1 (round-24) — POSITIVE PROVENANCE. Earlier the boundary KEPT any doc
+   * that lacked a recordingId ("no recordingId ⇒ keep"). Legacy rows from the
+   * removed optional-metadata rag:index-transcript path can carry NEITHER a
+   * recordingId NOR a captureId, so they were unassociable — they survived every
+   * recording exclusion / hard purge and still reached RAG + rag:get-chunks. A
+   * doc is now kept ONLY if it has POSITIVE, resolvable, eligible provenance:
+   * its recordingId resolves to an ELIGIBLE recording, OR its captureId resolves
+   * to an ELIGIBLE capture. A doc with NEITHER (incl. the legacy neither-id rows)
+   * is DROPPED. This is fail-closed and NON-DESTRUCTIVE — the rows stay in the
+   * store, they are simply never served (a reindex/purge migration is a separate
+   * follow-up). No legitimate doc lacks both: all four main-process indexers set
+   * recordingId, and artifacts additionally set captureId (round 17).
    */
   private filterEligibleDocs(docs: VectorDocument[]): VectorDocument[] {
     // ADV11 (round-12) — POSITIVE PROVENANCE RESOLUTION against the DB.
@@ -470,17 +480,19 @@ class VectorStore {
     const failClosed = existRec.failClosed || eligibility.failClosed || capEligibility.failClosed
 
     return docs.filter((d) => {
+      // ADV23-1 (round-24) — require POSITIVE provenance; no "no recordingId ⇒
+      // keep" fall-through. Any lookup failure ⇒ drop everything (fail closed).
+      if (failClosed) return false
       const recId = d.metadata.recordingId
-      if (!recId) return true // non-recording doc — never gated
-      if (failClosed) return false // cannot resolve provenance ⇒ drop everything recording-tied
-      if (existRec.ids.has(recId)) {
+      if (recId && existRec.ids.has(recId)) {
         // Recording-backed ⇒ governed by the allowlist. A forged captureId cannot
         // make a real excluded recording eligible.
         return eligibility.eligible.has(recId)
       }
-      // recordingId does NOT resolve to a recording ⇒ artifact or hard-purged
-      // orphan. Keep IFF a genuine ELIGIBLE captureId backs it; else drop
-      // (forged / orphan / soft-deleted / value-excluded artifact capture).
+      // recordingId is absent OR does NOT resolve to a recording ⇒ artifact,
+      // hard-purged orphan, or a legacy neither-id row. Keep IFF a genuine
+      // ELIGIBLE captureId backs it; else DROP (no positive provenance:
+      // null-provenance legacy row / forged / soft-deleted / value-excluded).
       const capId = d.metadata.captureId
       return !!capId && capEligibility.eligible.has(capId)
     })

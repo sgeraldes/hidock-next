@@ -171,6 +171,30 @@ describe('ADV19-2 — post-await recheck of all prompt components', () => {
     expect(messages[messages.length - 1].content).not.toContain('ALPHA_TEXT')
     expect(resp.sources).toHaveLength(0)
   })
+
+  it('ADV23-1 — a null-provenance vector chunk (neither recordingId nor captureId) is DROPPED from the prompt', async () => {
+    // A legacy null-provenance chunk with no recordingId AND no captureId slips past
+    // (or is injected directly into) search. Round-24: it has no positive provenance
+    // and must be dropped BEFORE the provider call — never sent, not just marked
+    // unverifiable. The eligible chunk alongside it still grounds the answer.
+    searchMock.mockResolvedValueOnce([
+      { document: { content: 'NULLPROV_TEXT', metadata: { meetingId: 'mZ', subject: 'Meeting mZ' } }, score: 0.9 },
+      vectorDoc('recB', 'mB', 'BETA_TEXT')
+    ])
+    const rag = getRAGService()
+    const resp = await rag.chat('conv1', 'question')
+    const messages = generateMock.mock.calls[0][0] as Array<{ role: string; content: string }>
+    const userMsg = messages[messages.length - 1].content
+    // The null-provenance chunk's text NEVER crosses the provider boundary.
+    expect(userMsg).not.toContain('NULLPROV_TEXT')
+    expect(userMsg).toContain('BETA_TEXT')
+    // No citation chip for the dropped chunk; the answer binds ONLY the eligible recB.
+    expect(resp.sources.some((s) => s.subject === 'Meeting mZ')).toBe(false)
+    expect(rag.consumeAssistantAnswer('conv1', resp.generationId!)).toMatchObject({
+      kind: 'rag',
+      prov: { recordingIds: ['recB'], captureIds: [] }
+    })
+  })
 })
 
 describe('ADV19-4 — provenance bound to a unique generation id', () => {

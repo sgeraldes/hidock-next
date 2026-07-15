@@ -86,13 +86,18 @@ describe('VectorStore.search exclusion', () => {
     expect(results.length).toBe(0)
   })
 
-  it('P1 (round-3) — a NON-recording doc still surfaces when the exclusion lookup throws', async () => {
+  it('ADV23-1 (round-24) — a doc with NEITHER recordingId nor captureId is DROPPED (positive provenance)', async () => {
     const store = new VectorStore()
-    // No recordingId → not privacy-scoped → unaffected by the fail-closed drop.
+    // Round-24 flip: previously "no recordingId ⇒ surfaces". A doc with no
+    // resolvable eligible recording AND no eligible capture has no positive
+    // provenance (e.g. a legacy null-provenance vector row) and must NOT surface —
+    // it is unassociable, so it survives every exclusion/hard-purge otherwise.
     await store.addDocument('a general note', { chunkIndex: 0 })
+    // Dropped even under healthy lookups (no positive provenance)…
+    expect((await store.search('q', 5)).length).toBe(0)
+    // …and under fail-closed.
     deps.throwOnExclusion = true
-    const results = await store.search('q', 5)
-    expect(results.length).toBe(1)
+    expect((await store.search('q', 5)).length).toBe(0)
   })
 
   it('P2 (round-3) — indexTranscript skips the write when shouldPersist() is false (ineligible mid-embeddings)', async () => {

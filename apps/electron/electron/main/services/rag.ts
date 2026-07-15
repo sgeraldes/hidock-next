@@ -950,7 +950,15 @@ class RAGService {
         if (!recEligible(v.recordingId)) continue
         provRecordingIds.add(v.recordingId)
       } else {
-        provUnverifiable = true // unattributable chunk ⇒ answer fails closed on read
+        // ADV23-1 (round-24) — a chunk with NEITHER a resolvable eligible capture
+        // NOR recording has NO positive provenance (e.g. a legacy null-provenance
+        // vector row). DROP it from the prompt BEFORE constructing the provider
+        // messages so its text never crosses the LLM boundary. Previously it was
+        // kept and the answer merely marked unverifiable — which still SENT the
+        // text. The vector boundary (filterEligibleDocs) now drops these at search
+        // time too; this is defense-in-depth at prompt construction.
+        provUnverifiable = true
+        continue
       }
       contextParts.push(v.part)
       sources.push(v.source)
