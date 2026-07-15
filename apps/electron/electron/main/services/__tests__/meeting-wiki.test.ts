@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, readdirSync, readFileSync } from 'fs'
+import { mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 
@@ -26,6 +26,9 @@ interface FakeWikiRow {
 let tmpRoot = ''
 let currentRow: FakeWikiRow | null = null
 let backfillRows: FakeWikiRow[] = []
+// RE8-P1 (round-9) — in-memory model of the `config` KV table for the wiki
+// cleanup-retry ledger.
+let configStore = new Map<string, string>()
 // RE7-1 (round-7) — mutable exclusion so eligibility-gating tests can drive the
 // boundary. Default: nothing excluded, not fail-closed.
 let excludedResult: { ids: Set<string>; failClosed: boolean } = { ids: new Set<string>(), failClosed: false }
@@ -42,11 +45,28 @@ vi.mock('../database', () => ({
     if (backfillRows.length > 0 && id != null) return backfillRows.find((r) => r.recording_id === id) ?? null
     return currentRow
   },
-  // backfillMeetingWiki enumerates transcript rows via queryAll.
-  queryAll: () => backfillRows,
+  // backfillMeetingWiki enumerates transcript rows via queryAll; the wiki
+  // cleanup-retry ledger (RE8-P1) reads config rows from an in-memory KV store.
+  queryAll: (sql: string, params?: unknown[]) => {
+    if (/FROM config WHERE key LIKE/i.test(sql)) {
+      const prefix = String(params?.[0] ?? '').replace(/%$/, '')
+      return [...configStore.entries()].filter(([k]) => k.startsWith(prefix)).map(([, v]) => ({ value: v }))
+    }
+    return backfillRows
+  },
+  // RE8-P1 (round-9) — reconcile/backfill write the retry ledger via run().
+  run: (sql: string, params?: unknown[]) => {
+    if (/INSERT OR REPLACE INTO config/i.test(sql)) configStore.set(String(params?.[0]), String(params?.[1]))
+    else if (/DELETE FROM config WHERE key/i.test(sql)) configStore.delete(String(params?.[0]))
+  },
   // exportMeetingWiki / backfill gate on isRecordingEligible /
-  // filterEligibleRecordingIds, which read getExcludedRecordingIds.
-  getExcludedRecordingIds: () => excludedResult
+  // filterEligibleRecordingIds. ADV9 (round-9): the boundary now uses the
+  // POSITIVE allowlist getEligibleRecordingIds; derive it from the same source.
+  getExcludedRecordingIds: () => excludedResult,
+  getEligibleRecordingIds: (ids: Iterable<string>) =>
+    excludedResult.failClosed
+      ? { eligible: new Set<string>(), failClosed: true }
+      : { eligible: new Set([...ids].filter((i) => i && !excludedResult.ids.has(i))), failClosed: false }
 }))
 
 describe('exportMeetingWiki — stale page cleanup (ISSUE-8)', () => {
@@ -54,6 +74,7 @@ describe('exportMeetingWiki — stale page cleanup (ISSUE-8)', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'hidock-wiki-'))
     currentRow = null
     backfillRows = []
+    configStore = new Map<string, string>()
     excludedResult = { ids: new Set<string>(), failClosed: false }
   })
 
@@ -152,6 +173,7 @@ describe('meeting-wiki — eligibility gating (RE7-1)', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'hidock-wiki-'))
     currentRow = null
     backfillRows = []
+    configStore = new Map<string, string>()
     excludedResult = { ids: new Set<string>(), failClosed: false }
   })
   afterEach(() => {
@@ -264,6 +286,7 @@ describe('removeMeetingWiki — cleanup result (RE7-P1b)', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'hidock-wiki-'))
     currentRow = null
     backfillRows = []
+    configStore = new Map<string, string>()
     excludedResult = { ids: new Set<string>(), failClosed: false }
   })
   afterEach(() => {
@@ -283,5 +306,54 @@ describe('removeMeetingWiki — cleanup result (RE7-P1b)', () => {
     const { removeMeetingWiki } = await import('../meeting-wiki')
     // No page ever written → wiki dir does not exist → success, nothing removed.
     expect(removeMeetingWiki('ghost')).toEqual({ removed: 0, failed: 0, ok: true })
+  })
+})
+
+/**
+ * RE8-P1 (round-9) — a transition (mark-personal / soft-delete / value-rating)
+ * whose wiki cleanup FAILS must not silently drop it: reconcileWikiEligibility
+ * enqueues a persistent retry, and a later sweep removes the page.
+ */
+describe('meeting-wiki — cleanup-retry ledger (RE8-P1)', () => {
+  beforeEach(() => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'hidock-wiki-'))
+    currentRow = null
+    backfillRows = []
+    configStore = new Map<string, string>()
+    excludedResult = { ids: new Set<string>(), failClosed: false }
+  })
+  afterEach(() => {
+    rmSync(tmpRoot, { recursive: true, force: true })
+  })
+
+  it('a failed transition cleanup is enqueued, then cleared by a later retry', async () => {
+    const { reconcileWikiEligibility, retryPendingWikiCleanups } = await import('../meeting-wiki')
+
+    // Force removeMeetingWiki to fail (ok:false): put a FILE where the wiki
+    // directory is expected, so readdirSync throws ENOTDIR (not ENOENT).
+    writeFileSync(join(tmpRoot, 'wiki'), 'blocking file')
+    excludedResult = { ids: new Set(['rec-fail']), failClosed: false }
+
+    const result = reconcileWikiEligibility('rec-fail')
+    expect(result?.ok).toBe(false) // cleanup could not complete
+    // …and was ENQUEUED for retry rather than reported as success.
+    expect(configStore.has('wiki_cleanup_pending:rec-fail')).toBe(true)
+
+    // Unblock the directory; a later sweep now succeeds and clears the entry.
+    rmSync(join(tmpRoot, 'wiki'), { force: true })
+    const swept = retryPendingWikiCleanups()
+    expect(swept.cleared).toBe(1)
+    expect(configStore.has('wiki_cleanup_pending:rec-fail')).toBe(false)
+  })
+
+  it('retry drops a pending entry once the recording is eligible again (no purge needed)', async () => {
+    const { retryPendingWikiCleanups } = await import('../meeting-wiki')
+    // Pre-seed a pending entry for a recording that is now eligible again.
+    configStore.set('wiki_cleanup_pending:rec-back', 'rec-back')
+    excludedResult = { ids: new Set<string>(), failClosed: false } // rec-back eligible
+
+    const swept = retryPendingWikiCleanups()
+    expect(swept.cleared).toBe(1)
+    expect(configStore.has('wiki_cleanup_pending:rec-back')).toBe(false)
   })
 })

@@ -13,7 +13,7 @@
 import { existsSync, mkdirSync, writeFileSync, readdirSync, readFileSync, unlinkSync } from 'fs'
 import { join } from 'path'
 import { getTranscriptsPath } from './file-storage'
-import { queryAll, queryOne } from './database'
+import { queryAll, queryOne, run } from './database'
 import { isRecordingEligible, filterEligibleRecordingIds } from './recording-eligibility'
 
 interface WikiRow {
@@ -208,14 +208,19 @@ export function reconcileWikiEligibility(recordingId: string): WikiCleanupResult
       if (result.removed > 0) {
         console.log(`[MeetingWiki] Removed ${result.removed} page(s) for now-excluded recording ${recordingId}`)
       }
-      // RE7-P1b — surface a failed cleanup: a transition MUST NOT report success
-      // while the page is still readable on disk. The boot backfill re-attempts
-      // removal for excluded recordings, so this also self-heals on next launch.
+      // RE8-P1 (round-9) — a transition (mark-personal / soft-delete /
+      // value-rating) MUST NOT report success while the page is still readable
+      // on disk. On a failed cleanup, ENQUEUE a persistent retry (mirrors the
+      // hard-purge pending-cleanup ledger) so the page is removed by a later
+      // sweep even if this attempt failed; on success, clear any stale entry.
       if (!result.ok) {
         console.warn(
           `[MeetingWiki] wiki cleanup INCOMPLETE for excluded recording ${recordingId} ` +
-            `(removed=${result.removed}, failed=${result.failed}) — page may still be readable; will retry on next backfill`
+            `(removed=${result.removed}, failed=${result.failed}) — page may still be readable; enqueued for retry`
         )
+        enqueueWikiCleanupRetry(recordingId)
+      } else {
+        clearWikiCleanupRetry(recordingId)
       }
       return result
     }
@@ -224,6 +229,73 @@ export function reconcileWikiEligibility(recordingId: string): WikiCleanupResult
     return { removed: 0, failed: 0, ok: false }
   }
   return null // eligible — nothing to reconcile
+}
+
+const WIKI_CLEANUP_RETRY_PREFIX = 'wiki_cleanup_pending:'
+
+/** RE8-P1 — record that an excluded recording's wiki page could not be removed,
+ *  so a later sweep retries it. Persisted in the generic `config` KV table (no
+ *  schema change), mirroring the hard-purge pending-cleanup ledger. Never throws. */
+function enqueueWikiCleanupRetry(recordingId: string): void {
+  try {
+    run('INSERT OR REPLACE INTO config (key, value, updated_at) VALUES (?, ?, ?)', [
+      `${WIKI_CLEANUP_RETRY_PREFIX}${recordingId}`,
+      recordingId,
+      new Date().toISOString()
+    ])
+  } catch (e) {
+    console.warn(`[MeetingWiki] could not enqueue wiki-cleanup retry for ${recordingId}:`, e)
+  }
+}
+
+/** Clear a pending wiki-cleanup retry (page removed, or recording eligible again). */
+function clearWikiCleanupRetry(recordingId: string): void {
+  try {
+    run('DELETE FROM config WHERE key = ?', [`${WIKI_CLEANUP_RETRY_PREFIX}${recordingId}`])
+  } catch (e) {
+    console.warn(`[MeetingWiki] could not clear wiki-cleanup retry for ${recordingId}:`, e)
+  }
+}
+
+/**
+ * RE8-P1 (round-9) — retry every enqueued wiki-cleanup: for each pending
+ * recording, if it is STILL ineligible remove its page (clearing the entry only
+ * when the removal succeeds); if it became eligible again, drop the entry. Runs
+ * as part of the boot backfill and is safe to call anytime. Returns how many
+ * pending entries were cleared. Never throws.
+ */
+export function retryPendingWikiCleanups(): { cleared: number; stillPending: number } {
+  let cleared = 0
+  let stillPending = 0
+  let rows: Array<{ value: string | null }>
+  try {
+    rows = queryAll<{ value: string | null }>('SELECT value FROM config WHERE key LIKE ?', [`${WIKI_CLEANUP_RETRY_PREFIX}%`])
+  } catch (e) {
+    console.warn('[MeetingWiki] could not read pending wiki cleanups:', e)
+    return { cleared: 0, stillPending: 0 }
+  }
+  for (const r of rows) {
+    const recordingId = r.value
+    if (!recordingId) continue
+    try {
+      if (isRecordingEligible(recordingId)) {
+        clearWikiCleanupRetry(recordingId) // eligible again — nothing to purge
+        cleared++
+        continue
+      }
+      const result = removeMeetingWiki(recordingId)
+      if (result.ok) {
+        clearWikiCleanupRetry(recordingId)
+        cleared++
+      } else {
+        stillPending++
+      }
+    } catch (e) {
+      console.warn(`[MeetingWiki] wiki-cleanup retry failed for ${recordingId}:`, e)
+      stillPending++
+    }
+  }
+  return { cleared, stillPending }
 }
 
 /** Export (or re-export) the wiki page for one recording. Returns the path. */
@@ -260,6 +332,10 @@ export function exportMeetingWiki(recordingId: string): string | null {
 
 /** Export wiki pages for every transcript that doesn't have one yet. */
 export function backfillMeetingWiki(): { written: number; failed: number } {
+  // RE8-P1 (round-9) — first drain any wiki-cleanup retries enqueued by a failed
+  // transition cleanup, so an excluded recording's page is removed on boot even
+  // if the mark-personal / soft-delete / value-rating attempt failed earlier.
+  retryPendingWikiCleanups()
   const rows = queryAll<{ recording_id: string }>(
     `SELECT recording_id FROM transcripts WHERE TRIM(COALESCE(full_text, '')) != ''`
   )
