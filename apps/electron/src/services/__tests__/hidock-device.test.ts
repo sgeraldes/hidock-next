@@ -3650,18 +3650,21 @@ describe('HiDockDeviceService - persistCacheToStorage error path', () => {
       { filename: 'test.wav', size: 1024, duration: 60, dateCreated: new Date() }
     ]
 
-    serviceAny.persistCacheToStorage()
+    try {
+      serviceAny.persistCacheToStorage()
 
-    // Wait for the catch to fire
-    await new Promise(resolve => setTimeout(resolve, 10))
-
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Failed to persist cache'),
-      expect.any(Error)
-    )
-
-    warnSpy.mockRestore()
-    delete (globalThis as any).window
+      // persistCacheToStorage is fire-and-forget; poll until the saveAll
+      // rejection reaches its catch instead of racing it with a fixed sleep.
+      await vi.waitFor(() => {
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining('Failed to persist cache'),
+          expect.any(Error)
+        )
+      }, { timeout: 15000, interval: 25 })
+    } finally {
+      warnSpy.mockRestore()
+      delete (globalThis as any).window
+    }
   })
 
   it('should use current date when dateCreated is missing', () => {
