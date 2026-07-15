@@ -117,6 +117,8 @@ export interface RAGChatRequest {
 export interface RAGChatResponse {
   answer: string
   sources: RAGSource[]
+  /** ADV19-4 — unique id bound to this answer's provenance; pass to addMessage. */
+  generationId?: string
 }
 
 /**

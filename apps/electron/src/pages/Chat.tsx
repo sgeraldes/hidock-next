@@ -706,12 +706,14 @@ export function Chat() {
         setMessages((prev) => [...prev, errorMsg])
         setFailedMessageIds(prev => new Set(prev).add(errorMsg.id))
       } else {
-        // Add assistant response
+        // Add assistant response. ADV19-4 — pass the generationId back so main binds
+        // THIS answer's authoritative provenance union to the persisted message.
         const assistantMsg = await window.electronAPI.assistant.addMessage(
           currentConv!.id,
           'assistant',
           response.answer,
-          JSON.stringify(response.sources || [])
+          JSON.stringify(response.sources || []),
+          response.generationId
         )
         setMessages((prev) => [...prev, assistantMsg])
 
@@ -816,7 +818,8 @@ export function Chat() {
       } else {
         const assistantMsg = await window.electronAPI.assistant.addMessage(
           activeConversation.id, 'assistant', response.answer,
-          JSON.stringify(response.sources || [])
+          JSON.stringify(response.sources || []),
+          response.generationId
         )
         setMessages(prev => [...prev, assistantMsg])
 

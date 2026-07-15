@@ -4,6 +4,7 @@ import { queryAll, queryOne, run, runInTransaction } from '../services/database'
 import { getRAGService } from '../services/rag'
 import {
   packSources,
+  packNonRagAssistant,
   presentSourcesNoRevalidate,
   revalidateStoredSources,
   REDACTED_ANSWER
@@ -86,7 +87,7 @@ export function registerAssistantHandlers(): void {
   })
 
   // Add a message to a conversation
-  ipcMain.handle('assistant:addMessage', async (_, conversationId: string, role: 'user' | 'assistant', content: string, sources?: string) => {
+  ipcMain.handle('assistant:addMessage', async (_, conversationId: string, role: 'user' | 'assistant', content: string, sources?: string, generationId?: string) => {
     try {
       // Validate conversation exists before adding message
       const conv = queryOne<any>('SELECT id FROM conversations WHERE id = ?', [conversationId])
@@ -99,15 +100,22 @@ export function registerAssistantHandlers(): void {
       const id = randomUUID()
       const now = new Date().toISOString()
 
-      // ADV18-2 (round-19) — persist the AUTHORITATIVE provenance union alongside
-      // the snippets so a later read can redact the answer if ANY contributing
-      // recording/capture is excluded. The union is computed main-side by the RAG
-      // service (over vector + pinned + graph) and consumed here by session id
-      // (== conversationId); the renderer never supplies or can tamper with it. A
-      // missing union (non-RAG assistant message, or an absent stash) yields no
-      // envelope, so that assistant message fails closed (redacted) on read.
-      const prov = role === 'assistant' ? getRAGService().consumeAnswerProvenance(conversationId) : undefined
-      const packedSources = packSources(sources, prov)
+      // ADV19-1 / ADV19-4 (round-20) — EVERY assistant message carries an explicit
+      // MAIN-ISSUED envelope. The kind is derived from RAG PIPELINE STATE, never from
+      // renderer input: the renderer passes back the generationId returned with the
+      // RAG answer, and the RAG service resolves it to either a `kind:'rag'` envelope
+      // with THIS generation's authoritative union, or (unknown/missing id while a
+      // grounded generation is still outstanding) a fail-closed unverifiable rag
+      // envelope, or (no generationId AND nothing grounded outstanding) a trusted
+      // `kind:'non-rag'` marker. The renderer cannot forge non-rag to smuggle grounded
+      // content. User messages store their (rare) raw sources verbatim.
+      let packedSources: string | null
+      if (role === 'assistant') {
+        const decision = getRAGService().resolveAssistantProvenance(conversationId, generationId)
+        packedSources = decision.kind === 'rag' ? packSources(sources, decision.prov) : packNonRagAssistant()
+      } else {
+        packedSources = packSources(sources)
+      }
 
       runInTransaction(() => {
         run('INSERT INTO chat_messages (id, conversation_id, role, content, sources, created_at) VALUES (?, ?, ?, ?, ?, ?)',

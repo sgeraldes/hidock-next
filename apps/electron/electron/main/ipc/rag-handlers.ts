@@ -107,7 +107,8 @@ export function registerRAGHandlers(): void {
 
         return success({
           answer: response.answer,
-          sources: response.sources
+          sources: response.sources,
+          generationId: response.generationId
         })
       } catch (err) {
         console.error('rag:chat error:', err)

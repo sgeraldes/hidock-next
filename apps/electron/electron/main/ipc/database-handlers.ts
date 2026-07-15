@@ -25,7 +25,7 @@ import {
 } from '../services/database'
 import { getRecurringTopics } from '../services/recurring-topics'
 import { filterEligibleRecordingIds, existingRecordings } from '../services/recording-eligibility'
-import { revalidateStoredSources, REDACTED_ANSWER } from '../services/chat-source-provenance'
+import { packSources, revalidateStoredSources, REDACTED_ANSWER } from '../services/chat-source-provenance'
 
 export function registerDatabaseHandlers(): void {
   // Meetings
@@ -171,8 +171,17 @@ export function registerDatabaseHandlers(): void {
   })
 
   ipcMain.handle('db:add-chat-message', async (_, role: 'user' | 'assistant', content: string, sources?: string) => {
-    const id = addChatMessage(role, content, sources)
-    return { id, role, content, sources }
+    // ADV19-1 (round-20) — this legacy chat path has NO RAG generation context and
+    // no conversation id, so it cannot resolve an authoritative provenance union.
+    // Stamp assistant rows with a fail-closed UNVERIFIABLE main-issued envelope
+    // (redacted on read via the shared boundary); an un-enveloped assistant row must
+    // never be trusted. User rows keep their raw sources verbatim.
+    const packed =
+      role === 'assistant'
+        ? packSources(undefined, { recordingIds: [], captureIds: [], unverifiable: true })
+        : sources ?? null
+    const id = addChatMessage(role, content, packed ?? undefined)
+    return { id, role, content, sources: packed }
   })
 
   ipcMain.handle('db:clear-chat-history', async () => {

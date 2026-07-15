@@ -653,7 +653,7 @@ export interface ElectronAPI {
     createConversation: (title?: string) => Promise<Conversation>
     deleteConversation: (id: string) => Promise<{ success: boolean; error?: string }>
     getMessages: (conversationId: string) => Promise<Message[]>
-    addMessage: (conversationId: string, role: 'user' | 'assistant', content: string, sources?: string) => Promise<Message>
+    addMessage: (conversationId: string, role: 'user' | 'assistant', content: string, sources?: string, generationId?: string) => Promise<Message>
     updateConversationTitle: (conversationId: string, title: string) => Promise<{ success: boolean; error?: string }>
     addContext: (conversationId: string, knowledgeCaptureId: string) => Promise<{ success: boolean; error?: string }>
     removeContext: (conversationId: string, knowledgeCaptureId: string) => Promise<{ success: boolean; error?: string }>
@@ -760,6 +760,8 @@ export interface ElectronAPI {
         score: number
       }>
       error?: string
+      /** ADV19-4 — pass back to assistant.addMessage to bind the answer's provenance. */
+      generationId?: string
     }>
     summarizeMeeting: (meetingId: string) => Promise<Result<string>>
     findActionItems: (meetingId?: string) => Promise<Result<string>>
@@ -1469,7 +1471,7 @@ const electronAPI: ElectronAPI = {
     createConversation: (title) => callIPC('assistant:createConversation', title),
     deleteConversation: (id) => callIPC('assistant:deleteConversation', id),
     getMessages: (conversationId) => callIPC('assistant:getMessages', conversationId),
-    addMessage: (conversationId, role, content, sources) => callIPC('assistant:addMessage', conversationId, role, content, sources),
+    addMessage: (conversationId, role, content, sources, generationId) => callIPC('assistant:addMessage', conversationId, role, content, sources, generationId),
     updateConversationTitle: (conversationId, title) => callIPC('assistant:updateConversationTitle', conversationId, title),
     addContext: (conversationId, knowledgeCaptureId) => callIPC('assistant:addContext', conversationId, knowledgeCaptureId),
     removeContext: (conversationId, knowledgeCaptureId) => callIPC('assistant:removeContext', conversationId, knowledgeCaptureId),

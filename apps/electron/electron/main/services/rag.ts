@@ -14,6 +14,7 @@ import {
   type MessageProvenance
 } from './chat-source-provenance'
 import { stripDiacritics } from './entity-normalize'
+import { randomUUID } from 'crypto'
 import type { BrainId } from './brains/types'
 // Type-only — erased at compile so RAG's runtime import graph stays free of the
 // knowledge-graph/ingest/LLM stack (loaded lazily inside buildGraphContext).
@@ -51,6 +52,13 @@ interface RAGResponse {
     captureId?: string
   }>
   error?: string
+  /**
+   * ADV19-4 (round-20) — a UNIQUE id for THIS generation. The renderer MUST pass it
+   * back to assistant:addMessage so the persist path consumes THIS answer's
+   * authoritative provenance union (not the conversation's latest). Absent on error
+   * turns (no answer was generated).
+   */
+  generationId?: string
 }
 
 const SYSTEM_PROMPT = `You are a helpful meeting assistant that answers questions based on meeting transcripts.
@@ -492,26 +500,111 @@ function filterEligibleKnowledge(_db: any, rows: any[]): any[] {
   return rows.filter((r) => eligible.has(r.id as string))
 }
 
+/** A pending answer awaiting persistence, bound to a unique generation id. */
+interface PendingGeneration {
+  conversationId: string
+  prov: MessageProvenance
+  /** True when the union has anything excludable (recordings/captures/unverifiable). */
+  grounded: boolean
+}
+
+/** The main-issued envelope decision for a persisting assistant message. */
+export type AssistantProvenanceDecision =
+  | { kind: 'rag'; prov: MessageProvenance }
+  | { kind: 'non-rag' }
+
+const UNVERIFIABLE_PROV: MessageProvenance = { recordingIds: [], captureIds: [], unverifiable: true }
+
 class RAGService {
   private contexts: LRUSessionCache = new LRUSessionCache()
   // B-CHAT-005: Active AbortControllers for cancellable requests
   private activeControllers: Map<string, AbortController> = new Map()
   /**
-   * ADV18-2 (round-19) — authoritative provenance union for the LAST answer of
-   * each session, computed main-side over ALL prompt components (vector + pinned
-   * + graph). assistant:addMessage consumes it by session id (== conversation id)
-   * so the persisted envelope carries provenance the renderer NEVER supplies or
-   * can tamper with. A missing entry ⇒ the persist path fails closed (no
-   * envelope ⇒ redact on read). Cleared at the start of every chat() turn and on
-   * clearSession.
+   * ADV19-4 (round-20) — provenance is bound to a UNIQUE GENERATION id, not the
+   * conversation. Each chat() generation registers its authoritative union under a
+   * fresh generationId (returned to the renderer with the answer); the persist path
+   * (assistant:addMessage) MUST supply that id to consume the MATCHING union. The
+   * round-19 model keyed by conversation — one slot — so a second overlapping
+   * generation overwrote the first answer's pending union ⇒ cross-consumption.
+   * Keyed by generationId, answer A can only ever consume A's union.
    */
-  private answerProvenance: Map<string, MessageProvenance> = new Map()
+  private pendingGenerations: Map<string, PendingGeneration> = new Map()
+  /**
+   * Per-conversation set of unconsumed GROUNDED generation ids. Lets main tell a
+   * genuine non-RAG emit (error/greeting) from a renderer trying to persist grounded
+   * content WITHOUT its generationId as a 'non-rag' message (⇒ fail closed).
+   */
+  private groundedByConversation: Map<string, Set<string>> = new Map()
+  /** ADV19-4 — per-conversation in-flight guard: reject overlapping generations. */
+  private inFlight: Set<string> = new Set()
 
-  /** Consume (and clear) the last answer's provenance union for a session. */
-  consumeAnswerProvenance(sessionId: string): MessageProvenance | undefined {
-    const prov = this.answerProvenance.get(sessionId)
-    this.answerProvenance.delete(sessionId)
-    return prov
+  /** Bound pending-generation memory; oldest evicted (evicted ⇒ fail-closed on persist). */
+  private static readonly MAX_PENDING_GENERATIONS = 256
+
+  /** Register a completed generation's provenance under its unique id. */
+  private registerPendingGeneration(generationId: string, conversationId: string, prov: MessageProvenance): void {
+    const grounded = prov.unverifiable || prov.recordingIds.length > 0 || prov.captureIds.length > 0
+    while (this.pendingGenerations.size >= RAGService.MAX_PENDING_GENERATIONS) {
+      const oldest = this.pendingGenerations.keys().next().value
+      if (oldest === undefined) break
+      this.discardPendingGeneration(oldest)
+    }
+    this.pendingGenerations.set(generationId, { conversationId, prov, grounded })
+    if (grounded) {
+      let set = this.groundedByConversation.get(conversationId)
+      if (!set) { set = new Set(); this.groundedByConversation.set(conversationId, set) }
+      set.add(generationId)
+    }
+  }
+
+  private discardPendingGeneration(generationId: string): void {
+    const entry = this.pendingGenerations.get(generationId)
+    if (!entry) return
+    this.pendingGenerations.delete(generationId)
+    const set = this.groundedByConversation.get(entry.conversationId)
+    if (set) {
+      set.delete(generationId)
+      if (set.size === 0) this.groundedByConversation.delete(entry.conversationId)
+    }
+  }
+
+  private clearPendingForConversation(conversationId: string): void {
+    const set = this.groundedByConversation.get(conversationId)
+    if (set) for (const id of [...set]) this.pendingGenerations.delete(id)
+    this.groundedByConversation.delete(conversationId)
+    // Also drop any non-grounded pending entries for this conversation.
+    for (const [id, entry] of this.pendingGenerations) {
+      if (entry.conversationId === conversationId) this.pendingGenerations.delete(id)
+    }
+  }
+
+  /**
+   * ADV19-1/ADV19-4 (round-20) — decide the MAIN-ISSUED envelope kind + provenance
+   * for a persisting assistant message. The kind is derived from RAG PIPELINE STATE,
+   * NEVER from renderer input, so the renderer cannot forge a trusted 'non-rag'
+   * message carrying grounded content:
+   *   • generationId matches an unconsumed pending generation for THIS conversation
+   *     ⇒ kind:'rag' with that generation's authoritative union (consumed here);
+   *   • generationId unknown / already-consumed / for another conversation ⇒
+   *     kind:'rag' UNVERIFIABLE (fail-closed ⇒ redacted on read);
+   *   • NO generationId but the conversation still has an unconsumed GROUNDED
+   *     generation outstanding ⇒ the renderer is persisting grounded content as a
+   *     non-source message ⇒ kind:'rag' UNVERIFIABLE (forge ignored);
+   *   • NO generationId and NO grounded generation outstanding ⇒ a genuine non-RAG
+   *     emit (error/greeting/status) ⇒ kind:'non-rag' (trusted, grounds nothing).
+   */
+  resolveAssistantProvenance(conversationId: string, generationId?: string): AssistantProvenanceDecision {
+    if (generationId) {
+      const entry = this.pendingGenerations.get(generationId)
+      if (entry && entry.conversationId === conversationId) {
+        this.discardPendingGeneration(generationId)
+        return { kind: 'rag', prov: entry.prov }
+      }
+      return { kind: 'rag', prov: UNVERIFIABLE_PROV }
+    }
+    const grounded = this.groundedByConversation.get(conversationId)
+    if (grounded && grounded.size > 0) return { kind: 'rag', prov: UNVERIFIABLE_PROV }
+    return { kind: 'non-rag' }
   }
 
   async isReady(): Promise<{ ready: boolean; reason?: string }> {
@@ -566,8 +659,6 @@ class RAGService {
     message: string,
     meetingFilter?: string
   ): Promise<RAGResponse> {
-    const vectorStore = getVectorStore()
-
     // Validate that sessionId corresponds to a valid conversation
     try {
       const conversation = queryOne<any>('SELECT id FROM conversations WHERE id = ?', [sessionId])
@@ -588,18 +679,41 @@ class RAGService {
       }
     }
 
-    // ADV18-2 (round-19) — clear any stale provenance for this session at the
-    // START of the turn; it is set ONLY on the successful return path below, so
-    // an error turn (or an abandoned generation) leaves no provenance for the
-    // next assistant:addMessage to consume (⇒ that message would fail closed).
-    this.answerProvenance.delete(sessionId)
+    // ADV19-4 (round-20) — per-conversation in-flight guard. Reject an OVERLAPPING
+    // generation for the SAME conversation so two answers can't interleave and
+    // cross-consume provenance. This is a MAIN-process boundary — it does NOT rely
+    // on the renderer's isProcessing flag. The finally always releases it (even on a
+    // thrown provider/search error) so a conversation can never wedge.
+    if (this.inFlight.has(sessionId)) {
+      return {
+        answer: '',
+        sources: [],
+        error: 'A response is already being generated for this conversation. Please wait for it to finish.'
+      }
+    }
+    this.inFlight.add(sessionId)
+    try {
+      return await this.generateAnswer(sessionId, message, meetingFilter)
+    } finally {
+      this.inFlight.delete(sessionId)
+    }
+  }
+
+  /**
+   * The actual RAG generation, guarded by chat()'s per-conversation in-flight lock.
+   * ADV19-4 — every generation gets a UNIQUE generationId; its authoritative
+   * provenance union is registered under that id (NOT the conversation) and returned
+   * with the answer so assistant:addMessage consumes THIS answer's union.
+   */
+  private async generateAnswer(
+    sessionId: string,
+    message: string,
+    meetingFilter?: string
+  ): Promise<RAGResponse> {
+    const vectorStore = getVectorStore()
+    const generationId = randomUUID()
 
     // B-CHAT-005: Create AbortController for this request
-    // Cancel any existing in-flight request for this session
-    const existingController = this.activeControllers.get(sessionId)
-    if (existingController) {
-      existingController.abort()
-    }
     const controller = new AbortController()
     this.activeControllers.set(sessionId, controller)
 
@@ -678,29 +792,29 @@ class RAGService {
     }
     // ------------------------------------------------
 
-    // Build context from search results
-    const contextParts: string[] = []
-    const sources: RAGResponse['sources'] = []
-
-    // ADV18-2 (round-19) — accumulate the AUTHORITATIVE provenance union over
-    // EVERY prompt component (vector chunks here, pinned + graph below). These
-    // ids are what the persisted answer is redacted against on re-read, so a
-    // later exclusion of ANY of them removes the whole answer + chips.
+    // ADV18-2 / ADV19-2 (round-20) — the AUTHORITATIVE provenance union over EVERY
+    // prompt component (vector + pinned + graph); it is what the persisted answer is
+    // redacted against on re-read. Each vector part is retained WITH its recording/
+    // capture provenance so the FINAL post-await recheck below can DROP a component
+    // whose source is excluded DURING an await (it is never built into the union nor
+    // sent to the provider).
     const provRecordingIds = new Set<string>()
     const provCaptureIds = new Set<string>()
     let provUnverifiable = false
 
-    // A vector doc is recording-backed via its `recordingId` ONLY when it is a
-    // transcript chunk; ALL artifact/capture indexing sets `captureId` (ADV10-P1,
-    // and `recordingId` there is the artifact id). Discriminate on captureId
-    // exactly like vector-store.filterEligibleDocs so we validate captures via the
-    // capture boundary and recordings via the recording boundary on read. A chunk
-    // with NEITHER id cannot be attributed ⇒ mark the answer unverifiable.
-    const captureVectorProvenance = (meta: { recordingId?: string; captureId?: string }): void => {
-      if (meta.captureId) provCaptureIds.add(meta.captureId)
-      else if (meta.recordingId) provRecordingIds.add(meta.recordingId)
-      else provUnverifiable = true
+    // A vector doc is capture-backed when it carries a `captureId` (ALL artifact/
+    // capture indexing sets it; `recordingId` there is the artifact id) — discriminate
+    // exactly like vector-store.filterEligibleDocs; otherwise it is recording-backed
+    // via `recordingId`. A chunk with NEITHER id cannot be attributed ⇒ the answer is
+    // unverifiable. Provenance is FOLDED IN only for components that survive the
+    // recheck (below), never at build time.
+    interface TaggedVectorPart {
+      part: string
+      recordingId?: string
+      captureId?: string
+      source: RAGResponse['sources'][number]
     }
+    const vectorParts: TaggedVectorPart[] = []
 
     for (const result of searchResults) {
       if (result.score < 0.3) continue // Skip low-relevance results
@@ -716,16 +830,18 @@ class RAGService {
       // renderer can cite/link the source image. Everything else stays a meeting.
       if (doc.metadata.sourceType === 'image') {
         const desc = doc.metadata.subject || 'Screenshot'
-        contextParts.push(`[Screenshot: ${desc}${dateInfo}]\n${doc.content}`)
-        sources.push({
-          content: doc.content.substring(0, 200) + (doc.content.length > 200 ? '...' : ''),
-          subject: doc.metadata.subject,
-          timestamp: doc.metadata.timestamp,
-          score,
-          sourceType: 'image',
-          captureId: doc.metadata.captureId
+        vectorParts.push({
+          part: `[Screenshot: ${desc}${dateInfo}]\n${doc.content}`,
+          captureId: doc.metadata.captureId,
+          source: {
+            content: doc.content.substring(0, 200) + (doc.content.length > 200 ? '...' : ''),
+            subject: doc.metadata.subject,
+            timestamp: doc.metadata.timestamp,
+            score,
+            sourceType: 'image',
+            captureId: doc.metadata.captureId
+          }
         })
-        captureVectorProvenance(doc.metadata)
         continue
       }
 
@@ -735,15 +851,19 @@ class RAGService {
           ? `Meeting ID: ${doc.metadata.meetingId}`
           : 'Unknown meeting'
 
-      contextParts.push(`[${meetingInfo}${dateInfo}]\n${doc.content}`)
-      sources.push({
-        content: doc.content.substring(0, 200) + (doc.content.length > 200 ? '...' : ''),
-        meetingId: doc.metadata.meetingId,
-        subject: doc.metadata.subject,
-        timestamp: doc.metadata.timestamp,
-        score
+      vectorParts.push({
+        part: `[${meetingInfo}${dateInfo}]\n${doc.content}`,
+        // capture-backed chunks set captureId; transcript chunks set recordingId.
+        captureId: doc.metadata.captureId,
+        recordingId: doc.metadata.captureId ? undefined : doc.metadata.recordingId,
+        source: {
+          content: doc.content.substring(0, 200) + (doc.content.length > 200 ? '...' : ''),
+          meetingId: doc.metadata.meetingId,
+          subject: doc.metadata.subject,
+          timestamp: doc.metadata.timestamp,
+          score
+        }
       })
-      captureVectorProvenance(doc.metadata)
     }
 
     // Ground with Context Graph facts (F4): the assistant walks graph edges, not
@@ -752,27 +872,80 @@ class RAGService {
     // is scoped to a meeting, that meeting's neighborhood. Trimmed to a per-brain
     // token budget. Loaded lazily inside buildGraphContext so RAG's static import
     // graph stays free of the ingest/LLM stack.
-    // ADV18-2 — collect the recording ids backing the graph facts we actually
-    // emit, so the answer's provenance union covers graph grounding (not just
-    // vector snippets). `unresolved` (a provenance read threw) ⇒ unverifiable.
+    // ADV18-2 — collect the recording ids backing the graph facts we actually emit,
+    // so the answer's provenance union covers graph grounding. `unresolved` (a
+    // provenance read threw, OR a zero-provenance legacy fact was emitted — ADV19-3)
+    // ⇒ the answer is unverifiable.
     const graphProv: NeighborhoodFactProvenance = { recordingIds: new Set<string>(), unresolved: false }
     const graphContextParts = await buildGraphContext(message, context.meetingId, graphProv)
-    for (const id of graphProv.recordingIds) provRecordingIds.add(id)
-    if (graphProv.unresolved) provUnverifiable = true
 
-    // ADV5/INC (round-5/6) — revalidate pinned recordings through the shared
-    // fail-closed boundary HERE, immediately before prompt construction and
-    // AFTER buildGraphContext's dynamic-import/router awaits (a deletion during
-    // that await must not go stale). A now-excluded pinned recording is dropped;
-    // if eligibility can't be established, ALL pinned recording-backed context
-    // is dropped (fail closed).
-    const { eligible: eligiblePinned } = filterEligibleRecordingIds(pinnedEntries.map((e) => e.recordingId))
-    const pinnedContextParts = pinnedEntries.filter((e) => eligiblePinned.has(e.recordingId)).map((e) => e.part)
-    // ADV18-2 — the pinned recordings actually injected are authoritative sources.
-    for (const e of pinnedEntries) if (eligiblePinned.has(e.recordingId)) provRecordingIds.add(e.recordingId)
+    // ADV19-2 (round-20) — POST-AWAIT RECHECK. Everything above involved awaits
+    // (search embeddings, the pinned DB read, buildGraphContext's dynamic import +
+    // router awaits); a recording/capture could have been trashed / marked personal /
+    // value-excluded DURING any of them. Revalidate ALL components (vector + pinned +
+    // graph) TOGETHER through the shared fail-closed boundary NOW — immediately before
+    // the provider messages are built — and DROP any now-ineligible component so its
+    // text is NEVER sent to Gemini/Ollama. Fail-closed on a lookup error (drop the
+    // component). An exclusion that lands AFTER the provider generation has already
+    // started cannot be un-sent, but the persisted answer's union will then be
+    // excluded/unverifiable ⇒ redacted on the next read.
+    const recCheck = filterEligibleRecordingIds([
+      ...vectorParts.filter((v) => v.recordingId).map((v) => v.recordingId!),
+      ...pinnedEntries.map((e) => e.recordingId),
+      ...graphProv.recordingIds
+    ])
+    const capCheck = filterEligibleCaptureIds(
+      vectorParts.filter((v) => v.captureId).map((v) => v.captureId!)
+    )
+    const recEligible = (id?: string): boolean => !!id && !recCheck.failClosed && recCheck.eligible.has(id)
+    const capEligible = (id?: string): boolean => !!id && !capCheck.failClosed && capCheck.eligible.has(id)
+
+    // Vector parts — keep only components whose recording/capture is still eligible;
+    // fold the surviving ids into the union + emit their chips.
+    const contextParts: string[] = []
+    const sources: RAGResponse['sources'] = []
+    for (const v of vectorParts) {
+      if (v.captureId) {
+        if (!capEligible(v.captureId)) continue // excluded during await ⇒ drop
+        provCaptureIds.add(v.captureId)
+      } else if (v.recordingId) {
+        if (!recEligible(v.recordingId)) continue
+        provRecordingIds.add(v.recordingId)
+      } else {
+        provUnverifiable = true // unattributable chunk ⇒ answer fails closed on read
+      }
+      contextParts.push(v.part)
+      sources.push(v.source)
+    }
+
+    // Pinned context (ADV5/INC round-5/6) — revalidated in the SAME post-await pass.
+    const pinnedContextParts: string[] = []
+    for (const e of pinnedEntries) {
+      if (!recEligible(e.recordingId)) continue // now-excluded pinned recording ⇒ drop
+      pinnedContextParts.push(e.part)
+      provRecordingIds.add(e.recordingId)
+    }
+
+    // Graph facts are a bundle with only AGGREGATE provenance. If ANY graph-backing
+    // recording became ineligible during the await (or the lookup failed closed),
+    // drop ALL graph parts (we can't attribute per-fact) so no excluded text is sent.
+    // A zero-provenance legacy fact (graphProv.unresolved, ADV19-3) stays in the
+    // prompt as an accepted grounding residual (RE-3) but marks the answer
+    // unverifiable ⇒ redacted on re-read.
+    let graphParts = graphContextParts
+    let dropGraph = false
+    for (const id of graphProv.recordingIds) {
+      if (!recEligible(id)) { dropGraph = true; break }
+    }
+    if (dropGraph) {
+      graphParts = []
+    } else {
+      for (const id of graphProv.recordingIds) provRecordingIds.add(id)
+      if (graphProv.unresolved) provUnverifiable = true
+    }
 
     // Combine pinned context, graph facts, and search results
-    const allContextParts = [...pinnedContextParts, ...graphContextParts, ...contextParts]
+    const allContextParts = [...pinnedContextParts, ...graphParts, ...contextParts]
 
     // Prepare messages
     const contextText =
@@ -840,10 +1013,12 @@ class RAGService {
       }
     }
 
-    // ADV18-2 (round-19) — the authoritative provenance union for THIS answer,
-    // over vector + pinned + graph. Attached to the cached history turn (so the
-    // resend gate above can revalidate it next turn) AND stashed for the
-    // persist path (assistant:addMessage consumes it by session id).
+    // ADV18-2 / ADV19-4 (round-20) — the authoritative provenance union for THIS
+    // answer, over the SURVIVING vector + pinned + graph components. Attached to the
+    // cached history turn (so the resend gate above can revalidate it next turn) AND
+    // registered under THIS generation's unique id for the persist path (consumed by
+    // assistant:addMessage with the matching generationId — never the conversation's
+    // latest, so overlapping generations can't cross-consume).
     const answerProv: MessageProvenance = {
       recordingIds: [...provRecordingIds],
       captureIds: [...provCaptureIds],
@@ -859,13 +1034,13 @@ class RAGService {
       context.conversationHistory = context.conversationHistory.slice(-20)
     }
 
-    // Stash provenance for the persist path (consumed by assistant:addMessage).
-    this.answerProvenance.set(sessionId, answerProv)
+    // Bind this answer's provenance to its unique generation id for the persist path.
+    this.registerPendingGeneration(generationId, sessionId, answerProv)
 
     // B-CHAT-005: Clean up controller after successful completion
     this.activeControllers.delete(sessionId)
 
-    return { answer, sources }
+    return { answer, sources, generationId }
   }
 
   async summarizeMeeting(meetingId: string): Promise<string | null> {
@@ -947,8 +1122,8 @@ ${transcript.substring(0, 8000)}`
 
   clearSession(sessionId: string): void {
     this.contexts.delete(sessionId)
-    // ADV18-2 — drop any stashed answer provenance for this session too.
-    this.answerProvenance.delete(sessionId)
+    // ADV19-4 — drop any pending generation provenance for this conversation too.
+    this.clearPendingForConversation(sessionId)
     // Also cancel any in-flight request for this session
     const controller = this.activeControllers.get(sessionId)
     if (controller) {
