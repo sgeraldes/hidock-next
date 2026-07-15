@@ -163,4 +163,26 @@ describe('RAGService.globalSearch (real SQL)', () => {
     expect(ids).toContain('kc-1') // standalone still allowed
     expect(ids).not.toContain('kc-rec2') // recording-backed dropped (fail closed)
   })
+
+  // P2 (round-7) — eligibility filtering must run BEFORE the display LIMIT.
+  // With the old LIMIT-then-filter order, an excluded capture occupying the
+  // first `limit` rows would shrink the result to empty even though an eligible
+  // match exists just beyond the limit. Over-fetch fixes this.
+  it('P2 — an eligible capture beyond the display LIMIT still surfaces after excluded rows are filtered', async () => {
+    // Two captures match a unique term; the FIRST (insert order) is recording-backed
+    // and excluded, the SECOND is an eligible standalone capture. limit = 1.
+    dbInstance.run(`
+      INSERT INTO knowledge_captures (id, title, summary, captured_at, source_recording_id, deleted_at) VALUES
+        ('kc-zex', 'Zebra excluded note', 'Zebra recording-backed capture', '2026-02-01', 'rec-x', NULL),
+        ('kc-zok', 'Zebra eligible note', 'Zebra standalone capture', '2026-02-02', NULL, NULL);
+    `)
+    globalExclusion = { ids: new Set(['rec-x']), failClosed: false }
+
+    const rag = getRAGService()
+    const result = await rag.globalSearch('Zebra', 1)
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    const ids = result.data.knowledge.map((k: any) => k.id)
+    expect(ids).toEqual(['kc-zok']) // excluded row filtered pre-limit; eligible match returned
+  })
 })

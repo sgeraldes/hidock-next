@@ -10,7 +10,12 @@ vi.mock('electron', () => ({
 
 vi.mock('../../services/database', () => ({
   getMeetings: vi.fn(),
-  queryAll: vi.fn()
+  queryAll: vi.fn(),
+  queryOne: vi.fn(),
+  // RE7-3 (round-7) — briefing:get routes recording-backed rows through the
+  // real eligibility boundary, which reads getExcludedRecordingIds. Default:
+  // nothing excluded, not fail-closed (so all rows remain eligible).
+  getExcludedRecordingIds: vi.fn(() => ({ ids: new Set<string>(), failClosed: false }))
 }))
 
 vi.mock('../../services/config', () => ({
@@ -191,5 +196,75 @@ describe('Briefing IPC Handlers', () => {
     for (const c of dayScoped) {
       expect(c.params).toEqual([dayStart, dayEnd])
     }
+  })
+
+  // RE7-3 (round-7) — Today is an assistant-facing DISPLAY. Even though the SQL
+  // already drops personal/soft-deleted, a VALUE-excluded recording (and a stale
+  // actionable pointing at a now-excluded recording) must be filtered through the
+  // shared eligibility boundary before being shown.
+  it('drops value-excluded recordings and their stale actionables from the briefing', async () => {
+    const { queryAll, queryOne, getMeetings, getExcludedRecordingIds } = await import('../../services/database')
+    vi.mocked(getMeetings).mockReturnValue([])
+    // rec-drop is value-excluded; the boundary reports it excluded.
+    vi.mocked(getExcludedRecordingIds).mockReturnValue({ ids: new Set(['rec-drop']), failClosed: false } as any)
+    // Actionable a-drop's capture resolves to rec-drop; a-keep's to rec-keep.
+    vi.mocked(queryOne).mockImplementation((_sql: string, params?: unknown[]) => {
+      const id = params?.[0]
+      if (id === 'kc-drop') return { source_recording_id: 'rec-drop' } as any
+      if (id === 'kc-keep') return { source_recording_id: 'rec-keep' } as any
+      return null as any
+    })
+    const followUpRow = (rid: string) => ({
+      recording_id: rid, title_suggestion: rid, summary: 's', action_items: '[]',
+      word_count: 10, filename: `${rid}.wav`, date_recorded: '2026-07-09T10:00:00Z',
+      meeting_id: null, meeting_subject: null, meeting_start: null, meeting_end: null
+    })
+    vi.mocked(queryAll).mockImplementation(
+      routeQueryAll([
+        { match: /LEFT JOIN recordings r ON r\.id = t\.recording_id/, rows: [followUpRow('rec-keep'), followUpRow('rec-drop')] },
+        { match: /JOIN recordings r ON r\.id = t\.recording_id\s+LEFT JOIN meetings m/, rows: [followUpRow('rec-keep'), followUpRow('rec-drop')] },
+        { match: /SELECT COUNT\(1\) AS n FROM recordings r/, rows: [{ n: 0 }] },
+        { match: /FROM actionables/, rows: [
+          { id: 'a-keep', type: 'email', title: 'Keep', source_knowledge_id: 'kc-keep' },
+          { id: 'a-drop', type: 'email', title: 'Drop', source_knowledge_id: 'kc-drop' }
+        ] },
+        { match: /FROM transcripts WHERE/, rows: [{ n: 2 }] },
+        { match: /FROM vector_embeddings/, rows: [{ n: 0 }] }
+      ])
+    )
+
+    const res = await handlers['briefing:get']()
+    expect(res.success).toBe(true)
+    expect(res.data.recentKnowledge.map((r: any) => r.recordingId)).toEqual(['rec-keep'])
+    expect(res.data.todayFollowUps.map((r: any) => r.recordingId)).toEqual(['rec-keep'])
+    expect(res.data.pendingActionables.map((a: any) => a.id)).toEqual(['a-keep'])
+  })
+
+  it('fails closed — returns no recording-backed rows when eligibility is unverifiable', async () => {
+    const { queryAll, queryOne, getMeetings, getExcludedRecordingIds } = await import('../../services/database')
+    vi.mocked(getMeetings).mockReturnValue([])
+    vi.mocked(getExcludedRecordingIds).mockReturnValue({ ids: new Set<string>(), failClosed: true } as any)
+    vi.mocked(queryOne).mockReturnValue(null as any)
+    const row = {
+      recording_id: 'rec-1', title_suggestion: 't', summary: 's', action_items: '[]',
+      word_count: 10, filename: 'r.wav', date_recorded: '2026-07-09T10:00:00Z',
+      meeting_id: null, meeting_subject: null, meeting_start: null, meeting_end: null
+    }
+    vi.mocked(queryAll).mockImplementation(
+      routeQueryAll([
+        { match: /LEFT JOIN recordings r ON r\.id = t\.recording_id/, rows: [row] },
+        { match: /JOIN recordings r ON r\.id = t\.recording_id\s+LEFT JOIN meetings m/, rows: [row] },
+        { match: /SELECT COUNT\(1\) AS n FROM recordings r/, rows: [{ n: 0 }] },
+        { match: /FROM actionables/, rows: [{ id: 'a-1', type: 'email', title: 'X', source_knowledge_id: 'rec-1' }] },
+        { match: /FROM transcripts WHERE/, rows: [{ n: 1 }] },
+        { match: /FROM vector_embeddings/, rows: [{ n: 0 }] }
+      ])
+    )
+
+    const res = await handlers['briefing:get']()
+    expect(res.success).toBe(true)
+    expect(res.data.recentKnowledge).toEqual([])
+    expect(res.data.todayFollowUps).toEqual([])
+    expect(res.data.pendingActionables).toEqual([])
   })
 })

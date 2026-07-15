@@ -915,18 +915,23 @@ ${transcript.substring(0, 8000)}`
         const escaped = escapeLikePattern(terms[0])
         const likeQuery = `%${escaped}%`
 
+        // RE6-INC (round-7, P2) — over-fetch so eligibility filtering happens
+        // BEFORE the display LIMIT: excluded captures in the first `limit` rows
+        // must not shrink the eligible result set (an eligible match beyond the
+        // limit still surfaces). Filter, then slice to `limit`.
+        const overfetch = Math.max(limit * 10, 50)
         const knowledgeRows = db.exec(`
           SELECT id, title, summary, captured_at FROM knowledge_captures
           WHERE title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\'
           LIMIT ?
-        `, [likeQuery, likeQuery, limit])
+        `, [likeQuery, likeQuery, overfetch])
 
         const knowledge = filterEligibleKnowledge(db, knowledgeRows.length > 0 ? knowledgeRows[0].values.map(v => ({
           id: v[0],
           title: v[1],
           summary: v[2],
           capturedAt: v[3]
-        })) : [])
+        })) : []).slice(0, limit)
 
         const peopleRows = db.exec(`
           SELECT id, name, email, type FROM contacts
@@ -992,15 +997,17 @@ ${transcript.substring(0, 8000)}`
         return { sql, params }
       }
 
-      // 1. Search knowledge captures with explicit columns + multi-term ranking
-      const kq = buildMultiTermQuery('knowledge_captures', ['title', 'summary'], 'id, title, summary, captured_at', limit)
+      // 1. Search knowledge captures with explicit columns + multi-term ranking.
+      // RE6-INC (P2) — over-fetch so eligibility filtering precedes the display
+      // LIMIT (see the single-term path above).
+      const kq = buildMultiTermQuery('knowledge_captures', ['title', 'summary'], 'id, title, summary, captured_at', Math.max(limit * 10, 50))
       const knowledgeRows = db.exec(kq.sql, kq.params)
       const knowledge = filterEligibleKnowledge(db, knowledgeRows.length > 0 ? knowledgeRows[0].values.map(v => ({
         id: v[0],
         title: v[1],
         summary: v[2],
         capturedAt: v[3]
-      })) : [])
+      })) : []).slice(0, limit)
 
       // 2. Search people with explicit columns + multi-term ranking
       const pq = buildMultiTermQuery('contacts', ['name', 'email', 'company', 'role'], 'id, name, email, type', limit)

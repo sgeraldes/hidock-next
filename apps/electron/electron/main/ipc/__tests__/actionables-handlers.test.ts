@@ -13,7 +13,11 @@ vi.mock('electron', () => ({
 vi.mock('../../services/database', () => ({
   queryAll: vi.fn(),
   queryOne: vi.fn(),
-  run: vi.fn()
+  run: vi.fn(),
+  // RE7-3 (round-7) — getAll/getByMeeting route rows through the real
+  // eligibility boundary, which reads getExcludedRecordingIds. Default:
+  // nothing excluded, not fail-closed (so all rows remain eligible).
+  getExcludedRecordingIds: vi.fn(() => ({ ids: new Set<string>(), failClosed: false }))
 }))
 
 describe('Actionables IPC Handlers', () => {
@@ -496,6 +500,52 @@ describe('Actionables IPC Handlers', () => {
         success: false,
         error: 'DB completely down'
       })
+    })
+  })
+
+  // RE7-3 (round-7) — actionables lists are assistant-facing DISPLAY of
+  // recording-derived content, routed through the shared eligibility boundary.
+  describe('eligibility filtering (RE7-3)', () => {
+    const row = (id: string, skid: string) => ({
+      id, type: 'email', title: id, description: null, source_knowledge_id: skid,
+      source_action_item_id: null, suggested_template: null, suggested_recipients: null,
+      status: 'pending', confidence: null, artifact_id: null, generated_at: null,
+      shared_at: null, created_at: '2026-07-09T10:00:00Z', updated_at: '2026-07-09T10:00:00Z'
+    })
+
+    it('getAll drops actionables whose source recording is excluded, keeps standalone rows', async () => {
+      const { queryAll, queryOne, getExcludedRecordingIds } = await import('../../services/database')
+      // a-keep → rec-keep (eligible); a-drop → rec-drop (excluded); a-standalone → no capture.
+      vi.mocked(queryOne).mockImplementation((_sql: string, params?: unknown[]) => {
+        const id = params?.[0]
+        if (id === 'kc-keep') return { source_recording_id: 'rec-keep' } as any
+        if (id === 'kc-drop') return { source_recording_id: 'rec-drop' } as any
+        // kc-standalone: a real capture NOT backed by any recording → always kept.
+        if (id === 'kc-standalone') return { source_recording_id: null } as any
+        return null as any
+      })
+      vi.mocked(getExcludedRecordingIds).mockReturnValue({ ids: new Set(['rec-drop']), failClosed: false } as any)
+      vi.mocked(queryAll).mockReturnValue([row('a-keep', 'kc-keep'), row('a-drop', 'kc-drop'), row('a-standalone', 'kc-standalone')])
+
+      const result = await handlers['actionables:getAll'](null)
+      expect(result.map((a: any) => a.id).sort()).toEqual(['a-keep', 'a-standalone'])
+    })
+
+    it('getAll fails closed — drops every recording-backed actionable when eligibility is unverifiable', async () => {
+      const { queryAll, queryOne, getExcludedRecordingIds } = await import('../../services/database')
+      vi.mocked(queryOne).mockImplementation((_sql: string, params?: unknown[]) => {
+        const id = params?.[0]
+        if (id === 'kc-1') return { source_recording_id: 'rec-1' } as any
+        // kc-free: a real standalone capture (no source recording) → always kept.
+        if (id === 'kc-free') return { source_recording_id: null } as any
+        return null as any
+      })
+      vi.mocked(getExcludedRecordingIds).mockReturnValue({ ids: new Set<string>(), failClosed: true } as any)
+      // a-rec is recording-backed (dropped on fail-closed); a-free is standalone (kept).
+      vi.mocked(queryAll).mockReturnValue([row('a-rec', 'kc-1'), row('a-free', 'kc-free')])
+
+      const result = await handlers['actionables:getAll'](null)
+      expect(result.map((a: any) => a.id)).toEqual(['a-free'])
     })
   })
 })

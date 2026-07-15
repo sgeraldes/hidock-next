@@ -6,7 +6,8 @@
  */
 
 import { ipcMain } from 'electron'
-import { getMeetings, queryAll } from '../services/database'
+import { getMeetings, queryAll, queryOne } from '../services/database'
+import { filterEligibleRecordingIds } from '../services/recording-eligibility'
 import { getConfig } from '../services/config'
 
 export interface BriefingRecentItem {
@@ -87,7 +88,9 @@ export function registerBriefingHandlers(): void {
 
       const todayMeetings = getMeetings(dayStart, dayEnd)
 
-      const recentKnowledge: BriefingRecentItem[] = queryAll<TranscriptRow>(
+      // Over-fetch (LIMIT 30) so the value-exclusion filter below can still fill
+      // the ~6-item Recent list after excluded rows are dropped.
+      const recentKnowledgeRaw: BriefingRecentItem[] = queryAll<TranscriptRow>(
         `SELECT ${TRANSCRIPT_SELECT}
          FROM transcripts t
          LEFT JOIN recordings r ON r.id = t.recording_id
@@ -95,11 +98,11 @@ export function registerBriefingHandlers(): void {
          WHERE TRIM(COALESCE(t.full_text, '')) != ''
            AND COALESCE(r.personal, 0) = 0 AND r.deleted_at IS NULL
          ORDER BY COALESCE(r.date_recorded, '') DESC
-         LIMIT 6`
+         LIMIT 30`
       ).map(mapTranscriptRow)
 
       // Today's recorded + transcribed meetings, newest first — the follow-up digest.
-      const todayFollowUps: BriefingRecentItem[] = queryAll<TranscriptRow>(
+      const todayFollowUpsRaw: BriefingRecentItem[] = queryAll<TranscriptRow>(
         `SELECT ${TRANSCRIPT_SELECT}
          FROM transcripts t
          JOIN recordings r ON r.id = t.recording_id
@@ -123,7 +126,7 @@ export function registerBriefingHandlers(): void {
         [dayStart, dayEnd]
       )[0]?.n ?? 0
 
-      const pendingActionables = queryAll<{
+      const pendingActionablesRaw = queryAll<{
         id: string
         type: string
         title: string
@@ -137,7 +140,7 @@ export function registerBriefingHandlers(): void {
          FROM actionables
          WHERE status = 'pending'
          ORDER BY created_at DESC
-         LIMIT 8`
+         LIMIT 30`
       ).map<BriefingActionable>((a) => ({
         id: a.id,
         type: a.type,
@@ -148,6 +151,39 @@ export function registerBriefingHandlers(): void {
         confidence: a.confidence,
         createdAt: a.created_at
       }))
+
+      // RE7-3 (round-7) — Today is an assistant-facing DISPLAY, so route every
+      // recording-backed row through the shared eligibility boundary. The SQL
+      // above already drops personal/soft-deleted, but VALUE-excluded rows (and
+      // a stale actionable pointing at a now-excluded recording) still slip
+      // through. An actionable's source_knowledge_id is a capture id (→ resolve
+      // its source recording) or, when no capture row exists, a recording id.
+      const actionableRec = new Map<string, string | null>()
+      for (const a of pendingActionablesRaw) {
+        if (actionableRec.has(a.sourceKnowledgeId)) continue
+        const kc = queryOne<{ source_recording_id: string | null }>(
+          'SELECT source_recording_id FROM knowledge_captures WHERE id = ?',
+          [a.sourceKnowledgeId]
+        )
+        actionableRec.set(a.sourceKnowledgeId, kc ? kc.source_recording_id ?? null : a.sourceKnowledgeId)
+      }
+      const allRecIds = [
+        ...recentKnowledgeRaw.map((r) => r.recordingId),
+        ...todayFollowUpsRaw.map((r) => r.recordingId),
+        ...[...actionableRec.values()].filter((x): x is string => !!x)
+      ]
+      const { eligible, failClosed } = filterEligibleRecordingIds(allRecIds)
+      // Fail closed: return NO recording-backed rows if eligibility is unknown.
+      const recentKnowledge = failClosed ? [] : recentKnowledgeRaw.filter((r) => eligible.has(r.recordingId)).slice(0, 6)
+      const todayFollowUps = failClosed ? [] : todayFollowUpsRaw.filter((r) => eligible.has(r.recordingId))
+      const pendingActionables = failClosed
+        ? []
+        : pendingActionablesRaw
+            .filter((a) => {
+              const rec = actionableRec.get(a.sourceKnowledgeId)
+              return !rec || eligible.has(rec) // not recording-backed → keep; else eligible only
+            })
+            .slice(0, 8)
 
       const config = getConfig()
       const stats = {
