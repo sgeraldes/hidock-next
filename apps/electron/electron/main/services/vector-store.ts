@@ -430,13 +430,25 @@ class VectorStore {
    */
   private filterEligibleDocs(docs: VectorDocument[]): VectorDocument[] {
     // ADV9 (round-9) — the recording allowlist is POSITIVE (an id must resolve to
-    // an existing eligible recording). Image/artifact docs carry their ARTIFACT
+    // an existing eligible recording). Artifact/capture docs carry their ARTIFACT
     // id in `recordingId` (the vector_embeddings.recording_id column is reused),
     // NOT a recording id — their OWN capture/artifact lifecycle governs them, so
-    // the recording allowlist must not apply (it would drop every image). This
-    // matches the prior blocklist behaviour, which never excluded artifact ids.
+    // the recording allowlist must not apply (it would drop every artifact).
+    //
+    // ADV10-P1 (round-11) — the discriminator is `captureId`, NOT `sourceType`.
+    // Round-9 exempted only `sourceType === 'image'`, but artifact-service.ts
+    // (and clipboard-capture.ts) index EVERY artifact kind — pdf/markdown/txt/
+    // json/image — with the artifact id in `recordingId` AND a `captureId` set.
+    // Exempting only 'image' wrongly ran pdf/md/txt/json artifact docs against the
+    // recordings allowlist, failing the positive existence check and dropping them
+    // from vector search + chunk retrieval. The reliable invariant is that ALL
+    // artifact/capture indexing sets `captureId` (artifact-service.ts,
+    // clipboard-capture.ts) while real-recording transcript indexing
+    // (transcription.ts, backfillMissingTranscripts) NEVER sets it. So a doc is
+    // recording-backed IFF it has a `recordingId` AND NO `captureId` — future-proof
+    // across all present and future artifact kinds (no sourceType enumeration).
     const isRecordingBacked = (d: VectorDocument): boolean =>
-      d.metadata.sourceType !== 'image' && !!d.metadata.recordingId
+      !!d.metadata.recordingId && !d.metadata.captureId
     const recIds = docs.filter(isRecordingBacked).map((d) => d.metadata.recordingId!)
     const { eligible } = filterEligibleRecordingIds(recIds)
     return docs.filter((d) => {
