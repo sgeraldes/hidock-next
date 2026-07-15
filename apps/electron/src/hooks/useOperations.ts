@@ -1,7 +1,16 @@
 import { useCallback } from 'react'
 import { toast } from '@/components/ui/toaster'
 import { useTranscriptionStore } from '@/store/features/useTranscriptionStore'
-import { cancelDownloads, cancelDownloadsComplete, requestScopedDownloads, markDownloadPriority } from '@/hooks/useDownloadOrchestrator'
+import {
+  cancelDownloads,
+  cancelDownloadsComplete,
+  requestScopedDownloads,
+  markDownloadPriority,
+  releaseDownloadBookkeeping,
+  clearAllDownloadBookkeeping,
+  markDownloadCancelled,
+  clearDownloadCancelled
+} from '@/hooks/useDownloadOrchestrator'
 import type { UnifiedRecording } from '@/types/unified-recording'
 import { hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import type { AppConfig } from '@/types'
@@ -236,15 +245,54 @@ export function useOperations() {
     }
   }, [])
 
+  /**
+   * Cancel a single in-progress or pending download. Awaits the main-process
+   * settlement (Phase-1 contract: aborts the in-flight USB transfer and resolves only
+   * after the device has settled), so the caller can reflect the 'cancelling' →
+   * 'cancelled' transition. Releases the file's scope/priority bookkeeping so the
+   * orchestrator does not auto-requeue it; it stays retryable by explicit re-download.
+   */
+  const cancelDownload = useCallback(async (filename: string) => {
+    // Finding 1: mark this file as user-cancelled in the renderer orchestrator BEFORE
+    // awaiting, so when the aborted transfer resolves-false back in processDownload it
+    // is recognized as a cancellation (surfaced as 'cancelled', no error toast/log, not
+    // counted as a failure) rather than a USB failure. A per-file cancel only aborts the
+    // MAIN-process transfer, so the renderer queue signal alone can't tell them apart.
+    markDownloadCancelled(filename)
+    try {
+      releaseDownloadBookkeeping(filename)
+      const res = await window.electronAPI.downloadService.cancel(filename)
+      if (res?.success === false) {
+        // Nothing was cancelled (e.g. already terminal / not in flight) — drop the
+        // marker so a genuinely running transfer is never mislabeled as cancelled.
+        clearDownloadCancelled(filename)
+        toast({ title: 'Could not cancel download', description: res.error || filename, variant: 'error' })
+        return false
+      }
+      toast({ title: 'Download cancelled', description: filename })
+      return true
+    } catch (e) {
+      clearDownloadCancelled(filename)
+      const msg = e instanceof Error ? e.message : 'Unknown error'
+      toast({ title: 'Could not cancel download', description: msg, variant: 'error' })
+      return false
+    }
+  }, [])
+
   const cancelAllDownloads = useCallback(async () => {
     try {
+      // Immediate renderer-side stop (abort the loop + deviceSyncing=false) for snappy
+      // UI, then AWAIT the single main-process cancelAll which owns the USB abort +
+      // drain and empties the queue. Don't flip durable state before it resolves.
       cancelDownloads()
       await window.electronAPI.downloadService.cancelAll()
-      cancelDownloadsComplete()
+      clearAllDownloadBookkeeping()
       toast({ title: 'All downloads cancelled' })
     } catch (e) {
-      cancelDownloadsComplete()
       console.error('Failed to cancel downloads:', e)
+      toast({ title: 'Could not cancel downloads', variant: 'error' })
+    } finally {
+      cancelDownloadsComplete()
     }
   }, [])
 
@@ -258,6 +306,7 @@ export function useOperations() {
     // Downloads
     queueDownload,
     queueBulkDownloads,
+    cancelDownload,
     cancelAllDownloads
   }
 }

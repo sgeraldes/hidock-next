@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, unlinkSync, utimesSync } from 'fs'
+import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, unlinkSync, utimesSync, renameSync } from 'fs'
 import { join, basename, extname, resolve, normalize } from 'path'
 import { getConfig, getDataPath } from './config'
 
@@ -91,12 +91,38 @@ export function getDatabasePath(): string {
 }
 
 
+/** Options for saveRecording. */
+export interface SaveRecordingOptions {
+  /**
+   * Cancellation predicate. Checked AFTER the data is written to a temp `.partial`
+   * file but BEFORE the atomic rename to the final path. When it returns true the
+   * temp file is deleted and saveRecording resolves `null` — no final file is ever
+   * created, and no pre-existing recording is touched (collisions get a numeric
+   * suffix, so the final path is always a fresh name we own).
+   */
+  isCancelled?: () => boolean
+}
+
+export async function saveRecording(
+  filename: string,
+  data: Buffer,
+  meetingSubject?: string,
+  originalDate?: Date
+): Promise<string>
+export async function saveRecording(
+  filename: string,
+  data: Buffer,
+  meetingSubject: string | undefined,
+  originalDate: Date | undefined,
+  options: SaveRecordingOptions
+): Promise<string | null>
 export async function saveRecording(
   filename: string,
   data: Buffer,
   _meetingSubject?: string,
-  originalDate?: Date
-): Promise<string> {
+  originalDate?: Date,
+  options?: SaveRecordingOptions
+): Promise<string | null> {
   const recordingsPath = getRecordingsPath()
 
   // Extract just the base filename without path
@@ -117,7 +143,9 @@ export async function saveRecording(
   // Validate the final path stays within recordings directory
   let filePath = validatePath(recordingsPath, cleanFilename)
 
-  // Handle filename collision - add suffix if file already exists
+  // Handle filename collision - add suffix if file already exists. This guarantees
+  // the final path is ALWAYS a name we are about to create, so cleaning up on cancel
+  // can never delete a pre-existing valid recording.
   if (existsSync(filePath)) {
     const nameWithoutExt = cleanFilename.slice(0, cleanFilename.lastIndexOf('.'))
     const extension = cleanFilename.slice(cleanFilename.lastIndexOf('.'))
@@ -129,10 +157,27 @@ export async function saveRecording(
     }
   }
 
-  // Write the data as-is without modifications
-  const dataToWrite = data
+  // Atomic write: stage the bytes in a unique temp `.partial` file, then rename onto
+  // the final path (rename is atomic on the same volume). A crash or cancel mid-write
+  // leaves only the temp file — never a truncated recording at the real path. The
+  // temp is cleaned up on any failure/cancel.
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.partial`
 
-  writeFileSync(filePath, dataToWrite)
+  try {
+    writeFileSync(tempPath, data)
+
+    // Cancellation checkpoint — after the bytes are staged, before we publish them.
+    if (options?.isCancelled?.()) {
+      try { if (existsSync(tempPath)) unlinkSync(tempPath) } catch { /* best-effort */ }
+      return null
+    }
+
+    renameSync(tempPath, filePath)
+  } catch (error) {
+    // Never leave a stray temp file behind on failure.
+    try { if (existsSync(tempPath)) unlinkSync(tempPath) } catch { /* best-effort */ }
+    throw error
+  }
 
   // Set the file's modification time to the original recording date
   // This ensures file explorer shows the correct date

@@ -33,6 +33,12 @@ vi.mock('@/store/features/useTranscriptionStore', () => ({
 }))
 vi.mock('@/store/ui/useUIStore', () => ({ useUIStore: vi.fn() }))
 
+const mockCancelDownload = vi.fn()
+const mockCancelAllDownloads = vi.fn()
+vi.mock('@/hooks/useOperations', () => ({
+  useOperations: () => ({ cancelDownload: mockCancelDownload, cancelAllDownloads: mockCancelAllDownloads })
+}))
+
 const mockOpenOverlay = vi.fn()
 
 function setup({
@@ -40,7 +46,7 @@ function setup({
   queue = new Map(),
   stats = { total: 0, completed: 0, failed: 0, processing: 0, pending: 0, aggregateProgress: 0 }
 }: {
-  downloads?: Map<string, { filename: string; progress: number; size: number }>
+  downloads?: Map<string, { filename: string; progress: number; size: number; status?: string }>
   queue?: Map<string, any>
   stats?: { total: number; completed: number; failed: number; processing: number; pending: number; aggregateProgress: number }
 } = {}) {
@@ -105,5 +111,41 @@ describe('NotificationsButton', () => {
     fireEvent.click(screen.getByRole('button', { name: /Notifications/i }))
     fireEvent.click(screen.getByRole('button', { name: /view all in operations/i }))
     expect(mockOpenOverlay).toHaveBeenCalledTimes(1)
+  })
+
+  it('offers a per-download Cancel that calls cancelDownload(filename)', () => {
+    setup({
+      downloads: new Map([['d1', { filename: '2026-07-10-notes.wav', progress: 42, size: 1000, status: 'downloading' }]])
+    })
+    render(<NotificationsButton />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Notifications/i }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel download 2026-07-10-notes' }))
+    expect(mockCancelDownload).toHaveBeenCalledWith('2026-07-10-notes.wav')
+  })
+
+  it('shows a "Cancelling…" row with the cancel control disabled while awaiting settlement', () => {
+    setup({
+      downloads: new Map([['d1', { filename: 'x.wav', progress: 80, size: 1000, status: 'cancelling' }]])
+    })
+    render(<NotificationsButton />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Notifications/i }))
+    expect(screen.getByText('Cancelling…')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Cancel download x' })).toBeDisabled()
+  })
+
+  it('offers a Cancel-all downloads control wired to cancelAllDownloads', () => {
+    setup({
+      downloads: new Map([
+        ['d1', { filename: 'a.wav', progress: 10, size: 1000, status: 'downloading' }],
+        ['d2', { filename: 'b.wav', progress: 0, size: 1000, status: 'pending' }]
+      ])
+    })
+    render(<NotificationsButton />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Notifications/i }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel all downloads' }))
+    expect(mockCancelAllDownloads).toHaveBeenCalledTimes(1)
   })
 })

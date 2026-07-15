@@ -27,17 +27,22 @@ import {
 } from './database'
 import { saveRecording, getRecordingsPath } from './file-storage'
 import { emitActivityLog } from './activity-log'
+import { cancelActiveTransfer, cancelActiveTransferByName, getActiveTransferFilename } from './download-transfer-controller'
 import { existsSync } from 'fs'
 import { join, basename } from 'path'
 
 // Download queue item
 // C-004: Added 'cancelled' status to distinguish user cancellations from actual failures
+// Phase-1 cancellation: 'cancelling' is a TRANSIENT status emitted to the renderer
+// while the in-flight USB transfer is being aborted + settled. It is never persisted
+// (the durable terminal state is 'cancelled'); a crash mid-cancel leaves the DB row at
+// its prior 'downloading'/'pending' value, which reconciliation handles.
 export interface DownloadQueueItem {
   id: string
   filename: string
   fileSize: number
   progress: number
-  status: 'pending' | 'downloading' | 'completed' | 'failed' | 'cancelled'
+  status: 'pending' | 'downloading' | 'cancelling' | 'completed' | 'failed' | 'cancelled'
   error?: string
   startedAt?: Date
   // Set when the item reaches ANY terminal state (completed, failed, cancelled) —
@@ -111,6 +116,17 @@ export class DownloadService {
    */
   private markDirty(): void {
     this.dirty = true
+  }
+
+  /**
+   * True when the item is in (or transitioning into) a user-cancelled terminal state.
+   * Read through this helper — not an inline `item.status === ...` — because callers
+   * check it AFTER assigning `item.status = 'downloading'`, and a concurrent cancel
+   * mutates the SAME object; the helper's parameter type keeps the full status union
+   * so the comparison stays valid (an inline check would be narrowed to the literal).
+   */
+  private isCancelledStatus(item: DownloadQueueItem): boolean {
+    return item.status === 'cancelling' || item.status === 'cancelled'
   }
 
   /**
@@ -537,6 +553,15 @@ export class DownloadService {
       return { success: false, error: 'File not in queue' }
     }
 
+    // Phase-1 cancellation race: a user cancel can land AFTER the renderer already
+    // finished the USB transfer and called process-download. If the item is already
+    // cancelling/cancelled, do NOT overwrite it back to 'downloading' and do NOT save
+    // the file — the user asked for it gone. Leave the terminal state intact.
+    if (this.isCancelledStatus(item)) {
+      console.log(`[DownloadService] Skipping save for ${filename} — status is '${item.status}'`)
+      return { success: false, error: 'Download cancelled' }
+    }
+
     try {
       // C-004: Validate download path exists and is writable before processing
       const recordingsPath = getRecordingsPath()
@@ -575,8 +600,34 @@ export class DownloadService {
         return { success: false, error: errMsg }
       }
 
-      // Save the file with the original recording date if available
-      const filePath = await saveRecording(filename, data, undefined, item.recordingDate)
+      // Re-check RIGHT before touching disk: a cancel may have landed during the
+      // integrity check / directory creation awaits above.
+      if (this.isCancelledStatus(item)) {
+        console.log(`[DownloadService] Aborting save for ${filename} — cancelled before write`)
+        return { success: false, error: 'Download cancelled' }
+      }
+
+      // Save the file with the original recording date if available. saveRecording
+      // writes to a temp `.partial` and atomically renames only after a final
+      // cancellation check, so a cancel that lands mid-write never yields a visible
+      // half-file (and never deletes a pre-existing valid recording — collisions get
+      // a numeric suffix). isCancelled() is re-evaluated inside, just before rename.
+      const filePath = await saveRecording(filename, data, undefined, item.recordingDate, {
+        isCancelled: () => this.isCancelledStatus(item),
+      })
+
+      if (filePath === null) {
+        // Cancelled between the check above and the rename — temp file was cleaned up.
+        console.log(`[DownloadService] Save cancelled for ${filename} (no file written)`)
+        return { success: false, error: 'Download cancelled' }
+      }
+
+      // Final guard before persisting DB rows: never write synced_files/recordings for
+      // a file the user cancelled (a late completion must not resurrect it as synced).
+      if (this.isCancelledStatus(item)) {
+        console.log(`[DownloadService] Discarding completed save for ${filename} — cancelled`)
+        return { success: false, error: 'Download cancelled' }
+      }
 
       // Update database. markRecordingDownloaded matches any extension variant
       // (.hda device name vs .wav local name) and creates the recordings row
@@ -640,12 +691,18 @@ export class DownloadService {
   }
 
   /**
-   * Cancel a specific download (spec-004)
-   * C-004: Uses 'cancelled' status to distinguish from actual failures
-   * Note: This only updates the state in the main process.
-   * The renderer must call deviceService.cancelDownload() to abort the actual USB transfer.
+   * Cancel a specific download (spec-004).
+   * C-004: Uses 'cancelled' status to distinguish from actual failures.
+   *
+   * Phase-1 cancellation: this now ALSO aborts the in-flight USB transfer for this
+   * file (via the shared download-transfer-controller) and resolves only AFTER the
+   * device has settled — so a caller can `await` a real completion, and the renderer
+   * no longer has to separately abort the transfer. If the file's transfer is
+   * actively streaming, the item briefly shows 'cancelling' (emitted to the UI) until
+   * the abort settles; a still-'pending' item (not on the bus) goes straight to
+   * 'cancelled'.
    */
-  cancelDownload(filename: string): { success: boolean; error?: string } {
+  async cancelDownload(filename: string): Promise<{ success: boolean; error?: string }> {
     const item = this.state.queue.get(filename)
     if (!item) {
       return { success: false, error: 'Download not found in queue' }
@@ -653,6 +710,15 @@ export class DownloadService {
 
     if (item.status !== 'pending' && item.status !== 'downloading') {
       return { success: false, error: `Cannot cancel download with status: ${item.status}` }
+    }
+
+    // If THIS file is the transfer currently streaming on the USB bus, abort it and
+    // wait for the device to settle before marking the item terminal.
+    if (getActiveTransferFilename() === filename) {
+      item.status = 'cancelling' // transient — emitted so the UI can show a spinner
+      this.markDirty()
+      this.emitStateUpdate(true)
+      await cancelActiveTransferByName(filename, 'user-cancel')
     }
 
     item.status = 'cancelled'
@@ -716,6 +782,15 @@ export class DownloadService {
   markFailed(filename: string, error: string): void {
     const item = this.state.queue.get(filename)
     if (item) {
+      // Phase-1 cancellation: never downgrade a user cancel to 'failed'. When a cancel
+      // aborts the in-flight USB transfer, the renderer's transfer call returns false
+      // and its error path calls markFailed — that must NOT clobber the 'cancelling'/
+      // 'cancelled' state (which would make it look retryable and resurrect on
+      // reconnect). A deliberate cancel stays terminal until an explicit retry.
+      if (item.status === 'cancelling' || item.status === 'cancelled') {
+        console.log(`[DownloadService] Ignoring markFailed for ${filename} — status is '${item.status}'`)
+        return
+      }
       item.status = 'failed'
       item.error = error
       item.completedAt = new Date() // terminal-state stamp: prune age source
@@ -970,20 +1045,37 @@ export class DownloadService {
   }
 
   /**
-   * Cancel all pending downloads
+   * Cancel all pending + in-progress downloads.
    * B-DWN-005: Persist cancelled state for each item
    * C-004: Uses 'cancelled' status instead of 'failed' for user-initiated cancellation
    * AUD4-008: Re-entrancy guard + batch SQLite writes in a transaction
+   *
+   * Phase-1 cancellation: also aborts the in-flight USB transfer (via the shared
+   * download-transfer-controller) and resolves only AFTER the device has settled, so
+   * the whole queue — including the one file actively streaming — is truly stopped.
+   * Emptying the pending set additionally lets the renderer's download loop end
+   * naturally (it finds nothing left to process).
    */
-  cancelAll(): void {
+  async cancelAll(): Promise<void> {
     if (this.cancelLock) return
     try {
       this.cancelLock = true
       this.state.isPaused = true
 
+      const activeFilename = getActiveTransferFilename()
+      const activeItem = activeFilename ? this.state.queue.get(activeFilename) : undefined
       const itemsToCancel: DownloadQueueItem[] = []
       for (const item of this.state.queue.values()) {
         if (item.status === 'pending' || item.status === 'downloading') {
+          // The file actively streaming on the bus takes the SAME transient
+          // 'cancelling' → 'cancelled' path as single-cancel: it is not yet terminal
+          // until the USB transfer has drained/settled below. Marking it 'cancelled'
+          // here (as pending items correctly are) would let the renderer's 3.5s
+          // flash-dismiss drop the row before the device has settled on a large file.
+          if (item === activeItem) {
+            item.status = 'cancelling' // transient — settled to 'cancelled' after the drain
+            continue
+          }
           item.status = 'cancelled'
           item.error = 'Cancelled by user'
           item.cancelReason = 'user' // HIGH-3: deliberate cancel — terminal until manual retry
@@ -998,7 +1090,6 @@ export class DownloadService {
             this.persistQueueItem(item)
           }
         })
-        emitActivityLog('info', 'All downloads cancelled', `${itemsToCancel.length} items`)
       }
 
       if (this.state.currentSession) {
@@ -1006,7 +1097,31 @@ export class DownloadService {
       }
 
       this.markDirty()
-      this.emitStateUpdate(true)
+      this.emitStateUpdate(true) // emit the transient 'cancelling' row + terminal others
+
+      // Abort the file actively streaming on the bus and wait for USB settlement.
+      // markFailed() is guarded against clobbering the 'cancelled' state the renderer's
+      // abort-triggered error path would otherwise set to 'failed'.
+      if (activeFilename) {
+        await cancelActiveTransfer('user-cancel')
+      }
+
+      // Now settle the active row to its terminal 'cancelled' state (after the drain),
+      // mirroring single-cancel. Guarded so a raced completion isn't clobbered.
+      if (activeItem && activeItem.status === 'cancelling') {
+        activeItem.status = 'cancelled'
+        activeItem.error = 'Cancelled by user'
+        activeItem.cancelReason = 'user'
+        activeItem.completedAt = new Date()
+        this.persistQueueItem(activeItem)
+        itemsToCancel.push(activeItem)
+        this.markDirty()
+        this.emitStateUpdate(true)
+      }
+
+      if (itemsToCancel.length > 0) {
+        emitActivityLog('info', 'All downloads cancelled', `${itemsToCancel.length} items`)
+      }
 
       // HIGH-3: NO delayed cleanup — the retained user-cancelled rows are the
       // durable terminal-suppression markers (see cancelDownload). They clear via
@@ -1192,14 +1307,15 @@ export function registerDownloadServiceHandlers(): void {
     service.clearCompleted()
   })
 
-  // Cancel single download (spec-004)
-  ipcMain.handle('download-service:cancel', (_, filename: string) => {
+  // Cancel single download (spec-004). Resolves after the in-flight USB transfer for
+  // this file (if any) has been aborted and settled, so the renderer can await it.
+  ipcMain.handle('download-service:cancel', async (_, filename: string) => {
     return service.cancelDownload(filename)
   })
 
-  // Cancel all
-  ipcMain.handle('download-service:cancel-all', () => {
-    service.cancelAll()
+  // Cancel all. Resolves after the in-flight USB transfer has been aborted and settled.
+  ipcMain.handle('download-service:cancel-all', async () => {
+    await service.cancelAll()
   })
 
   // Retry failed downloads
