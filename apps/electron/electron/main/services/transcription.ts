@@ -111,6 +111,8 @@ import {
   queryAll,
   isValueExcludedRecording,
   isRecordingProcessable,
+  isRecordingGraphIngestable,
+  getValueExcludedRecordingIds,
   acquireTranscriptionLock,
   releaseTranscriptionLock,
   clearStaleTranscriptionLock,
@@ -1488,24 +1490,62 @@ export async function reanalyzeFailedTranscripts(limit = 3): Promise<number> {
     return 0
   }
 
+  // RE-2 (Codex adversarial re-review round 2, BINDING — privacy leak): this
+  // boot backfill used to SELECT straight from transcripts with NO recordings
+  // exclusion, then send full_text to the provider — so a trashed / personal /
+  // value-excluded recording's transcript got re-uploaded on every restart,
+  // directly contradicting "excluded from all AI processing". The SELECT now
+  // JOINs recordings and excludes soft-deleted + personal at the query level;
+  // value-excluded ids are filtered by a once-per-call pre-filter Set BEFORE
+  // the provider call (cost gate); and eligibility is re-checked FRESH after
+  // the analysis await, inside the same persist transaction (isRecordingGraph-
+  // Ingestable = exists AND not deleted AND not personal AND not value-excluded),
+  // so a rating/delete that lands mid-analysis still blocks the heal.
   const rows = queryAll<{ recording_id: string; full_text: string }>(
-    `SELECT recording_id, full_text FROM transcripts
-     WHERE (summary IS NULL OR summary = 'Analysis failed' OR title_suggestion IS NULL)
-       AND full_text IS NOT NULL AND TRIM(full_text) != ''
-     ORDER BY created_at DESC
-     LIMIT ?`,
+    `SELECT t.recording_id AS recording_id, t.full_text AS full_text
+       FROM transcripts t JOIN recordings r ON r.id = t.recording_id
+      WHERE (t.summary IS NULL OR t.summary = 'Analysis failed' OR t.title_suggestion IS NULL)
+        AND t.full_text IS NOT NULL AND TRIM(t.full_text) != ''
+        AND r.deleted_at IS NULL AND COALESCE(r.personal, 0) = 0
+      ORDER BY t.created_at DESC
+      LIMIT ?`,
     [limit]
   )
   if (rows.length === 0) return 0
+
+  // Once-per-call value-exclusion snapshot (cost gate before the provider call).
+  // Defensive: a failure degrades to "no pre-filter"; the per-row post-await
+  // point-read below is the authoritative gate.
+  let valueExcluded: Set<string>
+  try {
+    valueExcluded = getValueExcludedRecordingIds()
+  } catch (e) {
+    console.warn('[Reanalyze] value pre-filter unavailable (post-await point-read still gates):', e)
+    valueExcluded = new Set<string>()
+  }
 
   console.log(`[Reanalyze] Re-running analysis for ${rows.length} transcript(s) with failed/missing analysis`)
 
   let healed = 0
   for (const row of rows) {
     try {
+      // Value-excluded at run start → never send full_text to the provider.
+      if (valueExcluded.has(row.recording_id)) {
+        console.log(`[Reanalyze] Skipped value-excluded recording ${row.recording_id} (no provider call)`)
+        continue
+      }
       // Re-run with no candidate meetings — backfill only heals the analysis
       // fields; meeting matching already ran (or will re-run) elsewhere.
       const analysis = await analyzeTranscriptWithGemini(row.full_text, [])
+
+      // RE-2 — fresh eligibility re-check AFTER the await: a trash / mark-personal
+      // / garbage-rating committed while the provider call was in flight must
+      // block the heal. Skips the UPDATE, capture-ensure, value-apply, and wiki
+      // re-export below.
+      if (!isRecordingGraphIngestable(row.recording_id)) {
+        console.log(`[Reanalyze] Recording ${row.recording_id} became ineligible mid-analysis — heal skipped`)
+        continue
+      }
 
       // Still failing — don't overwrite with the sentinel again.
       if (!analysis.summary || analysis.summary === 'Analysis failed') {

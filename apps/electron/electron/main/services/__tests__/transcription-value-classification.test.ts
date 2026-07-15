@@ -42,6 +42,10 @@ const mockIsValueExcludedRecording = vi.fn((..._args: any[]) => false)
 // ARF-3 — the post-analysis processability gate. Default true (live); the
 // ARF-3 describe below drives it false to simulate a mid-analysis trash.
 const mockIsRecordingProcessable = vi.fn((..._args: any[]) => true)
+// RE-2 — reanalyzeFailedTranscripts exclusion gates: value pre-filter Set +
+// the post-await point-read. Defaults let existing reanalyze tests heal.
+const mockGetValueExcludedRecordingIds = vi.fn((..._args: any[]) => new Set<string>())
+const mockIsRecordingGraphIngestable = vi.fn((..._args: any[]) => true)
 const mockRun = vi.fn()
 const mockBrainGenerate = vi.fn()
 // The local-asr fake child process returns this as the transcript text. The
@@ -129,7 +133,10 @@ vi.mock('../database', () => ({
   // value-gates.test.ts against a real engine.
   isValueExcludedRecording: (...args: any[]) => mockIsValueExcludedRecording(...args),
   // ARF-3 — post-analysis boundary gate.
-  isRecordingProcessable: (...args: any[]) => mockIsRecordingProcessable(...args)
+  isRecordingProcessable: (...args: any[]) => mockIsRecordingProcessable(...args),
+  // RE-2 — boot-backfill exclusion gates.
+  getValueExcludedRecordingIds: (...args: any[]) => mockGetValueExcludedRecordingIds(...args),
+  isRecordingGraphIngestable: (...args: any[]) => mockIsRecordingGraphIngestable(...args)
 }))
 
 vi.mock('electron', () => ({
