@@ -25,6 +25,7 @@ import {
 } from '../services/database'
 import { getRecurringTopics } from '../services/recurring-topics'
 import { filterEligibleRecordingIds, existingRecordings } from '../services/recording-eligibility'
+import { revalidateStoredSources, REDACTED_ANSWER } from '../services/chat-source-provenance'
 
 export function registerDatabaseHandlers(): void {
   // Meetings
@@ -156,7 +157,17 @@ export function registerDatabaseHandlers(): void {
 
   // Chat
   ipcMain.handle('db:get-chat-history', async (_, limit?: number) => {
-    return getChatHistory(limit)
+    // ADV17-2 (round-18) — the legacy chat history reads the SAME chat_messages
+    // table as assistant:getMessages and returns each message's persisted
+    // `sources` (transcript excerpts). Revalidate every message's normalized
+    // provenance through the shared fail-closed boundary before returning: drop
+    // now-excluded snippets and redact an answer grounded solely on excluded
+    // sources. (Same treatment as assistant:getMessages so the two readers of
+    // this table can never diverge.)
+    return getChatHistory(limit).map((row) => {
+      const { sources, redactContent } = revalidateStoredSources(row.sources, (row as { role?: string }).role ?? '')
+      return { ...row, sources, ...(redactContent ? { content: REDACTED_ANSWER } : {}) }
+    })
   })
 
   ipcMain.handle('db:add-chat-message', async (_, role: 'user' | 'assistant', content: string, sources?: string) => {

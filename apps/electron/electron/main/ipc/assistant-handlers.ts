@@ -2,6 +2,12 @@
 import { ipcMain } from 'electron'
 import { queryAll, queryOne, run, runInTransaction } from '../services/database'
 import { getRAGService } from '../services/rag'
+import {
+  packSources,
+  presentSourcesNoRevalidate,
+  revalidateStoredSources,
+  REDACTED_ANSWER
+} from '../services/chat-source-provenance'
 import type { Conversation, Message } from '@/types/knowledge'
 import { randomUUID } from 'crypto'
 
@@ -64,7 +70,15 @@ export function registerAssistantHandlers(): void {
       }
 
       const rows = queryAll<any>(`SELECT ${MESSAGE_COLUMNS} FROM chat_messages WHERE conversation_id = ? ORDER BY created_at ASC`, [conversationId])
-      return rows.map(mapToMessage)
+      // ADV17-2 — revalidate each persisted message's source provenance against
+      // the shared fail-closed boundaries before returning. Excluded snippets are
+      // dropped; an answer grounded solely on now-excluded sources is redacted.
+      return rows.map((row) => {
+        const { sources, redactContent } = revalidateStoredSources(row.sources, row.role)
+        const msg = mapToMessage({ ...row, sources })
+        if (redactContent) msg.content = REDACTED_ANSWER
+        return msg
+      })
     } catch (error) {
       console.error('Failed to get messages:', error)
       return []
@@ -85,16 +99,22 @@ export function registerAssistantHandlers(): void {
       const id = randomUUID()
       const now = new Date().toISOString()
 
+      // ADV17-2 — persist normalized provenance alongside the snippets so a later
+      // read can revalidate them against the shared eligibility boundaries.
+      const packedSources = packSources(sources)
+
       runInTransaction(() => {
         run('INSERT INTO chat_messages (id, conversation_id, role, content, sources, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-          [id, conversationId, role, content, sources || null, now])
+          [id, conversationId, role, content, packedSources, now])
 
         // Update conversation's updated_at timestamp
         run('UPDATE conversations SET updated_at = ? WHERE id = ?', [now, conversationId])
       })
 
       const newMessage = queryOne<any>(`SELECT ${MESSAGE_COLUMNS} FROM chat_messages WHERE id = ?`, [id])
-      return mapToMessage(newMessage)
+      // Return the freshly-added message with sources unwrapped to the plain array
+      // the renderer expects (no revalidation needed — nothing excluded yet).
+      return mapToMessage({ ...newMessage, sources: presentSourcesNoRevalidate(newMessage.sources) })
     } catch (error) {
       console.error('Failed to add message:', error)
       throw error
