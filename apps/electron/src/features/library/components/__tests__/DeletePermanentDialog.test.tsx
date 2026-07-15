@@ -86,6 +86,27 @@ describe('DeletePermanentDialog', () => {
     expect(screen.queryByRole('heading', { name: /delete permanently/i })).not.toBeInTheDocument()
   })
 
+  // spec-006/F17 T6 F-INFO-5 — the retry-safety line documents the AR3-1
+  // fail-closed guarantee, and is shown UNCONDITIONALLY (not gated on
+  // whether the graph estimate is known).
+  describe('retry-safety line (F-INFO-5/D2)', () => {
+    it('always renders, regardless of graphEstimate', () => {
+      renderDialog({ impact: baseImpact }) // graphEstimate absent
+      expect(screen.getByText(/if the knowledge-graph cleanup can't complete, nothing is deleted/i)).toBeInTheDocument()
+    })
+
+    it('renders alongside the "Graph impact: unknown" warning, not instead of it', () => {
+      renderDialog({ impact: { ...baseImpact, graphEstimate: null } })
+      expect(screen.getByText(/if the knowledge-graph cleanup can't complete, nothing is deleted/i)).toBeInTheDocument()
+      expect(screen.getByText(/graph impact: unknown/i)).toBeInTheDocument()
+    })
+
+    it('renders even when a numeric graphEstimate is known', () => {
+      renderDialog({ impact: { ...baseImpact, graphEstimate: 5 } })
+      expect(screen.getByText(/if the knowledge-graph cleanup can't complete, nothing is deleted/i)).toBeInTheDocument()
+    })
+  })
+
   describe('graph-impact honesty (AR3-8)', () => {
     it('renders no graph line when graphEstimate is undefined (not provided yet)', () => {
       renderDialog({ impact: baseImpact })

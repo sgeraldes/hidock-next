@@ -27,6 +27,7 @@ import {
   AlertDialogTitle
 } from '@/components/ui/alert-dialog'
 import { Checkbox } from '@/components/ui/checkbox'
+import { GRAPH_CLEANUP_RETRY_SAFETY_LINE } from '@/features/library/utils/deletionCopy'
 
 export interface DeletePermanentDialogImpact {
   transcripts: number
@@ -45,6 +46,14 @@ export interface DeletePermanentDialogImpact {
   graphEstimate?: number | null
   /** Informational only — see the gating note on DeletePermanentDialogProps.deviceConnected. */
   onDevice?: boolean
+  /**
+   * spec-006/F17 T6 F-INFO-6: the device's own filename for this recording,
+   * sourced from the DB row (deletionImpact), NOT rendered here — Library.tsx
+   * reads it to route the device-delete call for a Trash row, whose
+   * UnifiedRecording has no deviceFilename field at all (always flattened to
+   * 'local-only'). null when not on device; absent for pre-T6 payloads.
+   */
+  deviceFilename?: string | null
 }
 
 export interface DeletePermanentDialogProps {
@@ -125,6 +134,10 @@ export function DeletePermanentDialog({
                   live/future guarantee. */}
               <p>As of now, this removes {removesText}.</p>
               <p className="font-medium text-destructive">This CANNOT be undone.</p>
+              {/* F-INFO-5 / D2 — the fail-closed retry-safety guarantee, shown
+                  unconditionally (true regardless of whether the graph
+                  estimate above is known or not). */}
+              <p className="text-xs text-muted-foreground">{GRAPH_CLEANUP_RETRY_SAFETY_LINE}</p>
               {graphUnknown && (
                 <div
                   role="alert"
