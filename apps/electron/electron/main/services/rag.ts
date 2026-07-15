@@ -7,7 +7,7 @@ import { getVectorStore, SearchResult } from './vector-store'
 import { getOllamaService, OllamaChatMessage } from './ollama'
 import { getChatLLMService } from './chat-llm'
 import { getEmbeddingsService } from './embeddings'
-import { getDatabase, queryOne, queryAll, escapeLikePattern } from './database'
+import { getDatabase, queryOne, queryAll, escapeLikePattern, getExcludedRecordingIds } from './database'
 import { stripDiacritics } from './entity-normalize'
 import type { BrainId } from './brains/types'
 import { Result, success, error } from '../types/api'
@@ -588,21 +588,42 @@ class RAGService {
     try {
       const db = getDatabase()
       if (db) {
+        // ADV5 (round-5, FAIL CLOSED) — a recording pinned to this conversation
+        // can be trashed / marked personal / value-rated-out AFTER it was
+        // pinned. Revalidate every pinned capture's recording against the
+        // SHARED exclusion source at prompt-construction. If the lookup itself
+        // throws, drop ALL pinned recording-backed context (fail closed) rather
+        // than injecting private content into the prompt.
+        let excluded: Set<string>
+        let exclusionUnavailable = false
+        try {
+          excluded = getExcludedRecordingIds()
+        } catch (e) {
+          console.error('[RAG] pinned-context exclusion lookup FAILED — failing closed (no pinned recording-backed context):', e)
+          excluded = new Set()
+          exclusionUnavailable = true
+        }
         // Get knowledge captures attached to this conversation
         const contextRes = db.exec('SELECT knowledge_capture_id FROM conversation_context WHERE conversation_id = ?', [sessionId])
         if (contextRes && contextRes.length > 0 && contextRes[0].values && contextRes[0].values.length > 0) {
           const kcIds = contextRes[0].values.map(v => v[0] as string)
           for (const id of kcIds) {
-            // Fetch the full transcript for each pinned knowledge capture
+            // Fetch the full transcript + its recording id for each pinned capture.
             const transcriptRes = db.exec(`
-              SELECT t.full_text, k.title 
+              SELECT t.full_text, k.title, t.recording_id
               FROM transcripts t
               JOIN knowledge_captures k ON k.source_recording_id = t.recording_id
               WHERE k.id = ?
             `, [id])
-            
+
             if (transcriptRes && transcriptRes.length > 0 && transcriptRes[0].values && transcriptRes[0].values.length > 0) {
-              const [text, title] = transcriptRes[0].values[0] as [string, string]
+              const [text, title, recordingId] = transcriptRes[0].values[0] as [string, string, string]
+              // ADV5 — drop a pinned recording that is now excluded (soft-deleted
+              // / personal / value-excluded), or drop everything on lookup failure.
+              if (exclusionUnavailable || (recordingId && excluded.has(recordingId))) {
+                console.log(`[RAG] pinned context ${id} dropped — recording ${recordingId} is excluded or eligibility unknown`)
+                continue
+              }
               pinnedContextParts.push(`[PINNED CONTEXT: ${title}]\n${text}`)
             }
           }
