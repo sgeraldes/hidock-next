@@ -1083,30 +1083,101 @@ export function searchGraphNodes(query: string, limit = 12): ContextGraphNode[] 
     return toDTO({ center: undefined, nodes: rows.map((n) => ({ ...n, degree: 0 })), edges: [] }).nodes
   }
 
-  // ADV10-MED (round-11) — page the ordered matches until `limit` VISIBLE nodes
-  // are collected OR the query is exhausted, instead of over-fetching a fixed
-  // `limit * 4` and filtering after. Under partial cleanup the first limit*4
-  // ordered matches can all be excluded-only (e.g. 48 stale nodes before an
-  // eligible 49th), which made the old ceiling return empty/undersized without
-  // ever examining the eligible node — a user-visible false negative. This mirrors
-  // the round-9 fetch-until-filled pattern (rag collectEligibleKnowledge): no
-  // fixed multiplier ceiling, bounded only by table size via advancing OFFSET.
-  const PAGE = Math.max(limit * 4, 40)
-  const visible: GraphNode[] = []
-  for (let offset = 0; ; offset += PAGE) {
-    const rows = store.db.queryAll<GraphNode>(orderedQuery, [`%${q}%`, PAGE, offset])
-    if (rows.length === 0) break
-    for (const n of rows) {
-      if (isNodeVisibleUnderExclusion(store, n.id, exclusion)) {
-        visible.push(n)
-        if (visible.length >= limit) {
-          return toDTO({ center: undefined, nodes: visible.map((x) => ({ ...x, degree: 0 })), edges: [] }).nodes
-        }
-      }
-    }
-    if (rows.length < PAGE) break // source exhausted
+  // ADV11-MED (round-12) — express exclusion in SQL so the DB's LIMIT applies to
+  // VISIBLE rows directly. Round-11 paged the ordered matches and called
+  // isNodeVisibleUnderExclusion PER NODE (each firing its own incident-edge +
+  // provenance queries) until `limit` visible were found — an unbounded N+1
+  // synchronous main-thread scan that, under heavy/cleanup-stale exclusions,
+  // could examine the whole table and freeze IPC/UI. Instead we materialize the
+  // set of excluded-only node ids ONCE (a fixed, bounded number of queries — two
+  // full scans, NOT one-per-node), then let SQLite skip them via `id NOT IN(...)`
+  // so a single ordered page of `limit` rows is already the visible answer. No
+  // false-negative truncation: a genuinely eligible node beyond the first page is
+  // still returned because the DB filters before applying LIMIT.
+  const hidden = computeExcludedOnlyNodeIds(store, exclusion)
+  if (hidden.size === 0) {
+    // Exclusions active but they suppress no NODE (e.g. only shared-source edges) —
+    // the plain ordered page is already all-visible.
+    const rows = store.db.queryAll<GraphNode>(orderedQuery, [`%${q}%`, limit, 0])
+    return toDTO({ center: undefined, nodes: rows.map((n) => ({ ...n, degree: 0 })), edges: [] }).nodes
   }
-  return toDTO({ center: undefined, nodes: visible.map((n) => ({ ...n, degree: 0 })), edges: [] }).nodes
+  // Build `id NOT IN (chunk1) AND id NOT IN (chunk2) …` — chunked to stay under
+  // the SQL bound-parameter limit for large excluded-only sets.
+  const hiddenIds = [...hidden]
+  const CHUNK = 400
+  const notInClauses: string[] = []
+  const notInParams: string[] = []
+  for (let i = 0; i < hiddenIds.length; i += CHUNK) {
+    const chunk = hiddenIds.slice(i, i + CHUNK)
+    notInClauses.push(`id NOT IN (${chunk.map(() => '?').join(',')})`)
+    notInParams.push(...chunk)
+  }
+  const filteredQuery =
+    `SELECT * FROM graph_nodes WHERE LOWER(label) LIKE ? AND ${notInClauses.join(' AND ')} ` +
+    'ORDER BY LENGTH(label) ASC, id ASC LIMIT ?'
+  const rows = store.db.queryAll<GraphNode>(filteredQuery, [`%${q}%`, ...notInParams, limit])
+  return toDTO({ center: undefined, nodes: rows.map((n) => ({ ...n, degree: 0 })), edges: [] }).nodes
+}
+
+/**
+ * ADV11-MED (round-12) — materialize the set of EXCLUDED-ONLY graph node ids
+ * (nodes with ≥1 incident edge where EVERY incident edge is provenance-
+ * suppressed) using a FIXED, bounded number of queries: one full read of
+ * graph_edge_sources + one full read of graph_edges, regardless of how many
+ * nodes match a search. This replaces the per-node isNodeVisibleUnderExclusion
+ * N+1 so a caller can push the exclusion into SQL (`id NOT IN(...)`) and keep the
+ * DB's LIMIT meaningful. The visibility decision is byte-for-byte the same as
+ * isNodeVisibleUnderExclusion: a node with no incident edges, or with ≥1
+ * surviving (non-suppressed / legacy zero-provenance) edge, is NOT hidden.
+ */
+function computeExcludedOnlyNodeIds(
+  store: KnowledgeGraphStore,
+  exclusion: GroundingExclusion
+): Set<string> {
+  const hidden = new Set<string>()
+  if (exclusionIsNoop(exclusion)) return hidden
+
+  // 1. Group provenance by edge (one full scan), then decide which edges are
+  //    suppressed with the SAME rule as provenanceSuppressedEdgeIds.
+  const provRows = store.db.queryAll<{ edge_id: string; recording_id: string }>(
+    'SELECT edge_id, recording_id FROM graph_edge_sources WHERE recording_id IS NOT NULL'
+  )
+  const byEdge = new Map<string, string[]>()
+  for (const r of provRows) {
+    const list = byEdge.get(r.edge_id)
+    if (list) list.push(r.recording_id)
+    else byEdge.set(r.edge_id, [r.recording_id])
+  }
+  const suppressedEdges = new Set<string>()
+  for (const [edgeId, recIds] of byEdge) {
+    // fail-closed → every attributed edge (has provenance rows) is suppressed;
+    // otherwise → suppressed only when EVERY source recording is excluded.
+    if (exclusion.failClosed || recIds.every((id) => exclusion.ids.has(id))) {
+      suppressedEdges.add(edgeId)
+    }
+  }
+
+  // 2. Per node, count incident edges vs suppressed incident edges (one full
+  //    scan). A node is hidden iff it has incident edges and ALL are suppressed.
+  const incident = new Map<string, number>()
+  const suppressedIncident = new Map<string, number>()
+  const bump = (m: Map<string, number>, k: string): void => {
+    m.set(k, (m.get(k) ?? 0) + 1)
+  }
+  const edges = store.db.queryAll<{ id: string; source_id: string; target_id: string }>(
+    'SELECT id, source_id, target_id FROM graph_edges'
+  )
+  for (const e of edges) {
+    const isSup = suppressedEdges.has(e.id)
+    for (const nodeId of [e.source_id, e.target_id]) {
+      bump(incident, nodeId)
+      if (isSup) bump(suppressedIncident, nodeId)
+    }
+  }
+  for (const [nodeId, count] of incident) {
+    if (count > 0 && suppressedIncident.get(nodeId) === count) hidden.add(nodeId)
+  }
+  return hidden
 }
 
 /**

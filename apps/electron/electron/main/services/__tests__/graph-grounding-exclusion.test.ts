@@ -511,6 +511,47 @@ describe('ADV10-MED — graph-node search pages past excluded-only matches', () 
 })
 
 // ---------------------------------------------------------------------------
+// ADV11-MED (round-12) — the exclusion is pushed into SQL via a materialized
+// excluded-only node set (a FIXED, bounded number of queries), NOT a per-node
+// isNodeVisibleUnderExclusion N+1 that scaled with the number of matches. A
+// large excluded-only block must not translate into table-sized synchronous
+// work on the main thread.
+// ---------------------------------------------------------------------------
+
+describe('ADV11-MED — graph-node search does bounded work (no per-node N+1)', () => {
+  it('finds an eligible match past a >200-node excluded block with a bounded query count', () => {
+    seedRecording('recBig')
+    // 250 excluded-only "qxb###" nodes (length 6) ranked ahead of the eligible one.
+    for (let i = 0; i < 250; i++) {
+      const pad = String(i).padStart(3, '0')
+      seedNode(`nBig${pad}`, 'topic', `qxb${pad}`) // length 6
+      seedEdge(`eBig${pad}`, `nBig${pad}`, 'nAlice', 'MENTIONED')
+      seedEdgeSource(`eBig${pad}`, 'recBig', 'txBig')
+    }
+    // One eligible node via a legacy (zero-provenance) edge, longer label → sorts last.
+    seedNode('nBigElig', 'topic', 'qxbEligibleLongLabel')
+    seedEdge('eBigElig', 'nBigElig', 'nAlice', 'RELATES_TO') // legacy, survives
+
+    deleteRecordingCascade('recBig', { hard: false })
+
+    // Count DB reads issued on the graph store during the search. The old per-node
+    // path fired ≥1 store query PER excluded match examined (250+). The SQL-level
+    // path issues only a fixed handful (provenance scan + edges scan + one search).
+    const store = getKnowledgeGraphStore()
+    const spy = vi.spyOn(store.db, 'queryAll')
+    try {
+      const labels = searchGraphNodes('qxb').map((n) => n.label)
+      expect(labels).toContain('qxbEligibleLongLabel')
+      expect(labels.some((l) => /^qxb\d\d\d$/.test(l))).toBe(false)
+      // Bounded: far below the 250-node block — proves work is NOT per-node.
+      expect(spy.mock.calls.length).toBeLessThan(20)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
 // RE-3 — legacy ZERO-provenance edges CANNOT be attributed, so a permanent
 // delete never removes them and grounding keeps them (documented behavior).
 // ---------------------------------------------------------------------------
