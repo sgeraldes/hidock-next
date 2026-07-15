@@ -170,7 +170,19 @@ export function registerDatabaseHandlers(): void {
     })
   })
 
-  ipcMain.handle('db:add-chat-message', async (_, role: 'user' | 'assistant', content: string, sources?: string) => {
+  ipcMain.handle('db:add-chat-message', async (_, role: unknown, content: string, sources?: string) => {
+    // ADV21 (round-22) — EXACT runtime role allowlist (the TS union is compile-time
+    // only). REJECT anything that is not the exact string 'user' or 'assistant' —
+    // no trim/lowercase; 'system'/'Assistant'/' assistant '/''/null/non-string all
+    // rejected (no insert). Otherwise a smuggled role would ride the user branch and
+    // its content would be preserved on read.
+    if (role !== 'user' && role !== 'assistant') {
+      const error = new Error(
+        `db:add-chat-message rejected invalid role: ${typeof role === 'string' ? JSON.stringify(role) : typeof role}`
+      )
+      console.error(error.message)
+      throw error
+    }
     // ADV19-1 (round-20) — this legacy chat path has NO RAG generation context and
     // no conversation id, so it cannot resolve an authoritative provenance union.
     // Stamp assistant rows with a fail-closed UNVERIFIABLE main-issued envelope

@@ -60,7 +60,7 @@ vi.mock('electron', () => ({
 }))
 
 import { ipcMain } from 'electron'
-import { initializeDatabase, closeDatabase, run } from '../../services/database'
+import { initializeDatabase, closeDatabase, run, queryAll } from '../../services/database'
 import { REDACTED_ANSWER } from '../../services/chat-source-provenance'
 import { registerAssistantHandlers } from '../assistant-handlers'
 import { registerDatabaseHandlers } from '../database-handlers'
@@ -277,6 +277,95 @@ describe('assistant:addNotice — ADV20-1 main-owned non-RAG notice catalog', ()
   it('an unknown code falls back to the generic notice', async () => {
     const returned = await handlers['assistant:addNotice']({}, 'conv1', 'not-a-real-code')
     expect(returned.content).toContain('encountered an error')
+  })
+})
+
+describe('ADV21 (round-22) — exact runtime role allowlist (WRITE) + fail-closed unknown roles (READ)', () => {
+  // Every value other than the exact strings 'user'/'assistant' must be REJECTED at
+  // the write boundary (no normalization) — and no row may be inserted.
+  const INVALID_ROLES: unknown[] = ['system', 'Assistant', ' assistant ', 'ASSISTANT', '', null, undefined, 5, {}, ['assistant']]
+
+  for (const bad of INVALID_ROLES) {
+    it(`assistant:addMessage REJECTS role ${JSON.stringify(bad)} and inserts NO row`, async () => {
+      const before = queryAll<{ n: number }>('SELECT COUNT(*) AS n FROM chat_messages')[0].n
+      await expect(
+        handlers['assistant:addMessage']({}, 'conv1', bad as any, 'SMUGGLED_CONTENT', 'forged-sources', 'gen-1')
+      ).rejects.toThrow()
+      const after = queryAll<{ n: number }>('SELECT COUNT(*) AS n FROM chat_messages')[0].n
+      expect(after).toBe(before)
+      // The smuggled content must never have been persisted under any role.
+      const leaked = queryAll<{ id: string }>('SELECT id FROM chat_messages WHERE content = ?', ['SMUGGLED_CONTENT'])
+      expect(leaked).toHaveLength(0)
+    })
+
+    it(`db:add-chat-message REJECTS role ${JSON.stringify(bad)} and inserts NO row`, async () => {
+      const before = queryAll<{ n: number }>('SELECT COUNT(*) AS n FROM chat_messages')[0].n
+      await expect(
+        handlers['db:add-chat-message']({}, bad as any, 'SMUGGLED_CONTENT', 'forged-sources')
+      ).rejects.toThrow()
+      const after = queryAll<{ n: number }>('SELECT COUNT(*) AS n FROM chat_messages')[0].n
+      expect(after).toBe(before)
+      const leaked = queryAll<{ id: string }>('SELECT id FROM chat_messages WHERE content = ?', ['SMUGGLED_CONTENT'])
+      expect(leaked).toHaveLength(0)
+    })
+  }
+
+  it('READ fail-closed — a directly-inserted row with a non-standard role is REDACTED via assistant:getMessages', async () => {
+    // Simulate a legacy/smuggled row that somehow bypassed the write allowlist.
+    run(
+      'INSERT INTO chat_messages (id, conversation_id, role, content, sources, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      ['sys1', 'conv1', 'system', 'SYSTEM_PROMPT_LEAK', JSON.stringify([{ content: 'excerpt', meetingId: 'mtg1' }]), '2026-01-02T10:00:00.000Z']
+    )
+    const msgs = await handlers['assistant:getMessages']({}, 'conv1')
+    const smuggled = msgs.find((m: { id: string }) => m.id === 'sys1')
+    expect(smuggled.content).toBe(REDACTED_ANSWER)
+    expect(smuggled.content).not.toContain('SYSTEM_PROMPT_LEAK')
+    expect(JSON.parse(smuggled.sources)).toEqual([])
+  })
+
+  it('READ fail-closed — the same non-standard-role row is REDACTED via db:get-chat-history', async () => {
+    run(
+      'INSERT INTO chat_messages (id, conversation_id, role, content, sources, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      ['sys2', 'conv1', 'SYSTEM', 'ANOTHER_LEAK', JSON.stringify([{ content: 'excerpt', meetingId: 'mtg1' }]), '2026-01-02T10:00:00.000Z']
+    )
+    const history = await handlers['db:get-chat-history']({}, 50)
+    const smuggled = history.find((m: { id: string }) => m.id === 'sys2')
+    expect(smuggled.content).toBe(REDACTED_ANSWER)
+    expect(smuggled.content).not.toContain('ANOTHER_LEAK')
+    expect(JSON.parse(smuggled.sources)).toEqual([])
+  })
+
+  it('exact role="user" WRITE+READ ⇒ content preserved (allowlist admits the exact string only)', async () => {
+    const returned = await handlers['assistant:addMessage']({}, 'conv1', 'user', 'Exact user text.')
+    expect(returned.role).toBe('user')
+    expect(returned.content).toBe('Exact user text.')
+    const msgs = await handlers['assistant:getMessages']({}, 'conv1')
+    const user = msgs.find((m: { id: string }) => m.id === returned.id)
+    expect(user.content).toBe('Exact user text.')
+  })
+
+  it('exact role="assistant" via the main-owned generationId path ⇒ round-21 behavior intact', async () => {
+    // Eligible generation ⇒ main content shown.
+    await handlers['assistant:addMessage']({}, 'conv1', 'assistant', 'ignored', undefined, 'gen-1')
+    let msgs = await handlers['assistant:getMessages']({}, 'conv1')
+    let assistant = msgs.find((m: { role: string }) => m.role === 'assistant')
+    expect(assistant.content).toContain('migrate on Friday')
+    // Exclude the cited recording ⇒ redacted (envelope gate still active).
+    run('UPDATE recordings SET deleted_at = ? WHERE id = ?', ['2026-07-15T00:00:00.000Z', 'recR'])
+    msgs = await handlers['assistant:getMessages']({}, 'conv1')
+    assistant = msgs.find((m: { role: string }) => m.role === 'assistant')
+    expect(assistant.content).not.toContain('migrate on Friday')
+  })
+
+  it('db:add-chat-message admits exact "user" and "assistant" (assistant fail-closed unverifiable envelope)', async () => {
+    const u = await handlers['db:add-chat-message']({}, 'user', 'legacy user text', JSON.stringify([{ content: 'x' }]))
+    expect(u.role).toBe('user')
+    const a = await handlers['db:add-chat-message']({}, 'assistant', 'legacy assistant text')
+    expect(a.role).toBe('assistant')
+    // The legacy assistant row is redacted on read (no resolvable provenance).
+    const history = await handlers['db:get-chat-history']({}, 50)
+    const assistant = history.find((m: { id: string }) => m.id === a.id)
+    expect(assistant.content).toBe(REDACTED_ANSWER)
   })
 })
 

@@ -115,8 +115,22 @@ export function registerAssistantHandlers(): void {
   //     (an exclusion landing between generation and now ⇒ REDACTED_ANSWER persisted),
   //     and the returned row is sanitized through the SAME read boundary as history
   //     reads (not presentSourcesNoRevalidate) so a live exclusion redacts the UI too.
-  ipcMain.handle('assistant:addMessage', async (_, conversationId: string, role: 'user' | 'assistant', content: string, _sources?: string, generationId?: string) => {
+  ipcMain.handle('assistant:addMessage', async (_, conversationId: string, role: unknown, content: string, _sources?: string, generationId?: string) => {
     try {
+      // ADV21 (round-22) — EXACT runtime role allowlist. The TypeScript union is a
+      // COMPILE-TIME guarantee only; at runtime a renderer can submit 'system',
+      // 'Assistant' (case), ' assistant ' (whitespace), '', null, or a non-string.
+      // REJECT anything that is not the exact string 'user' or 'assistant' — do NOT
+      // trim/lowercase/normalize (normalizing 'Assistant' → 'assistant' would smuggle
+      // arbitrary content into the trusted main-owned branch). Rejection = no insert.
+      if (role !== 'user' && role !== 'assistant') {
+        const error = new Error(
+          `assistant:addMessage rejected invalid role: ${typeof role === 'string' ? JSON.stringify(role) : typeof role}`
+        )
+        console.error(error.message)
+        throw error
+      }
+
       // Validate conversation exists before adding message
       const conv = queryOne<any>('SELECT id FROM conversations WHERE id = ?', [conversationId])
       if (!conv) {
@@ -129,7 +143,7 @@ export function registerAssistantHandlers(): void {
       const now = new Date().toISOString()
 
       // role='user' — the user's own text. The renderer may pass raw sources verbatim.
-      if (role !== 'assistant') {
+      if (role === 'user') {
         const packedSources = packSources(_sources)
         runInTransaction(() => {
           run('INSERT INTO chat_messages (id, conversation_id, role, content, sources, created_at) VALUES (?, ?, ?, ?, ?, ?)',

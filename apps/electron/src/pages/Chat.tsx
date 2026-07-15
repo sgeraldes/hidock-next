@@ -596,7 +596,10 @@ export function Chat() {
       `---`,
       ``,
       ...messages.map(msg => {
-        const role = msg.role === 'user' ? '**You:**' : '**Assistant:**'
+        // ADV21 (round-22) — label only EXACT roles. A smuggled/unknown role
+        // (main already redacts its content) is exported neutrally, never as
+        // 'Assistant'. Main-side gates are authoritative; this is defense-in-depth.
+        const role = msg.role === 'user' ? '**You:**' : msg.role === 'assistant' ? '**Assistant:**' : '**Message:**'
         const timestamp = new Date(msg.createdAt).toLocaleString()
         return `### ${role} _(${timestamp})_\n\n${msg.content}\n`
       })

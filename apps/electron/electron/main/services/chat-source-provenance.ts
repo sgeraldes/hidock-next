@@ -223,18 +223,27 @@ export function presentSourcesNoRevalidate(stored: string | null | undefined): s
  * verifiable, fully-eligible provenance union. Everything else — null, `[]`, a
  * legacy pre-v2 raw array, an older/unknown envelope version, a malformed blob, or
  * a `kind:'rag'` union that is unverifiable / references ANY excluded
- * recording/capture — is redacted (whole answer + all chips dropped). User-authored
- * (role=user) text is ALWAYS preserved verbatim.
+ * recording/capture — is redacted (whole answer + all chips dropped).
+ *
+ * ADV21 (round-22) — EXACT role handling, fail-closed for unknown roles:
+ *   • exact 'user'      — user-authored text, ALWAYS preserved verbatim.
+ *   • exact 'assistant' — envelope/provenance redaction (below).
+ *   • ANY OTHER value   — a legacy/unknown/smuggled role ('system', 'Assistant',
+ *     ' assistant ', '', null, non-string) ⇒ FAIL CLOSED (redact content + drop
+ *     chips). This protects pre-existing rows persisted with a non-standard role
+ *     and anything that somehow bypassed the write allowlist.
  */
 export function revalidateStoredSources(
   stored: string | null | undefined,
   role: string
 ): { sources: string | null; redactContent: boolean } {
-  const isAssistant = role === 'assistant'
-
   // User-authored text is ALWAYS preserved verbatim (never redacted, envelope or
   // not — the renderer never packs a user message with a provenance envelope).
-  if (!isAssistant) return { sources: stored ?? null, redactContent: false }
+  if (role === 'user') return { sources: stored ?? null, redactContent: false }
+
+  // Not exactly 'user' and not exactly 'assistant' ⇒ unknown/smuggled role ⇒ fail
+  // closed (redact). Never preserve content for a role we do not explicitly trust.
+  if (role !== 'assistant') return { sources: '[]', redactContent: true }
 
   // ASSISTANT — only a valid current-version main-issued envelope is trusted.
   const env = stored ? parseEnvelope(stored) : null
