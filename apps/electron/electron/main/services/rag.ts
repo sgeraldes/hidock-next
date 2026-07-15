@@ -890,6 +890,37 @@ ${transcript.substring(0, 8000)}`
   }
 
   /**
+   * RE7-P2a (round-8) — collect up to `limit` ELIGIBLE knowledge rows by paging
+   * the source query, so eligibility filtering happens BEFORE the display limit
+   * WITHOUT a fixed over-fetch ceiling that could still truncate away eligible
+   * matches. Pages via LIMIT/OFFSET until `limit` eligible rows are gathered or
+   * the source is exhausted; bounded by a defensive page cap. `fetchPage` returns
+   * the raw mapped rows for a (pageLimit, offset) window.
+   */
+  private collectEligibleKnowledge(
+    db: any,
+    limit: number,
+    fetchPage: (pageLimit: number, offset: number) => any[]
+  ): any[] {
+    if (limit <= 0) return []
+    const PAGE = Math.max(limit * 4, 40)
+    const MAX_PAGES = 50 // defensive bound (≥ 2000 rows scanned at the default page size)
+    const collected: any[] = []
+    let offset = 0
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const rows = fetchPage(PAGE, offset)
+      if (rows.length === 0) break
+      for (const r of filterEligibleKnowledge(db, rows)) {
+        collected.push(r)
+        if (collected.length >= limit) return collected.slice(0, limit)
+      }
+      if (rows.length < PAGE) break // source exhausted
+      offset += PAGE
+    }
+    return collected.slice(0, limit)
+  }
+
+  /**
    * Perform a global search across all entities.
    * B-EXP-003: Multi-term LIKE search with ranking by match count
    * (FTS5 is NOT available in sql.js WASM, so we use improved multi-term LIKE).
@@ -915,23 +946,16 @@ ${transcript.substring(0, 8000)}`
         const escaped = escapeLikePattern(terms[0])
         const likeQuery = `%${escaped}%`
 
-        // RE6-INC (round-7, P2) — over-fetch so eligibility filtering happens
-        // BEFORE the display LIMIT: excluded captures in the first `limit` rows
-        // must not shrink the eligible result set (an eligible match beyond the
-        // limit still surfaces). Filter, then slice to `limit`.
-        const overfetch = Math.max(limit * 10, 50)
-        const knowledgeRows = db.exec(`
-          SELECT id, title, summary, captured_at FROM knowledge_captures
-          WHERE title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\'
-          LIMIT ?
-        `, [likeQuery, likeQuery, overfetch])
-
-        const knowledge = filterEligibleKnowledge(db, knowledgeRows.length > 0 ? knowledgeRows[0].values.map(v => ({
-          id: v[0],
-          title: v[1],
-          summary: v[2],
-          capturedAt: v[3]
-        })) : []).slice(0, limit)
+        // RE7-P2a (round-8) — page until `limit` ELIGIBLE captures are collected
+        // (no fixed over-fetch ceiling that could truncate before eligibility).
+        const knowledge = this.collectEligibleKnowledge(db, limit, (pageLimit, offset) => {
+          const res = db.exec(`
+            SELECT id, title, summary, captured_at FROM knowledge_captures
+            WHERE title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\'
+            LIMIT ? OFFSET ?
+          `, [likeQuery, likeQuery, pageLimit, offset])
+          return res.length > 0 ? res[0].values.map(v => ({ id: v[0], title: v[1], summary: v[2], capturedAt: v[3] })) : []
+        })
 
         const peopleRows = db.exec(`
           SELECT id, name, email, type FROM contacts
@@ -966,7 +990,8 @@ ${transcript.substring(0, 8000)}`
         table: string,
         columns: string[],
         selectCols: string,
-        limitVal: number
+        limitVal: number,
+        offsetVal = 0
       ): { sql: string; params: (string | number)[] } => {
         const params: (string | number)[] = []
         const termClauses: string[] = []
@@ -992,22 +1017,19 @@ ${transcript.substring(0, 8000)}`
         const whereClause = termClauses.join(' OR ')
         const rankExpr = `(${matchCountParts.join(' + ')})`
 
-        const sql = `SELECT ${selectCols}, ${rankExpr} AS match_rank FROM ${table} WHERE ${whereClause} ORDER BY match_rank DESC LIMIT ?`
-        params.push(limitVal)
+        const sql = `SELECT ${selectCols}, ${rankExpr} AS match_rank FROM ${table} WHERE ${whereClause} ORDER BY match_rank DESC LIMIT ? OFFSET ?`
+        params.push(limitVal, offsetVal)
         return { sql, params }
       }
 
       // 1. Search knowledge captures with explicit columns + multi-term ranking.
-      // RE6-INC (P2) — over-fetch so eligibility filtering precedes the display
-      // LIMIT (see the single-term path above).
-      const kq = buildMultiTermQuery('knowledge_captures', ['title', 'summary'], 'id, title, summary, captured_at', Math.max(limit * 10, 50))
-      const knowledgeRows = db.exec(kq.sql, kq.params)
-      const knowledge = filterEligibleKnowledge(db, knowledgeRows.length > 0 ? knowledgeRows[0].values.map(v => ({
-        id: v[0],
-        title: v[1],
-        summary: v[2],
-        capturedAt: v[3]
-      })) : []).slice(0, limit)
+      // RE7-P2a (round-8) — page until `limit` ELIGIBLE captures collected (no
+      // fixed over-fetch ceiling that could truncate before eligibility).
+      const knowledge = this.collectEligibleKnowledge(db, limit, (pageLimit, offset) => {
+        const kq = buildMultiTermQuery('knowledge_captures', ['title', 'summary'], 'id, title, summary, captured_at', pageLimit, offset)
+        const rows = db.exec(kq.sql, kq.params)
+        return rows.length > 0 ? rows[0].values.map(v => ({ id: v[0], title: v[1], summary: v[2], capturedAt: v[3] })) : []
+      })
 
       // 2. Search people with explicit columns + multi-term ranking
       const pq = buildMultiTermQuery('contacts', ['name', 'email', 'company', 'role'], 'id, name, email, type', limit)

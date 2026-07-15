@@ -187,7 +187,10 @@ describe('Briefing IPC Handlers', () => {
 
     await handlers['briefing:get']()
 
-    const dayScoped = calls.filter((c) => Array.isArray(c.params) && c.params.length === 2)
+    // RE7-P2b (round-8) — the recent-knowledge + pending-actionables queries now
+    // page with `LIMIT ? OFFSET ?` (2 numeric params), so match the day-scoped
+    // queries by their date-bound SQL rather than by param count.
+    const dayScoped = calls.filter((c) => /date_recorded >= \?/.test(c.sql))
     // todayFollowUps + todayRecordingsPending both carry [dayStart, dayEnd].
     expect(dayScoped.length).toBeGreaterThanOrEqual(2)
     const [dayStart, dayEnd] = dayScoped[0].params as [string, string]
@@ -266,5 +269,73 @@ describe('Briefing IPC Handlers', () => {
     expect(res.data.recentKnowledge).toEqual([])
     expect(res.data.todayFollowUps).toEqual([])
     expect(res.data.pendingActionables).toEqual([])
+  })
+
+  // RE7-P2c (round-8) — on failClosed, drop ONLY rows with a resolved recording
+  // id; standalone (NULL-source) actionables are kept (matching actionables:getAll,
+  // which does not drop them).
+  it('RE7-P2c — keeps standalone (NULL-source) actionables on failClosed, drops recording-backed ones', async () => {
+    const { queryAll, queryOne, getMeetings, getExcludedRecordingIds } = await import('../../services/database')
+    vi.mocked(getMeetings).mockReturnValue([])
+    vi.mocked(getExcludedRecordingIds).mockReturnValue({ ids: new Set<string>(), failClosed: true } as any)
+    vi.mocked(queryOne).mockImplementation((_sql: string, params?: unknown[]) => {
+      const id = params?.[0]
+      if (id === 'kc-standalone') return { source_recording_id: null } as any // real standalone capture
+      if (id === 'kc-rec') return { source_recording_id: 'rec-1' } as any
+      return null as any
+    })
+    vi.mocked(queryAll).mockImplementation(
+      routeQueryAll([
+        { match: /LEFT JOIN recordings r ON r\.id = t\.recording_id/, rows: [] },
+        { match: /JOIN recordings r ON r\.id = t\.recording_id\s+LEFT JOIN meetings m/, rows: [] },
+        { match: /SELECT COUNT\(1\) AS n FROM recordings r/, rows: [{ n: 0 }] },
+        { match: /FROM actionables\s+WHERE status/, rows: [
+          { id: 'a-standalone', type: 'email', title: 'S', source_knowledge_id: 'kc-standalone' },
+          { id: 'a-rec', type: 'email', title: 'R', source_knowledge_id: 'kc-rec' }
+        ] },
+        { match: /FROM transcripts WHERE/, rows: [{ n: 0 }] },
+        { match: /FROM vector_embeddings/, rows: [{ n: 0 }] }
+      ])
+    )
+
+    const res = await handlers['briefing:get']()
+    expect(res.success).toBe(true)
+    // recentKnowledge/todayFollowUps are all recording-backed → honestly empty…
+    expect(res.data.recentKnowledge).toEqual([])
+    // …but the standalone actionable survives; only the recording-backed one is dropped.
+    expect(res.data.pendingActionables.map((a: any) => a.id)).toEqual(['a-standalone'])
+  })
+
+  // RE7-P2b (round-8) — page pending actionables until the 8-item display list is
+  // filled, even when a block larger than one page is value-excluded.
+  it('RE7-P2b — pages pending actionables past a >1-page block of excluded ones to fill the display limit', async () => {
+    const { queryAll, queryOne, getMeetings, getExcludedRecordingIds } = await import('../../services/database')
+    vi.mocked(getMeetings).mockReturnValue([])
+    vi.mocked(getExcludedRecordingIds).mockReturnValue({ ids: new Set(['rec-bad']), failClosed: false } as any)
+    vi.mocked(queryOne).mockImplementation((_sql: string, params?: unknown[]) => {
+      const id = String(params?.[0] ?? '')
+      if (id.startsWith('kc-bad')) return { source_recording_id: 'rec-bad' } as any // excluded
+      if (id.startsWith('kc-ok')) return { source_recording_id: null } as any // eligible standalone
+      return null as any
+    })
+    // Full ordered actionables list: 40 excluded, then 8 eligible.
+    const fullActionables = [
+      ...Array.from({ length: 40 }, (_, i) => ({ id: `a-bad-${i}`, type: 'email', title: `B${i}`, source_knowledge_id: `kc-bad-${i}` })),
+      ...Array.from({ length: 8 }, (_, j) => ({ id: `a-ok-${j}`, type: 'email', title: `O${j}`, source_knowledge_id: `kc-ok-${j}` }))
+    ]
+    vi.mocked(queryAll).mockImplementation((sql: string, params?: unknown[]) => {
+      if (/FROM actionables\s+WHERE status/.test(sql)) {
+        // Honor the paged LIMIT ? OFFSET ? so collectEligibleRows can page.
+        const [limit, offset] = (params as number[]) ?? [fullActionables.length, 0]
+        return fullActionables.slice(offset, offset + limit) as any
+      }
+      return [] as any
+    })
+
+    const res = await handlers['briefing:get']()
+    expect(res.success).toBe(true)
+    const ids = res.data.pendingActionables.map((a: any) => a.id)
+    expect(ids).toHaveLength(8)
+    expect(ids.every((id: string) => id.startsWith('a-ok-'))).toBe(true)
   })
 })

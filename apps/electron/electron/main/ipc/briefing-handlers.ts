@@ -40,6 +40,44 @@ interface TranscriptRow {
   meeting_end?: string | null
 }
 
+/**
+ * RE7-P2b/P2c (round-8) — page `fetchPage` until `limit` ELIGIBLE rows are
+ * collected or the source is exhausted, so a run of value-excluded rows in the
+ * first page can't leave the display list short of its limit. `recIdOf` returns
+ * a row's source recording id, or null when the row is NOT recording-backed
+ * (standalone → always kept). Fail-closed: when eligibility can't be established,
+ * ONLY recording-backed rows are dropped — standalone (null-recording) rows are
+ * still kept (matches actionables:getAll).
+ */
+function collectEligibleRows<T>(
+  limit: number,
+  fetchPage: (pageLimit: number, offset: number) => T[],
+  recIdOf: (row: T) => string | null
+): T[] {
+  if (limit <= 0) return []
+  const PAGE = Math.max(limit * 4, 20)
+  const MAX_PAGES = 25
+  const out: T[] = []
+  let offset = 0
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const rows = fetchPage(PAGE, offset)
+    if (rows.length === 0) break
+    const recIds = rows.map(recIdOf).filter((x): x is string => !!x)
+    const { eligible, failClosed } = filterEligibleRecordingIds(recIds)
+    for (const row of rows) {
+      const rec = recIdOf(row)
+      const ok = rec == null ? true : !failClosed && eligible.has(rec)
+      if (ok) {
+        out.push(row)
+        if (out.length >= limit) return out.slice(0, limit)
+      }
+    }
+    if (rows.length < PAGE) break // source exhausted
+    offset += PAGE
+  }
+  return out.slice(0, limit)
+}
+
 function mapTranscriptRow(row: TranscriptRow): BriefingRecentItem {
   let actionItems: string[] = []
   try {
@@ -88,20 +126,29 @@ export function registerBriefingHandlers(): void {
 
       const todayMeetings = getMeetings(dayStart, dayEnd)
 
-      // Over-fetch (LIMIT 30) so the value-exclusion filter below can still fill
-      // the ~6-item Recent list after excluded rows are dropped.
-      const recentKnowledgeRaw: BriefingRecentItem[] = queryAll<TranscriptRow>(
-        `SELECT ${TRANSCRIPT_SELECT}
-         FROM transcripts t
-         LEFT JOIN recordings r ON r.id = t.recording_id
-         LEFT JOIN meetings m ON m.id = r.meeting_id
-         WHERE TRIM(COALESCE(t.full_text, '')) != ''
-           AND COALESCE(r.personal, 0) = 0 AND r.deleted_at IS NULL
-         ORDER BY COALESCE(r.date_recorded, '') DESC
-         LIMIT 30`
-      ).map(mapTranscriptRow)
+      // RE7-P2b (round-8) — page the Recent list until 6 ELIGIBLE rows are
+      // collected (no fixed 30-row cap that a run of value-excluded rows could
+      // exhaust before the list is filled). Every row here is recording-backed.
+      const recentKnowledge: BriefingRecentItem[] = collectEligibleRows(
+        6,
+        (pageLimit, offset) =>
+          queryAll<TranscriptRow>(
+            `SELECT ${TRANSCRIPT_SELECT}
+             FROM transcripts t
+             LEFT JOIN recordings r ON r.id = t.recording_id
+             LEFT JOIN meetings m ON m.id = r.meeting_id
+             WHERE TRIM(COALESCE(t.full_text, '')) != ''
+               AND COALESCE(r.personal, 0) = 0 AND r.deleted_at IS NULL
+             ORDER BY COALESCE(r.date_recorded, '') DESC
+             LIMIT ? OFFSET ?`,
+            [pageLimit, offset]
+          ).map(mapTranscriptRow),
+        (r) => r.recordingId
+      )
 
-      // Today's recorded + transcribed meetings, newest first — the follow-up digest.
+      // Today's recorded + transcribed meetings, newest first — the follow-up
+      // digest (today-scoped, so bounded); every row is recording-backed, so on
+      // failClosed the eligible filter honestly empties it.
       const todayFollowUpsRaw: BriefingRecentItem[] = queryAll<TranscriptRow>(
         `SELECT ${TRANSCRIPT_SELECT}
          FROM transcripts t
@@ -126,64 +173,69 @@ export function registerBriefingHandlers(): void {
         [dayStart, dayEnd]
       )[0]?.n ?? 0
 
-      const pendingActionablesRaw = queryAll<{
-        id: string
-        type: string
-        title: string
-        description?: string
-        suggested_template?: string
-        source_knowledge_id: string
-        confidence?: number
-        created_at?: string
-      }>(
-        `SELECT id, type, title, description, suggested_template, source_knowledge_id, confidence, created_at
-         FROM actionables
-         WHERE status = 'pending'
-         ORDER BY created_at DESC
-         LIMIT 30`
-      ).map<BriefingActionable>((a) => ({
-        id: a.id,
-        type: a.type,
-        title: a.title,
-        description: a.description,
-        suggestedTemplate: a.suggested_template,
-        sourceKnowledgeId: a.source_knowledge_id,
-        confidence: a.confidence,
-        createdAt: a.created_at
-      }))
-
       // RE7-3 (round-7) — Today is an assistant-facing DISPLAY, so route every
       // recording-backed row through the shared eligibility boundary. The SQL
       // above already drops personal/soft-deleted, but VALUE-excluded rows (and
       // a stale actionable pointing at a now-excluded recording) still slip
       // through. An actionable's source_knowledge_id is a capture id (→ resolve
       // its source recording) or, when no capture row exists, a recording id.
+      // A capture with a NULL source recording → standalone actionable (kept).
       const actionableRec = new Map<string, string | null>()
-      for (const a of pendingActionablesRaw) {
-        if (actionableRec.has(a.sourceKnowledgeId)) continue
+      const resolveActionableRec = (sourceKnowledgeId: string): string | null => {
+        if (actionableRec.has(sourceKnowledgeId)) return actionableRec.get(sourceKnowledgeId) ?? null
         const kc = queryOne<{ source_recording_id: string | null }>(
           'SELECT source_recording_id FROM knowledge_captures WHERE id = ?',
-          [a.sourceKnowledgeId]
+          [sourceKnowledgeId]
         )
-        actionableRec.set(a.sourceKnowledgeId, kc ? kc.source_recording_id ?? null : a.sourceKnowledgeId)
+        const rec = kc ? kc.source_recording_id ?? null : sourceKnowledgeId
+        actionableRec.set(sourceKnowledgeId, rec)
+        return rec
       }
-      const allRecIds = [
-        ...recentKnowledgeRaw.map((r) => r.recordingId),
-        ...todayFollowUpsRaw.map((r) => r.recordingId),
-        ...[...actionableRec.values()].filter((x): x is string => !!x)
-      ]
-      const { eligible, failClosed } = filterEligibleRecordingIds(allRecIds)
-      // Fail closed: return NO recording-backed rows if eligibility is unknown.
-      const recentKnowledge = failClosed ? [] : recentKnowledgeRaw.filter((r) => eligible.has(r.recordingId)).slice(0, 6)
-      const todayFollowUps = failClosed ? [] : todayFollowUpsRaw.filter((r) => eligible.has(r.recordingId))
-      const pendingActionables = failClosed
+
+      // RE7-P2b (round-8) — page pending actionables until 8 ELIGIBLE rows are
+      // collected. RE7-P2c — collectEligibleRows keeps standalone (NULL-source)
+      // actionables even on failClosed (only recording-backed rows are dropped),
+      // matching actionables:getAll rather than the previous "drop everything".
+      const pendingActionables: BriefingActionable[] = collectEligibleRows(
+        8,
+        (pageLimit, offset) =>
+          queryAll<{
+            id: string
+            type: string
+            title: string
+            description?: string
+            suggested_template?: string
+            source_knowledge_id: string
+            confidence?: number
+            created_at?: string
+          }>(
+            `SELECT id, type, title, description, suggested_template, source_knowledge_id, confidence, created_at
+             FROM actionables
+             WHERE status = 'pending'
+             ORDER BY created_at DESC
+             LIMIT ? OFFSET ?`,
+            [pageLimit, offset]
+          ).map<BriefingActionable>((a) => ({
+            id: a.id,
+            type: a.type,
+            title: a.title,
+            description: a.description,
+            suggestedTemplate: a.suggested_template,
+            sourceKnowledgeId: a.source_knowledge_id,
+            confidence: a.confidence,
+            createdAt: a.created_at
+          })),
+        (a) => resolveActionableRec(a.sourceKnowledgeId)
+      )
+
+      // todayFollowUps is recording-backed and today-scoped: apply the boundary
+      // directly (failClosed → honestly empty).
+      const { eligible: followUpEligible, failClosed: followUpFailClosed } = filterEligibleRecordingIds(
+        todayFollowUpsRaw.map((r) => r.recordingId)
+      )
+      const todayFollowUps = followUpFailClosed
         ? []
-        : pendingActionablesRaw
-            .filter((a) => {
-              const rec = actionableRec.get(a.sourceKnowledgeId)
-              return !rec || eligible.has(rec) // not recording-backed → keep; else eligible only
-            })
-            .slice(0, 8)
+        : todayFollowUpsRaw.filter((r) => followUpEligible.has(r.recordingId))
 
       const config = getConfig()
       const stats = {

@@ -185,4 +185,34 @@ describe('RAGService.globalSearch (real SQL)', () => {
     const ids = result.data.knowledge.map((k: any) => k.id)
     expect(ids).toEqual(['kc-zok']) // excluded row filtered pre-limit; eligible match returned
   })
+
+  // RE7-P2a (round-8) — the previous fix over-fetched to a FIXED ceiling
+  // (max(limit*10, 50)); a long run of excluded rows past that ceiling could
+  // still truncate away an eligible match. globalSearch now PAGES until `limit`
+  // eligible rows are collected, so an eligible capture sitting beyond 50
+  // excluded ones still surfaces.
+  it('RE7-P2a — pages past a >50-row block of excluded captures to find the eligible one', async () => {
+    // 60 excluded recording-backed captures, then 1 eligible standalone capture.
+    const stmts: string[] = []
+    for (let i = 0; i < 60; i++) {
+      stmts.push(
+        `INSERT INTO knowledge_captures (id, title, summary, captured_at, source_recording_id, deleted_at) ` +
+          `VALUES ('kc-bad-${i}', 'Yak note ${i}', 'Yak recording-backed ${i}', '2026-03-${String((i % 27) + 1).padStart(2, '0')}', 'rec-bad', NULL)`
+      )
+    }
+    stmts.push(
+      `INSERT INTO knowledge_captures (id, title, summary, captured_at, source_recording_id, deleted_at) ` +
+        `VALUES ('kc-yok', 'Yak eligible', 'Yak standalone', '2026-02-01', NULL, NULL)`
+    )
+    dbInstance.run(stmts.join(';\n'))
+    // rec-bad excluded → all 60 recording-backed captures are ineligible.
+    globalExclusion = { ids: new Set(['rec-bad']), failClosed: false }
+
+    const rag = getRAGService()
+    const result = await rag.globalSearch('Yak', 1)
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    const ids = result.data.knowledge.map((k: any) => k.id)
+    expect(ids).toEqual(['kc-yok']) // found despite sitting beyond a 50+ excluded block
+  })
 })
