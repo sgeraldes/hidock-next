@@ -553,6 +553,15 @@ export class DatabaseEngine {
   /* --- Initialization / 4-phase boot -------------------------------------- */
 
   async initialize(): Promise<void> {
+    // Re-initialization: release any previous connection before opening a new
+    // one — better-sqlite3 handles are never GC-closed, so overwriting this.bdb
+    // below would strand the old native file handle (open until process exit,
+    // which on Windows also keeps the old .sqlite file undeletable).
+    if (this.bdb) this.closeDatabase()
+    // Per-boot flag (drives the one-time post-migration VACUUM); must not leak
+    // a previous boot's value into this one.
+    this.appliedMigration = false
+
     this.dbPath = this.config.dbPathProvider()
 
     // Safety net: snapshot the existing file BEFORE the first WAL open / migration.

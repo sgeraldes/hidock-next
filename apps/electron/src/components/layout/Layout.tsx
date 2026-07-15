@@ -213,6 +213,7 @@ export function Layout({ children }: LayoutProps) {
     loadConfig()
     loadMeetings()
     // loadRecordings() // Redundant: Pages load their own data via useUnifiedRecordings
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on mount to initialize app data
   }, [])
 
   // Toast notifications for device state changes (read from store)
@@ -250,6 +251,7 @@ export function Layout({ children }: LayoutProps) {
     }
 
     prevConnectedRef.current = isNowConnected
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- connectionStatus.step only read in the null-init guard; effect is intentionally keyed on device connection state
   }, [deviceState.connected, deviceState.model])
 
   // Toast notifications for connection errors (read from store)
@@ -279,6 +281,7 @@ export function Layout({ children }: LayoutProps) {
     if (config?.calendar.icsUrl && !lastCalendarSync) {
       syncCalendar()
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- initial sync only; keyed on icsUrl so it does not re-run when lastCalendarSync updates
   }, [config?.calendar.icsUrl])
 
   return (

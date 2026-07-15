@@ -494,7 +494,7 @@ export function Explore() {
                 {totalResults === 0 && !loading && (
                   <div className="text-center py-20 border-2 border-dashed rounded-3xl opacity-30">
                     <Search className="h-12 w-12 mx-auto mb-4" />
-                    <p className="text-sm">No results found for "{query}"</p>
+                    <p className="text-sm">No results found for &quot;{query}&quot;</p>
                   </div>
                 )}
                 {totalResults > 0 && !loading && activeTab !== 'all' && (() => {
@@ -506,8 +506,8 @@ export function Explore() {
                     return (
                       <div className="text-center py-12 border-2 border-dashed rounded-3xl opacity-30">
                         <Search className="h-10 w-10 mx-auto mb-3" />
-                        <p className="text-sm">No {activeTab} results for "{query}"</p>
-                        <p className="text-xs text-muted-foreground mt-1">Try the "all" tab to see results in other categories.</p>
+                        <p className="text-sm">No {activeTab} results for &quot;{query}&quot;</p>
+                        <p className="text-xs text-muted-foreground mt-1">Try the &quot;all&quot; tab to see results in other categories.</p>
                       </div>
                     )
                   }

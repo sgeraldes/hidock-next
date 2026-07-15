@@ -714,6 +714,5 @@ export function useDownloadOrchestrator() {
     }
   // DL-11: Only depend on deviceService (stable singleton). processDownloadQueue
   // is accessed via ref so changes don't cause re-subscription.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deviceService])
 }
