@@ -50,7 +50,9 @@ const fakeDb = vi.hoisted(() => ({
 
 vi.mock('../database', () => ({
   getDatabase: () => fakeDb,
-  getExcludedRecordingIds: () => new Set<string>()
+  // Round-6 — { ids, failClosed } shape.
+  getExcludedRecordingIds: () => ({ ids: new Set<string>(), failClosed: false }),
+  isRecordingProcessable: () => true
 }))
 
 vi.mock('../embeddings', () => ({

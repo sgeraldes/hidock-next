@@ -38,9 +38,13 @@ vi.mock('../vector-store', () => ({
 }))
 
 let dbInstance: any = null
+// RE6-3 (round-6) — controllable exclusion so a recording-backed capture can be
+// marked excluded; the knowledge results route through the shared boundary.
+let globalExclusion: { ids: Set<string>; failClosed: boolean } = { ids: new Set<string>(), failClosed: false }
 vi.mock('../database', () => ({
   getDatabase: () => dbInstance,
   queryOne: vi.fn(),
+  getExcludedRecordingIds: () => globalExclusion,
   // Real escaping behavior — escapes % _ \ with a leading backslash, which requires a
   // working `ESCAPE '\'` clause in the query to be interpreted correctly.
   escapeLikePattern: vi.fn((pattern: string) => pattern.replace(/[%_\\]/g, '\\$&'))
@@ -52,11 +56,12 @@ describe('RAGService.globalSearch (real SQL)', () => {
   beforeEach(async () => {
     vi.clearAllMocks()
     resetRAGService()
+    globalExclusion = { ids: new Set<string>(), failClosed: false }
     SQL = await initSqlJs()
     dbInstance = new SQL.Database()
 
     dbInstance.run(`
-      CREATE TABLE knowledge_captures (id TEXT, title TEXT, summary TEXT, captured_at TEXT);
+      CREATE TABLE knowledge_captures (id TEXT, title TEXT, summary TEXT, captured_at TEXT, source_recording_id TEXT, deleted_at TEXT);
       CREATE TABLE contacts (id TEXT, name TEXT, email TEXT, type TEXT, company TEXT, role TEXT);
       CREATE TABLE projects (id TEXT, name TEXT, description TEXT, status TEXT);
 
@@ -120,5 +125,42 @@ describe('RAGService.globalSearch (real SQL)', () => {
     expect(result.data.knowledge).toEqual([])
     expect(result.data.people).toEqual([])
     expect(result.data.projects).toEqual([])
+  })
+
+  // RE6-3 (round-6) — Explore/global knowledge search routes recording-backed
+  // captures through the eligibility boundary; eligible standalone captures stay.
+  it('drops a recording-backed capture whose source recording is excluded; keeps standalone + deleted-capture handling', async () => {
+    dbInstance.run(`
+      INSERT INTO knowledge_captures (id, title, summary, captured_at, source_recording_id, deleted_at) VALUES
+        ('kc-rec', 'Amazon secret notes', 'Amazon recording-backed capture', '2026-01-03', 'rec-x', NULL),
+        ('kc-del', 'Amazon deleted capture', 'Amazon soft-deleted capture', '2026-01-04', 'rec-y', '2026-01-05');
+    `)
+    // rec-x is excluded (personal/trashed/value-excluded — the boundary only sees the id set).
+    globalExclusion = { ids: new Set(['rec-x']), failClosed: false }
+
+    const rag = getRAGService()
+    const result = await rag.globalSearch('Amazon', 10)
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    const ids = result.data.knowledge.map((k: any) => k.id)
+    expect(ids).toContain('kc-1') // eligible standalone capture stays
+    expect(ids).not.toContain('kc-rec') // recording-backed + excluded → gone
+    expect(ids).not.toContain('kc-del') // soft-deleted capture → gone
+  })
+
+  it('RE6-3 — fails closed (drops recording-backed captures) when eligibility is unknown', async () => {
+    dbInstance.run(`
+      INSERT INTO knowledge_captures (id, title, summary, captured_at, source_recording_id, deleted_at) VALUES
+        ('kc-rec2', 'Amazon backed', 'Amazon recording-backed', '2026-01-06', 'rec-z', NULL);
+    `)
+    globalExclusion = { ids: new Set<string>(), failClosed: true }
+
+    const rag = getRAGService()
+    const result = await rag.globalSearch('Amazon', 10)
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    const ids = result.data.knowledge.map((k: any) => k.id)
+    expect(ids).toContain('kc-1') // standalone still allowed
+    expect(ids).not.toContain('kc-rec2') // recording-backed dropped (fail closed)
   })
 })

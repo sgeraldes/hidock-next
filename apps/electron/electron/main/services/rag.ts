@@ -7,7 +7,8 @@ import { getVectorStore, SearchResult } from './vector-store'
 import { getOllamaService, OllamaChatMessage } from './ollama'
 import { getChatLLMService } from './chat-llm'
 import { getEmbeddingsService } from './embeddings'
-import { getDatabase, queryOne, queryAll, escapeLikePattern, getExcludedRecordingIds } from './database'
+import { getDatabase, queryOne, queryAll, escapeLikePattern } from './database'
+import { filterEligibleRecordingIds } from './recording-eligibility'
 import { stripDiacritics } from './entity-normalize'
 import type { BrainId } from './brains/types'
 import { Result, success, error } from '../types/api'
@@ -450,6 +451,37 @@ class LRUSessionCache {
   }
 }
 
+/**
+ * RE6-3 (round-6) — filter Explore/global-search knowledge results through the
+ * recording-eligibility boundary. A capture is dropped when the capture itself
+ * is soft-deleted, OR it is recording-backed and its source recording is
+ * excluded (personal/soft-deleted/value-excluded) — or, fail-closed, when
+ * eligibility can't be established. Eligible STANDALONE captures (no source
+ * recording) are kept. Excluded titles/summaries must not stay discoverable.
+ */
+function filterEligibleKnowledge(db: any, rows: any[]): any[] {
+  if (rows.length === 0) return rows
+  const ids = rows.map((r) => r.id as string)
+  const placeholders = ids.map(() => '?').join(',')
+  const metaRes = db.exec(
+    `SELECT id, source_recording_id, deleted_at FROM knowledge_captures WHERE id IN (${placeholders})`,
+    ids
+  )
+  const meta = new Map<string, { rec: string | null; deleted: unknown }>()
+  if (metaRes.length > 0 && metaRes[0].values) {
+    for (const v of metaRes[0].values) meta.set(v[0] as string, { rec: (v[1] as string) ?? null, deleted: v[2] })
+  }
+  const recIds = [...meta.values()].map((m) => m.rec).filter((x): x is string => !!x)
+  const { eligible, failClosed } = filterEligibleRecordingIds(recIds)
+  return rows.filter((r) => {
+    const m = meta.get(r.id)
+    if (!m) return false // capture vanished
+    if (m.deleted) return false // capture soft-deleted
+    if (!m.rec) return true // standalone capture — not recording-backed
+    return !failClosed && eligible.has(m.rec) // recording-backed → eligible only
+  })
+}
+
 class RAGService {
   private contexts: LRUSessionCache = new LRUSessionCache()
   // B-CHAT-005: Active AbortControllers for cancellable requests
@@ -583,27 +615,12 @@ class RAGService {
       searchResults = await vectorStore.search(message, 5)
     }
 
-    // --- Added: Fetch explicit conversation context ---
-    const pinnedContextParts: string[] = []
+    // --- Added: Fetch explicit conversation context (raw; eligibility applied
+    // AFTER the graph-context await below — INC round-5/6 stale-await race). ---
+    const pinnedEntries: Array<{ recordingId: string; part: string }> = []
     try {
       const db = getDatabase()
       if (db) {
-        // ADV5 (round-5, FAIL CLOSED) — a recording pinned to this conversation
-        // can be trashed / marked personal / value-rated-out AFTER it was
-        // pinned. Revalidate every pinned capture's recording against the
-        // SHARED exclusion source at prompt-construction. If the lookup itself
-        // throws, drop ALL pinned recording-backed context (fail closed) rather
-        // than injecting private content into the prompt.
-        let excluded: Set<string>
-        let exclusionUnavailable = false
-        try {
-          excluded = getExcludedRecordingIds()
-        } catch (e) {
-          console.error('[RAG] pinned-context exclusion lookup FAILED — failing closed (no pinned recording-backed context):', e)
-          excluded = new Set()
-          exclusionUnavailable = true
-        }
-        // Get knowledge captures attached to this conversation
         const contextRes = db.exec('SELECT knowledge_capture_id FROM conversation_context WHERE conversation_id = ?', [sessionId])
         if (contextRes && contextRes.length > 0 && contextRes[0].values && contextRes[0].values.length > 0) {
           const kcIds = contextRes[0].values.map(v => v[0] as string)
@@ -618,13 +635,7 @@ class RAGService {
 
             if (transcriptRes && transcriptRes.length > 0 && transcriptRes[0].values && transcriptRes[0].values.length > 0) {
               const [text, title, recordingId] = transcriptRes[0].values[0] as [string, string, string]
-              // ADV5 — drop a pinned recording that is now excluded (soft-deleted
-              // / personal / value-excluded), or drop everything on lookup failure.
-              if (exclusionUnavailable || (recordingId && excluded.has(recordingId))) {
-                console.log(`[RAG] pinned context ${id} dropped — recording ${recordingId} is excluded or eligibility unknown`)
-                continue
-              }
-              pinnedContextParts.push(`[PINNED CONTEXT: ${title}]\n${text}`)
+              pinnedEntries.push({ recordingId, part: `[PINNED CONTEXT: ${title}]\n${text}` })
             }
           }
         }
@@ -687,6 +698,15 @@ class RAGService {
     // token budget. Loaded lazily inside buildGraphContext so RAG's static import
     // graph stays free of the ingest/LLM stack.
     const graphContextParts = await buildGraphContext(message, context.meetingId)
+
+    // ADV5/INC (round-5/6) — revalidate pinned recordings through the shared
+    // fail-closed boundary HERE, immediately before prompt construction and
+    // AFTER buildGraphContext's dynamic-import/router awaits (a deletion during
+    // that await must not go stale). A now-excluded pinned recording is dropped;
+    // if eligibility can't be established, ALL pinned recording-backed context
+    // is dropped (fail closed).
+    const { eligible: eligiblePinned } = filterEligibleRecordingIds(pinnedEntries.map((e) => e.recordingId))
+    const pinnedContextParts = pinnedEntries.filter((e) => eligiblePinned.has(e.recordingId)).map((e) => e.part)
 
     // Combine pinned context, graph facts, and search results
     const allContextParts = [...pinnedContextParts, ...graphContextParts, ...contextParts]
@@ -901,12 +921,12 @@ ${transcript.substring(0, 8000)}`
           LIMIT ?
         `, [likeQuery, likeQuery, limit])
 
-        const knowledge = knowledgeRows.length > 0 ? knowledgeRows[0].values.map(v => ({
+        const knowledge = filterEligibleKnowledge(db, knowledgeRows.length > 0 ? knowledgeRows[0].values.map(v => ({
           id: v[0],
           title: v[1],
           summary: v[2],
           capturedAt: v[3]
-        })) : []
+        })) : [])
 
         const peopleRows = db.exec(`
           SELECT id, name, email, type FROM contacts
@@ -975,12 +995,12 @@ ${transcript.substring(0, 8000)}`
       // 1. Search knowledge captures with explicit columns + multi-term ranking
       const kq = buildMultiTermQuery('knowledge_captures', ['title', 'summary'], 'id, title, summary, captured_at', limit)
       const knowledgeRows = db.exec(kq.sql, kq.params)
-      const knowledge = knowledgeRows.length > 0 ? knowledgeRows[0].values.map(v => ({
+      const knowledge = filterEligibleKnowledge(db, knowledgeRows.length > 0 ? knowledgeRows[0].values.map(v => ({
         id: v[0],
         title: v[1],
         summary: v[2],
         capturedAt: v[3]
-      })) : []
+      })) : [])
 
       // 2. Search people with explicit columns + multi-term ranking
       const pq = buildMultiTermQuery('contacts', ['name', 'email', 'company', 'role'], 'id, name, email, type', limit)

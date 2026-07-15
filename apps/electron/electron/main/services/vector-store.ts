@@ -3,7 +3,8 @@
  * Simple in-memory vector store with SQLite persistence for meeting transcript embeddings
  */
 
-import { getDatabase, getExcludedRecordingIds, isRecordingProcessable } from './database'
+import { getDatabase, isRecordingProcessable } from './database'
+import { filterEligibleRecordingIds } from './recording-eligibility'
 import { getEmbeddingsService } from './embeddings'
 
 interface VectorDocument {
@@ -418,6 +419,24 @@ class VectorStore {
     return indexed
   }
 
+  /**
+   * Round-6 (RE6-1) — THE single choke-point every vector read primitive routes
+   * through, so all consumers (global chat, meeting-scoped chat, summarize-
+   * Meeting, meeting-scoped findActionItems, the rag:get-chunks chunk viewer)
+   * inherit the same fail-closed eligibility policy. A doc with a recordingId is
+   * kept only when that recording is eligible (not personal/deleted/value-
+   * excluded); on any exclusion-lookup failure ALL recording-backed docs are
+   * dropped (fail closed). Non-recording docs (no recordingId) always pass.
+   */
+  private filterEligibleDocs(docs: VectorDocument[]): VectorDocument[] {
+    const recIds = docs.map((d) => d.metadata.recordingId).filter((x): x is string => !!x)
+    const { eligible } = filterEligibleRecordingIds(recIds)
+    return docs.filter((d) => {
+      const recId = d.metadata.recordingId
+      return !recId || eligible.has(recId) // failClosed ⇒ eligible is empty ⇒ recording docs dropped
+    })
+  }
+
   async search(query: string, topK = 5): Promise<SearchResult[]> {
     const queryEmbedding = await getEmbeddingsService().generateEmbedding(query)
     if (!queryEmbedding) {
@@ -425,31 +444,9 @@ class VectorStore {
       return []
     }
 
-    // Exclude chunks from personal ("ignored") or soft-deleted recordings so the
-    // assistant never surfaces private content. Filtering at query time (rather
-    // than deleting chunks) makes marking a recording personal instantly
-    // effective and fully reversible without re-indexing.
-    // P1 (round-3, FAIL CLOSED) — if the exclusion lookup THROWS, we cannot
-    // prove any recording eligible, so drop EVERY recording-backed result
-    // rather than defaulting to an empty set (fail-open would surface private
-    // content on a transient DB error). Non-recording docs (no recordingId)
-    // are unaffected.
-    let excluded: Set<string>
-    let exclusionUnavailable = false
-    try {
-      excluded = getExcludedRecordingIds()
-    } catch (e) {
-      console.error('[VectorStore] exclusion lookup FAILED — failing closed (no recording-backed results):', e)
-      excluded = new Set()
-      exclusionUnavailable = true
-    }
-
-    // Calculate similarity scores
+    // Calculate similarity scores over ELIGIBLE docs only (RE6-1 boundary).
     const results: SearchResult[] = []
-
-    for (const doc of this.documents.values()) {
-      const recId = doc.metadata.recordingId
-      if (recId && (exclusionUnavailable || excluded.has(recId))) continue
+    for (const doc of this.filterEligibleDocs([...this.documents.values()])) {
       const score = cosineSimilarity(queryEmbedding, doc.embedding)
       results.push({ document: doc, score })
     }
@@ -513,9 +510,11 @@ class VectorStore {
   }
 
   async searchByMeeting(meetingId: string): Promise<VectorDocument[]> {
-    return Array.from(this.documents.values())
-      .filter((d) => d.metadata.meetingId === meetingId)
-      .sort((a, b) => a.metadata.chunkIndex - b.metadata.chunkIndex)
+    // RE6-1 — meeting-scoped reads (meeting chat, summarizeMeeting, meeting-
+    // scoped findActionItems) route through the SAME eligibility boundary.
+    return this.filterEligibleDocs(
+      Array.from(this.documents.values()).filter((d) => d.metadata.meetingId === meetingId)
+    ).sort((a, b) => a.metadata.chunkIndex - b.metadata.chunkIndex)
   }
 
   async deleteByRecording(recordingId: string): Promise<number> {
@@ -584,7 +583,9 @@ class VectorStore {
   }
 
   getAllDocuments(): VectorDocument[] {
-    return Array.from(this.documents.values())
+    // RE6-1 — the chunk viewer (rag:get-chunks) and any other consumer of the
+    // full document set inherit the fail-closed eligibility boundary here.
+    return this.filterEligibleDocs(Array.from(this.documents.values()))
   }
 }
 

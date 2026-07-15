@@ -60,12 +60,12 @@ vi.mock('../database', () => ({
     return row
   }),
   escapeLikePattern: vi.fn((pattern: string) => pattern.replace(/[%_\\]/g, '\\$&')),
-  // ADV5 (round-5) — the pinned-context path revalidates each pinned recording
-  // against this shared exclusion source; empty ⇒ rec-1 is eligible.
-  getExcludedRecordingIds: () => {
-    if (throwExclusionLookup) throw new Error('exclusion lookup failed (simulated)')
-    return excludedRecordingIds
-  }
+  // ADV5 (round-5) / round-6 — the pinned-context path revalidates each pinned
+  // recording through the shared boundary (recording-eligibility.ts), which
+  // reads this. Round-6 shape { ids, failClosed }; the real function surfaces
+  // failClosed rather than throwing, so the mock mimics that.
+  getExcludedRecordingIds: () =>
+    throwExclusionLookup ? { ids: new Set<string>(), failClosed: true } : { ids: excludedRecordingIds, failClosed: false }
 }))
 
 describe('RAGService Context Injection', () => {

@@ -3,6 +3,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { getOutputGeneratorService } from '../output-generator'
 import * as db from '../database'
 
+// RE6-2 — mutable exclusion result so a test can flip a recording to excluded /
+// force fail-closed. Default: all eligible.
+let excludedRecordingResult: { ids: Set<string>; failClosed: boolean } = { ids: new Set<string>(), failClosed: false }
+
 // Mock dependencies
 vi.mock('../database', () => ({
   getMeetingById: vi.fn(),
@@ -12,7 +16,10 @@ vi.mock('../database', () => ({
   getMeetingsForContact: vi.fn(),
   getProjectById: vi.fn(),
   getContactById: vi.fn(),
-  queryOne: vi.fn()
+  queryOne: vi.fn(),
+  // RE6-2 (round-6) — output generation routes every resolved recording id
+  // through the shared eligibility boundary; default: all eligible.
+  getExcludedRecordingIds: () => excludedRecordingResult
 }))
 
 // Stable Ollama spies so tests can assert whether the local fallback was invoked.
@@ -48,6 +55,7 @@ vi.mock('../config', () => ({
 describe('OutputGeneratorService', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    excludedRecordingResult = { ids: new Set<string>(), failClosed: false }
     mockConfig.transcription.geminiApiKey = ''
     mockOllamaIsAvailable.mockResolvedValue(true)
     mockOllamaGenerate.mockResolvedValue('Generated Content')
@@ -107,5 +115,51 @@ describe('OutputGeneratorService', () => {
       generator.generate({ templateId: 'meeting_minutes', knowledgeCaptureId: 'kc-1' })
     ).rejects.toThrow(/Gemini 500/)
     expect(mockOllamaGenerate).not.toHaveBeenCalled()
+  })
+
+  // RE6-2 (round-6) — every resolved recording id is routed through the shared
+  // eligibility boundary immediately before prompt construction.
+  describe('RE6-2 — recording eligibility boundary', () => {
+    function stubCapture(): void {
+      vi.mocked(db.queryOne).mockReturnValue({
+        id: 'kc-1',
+        title: 'Knowledge Capture 1',
+        source_recording_id: 'rec-1',
+        captured_at: new Date().toISOString()
+      })
+      vi.mocked(db.getTranscriptByRecordingId).mockReturnValue({
+        id: 'trans-1',
+        recording_id: 'rec-1',
+        full_text: 'Full transcript text',
+        language: 'en',
+        created_at: new Date().toISOString()
+      } as any)
+    }
+
+    it('refuses when the pinned/context recording is excluded (personal/trashed/value-excluded)', async () => {
+      stubCapture()
+      excludedRecordingResult = { ids: new Set(['rec-1']), failClosed: false }
+      const generator = getOutputGeneratorService()
+      await expect(
+        generator.generate({ templateId: 'meeting_minutes', knowledgeCaptureId: 'kc-1' })
+      ).rejects.toThrow(/No transcripts available/)
+    })
+
+    it('fails closed (refuses) when eligibility cannot be established', async () => {
+      stubCapture()
+      excludedRecordingResult = { ids: new Set<string>(), failClosed: true }
+      const generator = getOutputGeneratorService()
+      await expect(
+        generator.generate({ templateId: 'meeting_minutes', knowledgeCaptureId: 'kc-1' })
+      ).rejects.toThrow(/refused \(fail closed\)/)
+    })
+
+    it('generates normally for an eligible recording (control)', async () => {
+      stubCapture()
+      excludedRecordingResult = { ids: new Set<string>(), failClosed: false }
+      const generator = getOutputGeneratorService()
+      const result = await generator.generate({ templateId: 'meeting_minutes', knowledgeCaptureId: 'kc-1' })
+      expect(result.content).toBe('Generated Content')
+    })
   })
 })

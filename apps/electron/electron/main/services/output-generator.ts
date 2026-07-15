@@ -16,6 +16,7 @@ import {
   getContactById,
   queryOne
 } from './database'
+import { filterEligibleRecordingIds } from './recording-eligibility'
 
 export interface GenerateOutputOptions {
   templateId: OutputTemplateId
@@ -58,8 +59,13 @@ class OutputGeneratorService {
       throw new Error(`Template not found: ${templateId}`)
     }
 
-    // Collect transcripts based on context
-    const transcripts: string[] = []
+    // Collect transcripts based on context. RE6-2 (round-6): every transcript
+    // is tagged with the RECORDING id it came from, so the shared fail-closed
+    // eligibility boundary can be applied ONCE, immediately before prompt
+    // construction — the resolvers below (getRecordingsForMeeting, etc.) return
+    // personal/soft-deleted recordings, and a stale actionable/context id can
+    // point at a now-excluded recording.
+    const entries: Array<{ recordingId: string; text: string }> = []
     let contextInfo: Record<string, string> = {}
 
     if (meetingId) {
@@ -73,7 +79,7 @@ class OutputGeneratorService {
       for (const recording of recordings) {
         const transcript = getTranscriptByRecordingId(recording.id)
         if (transcript?.full_text) {
-          transcripts.push(transcript.full_text)
+          entries.push({ recordingId: recording.id, text: transcript.full_text })
         }
       }
 
@@ -95,7 +101,7 @@ class OutputGeneratorService {
         for (const recording of recordings) {
           const transcript = getTranscriptByRecordingId(recording.id)
           if (transcript?.full_text) {
-            transcripts.push(`[Meeting: ${meeting.subject}]\n${transcript.full_text}`)
+            entries.push({ recordingId: recording.id, text: `[Meeting: ${meeting.subject}]\n${transcript.full_text}` })
           }
         }
       }
@@ -118,7 +124,7 @@ class OutputGeneratorService {
         for (const recording of recordings) {
           const transcript = getTranscriptByRecordingId(recording.id)
           if (transcript?.full_text) {
-            transcripts.push(`[Meeting: ${meeting.subject}]\n${transcript.full_text}`)
+            entries.push({ recordingId: recording.id, text: `[Meeting: ${meeting.subject}]\n${transcript.full_text}` })
           }
         }
       }
@@ -137,7 +143,7 @@ class OutputGeneratorService {
       if (kc) {
         const transcript = getTranscriptByRecordingId(kc.source_recording_id)
         if (transcript?.full_text) {
-          transcripts.push(transcript.full_text)
+          entries.push({ recordingId: kc.source_recording_id, text: transcript.full_text })
         }
 
         contextInfo = {
@@ -150,7 +156,7 @@ class OutputGeneratorService {
         if (!transcript?.full_text) {
           throw new Error(`Knowledge capture not found: ${options.knowledgeCaptureId}`)
         }
-        transcripts.push(transcript.full_text)
+        entries.push({ recordingId: options.knowledgeCaptureId, text: transcript.full_text })
 
         const recording = queryOne<any>('SELECT * FROM recordings WHERE id = ?', [options.knowledgeCaptureId])
         contextInfo = {
@@ -162,6 +168,16 @@ class OutputGeneratorService {
         }
       }
     }
+
+    // RE6-2 — apply the shared eligibility boundary immediately before prompt
+    // construction. Drop excluded (personal/soft-deleted/value-excluded)
+    // recordings; if eligibility can't be established at all, fail closed
+    // (refuse) rather than send/persist/export an excluded transcript.
+    const { eligible, failClosed } = filterEligibleRecordingIds(entries.map((e) => e.recordingId))
+    if (failClosed) {
+      throw new Error('Cannot verify recording eligibility — output generation refused (fail closed)')
+    }
+    const transcripts = entries.filter((e) => eligible.has(e.recordingId)).map((e) => e.text)
 
     if (transcripts.length === 0) {
       throw new Error('No transcripts available for the selected context')

@@ -17,10 +17,12 @@ const deps = vi.hoisted(() => ({
 
 vi.mock('../database', () => ({
   getDatabase: () => ({ run: vi.fn(), exec: () => [], prepare: () => ({ step: () => false, free: () => {} }) }),
-  getExcludedRecordingIds: () => {
-    if (deps.throwOnExclusion) throw new Error('exclusion lookup failed (simulated DB error)')
-    return deps.excluded
-  },
+  // Round-6 — { ids, failClosed }. The real getExcludedRecordingIds catches
+  // internally and surfaces failClosed rather than throwing, so the mock mimics
+  // that: throwOnExclusion ⇒ failClosed (the shared boundary drops all
+  // recording-backed docs).
+  getExcludedRecordingIds: () =>
+    deps.throwOnExclusion ? { ids: new Set<string>(), failClosed: true } : { ids: deps.excluded, failClosed: false },
   // P2 — used by the boot backfill; not exercised by the search tests.
   isRecordingProcessable: () => true
 }))
@@ -127,5 +129,43 @@ describe('VectorStore.search exclusion', () => {
     deps.excluded = new Set()
     results = await store.search('anything', 10)
     expect(results.map((r) => r.document.metadata.recordingId).sort()).toEqual(['r-ok', 'r-value-excluded'])
+  })
+})
+
+// RE6-1 (round-6) — ALL vector read primitives route through the SAME
+// fail-closed eligibility boundary, so meeting-scoped chat / summaries /
+// action-items (searchByMeeting) and the chunk viewer (getAllDocuments)
+// inherit exclusion.
+describe('VectorStore read primitives inherit the eligibility boundary', () => {
+  it('searchByMeeting omits an excluded recording chunk (meeting chat / summary / action items)', async () => {
+    const store = new VectorStore()
+    await store.addDocument('ok chunk', { recordingId: 'r-ok', meetingId: 'm-1', chunkIndex: 0 })
+    await store.addDocument('secret chunk', { recordingId: 'r-bad', meetingId: 'm-1', chunkIndex: 1 })
+
+    expect((await store.searchByMeeting('m-1')).map((d) => d.metadata.recordingId).sort()).toEqual(['r-bad', 'r-ok'])
+
+    deps.excluded = new Set(['r-bad'])
+    const docs = await store.searchByMeeting('m-1')
+    expect(docs.map((d) => d.metadata.recordingId)).toEqual(['r-ok'])
+  })
+
+  it('searchByMeeting fails closed (no recording-backed docs) on lookup failure', async () => {
+    const store = new VectorStore()
+    await store.addDocument('ok chunk', { recordingId: 'r-ok', meetingId: 'm-1', chunkIndex: 0 })
+    deps.throwOnExclusion = true
+    expect(await store.searchByMeeting('m-1')).toEqual([])
+  })
+
+  it('getAllDocuments omits excluded recordings (chunk viewer) and fails closed', async () => {
+    const store = new VectorStore()
+    await store.addDocument('ok chunk', { recordingId: 'r-ok', chunkIndex: 0 })
+    await store.addDocument('secret chunk', { recordingId: 'r-bad', chunkIndex: 0 })
+
+    deps.excluded = new Set(['r-bad'])
+    expect(store.getAllDocuments().map((d) => d.metadata.recordingId)).toEqual(['r-ok'])
+
+    deps.excluded = new Set()
+    deps.throwOnExclusion = true
+    expect(store.getAllDocuments()).toEqual([])
   })
 })
