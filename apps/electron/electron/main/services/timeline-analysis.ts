@@ -30,6 +30,7 @@
 
 import { GoogleGenerativeAI } from '@google/generative-ai'
 import { getRecordingById, resolveRecordingId, queryOne, queryAll, run } from './database'
+import { isRecordingEligible } from './recording-eligibility'
 
 export interface SentimentSegment {
   startSec: number
@@ -897,6 +898,16 @@ export async function analyzeTimeline(
   const canonical = getRecordingById(recordingId) ?? resolveRecordingId(recordingId)
   const id = canonical?.id ?? recordingId
 
+  // RE8-2 (round-8) — MANDATORY internal eligibility gate BEFORE the sentiment
+  // LLM. The prior design threaded eligibility only through the OPTIONAL
+  // `shouldPersist` callback, which the production recordings:analyzeTimeline IPC
+  // omits — so a trashed / personal / value-excluded recording's transcript went
+  // to Gemini anyway. Gate here so no caller can bypass it; fail-closed → empty.
+  if (!isRecordingEligible(id)) {
+    onProgress?.({ stage: 'complete', progress: 100 })
+    return { ...EMPTY }
+  }
+
   const row = queryOne<TranscriptRow>(TRANSCRIPT_ROW_SELECT, [id])
   if (!row) return { ...EMPTY }
 
@@ -934,10 +945,13 @@ export async function analyzeTimeline(
     markersAnalyzed: true,
     segments: sentimentSegments
   }
-  // P2 (round-3) — re-check eligibility ADJACENT to the write (no await between
-  // here and the UPDATE). A purge/trash landing during the sentiment await must
-  // not persist a timeline derivative for a now-ineligible recording.
-  if (shouldPersist && !shouldPersist()) {
+  // RE8-2 (round-8) / P2 (round-3) — re-check eligibility ADJACENT to the write
+  // (no await between here and the UPDATE). MANDATORY internal boundary check
+  // (covers value-exclusion + fail-closed for EVERY caller) AND the optional
+  // `shouldPersist` (the pipeline's in-flight cancel via isRecordingProcessable).
+  // A purge/trash/exclusion landing during the sentiment await must not persist a
+  // timeline derivative for a now-ineligible recording.
+  if (!isRecordingEligible(id) || (shouldPersist && !shouldPersist())) {
     console.log(`[Timeline] Recording ${id} became ineligible mid-analysis — timeline not persisted`)
   } else {
     run('UPDATE transcripts SET sentiment_segments = ?, event_markers = ? WHERE recording_id = ?', [

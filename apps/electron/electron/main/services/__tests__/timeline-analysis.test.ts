@@ -423,6 +423,40 @@ describe('analyzeTimeline (persist + idempotent)', () => {
     expect(stages).toContain('complete')
   })
 
+  // RE8-2 (round-8) — analyzeTimeline gates internally on isRecordingEligible, so
+  // the production recordings:analyzeTimeline IPC (which omits shouldPersist) can
+  // no longer send an excluded recording's transcript to Gemini or persist a
+  // sentiment derivative for it.
+  it('refuses (empty, no LLM) when the recording is excluded — even with no shouldPersist', async () => {
+    let scorerCalls = 0
+    const spyScorer = async (windows: SentimentWindow[]) => {
+      scorerCalls++
+      return fakeScorer(windows)
+    }
+    run('UPDATE recordings SET personal = 1 WHERE id = ?', ['rec3'])
+    const result = await analyzeTimeline('rec3', undefined, { scoreWindows: spyScorer })
+    expect(result).toEqual({ sentimentSegments: [], eventMarkers: [] })
+    expect(scorerCalls).toBe(0) // never sent to the provider
+    const persisted = getTimelineAnalysis('rec3')
+    expect(persisted.sentimentSegments.length).toBe(0)
+    expect(persisted.eventMarkers.length).toBe(0)
+  })
+
+  it('does not persist when the recording becomes excluded during the sentiment await (no shouldPersist needed)', async () => {
+    // Eligible at entry; the scorer trashes it mid-flight.
+    const flipScorer = async (windows: SentimentWindow[]) => {
+      run('UPDATE recordings SET deleted_at = ? WHERE id = ?', ['2026-07-15T00:00:00.000Z', 'rec3'])
+      return fakeScorer(windows)
+    }
+    const result = await analyzeTimeline('rec3', undefined, { scoreWindows: flipScorer })
+    // Computed + returned to the caller…
+    expect(result.sentimentSegments.length).toBeGreaterThan(0)
+    // …but NOTHING is written back for the now-excluded recording.
+    const persisted = getTimelineAnalysis('rec3')
+    expect(persisted.sentimentSegments.length).toBe(0)
+    expect(persisted.eventMarkers.length).toBe(0)
+  })
+
   it('returns empty arrays when the recording has no transcript', async () => {
     seedRecording('rec4')
     const result = await analyzeTimeline('rec4', undefined, { scoreWindows: fakeScorer })

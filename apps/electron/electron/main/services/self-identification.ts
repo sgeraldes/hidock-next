@@ -50,6 +50,7 @@ import {
 } from './database'
 import { resolveContact } from './entity-resolver'
 import { isGenericSpeakerLabel, normalizeName, accentFoldedKey } from './entity-normalize'
+import { isRecordingEligible } from './recording-eligibility'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -612,22 +613,31 @@ export async function runSelfIdentificationForRecording(
     return { bound: 0, mergeSuspected: 0, skipped: false }
   }
 
-  // P2 (round-3) — pre-LLM eligibility gate: never send a trashed / personal /
-  // purged recording's turns to the provider (matters for the boot backfill,
-  // which can reach a recording deleted after its SELECT). Skip WITHOUT
-  // marking scanned so a later restore can still self-identify.
+  // RE8-3 (round-8) — MANDATORY internal eligibility gate BEFORE the LLM. The
+  // prior design ran this ONLY when the OPTIONAL `shouldPersist` callback was
+  // supplied; the production self-id:runForRecording IPC passes only {force}, so
+  // a trashed / personal / value-excluded recording's diarized turns went to the
+  // LLM (and created contacts/bindings) anyway. Gate here so EVERY caller is
+  // fail-closed. Skip WITHOUT marking scanned so a later restore can self-identify.
+  if (!isRecordingEligible(recordingId)) {
+    return { bound: 0, mergeSuspected: 0, skipped: true }
+  }
+
+  // P2 (round-3) — additional in-flight gate for the pipeline (isRecordingProcessable).
   if (opts.shouldPersist && !opts.shouldPersist()) {
     return { bound: 0, mergeSuspected: 0, skipped: true }
   }
 
   const result = await extractSelfIdentifications(turns, { llm: opts.llm })
 
-  // P2 — post-await gate ADJACENT to the writes (assignSpeaker creates
-  // contacts + speaker bindings, resolveMention writes mention-resolutions,
+  // RE8-3 (round-8) / P2 — post-await gate ADJACENT to the writes (assignSpeaker
+  // creates contacts + speaker bindings, resolveMention writes mention-resolutions,
   // markMergeSuspected + markScanned write config markers — ALL below are
-  // synchronous, so this one check covers them). A delete/trash that landed
-  // while the LLM ran persists nothing and leaves the recording un-scanned.
-  if (opts.shouldPersist && !opts.shouldPersist()) {
+  // synchronous, so this one check covers them). MANDATORY internal boundary check
+  // (covers value-exclusion + fail-closed for EVERY caller) AND the optional
+  // in-flight `shouldPersist`. A delete/trash/exclusion that landed while the LLM
+  // ran persists nothing and leaves the recording un-scanned.
+  if (!isRecordingEligible(recordingId) || (opts.shouldPersist && !opts.shouldPersist())) {
     console.log(`[SelfID] ${recordingId} became ineligible mid-analysis — no bindings/markers persisted`)
     return { bound: 0, mergeSuspected: 0, skipped: true }
   }

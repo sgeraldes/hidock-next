@@ -36,8 +36,16 @@ vi.mock('../database', () => ({
   runInTransaction: (fn: () => unknown) => fn(),
   saveDatabase: () => {},
   // Simulate the audio transcription backlog: when busy, 'pending' is non-empty.
-  getQueueItems: (status?: string) => (queueBusy && status === 'pending' ? [{ id: 'q1' }] : [])
+  getQueueItems: (status?: string) => (queueBusy && status === 'pending' ? [{ id: 'q1' }] : []),
+  // RE8-1 (round-8) — reformatOne + the work-list filter route recording ids
+  // through the eligibility boundary, which reads getExcludedRecordingIds.
+  // Default: nothing excluded, not fail-closed (all eligible).
+  getExcludedRecordingIds: () => excludedResult
 }))
+
+// RE8-1 (round-8) — mutable so eligibility-gating tests can exclude a recording
+// / force fail-closed.
+let excludedResult: { ids: Set<string>; failClosed: boolean } = { ids: new Set<string>(), failClosed: false }
 
 const mockGenerate = vi.fn()
 vi.mock('../chat-llm', () => ({
@@ -119,6 +127,7 @@ beforeEach(async () => {
   dbInstance = new SQL.Database()
   seedSchema()
   queueBusy = false
+  excludedResult = { ids: new Set<string>(), failClosed: false }
   mockGenerate.mockReset()
   vi.useFakeTimers()
 })
@@ -272,5 +281,57 @@ describe('getUpgradeStatus', () => {
     const status = getUpgradeStatus()
     expect(status.legacyTotal).toBe(1)
     expect(status.reformattingActive).toBe(false)
+  })
+})
+
+/**
+ * RE8-1 (round-8) — reformatOne sends the stored transcript to the chat LLM, so
+ * an excluded (personal / trashed / value-excluded) recording must never reach
+ * the provider and must never be persisted. The gate is INTERNAL + MANDATORY, so
+ * even a direct caller (not just the filtered worker) is fail-closed.
+ */
+describe('reformatOne — eligibility gate (RE8-1)', () => {
+  beforeEach(() => {
+    addTranscript({ id: 't1', fullText: 'texto plano para reformatear sin estructura alguna' })
+    mockGenerate.mockResolvedValue('[{"speaker":"Speaker 1","text":"texto plano"}]')
+  })
+
+  it('skips WITHOUT calling the LLM when the recording is excluded', async () => {
+    excludedResult = { ids: new Set(['rec-t1']), failClosed: false }
+    expect(await reformatOne('t1')).toBe('skipped')
+    expect(mockGenerate).not.toHaveBeenCalled()
+    expect(transcriptRow('t1').speakers).toBeNull()
+  })
+
+  it('fails closed (skips, no LLM) when eligibility cannot be verified', async () => {
+    excludedResult = { ids: new Set<string>(), failClosed: true }
+    expect(await reformatOne('t1')).toBe('skipped')
+    expect(mockGenerate).not.toHaveBeenCalled()
+    expect(transcriptRow('t1').speakers).toBeNull()
+  })
+
+  it('does not persist when the recording becomes excluded mid-run (after the LLM await)', async () => {
+    // Eligible at entry, but a trash/exclusion lands during the provider round-trip.
+    mockGenerate.mockImplementation(async () => {
+      excludedResult = { ids: new Set(['rec-t1']), failClosed: false }
+      return '[{"speaker":"Speaker 1","text":"texto plano"}]'
+    })
+    expect(await reformatOne('t1')).toBe('skipped')
+    expect(transcriptRow('t1').speakers).toBeNull()
+  })
+
+  it('kickReformatProcessing never enqueues an excluded transcript for the LLM', async () => {
+    excludedResult = { ids: new Set(['rec-t1']), failClosed: false }
+    queueBusy = false
+    await kickReformatProcessing(60, 5000)
+    expect(mockGenerate).not.toHaveBeenCalled()
+    expect(transcriptRow('t1').speakers).toBeNull()
+  })
+
+  it('kickReformatProcessing suppresses the whole work list when eligibility is unavailable', async () => {
+    excludedResult = { ids: new Set<string>(), failClosed: true }
+    queueBusy = false
+    await kickReformatProcessing(60, 5000)
+    expect(mockGenerate).not.toHaveBeenCalled()
   })
 })
