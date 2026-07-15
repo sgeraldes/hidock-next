@@ -29,7 +29,9 @@ import {
   isProjectDiscoveryRejected,
   clearProjectDiscoveryRejection,
   dismissDiscoveredProject,
-  DismissDiscoveredError
+  DismissDiscoveredError,
+  mergeProjects,
+  unmergeProjects
 } from '../database'
 import { applyTranscriptEntities } from '../org-reconciler'
 
@@ -226,6 +228,104 @@ describe('project discovery rejection tombstones (v41)', () => {
       }
       expect(caught?.code).toBe('NOT_DISCOVERED')
       expect(projectRowsByName(name)).toHaveLength(1)
+    })
+  })
+
+  /**
+   * v42 follow-up (adversarial review, HIGH): merging projects must not launder
+   * manual data into a dismissable row. mergeProjects folds provenance with
+   * MANUAL dominance: the merged row stays 'discovered' only when BOTH inputs
+   * were 'discovered'; 'manual' on either side wins, and NULL (legacy/unknown)
+   * beats 'discovered' fail-closed. Otherwise a discovered keeper absorbing a
+   * manual loser would keep origin='discovered' and dismissDiscoveredProject
+   * would happily delete the combined hub. Both orderings are covered.
+   */
+  describe('v42: merge provenance dominance (manual data never becomes dismissable)', () => {
+    /** Auto-create a discovered project via the reconciler and return its row id. */
+    function createDiscovered(name: string): string {
+      const res = applyTranscriptEntities({ meetingId: 'm1', project: { name } })
+      expect(res.projectLinked).toBe(true)
+      const [row] = projectRowsByName(name)
+      expect(row).toBeDefined()
+      expect(originOf(row.id)).toBe('discovered')
+      return row.id
+    }
+    function originOf(id: string): string | null {
+      return queryOne<{ origin: string | null }>('SELECT origin FROM projects WHERE id = ?', [id])?.origin ?? null
+    }
+    function expectNotDismissable(id: string): void {
+      let caught: DismissDiscoveredError | undefined
+      try {
+        dismissDiscoveredProject(id)
+      } catch (e) {
+        caught = e as DismissDiscoveredError
+      }
+      expect(caught?.code).toBe('NOT_DISCOVERED')
+      expect(queryOne('SELECT 1 FROM projects WHERE id = ?', [id])).toBeDefined()
+    }
+
+    it('DISCOVERED keeper + MANUAL loser -> merged row becomes manual and cannot be dismissed (the review ordering)', () => {
+      const keeperId = createDiscovered('Zephyr Windmill')
+      createProject({ id: 'manual-brook', name: 'Cobalt Brook', description: null, status: 'active' })
+
+      mergeProjects(keeperId, 'manual-brook')
+
+      // Manual dominates: the combined row now carries manual data.
+      expect(originOf(keeperId)).toBe('manual')
+      expectNotDismissable(keeperId)
+    })
+
+    it('MANUAL keeper + DISCOVERED loser -> merged row stays manual and cannot be dismissed', () => {
+      createProject({ id: 'manual-quill', name: 'Umber Quill', description: null, status: 'active' })
+      const loserId = createDiscovered('Russet Lantern')
+
+      mergeProjects('manual-quill', loserId)
+
+      expect(originOf('manual-quill')).toBe('manual')
+      expectNotDismissable('manual-quill')
+    })
+
+    it('DISCOVERED + DISCOVERED -> merged row remains discovered and dismissable', () => {
+      const keeperId = createDiscovered('Juniper Kestrel')
+      const loserId = createDiscovered('Basalt Otter')
+
+      mergeProjects(keeperId, loserId)
+
+      expect(originOf(keeperId)).toBe('discovered')
+      dismissDiscoveredProject(keeperId)
+      expect(queryOne('SELECT 1 FROM projects WHERE id = ?', [keeperId])).toBeUndefined()
+      expect(isProjectDiscoveryRejected('Juniper Kestrel')).toBe(true)
+    })
+
+    it('LEGACY NULL keeper + DISCOVERED loser -> merged row stays NULL (fail-closed) and cannot be dismissed', () => {
+      run("INSERT INTO projects (id, name, status) VALUES ('legacy-fjord', 'Tundra Fjord', 'active')")
+      expect(originOf('legacy-fjord')).toBeNull()
+      const loserId = createDiscovered('Sable Mesa')
+
+      mergeProjects('legacy-fjord', loserId)
+
+      // Unknown provenance must not be upgraded to 'discovered' by absorbing one.
+      expect(originOf('legacy-fjord')).toBeNull()
+      expectNotDismissable('legacy-fjord')
+    })
+
+    it('unmerge restores the keeper\'s own discovered origin (fold is journaled)', () => {
+      const keeperId = createDiscovered('Vermilion Osprey')
+      createProject({ id: 'manual-dune', name: 'Ochre Dune', description: null, status: 'active' })
+
+      mergeProjects(keeperId, 'manual-dune')
+      expect(originOf(keeperId)).toBe('manual')
+
+      const journal = queryOne<{ id: string }>(
+        "SELECT id FROM merge_journal WHERE kind = 'project' AND keeper_id = ? ORDER BY created_at DESC LIMIT 1",
+        [keeperId]
+      )
+      expect(journal).toBeDefined()
+      unmergeProjects(journal!.id)
+
+      // Keeper is discovered (and dismissable) again; the recreated loser is manual.
+      expect(originOf(keeperId)).toBe('discovered')
+      expect(originOf('manual-dune')).toBe('manual')
     })
   })
 })
