@@ -208,11 +208,12 @@ async function initializeServices(): Promise<void> {
   // Gate USB hot-plug auto-connect on the user's "Auto-connect on startup"
   // preference. Without this the device reconnects on every power-on / plug-in
   // regardless of the toggle. Manual "Connect Device" is unaffected.
-  // Track I: additionally requires the Device Sync feature. isFeatureEnabled is
-  // symmetrically pinned to the BOOT-effective snapshot for device-sync (never
-  // transitions mid-session): booted-off stays off, and a live disable keeps the
-  // boot state until restart — USB behavior only ever changes across a reboot.
-  // The user's autoConnect preference itself still applies live.
+  // Track I: additionally requires the Device Sync feature. Auto-connect is an
+  // INITIATION path (round-3 partition): isFeatureEnabled('device-sync') is
+  // boot-enabled AND desired-enabled, so a live disable stops hot-plug
+  // auto-connect immediately, while boot-disabled keeps it off regardless of a
+  // live enable (USB safety — activation only across a reboot). Teardown /
+  // observation IPC stays reachable via the boot-only half of the gate.
   setAutoConnectChecker(
     () => getConfig().device.autoConnect === true && isFeatureEnabled('device-sync')
   )

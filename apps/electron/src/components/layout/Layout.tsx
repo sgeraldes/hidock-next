@@ -132,12 +132,20 @@ export type NavItemVisibility = 'visible' | 'grayed' | 'hidden'
 
 export function navItemVisibility(
   resolved: ReturnType<typeof useFeatureStore.getState>['resolved'],
-  href: string
+  href: string,
+  pendingRestart: readonly string[] = []
 ): { visibility: NavItemVisibility; hint: string | null } {
   const feature = featureForPath(href)
   if (!feature) return { visibility: 'visible', hint: null } // floor (Library, Settings)
   const state = resolved[feature]
   if (!state || state.enabled) return { visibility: 'visible', hint: null }
+  // Round-3 pending-DISABLE: desired-off but active at boot (restart pending).
+  // Main keeps the feature's teardown/status IPC open, so the surface stays
+  // VISIBLE — hiding e.g. Sync here would orphan disconnect/cancel controls
+  // while USB work may still be in flight.
+  if (pendingRestart.includes(feature)) {
+    return { visibility: 'visible', hint: 'Off after restart' }
+  }
   if (state.reason?.startsWith('requires:')) {
     return { visibility: 'grayed', hint: describeDisableReason(state.reason) }
   }
@@ -148,6 +156,7 @@ export function Layout({ children }: LayoutProps) {
   const location = useLocation()
   // Track I: resolved feature state drives nav filtering/graying below.
   const resolvedFeatures = useFeatureStore((s) => s.resolved)
+  const pendingRestart = useFeatureStore((s) => s.pendingRestart)
   // SM-02 fix: Use granular selectors instead of destructuring entire store
   const loadMeetings = useAppStore((s) => s.loadMeetings)
   const syncCalendar = useAppStore((s) => s.syncCalendar)
@@ -189,7 +198,7 @@ export function Layout({ children }: LayoutProps) {
     .map((section) => ({
       title: section.title,
       items: section.items
-        .map((item) => ({ ...item, ...navItemVisibility(resolvedFeatures, item.href) }))
+        .map((item) => ({ ...item, ...navItemVisibility(resolvedFeatures, item.href, pendingRestart) }))
         .filter((item) => item.visibility !== 'hidden')
     }))
     .filter((section) => section.items.length > 0)

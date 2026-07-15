@@ -18,6 +18,7 @@ import type { IpcMain, IpcMainInvokeEvent } from 'electron'
 import { getConfig } from './config'
 import {
   channelFeature,
+  isTeardownChannel,
   resolveFeatureState,
   FEATURES,
   type FeatureId,
@@ -56,20 +57,23 @@ export function getResolvedFeatures(): ResolvedFeatures {
  * kept SEPARATE from the desired config (Review-2 [CRITICAL]).
  *
  * Restart-gated features (`runtimeToggleable: false` — device-sync, assistant)
- * are pinned to this boot snapshot for the IPC gate SYMMETRICALLY — in BOTH
- * directions (adversarial round-2 [CRITICAL]):
+ * are enforced against this snapshot through an INITIATION / TEARDOWN partition
+ * (adversarial round-3):
  *
- *  - A feature OFF at boot cannot be opened live by writing the desired config
- *    (USB safety: enabling device-sync at runtime must NOT make jensen /
- *    device-pipeline IPC callable until the next boot — CLAUDE.md USB rules).
- *  - A feature ON at boot stays functional until the next boot even if the user
- *    disables it live. Closing the gate mid-session would strand active USB
- *    work (a connection / download / scan keeps running in the main process)
- *    while making its OWN teardown channels — `jensen:disconnect`,
- *    `jensen:cancelDownload`, `jensen:reset`, pipeline cleanup — unreachable;
- *    a later re-enable could then resume USB state that was never drained
- *    (protocol desync / device-lockup risk). Instead the desired config records
- *    the intent and `derivePendingRestart` surfaces the restart banner.
+ *  - Boot-DISABLED ⇒ EVERYTHING closed until the next boot. Enabling live only
+ *    updates the desired config (USB safety: enabling device-sync at runtime
+ *    must NOT make jensen / device-pipeline IPC callable — CLAUDE.md USB rules).
+ *  - Boot-enabled + desired-enabled ⇒ everything open (normal operation).
+ *  - Boot-enabled + desired-DISABLED (live disable, restart pending) ⇒
+ *    INITIATION channels (connects, scans, download/pipeline starts — and the
+ *    auto-connect checker, via `isFeatureEnabled`) are blocked immediately, so
+ *    no NEW device/AI work starts; TEARDOWN/OBSERVATION channels (disconnect,
+ *    cancel, reset, pipeline cleanup, passive status reads — `TEARDOWN_CHANNELS`
+ *    in the registry) stay callable so in-flight / boot-active state can always
+ *    be drained. Closing teardown too (round-1's `live && boot` on every
+ *    channel) stranded active USB work behind an unreachable disconnect;
+ *    leaving initiation open (round-2's boot-only gate) kept starting new
+ *    device work the renderer said was off. The partition is the fix for both.
  *
  * `null` until `captureBootEffectiveFeatures()` runs at boot; the getter then
  * falls back to the live desired state so unit tests (and any path that never
@@ -100,23 +104,28 @@ export function __resetBootEffectiveFeaturesForTests(): void {
   bootEffectiveFeatures = null
 }
 
+/** Was the feature in force at boot? (The teardown half of the partition.) */
+export function isFeatureBootEnabled(id: FeatureId): boolean {
+  return getBootEffectiveFeatures()[id].enabled
+}
+
 /**
- * Is a single feature enabled for enforcement right now? Defaults to enabled when
- * config is unset (`full`).
+ * Is a single feature enabled for INITIATING new work right now? Defaults to
+ * enabled when config is unset (`full`).
  *
  * - Runtime-toggleable features read the LIVE desired state (enabling/disabling
  *   takes effect immediately — this is what makes runtime toggles work).
- * - Restart-gated features (`runtimeToggleable: false`) consult the boot-effective
- *   snapshot ONLY — symmetric in both directions. Live config edits never
- *   transition the gate mid-session: an enable does not open the feature until
- *   the next boot (USB safety), and a disable does not close it (which would
- *   strand active USB work while blocking its teardown channels — see the
- *   bootEffectiveFeatures doc above). Desired-vs-boot differences surface as
- *   pendingRestart, never as a live gate flip.
+ * - Restart-gated features (`runtimeToggleable: false`) carry INITIATION
+ *   semantics: boot-enabled AND desired-enabled. A live disable blocks new work
+ *   immediately (including the USB auto-connect checker and gated boot tasks);
+ *   a live enable stays blocked until the next boot. Teardown/observation
+ *   channels are gated separately on `isFeatureBootEnabled` (see
+ *   gateInvokeHandler and the partition doc above).
  */
 export function isFeatureEnabled(id: FeatureId): boolean {
-  if (FEATURES[id].runtimeToggleable) return getResolvedFeatures()[id].enabled
-  return getBootEffectiveFeatures()[id].enabled
+  const live = getResolvedFeatures()[id].enabled
+  if (FEATURES[id].runtimeToggleable) return live
+  return live && getBootEffectiveFeatures()[id].enabled
 }
 
 type InvokeHandler = (event: IpcMainInvokeEvent, ...args: any[]) => any
@@ -125,12 +134,18 @@ type InvokeHandler = (event: IpcMainInvokeEvent, ...args: any[]) => any
  * Wrap an IPC invoke handler so it fails closed when the feature that owns
  * `channel` is disabled. Core/shared channels (channelFeature → null) pass
  * through unchanged. Exposed standalone for direct unit testing.
+ *
+ * Restart-gated owners use the initiation/teardown partition: initiation
+ * channels require boot AND desired enabled; teardown/observation channels
+ * require boot-enabled only, so draining in-flight state is always possible.
  */
 export function gateInvokeHandler(channel: string, handler: InvokeHandler): InvokeHandler {
   const owner = channelFeature(channel)
   if (owner === null) return handler // shared/core channel — never gated
+  const teardown = !FEATURES[owner].runtimeToggleable && isTeardownChannel(channel)
   return (event: IpcMainInvokeEvent, ...args: any[]) => {
-    if (!isFeatureEnabled(owner)) {
+    const allowed = teardown ? isFeatureBootEnabled(owner) : isFeatureEnabled(owner)
+    if (!allowed) {
       throw new FeatureDisabledError(owner, channel)
     }
     return handler(event, ...args)

@@ -14,7 +14,11 @@ import { describe, it, expect } from 'vitest'
 import { readdirSync, readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join, resolve } from 'path'
-import { classifyChannel } from '../../../../src/shared/feature-registry'
+import {
+  classifyChannel,
+  FEATURES,
+  TEARDOWN_CHANNELS,
+} from '../../../../src/shared/feature-registry'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 // __tests__ → ipc → main
@@ -113,5 +117,33 @@ describe('IPC channel registrar inventory', () => {
     // …but an UNREGISTERED/new storage channel does not inherit openness: it is
     // unclassified until a human adds it to CORE_CHANNELS (or maps it to a feature).
     expect(classifyChannel('storage:some-future-channel')).toEqual({ kind: 'unclassified' })
+  })
+
+  it('TEARDOWN_CHANNELS integrity (round-3): every entry is a REGISTERED channel owned by a RESTART-GATED feature', () => {
+    for (const ch of TEARDOWN_CHANNELS) {
+      // No typos / stale entries: the channel must actually be registered.
+      expect(ALL_CHANNELS, `not registered: ${ch}`).toContain(ch)
+      // The partition only applies to restart-gated owners.
+      const cls = classifyChannel(ch)
+      expect(cls.kind, ch).toBe('feature')
+      if (cls.kind === 'feature') {
+        expect(FEATURES[cls.feature].runtimeToggleable, `${ch} owner must be restart-gated`).toBe(
+          false
+        )
+      }
+    }
+    // Spot-check the initiation default: connect/scan/download starts are NOT teardown.
+    for (const ch of [
+      'jensen:connect',
+      'jensen:tryConnect',
+      'jensen:listFiles',
+      'jensen:downloadFile',
+      'device-pipeline:connect',
+      'device-pipeline:sync',
+      'download-service:queue-downloads',
+      'download-service:start-session',
+    ]) {
+      expect(TEARDOWN_CHANNELS, `${ch} must be initiation`).not.toContain(ch)
+    }
   })
 })

@@ -582,6 +582,80 @@ export const CORE_CHANNELS: string[] = [
   'recordings:updateTranscriptionStatus',
 ]
 
+// ---------------------------------------------------------------------------
+// Initiation / teardown partition for restart-gated features (round-3)
+// ---------------------------------------------------------------------------
+
+/**
+ * TEARDOWN / OBSERVATION channels of restart-gated features. The IPC gate rule
+ * for a restart-gated feature (device-sync, assistant) is a partition:
+ *
+ *  - INITIATION (default — any owned channel NOT listed here): requires
+ *    boot-enabled AND desired-enabled. A live disable blocks new device/AI work
+ *    immediately (connects, scans, downloads, pipeline starts, auto-connect).
+ *  - TEARDOWN / OBSERVATION (listed here): requires boot-enabled ONLY. Callable
+ *    regardless of the desired flag, so in-flight or boot-active state can
+ *    always be drained (disconnect, cancel, reset, pipeline cleanup) and
+ *    passive status reads keep working while the restart is pending.
+ *  - Boot-disabled keeps EVERYTHING closed (both halves) until the next boot.
+ *
+ * Runtime-toggleable features are unaffected (pure live gating; their teardown
+ * is handled by feature-lifecycle stop actions).
+ *
+ * Defaulting unlisted channels to INITIATION is the fail-safe direction: a new
+ * device channel cannot keep starting work after a live disable by omission.
+ */
+export const TEARDOWN_CHANNELS: string[] = [
+  // --- device-sync / jensen: teardown ---
+  'jensen:disconnect',
+  'jensen:cancelDownload',
+  'jensen:reset',
+  'jensen:stopBluetoothScan',
+  'jensen:stopRealtime',
+  'jensen:pauseRealtime',
+  // --- device-sync / jensen: passive status reads (no new device work) ---
+  'jensen:isConnected',
+  'jensen:isP1Device',
+  'jensen:getModel',
+  'jensen:getDeviceInfo',
+  'jensen:getBatteryStatus',
+  'jensen:getCardInfo',
+  'jensen:getSettings',
+  'jensen:getRealtimeSettings',
+  'jensen:getRealtimeData',
+  'jensen:getBluetoothStatus',
+  'jensen:getFileCount',
+  // --- device-sync / pipeline teardown + observation ---
+  'device-pipeline:disconnect',
+  'device-pipeline:cancel',
+  'device-pipeline:get-state',
+  // --- device-sync / local device cache (no USB at all) ---
+  'deviceCache:getAll',
+  'deviceCache:saveAll',
+  'deviceCache:clear',
+  // --- device-sync / download-service teardown + in-flight bookkeeping + reads ---
+  'download-service:cancel',
+  'download-service:cancel-active',
+  'download-service:cancel-all',
+  'download-service:check-stalled',
+  'download-service:clear-completed',
+  'download-service:get-files-to-sync',
+  'download-service:get-state',
+  'download-service:get-stats',
+  'download-service:is-file-synced',
+  'download-service:mark-failed',
+  'download-service:notify-completion',
+  'download-service:update-progress',
+  // --- assistant: cancel/cleanup of in-flight AI work ---
+  'rag:cancel',
+  'rag:clear-session',
+]
+
+/** Is this channel in the teardown/observation half of the partition? */
+export function isTeardownChannel(channel: string): boolean {
+  return TEARDOWN_CHANNELS.includes(channel)
+}
+
 /** Result of classifying an IPC channel for the gate + the completeness test. */
 export type ChannelClass =
   | { kind: 'feature'; feature: FeatureId }
