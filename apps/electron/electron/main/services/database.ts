@@ -5057,9 +5057,21 @@ export function getMentionSnippets(name: string, limit = 2): MentionResult {
     `SELECT recording_id FROM transcripts WHERE full_text LIKE ? ESCAPE '\\'`,
     [pattern]
   )
-  const recordingIds = idRows.map((r) => r.recording_id)
+
+  // ADV14 round-15 sweep — getMentionSnippets returns RAW transcript excerpts +
+  // the full set of matching recording ids to the Identity-Suggestions merge UI
+  // (a non-exempt discovery surface, NOT the owner meeting-detail viewer). Route
+  // every candidate recording id through the positive fail-closed allowlist so a
+  // soft-deleted / personal / value-excluded / hard-purged recording's text can
+  // NOT leak into merge cards. getEligibleRecordingIds lives in THIS module (no
+  // import cycle with recording-eligibility.ts, which imports database.ts).
+  const { eligible, failClosed } = getEligibleRecordingIds(idRows.map((r) => r.recording_id))
+  if (failClosed) return { snippets: [], recordingIds: [] }
+  const recordingIds = idRows.map((r) => r.recording_id).filter((id) => eligible.has(id))
+  if (recordingIds.length === 0) return { snippets: [], recordingIds: [] }
 
   const cap = Math.max(1, Math.min(Math.floor(limit) || 2, 10))
+  const placeholders = recordingIds.map(() => '?').join(',')
   const rows = queryAll<{ recording_id: string; full_text: string; title: string | null; date: string | null }>(
     `SELECT t.recording_id AS recording_id, t.full_text AS full_text,
             COALESCE(t.title_suggestion, m.subject, r.filename) AS title,
@@ -5068,9 +5080,10 @@ export function getMentionSnippets(name: string, limit = 2): MentionResult {
        JOIN recordings r ON r.id = t.recording_id
        LEFT JOIN meetings m ON m.id = r.meeting_id
       WHERE t.full_text LIKE ? ESCAPE '\\'
+        AND t.recording_id IN (${placeholders})
       ORDER BY r.date_recorded DESC
       LIMIT ?`,
-    [pattern, cap]
+    [pattern, ...recordingIds, cap]
   )
 
   const snippets = rows.map((row) => ({
@@ -5445,6 +5458,59 @@ function safeGraphQuery<T>(sql: string, params: unknown[]): T[] {
 }
 
 /**
+ * ADV14 round-15 sweep — edge-provenance suppression for the graph topic labels
+ * surfaced by getPersonContext. Given (label, edge_id) rows for a person's ABOUT
+ * edges, keep a topic label when at least ONE of its contributing edges is
+ * visible under the SAME rule the graph-grounding path applies: an edge is
+ * visible if it has NO provenance rows (legacy / unattributable, kept) OR ≥1
+ * ELIGIBLE source recording. On a fail-closed eligibility lookup, only
+ * unattributed (no-provenance) edges survive — recording-attributed topics are
+ * suppressed rather than leaked. Dedupes labels and caps AFTER filtering.
+ */
+function suppressExcludedTopicLabels(rows: Array<{ label: string; edge_id: string }>, cap: number): string[] {
+  if (rows.length === 0) return []
+  const edgeIds = [...new Set(rows.map((r) => r.edge_id).filter((id): id is string => !!id))]
+  const provByEdge = new Map<string, string[]>()
+  const allRecIds = new Set<string>()
+  const CHUNK = 400
+  for (let i = 0; i < edgeIds.length; i += CHUNK) {
+    const chunk = edgeIds.slice(i, i + CHUNK)
+    const placeholders = chunk.map(() => '?').join(',')
+    const srcs = safeGraphQuery<{ edge_id: string; recording_id: string }>(
+      `SELECT edge_id, recording_id FROM graph_edge_sources
+        WHERE edge_id IN (${placeholders}) AND recording_id IS NOT NULL`,
+      chunk
+    )
+    for (const s of srcs) {
+      if (!provByEdge.has(s.edge_id)) provByEdge.set(s.edge_id, [])
+      provByEdge.get(s.edge_id)!.push(s.recording_id)
+      allRecIds.add(s.recording_id)
+    }
+  }
+  const { eligible, failClosed } = getEligibleRecordingIds(allRecIds)
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const row of rows) {
+    if (!row.label || seen.has(row.label)) continue
+    const prov = provByEdge.get(row.edge_id)
+    let visible: boolean
+    if (!prov || prov.length === 0) {
+      visible = true // no provenance (legacy) → keep, matches neighborhoodFacts
+    } else if (failClosed) {
+      visible = false // recording-attributed but eligibility unknown → suppress
+    } else {
+      visible = prov.some((id) => eligible.has(id)) // ≥1 eligible source survives
+    }
+    if (visible) {
+      seen.add(row.label)
+      out.push(row.label)
+      if (out.length >= cap) break
+    }
+  }
+  return out
+}
+
+/**
  * Compact graph-neighborhood context for the identity merge card (B7 symmetric
  * context): the people this person most co-attends meetings with, and the
  * topics/projects closest to them. Accepts a contact id OR a raw name (resolver-band
@@ -5483,19 +5549,27 @@ export function getPersonContext(idOrName: string, limit = 4): PersonContext {
     : []
 
   // Topics via the graph; fall back to the person's meeting projects when empty.
-  let topics = safeGraphQuery<{ label: string }>(
-    `SELECT DISTINCT t.label AS label
+  //
+  // ADV14 round-15 sweep — these topic labels come from ABOUT edges built from
+  // transcript analysis, so a value-excluded / soft-deleted / personal
+  // recording's edge would otherwise surface its topic label in the Identity
+  // merge card (a non-exempt discovery surface, NOT the owner meeting-detail
+  // viewer). Apply the SAME edge-provenance suppression the graph-grounding path
+  // uses (keep a topic when its ABOUT edge has NO provenance [legacy /
+  // unattributable] OR ≥1 ELIGIBLE source recording; drop it when EVERY source
+  // is excluded). The `cap` is applied AFTER suppression so a run of excluded
+  // edges can't truncate eligible topics out of the result.
+  const topicRows = safeGraphQuery<{ label: string; edge_id: string }>(
+    `SELECT DISTINCT t.label AS label, ab.id AS edge_id
        FROM graph_nodes p
        JOIN graph_edges ea ON ea.source_id = p.id AND ea.type = 'ATTENDED'
        JOIN graph_nodes m  ON m.id = ea.target_id AND m.type = 'meeting'
        JOIN graph_edges ab ON ab.source_id = m.id AND ab.type = 'ABOUT'
        JOIN graph_nodes t  ON t.id = ab.target_id AND (t.type = 'topic' OR t.type = 'project')
-      WHERE p.type = 'person' AND p.norm_key = ?
-      LIMIT ?`,
-    [normKey, cap]
+      WHERE p.type = 'person' AND p.norm_key = ?`,
+    [normKey]
   )
-    .map((r) => r.label)
-    .filter(Boolean)
+  let topics = suppressExcludedTopicLabels(topicRows, cap)
 
   if (topics.length === 0 && contactId) {
     topics = safeGraphQuery<{ label: string }>(
