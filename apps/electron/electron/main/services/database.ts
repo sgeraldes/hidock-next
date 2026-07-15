@@ -2154,6 +2154,56 @@ const MIGRATIONS: Record<number, () => void> = {
         console.warn('[Migration v42] add origin failed:', e)
       }
     }
+
+    // Re-key v41 tombstones under the NFKC name normalization that ships with
+    // v42. v41 wrote name_norm with the pre-NFKC normalizeName, so a tombstone
+    // recorded under a decomposed (NFD) or compatibility form no longer matches
+    // post-v42 lookups: re-analysis would resurrect the dismissed project, and a
+    // manual re-create could never clear the stranded key. Recompute every key
+    // from original_name in one transaction. NFKC collisions (two old keys
+    // folding to one) are resolved deterministically: keep the NEWEST rejection
+    // (latest rejected_at, ties broken by old name_norm), drop the rest — the
+    // newest row is the user's most recent dismissal decision for that name.
+    try {
+      runInTransaction(() => {
+        const rows = queryAll<{
+          name_norm: string
+          original_name: string
+          source_meeting_id: string | null
+          rejected_at: string | null
+        }>(
+          'SELECT name_norm, original_name, source_meeting_id, rejected_at FROM project_discovery_rejections ' +
+            'ORDER BY rejected_at DESC, name_norm DESC'
+        )
+        let rekeyed = 0
+        const winners = new Map<string, (typeof rows)[number] & { oldNorm: string }>()
+        for (const row of rows) {
+          const newNorm = normalizeName(row.original_name)
+          if (!newNorm) continue
+          // Rows are newest-first, so the first row seen per new key wins.
+          if (!winners.has(newNorm)) winners.set(newNorm, { ...row, oldNorm: row.name_norm })
+        }
+        for (const [newNorm, row] of winners) {
+          if (newNorm !== row.oldNorm) rekeyed++
+        }
+        if (rekeyed > 0 || winners.size !== rows.length) {
+          run('DELETE FROM project_discovery_rejections')
+          for (const [newNorm, row] of winners) {
+            run(
+              `INSERT INTO project_discovery_rejections (name_norm, original_name, source_meeting_id, rejected_at)
+               VALUES (?, ?, ?, ?)`,
+              [newNorm, row.original_name, row.source_meeting_id, row.rejected_at]
+            )
+          }
+          console.log(
+            `[Migration v42] re-keyed ${rekeyed} tombstone(s) to NFKC, ` +
+              `dropped ${rows.length - winners.size} collision(s)`
+          )
+        }
+      })
+    } catch (e) {
+      console.warn('[Migration v42] tombstone re-key failed:', e)
+    }
     console.log('Migration v42 complete')
   }
 
@@ -5961,12 +6011,29 @@ export function mergeProjects(keeperId: string, loserId: string): Project {
     const notEmpty = (v: string | null | undefined) => !!(v && v.trim())
     const description = notEmpty(keeper.description) ? keeper.description : loser.description ?? null
     const status = notEmpty(keeper.status) ? keeper.status : loser.status || 'active'
+    // Provenance dominance (v42): the merged row now contains BOTH projects'
+    // data, so it may only stay 'discovered' (dismissable) when both inputs were
+    // 'discovered'. 'manual' dominates ('manual' merged either way is guarded),
+    // and NULL (legacy/unknown) dominates 'discovered' — fail-closed: data of
+    // unproven origin must never become tombstone-deletable through a merge.
+    // Journaled in folded_fields, so unmerge restores the keeper's own origin.
+    const origin: Project['origin'] =
+      keeper.origin === 'manual' || loser.origin === 'manual'
+        ? 'manual'
+        : keeper.origin === 'discovered' && loser.origin === 'discovered'
+          ? 'discovered'
+          : null
     const foldedFields = diffFoldedFields(
-      { description: keeper.description, status: keeper.status },
-      { description, status }
+      { description: keeper.description, status: keeper.status, origin: keeper.origin },
+      { description, status, origin }
     )
 
-    runNoSave('UPDATE projects SET description = ?, status = ? WHERE id = ?', [description, status, keeperId])
+    runNoSave('UPDATE projects SET description = ?, status = ?, origin = ? WHERE id = ?', [
+      description,
+      status,
+      origin,
+      keeperId
+    ])
     runNoSave('DELETE FROM projects WHERE id = ?', [loserId])
 
     const manifest: ProjectMergeManifest = {
