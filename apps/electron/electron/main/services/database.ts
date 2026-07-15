@@ -3955,12 +3955,23 @@ export function updatePendingFileCleanups(journalId: string, remaining: PendingC
 
 /**
  * F17/T6 AR3-6(b) — immediately reconcile a single recording's device
- * presence after a CONFIRMED device delete (permanent-delete's device
- * checkbox, and the synced-row "Delete from device" item), so the UI doesn't
- * show a stale 'both'/on-device row until the next authoritative scan (which
- * remains the source of truth and will re-confirm this). Mirrors
+ * presence after a CONFIRMED device delete, so the UI doesn't show a stale
+ * 'both'/on-device row until the next authoritative scan (which remains the
+ * source of truth and will re-confirm this). Mirrors
  * markRecordingsNotOnDevice's per-row logic, targeted at one id instead of a
  * full-scan diff. No-ops for an unknown or already-not-on-device recording.
+ *
+ * Honest caller inventory (phase-3 integration-review C1): the sole IPC
+ * caller (`recordings:markNotOnDevice`) only reaches this function when its
+ * id still resolves — which, for the only wired production caller
+ * (`executeDeletePermanent`'s device checkbox in Library.tsx), is never
+ * true, because the hard cascade deletes the recordings row before the
+ * device delete confirms. This function is therefore effectively dead
+ * outside tests today. It is kept (rather than deleted) as the honest
+ * reconciliation contract for a future caller that still has a resolvable
+ * row at call time — e.g. the synced-row "Delete from device" flow
+ * (`executeDeleteFromDevice`), which currently does not call it and instead
+ * relies on the next device scan.
  */
 export function markRecordingNotOnDeviceById(id: string): void {
   const rec = getRecordingById(id)

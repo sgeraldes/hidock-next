@@ -23,3 +23,17 @@ Every delete affordance says exactly what it does; soft-deleted items have a vis
 
 ## Constraints
 - Renderer-only where possible; IPC additions follow zod-validated handler patterns; fixture/temp DBs in tests; non-interactive commands.
+
+## SCOPE HONESTY NOTE (2026-07-15 — phase-3 integration-review S3)
+The Trash surface (item 2 above) hides a soft-deleted recording from ingest,
+RAG retrieval, and every default Library surface — but it does **not**
+retract that recording's already-ingested knowledge-graph edges. A recording
+ingested while live, then moved to Trash, keeps contributing its
+person/topic/edge facts to graph-derived assistant grounding
+(`neighborhoodFacts`/context graph/lens — see the code comment at
+`knowledge-graph-service.ts`'s `neighborhoodFacts`) until it is HARD purged
+(F17 T6's graph cleanup is hard-purge-only by design). This is **deliberate**
+— soft-delete stays reversible (a graph retraction would need to be undone on
+Restore too, which is out of scope here), and hard-purge-only cleanup keeps
+the invariant simple. Revisit under **F20** if tombstoned recordings should
+also hide from graph grounding before a hard purge.

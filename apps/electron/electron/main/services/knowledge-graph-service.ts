@@ -943,6 +943,16 @@ export function findMentionedEntity(text: string): ContextGraphNode | null {
  * Compact, human-readable facts about an entity's neighborhood — one line per
  * connected entity. Used to ground the assistant/RAG with graph context.
  * Returns '' when nothing is found (caller appends nothing).
+ *
+ * Honesty note (phase-3 integration-review S3, todo-005's SCOPE HONESTY
+ * NOTE): this reads graph_nodes/graph_edges via queryNeighborhood with no
+ * recordings.deleted_at filter. A recording ingested while live, then
+ * soft-deleted (moved to Trash), keeps contributing its already-ingested
+ * person/topic/edge facts here until it is HARD purged — F17's soft delete
+ * stops future AI processing, not past graph grounding. Deliberate: soft
+ * delete stays reversible, and cleanup is hard-purge-only by design (F17
+ * T6). Revisit under F20 if tombstoned recordings should also hide from
+ * graph grounding before a hard purge.
  */
 export function neighborhoodFacts(entityId: string, hops = 1, maxFacts = 20): string {
   const data = queryNeighborhood(entityId, hops)

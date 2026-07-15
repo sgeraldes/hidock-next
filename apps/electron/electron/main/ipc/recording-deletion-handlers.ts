@@ -203,9 +203,8 @@ export function registerRecordingDeletionHandlers(): void {
   })
 
   // spec-006/F17 T6 AR3-6(b) — immediately reconcile a single recording's
-  // device presence after a CONFIRMED device delete (the permanent-delete
-  // device checkbox, and the synced-row "Delete from device" item), so the
-  // UI doesn't show a stale on-device row until the next authoritative scan.
+  // device presence after a CONFIRMED device delete, so the UI doesn't show
+  // a stale on-device row until the next authoritative scan.
   //
   // T6 fix round (CX-T6-1): in the PERMANENT flow the hard cascade has
   // already deleted the recordings row by the time the device delete
@@ -214,10 +213,22 @@ export function registerRecordingDeletionHandlers(): void {
   // the offline device cache (`device_file_cache`) still held the filename
   // and resurrected the deleted file as a ghost device-only row. The handler
   // now ALSO reconciles by filename: the caller passes the device filename it
-  // just deleted, and the cache entry is removed for it (plus, when the row
-  // DOES still resolve — the synced-row flow — for the row's own filename
-  // variants too). Unresolvable id + a filename is therefore a SUCCESS, not
-  // an error.
+  // just deleted, and the cache entry is removed for it. Unresolvable id + a
+  // filename is therefore a SUCCESS, not an error.
+  //
+  // Honest caller inventory (phase-3 integration-review C1): the ONLY
+  // renderer caller today is the permanent-delete device checkbox
+  // (executeDeletePermanent, Library.tsx), invoked AFTER the hard cascade
+  // has already deleted the recordings row — so `rec` below always resolves
+  // to null in production, and only the filename-cache-key branch
+  // (`removeDeviceFileCacheEntry`) ever actually runs. The `if (rec)` id
+  // branch below (and the `rec?.filename`/`rec?.original_filename` extra
+  // cache keys) is exercised only by this file's own unit tests, not by any
+  // live caller — it is kept, rather than deleted, as the honest
+  // reconciliation contract for a future caller that still has a resolvable
+  // row at call time. The synced-row "Delete from device" flow
+  // (executeDeleteFromDevice, Library.tsx) does NOT call this handler at
+  // all today; it relies on the next ~90s device scan to self-heal.
   ipcMain.handle('recordings:markNotOnDevice', async (_, id: unknown, deviceFilename: unknown) => {
     try {
       const parsed = MarkNotOnDeviceSchema.safeParse({ id, deviceFilename: deviceFilename ?? undefined })
