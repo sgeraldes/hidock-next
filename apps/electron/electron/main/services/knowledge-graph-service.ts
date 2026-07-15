@@ -664,7 +664,7 @@ export function removeRecordingFromGraph(
 
 export function queryTopAttendees(name: string): AttendeeResult[] {
   const store = getKnowledgeGraphStore()
-  const exclusion = getGroundingExclusionSet()
+  const exclusion = getGroundingExclusionSet(true) // ADV23-2: non-owner surface — suppress legacy zero-provenance edges
   if (exclusionIsNoop(exclusion)) return topAttendeesForProjectOrTopic(store, name)
   const normName = name.toLowerCase().trim()
   // Raw (person, meeting) attendance rows WITH the two connecting edge ids so
@@ -703,7 +703,7 @@ export function queryTopAttendees(name: string): AttendeeResult[] {
 
 export function queryTopSkill(skill: string): SkillDemonstratorResult[] {
   const store = getKnowledgeGraphStore()
-  const exclusion = getGroundingExclusionSet()
+  const exclusion = getGroundingExclusionSet(true) // ADV23-2: non-owner surface — suppress legacy zero-provenance edges
   if (exclusionIsNoop(exclusion)) return topSkillDemonstrators(store, skill)
   const normSkill = skill.toLowerCase().trim()
   const rows = store.db.queryAll<{ person_id: string; person_label: string; edge_id: string; weight: number }>(
@@ -731,7 +731,7 @@ export function queryPersonProfile(name: string): PersonProfile | undefined {
   const store = getKnowledgeGraphStore()
   const profile = personProfile(store, name)
   if (!profile) return undefined
-  const exclusion = getGroundingExclusionSet()
+  const exclusion = getGroundingExclusionSet(true) // ADV23-2: non-owner surface — suppress legacy zero-provenance edges
   if (exclusionIsNoop(exclusion)) return profile
   // An excluded-only person is not retrievable at all.
   if (!isNodeVisibleUnderExclusion(store, profile.personId, exclusion)) return undefined
@@ -762,7 +762,7 @@ export function queryPersonProfile(name: string): PersonProfile | undefined {
 export function queryMeetingGraph(meetingId: string): MeetingGraph {
   const store = getKnowledgeGraphStore()
   const graph = meetingSummaryGraph(store, meetingId)
-  const exclusion = getGroundingExclusionSet()
+  const exclusion = getGroundingExclusionSet(true) // ADV23-2: non-owner surface — suppress legacy zero-provenance edges
   if (exclusionIsNoop(exclusion) || !graph.meeting) return graph
   // Centered on a meeting: fail closed + never expose an excluded-only meeting.
   if (exclusion.failClosed || !isNodeVisibleUnderExclusion(store, graph.meeting.id, exclusion)) {
@@ -780,7 +780,7 @@ export function queryMeetingGraph(meetingId: string): MeetingGraph {
 
 export function queryStats(): { nodes: number; edges: number; nodesByType: Record<string, number> } {
   const store = getKnowledgeGraphStore()
-  const exclusion = getGroundingExclusionSet()
+  const exclusion = getGroundingExclusionSet(true) // ADV23-2: non-owner surface — suppress legacy zero-provenance edges
   if (!exclusionIsNoop(exclusion)) {
     // RE4-3 — counts must reflect only VISIBLE (eligible) content, so an
     // excluded recording's attributed nodes/edges aren't counted. Build the
@@ -809,7 +809,7 @@ export function queryStats(): { nodes: number; edges: number; nodesByType: Recor
 export function queryListNodes(type?: string): GraphNode[] {
   const store = getKnowledgeGraphStore()
   const nodes = store.findNodes(type ? { type: type as any } : {})
-  const exclusion = getGroundingExclusionSet()
+  const exclusion = getGroundingExclusionSet(true) // ADV23-2: non-owner surface — suppress legacy zero-provenance edges
   if (exclusionIsNoop(exclusion)) return nodes
   return nodes.filter((n) => isNodeVisibleUnderExclusion(store, n.id, exclusion))
 }
@@ -974,7 +974,7 @@ function toDTO(sub: SubGraph): ContextGraphData {
  */
 export function queryContextGraph(limit: number = DEFAULT_OVERVIEW_NODE_LIMIT): ContextGraphData {
   const store = getKnowledgeGraphStore()
-  const exclusion = getGroundingExclusionSet()
+  const exclusion = getGroundingExclusionSet(true) // ADV23-2: non-owner surface — suppress legacy zero-provenance edges
   // Fast path: nothing to suppress (healthy + empty) → original behaviour.
   if (exclusionIsNoop(exclusion)) return toDTO(fullGraph(store, limit))
 
@@ -1056,7 +1056,7 @@ export function queryNeighborhood(entityId: string, hops = 1): ContextGraphData 
   const store = getKnowledgeGraphStore()
   const nodeId = resolveEntityToNodeId(entityId)
   if (!nodeId) return { center: null, nodes: [], edges: [] }
-  const exclusion = getGroundingExclusionSet()
+  const exclusion = getGroundingExclusionSet(true) // ADV23-2: non-owner surface — suppress legacy zero-provenance edges
   // RE4-2 (round-4) — a centered view fails closed and never exposes an
   // excluded-only center: check center visibility BEFORE building.
   if (exclusion.failClosed || !isNodeVisibleUnderExclusion(store, nodeId, exclusion)) {
@@ -1071,7 +1071,7 @@ export function searchGraphNodes(query: string, limit = 12): ContextGraphNode[] 
   const q = query.trim().toLowerCase()
   if (!q) return []
   if (limit <= 0) return []
-  const exclusion = getGroundingExclusionSet()
+  const exclusion = getGroundingExclusionSet(true) // ADV23-2: non-owner surface — suppress legacy zero-provenance edges
   // Stable ordering across pages: LENGTH(label) then id, so OFFSET pagination
   // never revisits or skips a row (LENGTH alone is not a total order).
   const orderedQuery =
@@ -1193,7 +1193,12 @@ function computeExcludedOnlyNodeIds(
     'SELECT id, source_id, target_id FROM graph_edges'
   )
   for (const e of edges) {
-    const isSup = suppressedEdges.has(e.id)
+    // ADV23-2 (round-24) — a zero-provenance edge (no graph_edge_sources rows,
+    // hence absent from byEdge) is suppressed on non-owner surfaces, exactly as
+    // provenanceSuppressedEdgeIds does, so an excluded-only node computed here
+    // matches isNodeVisibleUnderExclusion byte-for-byte.
+    const isSup =
+      suppressedEdges.has(e.id) || (!!exclusion.suppressZeroProvenance && !byEdge.has(e.id))
     for (const nodeId of [e.source_id, e.target_id]) {
       bump(incident, nodeId)
       if (isSup) bump(suppressedIncident, nodeId)
@@ -1240,6 +1245,19 @@ export function findMentionedEntity(text: string): ContextGraphNode | null {
 export interface GroundingExclusion {
   ids: Set<string>
   failClosed: boolean
+  /**
+   * ADV23-2 (round-24) — when true, ALSO suppress ZERO-PROVENANCE (legacy pre-F18)
+   * edges — edges with no graph_edge_sources rows — from the surface using this
+   * context. NON-OWNER Context Graph read surfaces (views / search / topic +
+   * attendee + skill + profile + stats aggregates) pass `true`: a pre-F18 edge
+   * cannot be proven to NOT derive from a now-excluded recording, so it is
+   * suppressed (fail-closed interim until the F21 provenance rebuild restores it
+   * WITH attribution). CHAT grounding (neighborhoodFacts/buildGraphContext) keeps
+   * this `false` — it handles zero-provenance separately via the answer's
+   * `unresolved` provenance flag (rounds 19-20), dropping the whole graph bundle
+   * from the prompt rather than suppressing edges here.
+   */
+  suppressZeroProvenance?: boolean
 }
 
 /**
@@ -1248,7 +1266,7 @@ export interface GroundingExclusion {
  * error it FAILS CLOSED (P1): no leak of attributed content on a transient DB
  * failure.
  */
-export function getGroundingExclusionSet(): GroundingExclusion {
+export function getGroundingExclusionSet(suppressZeroProvenance = false): GroundingExclusion {
   try {
     // ADV9 (round-9) — derive the suppression blocklist from the POSITIVE
     // eligibility allowlist over the recording ids actually referenced by graph
@@ -1263,21 +1281,26 @@ export function getGroundingExclusionSet(): GroundingExclusion {
       'SELECT DISTINCT recording_id FROM graph_edge_sources WHERE recording_id IS NOT NULL'
     )
     const provIds = provRows.map((r) => r.recording_id).filter((x): x is string => !!x)
-    if (provIds.length === 0) return { ids: new Set<string>(), failClosed: false }
+    if (provIds.length === 0) return { ids: new Set<string>(), failClosed: false, suppressZeroProvenance }
     const { eligible, failClosed } = getEligibleRecordingIds(provIds)
-    if (failClosed) return { ids: new Set<string>(), failClosed: true }
+    if (failClosed) return { ids: new Set<string>(), failClosed: true, suppressZeroProvenance }
     const ids = new Set<string>()
     for (const id of provIds) if (!eligible.has(id)) ids.add(id)
-    return { ids, failClosed: false }
+    return { ids, failClosed: false, suppressZeroProvenance }
   } catch (e) {
     console.error('[KnowledgeGraph] grounding exclusion lookup FAILED — failing closed (suppressing all attributed facts):', e)
-    return { ids: new Set<string>(), failClosed: true }
+    return { ids: new Set<string>(), failClosed: true, suppressZeroProvenance }
   }
 }
 
-/** True when this exclusion context can suppress nothing (healthy + empty). */
+/**
+ * True when this exclusion context can suppress nothing (healthy + empty). A
+ * context that suppresses zero-provenance edges (ADV23-2 non-owner surfaces) is
+ * NEVER a no-op — even with an empty excluded-recording set it must still run so
+ * legacy pre-F18 edges are dropped.
+ */
 function exclusionIsNoop(exclusion: GroundingExclusion): boolean {
-  return !exclusion.failClosed && exclusion.ids.size === 0
+  return !exclusion.failClosed && exclusion.ids.size === 0 && !exclusion.suppressZeroProvenance
 }
 
 /** Fetch graph_edge_sources for a set of edge ids, chunked to stay under the
@@ -1336,7 +1359,17 @@ function provenanceSuppressedEdgeIds(
     if (list) list.push(r.recording_id)
     else byEdge.set(r.edge_id, [r.recording_id])
   }
-  for (const [edgeId, recIds] of byEdge) {
+  // Iterate the CANDIDATE edges (not just the attributed ones) so a zero-provenance
+  // legacy edge can be suppressed on non-owner surfaces (ADV23-2).
+  for (const edgeId of edgeIds) {
+    const recIds = byEdge.get(edgeId)
+    if (!recIds || recIds.length === 0) {
+      // Zero-provenance legacy edge (no graph_edge_sources rows). ADV23-2
+      // (round-24): suppressed on non-owner surfaces (suppressZeroProvenance);
+      // kept for chat grounding (handled via the answer's unresolved flag).
+      if (exclusion.suppressZeroProvenance) suppressed.add(edgeId)
+      continue
+    }
     // fail-closed → any attributed edge (it has provenance rows) is suppressed;
     // otherwise → suppressed only when EVERY source is excluded.
     if (exclusion.failClosed || recIds.every((id) => exclusion.ids.has(id))) {
@@ -1657,7 +1690,7 @@ export function queryLens(
 ): ContextLensData {
   const store = getKnowledgeGraphStore()
   const emptyLens: ContextLensData = { center: null, nodes: [], edges: [], referenceMs: null, strata: [] }
-  const exclusion = getGroundingExclusionSet()
+  const exclusion = getGroundingExclusionSet(true) // ADV23-2: non-owner surface — suppress legacy zero-provenance edges
   let centerNodeId: string | null = null
   if (centerEntityId) {
     centerNodeId = resolveEntityToNodeId(centerEntityId)
@@ -1693,7 +1726,8 @@ export function pickLensCenter(ownerContactId?: string | null): LensCenter | nul
   if (!node) return null
   // P3 (round-3) — never default-center an excluded-only node; fall back to
   // null so the caller builds the (already-suppressed) whole-graph lens.
-  if (!isNodeVisibleUnderExclusion(store, node.id, getGroundingExclusionSet())) return null
+  // ADV23-2 — non-owner surface: legacy zero-provenance nodes are excluded-only.
+  if (!isNodeVisibleUnderExclusion(store, node.id, getGroundingExclusionSet(true))) return null
   const projects = projectNameIndex()
   const dto = nodeToDTO({ ...node, degree: 0 }, projects)
   return { id: dto.id, type: dto.type, label: dto.label, contactId: dto.contactId }
@@ -1718,7 +1752,7 @@ export function queryProvenance(entityId: string): ProvenanceDTO {
     dateMs: null,
   }
   if (!nodeId) return empty
-  const exclusion = getGroundingExclusionSet()
+  const exclusion = getGroundingExclusionSet(true) // ADV23-2: non-owner surface — suppress legacy zero-provenance edges
   // RE4-2 — centered read: fail closed, and never expose an excluded-only center.
   if (exclusion.failClosed || !isNodeVisibleUnderExclusion(store, nodeId, exclusion)) return empty
 
@@ -1862,7 +1896,8 @@ export function getNodeDetail(entityId: string): NodeDetailDTO {
   const node = store.getNode(nodeId)
   if (!node) return empty
   // P3 (round-3) — the inspector must not expose an excluded-only node.
-  if (!isNodeVisibleUnderExclusion(store, nodeId, getGroundingExclusionSet())) return empty
+  // ADV23-2 — non-owner surface: legacy zero-provenance nodes are excluded-only.
+  if (!isNodeVisibleUnderExclusion(store, nodeId, getGroundingExclusionSet(true))) return empty
 
   const projects = projectNameIndex()
   const dto = nodeToDTO({ ...node, degree: 0 }, projects)

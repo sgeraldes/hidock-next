@@ -326,9 +326,14 @@ describe('RE-4 — Context Graph views suppress excluded provenance', () => {
     return data.edges.map((e) => byId.get(e.target) ?? e.target)
   }
 
-  it('queryNeighborhood(Alice): baseline shows all neighbors', () => {
+  it('ADV23-2 — baseline shows attributed neighbors; the legacy zero-provenance neighbor is SUPPRESSED', () => {
+    // Round-24 flip: Bob is reachable only via eLegacy (zero-provenance). On a
+    // NON-OWNER view surface a pre-F18 zero-provenance edge is now suppressed
+    // (fail-closed interim until the F21 rebuild), so Bob is pruned even with NO
+    // recording excluded. Attributed neighbors (Roadmap/Backlog) stay.
     const data = queryNeighborhood('Alice')
-    expect(labelsOf(data)).toEqual(expect.arrayContaining(['Alice', 'Roadmap', 'Backlog', 'Bob']))
+    expect(labelsOf(data)).toEqual(expect.arrayContaining(['Alice', 'Roadmap', 'Backlog']))
+    expect(labelsOf(data)).not.toContain('Bob') // legacy zero-provenance → suppressed
   })
 
   it('soft-delete recA drops the sole-sourced edge AND prunes its orphaned node', () => {
@@ -336,8 +341,10 @@ describe('RE-4 — Context Graph views suppress excluded provenance', () => {
     const data = queryNeighborhood('Alice')
     // Roadmap was reachable ONLY via eA (recA) → edge suppressed, node pruned.
     expect(labelsOf(data)).not.toContain('Roadmap')
-    // Backlog (shared, recB eligible) and Bob (legacy) stay.
-    expect(labelsOf(data)).toEqual(expect.arrayContaining(['Alice', 'Backlog', 'Bob']))
+    // Backlog (shared, recB eligible) stays. Bob (legacy zero-provenance) is now
+    // suppressed on the view surface too (ADV23-2).
+    expect(labelsOf(data)).toEqual(expect.arrayContaining(['Alice', 'Backlog']))
+    expect(labelsOf(data)).not.toContain('Bob')
     expect(edgeTargets(data)).not.toContain('Roadmap')
   })
 
@@ -368,19 +375,21 @@ describe('RE-4 — Context Graph views suppress excluded provenance', () => {
     deleteRecordingCascade('recB', { hard: false })
     // Now both sources excluded → Backlog's only edge suppressed → pruned.
     expect(labelsOf(queryNeighborhood('Alice'))).not.toContain('Backlog')
-    // Legacy Bob still there.
-    expect(labelsOf(queryNeighborhood('Alice'))).toContain('Bob')
+    // ADV23-2 — legacy Bob is now suppressed on the view surface too.
+    expect(labelsOf(queryNeighborhood('Alice'))).not.toContain('Bob')
   })
 
-  it('queryContextGraph (full view) suppresses excluded attributed edges', () => {
+  it('queryContextGraph (full view) suppresses excluded attributed AND legacy zero-provenance edges', () => {
     deleteRecordingCascade('recA', { hard: false })
     const data = queryContextGraph(100)
     // The Alice→Roadmap edge is gone from the whole-graph view.
     const byId = new Map(data.nodes.map((n) => [n.id, n.label]))
     const edgeLabels = data.edges.map((e) => `${byId.get(e.source)}→${byId.get(e.target)}`)
     expect(edgeLabels).not.toContain('Alice→Roadmap')
-    // Legacy edge survives.
-    expect(edgeLabels).toContain('Alice→Bob')
+    // ADV23-2 — the legacy zero-provenance edge is now suppressed too (was kept).
+    expect(edgeLabels).not.toContain('Alice→Bob')
+    // A shared edge with an eligible source (recB) still shows.
+    expect(edgeLabels).toContain('Alice→Backlog')
   })
 
   it('queryLens suppresses excluded attributed edges (lens fields still present)', () => {
@@ -417,16 +426,17 @@ describe('P1 — grounding fails closed on exclusion-lookup error', () => {
     expect(facts).toContain('Alice relates to Bob')
   })
 
-  it('the non-centered overview fails closed (attributed edges hidden, legacy kept)', () => {
-    // The OVERVIEW is not centered, so it suppresses attributed edges and keeps
-    // legacy under fail-closed (a centered view empties instead — see RE4-2).
+  it('the non-centered overview fails closed (attributed AND legacy edges hidden)', () => {
+    // ADV23-2 flip: under fail-closed the overview suppresses attributed edges
+    // AND (now) legacy zero-provenance edges. With every Alice edge suppressed,
+    // Alice is orphaned and pruned — the whole-graph view is emptied.
     dbRun('DROP TABLE recordings')
     const data = queryContextGraph(100)
     const byId = new Map(data.nodes.map((n) => [n.id, n.label]))
     const edgeLabels = data.edges.map((e) => `${byId.get(e.source)}→${byId.get(e.target)}`)
     expect(edgeLabels).not.toContain('Alice→Roadmap')
     expect(edgeLabels).not.toContain('Alice→Backlog')
-    expect(edgeLabels).toContain('Alice→Bob')
+    expect(edgeLabels).not.toContain('Alice→Bob') // legacy no longer survives fail-closed
   })
 })
 
@@ -440,8 +450,10 @@ describe('P3 — search / provenance / inspector hide excluded-only nodes', () =
     expect(searchGraphNodes('Roadmap').map((n) => n.label)).toContain('Roadmap')
     deleteRecordingCascade('recA', { hard: false })
     expect(searchGraphNodes('Roadmap').map((n) => n.label)).not.toContain('Roadmap')
-    // Bob (legacy) and Backlog (shared, recB eligible) remain findable.
-    expect(searchGraphNodes('Bob').map((n) => n.label)).toContain('Bob')
+    // ADV23-2 — Bob is reachable only via a legacy zero-provenance edge → now an
+    // excluded-only node on the search surface → NOT findable.
+    expect(searchGraphNodes('Bob').map((n) => n.label)).not.toContain('Bob')
+    // Backlog (shared, recB eligible via an ATTRIBUTED edge) remains findable.
     expect(searchGraphNodes('Backlog').map((n) => n.label)).toContain('Backlog')
   })
 
@@ -483,9 +495,13 @@ describe('P3 — search / provenance / inspector hide excluded-only nodes', () =
 
 describe('INC-4 — overview built from eligible edges/nodes', () => {
   it('an excluded hub does not consume the limited overview slice', () => {
-    // Build an EXCLUDED hub H (degree 5, all edges sourced by recX) plus three
-    // eligible legacy nodes E1..E3 connected to a shared anchor.
+    // Build an EXCLUDED hub H (degree 5, all edges sourced by recX) plus two
+    // eligible nodes E1/E2 connected to a shared anchor via ATTRIBUTED edges to an
+    // eligible recording (recLiveA). ADV23-2 (round-24) — the eligible nodes must
+    // be attributed to a live recording, NOT connected by legacy zero-provenance
+    // edges, since those are now suppressed on the view surface.
     seedRecording('recX')
+    seedRecording('recLiveA')
     seedNode('nHub', 'topic', 'Hub')
     seedNode('nAnchor', 'topic', 'Anchor')
     for (const [i, leaf] of ['L1', 'L2', 'L3', 'L4', 'L5'].entries()) {
@@ -495,8 +511,10 @@ describe('INC-4 — overview built from eligible edges/nodes', () => {
     }
     seedNode('nE1', 'topic', 'E1')
     seedNode('nE2', 'topic', 'E2')
-    seedEdge('eE1', 'nAnchor', 'nE1', 'RELATES_TO') // legacy (no provenance)
-    seedEdge('eE2', 'nAnchor', 'nE2', 'RELATES_TO') // legacy
+    seedEdge('eE1', 'nAnchor', 'nE1', 'RELATES_TO')
+    seedEdgeSource('eE1', 'recLiveA', 'txLiveA') // eligible attributed edge
+    seedEdge('eE2', 'nAnchor', 'nE2', 'RELATES_TO')
+    seedEdgeSource('eE2', 'recLiveA', 'txLiveA') // eligible attributed edge
 
     // Exclude recX → Hub's every edge is suppressed → eligible degree 0.
     deleteRecordingCascade('recX', { hard: false })
@@ -522,6 +540,7 @@ describe('ADV10-MED — graph-node search pages past excluded-only matches', () 
   it('returns an eligible match that ranks after >limit*4 excluded-only matches', () => {
     // A dead recording whose provenance makes every "zzq##" node excluded-only.
     seedRecording('recDead')
+    seedRecording('recLive') // eligible — keeps the "eligible" match visible
     // 50 excluded-only nodes (> default limit 12 * 4 = 48) all matching "zzq",
     // each length-5 label so they sort (LENGTH ASC, id ASC) AHEAD of the longer
     // eligible label. Each is attributed SOLELY to recDead → invisible once excluded.
@@ -531,11 +550,13 @@ describe('ADV10-MED — graph-node search pages past excluded-only matches', () 
       seedEdge(`eDead${pad}`, `nDead${pad}`, 'nAlice', 'MENTIONED')
       seedEdgeSource(`eDead${pad}`, 'recDead', 'txDead')
     }
-    // One eligible node matching "zzq" via a LEGACY (zero-provenance) edge →
-    // always visible. Its longer label sorts it AFTER all 50 dead nodes, so the
-    // old fixed limit*4 fetch (48 rows) would never have examined it.
+    // One eligible node matching "zzq" via an ATTRIBUTED edge to an eligible
+    // recording → visible (ADV23-2: a legacy zero-provenance edge would now be
+    // suppressed). Its longer label sorts it AFTER all 50 dead nodes, so the old
+    // fixed limit*4 fetch (48 rows) would never have examined it.
     seedNode('nEligZzq', 'topic', 'zzqEligibleLongLabel') // length > 5 → sorts last
-    seedEdge('eEligZzq', 'nEligZzq', 'nAlice', 'RELATES_TO') // legacy, unattributed → survives
+    seedEdge('eEligZzq', 'nEligZzq', 'nAlice', 'RELATES_TO')
+    seedEdgeSource('eEligZzq', 'recLive', 'txLive') // eligible attributed → survives
 
     // (No baseline "no-exclusion" assertion: with 51 matches and the default
     // limit of 12, the long-label eligible node legitimately ranks 51st by the
@@ -558,6 +579,7 @@ describe('ADV10-MED — graph-node search pages past excluded-only matches', () 
 
   it('respects the visible limit while paging past excluded-only matches', () => {
     seedRecording('recDead2')
+    seedRecording('recLive2') // eligible — keeps the eligible matches visible
     // 48 excluded-only "wqz##" nodes (length 5) ahead of many eligible ones.
     for (let i = 0; i < 48; i++) {
       const pad = String(i).padStart(2, '0')
@@ -565,11 +587,14 @@ describe('ADV10-MED — graph-node search pages past excluded-only matches', () 
       seedEdge(`eDx${pad}`, `nDx${pad}`, 'nAlice', 'MENTIONED')
       seedEdgeSource(`eDx${pad}`, 'recDead2', 'txD2')
     }
-    // 20 eligible legacy "wqz##" nodes (longer labels sort after the dead ones).
+    // 20 eligible "wqz##" nodes via ATTRIBUTED edges to an eligible recording
+    // (longer labels sort after the dead ones). ADV23-2: legacy edges would be
+    // suppressed, so attribute them to keep them visible.
     for (let i = 0; i < 20; i++) {
       const pad = String(i).padStart(2, '0')
       seedNode(`nEx${pad}`, 'topic', `wqzEligible${pad}`)
-      seedEdge(`eEx${pad}`, `nEx${pad}`, 'nAlice', 'RELATES_TO') // legacy
+      seedEdge(`eEx${pad}`, `nEx${pad}`, 'nAlice', 'RELATES_TO')
+      seedEdgeSource(`eEx${pad}`, 'recLive2', 'txL2') // eligible attributed → survives
     }
     deleteRecordingCascade('recDead2', { hard: false })
 
@@ -591,6 +616,7 @@ describe('ADV10-MED — graph-node search pages past excluded-only matches', () 
 describe('ADV11-MED — graph-node search does bounded work (no per-node N+1)', () => {
   it('finds an eligible match past a >200-node excluded block with a bounded query count', () => {
     seedRecording('recBig')
+    seedRecording('recLiveBig') // eligible — keeps the eligible match visible
     // 250 excluded-only "qxb###" nodes (length 6) ranked ahead of the eligible one.
     for (let i = 0; i < 250; i++) {
       const pad = String(i).padStart(3, '0')
@@ -598,9 +624,11 @@ describe('ADV11-MED — graph-node search does bounded work (no per-node N+1)', 
       seedEdge(`eBig${pad}`, `nBig${pad}`, 'nAlice', 'MENTIONED')
       seedEdgeSource(`eBig${pad}`, 'recBig', 'txBig')
     }
-    // One eligible node via a legacy (zero-provenance) edge, longer label → sorts last.
+    // One eligible node via an ATTRIBUTED edge to an eligible recording, longer
+    // label → sorts last (ADV23-2: a legacy edge would now be suppressed).
     seedNode('nBigElig', 'topic', 'qxbEligibleLongLabel')
-    seedEdge('eBigElig', 'nBigElig', 'nAlice', 'RELATES_TO') // legacy, survives
+    seedEdge('eBigElig', 'nBigElig', 'nAlice', 'RELATES_TO')
+    seedEdgeSource('eBigElig', 'recLiveBig', 'txLiveBig') // eligible attributed → survives
 
     deleteRecordingCascade('recBig', { hard: false })
 
@@ -634,32 +662,43 @@ describe('ADV11-MED — graph-node search does bounded work (no per-node N+1)', 
 
 /**
  * Seed `count` excluded-only nodes (each sourced solely by `dead`) plus ONE
- * eligible node reachable via a legacy (zero-provenance) edge whose longer label
- * sorts LAST under the LENGTH(label),id ordering. All share `prefix` so a single
- * search query matches the whole block. Wrapped in a transaction so tens of
- * thousands of rows insert quickly on the real engine.
+ * eligible node reachable via an ATTRIBUTED edge to an eligible recording
+ * (`${dead}_live`) whose longer label sorts LAST under the LENGTH(label),id
+ * ordering. All share `prefix` so a single search query matches the whole block.
+ * ADV23-2 (round-24) — the eligible node is attributed (NOT a legacy
+ * zero-provenance edge, which the view/search surface now suppresses). Wrapped in
+ * a transaction so tens of thousands of rows insert quickly on the real engine.
  */
 function seedExcludedOnlyBlock(prefix: string, dead: string, count: number): void {
   runInTransaction(() => {
     seedRecording(dead)
+    const live = `${dead}_live`
+    seedRecording(live)
     for (let i = 0; i < count; i++) {
       const label = `${prefix}${i}`
       seedNode(`n_${label}`, 'topic', label)
       seedEdge(`e_${label}`, `n_${label}`, 'nAlice', 'MENTIONED')
       seedEdgeSource(`e_${label}`, dead, `tx_${dead}`)
     }
-    // Longer label → sorts after the entire excluded block; legacy edge → visible.
+    // Longer label → sorts after the entire excluded block; attributed to an
+    // eligible recording → survives suppression.
     seedNode(`n_${prefix}Elig`, 'topic', `${prefix}EligibleLongLabel`)
     seedEdge(`e_${prefix}Elig`, `n_${prefix}Elig`, 'nAlice', 'RELATES_TO')
+    seedEdgeSource(`e_${prefix}Elig`, live, `tx_${live}`)
   })
 }
 
 describe('ADV12-MED — graph-node search bounds SQLite variables via a temp-table anti-join', () => {
-  it('no exclusions (0 hidden ids): fast path returns matches without throwing', () => {
+  it('no excluded block: search returns eligible matches without throwing', () => {
+    // ADV23-2 (round-24) — attribute the eligible nodes to a live recording; a
+    // legacy zero-provenance edge would now be suppressed on the search surface.
+    seedRecording('recParam0Live')
     seedNode('nParam0', 'topic', 'pzz0')
     seedNode('nParam0b', 'topic', 'pzz0EligibleLongLabel')
-    seedEdge('eParam0', 'nParam0', 'nAlice', 'RELATES_TO') // legacy → visible
+    seedEdge('eParam0', 'nParam0', 'nAlice', 'RELATES_TO')
+    seedEdgeSource('eParam0', 'recParam0Live', 'txParam0Live')
     seedEdge('eParam0b', 'nParam0b', 'nAlice', 'RELATES_TO')
+    seedEdgeSource('eParam0b', 'recParam0Live', 'txParam0Live')
     let labels: string[] = []
     expect(() => {
       labels = searchGraphNodes('pzz', 20).map((n) => n.label)
@@ -1034,5 +1073,63 @@ describe('INC5 — lens center decided from the post-filter survivor graph', () 
     // pointing at the missing center id.
     expect(lens.center).toBeNull()
     expect(lens.nodes).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADV23-2 (round-24) — pre-F18 ZERO-PROVENANCE legacy edges are suppressed from
+// EVERY non-owner graph read surface (views / search / topic + attendee + skill
+// + profile + meeting + list + stats), while CHAT grounding still keeps them
+// (handled via the answer's `unresolved` provenance flag, not edge suppression).
+// This is the fail-closed interim until the F21 provenance rebuild.
+// ---------------------------------------------------------------------------
+
+describe('ADV23-2 — zero-provenance legacy edges suppressed from non-owner surfaces', () => {
+  // Zed's WHOLE neighborhood is pre-F18 zero-provenance (no graph_edge_sources).
+  function seedLegacyZed(): void {
+    seedNode('nZed', 'person', 'Zed')
+    seedNode('nLegacyMtg', 'meeting', 'LegacyMtg')
+    seedNode('nLegacyTopic', 'topic', 'LegacyTopic')
+    seedNode('nLegacySkill', 'skill', 'LegacySkill')
+    seedEdge('eZa', 'nZed', 'nLegacyMtg', 'ATTENDED') // no provenance rows
+    seedEdge('eZb', 'nLegacyMtg', 'nLegacyTopic', 'ABOUT') // no provenance rows
+    seedEdge('eZc', 'nZed', 'nLegacySkill', 'DEMONSTRATED') // no provenance rows
+  }
+
+  it('a zero-provenance-only person/meeting/skill is absent from views + search + inspector', () => {
+    seedLegacyZed()
+    expect(queryNeighborhood('Zed')).toEqual({ center: null, nodes: [], edges: [] })
+    expect(searchGraphNodes('Zed').map((n) => n.label)).not.toContain('Zed')
+    expect(searchGraphNodes('LegacyMtg').map((n) => n.label)).not.toContain('LegacyMtg')
+    expect(getNodeDetail('Zed').node).toBeNull()
+    expect(queryMeetingGraph('nLegacyMtg')).toEqual({ meeting: undefined, nodes: [], edges: [] })
+    const listed = queryListNodes().map((n) => n.label)
+    expect(listed).not.toContain('Zed')
+    expect(listed).not.toContain('LegacyMtg')
+    expect(listed).not.toContain('LegacySkill')
+  })
+
+  it('a zero-provenance edge is absent from topic / attendee / skill / profile aggregates', () => {
+    seedLegacyZed()
+    expect(queryTopAttendees('LegacyTopic').map((a) => a.person)).not.toContain('Zed')
+    expect(queryTopSkill('LegacySkill').map((s) => s.person)).not.toContain('Zed')
+    expect(queryPersonProfile('Zed')).toBeUndefined()
+  })
+
+  it('an edge with provenance to an ELIGIBLE recording is PRESENT; to an EXCLUDED recording is ABSENT', () => {
+    // eA is attributed to recA (eligible) → Roadmap present on the view.
+    expect(queryNeighborhood('Alice').nodes.map((n) => n.label)).toContain('Roadmap')
+    deleteRecordingCascade('recA', { hard: false })
+    // recA now excluded → its sole-sourced Roadmap edge suppressed → absent.
+    expect(queryNeighborhood('Alice').nodes.map((n) => n.label)).not.toContain('Roadmap')
+  })
+
+  it('CHAT grounding STILL keeps the zero-provenance legacy fact (contrast — not edge-suppressed)', () => {
+    // The chat path (neighborhoodFacts, default exclusion) does NOT suppress
+    // zero-provenance edges — it grounds on them and marks the answer unresolved
+    // instead (rounds 19-20). So the legacy Alice→Bob fact still grounds chat…
+    expect(neighborhoodFacts('Alice')).toContain('Alice relates to Bob')
+    // …while the SAME legacy edge is suppressed on the non-owner view surface.
+    expect(queryNeighborhood('Alice').nodes.map((n) => n.label)).not.toContain('Bob')
   })
 })

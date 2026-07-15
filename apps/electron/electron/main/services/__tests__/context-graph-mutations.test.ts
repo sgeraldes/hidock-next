@@ -62,6 +62,15 @@ function seedContact(id: string, name: string, extra: { role?: string; company?:
 function seedGraph(opts: { personLabel: string; contactId?: string } = { personLabel: 'Jiarabi' }) {
   const store = getKnowledgeGraphStore()
   const now = '2026-01-26T00:00:00.000Z'
+  // ADV23-2 (round-24) — attribute the seeded edges to an eligible recording so
+  // the nodes stay VISIBLE on the (non-owner) getNodeDetail surface, which now
+  // suppresses legacy zero-provenance edges. Real graph content always carries
+  // provenance; these functionality tests just need the node retrievable.
+  dbRun('INSERT OR IGNORE INTO recordings (id, filename, date_recorded) VALUES (?, ?, ?)', [
+    'rec-seed',
+    'rec-seed.hda',
+    '2026-01-01',
+  ])
   const person = store.upsertNode(
     opts.contactId
       ? { type: 'person', label: opts.personLabel, key: `contact:${opts.contactId}`, props: { contactId: opts.contactId }, now }
@@ -70,9 +79,15 @@ function seedGraph(opts: { personLabel: string; contactId?: string } = { personL
   const m1 = store.upsertNode({ type: 'meeting', label: 'Kickoff', props: { meetingId: 'mtg-1', date: '2026-01-10' }, now })
   const m2 = store.upsertNode({ type: 'meeting', label: 'Review', props: { meetingId: 'mtg-2', date: '2026-01-26' }, now })
   const proj = store.upsertNode({ type: 'project', label: 'Phoenix', now })
-  store.upsertEdge({ sourceId: person, targetId: m1, type: 'ATTENDED', now })
-  store.upsertEdge({ sourceId: person, targetId: m2, type: 'ATTENDED', now })
-  store.upsertEdge({ sourceId: m1, targetId: proj, type: 'ABOUT', now })
+  const e1 = store.upsertEdge({ sourceId: person, targetId: m1, type: 'ATTENDED', now })
+  const e2 = store.upsertEdge({ sourceId: person, targetId: m2, type: 'ATTENDED', now })
+  const e3 = store.upsertEdge({ sourceId: m1, targetId: proj, type: 'ABOUT', now })
+  for (const edgeId of [e1, e2, e3]) {
+    dbRun(
+      'INSERT OR IGNORE INTO graph_edge_sources (edge_id, recording_id, transcript_id, assertion_count, created_at) VALUES (?, ?, ?, 1, ?)',
+      [edgeId, 'rec-seed', 'tx-seed', '2026-01-01']
+    )
+  }
   return { person, m1, m2, proj }
 }
 
