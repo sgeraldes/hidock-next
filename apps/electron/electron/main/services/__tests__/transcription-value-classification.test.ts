@@ -50,7 +50,7 @@ let mockAsrText = 'Reunion breve sobre el estado del proyecto.'
 let mockConfig: any = {
   transcription: {
     provider: 'local-asr',
-    geminiApiKey: 'test-api-key',
+    geminiApiKey: 'test-api-key', // pragma: allowlist secret
     geminiModel: 'gemini-2.0-flash',
     language: 'es',
     autoTranscribe: false,

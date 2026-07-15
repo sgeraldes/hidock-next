@@ -25,7 +25,7 @@ describe('getProviderConfigFromSettings', () => {
   it('returns a google ProviderConfig when chat.provider is gemini and a geminiApiKey is set', async () => {
     mockGetConfig.mockReturnValue({
       chat: { provider: 'gemini', geminiModel: 'gemini-3.5-flash' },
-      transcription: { geminiApiKey: 'test-key-123' }
+      transcription: { geminiApiKey: 'test-key-123' } // pragma: allowlist secret
     })
 
     const { getProviderConfigFromSettings } = await import('../ai-provider-config')
