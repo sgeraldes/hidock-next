@@ -366,6 +366,46 @@ describe('getTimelineAnalysis', () => {
   })
 })
 
+// ADV17-1 (round-18) — the point-read must match analyzeTimeline's gate: an
+// excluded recording's persisted markers (labels derived from action/decision
+// text) are NEVER returned. Fail-closed = empty on false OR lookup failure.
+describe('getTimelineAnalysis — ADV17-1 eligibility gate', () => {
+  const EMPTY = { sentimentSegments: [], eventMarkers: [] }
+
+  beforeEach(async () => {
+    seedRecording('recGate')
+    seedTranscript('recGate', SPEAKERS_JSON)
+    seedCapture('capGate', 'recGate')
+    run('INSERT INTO action_items (id, knowledge_capture_id, content) VALUES (?, ?, ?)', [
+      'aiG',
+      'capGate',
+      'Carlos will prepare the rollback plan before the deploy window'
+    ])
+    // Persist markers WHILE the recording is still eligible.
+    await analyzeTimeline('recGate', undefined, { scoreWindows: fakeScorer })
+  })
+
+  it('returns persisted markers while the recording is eligible', () => {
+    const r = getTimelineAnalysis('recGate')
+    expect(r.eventMarkers.length).toBeGreaterThan(0)
+  })
+
+  it('returns EMPTY once the recording is soft-deleted', () => {
+    run('UPDATE recordings SET deleted_at = ? WHERE id = ?', ['2026-07-15T00:00:00.000Z', 'recGate'])
+    expect(getTimelineAnalysis('recGate')).toEqual(EMPTY)
+  })
+
+  it('returns EMPTY once the recording is marked personal', () => {
+    run('UPDATE recordings SET personal = 1 WHERE id = ?', ['recGate'])
+    expect(getTimelineAnalysis('recGate')).toEqual(EMPTY)
+  })
+
+  it('returns EMPTY once the recording is value-excluded (garbage capture)', () => {
+    run("UPDATE knowledge_captures SET quality_rating = 'garbage' WHERE id = ?", ['capGate'])
+    expect(getTimelineAnalysis('recGate')).toEqual(EMPTY)
+  })
+})
+
 describe('analyzeTimeline (persist + idempotent)', () => {
   beforeEach(() => {
     seedRecording('rec3')

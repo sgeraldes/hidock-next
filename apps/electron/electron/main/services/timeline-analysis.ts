@@ -859,6 +859,13 @@ export interface AnalyzeProgress {
 export function getTimelineAnalysis(recordingId: string): TimelineAnalysis {
   const canonical = getRecordingById(recordingId) ?? resolveRecordingId(recordingId)
   const id = canonical?.id ?? recordingId
+  // ADV17-1 (round-18) — DISPLAY read boundary. Event markers persist labels
+  // derived from transcript action/decision text; the sibling analyzeTimeline is
+  // gated (round-8) so this read path must match. isRecordingEligible is a
+  // positive allowlist + fail-closed: a trashed / personal / value-excluded /
+  // hard-purged / unresolvable recording returns NO markers (empty), never the
+  // stale derived labels.
+  if (!isRecordingEligible(id)) return { ...EMPTY }
   const row = queryOne<TranscriptRow>(TRANSCRIPT_ROW_SELECT, [id])
   if (!row) return { ...EMPTY }
   const { segments, envelope } = parseSentimentColumn(row.sentiment_segments)
