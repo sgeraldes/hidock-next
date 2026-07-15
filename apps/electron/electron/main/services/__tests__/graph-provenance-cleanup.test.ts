@@ -142,6 +142,28 @@ describe('ingest -> removeRecordingFromGraph (end-to-end)', () => {
     expect(store.getNode(meetingNode!.id)).toBeUndefined()
   })
 
+  // P1 (round-3) — a value-excluded recording's transcript must NEVER reach the
+  // extraction LLM during ingest (the pre-LLM authoritative gate is fail-closed).
+  it('P1 — a value-excluded recording is skipped BEFORE the extraction LLM call', async () => {
+    seedRecording('rec-elig')
+    seedTranscript('tx-elig', 'rec-elig', 'Alice discussed the roadmap.')
+    seedRecording('rec-excl')
+    seedTranscript('tx-excl', 'rec-excl', 'This transcript is confidential garbage.')
+    dbRun(
+      "INSERT INTO knowledge_captures (id, title, captured_at, source_recording_id, quality_rating) VALUES ('c-excl','C','2026-06-01','rec-excl','garbage')"
+    )
+
+    const result = await ingestFromDbTranscripts()
+    expect(result.ingested).toBe(1) // only the eligible one
+
+    // The LLM (complete) saw the eligible transcript's text but NEVER the
+    // excluded one's — no provenance rows for the excluded recording either.
+    const prompts = (complete as any).mock.calls.map((c: any[]) => String(c[0]))
+    expect(prompts.some((p: string) => p.includes('roadmap'))).toBe(true)
+    expect(prompts.some((p: string) => p.includes('confidential garbage'))).toBe(false)
+    expect(dbQueryAll('SELECT * FROM graph_edge_sources WHERE recording_id = ?', ['rec-excl'])).toHaveLength(0)
+  })
+
   it('dryRun reports the same counts as a subsequent real run, without mutating anything', async () => {
     seedRecording('rec-dry')
     seedTranscript('tx-dry', 'rec-dry', 'Alice discussed the roadmap.')

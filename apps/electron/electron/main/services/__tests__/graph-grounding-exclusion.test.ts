@@ -55,6 +55,9 @@ import {
   queryNeighborhood,
   queryContextGraph,
   queryLens,
+  searchGraphNodes,
+  queryProvenance,
+  getNodeDetail,
   removeRecordingProvenanceCore,
 } from '../knowledge-graph-service'
 
@@ -188,12 +191,13 @@ describe('ARF-2 — provenance-aware assistant grounding', () => {
     expect(facts).toContain('Alice relates to Bob')
   })
 
-  it('getGroundingExclusionSet mirrors getExcludedRecordingIds', () => {
+  it('getGroundingExclusionSet mirrors getExcludedRecordingIds (healthy = not fail-closed)', () => {
     deleteRecordingCascade('recA', { hard: false })
     setRecordingPersonal('recB', true)
-    const set = getGroundingExclusionSet()
-    expect(set.has('recA')).toBe(true)
-    expect(set.has('recB')).toBe(true)
+    const exclusion = getGroundingExclusionSet()
+    expect(exclusion.failClosed).toBe(false)
+    expect(exclusion.ids.has('recA')).toBe(true)
+    expect(exclusion.ids.has('recB')).toBe(true)
   })
 })
 
@@ -274,6 +278,122 @@ describe('RE-4 — Context Graph views suppress excluded provenance', () => {
     const byId = new Map(lens.nodes.map((n) => [n.id, n.label]))
     const edgeLabels = lens.edges.map((e) => `${byId.get(e.source)}→${byId.get(e.target)}`)
     expect(edgeLabels).not.toContain('Alice→Roadmap')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P1 (round-3) — the exclusion lookup FAILS CLOSED: if it throws, grounding
+// suppresses ALL recording-attributed facts (only legacy zero-provenance
+// survives) rather than leaking them on a transient DB error.
+// ---------------------------------------------------------------------------
+
+describe('P1 — grounding fails closed on exclusion-lookup error', () => {
+  it('getGroundingExclusionSet reports failClosed=true when the lookup throws', () => {
+    dbRun('DROP TABLE recordings') // forces getExcludedRecordingIds to throw
+    const exclusion = getGroundingExclusionSet()
+    expect(exclusion.failClosed).toBe(true)
+    expect(exclusion.ids.size).toBe(0)
+  })
+
+  it('neighborhoodFacts suppresses ALL attributed facts but keeps legacy on lookup failure', () => {
+    dbRun('DROP TABLE recordings')
+    const facts = neighborhoodFacts('Alice')
+    // eA (recA) and eShared (recA+recB) are attributed → suppressed.
+    expect(facts).not.toContain('Alice mentioned Roadmap')
+    expect(facts).not.toContain('Alice mentioned Backlog')
+    // eLegacy has no provenance rows → kept (grounding not gutted).
+    expect(facts).toContain('Alice relates to Bob')
+  })
+
+  it('the Context Graph view also fails closed (attributed edges hidden, legacy kept)', () => {
+    dbRun('DROP TABLE recordings')
+    const data = queryNeighborhood('Alice')
+    const byId = new Map(data.nodes.map((n) => [n.id, n.label]))
+    const edgeLabels = data.edges.map((e) => `${byId.get(e.source)}→${byId.get(e.target)}`)
+    expect(edgeLabels).not.toContain('Alice→Roadmap')
+    expect(edgeLabels).not.toContain('Alice→Backlog')
+    expect(edgeLabels).toContain('Alice→Bob')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P3 (round-3) — provenance suppression on the inspector/search read IPCs.
+// ---------------------------------------------------------------------------
+
+describe('P3 — search / provenance / inspector hide excluded-only nodes', () => {
+  it('searchGraphNodes hides a node whose ONLY provenance is excluded', () => {
+    // Roadmap is reachable only via eA (recA). Exclude recA → excluded-only.
+    expect(searchGraphNodes('Roadmap').map((n) => n.label)).toContain('Roadmap')
+    deleteRecordingCascade('recA', { hard: false })
+    expect(searchGraphNodes('Roadmap').map((n) => n.label)).not.toContain('Roadmap')
+    // Bob (legacy) and Backlog (shared, recB eligible) remain findable.
+    expect(searchGraphNodes('Bob').map((n) => n.label)).toContain('Bob')
+    expect(searchGraphNodes('Backlog').map((n) => n.label)).toContain('Backlog')
+  })
+
+  it('an isolated node (no edges) stays findable even under exclusion', () => {
+    seedNode('nSolo', 'topic', 'Solo')
+    deleteRecordingCascade('recA', { hard: false })
+    expect(searchGraphNodes('Solo').map((n) => n.label)).toContain('Solo')
+  })
+
+  it('queryProvenance of a shared-source center omits the excluded edge contribution', () => {
+    // Alice is a shared-source center (eShared kept via recB). Roadmap reaches
+    // Alice only via eA (recA). Excluding recA removes Roadmap from Alice's
+    // provenance while Backlog (shared) stays.
+    deleteRecordingCascade('recA', { hard: false })
+    const prov = queryProvenance('Alice')
+    const allLabels = [...prov.meetings, ...prov.people, ...prov.projects, ...prov.actions].map((e) => e.label)
+    expect(allLabels).not.toContain('Roadmap')
+  })
+
+  it('getNodeDetail returns empty for an excluded-only node', () => {
+    deleteRecordingCascade('recA', { hard: false })
+    const detail = getNodeDetail('Roadmap')
+    expect(detail.node).toBeNull()
+  })
+
+  it('restore returns the node to search + inspector', () => {
+    deleteRecordingCascade('recA', { hard: false })
+    expect(searchGraphNodes('Roadmap').map((n) => n.label)).not.toContain('Roadmap')
+    restoreRecording('recA')
+    expect(searchGraphNodes('Roadmap').map((n) => n.label)).toContain('Roadmap')
+    expect(getNodeDetail('Roadmap').node).not.toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// INC-4 (round-3) — the overview cap must fill with ELIGIBLE content: an
+// excluded high-degree hub must not consume the slice and leave it sparse.
+// ---------------------------------------------------------------------------
+
+describe('INC-4 — overview built from eligible edges/nodes', () => {
+  it('an excluded hub does not consume the limited overview slice', () => {
+    // Build an EXCLUDED hub H (degree 5, all edges sourced by recX) plus three
+    // eligible legacy nodes E1..E3 connected to a shared anchor.
+    seedRecording('recX')
+    seedNode('nHub', 'topic', 'Hub')
+    seedNode('nAnchor', 'topic', 'Anchor')
+    for (const [i, leaf] of ['L1', 'L2', 'L3', 'L4', 'L5'].entries()) {
+      seedNode(`n${leaf}`, 'topic', leaf)
+      seedEdge(`eHub${i}`, 'nHub', `n${leaf}`, 'RELATES_TO')
+      seedEdgeSource(`eHub${i}`, 'recX', 'txX') // all Hub edges attributed to recX
+    }
+    seedNode('nE1', 'topic', 'E1')
+    seedNode('nE2', 'topic', 'E2')
+    seedEdge('eE1', 'nAnchor', 'nE1', 'RELATES_TO') // legacy (no provenance)
+    seedEdge('eE2', 'nAnchor', 'nE2', 'RELATES_TO') // legacy
+
+    // Exclude recX → Hub's every edge is suppressed → eligible degree 0.
+    deleteRecordingCascade('recX', { hard: false })
+
+    // A tight overview cap must fill with visible content (Anchor/E1/E2 + the
+    // original Alice cluster), NOT be eaten by the now-invisible Hub.
+    const overview = queryContextGraph(4)
+    const labels = overview.nodes.map((n) => n.label)
+    expect(labels).not.toContain('Hub')
+    // The slice is filled with eligible nodes (not left sparse/empty).
+    expect(overview.nodes.length).toBe(4)
   })
 })
 

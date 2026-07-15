@@ -259,6 +259,19 @@ export async function ingestFromDbTranscripts(): Promise<IngestResult> {
     }
 
     try {
+      // P1 (round-3, FAIL CLOSED) — the value pre-filter Set above degrades to
+      // EMPTY on a lookup error (fail-open), which would send an excluded
+      // recording's full_text to the LLM. Gate the provider call on an
+      // AUTHORITATIVE fresh point-read (exists AND not deleted AND not personal
+      // AND not value-excluded) so a transient exclusion-lookup failure never
+      // leaks content to the provider.
+      if (!isRecordingGraphIngestable(row.recording_id)) {
+        result.skipped++
+        console.log(
+          `[KnowledgeGraph] Skipped ineligible recording ${row.recording_id} before extraction (transcript ${row.id})`
+        )
+        continue
+      }
       const meta = {
         meetingId: row.meeting_id ?? row.recording_id,
         title: row.subject ?? undefined,
@@ -841,10 +854,28 @@ function toDTO(sub: SubGraph): ContextGraphData {
  */
 export function queryContextGraph(limit: number = DEFAULT_OVERVIEW_NODE_LIMIT): ContextGraphData {
   const store = getKnowledgeGraphStore()
-  // RE-4 — suppress attributed edges/nodes of excluded (soft-deleted / personal
-  // / value-excluded) recordings from the visual view, matching the grounding
-  // filter and the honest deletion copy.
-  return suppressExcludedFromView(toDTO(fullGraph(store, limit)), getGroundingExclusionSet())
+  const exclusion = getGroundingExclusionSet()
+  // Fast path: nothing to suppress (healthy + empty) → original behaviour.
+  if (exclusionIsNoop(exclusion)) return toDTO(fullGraph(store, limit))
+
+  // INC-4 (round-3) — fullGraph picks the highest-degree nodes BEFORE
+  // suppression, so excluded hubs would eat the slice and leave a sparse/empty
+  // overview. Instead suppress on the FULL graph, then pick the top-`limit`
+  // nodes by their POST-suppression (eligible) degree so the cap fills with
+  // visible content.
+  const full = suppressExcludedFromView(toDTO(fullGraph(store)), exclusion)
+  if (full.nodes.length <= limit) return full
+  const eligibleDegree = new Map<string, number>()
+  for (const e of full.edges) {
+    eligibleDegree.set(e.source, (eligibleDegree.get(e.source) ?? 0) + 1)
+    eligibleDegree.set(e.target, (eligibleDegree.get(e.target) ?? 0) + 1)
+  }
+  const topNodes = [...full.nodes]
+    .sort((a, b) => (eligibleDegree.get(b.id) ?? 0) - (eligibleDegree.get(a.id) ?? 0))
+    .slice(0, limit)
+  const keptIds = new Set(topNodes.map((n) => n.id))
+  const keptEdges = full.edges.filter((e) => keptIds.has(e.source) && keptIds.has(e.target))
+  return { ...full, nodes: topNodes, edges: keptEdges }
 }
 
 /**
@@ -914,11 +945,19 @@ export function searchGraphNodes(query: string, limit = 12): ContextGraphNode[] 
   const store = getKnowledgeGraphStore()
   const q = query.trim().toLowerCase()
   if (!q) return []
+  // P3 (round-3) — over-fetch so the visible slice can still fill `limit` after
+  // excluded-only nodes are dropped, then filter each hit through the node
+  // visibility check (an excluded-only node must not appear in search).
+  const exclusion = getGroundingExclusionSet()
+  const fetch = exclusionIsNoop(exclusion) ? limit : Math.max(limit * 4, limit)
   const rows = store.db.queryAll<GraphNode>(
     'SELECT * FROM graph_nodes WHERE LOWER(label) LIKE ? ORDER BY LENGTH(label) ASC LIMIT ?',
-    [`%${q}%`, limit]
+    [`%${q}%`, fetch]
   )
-  return toDTO({ center: undefined, nodes: rows.map((n) => ({ ...n, degree: 0 })), edges: [] }).nodes
+  const visible = exclusionIsNoop(exclusion)
+    ? rows
+    : rows.filter((n) => isNodeVisibleUnderExclusion(store, n.id, exclusion)).slice(0, limit)
+  return toDTO({ center: undefined, nodes: visible.map((n) => ({ ...n, degree: 0 })), edges: [] }).nodes
 }
 
 /**
@@ -945,45 +984,89 @@ export function findMentionedEntity(text: string): ContextGraphNode | null {
 }
 
 /**
- * ARF-2 (Codex adversarial FINAL review) — the excluded-recording id set whose
- * provenance-sourced facts must NOT ground the assistant: soft-deleted
- * (deleted_at) OR personal OR value-excluded. Reuses the EXACT predicate the
- * vector store already enforces (getExcludedRecordingIds), so graph grounding
- * and vector retrieval agree on "excluded". Defensive: a failure degrades to
- * "exclude nothing" (grounding stays best-effort) rather than dropping all
- * grounding — the hard-purge path remains the enforceable backstop; this read
- * filter is the honest best-effort for the reversible soft exclusions.
- * Exported so the assistant path (rag.ts buildGraphContext) can compute it ONCE
- * per query and thread it through every neighborhoodFacts call.
+ * ARF-2 / P1 (round-3, fail-closed) — the excluded-recording context for graph
+ * suppression. `ids` = soft-deleted OR personal OR value-excluded recordings
+ * (the EXACT predicate the vector store enforces via getExcludedRecordingIds).
+ * `failClosed` = the lookup THREW: the exclusion set is UNKNOWN, so every
+ * recording-attributed edge must be suppressed (only legacy zero-provenance
+ * edges survive) rather than defaulting to "exclude nothing" (fail-open would
+ * turn a transient DB error into unrestricted retrieval).
  */
-export function getGroundingExclusionSet(): Set<string> {
-  try {
-    return getExcludedRecordingIds()
-  } catch (e) {
-    console.warn('[KnowledgeGraph] grounding exclusion set unavailable — facts unfiltered:', e)
-    return new Set<string>()
-  }
+export interface GroundingExclusion {
+  ids: Set<string>
+  failClosed: boolean
 }
 
 /**
- * ARF-2 — given candidate graph edge ids, return the subset to SUPPRESS from
- * assistant grounding because EVERY graph_edge_sources row for the edge belongs
- * to an excluded recording. An edge with NO provenance rows (legacy pre-F18
- * content) or with ≥1 source from an eligible recording is KEPT. Empty excluded
- * set ⇒ nothing suppressed (fast path).
+ * Compute the grounding/view exclusion context ONCE per query (the assistant
+ * path in rag.ts threads it through every neighborhoodFacts call). On a lookup
+ * error it FAILS CLOSED (P1): no leak of attributed content on a transient DB
+ * failure.
+ */
+export function getGroundingExclusionSet(): GroundingExclusion {
+  try {
+    return { ids: getExcludedRecordingIds(), failClosed: false }
+  } catch (e) {
+    console.error('[KnowledgeGraph] grounding exclusion lookup FAILED — failing closed (suppressing all attributed facts):', e)
+    return { ids: new Set<string>(), failClosed: true }
+  }
+}
+
+/** True when this exclusion context can suppress nothing (healthy + empty). */
+function exclusionIsNoop(exclusion: GroundingExclusion): boolean {
+  return !exclusion.failClosed && exclusion.ids.size === 0
+}
+
+/** Fetch graph_edge_sources for a set of edge ids, chunked to stay under the
+ *  SQL bound-parameter limit (large overview edge sets). */
+function edgeProvenanceRows(
+  store: KnowledgeGraphStore,
+  edgeIds: string[]
+): Array<{ edge_id: string; recording_id: string }> {
+  const out: Array<{ edge_id: string; recording_id: string }> = []
+  const CHUNK = 400
+  for (let i = 0; i < edgeIds.length; i += CHUNK) {
+    const chunk = edgeIds.slice(i, i + CHUNK)
+    const placeholders = chunk.map(() => '?').join(',')
+    out.push(
+      ...store.db.queryAll<{ edge_id: string; recording_id: string }>(
+        `SELECT edge_id, recording_id FROM graph_edge_sources WHERE edge_id IN (${placeholders})`,
+        chunk
+      )
+    )
+  }
+  return out
+}
+
+/**
+ * ARF-2 / P1 — given candidate graph edge ids, return the subset to SUPPRESS.
+ * An edge with NO provenance rows (legacy pre-F18) or with ≥1 source from an
+ * eligible recording is KEPT. In fail-closed mode EVERY provenance-attributed
+ * edge is suppressed (the exclusion set is unknown); if the provenance read
+ * ITSELF throws in fail-closed mode, every candidate edge is suppressed (we
+ * cannot prove any edge eligible).
  */
 function provenanceSuppressedEdgeIds(
   store: KnowledgeGraphStore,
   edgeIds: string[],
-  excluded: Set<string>
+  exclusion: GroundingExclusion
 ): Set<string> {
   const suppressed = new Set<string>()
-  if (excluded.size === 0 || edgeIds.length === 0) return suppressed
-  const placeholders = edgeIds.map(() => '?').join(',')
-  const rows = store.db.queryAll<{ edge_id: string; recording_id: string }>(
-    `SELECT edge_id, recording_id FROM graph_edge_sources WHERE edge_id IN (${placeholders})`,
-    edgeIds
-  )
+  if (edgeIds.length === 0 || exclusionIsNoop(exclusion)) return suppressed
+
+  let rows: Array<{ edge_id: string; recording_id: string }>
+  try {
+    rows = edgeProvenanceRows(store, edgeIds)
+  } catch (e) {
+    if (exclusion.failClosed) {
+      // Can't even read provenance while already failing closed — suppress
+      // every candidate edge (safe: no attributed content can leak).
+      console.error('[KnowledgeGraph] provenance read failed while fail-closed — suppressing all candidate edges:', e)
+      return new Set(edgeIds)
+    }
+    throw e
+  }
+
   const byEdge = new Map<string, string[]>()
   for (const r of rows) {
     const list = byEdge.get(r.edge_id)
@@ -991,10 +1074,36 @@ function provenanceSuppressedEdgeIds(
     else byEdge.set(r.edge_id, [r.recording_id])
   }
   for (const [edgeId, recIds] of byEdge) {
-    // Has ≥1 provenance row (it is in the map) AND every source is excluded.
-    if (recIds.every((id) => excluded.has(id))) suppressed.add(edgeId)
+    // fail-closed → any attributed edge (it has provenance rows) is suppressed;
+    // otherwise → suppressed only when EVERY source is excluded.
+    if (exclusion.failClosed || recIds.every((id) => exclusion.ids.has(id))) {
+      suppressed.add(edgeId)
+    }
   }
   return suppressed
+}
+
+/**
+ * P3 (round-3) — is a graph node visible under the current exclusion? A node is
+ * HIDDEN only when it has ≥1 incident edge AND every incident edge is
+ * provenance-suppressed (an "excluded-only" node). A node with no incident
+ * edges (isolated / not recording-tied) or with ≥1 eligible edge is visible.
+ * Used by the inspector/search read paths (searchGraphNodes, queryProvenance,
+ * getNodeDetail, default-center) so they never expose an excluded-only node.
+ */
+function isNodeVisibleUnderExclusion(
+  store: KnowledgeGraphStore,
+  nodeId: string,
+  exclusion: GroundingExclusion
+): boolean {
+  if (exclusionIsNoop(exclusion)) return true
+  const incident = store.db.queryAll<{ id: string }>(
+    'SELECT id FROM graph_edges WHERE source_id = ? OR target_id = ?',
+    [nodeId, nodeId]
+  )
+  if (incident.length === 0) return true // isolated — not recording-attributed
+  const suppressed = provenanceSuppressedEdgeIds(store, incident.map((e) => e.id), exclusion)
+  return suppressed.size < incident.length // ≥1 edge survived ⇒ visible
 }
 
 /**
@@ -1015,12 +1124,12 @@ function suppressExcludedFromView<
     nodes: Array<{ id: string }>
     edges: Array<{ id: string; source: string; target: string }>
   }
->(data: T, excluded: Set<string>): T {
-  if (excluded.size === 0 || data.edges.length === 0) return data
+>(data: T, exclusion: GroundingExclusion): T {
+  if (exclusionIsNoop(exclusion) || data.edges.length === 0) return data
   const suppressed = provenanceSuppressedEdgeIds(
     getKnowledgeGraphStore(),
     data.edges.map((e) => e.id),
-    excluded
+    exclusion
   )
   if (suppressed.size === 0) return data
 
@@ -1068,7 +1177,7 @@ export function neighborhoodFacts(
   entityId: string,
   hops = 1,
   maxFacts = 20,
-  excluded: Set<string> = getGroundingExclusionSet()
+  exclusion: GroundingExclusion = getGroundingExclusionSet()
 ): string {
   const data = queryNeighborhood(entityId, hops)
   if (!data.center || data.nodes.length <= 1) return ''
@@ -1080,7 +1189,7 @@ export function neighborhoodFacts(
   const suppressed = provenanceSuppressedEdgeIds(
     getKnowledgeGraphStore(),
     data.edges.map((e) => e.id),
-    excluded
+    exclusion
   )
 
   const lines: string[] = []
@@ -1199,6 +1308,9 @@ export function pickLensCenter(ownerContactId?: string | null): LensCenter | nul
   const store = getKnowledgeGraphStore()
   const node = pickDefaultCenter(store, ownerContactId ?? undefined)
   if (!node) return null
+  // P3 (round-3) — never default-center an excluded-only node; fall back to
+  // null so the caller builds the (already-suppressed) whole-graph lens.
+  if (!isNodeVisibleUnderExclusion(store, node.id, getGroundingExclusionSet())) return null
   const projects = projectNameIndex()
   const dto = nodeToDTO({ ...node, degree: 0 }, projects)
   return { id: dto.id, type: dto.type, label: dto.label, contactId: dto.contactId }
@@ -1223,6 +1335,13 @@ export function queryProvenance(entityId: string): ProvenanceDTO {
     dateMs: null,
   }
   if (!nodeId) return empty
+  // P3 (round-3) — an excluded-only center has no eligible provenance to show;
+  // and each listed entity is filtered so an excluded edge's contribution
+  // (e.g. a meeting reachable only via excluded provenance) is absent.
+  const exclusion = getGroundingExclusionSet()
+  if (!isNodeVisibleUnderExclusion(store, nodeId, exclusion)) return empty
+  const visible = (e: { id: string }): boolean =>
+    exclusionIsNoop(exclusion) || isNodeVisibleUnderExclusion(store, e.id, exclusion)
   const prov: Provenance = provenance(store, nodeId)
   const projects = projectNameIndex()
   const mapEntity = (e: {
@@ -1246,10 +1365,10 @@ export function queryProvenance(entityId: string): ProvenanceDTO {
   }
   return {
     node: prov.node ? mapEntity(prov.node) : null,
-    meetings: prov.meetings.map(mapEntity),
-    people: prov.people.map(mapEntity),
-    projects: prov.projects.map(mapEntity),
-    actions: prov.actions.map(mapEntity),
+    meetings: prov.meetings.filter(visible).map(mapEntity),
+    people: prov.people.filter(visible).map(mapEntity),
+    projects: prov.projects.filter(visible).map(mapEntity),
+    actions: prov.actions.filter(visible).map(mapEntity),
     pathIds: prov.pathIds,
     narrative: prov.narrative,
     dateMs: prov.dateMs,
@@ -1329,6 +1448,8 @@ export function getNodeDetail(entityId: string): NodeDetailDTO {
   if (!nodeId) return empty
   const node = store.getNode(nodeId)
   if (!node) return empty
+  // P3 (round-3) — the inspector must not expose an excluded-only node.
+  if (!isNodeVisibleUnderExclusion(store, nodeId, getGroundingExclusionSet())) return empty
 
   const projects = projectNameIndex()
   const dto = nodeToDTO({ ...node, degree: 0 }, projects)
