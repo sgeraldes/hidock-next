@@ -124,6 +124,21 @@ describe('entity-resolver', () => {
     expect(r.method).toBe('alias')
   })
 
+  it('resolves a project whose stored name differs only by Unicode form (NFKC-exact, tier 1b)', () => {
+    // Stored decomposed (e + U+0301), queried composed (U+00E9): SQLite's
+    // ASCII-only LOWER can't equate them and tier 3 skips pNorm === norm, so
+    // without the NFKC-exact scan this mention would resolve to nothing and the
+    // reconciler would auto-create a byte-twin project.
+    const decomposed = 'Café Project'
+    const composed = 'Café Project'
+    expect(decomposed).not.toBe(composed)
+    dbInstance.run("INSERT INTO projects (id, name) VALUES ('p-cafe', ?)", [decomposed])
+    const r = resolveProject(composed)
+    expect(r.id).toBe('p-cafe')
+    expect(r.confidence).toBe(0.95)
+    expect(r.method).toBe('exact-name')
+  })
+
   describe('ambiguous bare first names', () => {
     beforeEach(() => {
       dbInstance.run(`
