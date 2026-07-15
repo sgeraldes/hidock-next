@@ -15,6 +15,11 @@ vi.mock('../../services/artifact-service', () => ({
   getArtifactById: vi.fn()
 }))
 
+// ADV17-3 — gate getForCapture / openInFolder on the shared capture allowlist.
+vi.mock('../../services/recording-eligibility', () => ({
+  isCaptureEligible: vi.fn(() => true)
+}))
+
 describe('Artifact IPC Handlers', () => {
   let handlers: Record<string, Function> = {}
 
@@ -91,5 +96,46 @@ describe('Artifact IPC Handlers', () => {
     const result = await handlers['artifacts:openInFolder']({}, 'art-1')
     expect(result.success).toBe(true)
     expect(shell.showItemInFolder).toHaveBeenCalledWith('/data/artifacts/pdf/ab/art-1.pdf')
+  })
+
+  // ─── ADV17-3 (round-18) capture-eligibility gate ───────────────────────────
+  it('artifacts:getForCapture returns empty for an ineligible capture without querying', async () => {
+    const { isCaptureEligible } = await import('../../services/recording-eligibility')
+    const { getArtifactsForCapture } = await import('../../services/artifact-service')
+    vi.mocked(isCaptureEligible).mockReturnValueOnce(false)
+
+    const result = await handlers['artifacts:getForCapture']({}, 'cap-excluded')
+
+    expect(result.success).toBe(true)
+    expect(result.data).toEqual([])
+    // Fail-closed: never even reads the capture's artifacts.
+    expect(getArtifactsForCapture).not.toHaveBeenCalled()
+  })
+
+  it('artifacts:openInFolder refuses to reveal an ineligible capture\'s artifact', async () => {
+    const { isCaptureEligible } = await import('../../services/recording-eligibility')
+    const { getArtifactById } = await import('../../services/artifact-service')
+    const { shell } = await import('electron')
+    vi.mocked(getArtifactById).mockReturnValue({
+      id: 'art-1',
+      knowledge_capture_id: 'cap-excluded',
+      kind: 'pdf',
+      mime: 'application/pdf',
+      storage_path: '/data/artifacts/pdf/ab/art-1.pdf',
+      size: 10,
+      content_hash: 'h',
+      extracted_text: null,
+      metadata: null,
+      source_connector_id: null,
+      source_ref: null,
+      created_at: '2026-07-08T00:00:00Z'
+    })
+    vi.mocked(isCaptureEligible).mockReturnValueOnce(false)
+
+    const result = await handlers['artifacts:openInFolder']({}, 'art-1')
+
+    expect(result.success).toBe(false)
+    expect(result.error.code).toBe('NOT_FOUND')
+    expect(shell.showItemInFolder).not.toHaveBeenCalled()
   })
 })
