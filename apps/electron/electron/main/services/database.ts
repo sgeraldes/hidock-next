@@ -2188,15 +2188,45 @@ const MIGRATIONS: Record<number, () => void> = {
           console.warn('[Migration v42] add merge_journal.seq failed:', e)
         }
       }
-      // Backfill runs UNCONDITIONALLY (WHERE ... IS NULL makes it idempotent):
-      // repairPhase may have force-added the columns on this same boot, in
-      // which case the includes-guards above skip the ALTERs but legacy rows
-      // still need their values.
+      // Backfills run UNCONDITIONALLY (WHERE ... IS NULL makes them idempotent):
+      // repairPhase may have force-added the columns on this same boot — or an
+      // earlier FAILED v42 attempt may have added both nullable columns and
+      // died before filling them — in which case the includes-guards above
+      // skip the ALTERs but legacy rows still need their values.
+      //
+      // seq is ESSENTIAL (the unmerge ordering guard keys on it) and does not
+      // depend on snapshot validity, so it runs first, alone, and a failure
+      // RETHROWS — v42 must not be recorded over NULL-seq journals (same
+      // policy as the tombstone re-key below), or they would be stranded
+      // forever behind a recorded version with ordering unenforced.
       try {
-        database.run("UPDATE merge_journal SET loser_id = json_extract(loser_snapshot, '$.id') WHERE loser_id IS NULL")
         database.run('UPDATE merge_journal SET seq = rowid WHERE seq IS NULL')
       } catch (e) {
-        console.warn('[Migration v42] merge_journal backfill failed:', e)
+        console.warn('[Migration v42] merge_journal seq backfill failed:', e)
+        throw e
+      }
+      // loser_id is backfilled per-row behind json_valid so ONE malformed
+      // loser_snapshot cannot abort the statement and strand every valid row.
+      // Malformed rows are logged and keep loser_id NULL — the unmerge guard
+      // rejects them fail-closed (unreadable snapshot), never silently orders
+      // or undoes them. An unexpected statement failure still rethrows.
+      try {
+        const malformed = queryAll<{ id: string }>(
+          'SELECT id FROM merge_journal WHERE loser_id IS NULL AND NOT json_valid(loser_snapshot)'
+        )
+        if (malformed.length > 0) {
+          console.warn(
+            `[Migration v42] ${malformed.length} merge_journal row(s) have a malformed loser_snapshot and stay ` +
+              `un-unmergeable (fail-closed): ${malformed.map((r) => r.id).join(', ')}`
+          )
+        }
+        database.run(
+          "UPDATE merge_journal SET loser_id = json_extract(loser_snapshot, '$.id') " +
+            'WHERE loser_id IS NULL AND json_valid(loser_snapshot)'
+        )
+      } catch (e) {
+        console.warn('[Migration v42] merge_journal loser_id backfill failed:', e)
+        throw e
       }
     }
 
@@ -2566,25 +2596,36 @@ function repairPhase(): void {
   }
 
   // Repair merge_journal (v42): loser_id + seq for the dependency-aware
-  // newest-first unmerge guard. Force-add AND backfill so an older on-disk
-  // schema that skipped the migration still gets ordered, queryable journals
-  // before any unmerge runs. Idempotent (backfills are WHERE ... IS NULL).
+  // newest-first unmerge guard. Force-add so an older on-disk schema that
+  // skipped the migration still gets the columns before any unmerge runs.
   const journalCols = getTableColumns(database, 'merge_journal')
   if (journalCols.length > 0) {
     if (!journalCols.includes('loser_id')) {
       console.log('[Database] Repairing merge_journal: adding loser_id')
-      try {
-        database.run('ALTER TABLE merge_journal ADD COLUMN loser_id TEXT')
-        database.run("UPDATE merge_journal SET loser_id = json_extract(loser_snapshot, '$.id') WHERE loser_id IS NULL")
-      } catch { /* already exists */ }
+      try { database.run('ALTER TABLE merge_journal ADD COLUMN loser_id TEXT') } catch { /* already exists */ }
     }
     if (!journalCols.includes('seq')) {
       console.log('[Database] Repairing merge_journal: adding seq')
-      try {
-        database.run('ALTER TABLE merge_journal ADD COLUMN seq INTEGER')
-        database.run('UPDATE merge_journal SET seq = rowid WHERE seq IS NULL')
-      } catch { /* already exists */ }
+      try { database.run('ALTER TABLE merge_journal ADD COLUMN seq INTEGER') } catch { /* already exists */ }
     }
+    // Backfills run UNCONDITIONALLY every boot, independently, idempotent via
+    // WHERE ... IS NULL. This is the recovery path for a partially-applied
+    // earlier v42 attempt that added both nullable columns (making the
+    // conditional adds above no-ops) but died before filling them: a NULL seq
+    // makes that journal UNMERGEABLE (the guard rejects it fail-closed rather
+    // than ordering it as zero), so this backfill is what returns those
+    // journals to service. loser_id is guarded per-row by json_valid so one
+    // malformed snapshot never blocks the valid rows (malformed rows stay
+    // NULL and are rejected fail-closed at unmerge time).
+    try {
+      database.run('UPDATE merge_journal SET seq = rowid WHERE seq IS NULL')
+    } catch { /* seq column missing on an ancient schema — the migration adds it */ }
+    try {
+      database.run(
+        "UPDATE merge_journal SET loser_id = json_extract(loser_snapshot, '$.id') " +
+          'WHERE loser_id IS NULL AND json_valid(loser_snapshot)'
+      )
+    } catch { /* loser_id column missing on an ancient schema — the migration adds it */ }
   }
 
   // Repair project_notes (v29): force-create so an older on-disk DB that skipped
@@ -5216,19 +5257,51 @@ export class MergeOrderConflictError extends Error {
  * on the explicit immutable seq column, never rowid.
  */
 function assertNewestFirstUnmerge(row: MergeJournalRow): void {
-  const loserId = row.loser_id ?? ((): string | null => {
+  // Fail-closed on journals the ordering system cannot place: a NULL seq
+  // (partially-applied v42 that the boot-time repair backfill has not healed
+  // yet) must NEVER be silently ordered as zero — that would exempt the row
+  // from the guard entirely and reopen the out-of-order corruption class.
+  if (row.seq === null || row.seq === undefined) {
+    throw new Error(
+      `Merge journal ${row.id} has no merge-order sequence (seq) and cannot be safely undone. ` +
+        'Restart the app so the repair pass can backfill journal ordering, then retry.'
+    )
+  }
+  // ...and symmetrically: while ANY open journal of this kind is unsequenced,
+  // "newer than" is unknowable for the whole kind (a NULL-seq row can never
+  // match `seq > ?`, so it could silently fail to block an older undo). Pause
+  // undo for the kind until the backfill heals it — transient by construction,
+  // since seq backfill is unconditional on every boot and snapshot-independent.
+  const unsequenced = queryOne<{ id: string }>(
+    'SELECT id FROM merge_journal WHERE kind = ? AND undone_at IS NULL AND seq IS NULL LIMIT 1',
+    [row.kind]
+  )
+  if (unsequenced) {
+    throw new Error(
+      `Merge journal ${unsequenced.id} has no merge-order sequence (seq), so ${row.kind} merges cannot be ` +
+        'safely undone right now. Restart the app so the repair pass can backfill journal ordering, then retry.'
+    )
+  }
+  // Fail-closed on journals the undo cannot faithfully replay: if loser_id was
+  // never backfilled AND the snapshot is unparseable, the loser cannot be
+  // recreated from it — reject here with a precise message instead of letting
+  // JSON.parse explode mid-unmerge.
+  let loserId: string | null = row.loser_id
+  if (loserId === null || loserId === undefined) {
     try {
-      return (JSON.parse(row.loser_snapshot) as { id?: string }).id ?? null
+      loserId = (JSON.parse(row.loser_snapshot) as { id?: string }).id ?? null
     } catch {
-      return null
+      throw new Error(
+        `Merge journal ${row.id} has an unreadable loser snapshot; this merge cannot be undone.`
+      )
     }
-  })()
+  }
   const newer = queryOne<{ id: string; loser_snapshot: string }>(
     `SELECT id, loser_snapshot FROM merge_journal
      WHERE kind = ? AND undone_at IS NULL AND seq > ?
        AND (keeper_id = ? OR keeper_id = ? OR loser_id = ? OR loser_id = ?)
      ORDER BY seq DESC LIMIT 1`,
-    [row.kind, row.seq ?? 0, row.keeper_id, loserId, row.keeper_id, loserId]
+    [row.kind, row.seq, row.keeper_id, loserId, row.keeper_id, loserId]
   )
   if (!newer) return
   let blockingName: string | null = null

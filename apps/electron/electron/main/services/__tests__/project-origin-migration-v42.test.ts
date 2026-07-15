@@ -80,10 +80,21 @@ describe('schema v42: projects.origin (provenance-enforced discovered-project di
     expect(migration![0]).toContain('ALTER TABLE merge_journal ADD COLUMN seq INTEGER')
     expect(migration![0]).toContain("json_extract(loser_snapshot, '$.id')")
     expect(migration![0]).toContain('SET seq = rowid WHERE seq IS NULL')
-    // …and the shared unmerge guard orders strictly by seq, never rowid.
+    // …the loser_id backfill is json_valid-guarded per row (one malformed
+    // snapshot must not strand the valid rows)…
+    expect(migration![0]).toContain('json_valid(loser_snapshot)')
+    // …repairPhase re-runs both backfills unconditionally every boot (the
+    // partial-v42 recovery path for columns added by a failed attempt)…
+    const repair = source.match(/function repairPhase\(\): void \{[\s\S]*?\n\}/)
+    expect(repair).not.toBeNull()
+    expect(repair![0]).toContain('SET seq = rowid WHERE seq IS NULL')
+    expect(repair![0]).toContain('json_valid(loser_snapshot)')
+    // …and the shared unmerge guard orders strictly by seq, never rowid, and
+    // fails closed on unsequenced rows instead of ordering them as zero.
     const guard = source.match(/function assertNewestFirstUnmerge[\s\S]*?\n\}/)
     expect(guard).not.toBeNull()
     expect(guard![0]).toMatch(/seq > \?/)
     expect(guard![0]).not.toMatch(/rowid/)
+    expect(guard![0]).toContain('seq IS NULL')
   })
 })
