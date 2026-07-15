@@ -675,7 +675,7 @@ export function Actionables() {
                             {actionable.title}
                           </h3>
                           {actionable.description && expandedId !== actionable.id && (
-                            <p className="text-sm text-muted-foreground mt-1 line-clamp-1 italic pr-4">"{actionable.description}"</p>
+                            <p className="text-sm text-muted-foreground mt-1 line-clamp-1 italic pr-4">&quot;{actionable.description}&quot;</p>
                           )}
                         </button>
                         <div className="flex items-center gap-3 mt-3">
@@ -896,7 +896,7 @@ export function Actionables() {
               </div>
               <p className="text-sm text-muted-foreground leading-relaxed">
                 HiDock automatically detects the intent to share information or follow up.
-                For example, after a meeting with a candidate, I'll suggest generating **Interview Feedback**.
+                For example, after a meeting with a candidate, I&apos;ll suggest generating **Interview Feedback**.
               </p>
             </CardContent>
           </Card>

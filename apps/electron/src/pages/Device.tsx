@@ -1483,7 +1483,7 @@ export function Device() {
                 <div className="space-y-2">
                   <h3 className="font-medium">1. Connect your device</h3>
                   <p className="text-sm text-muted-foreground">
-                    Plug in your HiDock via USB and click "Connect Device" to establish a connection
+                    Plug in your HiDock via USB and click &quot;Connect Device&quot; to establish a connection
                   </p>
                 </div>
                 <div className="space-y-2">

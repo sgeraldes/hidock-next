@@ -110,7 +110,7 @@ export function ActionableDetail({ actionable, resolveRecipient }: ActionableDet
       {actionable.description && (
         <DetailSection icon={FileText} label="What was detected">
           <p className="italic text-muted-foreground leading-relaxed whitespace-pre-wrap">
-            "{actionable.description}"
+            &quot;{actionable.description}&quot;
           </p>
         </DetailSection>
       )}
