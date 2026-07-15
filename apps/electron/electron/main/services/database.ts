@@ -2167,15 +2167,6 @@ const MIGRATIONS: Record<number, () => void> = {
 function repairPhase(): void {
   const database = getDatabase()
 
-  // Repair Projects (v42): origin provenance column. Force-add so an older
-  // on-disk schema that skipped the migration still gets the column before the
-  // reconciler or dismissDiscoveredProject touches it. Idempotent.
-  const projectCols = getTableColumns(database, 'projects')
-  if (projectCols.length > 0 && !projectCols.includes('origin')) {
-    console.log('[Database] Repairing projects: adding origin')
-    try { database.run('ALTER TABLE projects ADD COLUMN origin TEXT') } catch (e) { /* already exists */ }
-  }
-
   // Repair Meetings (v32): all-day flag + named calendar date. Force-add so an
   // older on-disk schema that skipped the migration still gets the columns
   // before any calendar-sync write. Idempotent.
@@ -2453,7 +2444,10 @@ function repairPhase(): void {
     }
   }
 
-  // Repair projects (v29): force-add folder_path/url if missing.
+  // Repair projects (v29 + v42): force-add folder_path/url and the origin
+  // provenance column if missing, so an older on-disk schema that skipped a
+  // migration still gets them before the reconciler or dismissDiscoveredProject
+  // touches the table. Idempotent.
   const projectCols = getTableColumns(database, 'projects')
   if (projectCols.length > 0) {
     for (const col of ['folder_path', 'url']) {
@@ -2461,6 +2455,10 @@ function repairPhase(): void {
         console.log(`[Database] Repairing projects: adding ${col}`)
         try { database.run(`ALTER TABLE projects ADD COLUMN ${col} TEXT`) } catch (e) {}
       }
+    }
+    if (!projectCols.includes('origin')) {
+      console.log('[Database] Repairing projects: adding origin')
+      try { database.run('ALTER TABLE projects ADD COLUMN origin TEXT') } catch (e) { /* already exists */ }
     }
   }
 
