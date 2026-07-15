@@ -39,6 +39,9 @@ const mockGenerateContent = vi.fn()
 // write capture + brain seam so the gate's skip branches are testable at the
 // wire level (through transcribeManually), not just at the predicate level.
 const mockIsValueExcludedRecording = vi.fn((..._args: any[]) => false)
+// ARF-3 — the post-analysis processability gate. Default true (live); the
+// ARF-3 describe below drives it false to simulate a mid-analysis trash.
+const mockIsRecordingProcessable = vi.fn((..._args: any[]) => true)
 const mockRun = vi.fn()
 const mockBrainGenerate = vi.fn()
 // The local-asr fake child process returns this as the transcript text. The
@@ -124,7 +127,9 @@ vi.mock('../database', () => ({
   // Default false (not excluded); the actionable-gate describe below drives
   // it per-test. The DB-level predicate itself is covered by
   // value-gates.test.ts against a real engine.
-  isValueExcludedRecording: (...args: any[]) => mockIsValueExcludedRecording(...args)
+  isValueExcludedRecording: (...args: any[]) => mockIsValueExcludedRecording(...args),
+  // ARF-3 — post-analysis boundary gate.
+  isRecordingProcessable: (...args: any[]) => mockIsRecordingProcessable(...args)
 }))
 
 vi.mock('electron', () => ({
@@ -205,6 +210,14 @@ vi.mock('../meeting-wiki', () => ({ exportMeetingWiki: vi.fn(() => null) }))
 vi.mock('../timeline-analysis', () => ({ analyzeTimeline: vi.fn(async () => ({ sentimentSegments: [], eventMarkers: [] })) }))
 vi.mock('../org-reconciler', () => ({ applyTranscriptEntities: vi.fn(() => ({ contacts: 0, projectLinked: false })) }))
 vi.mock('../self-identification', () => ({ runSelfIdentificationForRecording: vi.fn(async () => ({ bound: 0, mergeSuspected: 0 })) }))
+
+// ARF-3 — static handles to the (mocked) post-analysis derivative boundaries,
+// so a test can assert they are / are not reached. The transcription pipeline
+// dynamic-imports these; vitest resolves both to the same mock instances.
+import { exportMeetingWiki } from '../meeting-wiki'
+import { analyzeTimeline } from '../timeline-analysis'
+import { applyTranscriptEntities } from '../org-reconciler'
+import { runSelfIdentificationForRecording } from '../self-identification'
 
 function resetConfig(overrides: Partial<typeof mockConfig.transcription> = {}) {
   mockConfig = {
@@ -563,5 +576,102 @@ describe('transcribeRecording — actionable-detection value gate (T2 wire level
     expect(actionableInserts()).toHaveLength(0)
     // Both the pre-check and the post-await re-check consulted the predicate.
     expect(mockIsValueExcludedRecording.mock.calls.length).toBeGreaterThanOrEqual(2)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ARF-3 (Codex adversarial FINAL review) — a soft-delete / mark-personal that
+// lands while an in-flight transcription is running must stop NEW post-analysis
+// derivatives (title, actionables, timeline, org-reconcile, identity,
+// transcript-ready emit, wiki export, vector index). isRecordingProcessable is
+// the point-read gate checked before each boundary.
+// ---------------------------------------------------------------------------
+
+describe('transcribeRecording — ARF-3 in-flight trash stops post-analysis derivatives', () => {
+  const LONG_ASR_TEXT = Array.from({ length: 120 }, (_, i) => `palabra${i}`).join(' ')
+  const actionableInserts = () =>
+    mockRun.mock.calls.filter((c) => String(c[0]).includes('INSERT INTO actionables'))
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    resetConfig()
+    mockIsValueExcludedRecording.mockReturnValue(false)
+    mockIsRecordingProcessable.mockReturnValue(true)
+    mockBrainGenerate.mockResolvedValue(
+      JSON.stringify([
+        { type: 'action_items', confidence: 0.9, suggestedTitle: 'Enviar notas', reason: 'r', suggestedTemplate: 'action_items' }
+      ])
+    )
+    mockAsrText = LONG_ASR_TEXT
+    mockGetRecordingById.mockReturnValue({
+      id: 'rec-trash',
+      filename: 'trash.wav',
+      file_path: 'G:\\Recordings\\trash.wav',
+      status: 'complete'
+    })
+    mockQueryAll.mockImplementation(() => [])
+    mockQueryOne.mockReturnValue({ id: 'cap-trash' })
+    mockEnsureCapture.mockReturnValue('cap-trash')
+    mockApplyCaptureValueClassification.mockReturnValue({ applied: true, rating: 'unrated' })
+    mockGenerateContent.mockResolvedValue(geminiJsonResponse(BASE_ANALYSIS))
+  })
+
+  it('control (processable): every post-analysis derivative is persisted', async () => {
+    const { transcribeManually } = await import('../transcription')
+    await transcribeManually('rec-trash')
+
+    expect(mockInsertTranscript).toHaveBeenCalled() // the transcript itself
+    expect(mockUpdateKnowledgeCaptureTitle).toHaveBeenCalled()
+    expect(actionableInserts().length).toBeGreaterThan(0)
+    expect(vi.mocked(analyzeTimeline)).toHaveBeenCalled()
+    expect(vi.mocked(applyTranscriptEntities)).toHaveBeenCalled()
+    expect(vi.mocked(runSelfIdentificationForRecording)).toHaveBeenCalled()
+    expect(vi.mocked(exportMeetingWiki)).toHaveBeenCalled()
+    expect(mockEmitDomainEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'entity:transcript-ready' })
+    )
+  })
+
+  it('trashed mid-analysis (isRecordingProcessable=false): the transcript persists but ZERO derivatives do', async () => {
+    mockIsRecordingProcessable.mockReturnValue(false)
+
+    const { transcribeManually } = await import('../transcription')
+    await transcribeManually('rec-trash')
+
+    // Transcript row + status still written (its own primary artifact — accepted).
+    expect(mockInsertTranscript).toHaveBeenCalled()
+
+    // Every downstream derivative boundary is skipped.
+    expect(mockUpdateKnowledgeCaptureTitle).not.toHaveBeenCalled()
+    expect(actionableInserts()).toHaveLength(0)
+    expect(vi.mocked(analyzeTimeline)).not.toHaveBeenCalled()
+    expect(vi.mocked(applyTranscriptEntities)).not.toHaveBeenCalled()
+    expect(vi.mocked(runSelfIdentificationForRecording)).not.toHaveBeenCalled()
+    expect(vi.mocked(exportMeetingWiki)).not.toHaveBeenCalled()
+    expect(mockEmitDomainEvent).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'entity:transcript-ready' })
+    )
+  })
+
+  it('trashed AFTER the timeline stage: later boundaries (org-reconcile, wiki, transcript-ready) skip (per-boundary re-check)', async () => {
+    // The recording becomes ineligible DURING the timeline stage — proving the
+    // gate is re-evaluated before EACH boundary, not once up front.
+    vi.mocked(analyzeTimeline).mockImplementation(async () => {
+      mockIsRecordingProcessable.mockReturnValue(false)
+      return { sentimentSegments: [], eventMarkers: [] }
+    })
+
+    const { transcribeManually } = await import('../transcription')
+    await transcribeManually('rec-trash')
+
+    // Timeline ran while still eligible…
+    expect(vi.mocked(analyzeTimeline)).toHaveBeenCalled()
+    // …but every boundary AFTER it was skipped.
+    expect(vi.mocked(applyTranscriptEntities)).not.toHaveBeenCalled()
+    expect(vi.mocked(runSelfIdentificationForRecording)).not.toHaveBeenCalled()
+    expect(vi.mocked(exportMeetingWiki)).not.toHaveBeenCalled()
+    expect(mockEmitDomainEvent).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'entity:transcript-ready' })
+    )
   })
 })

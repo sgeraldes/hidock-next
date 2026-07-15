@@ -110,6 +110,7 @@ import {
   queryOne,
   queryAll,
   isValueExcludedRecording,
+  isRecordingProcessable,
   acquireTranscriptionLock,
   releaseTranscriptionLock,
   clearStaleTranscriptionLock,
@@ -1730,8 +1731,35 @@ Meeting ${i + 1}: "${m.subject}"
     saveDatabase()
   }
 
+  // ARF-3 (Codex adversarial FINAL review, BINDING) — from here on every step
+  // PERSISTS a NEW derivative (title, actionables, timeline, org-reconcile,
+  // self-identification, transcript-ready emit, wiki export, vector index).
+  // Each of those boundaries is separated by an async LLM/IO await, during
+  // which the user may have moved this recording to Trash (soft delete) or
+  // marked it personal. Soft delete already removes queued rows and tombstones
+  // the processing queue row, but this in-flight worker keeps running — so we
+  // re-check a cheap point-read immediately before each boundary and, on the
+  // first ineligible result, log ONCE and skip ALL remaining steps. The
+  // transcript row + status were already persisted above (acceptable — that is
+  // the recording's own primary artifact); this gate protects the downstream
+  // DERIVATIVES the trashed recording must not spawn. The graph path is gated
+  // separately at ingest time by isRecordingGraphIngestable.
+  let processabilitySkipLogged = false
+  const stillProcessable = (): boolean => {
+    if (isRecordingProcessable(recordingId)) return true
+    if (!processabilitySkipLogged) {
+      processabilitySkipLogged = true
+      console.log(
+        `[Transcription] Recording ${recordingId} was trashed or marked personal mid-analysis — ` +
+          'skipping all remaining post-analysis derivatives (title, actionables, timeline, ' +
+          'org-reconcile, identity, transcript-ready, wiki, vector index)'
+      )
+    }
+    return false
+  }
+
   // Auto-update recording title if we have a title suggestion
-  if (analysis.title_suggestion) {
+  if (analysis.title_suggestion && stillProcessable()) {
     updateKnowledgeCaptureTitle(recordingId, analysis.title_suggestion)
   }
 
@@ -1746,7 +1774,10 @@ Meeting ${i + 1}: "${m.subject}"
   // key_points JSON (already written into the transcript row above) and the
   // timeline pass below untouched — those are display data, not an
   // intelligence surface.
-  if (isValueExcludedRecording(recordingId)) {
+  if (!stillProcessable()) {
+    // ARF-3 — trashed/personal mid-analysis: skip actionable extraction too
+    // (value-exclusion alone did NOT cover soft-delete/personal).
+  } else if (isValueExcludedRecording(recordingId)) {
     console.log(
       `[Actionable Detection] Skipped value-excluded recording ${recordingId} (no actionables extracted)`
     )
@@ -1768,8 +1799,9 @@ Meeting ${i + 1}: "${m.subject}"
       // persisting anything, so a rating committed while detection was in
       // flight still gates the inserts. (The pre-check above stays: it is the
       // cost gate that skips the LLM call entirely for a recording already
-      // known to be excluded.)
-      if (isValueExcludedRecording(recordingId)) {
+      // known to be excluded.) ARF-3 — the same fresh re-check also covers a
+      // soft-delete / mark-personal that landed while detection was in flight.
+      if (!stillProcessable() || isValueExcludedRecording(recordingId)) {
         console.log(
           `[Actionable Detection] Skipped value-excluded recording ${recordingId} (rating landed mid-detection; no actionables persisted)`
         )
@@ -1819,7 +1851,7 @@ Meeting ${i + 1}: "${m.subject}"
   // without a manual analyzeTimeline() call. Dynamic import avoids a static
   // cycle (timeline-analysis is otherwise a leaf). Non-fatal — the transcript is
   // already persisted; a timeline failure must not fail the transcription.
-  try {
+  if (stillProcessable()) try {
     const { analyzeTimeline } = await import('./timeline-analysis')
     const timeline = await analyzeTimeline(recordingId)
     console.log(
@@ -1832,7 +1864,7 @@ Meeting ${i + 1}: "${m.subject}"
 
   // Persist people + project the analysis extracted from the conversation
   // (the ICS feed has no attendee data — the transcript is the source).
-  try {
+  if (stillProcessable()) try {
     const { applyTranscriptEntities } = await import('./org-reconciler')
     const linkedMeetingId =
       (analysis.selected_meeting_id && analysis.selected_meeting_id !== 'none'
@@ -1859,7 +1891,7 @@ Meeting ${i + 1}: "${m.subject}"
   // speaker map. LLM-gated by a cheap lexical prefilter; non-fatal. Runs AFTER
   // applyTranscriptEntities so its 'self-identification' tier upgrades any
   // weaker attendee-context resolution just written for the same name.
-  try {
+  if (stillProcessable()) try {
     const { runSelfIdentificationForRecording } = await import('./self-identification')
     const selfId = await runSelfIdentificationForRecording(recordingId)
     if (selfId.bound > 0 || selfId.mergeSuspected > 0) {
@@ -1873,8 +1905,11 @@ Meeting ${i + 1}: "${m.subject}"
   }
 
   // Living knowledge graph (v27): announce the finished transcript so graph-sync
-  // can debounce-ingest only the new material. Non-fatal.
-  try {
+  // can debounce-ingest only the new material. Non-fatal. ARF-3 — gated so a
+  // trashed/personal recording never even triggers the debounced graph ingest
+  // (isRecordingGraphIngestable is the ultimate backstop at ingest time, but
+  // not emitting is cheaper and clearer).
+  if (stillProcessable()) try {
     const { getEventBus } = await import('./event-bus')
     getEventBus().emitDomainEvent({
       type: 'entity:transcript-ready',
@@ -1887,7 +1922,7 @@ Meeting ${i + 1}: "${m.subject}"
 
   // Export the per-meeting wiki page (plain markdown knowledge base readable
   // by the user and by external agents like Claude Code). Non-fatal.
-  try {
+  if (stillProcessable()) try {
     const { exportMeetingWiki } = await import('./meeting-wiki')
     const wikiPath = exportMeetingWiki(recordingId)
     if (wikiPath) console.log(`[MeetingWiki] Exported ${wikiPath}`)
@@ -1897,8 +1932,11 @@ Meeting ${i + 1}: "${m.subject}"
 
   progressCallback?.('indexing', 85) // spec-014: progress reporting
 
-  // Index transcript into vector store for RAG
-  try {
+  // Index transcript into vector store for RAG. ARF-3 — gated: a trashed /
+  // personal recording must not be indexed into the assistant's retrieval
+  // store (the exclusion set filters SEARCH results, but not indexing new
+  // ones for an in-flight transcription; skip it outright here).
+  if (stillProcessable()) try {
     const vectorStore = getVectorStore()
     // Use the AI-linked meeting ID if available, otherwise fall back to the original
     const meetingId = analysis.selected_meeting_id || recording.meeting_id

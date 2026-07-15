@@ -3113,6 +3113,10 @@ export function setRecordingPersonal(id: string, personal: boolean): boolean | u
       // Pull it out of the transcription queue immediately (a queued personal
       // recording must not be processed). Leaves completed history intact.
       runNoSave("DELETE FROM transcription_queue WHERE recording_id = ? AND status IN ('pending', 'failed')", [id])
+      // ARF-3 — tombstone a PROCESSING row too, mirroring soft delete: a
+      // recording marked personal mid-analysis stops persisting new
+      // post-analysis derivatives (gated by isRecordingProcessable).
+      runNoSave("UPDATE transcription_queue SET status = 'cancelled' WHERE recording_id = ? AND status = 'processing'", [id])
     }
   })
   return personal
@@ -3212,6 +3216,27 @@ export function isRecordingGraphIngestable(recordingId: string): boolean {
   )
   if (!rec) return false
   return !isValueExcludedRecording(recordingId)
+}
+
+/**
+ * ARF-3 (Codex adversarial FINAL review) — cheap point-read: may the
+ * transcription pipeline still persist post-analysis derivatives (timeline,
+ * title, org-reconcile, identity, transcript-ready emit, wiki export, vector
+ * index) for this recording? True only when the recording still EXISTS, is NOT
+ * soft-deleted, and is NOT personal. Deliberately WITHOUT the value-exclusion
+ * check (unlike isRecordingGraphIngestable): a value-excluded recording is
+ * still transcribed and its own display data persisted — only its intelligence
+ * surfaces are value-gated separately. Checked immediately before each
+ * post-analysis boundary in transcribeRecording so a mid-flight soft-delete /
+ * mark-personal stops NEW derivatives from being written after the user
+ * trashed the recording.
+ */
+export function isRecordingProcessable(recordingId: string): boolean {
+  const rec = queryOne<{ id: string }>(
+    'SELECT id FROM recordings WHERE id = ? AND deleted_at IS NULL AND COALESCE(personal,0) = 0',
+    [recordingId]
+  )
+  return !!rec
 }
 
 /**
@@ -3609,6 +3634,11 @@ export function deleteRecordingCascade(
       runNoSave('UPDATE recordings SET deleted_at = ? WHERE id = ?', [now, recordingId])
       // Stop any in-flight/queued transcription for a hidden recording.
       runNoSave("DELETE FROM transcription_queue WHERE recording_id = ? AND status IN ('pending', 'failed')", [recordingId])
+      // ARF-3 — tombstone (cancel) a PROCESSING row too: a worker mid-analysis
+      // can then bail between stages if it checks, and the post-analysis
+      // boundary gates (isRecordingProcessable in transcription.ts) refuse to
+      // persist any further derivatives for this now-trashed recording.
+      runNoSave("UPDATE transcription_queue SET status = 'cancelled' WHERE recording_id = ? AND status = 'processing'", [recordingId])
       runNoSave(
         `INSERT INTO deletion_journal (id, recording_id, mode, recording_snapshot, created_at)
          VALUES (?, ?, 'soft', ?, ?)`,
