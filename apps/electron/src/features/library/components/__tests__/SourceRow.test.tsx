@@ -220,7 +220,7 @@ describe('SourceRow delete/restore menu — location label matrix (spec-005/F17 
     const trash = await screen.findByRole('menuitem', { name: /move to trash/i })
     const permanent = screen.getByRole('menuitem', { name: /delete permanently/i })
     expect(trash).toHaveAccessibleName(/move to trash.*hide it and stop ai processing.*restorable/i)
-    expect(permanent).toHaveAccessibleName(/delete permanently.*erase the file and all derived data.*can.t be undone/i)
+    expect(permanent).toHaveAccessibleName(/delete permanently.*erase the file and its attributable derived data.*can.t be undone/i)
     expect(screen.queryByRole('menuitem', { name: /delete from device/i })).not.toBeInTheDocument()
     // Order: Move to Trash before Delete permanently.
     const menu = screen.getByRole('menu')

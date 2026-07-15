@@ -19,7 +19,14 @@ export const SCOPE_DEVICE_DELETE = "Erase the recording from the HiDock. Can't b
 export const SCOPE_DEVICE_DELETE_SYNCED = 'Erase the recording from the HiDock. Keeps the local copy.'
 export const SCOPE_DEVICE_NOT_CONNECTED = 'Device not connected'
 export const SCOPE_TRASH = 'Hide it and stop AI processing. Restorable — keeps the file.'
-export const SCOPE_PERMANENT = "Erase the file and all derived data from this computer. Can't be undone."
+// RE3-6 (round-3) — "all derived data" was absolute/false: legacy graph
+// contributions from recordings analyzed by an earlier version can't be removed
+// per-recording (see LEGACY_GRAPH_DISCLOSURE). This menu/aria scope text (used
+// in SourceRow + SourceReader, where the full caveat doesn't fit) is scoped to
+// "attributable" derived data so it's honest at every visible+accessible
+// surface; the dialog still carries the full disclosure.
+export const SCOPE_PERMANENT =
+  "Erase the file and its attributable derived data from this computer. Can't be undone."
 export const SCOPE_RESTORE = 'Un-hide and resume AI processing.'
 
 /** Load-bearing aria-label join: folds the muted second line into the item's accessible name. */
