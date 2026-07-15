@@ -1,4 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
+import { readdirSync } from 'fs'
+import { tmpdir } from 'os'
 
 // Replace the electron-dependent modules so importing ingestion.ts doesn't pull
 // in config.ts (which calls app.getPath at module load). The sink under test is
@@ -98,9 +100,14 @@ describe('ConnectorIngestionSink routing', () => {
     const items: SourceItem[] = [
       { externalId: 'x', kind: 'image', mime: 'image/png', createdAt: '2026-07-09T00:00:00Z' },
     ]
+    // stageArtifact mkdtemps its staging dir BEFORE it knows the item is
+    // unfetchable — a skipped item must not strand that dir in %TEMP%.
+    const before = new Set(readdirSync(tmpdir()).filter((n) => n.startsWith('hidock-conn-')))
     const outcome = await sink.ingest('slack', container, items)
     expect(outcome.artifacts).toBe(0)
     expect(outcome.skipped).toBe(1)
+    const leaked = readdirSync(tmpdir()).filter((n) => n.startsWith('hidock-conn-') && !before.has(n))
+    expect(leaked).toEqual([])
   })
 
   it('batches multiple meetings into a single upsert call', async () => {

@@ -62,7 +62,7 @@ describe('useUnifiedRecordings', () => {
       setUnifiedRecordingsError: vi.fn(),
       markUnifiedRecordingsLoaded: vi.fn()
     }
-    // @ts-ignore
+    // @ts-ignore - useAppStore is vi-mocked, so mockImplementation exists at runtime
     useAppStore.mockImplementation((selector: any) => selector(storeState))
   })
 
@@ -136,9 +136,9 @@ describe('useUnifiedRecordings', () => {
         status: 'ready'
       }]
 
-      // @ts-ignore
+      // @ts-ignore - electronAPI members are vi.fn mocks in tests
       window.electronAPI.recordings.getAll.mockResolvedValue(mockRecs)
-      // @ts-ignore
+      // @ts-ignore - electronAPI members are vi.fn mocks in tests
       window.electronAPI.knowledge.getAll.mockResolvedValue(mockCaptures)
 
       renderHook(() => useUnifiedRecordings())
@@ -164,9 +164,9 @@ describe('useUnifiedRecordings', () => {
         status: 'complete',
         date_recorded: '2025-01-01T10:00:00Z'
       }]
-      // @ts-ignore
+      // @ts-ignore - electronAPI members are vi.fn mocks in tests
       window.electronAPI.recordings.getAll.mockResolvedValue(mockRecs)
-      // @ts-ignore
+      // @ts-ignore - electronAPI members are vi.fn mocks in tests
       window.electronAPI.knowledge.getAll.mockResolvedValue([])
 
       renderHook(() => useUnifiedRecordings())
@@ -275,7 +275,7 @@ describe('useUnifiedRecordings', () => {
 
   describe('error handling', () => {
     it('sets error state when recordings fetch fails', async () => {
-      // @ts-ignore
+      // @ts-ignore - electronAPI members are vi.fn mocks in tests
       window.electronAPI.recordings.getAll.mockRejectedValue(new Error('Database error'))
 
       renderHook(() => useUnifiedRecordings())
@@ -286,7 +286,7 @@ describe('useUnifiedRecordings', () => {
     })
 
     it('sets error state with generic message for non-Error exceptions', async () => {
-      // @ts-ignore
+      // @ts-ignore - electronAPI members are vi.fn mocks in tests
       window.electronAPI.recordings.getAll.mockRejectedValue('string error')
 
       renderHook(() => useUnifiedRecordings())
@@ -297,7 +297,7 @@ describe('useUnifiedRecordings', () => {
     })
 
     it('decrements loading counter on error', async () => {
-      // @ts-ignore
+      // @ts-ignore - electronAPI members are vi.fn mocks in tests
       window.electronAPI.recordings.getAll.mockRejectedValue(new Error('Fetch failed'))
 
       renderHook(() => useUnifiedRecordings())
@@ -323,7 +323,7 @@ describe('useUnifiedRecordings', () => {
   describe('electronAPI guard - crash prevention', () => {
     it('does not crash when window.electronAPI is undefined', () => {
       const savedAPI = window.electronAPI
-      // @ts-ignore
+      // @ts-ignore - simulate a non-Electron environment
       delete window.electronAPI
 
       try {
@@ -337,7 +337,7 @@ describe('useUnifiedRecordings', () => {
 
     it('returns empty recordings when electronAPI is undefined', async () => {
       const savedAPI = window.electronAPI
-      // @ts-ignore
+      // @ts-ignore - simulate a non-Electron environment
       delete window.electronAPI
 
       try {
@@ -353,7 +353,7 @@ describe('useUnifiedRecordings', () => {
 
     it('does not crash when electronAPI.onRecordingAdded is undefined', () => {
       const savedAPI = window.electronAPI
-      // @ts-ignore
+      // @ts-ignore - install a deliberately partial electronAPI for this case
       window.electronAPI = { recordings: { getAll: vi.fn().mockResolvedValue([]) } }
 
       try {
@@ -367,7 +367,7 @@ describe('useUnifiedRecordings', () => {
 
     it('does not crash when electronAPI.recordings is undefined', () => {
       const savedAPI = window.electronAPI
-      // @ts-ignore
+      // @ts-ignore - install a deliberately partial electronAPI for this case
       window.electronAPI = { onRecordingAdded: vi.fn(() => vi.fn()) }
 
       try {
@@ -439,8 +439,14 @@ describe('useUnifiedRecordings', () => {
 
       renderHook(() => useUnifiedRecordings())
 
-      // Wait a tick for effects to run
-      await new Promise(resolve => setTimeout(resolve, 50))
+      // Mount effects run in declaration order, and a wrongly-triggered load calls
+      // recordings.getAll() synchronously inside the initial-load effect body. So once
+      // the later-declared recording-watcher effect has subscribed, the load-or-skip
+      // decision has already been made — wait for that instead of a fixed sleep.
+      await vi.waitFor(
+        () => expect(window.electronAPI.onRecordingAdded).toHaveBeenCalled(),
+        { timeout: 15000, interval: 25 }
+      )
 
       // Should NOT have called any API because data is already loaded
       expect(window.electronAPI.recordings.getAll).not.toHaveBeenCalled()
@@ -460,7 +466,7 @@ describe('useUnifiedRecordings', () => {
 
     it('returns unsubscribe function from onRecordingAdded', () => {
       const unsubscribeFn = vi.fn()
-      // @ts-ignore
+      // @ts-ignore - electronAPI members are vi.fn mocks in tests
       window.electronAPI.onRecordingAdded.mockReturnValue(unsubscribeFn)
 
       const { unmount } = renderHook(() => useUnifiedRecordings())

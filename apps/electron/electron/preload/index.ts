@@ -401,13 +401,6 @@ export interface ElectronAPI {
     updateDuration: (id: string, durationSeconds: number) => Promise<{ success: boolean; error?: string }>
     backfillDurations: () => Promise<{ success: boolean; scanned?: number; updated?: number; markedLowValue?: number; error?: string }>
     linkToMeeting: (recordingId: string, meetingId: string, confidence: number, method: string) => Promise<any>
-    delete: (id: string) => Promise<boolean>
-    deleteBatch: (ids: string[]) => Promise<{
-      success: boolean
-      deleted: number
-      failed: number
-      errors: Array<{ id: string; error: string }>
-    }>
     // Privacy source-deletion (v38)
     markPersonal: (id: string, personal: boolean) => Promise<{ success: boolean; personal?: boolean; error?: string }>
     deletionImpact: (id: string) => Promise<{
@@ -1277,8 +1270,6 @@ const electronAPI: ElectronAPI = {
     backfillDurations: () => callIPC('recordings:backfillDurations'),
     linkToMeeting: (recordingId, meetingId, confidence, method) =>
       callIPC('db:link-recording-to-meeting', recordingId, meetingId, confidence, method),
-    delete: (id) => callIPC('recordings:delete', id),
-    deleteBatch: (ids) => callIPC('recordings:deleteBatch', ids),
     markPersonal: (id, personal) => callIPC('recordings:markPersonal', id, personal),
     deletionImpact: (id) => callIPC('recordings:deletionImpact', id),
     deleteCascade: (id, hard) => callIPC('recordings:deleteCascade', id, hard),
