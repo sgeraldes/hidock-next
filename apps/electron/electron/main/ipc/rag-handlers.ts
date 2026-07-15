@@ -3,7 +3,7 @@
  */
 
 import { ipcMain } from 'electron'
-import { getRAGService, RAGResponse } from '../services/rag'
+import { getRAGService } from '../services/rag'
 import { getVectorStore } from '../services/vector-store'
 import { getChatLLMService } from '../services/chat-llm'
 import { success, error, Result } from '../types/api'
@@ -101,15 +101,23 @@ export function registerRAGHandlers(): void {
 
         const response = await rag.chat(sessionId, message, meetingFilter)
 
+        // ADV22-1 (round-23) — CONTENT-FREE release. The RAG chat IPC returns ONLY the
+        // generationId + a non-content status; NEVER the answer text or source excerpts.
+        // The generated content stays in main's PendingGeneration (keyed by generationId)
+        // and reaches the renderer through EXACTLY ONE sanitized path:
+        // assistant:addMessage(generationId), which revalidates provenance at persist and
+        // redacts via the shared read boundary. A recording/capture can be excluded DURING
+        // the provider await (after the pre-call eligibility check), so releasing the raw
+        // answer here would bypass that final revalidation.
         if (response.error) {
-          return error('INTERNAL_ERROR', response.error)
+          // A provider/generation failure still carries a generationId whose MAIN-owned
+          // error text is replayed by assistant:addMessage. Surface it as a non-content
+          // error status so the renderer can trigger that replay (or the notice catalog
+          // when no generation exists).
+          return success({ generationId: response.generationId, status: 'error', error: response.error })
         }
 
-        return success({
-          answer: response.answer,
-          sources: response.sources,
-          generationId: response.generationId
-        })
+        return success({ generationId: response.generationId, status: 'ok' })
       } catch (err) {
         console.error('rag:chat error:', err)
         return error('INTERNAL_ERROR', 'Failed to process chat message', err)
@@ -117,14 +125,18 @@ export function registerRAGHandlers(): void {
     }
   )
 
-  // Legacy handler for backwards compatibility
+  // Legacy handler for backwards compatibility — ALSO content-free (ADV22-1, round-23).
+  // Returns ONLY generationId + a non-content error string; never the answer or sources.
+  // Chat.tsx consumes this path and obtains the displayable answer solely via
+  // assistant:addMessage(generationId).
   ipcMain.handle(
     'rag:chat-legacy',
     async (
       _event,
       { sessionId, message, meetingFilter }: { sessionId: string; message: string; meetingFilter?: string }
-    ): Promise<RAGResponse> => {
-      return rag.chat(sessionId, message, meetingFilter)
+    ): Promise<{ generationId?: string; error?: string }> => {
+      const response = await rag.chat(sessionId, message, meetingFilter)
+      return { generationId: response.generationId, error: response.error }
     }
   )
 

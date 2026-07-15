@@ -112,13 +112,23 @@ export interface RAGChatRequest {
 }
 
 /**
- * RAG chat response with sources
+ * RAG chat response — CONTENT-FREE (ADV22-1, round-23).
+ *
+ * The RAG chat IPC returns ONLY a generation id + a non-content status. The
+ * generated answer TEXT and its source excerpts stay in main's PendingGeneration
+ * (keyed by `generationId`) and reach the renderer through EXACTLY ONE sanitized
+ * path — assistant:addMessage(generationId) — which revalidates provenance at
+ * persist time and redacts via the shared read boundary. Releasing the raw answer
+ * here would bypass that final revalidation (a recording/capture can be excluded
+ * DURING the provider await, after the pre-call eligibility check).
  */
 export interface RAGChatResponse {
-  answer: string
-  sources: RAGSource[]
-  /** ADV19-4 — unique id bound to this answer's provenance; pass to addMessage. */
+  /** ADV19-4 — unique id bound to this answer's provenance; pass to assistant:addMessage. */
   generationId?: string
+  /** Generation outcome. Answer content is released ONLY via assistant:addMessage. */
+  status: 'ok' | 'error'
+  /** Non-content status/error message for a failed generation (never answer text or sources). */
+  error?: string
 }
 
 /**

@@ -752,18 +752,16 @@ export interface ElectronAPI {
   rag: {
     status: () => Promise<Result<RAGStatus>>
     chat: (request: RAGChatRequest) => Promise<Result<RAGChatResponse>>
+    /**
+     * ADV22-1 (round-23) — CONTENT-FREE. Returns ONLY the generationId + a non-content
+     * error string; NEVER the answer text or source excerpts. Obtain the displayable
+     * answer solely via assistant.addMessage(generationId).
+     */
     chatLegacy: (sessionId: string, message: string, meetingFilter?: string) => Promise<{
-      answer: string
-      sources: Array<{
-        content: string
-        meetingId?: string
-        subject?: string
-        timestamp?: string
-        score: number
-      }>
-      error?: string
-      /** ADV19-4 — pass back to assistant.addMessage to bind the answer's provenance. */
+      /** ADV19-4 — pass back to assistant.addMessage to release the sanitized answer. */
       generationId?: string
+      /** Non-content status/error message for a failed generation. */
+      error?: string
     }>
     summarizeMeeting: (meetingId: string) => Promise<Result<string>>
     findActionItems: (meetingId?: string) => Promise<Result<string>>
