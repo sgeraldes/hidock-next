@@ -348,10 +348,21 @@ export function useIdentitySuggestions(kind?: 'person' | 'project') {
               onClick: async () => {
                 try {
                   const undo = await unmerge(journalId)
-                  if (!undo.success) throw new Error('unmerge failed')
+                  if (!undo.success) {
+                    // Plumb the backend's message through — an ordering
+                    // rejection (MERGE_ORDER_CONFLICT) tells the user exactly
+                    // which newer merge to undo first.
+                    const e = (undo as { error?: { message?: string } }).error
+                    throw new Error(e?.message || 'unmerge failed')
+                  }
                   toast.info('Merge undone', 'The separate records were restored.')
-                } catch {
-                  toast.error('Undo failed', 'The records could not be separated again.')
+                } catch (err) {
+                  toast.error(
+                    'Undo failed',
+                    err instanceof Error && err.message && err.message !== 'unmerge failed'
+                      ? err.message
+                      : 'The records could not be separated again.'
+                  )
                 } finally {
                   load(true)
                 }

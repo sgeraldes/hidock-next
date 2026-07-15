@@ -31,6 +31,7 @@ import {
   getActionablesForProject,
   dismissDiscoveredProject,
   DismissDiscoveredError,
+  MergeOrderConflictError,
   Project as DBProject,
   ProjectNote
 } from '../services/database'
@@ -357,6 +358,15 @@ export function registerProjectsHandlers(): void {
       }
       return success(unmergeProjects(parsed.data))
     } catch (err) {
+      if (err instanceof MergeOrderConflictError) {
+        // Ordering rejection, not a database failure: a newer open merge
+        // depends on this journal's entities. Structured details let the undo
+        // UI point at the exact blocking merge.
+        return error('MERGE_ORDER_CONFLICT', err.message, {
+          blockingJournalId: err.blockingJournalId,
+          blockingLoserName: err.blockingLoserName
+        })
+      }
       console.error('projects:unmerge error:', err)
       return error('DATABASE_ERROR', err instanceof Error ? err.message : 'Failed to unmerge projects', err)
     }

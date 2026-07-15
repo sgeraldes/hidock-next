@@ -42,11 +42,22 @@ vi.mock('../../services/database', () => ({
   getActionablesForProject: vi.fn(),
   addProjectDiscoveryRejection: vi.fn(),
   dismissDiscoveredProject: vi.fn(),
-  // Real class so the handler's `err instanceof DismissDiscoveredError` guard works.
+  unmergeProjects: vi.fn(),
+  // Real classes so the handlers' `err instanceof` guards work.
   DismissDiscoveredError: class DismissDiscoveredError extends Error {
     constructor(public readonly code: 'NOT_FOUND' | 'NOT_DISCOVERED', message: string) {
       super(message)
       this.name = 'DismissDiscoveredError'
+    }
+  },
+  MergeOrderConflictError: class MergeOrderConflictError extends Error {
+    constructor(
+      public readonly blockingJournalId: string,
+      public readonly blockingLoserName: string | null,
+      message: string
+    ) {
+      super(message)
+      this.name = 'MergeOrderConflictError'
     }
   },
   getDatabase: vi.fn(() => ({
@@ -291,5 +302,27 @@ describe('Projects IPC Handlers', () => {
 
     expect(result.success).toBe(false)
     expect(result.error.code).toBe('NOT_FOUND')
+  })
+
+  it('unmerge maps an ordering rejection to MERGE_ORDER_CONFLICT with the blocking journal in details', async () => {
+    const { unmergeProjects, MergeOrderConflictError } = await import('../../services/database')
+    vi.mocked(unmergeProjects).mockImplementation(() => {
+      throw new (MergeOrderConflictError as any)(
+        'j-newer',
+        'Delta Hub',
+        'Merges must be undone newest-first: undo the newer merge of "Delta Hub" (j-newer) before this one'
+      )
+    })
+
+    registerProjectsHandlers()
+    const handler = getHandler('projects:unmerge')
+    const result = await handler?.({} as any, PROJECT_ID) as any
+
+    expect(result.success).toBe(false)
+    // Distinct code (NOT the generic DATABASE_ERROR) + structured details so
+    // the undo UI can point at the exact blocking merge.
+    expect(result.error.code).toBe('MERGE_ORDER_CONFLICT')
+    expect(result.error.message).toMatch(/undo the newer merge of "Delta Hub"/)
+    expect(result.error.details).toMatchObject({ blockingJournalId: 'j-newer', blockingLoserName: 'Delta Hub' })
   })
 })

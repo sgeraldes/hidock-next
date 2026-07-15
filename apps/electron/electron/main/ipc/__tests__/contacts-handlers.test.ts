@@ -25,6 +25,18 @@ vi.mock('../../services/database', () => ({
   getMeetingsForContact: vi.fn(),
   getContactsForMeeting: vi.fn(),
   mergeContacts: vi.fn(),
+  unmergeContacts: vi.fn(),
+  // Real class so the handler's `err instanceof MergeOrderConflictError` guard works.
+  MergeOrderConflictError: class MergeOrderConflictError extends Error {
+    constructor(
+      public readonly blockingJournalId: string,
+      public readonly blockingLoserName: string | null,
+      message: string
+    ) {
+      super(message)
+      this.name = 'MergeOrderConflictError'
+    }
+  },
   getDatabase: vi.fn(() => ({
     prepare: vi.fn(() => ({
       bind: vi.fn(),
@@ -250,5 +262,27 @@ describe('Contacts IPC Handlers', () => {
 
     expect(result.success).toBe(false)
     expect(result.error.code).toBe('NOT_FOUND')
+  })
+
+  it('unmerge maps an ordering rejection to MERGE_ORDER_CONFLICT with the blocking journal in details', async () => {
+    const { unmergeContacts, MergeOrderConflictError } = await import('../../services/database')
+    vi.mocked(unmergeContacts).mockImplementation(() => {
+      throw new (MergeOrderConflictError as any)(
+        'j-newer',
+        'Dora Delta',
+        'Merges must be undone newest-first: undo the newer merge of "Dora Delta" (j-newer) before this one'
+      )
+    })
+
+    registerContactsHandlers()
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(call => call[0] === 'contacts:unmerge')?.[1]
+    const result = await handler?.({} as any, 'j-older') as any
+
+    expect(result.success).toBe(false)
+    // Distinct code (NOT the generic DATABASE_ERROR) + structured details so
+    // the undo UI can point at the exact blocking merge.
+    expect(result.error.code).toBe('MERGE_ORDER_CONFLICT')
+    expect(result.error.message).toMatch(/undo the newer merge of "Dora Delta"/)
+    expect(result.error.details).toMatchObject({ blockingJournalId: 'j-newer', blockingLoserName: 'Dora Delta' })
   })
 })
