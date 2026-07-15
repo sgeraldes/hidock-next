@@ -11,25 +11,32 @@
  * NEVER sets `capture_id`. The vector store's positive recording allowlist only
  * admits ids that resolve to an EXISTING recording — an artifact id never does.
  *
- * The round-9 fix exempted only `sourceType === 'image'` from the allowlist, so
- * pdf/markdown/txt/json artifact docs were wrongly treated as recording-backed,
- * failed the positive existence check, and were dropped from vector search +
- * chunk retrieval. The fix discriminates on `captureId` (present ⇒ artifact,
- * absent ⇒ recording), which is future-proof across all artifact kinds.
+ * The round-9 fix exempted only `sourceType === 'image'`; round-11 switched to
+ * `captureId` presence. ADV11 (round-12) then found that trusting `captureId`
+ * PRESENCE is a privacy bypass (a renderer can forge it). The current design
+ * resolves provenance POSITIVELY against the DB: `recordingId` that names a REAL
+ * recording ⇒ recording-backed (obeys the allowlist); otherwise a genuine
+ * artifact ONLY when `captureId` names a REAL knowledge_captures row.
  *
- * This mock models the REAL positive allowlist: an id is eligible ONLY if it is
- * a known live recording AND not excluded (value/personal/deleted) — exactly why
- * an artifact id, absent from `recordings`, would be dropped if mis-classified.
+ * This mock models that: existence probes (getExistingRecordingIds /
+ * getExistingCaptureIds) answer IDENTITY, and the allowlist
+ * (getEligibleRecordingIds) answers ELIGIBILITY, so an artifact id — absent from
+ * `recordings` but present in `knowledge_captures` — is retained, while a real
+ * excluded recording is dropped even with any captureId attached. The forged-
+ * captureId attack itself is exercised against a REAL DB in
+ * vector-store-forged-provenance.test.ts.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const deps = vi.hoisted(() => ({
-  // Ids that resolve to a live, non-excluded recording row. An artifact id is
-  // deliberately NOT a member — that absence is the crux of ADV10-P1.
+  // Ids that EXIST as recording rows (any state). An artifact id is deliberately
+  // NOT a member — that absence is the crux of ADV10-P1 / ADV11.
   recordings: new Set<string>(),
   // Recordings that exist but are value-excluded / personal / soft-deleted.
   excluded: new Set<string>(),
+  // Ids that EXIST as knowledge_captures rows (genuine artifact/capture ids).
+  captures: new Set<string>(),
   throwOnExclusion: false
 }))
 
@@ -47,6 +54,16 @@ vi.mock('../database', () => ({
           eligible: new Set([...ids].filter((i) => i && deps.recordings.has(i) && !deps.excluded.has(i))),
           failClosed: false
         },
+  // ADV11 (round-12) — positive-provenance existence probes. Existence is
+  // IDENTITY, not eligibility: an excluded recording still EXISTS.
+  getExistingRecordingIds: (ids: Iterable<string>) =>
+    deps.throwOnExclusion
+      ? { ids: new Set<string>(), failClosed: true }
+      : { ids: new Set([...ids].filter((i) => i && deps.recordings.has(i))), failClosed: false },
+  getExistingCaptureIds: (ids: Iterable<string>) =>
+    deps.throwOnExclusion
+      ? { ids: new Set<string>(), failClosed: true }
+      : { ids: new Set([...ids].filter((i) => i && deps.captures.has(i))), failClosed: false },
   isRecordingProcessable: () => true
 }))
 vi.mock('../embeddings', () => ({
@@ -96,6 +113,7 @@ async function seed(store: VectorStore): Promise<void> {
 beforeEach(() => {
   deps.recordings = new Set(['rec-live'])
   deps.excluded = new Set<string>()
+  deps.captures = new Set(['cap-pdf', 'cap-md', 'cap-txt', 'cap-img'])
   deps.throwOnExclusion = false
 })
 
@@ -134,14 +152,26 @@ describe('ADV10-P1 — artifact docs are discriminated by captureId, not sourceT
     expect(ids).toEqual(['art-img', 'art-md', 'art-pdf', 'art-txt'])
   })
 
-  it('fail-closed on lookup error drops the transcript but keeps every artifact', async () => {
+  it('fail-closed on lookup error drops everything that carries a recordingId', async () => {
     const store = new VectorStore()
     await seed(store)
 
     deps.throwOnExclusion = true
     const ids = (await store.search('anything', 10)).map((r) => r.document.metadata.recordingId).sort()
-    // Artifacts carry captureId ⇒ not recording-backed ⇒ never fail-closed-dropped.
-    expect(ids).toEqual(['art-img', 'art-md', 'art-pdf', 'art-txt'])
-    expect(ids).not.toContain('rec-live')
+    // ADV11 (round-12) — when provenance CANNOT be resolved we can no longer tell a
+    // genuine artifact from a forged chunk, so we fail closed and keep ONLY docs
+    // with NO recordingId. Every seeded doc (transcript AND artifacts) carries a
+    // recordingId, so the result is empty. This is stricter than round-11 (which
+    // trusted captureId presence) — the whole point of the fix.
+    expect(ids).toEqual([])
+  })
+
+  it('fail-closed keeps a doc that has NO recordingId', async () => {
+    const store = new VectorStore()
+    await store.addDocument('a general standalone note', { chunkIndex: 0 })
+
+    deps.throwOnExclusion = true
+    const contents = (await store.search('anything', 10)).map((r) => r.document.content)
+    expect(contents).toEqual(['a general standalone note'])
   })
 })

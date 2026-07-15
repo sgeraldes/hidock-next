@@ -14,12 +14,18 @@
  * whack-a-mole: many independent readers, no shared boundary).
  */
 
-import { getEligibleRecordingIds } from './database'
+import { getEligibleRecordingIds, getExistingRecordingIds, getExistingCaptureIds } from './database'
 
 export interface EligibilityResult {
   /** The subset of the input ids that are eligible to surface. Empty when failClosed. */
   eligible: Set<string>
   /** True when the eligibility lookup could not complete → treat all as ineligible. */
+  failClosed: boolean
+}
+
+/** ADV11 (round-12) — id-existence result shared by the boundary. */
+export interface ExistenceResult {
+  ids: Set<string>
   failClosed: boolean
 }
 
@@ -42,6 +48,35 @@ export function filterEligibleRecordingIds(candidateIds: Iterable<string>): Elig
     // Any unexpected failure computing the allowlist → fail closed.
     console.error('[Eligibility] positive allowlist threw — failing closed:', e)
     return { eligible: new Set<string>(), failClosed: true }
+  }
+}
+
+/**
+ * ADV11 (round-12) — POSITIVE PROVENANCE existence probes, routed through the
+ * shared boundary so every consumer (not just the vector store) resolves
+ * recording/artifact provenance against the DB rather than trusting a
+ * renderer-settable field. `existingRecordings` = which candidate ids name REAL
+ * recordings (any state); `existingCaptures` = which name REAL knowledge
+ * captures. Both fail closed. See vector-store.ts filterEligibleDocs for why
+ * trusting `captureId` PRESENCE (round-11) was a privacy bypass: a renderer
+ * could forge a `captureId` to make an excluded recording's chunks skip the
+ * recording allowlist. Resolving provenance positively against the DB closes it.
+ */
+export function existingRecordings(candidateIds: Iterable<string>): ExistenceResult {
+  try {
+    return getExistingRecordingIds(candidateIds)
+  } catch (e) {
+    console.error('[Eligibility] existingRecordings threw — failing closed:', e)
+    return { ids: new Set<string>(), failClosed: true }
+  }
+}
+
+export function existingCaptures(candidateIds: Iterable<string>): ExistenceResult {
+  try {
+    return getExistingCaptureIds(candidateIds)
+  } catch (e) {
+    console.error('[Eligibility] existingCaptures threw — failing closed:', e)
+    return { ids: new Set<string>(), failClosed: true }
   }
 }
 

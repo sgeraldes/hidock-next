@@ -28,6 +28,17 @@ vi.mock('../database', () => ({
     deps.throwOnExclusion
       ? { eligible: new Set<string>(), failClosed: true }
       : { eligible: new Set([...ids].filter((i) => i && !deps.excluded.has(i))), failClosed: false },
+  // ADV11 (round-12) — provenance existence. In this suite EVERY recordingId used
+  // names a REAL recording (existence = identity; excluded ones still exist), and
+  // no captureId is used, so captures resolve to the empty set.
+  getExistingRecordingIds: (ids: Iterable<string>) =>
+    deps.throwOnExclusion
+      ? { ids: new Set<string>(), failClosed: true }
+      : { ids: new Set([...ids].filter((i): i is string => !!i)), failClosed: false },
+  getExistingCaptureIds: (_ids: Iterable<string>) =>
+    deps.throwOnExclusion
+      ? { ids: new Set<string>(), failClosed: true }
+      : { ids: new Set<string>(), failClosed: false },
   // P2 — used by the boot backfill; not exercised by the search tests.
   isRecordingProcessable: () => true
 }))

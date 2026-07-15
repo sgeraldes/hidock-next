@@ -54,6 +54,17 @@ vi.mock('../database', () => ({
   getExcludedRecordingIds: () => ({ ids: new Set<string>(), failClosed: false }),
   // ADV9 (round-9) — positive allowlist; nothing excluded here → all eligible.
   getEligibleRecordingIds: (ids: Iterable<string>) => ({ eligible: new Set([...ids].filter((i) => !!i)), failClosed: false }),
+  // ADV11 (round-12) — provenance existence, keyed on this suite's id naming:
+  // 'rec-*' are real recordings; 'art*' are artifact ids (NOT recordings) whose
+  // 'cap-*' captureId names a real capture.
+  getExistingRecordingIds: (ids: Iterable<string>) => ({
+    ids: new Set([...ids].filter((i): i is string => !!i && !i.startsWith('art'))),
+    failClosed: false
+  }),
+  getExistingCaptureIds: (ids: Iterable<string>) => ({
+    ids: new Set([...ids].filter((i): i is string => !!i && i.startsWith('cap'))),
+    failClosed: false
+  }),
   isRecordingProcessable: () => true
 }))
 

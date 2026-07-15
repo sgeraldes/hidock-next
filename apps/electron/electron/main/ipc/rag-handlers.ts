@@ -214,7 +214,18 @@ export function registerRAGHandlers(): void {
     return rag.getStats()
   })
 
-  // Index a transcript manually
+  // Index a transcript manually.
+  //
+  // ADV11 (round-12) — SECURITY BOUNDARY. The renderer cannot forge internal
+  // provenance. We build a WHITELISTED metadata object here and pass ONLY
+  // {meetingId, recordingId, timestamp, subject} into indexTranscript. In
+  // particular `captureId` (and any other key) supplied by the renderer is
+  // DROPPED — captureId is INTERNAL and may be set ONLY by main-process
+  // artifact-service.ts / clipboard-capture.ts. Without this strip, a renderer
+  // could send `{recordingId: <excludedId>, captureId: <forged>}` to try to make
+  // an excluded recording's chunks look like an artifact and skip the recording
+  // allowlist (vector-store filterEligibleDocs now also resolves provenance
+  // positively against the DB as defense-in-depth).
   ipcMain.handle(
     'rag:index-transcript',
     async (
@@ -232,7 +243,13 @@ export function registerRAGHandlers(): void {
         }
       }
     ) => {
-      const count = await vectorStore.indexTranscript(transcript, metadata)
+      const safeMetadata = {
+        meetingId: metadata?.meetingId,
+        recordingId: metadata?.recordingId,
+        timestamp: metadata?.timestamp,
+        subject: metadata?.subject
+      }
+      const count = await vectorStore.indexTranscript(transcript, safeMetadata)
       return { indexed: count }
     }
   )

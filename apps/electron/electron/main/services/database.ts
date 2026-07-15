@@ -3326,6 +3326,70 @@ export function getEligibleRecordingIds(candidateIds: Iterable<string>): Recordi
   }
 }
 
+/**
+ * ADV11 (round-12) — id-EXISTENCE result. The subset of candidate ids that are
+ * present as rows in a table, plus a fail-closed flag on any lookup error.
+ * Existence is about IDENTITY, not eligibility: a soft-deleted / personal /
+ * value-excluded recording still EXISTS.
+ */
+export interface IdExistence {
+  ids: Set<string>
+  failClosed: boolean
+}
+
+/**
+ * ADV11 (round-12) — the subset of candidate ids that EXIST as rows in
+ * `recordings`, REGARDLESS of state (deleted_at set, personal, or value-excluded
+ * all still count as EXISTING). This answers "does this id name a real
+ * recording?" — the positive provenance question the vector-store resolver uses
+ * to decide whether a doc's `recordingId` is a genuine recording (⇒ governed by
+ * the eligibility allowlist) or NOT (⇒ artifact id or hard-purged orphan). It is
+ * deliberately DISTINCT from {@link getEligibleRecordingIds} (which additionally
+ * filters out excluded recordings): a forged `captureId` must never let a REAL
+ * excluded recording escape the allowlist, so existence and eligibility are
+ * resolved separately. Chunked IN() to stay under the SQL bound-parameter limit.
+ * Fails CLOSED: any DB error yields an empty set with failClosed=true.
+ */
+export function getExistingRecordingIds(candidateIds: Iterable<string>): IdExistence {
+  return idsPresentIn('recordings', candidateIds)
+}
+
+/**
+ * ADV11 (round-12) — the subset of candidate ids present in `knowledge_captures`
+ * (a GENUINE artifact/capture id). Used to positively confirm that a vector doc
+ * whose `recordingId` does NOT resolve to a recording is a real artifact (its
+ * `captureId` names a live capture) rather than a forged-provenance chunk or a
+ * hard-purged recording orphan. Fails CLOSED.
+ */
+export function getExistingCaptureIds(candidateIds: Iterable<string>): IdExistence {
+  return idsPresentIn('knowledge_captures', candidateIds)
+}
+
+/** Shared existence probe: the subset of `candidateIds` present as `id` rows in
+ *  `table`, chunked, fail-closed. `table` is a fixed internal literal (never
+ *  user input) so interpolation is safe. */
+function idsPresentIn(table: 'recordings' | 'knowledge_captures', candidateIds: Iterable<string>): IdExistence {
+  const unique = [...new Set([...candidateIds].filter((id): id is string => !!id))]
+  if (unique.length === 0) return { ids: new Set<string>(), failClosed: false }
+  try {
+    const ids = new Set<string>()
+    const CHUNK = 400
+    for (let i = 0; i < unique.length; i += CHUNK) {
+      const chunk = unique.slice(i, i + CHUNK)
+      const placeholders = chunk.map(() => '?').join(',')
+      const rows = queryAll<{ id: string }>(
+        `SELECT id FROM ${table} WHERE id IN (${placeholders})`,
+        chunk
+      )
+      for (const row of rows) ids.add(row.id)
+    }
+    return { ids, failClosed: false }
+  } catch (e) {
+    console.error(`[Database] id-existence lookup in ${table} FAILED — failing closed:`, e)
+    return { ids: new Set<string>(), failClosed: true }
+  }
+}
+
 export function getExcludedRecordingIds(): RecordingExclusion {
   try {
     const rows = queryAll<{ id: string }>(

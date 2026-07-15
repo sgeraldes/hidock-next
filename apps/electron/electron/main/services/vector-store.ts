@@ -4,7 +4,7 @@
  */
 
 import { getDatabase, isRecordingProcessable } from './database'
-import { filterEligibleRecordingIds } from './recording-eligibility'
+import { filterEligibleRecordingIds, existingRecordings, existingCaptures } from './recording-eligibility'
 import { getEmbeddingsService } from './embeddings'
 
 interface VectorDocument {
@@ -429,31 +429,49 @@ class VectorStore {
    * dropped (fail closed). Non-recording docs (no recordingId) always pass.
    */
   private filterEligibleDocs(docs: VectorDocument[]): VectorDocument[] {
-    // ADV9 (round-9) — the recording allowlist is POSITIVE (an id must resolve to
-    // an existing eligible recording). Artifact/capture docs carry their ARTIFACT
-    // id in `recordingId` (the vector_embeddings.recording_id column is reused),
-    // NOT a recording id — their OWN capture/artifact lifecycle governs them, so
-    // the recording allowlist must not apply (it would drop every artifact).
+    // ADV11 (round-12) — POSITIVE PROVENANCE RESOLUTION against the DB.
     //
-    // ADV10-P1 (round-11) — the discriminator is `captureId`, NOT `sourceType`.
-    // Round-9 exempted only `sourceType === 'image'`, but artifact-service.ts
-    // (and clipboard-capture.ts) index EVERY artifact kind — pdf/markdown/txt/
-    // json/image — with the artifact id in `recordingId` AND a `captureId` set.
-    // Exempting only 'image' wrongly ran pdf/md/txt/json artifact docs against the
-    // recordings allowlist, failing the positive existence check and dropping them
-    // from vector search + chunk retrieval. The reliable invariant is that ALL
-    // artifact/capture indexing sets `captureId` (artifact-service.ts,
-    // clipboard-capture.ts) while real-recording transcript indexing
-    // (transcription.ts, backfillMissingTranscripts) NEVER sets it. So a doc is
-    // recording-backed IFF it has a `recordingId` AND NO `captureId` — future-proof
-    // across all present and future artifact kinds (no sourceType enumeration).
-    const isRecordingBacked = (d: VectorDocument): boolean =>
-      !!d.metadata.recordingId && !d.metadata.captureId
-    const recIds = docs.filter(isRecordingBacked).map((d) => d.metadata.recordingId!)
-    const { eligible } = filterEligibleRecordingIds(recIds)
+    // Round-11 discriminated recording-backed-ness by `captureId` PRESENCE
+    // (`recordingId && !captureId`). That TRUSTED an UNTRUSTED field: the
+    // `rag:index-transcript` IPC forwarded renderer-supplied metadata straight
+    // into indexTranscript with no runtime stripping (the TS type omitting
+    // captureId is compile-time only). A malicious/buggy renderer could index
+    // `{recordingId: <excludedId>, captureId: <anything>}` → those chunks skipped
+    // the recording allowlist and leaked an excluded recording's content back
+    // into search / meeting retrieval / chunk display / the LLM. A doc's
+    // `captureId` therefore cannot be a security discriminator.
+    //
+    // Instead, resolve provenance POSITIVELY: does `recordingId` name a REAL
+    // recording row (any state)? Then it is recording-backed and MUST obey the
+    // eligibility allowlist — a forged captureId cannot exempt a real excluded
+    // recording. If `recordingId` does NOT resolve to a recording, the doc is a
+    // genuine artifact ONLY when its `captureId` names a REAL knowledge_captures
+    // row; otherwise it is a forged chunk or a hard-purged recording orphan and
+    // is DROPPED (fail closed). Docs with no `recordingId` are never gated here.
+    const recCandidates = docs.map((d) => d.metadata.recordingId).filter((x): x is string => !!x)
+    const capCandidates = docs.map((d) => d.metadata.captureId).filter((x): x is string => !!x)
+
+    const existRec = existingRecordings(recCandidates) // which ids are REAL recordings (any state)
+    const eligibility = filterEligibleRecordingIds(recCandidates) // the allowlist over real recordings
+    const existCap = existingCaptures(capCandidates) // which captureIds are REAL captures
+
+    // ANY provenance lookup failing ⇒ we cannot prove provenance for a doc that
+    // has a recordingId ⇒ fail closed: keep only docs with NO recordingId.
+    const failClosed = existRec.failClosed || eligibility.failClosed || existCap.failClosed
+
     return docs.filter((d) => {
-      if (!isRecordingBacked(d)) return true // non-recording (image/no id) — not gated here
-      return eligible.has(d.metadata.recordingId!) // failClosed ⇒ empty ⇒ recording docs dropped
+      const recId = d.metadata.recordingId
+      if (!recId) return true // non-recording doc — never gated
+      if (failClosed) return false // cannot resolve provenance ⇒ drop everything recording-tied
+      if (existRec.ids.has(recId)) {
+        // Recording-backed ⇒ governed by the allowlist. A forged captureId cannot
+        // make a real excluded recording eligible.
+        return eligibility.eligible.has(recId)
+      }
+      // recordingId does NOT resolve to a recording ⇒ artifact or hard-purged
+      // orphan. Keep IFF a genuine captureId backs it; else drop (forged/orphan).
+      const capId = d.metadata.captureId
+      return !!capId && existCap.ids.has(capId)
     })
   }
 
