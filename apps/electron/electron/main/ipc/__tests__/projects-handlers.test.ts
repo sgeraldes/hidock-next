@@ -41,6 +41,13 @@ vi.mock('../../services/database', () => ({
   deleteProjectNote: vi.fn(),
   getActionablesForProject: vi.fn(),
   addProjectDiscoveryRejection: vi.fn(),
+  // ADV15 (round-16) — getById topics + getActionables now route through the
+  // shared eligibility boundaries. Default these DB helpers to no-op-eligible so
+  // these mapping/shape assertions are unaffected; behavioral exclusion is covered
+  // by the real-temp-DB projects-handlers.eligibility.test.ts.
+  getEligibleRecordingIds: vi.fn((ids: Iterable<string>) => ({ eligible: new Set([...ids]), failClosed: false })),
+  getExistingCaptureIds: vi.fn((_ids: Iterable<string>) => ({ ids: new Set<string>(), failClosed: false })),
+  getCaptureEligibilityRows: vi.fn((_ids: Iterable<string>) => ({ rows: [], failClosed: false })),
   getDatabase: vi.fn(() => ({
     prepare: vi.fn(() => ({
       bind: vi.fn(),

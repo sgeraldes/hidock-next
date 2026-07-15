@@ -11,22 +11,33 @@ vi.mock('electron', () => ({
 
 // Mock database
 vi.mock('../../services/database', () => {
-  // RE7-3 (round-7) — getAll/getByMeeting route rows through the real eligibility
-  // boundary. ADV9 (round-9): the boundary now uses the POSITIVE allowlist
-  // getEligibleRecordingIds; tests drive getExcludedRecordingIds and the eligible
-  // form derives from it (existing candidates minus excluded).
+  // ADV15 (round-16) — getAll/getByMeeting route rows through the shared
+  // CAPTURE-aware boundary (actionable-eligibility → recording-eligibility → these
+  // DB helpers). Tests drive getExcludedRecordingIds (recording exclusion) and a
+  // `__captures` registry (id → {source_recording_id, quality_rating, deleted_at});
+  // a source_knowledge_id NOT in the registry is treated as a legacy recording id.
   const getExcludedRecordingIds = vi.fn(() => ({ ids: new Set<string>(), failClosed: false }))
+  const captures = new Map<string, { source_recording_id: string | null; quality_rating: string | null; deleted_at: string | null }>()
   return {
     queryAll: vi.fn(),
     queryOne: vi.fn(),
     run: vi.fn(),
     getExcludedRecordingIds,
+    __captures: captures,
     getEligibleRecordingIds: (ids: Iterable<string>) => {
       const { ids: excluded, failClosed } = getExcludedRecordingIds()
       return failClosed
         ? { eligible: new Set<string>(), failClosed: true }
         : { eligible: new Set([...ids].filter((i) => i && !excluded.has(i))), failClosed: false }
-    }
+    },
+    getExistingCaptureIds: (ids: Iterable<string>) => ({
+      ids: new Set([...ids].filter((i) => i && captures.has(i))),
+      failClosed: false
+    }),
+    getCaptureEligibilityRows: (ids: Iterable<string>) => ({
+      rows: [...ids].filter((i) => i && captures.has(i)).map((id) => ({ id, ...captures.get(id)! })),
+      failClosed: false
+    })
   }
 })
 
@@ -35,6 +46,9 @@ describe('Actionables IPC Handlers', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks()
+    const db: any = await import('../../services/database')
+    db.__captures.clear()
+    db.getExcludedRecordingIds.mockReturnValue({ ids: new Set<string>(), failClosed: false })
     handlers = {}
     vi.mocked(ipcMain.handle).mockImplementation((channel: string, handler: Function) => {
       handlers[channel] = handler
@@ -513,46 +527,58 @@ describe('Actionables IPC Handlers', () => {
     })
   })
 
-  // RE7-3 (round-7) — actionables lists are assistant-facing DISPLAY of
-  // recording-derived content, routed through the shared eligibility boundary.
-  describe('eligibility filtering (RE7-3)', () => {
-    const row = (id: string, skid: string) => ({
+  // ADV15 (round-16) — actionables lists route through the shared CAPTURE-aware
+  // boundary. A standalone (no source recording) capture must ALSO pass capture
+  // eligibility (deleted_at + non-excluded quality) — the round-7 "null-source ⇒
+  // keep" bug (ADV15-3) is closed. Only a truly null source_knowledge_id (no
+  // capture at all) is unconditionally kept.
+  describe('eligibility filtering (ADV15 capture-aware)', () => {
+    const row = (id: string, skid: string | null) => ({
       id, type: 'email', title: id, description: null, source_knowledge_id: skid,
       source_action_item_id: null, suggested_template: null, suggested_recipients: null,
       status: 'pending', confidence: null, artifact_id: null, generated_at: null,
       shared_at: null, created_at: '2026-07-09T10:00:00Z', updated_at: '2026-07-09T10:00:00Z'
     })
+    const regCapture = (db: any, id: string, source_recording_id: string | null, quality_rating: string | null = null, deleted_at: string | null = null) =>
+      db.__captures.set(id, { source_recording_id, quality_rating, deleted_at })
 
-    it('getAll drops actionables whose source recording is excluded, keeps standalone rows', async () => {
-      const { queryAll, queryOne, getExcludedRecordingIds } = await import('../../services/database')
-      // a-keep → rec-keep (eligible); a-drop → rec-drop (excluded); a-standalone → no capture.
-      vi.mocked(queryOne).mockImplementation((_sql: string, params?: unknown[]) => {
-        const id = params?.[0]
-        if (id === 'kc-keep') return { source_recording_id: 'rec-keep' } as any
-        if (id === 'kc-drop') return { source_recording_id: 'rec-drop' } as any
-        // kc-standalone: a real capture NOT backed by any recording → always kept.
-        if (id === 'kc-standalone') return { source_recording_id: null } as any
-        return null as any
-      })
-      vi.mocked(getExcludedRecordingIds).mockReturnValue({ ids: new Set(['rec-drop']), failClosed: false } as any)
-      vi.mocked(queryAll).mockReturnValue([row('a-keep', 'kc-keep'), row('a-drop', 'kc-drop'), row('a-standalone', 'kc-standalone')])
+    it('drops actionables whose source recording is excluded, keeps eligible + eligible standalone', async () => {
+      const db: any = await import('../../services/database')
+      regCapture(db, 'kc-keep', 'rec-keep')
+      regCapture(db, 'kc-drop', 'rec-drop')
+      regCapture(db, 'kc-standalone', null, 'valuable')
+      db.getExcludedRecordingIds.mockReturnValue({ ids: new Set(['rec-drop']), failClosed: false })
+      vi.mocked(db.queryAll).mockReturnValue([row('a-keep', 'kc-keep'), row('a-drop', 'kc-drop'), row('a-standalone', 'kc-standalone')])
 
       const result = await handlers['actionables:getAll'](null)
       expect(result.map((a: any) => a.id).sort()).toEqual(['a-keep', 'a-standalone'])
     })
 
-    it('getAll fails closed — drops every recording-backed actionable when eligibility is unverifiable', async () => {
-      const { queryAll, queryOne, getExcludedRecordingIds } = await import('../../services/database')
-      vi.mocked(queryOne).mockImplementation((_sql: string, params?: unknown[]) => {
-        const id = params?.[0]
-        if (id === 'kc-1') return { source_recording_id: 'rec-1' } as any
-        // kc-free: a real standalone capture (no source recording) → always kept.
-        if (id === 'kc-free') return { source_recording_id: null } as any
-        return null as any
-      })
-      vi.mocked(getExcludedRecordingIds).mockReturnValue({ ids: new Set<string>(), failClosed: true } as any)
-      // a-rec is recording-backed (dropped on fail-closed); a-free is standalone (kept).
-      vi.mocked(queryAll).mockReturnValue([row('a-rec', 'kc-1'), row('a-free', 'kc-free')])
+    it('drops a soft-deleted capture and a value-excluded standalone capture (ADV15-2/-3)', async () => {
+      const db: any = await import('../../services/database')
+      regCapture(db, 'kc-ok', 'rec-ok')
+      regCapture(db, 'kc-softdel', 'rec-ok', null, '2026-07-10T00:00:00Z') // capture soft-deleted
+      regCapture(db, 'kc-garbage', null, 'garbage') // standalone garbage
+      db.getExcludedRecordingIds.mockReturnValue({ ids: new Set<string>(), failClosed: false })
+      vi.mocked(db.queryAll).mockReturnValue([row('a-ok', 'kc-ok'), row('a-softdel', 'kc-softdel'), row('a-garbage', 'kc-garbage')])
+
+      const result = await handlers['actionables:getAll'](null)
+      expect(result.map((a: any) => a.id)).toEqual(['a-ok'])
+    })
+
+    it('keeps a truly standalone actionable (null source_knowledge_id)', async () => {
+      const db: any = await import('../../services/database')
+      vi.mocked(db.queryAll).mockReturnValue([row('a-null', null)])
+      const result = await handlers['actionables:getAll'](null)
+      expect(result.map((a: any) => a.id)).toEqual(['a-null'])
+    })
+
+    it('fails closed — drops recording-backed actionables when recording eligibility is unverifiable, keeps eligible standalone capture', async () => {
+      const db: any = await import('../../services/database')
+      regCapture(db, 'kc-1', 'rec-1')
+      regCapture(db, 'kc-free', null, 'valuable') // eligible standalone capture
+      db.getExcludedRecordingIds.mockReturnValue({ ids: new Set<string>(), failClosed: true })
+      vi.mocked(db.queryAll).mockReturnValue([row('a-rec', 'kc-1'), row('a-free', 'kc-free')])
 
       const result = await handlers['actionables:getAll'](null)
       expect(result.map((a: any) => a.id)).toEqual(['a-free'])

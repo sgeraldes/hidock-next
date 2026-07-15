@@ -22,7 +22,14 @@ vi.mock('../../services/database', () => ({
   runInTransaction: vi.fn((fn) => fn()),
   getEligibleRecordingIds: vi.fn((ids: Iterable<string>) => ({ eligible: new Set([...ids]), failClosed: false })),
   getExistingRecordingIds: vi.fn((ids: Iterable<string>) => ({ ids: new Set([...ids]), failClosed: false })),
-  getExistingCaptureIds: vi.fn((ids: Iterable<string>) => ({ ids: new Set([...ids]), failClosed: false }))
+  getExistingCaptureIds: vi.fn((ids: Iterable<string>) => ({ ids: new Set([...ids]), failClosed: false })),
+  // ADV15 (round-16): the gated tier routes through filterEligibleCaptureIds →
+  // getCaptureEligibilityRows. Return each id as an eligible standalone capture so
+  // the gate is a no-op for these query-shape assertions.
+  getCaptureEligibilityRows: vi.fn((ids: Iterable<string>) => ({
+    rows: [...ids].map((id) => ({ id, source_recording_id: null, quality_rating: 'valuable', deleted_at: null })),
+    failClosed: false
+  }))
 }))
 
 describe('Knowledge IPC Handlers', () => {

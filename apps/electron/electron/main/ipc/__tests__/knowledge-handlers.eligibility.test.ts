@@ -60,11 +60,12 @@ function seedCapture(opts: {
   quality?: string | null
   capturedAt?: string
   title?: string
+  deletedAt?: string | null
 }): string {
   const id = opts.id ?? `cap-${++capSeq}`
   run(
-    'INSERT INTO knowledge_captures (id, title, summary, captured_at, source_recording_id, quality_rating) VALUES (?, ?, ?, ?, ?, ?)',
-    [id, opts.title ?? `Title ${id}`, `Summary ${id}`, opts.capturedAt ?? '2026-06-01T00:00:00.000Z', opts.source ?? null, opts.quality ?? null]
+    'INSERT INTO knowledge_captures (id, title, summary, captured_at, source_recording_id, quality_rating, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [id, opts.title ?? `Title ${id}`, `Summary ${id}`, opts.capturedAt ?? '2026-06-01T00:00:00.000Z', opts.source ?? null, opts.quality ?? null, opts.deletedAt ?? null]
   )
   return id
 }
@@ -126,6 +127,17 @@ describe('ADV14 GATE — knowledge:getById (gated)', () => {
     expect(await invoke('knowledge:getById', id)).toBeNull()
   })
 
+  it('ADV15-2 — returns null for a SOFT-DELETED capture (even from an eligible recording)', async () => {
+    seedRecording('rec-ok')
+    const id = seedCapture({ source: 'rec-ok', deletedAt: '2026-07-10T00:00:00.000Z' })
+    expect(await invoke('knowledge:getById', id)).toBeNull()
+  })
+
+  it('ADV15-2 — returns null for a SOFT-DELETED standalone capture', async () => {
+    const id = seedCapture({ source: null, quality: 'valuable', deletedAt: '2026-07-10T00:00:00.000Z' })
+    expect(await invoke('knowledge:getById', id)).toBeNull()
+  })
+
   it('fails closed (null) when the eligibility lookup throws', async () => {
     seedRecording('rec-ok')
     const id = seedCapture({ source: 'rec-ok' })
@@ -147,8 +159,11 @@ describe('ADV14 GATE — knowledge:getByIds (gated batch)', () => {
     seedRecording('rec-garbage')
     const garbage = seedCapture({ source: 'rec-garbage', quality: 'garbage' })
     const standaloneBad = seedCapture({ source: null, quality: 'garbage' })
+    // ADV15-2 — a soft-deleted capture from an ELIGIBLE recording must still be omitted.
+    seedRecording('rec-softdel-src')
+    const softDel = seedCapture({ source: 'rec-softdel-src', deletedAt: '2026-07-10T00:00:00.000Z' })
 
-    const res = await invoke('knowledge:getByIds', [ok, manual, del, personal, garbage, standaloneBad, 'ghost'])
+    const res = await invoke('knowledge:getByIds', [ok, manual, del, personal, garbage, standaloneBad, softDel, 'ghost'])
     expect(res.map((c: any) => c.id).sort()).toEqual([manual, ok].sort())
   })
 
