@@ -53,6 +53,7 @@
 - Stray root package-lock.json flagged by review: already gone (cleaned by the owner's parallel session); path-scoped staging remains the rule for every orchestrator commit.
 
 ## Ledger (append per integration)
+- 2026-07-15 ~04:3x — Review convergence: **Lane A r3 dispatched** — the gate design triangulated across rounds (asymmetric strands cleanup → symmetric leaves initiation open → FINAL: initiation needs boot AND desired-live, teardown needs boot only, enable stays boot-closed) + transcription drain must check the gate between items. **Lane B r3 dispatched** — shared dependency-aware unmerge guard (loser_id + explicit sequence in lane-local v42), contact paths included, typed MergeOrderConflictError. Every round has produced distinct real findings; no thrash.
 - 2026-07-14 ~00:45 — c5 orphan suites rescued to git (pre-plan hygiene). Plan written; adversarial plan review dispatched.
 - 2026-07-14 ~00:50 — Codex plan review: needs-attention, 6 findings → amendments above. Dispatch was then paused overnight (permission stop); no agents ran.
 - 2026-07-14 (owner GO) — beta base now `38e31614` (owner's parallel session merged assistant RAG/graph fixes; CI green on it). Wave 1 dispatched: A (codex terra), B (opus), J (opus).
