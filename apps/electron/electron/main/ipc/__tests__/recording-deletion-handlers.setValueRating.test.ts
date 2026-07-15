@@ -51,6 +51,13 @@ vi.mock('../../services/recording-deletion-service', () => ({
   retryPendingFileCleanups: vi.fn()
 }))
 
+// RE7-1 (round-7) — setValueRating reconciles the meeting wiki after a
+// value-rating transition. Mock it so the real meeting-wiki module chain
+// (file-storage → electron.app) is never loaded here.
+vi.mock('../../services/meeting-wiki', () => ({
+  reconcileWikiEligibility: vi.fn()
+}))
+
 function getSetValueRatingHandler(): (...args: unknown[]) => Promise<unknown> {
   const call = (ipcMain.handle as any).mock.calls.find((c: unknown[]) => c[0] === 'recordings:setValueRating')
   if (!call) throw new Error('recordings:setValueRating was not registered')

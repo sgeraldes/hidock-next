@@ -9,16 +9,21 @@
  * null contract.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { mkdtempSync, rmSync, readFileSync, existsSync, mkdirSync, symlinkSync, renameSync, realpathSync } from 'fs'
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, symlinkSync, renameSync, realpathSync } from 'fs'
 
 // All DB/brains/event-bus dependencies are INJECTED in these tests, so mock the
 // modules to keep the suite hermetic (the real ones pull in electron `app`).
+// RE7-2 (round-7) — the write-time + agent-run revalidations use the REAL shared
+// boundary (recording-eligibility.ts → getExcludedRecordingIds), so the mock
+// must provide it. Mutable so a test can exclude a recording / force failClosed.
+let handoverExclusion: { ids: Set<string>; failClosed: boolean } = { ids: new Set<string>(), failClosed: false }
 vi.mock('../database', () => ({
   getTranscriptByRecordingId: vi.fn(),
   getMeetingById: vi.fn(),
   getRecordingById: vi.fn(),
   queryOne: vi.fn(),
   queryAll: vi.fn(() => []),
+  getExcludedRecordingIds: () => handoverExclusion,
 }))
 vi.mock('../brains', () => ({
   getBrainRouter: vi.fn(() => ({ resolve: vi.fn(async () => null) })),
@@ -35,6 +40,7 @@ import {
   resetHandoverRegistry,
   slugify,
   runHandoverAgent,
+  HANDOVER_INELIGIBLE_ERROR,
   type HandoverDataDeps,
   type BundleRecord,
 } from '../handover-service'
@@ -62,6 +68,9 @@ function makeDeps(over: Partial<HandoverDataDeps> = {}): HandoverDataDeps {
         : undefined,
     getMeeting: (id) => (id === 'mtg-1' ? { id: 'mtg-1', subject: 'Acme Kickoff', start_time: '2026-07-10T10:00:00Z', attendees: 'Ana; Bob' } : undefined),
     getActionablesForKnowledge: (kid) => (kid === 'kc-1' ? [{ title: 'Create the SDD', description: 'From the kickoff', status: 'pending' }] : []),
+    // RE7-2 (round-7) — default all recordings eligible; a test overrides this
+    // to exercise the exclusion / fail-closed refusal path.
+    isRecordingEligible: () => true,
     ...over,
   }
 }
@@ -91,6 +100,7 @@ describe('validateTargetDir', () => {
   let root: string
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), 'handover-vt-'))
+    handoverExclusion = { ids: new Set<string>(), failClosed: false }
   })
   afterEach(() => {
     rmSync(root, { recursive: true, force: true })
@@ -215,6 +225,7 @@ describe('assembleHandoverBundle', () => {
   beforeEach(() => {
     resetHandoverRegistry()
     root = mkdtempSync(join(tmpdir(), 'handover-test-'))
+    handoverExclusion = { ids: new Set<string>(), failClosed: false }
   })
   afterEach(() => {
     rmSync(root, { recursive: true, force: true })
@@ -339,6 +350,55 @@ describe('assembleHandoverBundle', () => {
     expect(readFileSync(join(res.bundleDir, 'context', 'transcript.md'), 'utf-8')).toContain('No transcript available.')
     expect(readFileSync(join(res.bundleDir, 'context', 'action-items.md'), 'utf-8')).toContain('None recorded.')
   })
+
+  // RE7-2 (round-7) — a handover bundle is an EXPORT of recording-derived
+  // context (transcript, summary, decisions). It must never be assembled for an
+  // excluded (personal / trashed / low-value) recording. Two independent gates:
+  // the injected identity gate in resolveSource, and the shared-boundary
+  // re-check immediately before any file is written (defense in depth).
+  it('refuses (throws, writes nothing) when the injected identity gate marks the source ineligible', () => {
+    expect(() =>
+      assembleHandoverBundle({
+        targetDir: root,
+        handoverContent: 'x',
+        source: { actionableId: 'act-1' },
+        now: () => FIXED,
+        data: makeDeps({ isRecordingEligible: () => false }),
+      })
+    ).toThrow(HANDOVER_INELIGIBLE_ERROR)
+    // The bundle was refused before any content (manifest/HANDOVER.md) was written.
+    const slugDirs = existsSync(join(root, 'handover')) ? readdirSync(join(root, 'handover')) : []
+    for (const d of slugDirs) {
+      expect(existsSync(join(root, 'handover', d, 'manifest.json'))).toBe(false)
+    }
+  })
+
+  it('refuses at write-time when the shared boundary excludes the recording even if the injected gate passed', () => {
+    // resolveSource gate says eligible, but the authoritative boundary disagrees.
+    handoverExclusion = { ids: new Set(['rec-1']), failClosed: false }
+    expect(() =>
+      assembleHandoverBundle({
+        targetDir: root,
+        handoverContent: 'x',
+        source: { actionableId: 'act-1' },
+        now: () => FIXED,
+        data: makeDeps({ isRecordingEligible: () => true }),
+      })
+    ).toThrow(HANDOVER_INELIGIBLE_ERROR)
+  })
+
+  it('refuses at write-time when eligibility cannot be verified (fail closed)', () => {
+    handoverExclusion = { ids: new Set<string>(), failClosed: true }
+    expect(() =>
+      assembleHandoverBundle({
+        targetDir: root,
+        handoverContent: 'x',
+        source: { actionableId: 'act-1' },
+        now: () => FIXED,
+        data: makeDeps({ isRecordingEligible: () => true }),
+      })
+    ).toThrow(HANDOVER_INELIGIBLE_ERROR)
+  })
 })
 
 describe('runHandoverAgent', () => {
@@ -357,7 +417,13 @@ describe('runHandoverAgent', () => {
     targetDir = join(root, 'repo')
     bundleDir = join(targetDir, 'handover', 'x')
     mkdirSync(bundleDir, { recursive: true })
+    // RE7-2 (round-7) — runHandoverAgent re-validates the bundle's source
+    // recordings from manifest.json before launching the agent. Real bundles
+    // always carry a manifest; mirror that here (empty recordingIds → nothing
+    // recording-backed → eligibility passes).
+    writeFileSync(join(bundleDir, 'manifest.json'), JSON.stringify({ source: { recordingIds: [] } }), 'utf-8')
     record = { bundleDir, targetDir, createdAt: FIXED.toISOString() }
+    handoverExclusion = { ids: new Set<string>(), failClosed: false }
   })
   afterEach(() => {
     rmSync(root, { recursive: true, force: true })
@@ -499,6 +565,44 @@ describe('runHandoverAgent', () => {
     const firstRes = await first
     expect(firstRes.ok).toBe(true)
     expect(brain.generate).toHaveBeenCalledTimes(1)
+  })
+
+  // RE7-2 (round-7) — the source recording can be trashed / marked personal /
+  // rated low-value AFTER the bundle is assembled but BEFORE the agent runs. The
+  // run must re-validate the manifest's recordingIds through the shared boundary
+  // and refuse (spawn nothing, write nothing) when they became ineligible.
+  it('refuses to run when the bundle source recording became excluded since assembly', async () => {
+    writeFileSync(join(bundleDir, 'manifest.json'), JSON.stringify({ source: { recordingIds: ['rec-1'] } }), 'utf-8')
+    handoverExclusion = { ids: new Set(['rec-1']), failClosed: false }
+    const events: string[] = []
+    const brain = mockBrain('Did the work.')
+    const res = await runHandoverAgent({
+      bundleId: 'bundle-1',
+      now: () => at(9, 30, 0),
+      resolveBrain: async () => brain as any,
+      emit: (type) => events.push(type),
+      lookupBundle: lookup,
+    })
+    expect(res.ok).toBe(false)
+    expect(res.error).toBe(HANDOVER_INELIGIBLE_ERROR)
+    expect(events).toEqual(['handover:run-failed'])
+    expect(brain.generate).not.toHaveBeenCalled()
+    expect(existsSync(join(bundleDir, 'RUN.log'))).toBe(false)
+  })
+
+  it('refuses to run when the manifest cannot be read (fail closed)', async () => {
+    rmSync(join(bundleDir, 'manifest.json'), { force: true })
+    const brain = mockBrain('Did the work.')
+    const res = await runHandoverAgent({
+      bundleId: 'bundle-1',
+      now: () => at(9, 30, 0),
+      resolveBrain: async () => brain as any,
+      emit: () => {},
+      lookupBundle: lookup,
+    })
+    expect(res.ok).toBe(false)
+    expect(res.error).toBe(HANDOVER_INELIGIBLE_ERROR)
+    expect(brain.generate).not.toHaveBeenCalled()
   })
 
   it('fails closed when the resolved brain is not agentic (no silent wrong-dir run)', async () => {

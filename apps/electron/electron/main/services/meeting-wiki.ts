@@ -14,6 +14,7 @@ import { existsSync, mkdirSync, writeFileSync, readdirSync, readFileSync, unlink
 import { join } from 'path'
 import { getTranscriptsPath } from './file-storage'
 import { queryAll, queryOne } from './database'
+import { isRecordingEligible, filterEligibleRecordingIds } from './recording-eligibility'
 
 interface WikiRow {
   recording_id: string
@@ -166,8 +167,35 @@ export function removeMeetingWiki(recordingId: string): number {
   return removed
 }
 
+/**
+ * RE7-1 (round-7) — reconcile the on-disk wiki page with the recording's
+ * eligibility. Called on a personal / soft-delete / value-exclusion TRANSITION
+ * (which the transcription pipeline's re-export won't catch, since those
+ * transitions don't re-run analysis): remove any already-written page for a
+ * now-INELIGIBLE recording. Reversible — the boot backfill / next transcription
+ * regenerates the page once the recording is eligible again. Never throws.
+ */
+export function reconcileWikiEligibility(recordingId: string): void {
+  try {
+    if (!isRecordingEligible(recordingId)) {
+      const removed = removeMeetingWiki(recordingId)
+      if (removed > 0) console.log(`[MeetingWiki] Removed ${removed} page(s) for now-excluded recording ${recordingId}`)
+    }
+  } catch (e) {
+    console.warn(`[MeetingWiki] wiki eligibility reconcile failed for ${recordingId}:`, e)
+  }
+}
+
 /** Export (or re-export) the wiki page for one recording. Returns the path. */
 export function exportMeetingWiki(recordingId: string): string | null {
+  // RE7-1 (round-7) — the wiki markdown is readable by external agents/humans,
+  // so an excluded (personal/soft-deleted/value-excluded) recording must never
+  // get a page. Fail-closed via the shared boundary; if a page already exists
+  // (written while eligible, then trashed) remove it here too.
+  if (!isRecordingEligible(recordingId)) {
+    removeMeetingWiki(recordingId)
+    return null
+  }
   const row = queryOne<WikiRow>(
     `SELECT t.recording_id, t.full_text, t.language, t.summary, t.action_items,
             t.topics, t.key_points, t.title_suggestion, t.word_count,
@@ -195,9 +223,18 @@ export function backfillMeetingWiki(): { written: number; failed: number } {
   const rows = queryAll<{ recording_id: string }>(
     `SELECT recording_id FROM transcripts WHERE TRIM(COALESCE(full_text, '')) != ''`
   )
+  // RE7-1 — filter candidates through the shared boundary FAIL-CLOSED: if
+  // eligibility can't be established, write nothing rather than export excluded
+  // transcripts to disk on boot.
+  const { eligible, failClosed } = filterEligibleRecordingIds(rows.map((r) => r.recording_id))
+  if (failClosed) {
+    console.error('[MeetingWiki] Backfill skipped — recording eligibility unavailable (fail closed)')
+    return { written: 0, failed: 0 }
+  }
   let written = 0
   let failed = 0
   for (const { recording_id } of rows) {
+    if (!eligible.has(recording_id)) continue // excluded — no page
     try {
       if (exportMeetingWiki(recording_id)) written++
     } catch (e) {

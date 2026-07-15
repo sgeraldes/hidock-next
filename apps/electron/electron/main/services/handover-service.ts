@@ -24,7 +24,7 @@
  * contract (a null result is a SURFACED failure, not silence). No adapter internals
  * are touched here; this service only consumes the public brains seam.
  */
-import { mkdirSync, writeFileSync, appendFileSync, realpathSync, lstatSync } from 'fs'
+import { mkdirSync, writeFileSync, appendFileSync, realpathSync, lstatSync, readFileSync } from 'fs'
 import { join, parse, relative, resolve, sep } from 'path'
 import { homedir } from 'os'
 import { randomBytes, randomUUID } from 'crypto'
@@ -35,6 +35,7 @@ import {
   queryOne,
   queryAll,
 } from './database'
+import { isRecordingEligible, filterEligibleRecordingIds } from './recording-eligibility'
 import { getBrainRouter, getBrainRegistry } from './brains'
 import type { AIBrain } from './brains'
 import { getEventBus } from './event-bus'
@@ -114,6 +115,8 @@ export interface HandoverDataDeps {
   ) => { full_text?: string; summary?: string; action_items?: string; key_points?: string; topics?: string } | undefined
   getMeeting: (id: string) => { id: string; subject?: string; start_time?: string; attendees?: string } | undefined
   getActionablesForKnowledge: (knowledgeId: string) => Array<{ title: string; description?: string; type?: string; status?: string }>
+  /** RE7-2 (round-7) — the shared fail-closed recording-eligibility boundary. */
+  isRecordingEligible: (recordingId: string) => boolean
 }
 
 const defaultDataDeps: HandoverDataDeps = {
@@ -128,7 +131,12 @@ const defaultDataDeps: HandoverDataDeps = {
       'SELECT title, description, type, status FROM actionables WHERE source_knowledge_id = ? ORDER BY created_at',
       [knowledgeId]
     ),
+  isRecordingEligible: (recordingId) => isRecordingEligible(recordingId),
 }
+
+/** RE7-2 — thrown when a handover's source recording is excluded / ineligible. */
+export const HANDOVER_INELIGIBLE_ERROR =
+  'Handover refused — the source recording is excluded (trashed / personal / low-value) or its eligibility could not be verified.'
 
 interface ResolvedSource {
   actionableId: string | null
@@ -472,6 +480,14 @@ function resolveSource(ref: HandoverSourceRef, deps: HandoverDataDeps): Resolved
   const rec = recordingId ? deps.getRecording(recordingId) : undefined
   if (rec) meetingId = meetingId ?? rec.meeting_id ?? null
 
+  // RE7-2 (round-7) — resolve recording identity FIRST, then gate through the
+  // shared fail-closed boundary BEFORE reading any transcript/summary/action
+  // derivatives. A stale actionable/handover prompt must not export a
+  // now-excluded recording to an agentic brain; abort fail-closed.
+  if (recordingId && !deps.isRecordingEligible(recordingId)) {
+    throw new Error(HANDOVER_INELIGIBLE_ERROR)
+  }
+
   const transcript = recordingId ? deps.getTranscript(recordingId) : undefined
   const meeting = meetingId ? deps.getMeeting(meetingId) : undefined
   const knowledgeKey = knowledgeCaptureId ?? skid
@@ -604,6 +620,17 @@ export function assembleHandoverBundle(params: AssembleBundleParams): AssembleBu
     files: files.map((f) => f.rel).concat('manifest.json'),
   }
 
+  // RE7-2 — revalidate eligibility IMMEDIATELY before the writes (the source
+  // could have been trashed/personal/value-excluded between resolveSource and
+  // here). Fail closed: abort the whole bundle rather than persist an excluded
+  // recording's derivatives to disk.
+  {
+    const { eligible, failClosed } = filterEligibleRecordingIds(resolved.recordingIds)
+    if (failClosed || resolved.recordingIds.some((id) => !eligible.has(id))) {
+      throw new Error(HANDOVER_INELIGIBLE_ERROR)
+    }
+  }
+
   for (const f of files) writeFileSync(join(bundleDir, f.rel), f.content, 'utf-8')
   writeFileSync(join(bundleDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf-8')
 
@@ -693,6 +720,29 @@ function buildRunPrompt(bundleDir: string, targetDir: string): string {
  * process cwd (GenerateOptions.cwd) — and honours the never-throw / null
  * contract: a null result is a surfaced failure written to RUN.log, not silence.
  */
+/**
+ * RE7-2 (round-7) — final eligibility gate before an agent run. Reads the
+ * bundle's manifest recordingIds and re-validates them through the shared
+ * fail-closed boundary: the source could have been trashed / personal /
+ * value-excluded since the bundle was assembled. Returns an error string when
+ * the run must be refused, or null when eligible. A read/parse failure is
+ * treated as fail-closed (refuse).
+ */
+function revalidateBundleEligibility(bundleDir: string): string | null {
+  let recordingIds: string[]
+  try {
+    const manifest = JSON.parse(readFileSync(join(bundleDir, 'manifest.json'), 'utf-8')) as HandoverManifest
+    recordingIds = manifest.source?.recordingIds ?? []
+  } catch (e) {
+    console.error('[handover] could not read bundle manifest for eligibility re-check — failing closed:', e)
+    return HANDOVER_INELIGIBLE_ERROR
+  }
+  if (recordingIds.length === 0) return null // no recording-backed content
+  const { eligible, failClosed } = filterEligibleRecordingIds(recordingIds)
+  if (failClosed || recordingIds.some((id) => !eligible.has(id))) return HANDOVER_INELIGIBLE_ERROR
+  return null
+}
+
 export async function runHandoverAgent(params: RunHandoverAgentParams): Promise<RunHandoverAgentResult> {
   const now = params.now ?? (() => new Date())
   const resolveBrain = params.resolveBrain ?? defaultResolveBrain
@@ -761,6 +811,15 @@ export async function runHandoverAgent(params: RunHandoverAgentParams): Promise<
         runLogPath,
         error: lateTamper,
       }
+    }
+
+    // RE7-2 — final eligibility re-check, at the same last-moment gate as the
+    // tamper check: refuse the run (write nothing, spawn nothing) if the source
+    // recording became excluded since the bundle was assembled.
+    const ineligible = revalidateBundleEligibility(bundleDir)
+    if (ineligible) {
+      emit('handover:run-failed', { bundleId: params.bundleId, brainId: params.brainId ?? null, error: ineligible })
+      return { ok: false, brainId: params.brainId ?? null, brainLabel: null, finalResponse: null, runLogPath, error: ineligible }
     }
 
     if (!brain) {

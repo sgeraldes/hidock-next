@@ -25,21 +25,36 @@ interface FakeWikiRow {
 
 let tmpRoot = ''
 let currentRow: FakeWikiRow | null = null
+let backfillRows: FakeWikiRow[] = []
+// RE7-1 (round-7) — mutable exclusion so eligibility-gating tests can drive the
+// boundary. Default: nothing excluded, not fail-closed.
+let excludedResult: { ids: Set<string>; failClosed: boolean } = { ids: new Set<string>(), failClosed: false }
 
 vi.mock('../file-storage', () => ({
   getTranscriptsPath: () => tmpRoot
 }))
 
 vi.mock('../database', () => ({
-  // exportMeetingWiki reads exactly one row per call; return whatever the test set.
-  queryOne: () => currentRow,
-  queryAll: () => []
+  // exportMeetingWiki reads one transcript row per call, selected by the id
+  // param. When backfillRows are set, resolve per-recording; else use currentRow.
+  queryOne: (_sql: string, params?: unknown[]) => {
+    const id = params?.[0]
+    if (backfillRows.length > 0 && id != null) return backfillRows.find((r) => r.recording_id === id) ?? null
+    return currentRow
+  },
+  // backfillMeetingWiki enumerates transcript rows via queryAll.
+  queryAll: () => backfillRows,
+  // exportMeetingWiki / backfill gate on isRecordingEligible /
+  // filterEligibleRecordingIds, which read getExcludedRecordingIds.
+  getExcludedRecordingIds: () => excludedResult
 }))
 
 describe('exportMeetingWiki — stale page cleanup (ISSUE-8)', () => {
   beforeEach(() => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'hidock-wiki-'))
     currentRow = null
+    backfillRows = []
+    excludedResult = { ids: new Set<string>(), failClosed: false }
   })
 
   afterEach(() => {
@@ -123,5 +138,102 @@ describe('exportMeetingWiki — stale page cleanup (ISSUE-8)', () => {
     const bodies = remaining.map((f) => readFileSync(join(tmpRoot, 'wiki', f), 'utf-8'))
     expect(bodies.some((b) => b.includes('recording_id: rec-B'))).toBe(true)
     expect(bodies.filter((b) => b.includes('recording_id: rec-A'))).toHaveLength(1)
+  })
+})
+
+/**
+ * RE7-1 (round-7) — the meeting wiki is an EXPORT surface. A personal /
+ * soft-deleted / value-excluded recording must never keep a published wiki page,
+ * and export must refuse to (re)create one. All routed through the shared
+ * fail-closed eligibility boundary.
+ */
+describe('meeting-wiki — eligibility gating (RE7-1)', () => {
+  beforeEach(() => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'hidock-wiki-'))
+    currentRow = null
+    backfillRows = []
+    excludedResult = { ids: new Set<string>(), failClosed: false }
+  })
+  afterEach(() => {
+    rmSync(tmpRoot, { recursive: true, force: true })
+  })
+
+  const listWiki = () => {
+    try {
+      return readdirSync(join(tmpRoot, 'wiki')).filter((f) => f.endsWith('.md')).sort()
+    } catch {
+      return []
+    }
+  }
+
+  it('exportMeetingWiki refuses and removes the page when the recording became excluded', async () => {
+    const { exportMeetingWiki } = await import('../meeting-wiki')
+
+    // First export while eligible → one page exists.
+    currentRow = {
+      recording_id: 'rec-x',
+      full_text: 'texto',
+      title_suggestion: 'Reunion Sensible',
+      date_recorded: '2026-07-07T00:00:00.000Z'
+    }
+    expect(exportMeetingWiki('rec-x')).not.toBeNull()
+    expect(listWiki()).toHaveLength(1)
+
+    // Recording is now excluded (personal / trashed / low-value). Re-export must
+    // refuse AND scrub the previously published page.
+    excludedResult = { ids: new Set(['rec-x']), failClosed: false }
+    expect(exportMeetingWiki('rec-x')).toBeNull()
+    expect(listWiki()).toHaveLength(0)
+  })
+
+  it('exportMeetingWiki fails closed when eligibility cannot be verified', async () => {
+    const { exportMeetingWiki } = await import('../meeting-wiki')
+    currentRow = {
+      recording_id: 'rec-y',
+      full_text: 'texto',
+      title_suggestion: 'Reunion',
+      date_recorded: '2026-07-07T00:00:00.000Z'
+    }
+    excludedResult = { ids: new Set<string>(), failClosed: true }
+    expect(exportMeetingWiki('rec-y')).toBeNull()
+    expect(listWiki()).toHaveLength(0)
+  })
+
+  it('reconcileWikiEligibility removes an existing page on a transition to excluded', async () => {
+    const { exportMeetingWiki, reconcileWikiEligibility } = await import('../meeting-wiki')
+    currentRow = {
+      recording_id: 'rec-z',
+      full_text: 'texto',
+      title_suggestion: 'Reunion Z',
+      date_recorded: '2026-07-07T00:00:00.000Z'
+    }
+    expect(exportMeetingWiki('rec-z')).not.toBeNull()
+    expect(listWiki()).toHaveLength(1)
+
+    // Simulate the transition (markPersonal / soft-delete / low value-rating).
+    excludedResult = { ids: new Set(['rec-z']), failClosed: false }
+    reconcileWikiEligibility('rec-z')
+    expect(listWiki()).toHaveLength(0)
+  })
+
+  it('backfillMeetingWiki skips excluded recordings and fails closed as a whole on an unverifiable lookup', async () => {
+    const { backfillMeetingWiki } = await import('../meeting-wiki')
+
+    backfillRows = [
+      { recording_id: 'r-ok', full_text: 'a', title_suggestion: 'A', date_recorded: '2026-07-01T00:00:00.000Z' },
+      { recording_id: 'r-bad', full_text: 'b', title_suggestion: 'B', date_recorded: '2026-07-02T00:00:00.000Z' }
+    ]
+    // r-bad excluded → only r-ok is written.
+    excludedResult = { ids: new Set(['r-bad']), failClosed: false }
+    const partial = backfillMeetingWiki()
+    expect(partial.written).toBe(1)
+    expect(listWiki()).toHaveLength(1)
+
+    // Wipe and re-run with an unverifiable lookup → nothing is written at all.
+    rmSync(join(tmpRoot, 'wiki'), { recursive: true, force: true })
+    excludedResult = { ids: new Set<string>(), failClosed: true }
+    const closed = backfillMeetingWiki()
+    expect(closed.written).toBe(0)
+    expect(listWiki()).toHaveLength(0)
   })
 })

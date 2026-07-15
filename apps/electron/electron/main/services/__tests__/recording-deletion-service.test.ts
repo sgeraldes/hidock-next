@@ -34,7 +34,11 @@ const files = vi.hoisted(() => ({
 
 vi.mock('../database', () => db)
 vi.mock('../file-storage', () => ({ deleteRecording: files.deleteRecording }))
-vi.mock('../meeting-wiki', () => ({ removeMeetingWiki: files.removeMeetingWiki }))
+vi.mock('../meeting-wiki', () => ({
+  removeMeetingWiki: files.removeMeetingWiki,
+  // RE7-1 (round-7) — markPersonal + soft-delete reconcile the wiki; no-op here.
+  reconcileWikiEligibility: vi.fn()
+}))
 vi.mock('../vector-store', () => ({
   getVectorStore: () => ({ deleteByRecording: files.vectorDeleteByRecording })
 }))

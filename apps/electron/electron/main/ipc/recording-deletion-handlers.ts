@@ -47,6 +47,7 @@ import {
   restoreDeletedRecording,
   retryPendingFileCleanups
 } from '../services/recording-deletion-service'
+import { reconcileWikiEligibility } from '../services/meeting-wiki'
 
 const RecordingIdSchema = z.string().min(1).max(200)
 const MarkPersonalSchema = z.object({ id: RecordingIdSchema, personal: z.boolean() })
@@ -112,6 +113,10 @@ export function registerRecordingDeletionHandlers(): void {
       if (!rec) return { success: false, error: 'Recording not found' }
       const result = setKnowledgeCaptureRatingByRecording(rec.id, parsed.data.rating)
       if (!result.success) return { success: false, error: 'No knowledge capture for this recording' }
+      // RE7-1 (round-7) — a value-rating TRANSITION (e.g. → garbage/low-value)
+      // can make the recording value-excluded; remove any exported wiki page for
+      // a now-ineligible recording (regenerated when re-rated up).
+      reconcileWikiEligibility(rec.id)
       return { success: true, rating: result.rating }
     } catch (e) {
       console.error('recordings:setValueRating error:', e)
