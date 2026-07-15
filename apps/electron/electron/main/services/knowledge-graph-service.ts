@@ -1070,18 +1070,42 @@ export function searchGraphNodes(query: string, limit = 12): ContextGraphNode[] 
   const store = getKnowledgeGraphStore()
   const q = query.trim().toLowerCase()
   if (!q) return []
-  // P3 (round-3) — over-fetch so the visible slice can still fill `limit` after
-  // excluded-only nodes are dropped, then filter each hit through the node
-  // visibility check (an excluded-only node must not appear in search).
+  if (limit <= 0) return []
   const exclusion = getGroundingExclusionSet()
-  const fetch = exclusionIsNoop(exclusion) ? limit : Math.max(limit * 4, limit)
-  const rows = store.db.queryAll<GraphNode>(
-    'SELECT * FROM graph_nodes WHERE LOWER(label) LIKE ? ORDER BY LENGTH(label) ASC LIMIT ?',
-    [`%${q}%`, fetch]
-  )
-  const visible = exclusionIsNoop(exclusion)
-    ? rows
-    : rows.filter((n) => isNodeVisibleUnderExclusion(store, n.id, exclusion)).slice(0, limit)
+  // Stable ordering across pages: LENGTH(label) then id, so OFFSET pagination
+  // never revisits or skips a row (LENGTH alone is not a total order).
+  const orderedQuery =
+    'SELECT * FROM graph_nodes WHERE LOWER(label) LIKE ? ORDER BY LENGTH(label) ASC, id ASC LIMIT ? OFFSET ?'
+
+  // Fast path — no exclusions active: a single ordered page of `limit` rows.
+  if (exclusionIsNoop(exclusion)) {
+    const rows = store.db.queryAll<GraphNode>(orderedQuery, [`%${q}%`, limit, 0])
+    return toDTO({ center: undefined, nodes: rows.map((n) => ({ ...n, degree: 0 })), edges: [] }).nodes
+  }
+
+  // ADV10-MED (round-11) — page the ordered matches until `limit` VISIBLE nodes
+  // are collected OR the query is exhausted, instead of over-fetching a fixed
+  // `limit * 4` and filtering after. Under partial cleanup the first limit*4
+  // ordered matches can all be excluded-only (e.g. 48 stale nodes before an
+  // eligible 49th), which made the old ceiling return empty/undersized without
+  // ever examining the eligible node — a user-visible false negative. This mirrors
+  // the round-9 fetch-until-filled pattern (rag collectEligibleKnowledge): no
+  // fixed multiplier ceiling, bounded only by table size via advancing OFFSET.
+  const PAGE = Math.max(limit * 4, 40)
+  const visible: GraphNode[] = []
+  for (let offset = 0; ; offset += PAGE) {
+    const rows = store.db.queryAll<GraphNode>(orderedQuery, [`%${q}%`, PAGE, offset])
+    if (rows.length === 0) break
+    for (const n of rows) {
+      if (isNodeVisibleUnderExclusion(store, n.id, exclusion)) {
+        visible.push(n)
+        if (visible.length >= limit) {
+          return toDTO({ center: undefined, nodes: visible.map((x) => ({ ...x, degree: 0 })), edges: [] }).nodes
+        }
+      }
+    }
+    if (rows.length < PAGE) break // source exhausted
+  }
   return toDTO({ center: undefined, nodes: visible.map((n) => ({ ...n, degree: 0 })), edges: [] }).nodes
 }
 

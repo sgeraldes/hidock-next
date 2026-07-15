@@ -442,6 +442,75 @@ describe('INC-4 — overview built from eligible edges/nodes', () => {
 })
 
 // ---------------------------------------------------------------------------
+// ADV10-MED (round-11) — searchGraphNodes must page ordered matches until the
+// requested number of VISIBLE nodes is collected, with NO fixed limit*4 ceiling.
+// Under partial cleanup a long run of excluded-only matches must not truncate an
+// eligible match that ranks after them.
+// ---------------------------------------------------------------------------
+
+describe('ADV10-MED — graph-node search pages past excluded-only matches', () => {
+  it('returns an eligible match that ranks after >limit*4 excluded-only matches', () => {
+    // A dead recording whose provenance makes every "zzq##" node excluded-only.
+    seedRecording('recDead')
+    // 50 excluded-only nodes (> default limit 12 * 4 = 48) all matching "zzq",
+    // each length-5 label so they sort (LENGTH ASC, id ASC) AHEAD of the longer
+    // eligible label. Each is attributed SOLELY to recDead → invisible once excluded.
+    for (let i = 0; i < 50; i++) {
+      const pad = String(i).padStart(2, '0')
+      seedNode(`nDead${pad}`, 'topic', `zzq${pad}`) // label length 5
+      seedEdge(`eDead${pad}`, `nDead${pad}`, 'nAlice', 'MENTIONED')
+      seedEdgeSource(`eDead${pad}`, 'recDead', 'txDead')
+    }
+    // One eligible node matching "zzq" via a LEGACY (zero-provenance) edge →
+    // always visible. Its longer label sorts it AFTER all 50 dead nodes, so the
+    // old fixed limit*4 fetch (48 rows) would never have examined it.
+    seedNode('nEligZzq', 'topic', 'zzqEligibleLongLabel') // length > 5 → sorts last
+    seedEdge('eEligZzq', 'nEligZzq', 'nAlice', 'RELATES_TO') // legacy, unattributed → survives
+
+    // (No baseline "no-exclusion" assertion: with 51 matches and the default
+    // limit of 12, the long-label eligible node legitimately ranks 51st by the
+    // LENGTH-ASC ordering and is not in the top slice — that is correct ranking,
+    // not the bug. The bug is that AFTER exclusion it must still surface.)
+
+    // Exclude recDead → all 50 zzq## nodes become excluded-only, ranked ahead of
+    // the eligible match. Paging must still surface the eligible node.
+    deleteRecordingCascade('recDead', { hard: false })
+    const results = searchGraphNodes('zzq')
+    const labels = results.map((n) => n.label)
+
+    // The eligible node is returned despite ranking after 50 excluded matches.
+    expect(labels).toContain('zzqEligibleLongLabel')
+    // No excluded-only node leaks into the results.
+    expect(labels.some((l) => /^zzq\d\d$/.test(l))).toBe(false)
+    // Never exceeds the requested visible limit.
+    expect(results.length).toBeLessThanOrEqual(12)
+  })
+
+  it('respects the visible limit while paging past excluded-only matches', () => {
+    seedRecording('recDead2')
+    // 48 excluded-only "wqz##" nodes (length 5) ahead of many eligible ones.
+    for (let i = 0; i < 48; i++) {
+      const pad = String(i).padStart(2, '0')
+      seedNode(`nDx${pad}`, 'topic', `wqz${pad}`)
+      seedEdge(`eDx${pad}`, `nDx${pad}`, 'nAlice', 'MENTIONED')
+      seedEdgeSource(`eDx${pad}`, 'recDead2', 'txD2')
+    }
+    // 20 eligible legacy "wqz##" nodes (longer labels sort after the dead ones).
+    for (let i = 0; i < 20; i++) {
+      const pad = String(i).padStart(2, '0')
+      seedNode(`nEx${pad}`, 'topic', `wqzEligible${pad}`)
+      seedEdge(`eEx${pad}`, `nEx${pad}`, 'nAlice', 'RELATES_TO') // legacy
+    }
+    deleteRecordingCascade('recDead2', { hard: false })
+
+    const results = searchGraphNodes('wqz', 5)
+    // Exactly the requested visible limit, all eligible, none excluded.
+    expect(results.length).toBe(5)
+    expect(results.every((n) => n.label.startsWith('wqzEligible'))).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // RE-3 — legacy ZERO-provenance edges CANNOT be attributed, so a permanent
 // delete never removes them and grounding keeps them (documented behavior).
 // ---------------------------------------------------------------------------
