@@ -56,10 +56,12 @@ function collectEligibleRows<T>(
 ): T[] {
   if (limit <= 0) return []
   const PAGE = Math.max(limit * 4, 20)
-  const MAX_PAGES = 25
   const out: T[] = []
-  let offset = 0
-  for (let page = 0; page < MAX_PAGES; page++) {
+  // RE8-P2a (round-9) — NO fixed page ceiling: page until `limit` eligible rows
+  // are collected OR the source is genuinely exhausted (a page returns fewer than
+  // PAGE rows). OFFSET advances every iteration, so the loop is bounded by the
+  // table size; a long run of excluded rows can no longer leave the list short.
+  for (let offset = 0; ; offset += PAGE) {
     const rows = fetchPage(PAGE, offset)
     if (rows.length === 0) break
     const recIds = rows.map(recIdOf).filter((x): x is string => !!x)
@@ -73,7 +75,6 @@ function collectEligibleRows<T>(
       }
     }
     if (rows.length < PAGE) break // source exhausted
-    offset += PAGE
   }
   return out.slice(0, limit)
 }

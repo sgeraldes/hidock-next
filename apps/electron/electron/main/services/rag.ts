@@ -904,10 +904,13 @@ ${transcript.substring(0, 8000)}`
   ): any[] {
     if (limit <= 0) return []
     const PAGE = Math.max(limit * 4, 40)
-    const MAX_PAGES = 50 // defensive bound (≥ 2000 rows scanned at the default page size)
     const collected: any[] = []
-    let offset = 0
-    for (let page = 0; page < MAX_PAGES; page++) {
+    // RE8-P2b (round-9) — NO fixed page/scan ceiling: page until `limit` eligible
+    // rows are collected OR the source is genuinely exhausted (a page returns
+    // fewer than PAGE rows). OFFSET advances every iteration, so the loop is
+    // bounded by the table size — a long run of excluded rows before an eligible
+    // match can no longer truncate the result.
+    for (let offset = 0; ; offset += PAGE) {
       const rows = fetchPage(PAGE, offset)
       if (rows.length === 0) break
       for (const r of filterEligibleKnowledge(db, rows)) {
@@ -915,7 +918,6 @@ ${transcript.substring(0, 8000)}`
         if (collected.length >= limit) return collected.slice(0, limit)
       }
       if (rows.length < PAGE) break // source exhausted
-      offset += PAGE
     }
     return collected.slice(0, limit)
   }

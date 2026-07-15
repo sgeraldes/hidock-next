@@ -8,15 +8,25 @@ vi.mock('electron', () => ({
   }
 }))
 
-vi.mock('../../services/database', () => ({
-  getMeetings: vi.fn(),
-  queryAll: vi.fn(),
-  queryOne: vi.fn(),
-  // RE7-3 (round-7) — briefing:get routes recording-backed rows through the
-  // real eligibility boundary, which reads getExcludedRecordingIds. Default:
-  // nothing excluded, not fail-closed (so all rows remain eligible).
-  getExcludedRecordingIds: vi.fn(() => ({ ids: new Set<string>(), failClosed: false }))
-}))
+vi.mock('../../services/database', () => {
+  // RE7-3 (round-7) — briefing:get routes recording-backed rows through the real
+  // eligibility boundary. ADV9 (round-9): the boundary now uses the POSITIVE
+  // allowlist getEligibleRecordingIds; tests still drive getExcludedRecordingIds,
+  // and getEligibleRecordingIds derives from it (existing candidates minus excluded).
+  const getExcludedRecordingIds = vi.fn(() => ({ ids: new Set<string>(), failClosed: false }))
+  return {
+    getMeetings: vi.fn(),
+    queryAll: vi.fn(),
+    queryOne: vi.fn(),
+    getExcludedRecordingIds,
+    getEligibleRecordingIds: (ids: Iterable<string>) => {
+      const { ids: excluded, failClosed } = getExcludedRecordingIds()
+      return failClosed
+        ? { eligible: new Set<string>(), failClosed: true }
+        : { eligible: new Set([...ids].filter((i) => i && !excluded.has(i))), failClosed: false }
+    }
+  }
+})
 
 vi.mock('../../services/config', () => ({
   getConfig: vi.fn()
@@ -337,5 +347,35 @@ describe('Briefing IPC Handlers', () => {
     const ids = res.data.pendingActionables.map((a: any) => a.id)
     expect(ids).toHaveLength(8)
     expect(ids.every((id: string) => id.startsWith('a-ok-'))).toBe(true)
+  })
+
+  // RE8-P2a (round-9) — NO fixed page ceiling: 900 excluded rows precede the
+  // eligible ones (well beyond the old 25-page ≈ 500-row ceiling that would have
+  // left the list short). Pagination must exhaust them and still fill 8.
+  it('RE8-P2a — pages past a block larger than the old fixed ceiling to fill the display limit', async () => {
+    const { queryAll, queryOne, getMeetings, getExcludedRecordingIds } = await import('../../services/database')
+    vi.mocked(getMeetings).mockReturnValue([])
+    vi.mocked(getExcludedRecordingIds).mockReturnValue({ ids: new Set(['rec-bad']), failClosed: false } as any)
+    vi.mocked(queryOne).mockImplementation((_sql: string, params?: unknown[]) => {
+      const id = String(params?.[0] ?? '')
+      if (id.startsWith('kc-bad')) return { source_recording_id: 'rec-bad' } as any
+      if (id.startsWith('kc-ok')) return { source_recording_id: null } as any
+      return null as any
+    })
+    const fullActionables = [
+      ...Array.from({ length: 900 }, (_, i) => ({ id: `a-bad-${i}`, type: 'email', title: `B${i}`, source_knowledge_id: `kc-bad-${i}` })),
+      ...Array.from({ length: 8 }, (_, j) => ({ id: `a-ok-${j}`, type: 'email', title: `O${j}`, source_knowledge_id: `kc-ok-${j}` }))
+    ]
+    vi.mocked(queryAll).mockImplementation((sql: string, params?: unknown[]) => {
+      if (/FROM actionables\s+WHERE status/.test(sql)) {
+        const [limit, offset] = (params as number[]) ?? [fullActionables.length, 0]
+        return fullActionables.slice(offset, offset + limit) as any
+      }
+      return [] as any
+    })
+
+    const res = await handlers['briefing:get']()
+    expect(res.success).toBe(true)
+    expect(res.data.pendingActionables.map((a: any) => a.id)).toHaveLength(8)
   })
 })

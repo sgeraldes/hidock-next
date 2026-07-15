@@ -45,6 +45,12 @@ vi.mock('../database', () => ({
   getDatabase: () => dbInstance,
   queryOne: vi.fn(),
   getExcludedRecordingIds: () => globalExclusion,
+  // ADV9 (round-9) — filterEligibleKnowledge → filterEligibleRecordingIds now
+  // uses the POSITIVE allowlist; derive it from the same mutable excluded source.
+  getEligibleRecordingIds: (ids: Iterable<string>) =>
+    globalExclusion.failClosed
+      ? { eligible: new Set<string>(), failClosed: true }
+      : { eligible: new Set([...ids].filter((i) => i && !globalExclusion.ids.has(i))), failClosed: false },
   // Real escaping behavior — escapes % _ \ with a leading backslash, which requires a
   // working `ESCAPE '\'` clause in the query to be interpreted correctly.
   escapeLikePattern: vi.fn((pattern: string) => pattern.replace(/[%_\\]/g, '\\$&'))
@@ -214,5 +220,28 @@ describe('RAGService.globalSearch (real SQL)', () => {
     if (!result.success) return
     const ids = result.data.knowledge.map((k: any) => k.id)
     expect(ids).toEqual(['kc-yok']) // found despite sitting beyond a 50+ excluded block
+  })
+
+  // RE8-P2b (round-9) — NO fixed scan ceiling: an eligible capture sits beyond
+  // 2100 excluded ones (past the old max(limit*10,50)/50-page ≈ 2000-row ceiling
+  // that reintroduced truncation-before-filter for large libraries). It must
+  // still surface.
+  it('RE8-P2b — pages past a >2000-row block of excluded captures with no fixed ceiling', () => {
+    const values: string[] = []
+    for (let i = 0; i < 2100; i++) {
+      values.push(`('kc-w-${i}', 'Wombat note ${i}', 'Wombat backed ${i}', '2026-04-01', 'rec-w', NULL)`)
+    }
+    values.push(`('kc-wok', 'Wombat eligible', 'Wombat standalone', '2026-04-02', NULL, NULL)`)
+    dbInstance.run(
+      `INSERT INTO knowledge_captures (id, title, summary, captured_at, source_recording_id, deleted_at) VALUES ${values.join(',')}`
+    )
+    globalExclusion = { ids: new Set(['rec-w']), failClosed: false }
+
+    const rag = getRAGService()
+    return rag.globalSearch('Wombat', 1).then((result) => {
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(result.data.knowledge.map((k: any) => k.id)).toEqual(['kc-wok'])
+    })
   })
 })
