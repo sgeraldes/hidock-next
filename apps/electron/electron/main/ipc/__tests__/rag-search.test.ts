@@ -42,39 +42,18 @@ describe('RAG Global Search Handler', () => {
     expect(ipcMain.handle).toHaveBeenCalledWith('rag:globalSearch', expect.any(Function))
   })
 
-  it('ADV11 — rag:index-transcript STRIPS renderer-supplied captureId (and any non-whitelisted key)', async () => {
+  it('ADV12 — rag:index-transcript handler is NOT registered (renderer-controlled raw-transcript indexing removed)', () => {
     registerRAGHandlers()
-    // Find the registered rag:index-transcript handler.
-    const call = (ipcMain.handle as unknown as { mock: { calls: Array<[string, (...a: unknown[]) => unknown]> } }).mock.calls.find(
-      (c) => c[0] === 'rag:index-transcript'
-    )
-    expect(call).toBeTruthy()
-    const handler = call![1]
-
-    // A malicious renderer tries to forge internal provenance.
-    await handler({}, {
-      transcript: 'hello world',
-      metadata: {
-        meetingId: 'm-1',
-        recordingId: 'rec-excluded',
-        timestamp: '2026-06-01',
-        subject: 'S',
-        captureId: 'forged-xyz',
-        evil: 'nope'
-      }
-    })
-
-    expect(indexTranscript).toHaveBeenCalledTimes(1)
-    const passed = indexTranscript.mock.calls[0][1] as Record<string, unknown>
-    // Only the whitelisted keys reach the vector store — captureId and any other
-    // renderer key are dropped, so provenance cannot be forged at the boundary.
-    expect(passed).toEqual({
-      meetingId: 'm-1',
-      recordingId: 'rec-excluded',
-      timestamp: '2026-06-01',
-      subject: 'S'
-    })
-    expect(passed).not.toHaveProperty('captureId')
-    expect(passed).not.toHaveProperty('evil')
+    // The renderer-controlled raw-transcript indexing surface was removed
+    // entirely in round 13: it let the renderer supply arbitrary transcript
+    // content plus an arbitrary/optional recordingId, so excluded or foreign
+    // content could ride an eligible id (or no id at all) into vector search /
+    // RAG / LLM prompts. It had zero renderer callers — a dead, exploitable
+    // surface. Assert no handler is registered for it, and that the vector
+    // store's indexTranscript is never wired to an IPC boundary here.
+    const calls = (ipcMain.handle as unknown as { mock: { calls: Array<[string, (...a: unknown[]) => unknown]> } }).mock.calls
+    const registered = calls.find((c) => c[0] === 'rag:index-transcript')
+    expect(registered).toBeUndefined()
+    expect(indexTranscript).not.toHaveBeenCalled()
   })
 })

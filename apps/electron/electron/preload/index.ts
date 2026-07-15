@@ -758,12 +758,6 @@ export interface ElectronAPI {
       meetingCount: number
       sessionCount: number
     }>
-    indexTranscript: (transcript: string, metadata: {
-      meetingId?: string
-      recordingId?: string
-      timestamp?: string
-      subject?: string
-    }) => Promise<{ indexed: number }>
     search: (query: string, limit?: number) => Promise<Array<{
       content: string
       meetingId?: string
@@ -1620,8 +1614,6 @@ const electronAPI: ElectronAPI = {
     removeLastMessages: (sessionId, count) => callIPC('rag:removeLastMessages', sessionId, count),
     clearSession: (sessionId) => callIPC('rag:clear-session', sessionId),
     stats: () => callIPC('rag:stats'),
-    indexTranscript: (transcript, metadata) =>
-      callIPC('rag:index-transcript', { transcript, metadata }),
     search: (query, limit) => callIPC('rag:search', { query, limit }),
     getChunks: () => callIPC('rag:get-chunks'),
     globalSearch: (query, limit) => callIPC('rag:globalSearch', { query, limit })

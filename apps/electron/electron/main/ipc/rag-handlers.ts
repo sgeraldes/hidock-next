@@ -214,45 +214,15 @@ export function registerRAGHandlers(): void {
     return rag.getStats()
   })
 
-  // Index a transcript manually.
-  //
-  // ADV11 (round-12) — SECURITY BOUNDARY. The renderer cannot forge internal
-  // provenance. We build a WHITELISTED metadata object here and pass ONLY
-  // {meetingId, recordingId, timestamp, subject} into indexTranscript. In
-  // particular `captureId` (and any other key) supplied by the renderer is
-  // DROPPED — captureId is INTERNAL and may be set ONLY by main-process
-  // artifact-service.ts / clipboard-capture.ts. Without this strip, a renderer
-  // could send `{recordingId: <excludedId>, captureId: <forged>}` to try to make
-  // an excluded recording's chunks look like an artifact and skip the recording
-  // allowlist (vector-store filterEligibleDocs now also resolves provenance
-  // positively against the DB as defense-in-depth).
-  ipcMain.handle(
-    'rag:index-transcript',
-    async (
-      _event,
-      {
-        transcript,
-        metadata
-      }: {
-        transcript: string
-        metadata: {
-          meetingId?: string
-          recordingId?: string
-          timestamp?: string
-          subject?: string
-        }
-      }
-    ) => {
-      const safeMetadata = {
-        meetingId: metadata?.meetingId,
-        recordingId: metadata?.recordingId,
-        timestamp: metadata?.timestamp,
-        subject: metadata?.subject
-      }
-      const count = await vectorStore.indexTranscript(transcript, safeMetadata)
-      return { indexed: count }
-    }
-  )
+  // ADV12 (round-13) — the renderer-controlled raw-transcript indexing surface
+  // (`rag:index-transcript`) was REMOVED. It let the renderer supply arbitrary
+  // transcript text plus an arbitrary/optional recordingId, so excluded or
+  // foreign content could ride an eligible id (or no id) into vector search /
+  // RAG / LLM prompts — and it had ZERO renderer callers (dead, exploitable).
+  // A reindex-by-id feature, if ever needed, must live entirely in the main
+  // process: take ONLY a recordingId, load the authoritative transcript +
+  // metadata itself, and eligibility-check adjacent to persistence — never
+  // trust a renderer-supplied content↔recording association.
 
   // Search transcripts
   ipcMain.handle(
