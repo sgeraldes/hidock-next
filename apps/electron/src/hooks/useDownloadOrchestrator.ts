@@ -88,6 +88,24 @@ export function clearDownloadPriority(filename: string): void {
 }
 
 /**
+ * Release the request-scope + priority bookkeeping for a single filename. Called when
+ * a download is deliberately cancelled so the orchestrator never auto-requeues it
+ * (the main process also marks it 'cancelled' + cancelReason='user', so it stays
+ * terminal). The file remains retryable by an explicit user re-download, which
+ * re-registers scope/priority afresh.
+ */
+export function releaseDownloadBookkeeping(filename: string): void {
+  _requestedDownloads.delete(filename)
+  _priorityDownloads.delete(filename)
+}
+
+/** Clear ALL request-scope + priority bookkeeping (used by Cancel-All). */
+export function clearAllDownloadBookkeeping(): void {
+  _requestedDownloads.clear()
+  _priorityDownloads.clear()
+}
+
+/**
  * Pure selector for which pending items to process. Exported for unit tests.
  * - auto-download ON  → all pending (bulk auto-sync semantics)
  * - auto-download OFF → only items the user explicitly requested
@@ -167,8 +185,15 @@ export function canStartDownloadSession(isConnected: boolean, connectionStep: st
 }
 
 /**
- * Cancel in-progress downloads by aborting the USB transfer.
- * Call this from UI cancel buttons in addition to setting deviceSyncing = false.
+ * Immediate renderer-side stop for the download loop: aborts the in-flight renderer
+ * AbortController, cancels any renderer-owned USB transfers, and flips deviceSyncing
+ * off so the queue loop breaks and the UI reflects the stop right away.
+ *
+ * The AWAITABLE main-process settlement (which aborts the in-flight USB transfer in
+ * the main process and drains it to the protocol boundary) is owned by the caller via
+ * `downloadService.cancelAll()` — see useOperations.cancelAllDownloads. Do NOT flip
+ * durable UI/queue state to "done" before that promise resolves.
+ *
  * Idempotent: if a cancel is already in progress, returns immediately.
  */
 export function cancelDownloads(): void {
@@ -180,12 +205,10 @@ export function cancelDownloads(): void {
     _downloadAbortControllerRef.abort()
     _downloadAbortControllerRef = null
   }
-  // Cancel all downloads at device service level (aborts USB transfers)
+  // Cancel all downloads at device service level (aborts renderer-side USB transfers)
   const deviceService = getHiDockDeviceService()
   deviceService.cancelAllDownloads()
-  // DL-003: Also cancel main-process transfers
-  window.electronAPI?.downloadService?.cancelAll?.()
-  // Also set store state so the queue loop breaks
+  // Set store state so the queue loop breaks (immediate UI feedback).
   useAppStore.getState().cancelDeviceSync()
 }
 
@@ -244,6 +267,16 @@ export function useDownloadOrchestrator() {
       )
 
       if (!success) {
+        // A resolved-false can be a user cancellation that landed as a falsy return
+        // rather than a throw. Check aborted FIRST: never downgrade a user cancel to
+        // 'failed' (the main process owns the durable 'cancelled' state, and a 'failed'
+        // downgrade would look retryable and resurrect on reconnect).
+        if (signal.aborted) {
+          if (shouldLogQa()) console.log(`[QA-MONITOR][Operation] Download cancelled: ${item.filename}`)
+          deviceService.log('info', 'Download cancelled', `${item.filename}: Cancelled by user`)
+          removeFromDownloadQueue(item.filename)
+          return false
+        }
         console.error(`[useDownloadOrchestrator] Download failed: ${item.filename}`)
         await window.electronAPI.downloadService.markFailed(item.filename, 'USB transfer failed')
         removeFromDownloadQueue(item.filename)
@@ -286,23 +319,27 @@ export function useDownloadOrchestrator() {
         return false
       }
     } catch (error) {
+      // Check aborted BEFORE any markFailed: a user cancellation must surface as
+      // 'cancelled', not 'failed'. Calling markFailed here used to clobber the main
+      // process's 'cancelling'/'cancelled' state to 'failed', making a deliberate
+      // cancel look retryable and resurrect on reconnect (the renderer bug this fixes).
+      if (signal.aborted) {
+        deviceService.log('info', 'Download cancelled', `${item.filename}: Cancelled by user`)
+        // Deterministic cleanup of the renderer Map entry; the main-process cancel path
+        // re-emits the transient 'cancelled' row for the brief flash.
+        removeFromDownloadQueue(item.filename)
+        return false
+      }
       const libraryError = parseError(error, 'download')
       console.error(`[useDownloadOrchestrator] Error: ${item.filename}`, error)
       await window.electronAPI.downloadService.markFailed(item.filename, libraryError.message)
-      if (signal.aborted) {
-        // User-initiated cancellation — log as info, not error
-        deviceService.log('info', 'Download cancelled', `${item.filename}: Cancelled by user`)
-      } else {
-        deviceService.log('error', 'Download failed', `${item.filename}: ${libraryError.message}`)
-      }
-      if (!signal.aborted) {
-        removeFromDownloadQueue(item.filename)
-        toast({
-          title: 'Download error',
-          description: getErrorMessage(libraryError.type),
-          variant: 'error'
-        })
-      }
+      deviceService.log('error', 'Download failed', `${item.filename}: ${libraryError.message}`)
+      removeFromDownloadQueue(item.filename)
+      toast({
+        title: 'Download error',
+        description: getErrorMessage(libraryError.type),
+        variant: 'error'
+      })
       return false
     }
   }, [deviceService, addToDownloadQueue, updateDownloadProgress, removeFromDownloadQueue])
@@ -528,19 +565,10 @@ export function useDownloadOrchestrator() {
     // Subscribe to download service state updates
     const unsubDownloads = isElectron
       ? window.electronAPI.downloadService.onStateUpdate((state) => {
-          // Sync renderer queue with main process state
-          const rendererQueue = useAppStore.getState().downloadQueue
-          for (const item of state.queue) {
-            if ((item.status === 'pending' || item.status === 'downloading') && !rendererQueue.has(item.filename)) {
-              useAppStore.getState().addToDownloadQueue(item.filename, item.filename, item.fileSize || 0)
-            }
-          }
-          for (const [key] of rendererQueue) {
-            const mainItem = state.queue.find((i: DownloadQueueItem) => i.filename === key)
-            if (!mainItem || mainItem.status === 'completed' || mainItem.status === 'failed' || mainItem.status === 'cancelled') {
-              useAppStore.getState().removeFromDownloadQueue(key)
-            }
-          }
+          // Mirror the authoritative main-process queue into the single renderer store
+          // (status/progress/error, plus the transient 'cancelling'→'cancelled' flash).
+          // This is the one source of truth the bell popover + Operations overlay read.
+          useAppStore.getState().syncDownloadQueue(state.queue)
 
           if (_cancelEpoch > _lastProcessedEpoch) {
             _lastProcessedEpoch = _cancelEpoch
@@ -618,8 +646,8 @@ export function useDownloadOrchestrator() {
       // StrictMode does mount -> cleanup -> mount; resetting allows double subscription.
       // When the component truly unmounts and remounts, React creates a NEW ref(false).
     }
-  // DL-11: Only depend on deviceService (stable singleton). processDownloadQueue
-  // is accessed via ref so changes don't cause re-subscription.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  // DL-11: Only depend on deviceService (stable singleton). processDownloadQueue is
+  // accessed via ref so changes don't cause re-subscription; every other value used in
+  // the effect is a ref or a stable module function, so the dep array is exhaustive.
   }, [deviceService])
 }
