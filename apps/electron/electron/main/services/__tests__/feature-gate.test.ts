@@ -95,7 +95,7 @@ describe('gateInvokeHandler', () => {
     )
     // library read on the same prefix → open
     const read = vi.fn().mockResolvedValue([])
-    await expect(gateInvokeHandler('recordings:delete', read)({} as never)).resolves.toEqual([])
+    await expect(gateInvokeHandler('recordings:getAll', read)({} as never)).resolves.toEqual([])
   })
 
   it('reads the flag LIVE — re-enabling a feature unblocks the SAME wrapped handler', async () => {
