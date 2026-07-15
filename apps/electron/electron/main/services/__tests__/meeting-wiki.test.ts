@@ -236,4 +236,52 @@ describe('meeting-wiki — eligibility gating (RE7-1)', () => {
     expect(closed.written).toBe(0)
     expect(listWiki()).toHaveLength(0)
   })
+
+  it('RE7-P1a (round-8) — backfill REMOVES a stale page for a now-excluded recording (not just skips)', async () => {
+    const { exportMeetingWiki, backfillMeetingWiki } = await import('../meeting-wiki')
+
+    // A page exists from when the recording was eligible.
+    currentRow = { recording_id: 'r-stale', full_text: 'contenido', title_suggestion: 'Reunion Vieja', date_recorded: '2026-07-01T00:00:00.000Z' }
+    expect(exportMeetingWiki('r-stale')).not.toBeNull()
+    expect(listWiki()).toHaveLength(1)
+
+    // The recording is now excluded (e.g. newly value-classified low-value). A
+    // backfill pass must actively remove the stale markdown, not merely skip it.
+    backfillRows = [{ recording_id: 'r-stale', full_text: 'contenido', title_suggestion: 'Reunion Vieja', date_recorded: '2026-07-01T00:00:00.000Z' }]
+    excludedResult = { ids: new Set(['r-stale']), failClosed: false }
+    backfillMeetingWiki()
+    expect(listWiki()).toHaveLength(0)
+  })
+})
+
+/**
+ * RE7-P1b (round-8) — removeMeetingWiki must surface filesystem failures via its
+ * result instead of swallowing them, so a privacy transition cannot report
+ * success while an excluded recording's page is still readable on disk.
+ */
+describe('removeMeetingWiki — cleanup result (RE7-P1b)', () => {
+  beforeEach(() => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'hidock-wiki-'))
+    currentRow = null
+    backfillRows = []
+    excludedResult = { ids: new Set<string>(), failClosed: false }
+  })
+  afterEach(() => {
+    rmSync(tmpRoot, { recursive: true, force: true })
+  })
+
+  it('reports ok:true with a removed count when the page is deleted', async () => {
+    const { exportMeetingWiki, removeMeetingWiki } = await import('../meeting-wiki')
+    currentRow = { recording_id: 'r1', full_text: 'x', title_suggestion: 'T', date_recorded: '2026-07-01T00:00:00.000Z' }
+    expect(exportMeetingWiki('r1')).not.toBeNull()
+
+    const result = removeMeetingWiki('r1')
+    expect(result).toEqual({ removed: 1, failed: 0, ok: true })
+  })
+
+  it('reports ok:true (nothing to remove) when the wiki dir is absent', async () => {
+    const { removeMeetingWiki } = await import('../meeting-wiki')
+    // No page ever written → wiki dir does not exist → success, nothing removed.
+    expect(removeMeetingWiki('ghost')).toEqual({ removed: 0, failed: 0, ok: true })
+  })
 })

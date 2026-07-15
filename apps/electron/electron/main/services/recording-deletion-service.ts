@@ -169,9 +169,16 @@ export async function deleteRecording(
       }
     }
 
-    // Exported wiki markdown.
+    // Exported wiki markdown. RE7-P1b — removeMeetingWiki now surfaces FS
+    // failures; a page that could not be removed is queued for retry rather than
+    // silently reported as purged.
     try {
-      filesRemoved.wikiPages = removeMeetingWiki(recordingId)
+      const wiki = removeMeetingWiki(recordingId)
+      filesRemoved.wikiPages = wiki.removed
+      if (!wiki.ok) {
+        console.warn(`[RecordingDeletion] wiki purge incomplete for ${recordingId} (failed=${wiki.failed})`)
+        pendingTargets.push({ kind: 'wiki' })
+      }
     } catch (e) {
       console.warn('[RecordingDeletion] wiki purge failed:', e)
       pendingTargets.push({ kind: 'wiki' })
@@ -315,8 +322,9 @@ async function retryOneCleanupTarget(recordingId: string, target: PendingCleanup
         unlinkSync(target.path)
         return true
       case 'wiki':
-        removeMeetingWiki(recordingId)
-        return true
+        // RE7-P1b — only clear the pending target when the page is actually gone;
+        // a persistent FS failure keeps it queued for the next sweep.
+        return removeMeetingWiki(recordingId).ok
       case 'vector':
         await getVectorStore().deleteByRecording(recordingId)
         return true

@@ -57,6 +57,9 @@ import {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  // RE7-P1b (round-8) — removeMeetingWiki now returns a WikiCleanupResult; a
+  // benign default so paths that don't set it explicitly still read `.removed`/`.ok`.
+  files.removeMeetingWiki.mockReturnValue({ removed: 0, failed: 0, ok: true })
 })
 
 describe('markRecordingPersonal', () => {
@@ -104,7 +107,7 @@ describe('deleteRecording (hard)', () => {
       removed: { transcripts: 1 }
     })
     files.deleteRecording.mockReturnValue(true)
-    files.removeMeetingWiki.mockReturnValue(2)
+    files.removeMeetingWiki.mockReturnValue({ removed: 2, failed: 0, ok: true })
     files.existsSync.mockReturnValue(true)
 
     const res = await deleteRecording('r1', { hard: true })
@@ -160,7 +163,7 @@ describe('deleteRecording (hard)', () => {
     })
     files.deleteRecording.mockReturnValue(true)
     files.existsSync.mockReturnValue(true)
-    files.removeMeetingWiki.mockReturnValue(0)
+    files.removeMeetingWiki.mockReturnValue({ removed: 0, failed: 0, ok: true })
 
     const res = await deleteRecording('r1', { hard: true })
     expect(res.success).toBe(true)
@@ -214,7 +217,7 @@ describe('AR3-2 — partial file-cleanup + retry ledger round-trip', () => {
     })
     files.deleteRecording.mockReturnValue(false) // unlink attempt failed
     files.existsSync.mockReturnValue(true) // ...but the file DID exist
-    files.removeMeetingWiki.mockReturnValue(0)
+    files.removeMeetingWiki.mockReturnValue({ removed: 0, failed: 0, ok: true })
 
     const res = await deleteRecording('r1', { hard: true })
     expect(res.success).toBe(true)
@@ -239,7 +242,7 @@ describe('AR3-2 — partial file-cleanup + retry ledger round-trip', () => {
     })
     files.deleteRecording.mockReturnValue(false) // nothing to remove
     files.existsSync.mockReturnValue(false) // ...because it was already gone
-    files.removeMeetingWiki.mockReturnValue(0)
+    files.removeMeetingWiki.mockReturnValue({ removed: 0, failed: 0, ok: true })
 
     const res = await deleteRecording('r1', { hard: true })
     expect(res.success).toBe(true)
@@ -312,7 +315,7 @@ describe('AR3-2 — partial file-cleanup + retry ledger round-trip', () => {
     // (lock released within the same call).
     files.deleteRecording.mockReturnValueOnce(false).mockReturnValueOnce(true)
     files.existsSync.mockReturnValue(true)
-    files.removeMeetingWiki.mockReturnValue(0)
+    files.removeMeetingWiki.mockReturnValue({ removed: 0, failed: 0, ok: true })
     files.vectorDeleteByRecording.mockResolvedValue(0)
     db.getPendingFileCleanups.mockReturnValueOnce([
       { journalId: 'journal-locked', recordingId: 'r1', targets: [{ kind: 'audio', path: '/data/r1.wav' }] }
@@ -386,7 +389,7 @@ describe('AR3-2 — partial file-cleanup + retry ledger round-trip', () => {
           targets: [{ kind: 'wiki' }, { kind: 'vector' }, { kind: 'artifact', path: '/data/artifacts/a.pdf' }]
         }
       ])
-      files.removeMeetingWiki.mockReturnValue(1)
+      files.removeMeetingWiki.mockReturnValue({ removed: 1, failed: 0, ok: true })
       files.vectorDeleteByRecording.mockResolvedValue(0)
       files.existsSync.mockReturnValue(true)
 

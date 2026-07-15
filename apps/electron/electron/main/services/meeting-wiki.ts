@@ -135,20 +135,44 @@ function removeStaleWikiPages(dir: string, recordingId: string, keepFilename: st
 }
 
 /**
+ * Result of a wiki-page cleanup. `ok` is false when ANY unexpected filesystem
+ * error occurred (an unreadable directory that IS present, or a matched page
+ * that could not be deleted) — i.e. a page for the recording may STILL be on
+ * disk. Callers on a privacy transition (mark-personal / soft-delete /
+ * value-rating) MUST surface / retry a `!ok` result rather than reporting
+ * success, because the whole point of the removal is that the page is gone.
+ * A simply-absent wiki dir is `ok: true` (nothing to remove is success).
+ */
+export interface WikiCleanupResult {
+  /** Pages actually deleted. */
+  removed: number
+  /** Matched pages that could not be deleted (unlink failed). */
+  failed: number
+  /** False when a page may still remain due to an FS error (dir unreadable / unlink failed). */
+  ok: boolean
+}
+
+/**
  * Delete every exported wiki page for a recording (privacy hard-purge). Matches
  * pages by the `recording_id` in their YAML frontmatter, so a page whose title
- * changed is still found. Returns the number of files removed. Safe to call when
- * the wiki dir does not exist.
+ * changed is still found. Returns a {@link WikiCleanupResult} that surfaces FS
+ * failures (RE7-P1b) instead of silently swallowing them. Safe to call when the
+ * wiki dir does not exist.
  */
-export function removeMeetingWiki(recordingId: string): number {
+export function removeMeetingWiki(recordingId: string): WikiCleanupResult {
   const dir = getWikiDir()
   let entries: string[]
   try {
     entries = readdirSync(dir)
-  } catch {
-    return 0 // dir absent / unreadable — nothing to remove
+  } catch (e) {
+    // ENOENT = dir absent = nothing to remove = success. Any OTHER error means a
+    // page could still be present and we simply couldn't look — fail-surfaced.
+    if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') return { removed: 0, failed: 0, ok: true }
+    console.warn(`[MeetingWiki] Could not read wiki dir to purge ${recordingId}:`, e)
+    return { removed: 0, failed: 0, ok: false }
   }
   let removed = 0
+  let failed = 0
   for (const entry of entries) {
     if (!entry.endsWith('.md')) continue
     const full = join(dir, entry)
@@ -161,10 +185,12 @@ export function removeMeetingWiki(recordingId: string): number {
         console.log(`[MeetingWiki] Purged wiki page ${entry} for ${recordingId}`)
       }
     } catch (e) {
-      console.warn(`[MeetingWiki] Could not inspect ${entry} for purge:`, e)
+      // A matched-but-undeletable page is the dangerous case (page remains).
+      failed++
+      console.warn(`[MeetingWiki] Could not remove ${entry} for purge:`, e)
     }
   }
-  return removed
+  return { removed, failed, ok: failed === 0 }
 }
 
 /**
@@ -175,15 +201,29 @@ export function removeMeetingWiki(recordingId: string): number {
  * now-INELIGIBLE recording. Reversible — the boot backfill / next transcription
  * regenerates the page once the recording is eligible again. Never throws.
  */
-export function reconcileWikiEligibility(recordingId: string): void {
+export function reconcileWikiEligibility(recordingId: string): WikiCleanupResult | null {
   try {
     if (!isRecordingEligible(recordingId)) {
-      const removed = removeMeetingWiki(recordingId)
-      if (removed > 0) console.log(`[MeetingWiki] Removed ${removed} page(s) for now-excluded recording ${recordingId}`)
+      const result = removeMeetingWiki(recordingId)
+      if (result.removed > 0) {
+        console.log(`[MeetingWiki] Removed ${result.removed} page(s) for now-excluded recording ${recordingId}`)
+      }
+      // RE7-P1b — surface a failed cleanup: a transition MUST NOT report success
+      // while the page is still readable on disk. The boot backfill re-attempts
+      // removal for excluded recordings, so this also self-heals on next launch.
+      if (!result.ok) {
+        console.warn(
+          `[MeetingWiki] wiki cleanup INCOMPLETE for excluded recording ${recordingId} ` +
+            `(removed=${result.removed}, failed=${result.failed}) — page may still be readable; will retry on next backfill`
+        )
+      }
+      return result
     }
   } catch (e) {
     console.warn(`[MeetingWiki] wiki eligibility reconcile failed for ${recordingId}:`, e)
+    return { removed: 0, failed: 0, ok: false }
   }
+  return null // eligible — nothing to reconcile
 }
 
 /** Export (or re-export) the wiki page for one recording. Returns the path. */
@@ -234,7 +274,14 @@ export function backfillMeetingWiki(): { written: number; failed: number } {
   let written = 0
   let failed = 0
   for (const { recording_id } of rows) {
-    if (!eligible.has(recording_id)) continue // excluded — no page
+    if (!eligible.has(recording_id)) {
+      // RE7-P1a (round-8) — an excluded transcript (already personal/deleted/
+      // low-value, or newly value-classified) may STILL have a stale markdown
+      // page from when it was eligible. Don't merely skip — actively remove it,
+      // so the plain-files knowledge base can't leak an excluded recording.
+      removeMeetingWiki(recording_id)
+      continue
+    }
     try {
       if (exportMeetingWiki(recording_id)) written++
     } catch (e) {
