@@ -237,6 +237,17 @@ async function initializeServices(): Promise<void> {
   updateSplashStatus('Starting application...', 100)
 }
 
+// Dev/QA isolation override — inert unless HIDOCK_DEV_USERDATA is set. Lets a
+// harness boot a fully isolated instance (own profile → own config/dataPath →
+// own single-instance lock scope) without editing source. MUST run before the
+// single-instance lock below and before anything reads userData. Every prior
+// QA pass had to temp-edit this file for the same effect (see .claude/qa/*).
+const devUserDataOverride = process.env.HIDOCK_DEV_USERDATA
+if (devUserDataOverride) {
+  app.setPath('userData', devUserDataOverride)
+  console.warn(`[DEV] userData overridden to ${devUserDataOverride}`)
+}
+
 // Single-instance guard — MUST run before any window is created and before the
 // database is opened. With better-sqlite3 + WAL against one on-disk file, a
 // second concurrent main process running migrations / repair / self-heal
@@ -282,8 +293,11 @@ if (process.platform === 'win32') {
 // Conditionally enable remote debugging (dev mode or explicit opt-in)
 const enableRemoteDebugging = is.dev || process.env.ENABLE_REMOTE_DEBUGGING === 'true'
 if (enableRemoteDebugging) {
-  app.commandLine.appendSwitch('remote-debugging-port', '9222')
-  console.warn('[SECURITY] Remote debugging enabled on port 9222')
+  // HIDOCK_DEV_CDP_PORT: dev/QA-only override so an isolated instance never
+  // contends with the default 9222 (inert when unset).
+  const cdpPort = process.env.HIDOCK_DEV_CDP_PORT || '9222'
+  app.commandLine.appendSwitch('remote-debugging-port', cdpPort)
+  console.warn(`[SECURITY] Remote debugging enabled on port ${cdpPort}`)
 }
 
 app.whenReady().then(async () => {

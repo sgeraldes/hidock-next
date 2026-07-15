@@ -265,7 +265,7 @@ describe('Settings Page', () => {
 
     try {
       render(<Settings />)
-      expect(screen.getByText(/Live classification is off/)).toBeInTheDocument()
+      expect(screen.getByText(/Automatic rating of newly transcribed recordings is turned off/)).toBeInTheDocument()
     } finally {
       if (originalImpl) mockedUseConfigStore.mockImplementation(originalImpl)
     }
@@ -273,6 +273,6 @@ describe('Settings Page', () => {
 
   it('hides the kill-switch hint when valueClassificationEnabled is not explicitly false', async () => {
     render(<Settings />)
-    expect(screen.queryByText(/Live classification is off/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Automatic rating of newly transcribed recordings is turned off/)).not.toBeInTheDocument()
   })
 })

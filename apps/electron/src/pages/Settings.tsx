@@ -1078,11 +1078,15 @@ export function Settings() {
           {/* Library value classification (F16/spec-003) */}
           <Card>
             <CardHeader>
-              <CardTitle>Library value classification</CardTitle>
+              <CardTitle>Find low-value recordings</CardTitle>
               <CardDescription>
-                Classify existing captures by how much lasting, useful knowledge they hold — surfaces low-value and
-                garbage recordings in the Library. Runs in the background, chunked and rate-limited; you can cancel
-                and resume anytime.
+                The AI reads the transcript of each recording you haven&apos;t rated yet and judges whether the
+                conversation is actually useful — or noise, like personal chatter, a call where nobody showed up, or
+                background audio picked up by mistake. Recordings judged as noise get a Low-value or Garbage badge in
+                the Library, and from then on they are left out of Assistant answers, the Context Graph, and
+                action-item extraction. Nothing is deleted, and ratings you set yourself are never changed — you can
+                re-rate any recording from its row menu. Uses your configured AI provider (one request per recording);
+                runs in the background, and you can cancel and resume anytime.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
@@ -1091,24 +1095,25 @@ export function Settings() {
               )}
               {config?.transcription.valueClassificationEnabled === false && (
                 <p className="text-xs text-muted-foreground">
-                  Live classification is off (config kill-switch); this manual backfill still runs.
+                  Automatic rating of newly transcribed recordings is turned off in your config
+                  (valueClassificationEnabled) — this manual scan still works.
                 </p>
               )}
               <div className="flex items-center gap-2">
                 <Button
                   onClick={handleStartValueBackfill}
                   disabled={!hasValueProvider || valueBackfillRunning}
-                  aria-label="Classify library value"
+                  aria-label="Scan library for low-value recordings"
                 >
                   {valueBackfillRunning && <RefreshCw className="h-4 w-4 mr-2 animate-spin" aria-hidden="true" />}
                   {valueBackfillRunning
-                    ? 'Classifying…'
+                    ? 'Scanning…'
                     : valueBackfillRemaining > 0
-                      ? 'Resume classification'
-                      : 'Classify library value'}
+                      ? `Resume scan (${valueBackfillRemaining} left)`
+                      : 'Scan unrated recordings'}
                 </Button>
                 {valueBackfillRunning && (
-                  <Button variant="outline" onClick={handleCancelValueBackfill} aria-label="Cancel classification">
+                  <Button variant="outline" onClick={handleCancelValueBackfill} aria-label="Cancel scan">
                     Cancel
                   </Button>
                 )}
@@ -1116,7 +1121,7 @@ export function Settings() {
               {(valueBackfillRunning || valueBackfillProgress) && (
                 <p className="text-xs text-muted-foreground" aria-live="polite">
                   {valueBackfillProgress
-                    ? `${valueBackfillProgress.processed} / ${valueBackfillProgress.total} · ${valueBackfillProgress.marked} low-value`
+                    ? `Checked ${valueBackfillProgress.processed} of ${valueBackfillProgress.total} recordings · ${valueBackfillProgress.marked} marked low-value`
                     : 'Starting…'}
                 </p>
               )}
