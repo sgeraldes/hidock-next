@@ -96,6 +96,21 @@ interface Source {
   captureId?: string
 }
 
+/**
+ * Parse the persisted `sources` JSON string a message carries into the Source[]
+ * the chip UI expects. ADV20-1 (round-21) — assistant messages are returned by main
+ * with their sanitized sources; the renderer displays these rather than re-deriving.
+ */
+function parseMessageSources(sourcesJson?: string | null): Source[] {
+  if (!sourcesJson) return []
+  try {
+    const parsed = JSON.parse(sourcesJson)
+    return Array.isArray(parsed) ? (parsed as Source[]) : []
+  } catch {
+    return []
+  }
+}
+
 // Human-readable label for the active chat backend shown in the status badge.
 function backendLabel(backend?: 'gemini' | 'ollama' | 'none'): string {
   switch (backend) {
@@ -702,24 +717,32 @@ export function Chat() {
       const response = await window.electronAPI.rag.chatLegacy(currentConv!.id, userMessageContent)
 
       if (response.error) {
-        const errorMsg = await window.electronAPI.assistant.addMessage(currentConv!.id, 'assistant', response.error)
+        // ADV20-1 (round-21) — the renderer no longer authors assistant text. A
+        // provider-side failure carries a generationId whose main-owned error string
+        // is replayed by addMessage; a transport/guard error with no generation is
+        // shown via the fixed main-owned notice catalog.
+        const errorMsg = response.generationId
+          ? await window.electronAPI.assistant.addMessage(currentConv!.id, 'assistant', '', undefined, response.generationId)
+          : await window.electronAPI.assistant.addNotice(currentConv!.id, 'generic-error')
         setMessages((prev) => [...prev, errorMsg])
         setFailedMessageIds(prev => new Set(prev).add(errorMsg.id))
       } else {
-        // Add assistant response. ADV19-4 — pass the generationId back so main binds
-        // THIS answer's authoritative provenance union to the persisted message.
+        // ADV20-1 (round-21) — MAIN owns the answer. Pass back only the generationId;
+        // main replays the stored answer TEXT + sanitized sources it generated. The
+        // renderer DISPLAYS what main returns (it does not author assistant content).
         const assistantMsg = await window.electronAPI.assistant.addMessage(
           currentConv!.id,
           'assistant',
-          response.answer,
-          JSON.stringify(response.sources || []),
+          '',
+          undefined,
           response.generationId
         )
         setMessages((prev) => [...prev, assistantMsg])
 
-        // Store sources for assistant message only
-        if (response.sources && response.sources.length > 0) {
-          setSources((prev) => new Map(prev).set(assistantMsg.id, response.sources))
+        // Show the citation chips main returned with the persisted message.
+        const persistedSources = parseMessageSources(assistantMsg.sources)
+        if (persistedSources.length > 0) {
+          setSources((prev) => new Map(prev).set(assistantMsg.id, persistedSources))
         }
       }
 
@@ -744,13 +767,10 @@ export function Chat() {
 
     } catch (error) {
       console.error('Chat error:', error)
-      // Use activeConversation since currentConv may be out of scope
+      // Use activeConversation since currentConv may be out of scope. ADV20-1 — the
+      // renderer shows a fixed main-owned notice; it cannot author assistant text.
       if (activeConversation) {
-        const errorMsg = await window.electronAPI.assistant.addMessage(
-          activeConversation.id,
-          'assistant',
-          'Sorry, I encountered an error processing your request. Please check that a Gemini API key is set in Settings (or that Ollama is running) and try again.'
-        )
+        const errorMsg = await window.electronAPI.assistant.addNotice(activeConversation.id, 'generic-error')
         setMessages((prev) => [...prev, errorMsg])
         setFailedMessageIds(prev => new Set(prev).add(errorMsg.id))
       }
@@ -810,29 +830,28 @@ export function Chat() {
       )
 
       if (response.error) {
-        const errorMsg = await window.electronAPI.assistant.addMessage(
-          activeConversation.id, 'assistant', response.error
-        )
+        // ADV20-1 — main owns the text: provider failure replays its error via the
+        // generationId; a transport/guard error uses the fixed notice catalog.
+        const errorMsg = response.generationId
+          ? await window.electronAPI.assistant.addMessage(activeConversation.id, 'assistant', '', undefined, response.generationId)
+          : await window.electronAPI.assistant.addNotice(activeConversation.id, 'retry-failed')
         setMessages(prev => [...prev, errorMsg])
         setFailedMessageIds(prev => new Set(prev).add(errorMsg.id))
       } else {
+        // ADV20-1 — main replays the stored answer; the renderer displays it.
         const assistantMsg = await window.electronAPI.assistant.addMessage(
-          activeConversation.id, 'assistant', response.answer,
-          JSON.stringify(response.sources || []),
-          response.generationId
+          activeConversation.id, 'assistant', '', undefined, response.generationId
         )
         setMessages(prev => [...prev, assistantMsg])
 
-        if (response.sources && response.sources.length > 0) {
-          setSources(prev => new Map(prev).set(assistantMsg.id, response.sources))
+        const persistedSources = parseMessageSources(assistantMsg.sources)
+        if (persistedSources.length > 0) {
+          setSources(prev => new Map(prev).set(assistantMsg.id, persistedSources))
         }
       }
     } catch (error) {
       console.error('Retry error:', error)
-      const errorMsg = await window.electronAPI.assistant.addMessage(
-        activeConversation.id, 'assistant',
-        'Retry failed. Please check your connection and try again.'
-      )
+      const errorMsg = await window.electronAPI.assistant.addNotice(activeConversation.id, 'retry-failed')
       setMessages(prev => [...prev, errorMsg])
       setFailedMessageIds(prev => new Set(prev).add(errorMsg.id))
     } finally {

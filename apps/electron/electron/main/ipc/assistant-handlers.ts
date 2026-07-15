@@ -7,6 +7,7 @@ import {
   packNonRagAssistant,
   presentSourcesNoRevalidate,
   revalidateStoredSources,
+  isProvenanceExcluded,
   REDACTED_ANSWER
 } from '../services/chat-source-provenance'
 import type { Conversation, Message } from '@/types/knowledge'
@@ -15,6 +16,21 @@ import { randomUUID } from 'crypto'
 // B-CHAT-007: Explicit column lists instead of SELECT *
 const CONVERSATION_COLUMNS = 'id, title, created_at, updated_at'
 const MESSAGE_COLUMNS = 'id, conversation_id, role, content, sources, created_at, edited_at, original_content, created_output_id, saved_as_insight_id'
+
+/**
+ * ADV20-1 (round-21) — the MAIN-OWNED catalog for genuine NON-RAG assistant notices
+ * (IPC/transport failures the renderer catches when rag:chat never returned a
+ * generation). The renderer supplies only a `code`, NEVER free text, so it can never
+ * smuggle excluded/grounded content into a trusted non-rag message. Provider-side
+ * generation failures keep their dynamic (brain-naming) text via the pending-generation
+ * path (assistant:addMessage + the error generationId), not this catalog.
+ */
+const ASSISTANT_NOTICES: Record<string, string> = {
+  'generic-error':
+    'Sorry, I encountered an error processing your request. Please check that a Gemini API key is set in Settings (or that Ollama is running) and try again.',
+  'retry-failed': 'Retry failed. Please check your connection and try again.'
+}
+const DEFAULT_NOTICE_CODE = 'generic-error'
 
 export function registerAssistantHandlers(): void {
   // Get all conversations
@@ -86,8 +102,20 @@ export function registerAssistantHandlers(): void {
     }
   })
 
-  // Add a message to a conversation
-  ipcMain.handle('assistant:addMessage', async (_, conversationId: string, role: 'user' | 'assistant', content: string, sources?: string, generationId?: string) => {
+  // Add a message to a conversation.
+  //
+  // ADV20-1 / ADV20-2 (round-21) — MAIN OWNS THE ASSISTANT CONTENT end-to-end.
+  //   • role='user'      — the renderer authors its OWN text; persisted verbatim.
+  //   • role='assistant' — the renderer's `content` argument is IGNORED. Main replays
+  //     the answer TEXT + authoritative sources it stored at generation time (keyed by
+  //     `generationId`), so a renderer can neither substitute arbitrary content nor
+  //     ride a valid generation's eligible provenance with excluded content. An
+  //     unknown/missing/cross-conversation generationId ⇒ fail-closed REDACTED_ANSWER,
+  //     never renderer content. The RAG provenance union is REVALIDATED at persist time
+  //     (an exclusion landing between generation and now ⇒ REDACTED_ANSWER persisted),
+  //     and the returned row is sanitized through the SAME read boundary as history
+  //     reads (not presentSourcesNoRevalidate) so a live exclusion redacts the UI too.
+  ipcMain.handle('assistant:addMessage', async (_, conversationId: string, role: 'user' | 'assistant', content: string, _sources?: string, generationId?: string) => {
     try {
       // Validate conversation exists before adding message
       const conv = queryOne<any>('SELECT id FROM conversations WHERE id = ?', [conversationId])
@@ -100,37 +128,91 @@ export function registerAssistantHandlers(): void {
       const id = randomUUID()
       const now = new Date().toISOString()
 
-      // ADV19-1 / ADV19-4 (round-20) — EVERY assistant message carries an explicit
-      // MAIN-ISSUED envelope. The kind is derived from RAG PIPELINE STATE, never from
-      // renderer input: the renderer passes back the generationId returned with the
-      // RAG answer, and the RAG service resolves it to either a `kind:'rag'` envelope
-      // with THIS generation's authoritative union, or (unknown/missing id while a
-      // grounded generation is still outstanding) a fail-closed unverifiable rag
-      // envelope, or (no generationId AND nothing grounded outstanding) a trusted
-      // `kind:'non-rag'` marker. The renderer cannot forge non-rag to smuggle grounded
-      // content. User messages store their (rare) raw sources verbatim.
+      // role='user' — the user's own text. The renderer may pass raw sources verbatim.
+      if (role !== 'assistant') {
+        const packedSources = packSources(_sources)
+        runInTransaction(() => {
+          run('INSERT INTO chat_messages (id, conversation_id, role, content, sources, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+            [id, conversationId, role, content, packedSources, now])
+          run('UPDATE conversations SET updated_at = ? WHERE id = ?', [now, conversationId])
+        })
+        const userRow = queryOne<any>(`SELECT ${MESSAGE_COLUMNS} FROM chat_messages WHERE id = ?`, [id])
+        return mapToMessage({ ...userRow, sources: presentSourcesNoRevalidate(userRow.sources) })
+      }
+
+      // role='assistant' — consume MAIN's stored answer for this generation. The
+      // renderer's `content` is deliberately NOT used.
+      const answer = getRAGService().consumeAssistantAnswer(conversationId, generationId)
+
+      let finalContent: string
       let packedSources: string | null
-      if (role === 'assistant') {
-        const decision = getRAGService().resolveAssistantProvenance(conversationId, generationId)
-        packedSources = decision.kind === 'rag' ? packSources(sources, decision.prov) : packNonRagAssistant()
+      if (answer.kind === 'non-rag') {
+        // A genuine main-issued non-RAG emit (e.g. a provider-failure error string).
+        finalContent = answer.content
+        packedSources = packNonRagAssistant()
+      } else if (answer.kind === 'rag') {
+        // ADV20-2 — revalidate the provenance union IMMEDIATELY before insertion.
+        if (isProvenanceExcluded(answer.prov)) {
+          finalContent = REDACTED_ANSWER
+          packedSources = packSources(null, answer.prov)
+        } else {
+          finalContent = answer.content
+          packedSources = packSources(answer.sources, answer.prov)
+        }
       } else {
-        packedSources = packSources(sources)
+        // Unknown/consumed/cross-conversation id, or a renderer trying to author an
+        // assistant message with no valid generation ⇒ fail closed (never trusted,
+        // never renderer content).
+        finalContent = REDACTED_ANSWER
+        packedSources = packSources(null, { recordingIds: [], captureIds: [], unverifiable: true })
       }
 
       runInTransaction(() => {
         run('INSERT INTO chat_messages (id, conversation_id, role, content, sources, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-          [id, conversationId, role, content, packedSources, now])
-
-        // Update conversation's updated_at timestamp
+          [id, conversationId, 'assistant', finalContent, packedSources, now])
         run('UPDATE conversations SET updated_at = ? WHERE id = ?', [now, conversationId])
       })
 
       const newMessage = queryOne<any>(`SELECT ${MESSAGE_COLUMNS} FROM chat_messages WHERE id = ?`, [id])
-      // Return the freshly-added message with sources unwrapped to the plain array
-      // the renderer expects (no revalidation needed — nothing excluded yet).
-      return mapToMessage({ ...newMessage, sources: presentSourcesNoRevalidate(newMessage.sources) })
+      // ADV20-2 — sanitize the fresh insert through the SAME read boundary so a live
+      // exclusion between persist and return still redacts what the UI shows.
+      const { sources: sanitized, redactContent } = revalidateStoredSources(newMessage.sources, 'assistant')
+      const msg = mapToMessage({ ...newMessage, sources: sanitized })
+      if (redactContent) msg.content = REDACTED_ANSWER
+      return msg
     } catch (error) {
       console.error('Failed to add message:', error)
+      throw error
+    }
+  })
+
+  // Persist a genuine NON-RAG assistant NOTICE (an IPC/transport error the renderer
+  // caught when rag:chat never returned a generation). ADV20-1 (round-21) — the
+  // renderer passes only a fixed `code`, NEVER free text, so it cannot author trusted
+  // assistant content. Main maps the code to a canonical string and stamps a non-rag
+  // envelope. This is the ONLY renderer-invocable assistant-write with no generationId,
+  // and it can never carry renderer-supplied prose.
+  ipcMain.handle('assistant:addNotice', async (_, conversationId: string, code: string) => {
+    try {
+      const conv = queryOne<any>('SELECT id FROM conversations WHERE id = ?', [conversationId])
+      if (!conv) {
+        const error = new Error(`Cannot add notice: Conversation ${conversationId} not found`)
+        console.error(error.message)
+        throw error
+      }
+      const id = randomUUID()
+      const now = new Date().toISOString()
+      const text = ASSISTANT_NOTICES[code] ?? ASSISTANT_NOTICES[DEFAULT_NOTICE_CODE]
+      const packedSources = packNonRagAssistant()
+      runInTransaction(() => {
+        run('INSERT INTO chat_messages (id, conversation_id, role, content, sources, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+          [id, conversationId, 'assistant', text, packedSources, now])
+        run('UPDATE conversations SET updated_at = ? WHERE id = ?', [now, conversationId])
+      })
+      const row = queryOne<any>(`SELECT ${MESSAGE_COLUMNS} FROM chat_messages WHERE id = ?`, [id])
+      return mapToMessage({ ...row, sources: presentSourcesNoRevalidate(row.sources) })
+    } catch (error) {
+      console.error('Failed to add notice:', error)
       throw error
     }
   })

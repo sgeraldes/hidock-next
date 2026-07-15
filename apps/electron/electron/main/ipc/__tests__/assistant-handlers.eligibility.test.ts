@@ -1,15 +1,20 @@
 // @vitest-environment node
 
 /**
- * ADV18 (round-19) — end-to-end, real-temp-DB coverage of the persisted
- * RAG-answer replay gate on assistant:getMessages AND the legacy
- * db:get-chat-history sibling (both read the same chat_messages table).
+ * ADV18 (round-19) + ADV20 (round-21) — end-to-end, real-temp-DB coverage of:
+ *   • the persisted RAG-answer replay gate on assistant:getMessages AND the legacy
+ *     db:get-chat-history sibling (both read the same chat_messages table); and
+ *   • MAIN-OWNED atomic assistant-answer persistence (ADV20-1/ADV20-2): the renderer
+ *     supplies NO assistant content — assistant:addMessage IGNORES the renderer's
+ *     `content` and persists MAIN's stored answer (keyed by generationId), revalidates
+ *     the provenance union at PERSIST time (a post-generation exclusion ⇒ the row is
+ *     persisted AND RETURNED redacted), and sanitizes the fresh insert through the SAME
+ *     read boundary. Genuine non-RAG notices come from assistant:addNotice (fixed
+ *     catalog), never renderer prose.
  *
- * Seeds a recording linked to a meeting, persists an assistant message whose
- * AUTHORITATIVE provenance union (supplied by the mocked RAG service, exactly as
- * the real service would compute it main-side) names that recording, then
- * transitions the recording through each exclusion state and asserts the WHOLE
- * answer is redacted (round-19 redact-on-ANY) and the chips dropped.
+ * Seeds a recording linked to a meeting; the mocked RAG service returns MAIN's stored
+ * answer exactly as the real consumeAssistantAnswer would, then transitions the
+ * recording through each exclusion state.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
@@ -23,21 +28,29 @@ vi.mock('../../services/file-storage', () => ({
   getDatabasePath: () => dbPath
 }))
 
-// The RAG service is used by deleteConversation (clearSession) AND, in round-20,
-// by assistant:addMessage to resolve the MAIN-ISSUED envelope kind + provenance for
-// an assistant answer. `ragDecision` is what the real resolveAssistantProvenance
-// would return; tests flip it to exercise kind:'rag' (grounded), kind:'non-rag'
-// (genuine emit), and the forge-ignored fail-closed case. The renderer never
-// supplies the decision — main derives it from pipeline state.
+// The RAG service is used by deleteConversation (clearSession) AND, in round-21, by
+// assistant:addMessage to CONSUME the MAIN-OWNED answer (content + sources + prov) for
+// an assistant message. `ragMock.answer` is what the real consumeAssistantAnswer would
+// return; the mock respects the generationId (a falsy id fails closed exactly like the
+// real service, so the renderer can never author assistant content). The renderer NEVER
+// supplies content — main derives everything from pipeline state.
 const ragMock = vi.hoisted(() => ({
-  decision: { kind: 'rag', prov: { recordingIds: ['recR'], captureIds: [], unverifiable: false } } as
-    | { kind: 'rag'; prov: { recordingIds: string[]; captureIds: string[]; unverifiable: boolean } }
-    | { kind: 'non-rag' }
+  answer: {
+    kind: 'rag',
+    content: 'The team agreed to migrate on Friday.',
+    sources: JSON.stringify([{ content: 'a verbatim transcript excerpt', meetingId: 'mtg1', subject: 'Weekly Sync' }]),
+    prov: { recordingIds: ['recR'], captureIds: [], unverifiable: false }
+  } as
+    | { kind: 'rag'; content: string; sources: string; prov: { recordingIds: string[]; captureIds: string[]; unverifiable: boolean } }
+    | { kind: 'non-rag'; content: string }
+    | { kind: 'unverifiable' }
 }))
 vi.mock('../../services/rag', () => ({
   getRAGService: () => ({
     clearSession: vi.fn(),
-    resolveAssistantProvenance: () => ragMock.decision
+    // Falsy generationId ⇒ fail closed (a renderer trying to author content directly).
+    consumeAssistantAnswer: (_conversationId: string, generationId?: string) =>
+      generationId ? ragMock.answer : { kind: 'unverifiable' }
   })
 }))
 
@@ -48,10 +61,18 @@ vi.mock('electron', () => ({
 
 import { ipcMain } from 'electron'
 import { initializeDatabase, closeDatabase, run } from '../../services/database'
+import { REDACTED_ANSWER } from '../../services/chat-source-provenance'
 import { registerAssistantHandlers } from '../assistant-handlers'
 import { registerDatabaseHandlers } from '../database-handlers'
 
 const handlers: Record<string, Function> = {}
+
+const DEFAULT_RAG_ANSWER = {
+  kind: 'rag' as const,
+  content: 'The team agreed to migrate on Friday.',
+  sources: JSON.stringify([{ content: 'a verbatim transcript excerpt', meetingId: 'mtg1', subject: 'Weekly Sync' }]),
+  prov: { recordingIds: ['recR'], captureIds: [], unverifiable: false }
+}
 
 function seedMeetingAndRecording(): void {
   run('INSERT INTO meetings (id, subject, start_time, end_time) VALUES (?, ?, ?, ?)', [
@@ -81,14 +102,15 @@ function seedMeetingAndRecording(): void {
   ])
 }
 
+// The renderer passes FORGED content + a generationId; main IGNORES the content and
+// persists its OWN stored answer (ragMock.answer). The forged string must never land.
 async function addAssistantMessageCitingMeeting(): Promise<void> {
-  const sources = JSON.stringify([{ content: 'a verbatim transcript excerpt', meetingId: 'mtg1', subject: 'Weekly Sync' }])
-  await handlers['assistant:addMessage']({}, 'conv1', 'assistant', 'The team agreed to migrate on Friday.', sources)
+  await handlers['assistant:addMessage']({}, 'conv1', 'assistant', 'FORGED_RENDERER_CONTENT', 'forged-sources', 'gen-1')
 }
 
 beforeEach(async () => {
   vi.clearAllMocks()
-  ragMock.decision = { kind: 'rag', prov: { recordingIds: ['recR'], captureIds: [], unverifiable: false } }
+  ragMock.answer = { ...DEFAULT_RAG_ANSWER }
   for (const k of Object.keys(handlers)) delete handlers[k]
   vi.mocked(ipcMain.handle).mockImplementation((channel: string, handler: Function) => {
     handlers[channel] = handler
@@ -117,6 +139,8 @@ describe('assistant:getMessages — ADV18 provenance replay gate', () => {
     // Envelope internals never reach the renderer.
     expect(sources[0]).not.toHaveProperty('_prov')
     expect(assistant.content).toContain('migrate on Friday')
+    // The renderer's forged content NEVER lands — main owns the answer text.
+    expect(assistant.content).not.toContain('FORGED_RENDERER_CONTENT')
   })
 
   it('redacts the whole answer + drops chips after the recording is soft-deleted', async () => {
@@ -167,44 +191,92 @@ describe('assistant:getMessages — ADV18 provenance replay gate', () => {
   })
 })
 
-describe('assistant:addMessage — ADV19-1 main-issued envelope kinds', () => {
-  it('a genuine kind:non-rag assistant message is PRESERVED on read', async () => {
-    ragMock.decision = { kind: 'non-rag' }
-    await handlers['assistant:addMessage']({}, 'conv1', 'assistant', 'No relevant meetings found.')
+describe('assistant:addMessage — ADV20 main-owned answer persistence', () => {
+  it('ADV20-1 — CONTENT SUBSTITUTION: renderer forged content + valid generationId ⇒ MAIN content persisted+returned', async () => {
+    const returned = await handlers['assistant:addMessage'](
+      {}, 'conv1', 'assistant', 'FORGED_RENDERER_CONTENT', 'forged-sources', 'gen-1'
+    )
+    // The RETURNED live row already carries main's content, not the renderer's.
+    expect(returned.content).toBe('The team agreed to migrate on Friday.')
+    expect(returned.content).not.toContain('FORGED_RENDERER_CONTENT')
+    // …and the PERSISTED row too.
+    const msgs = await handlers['assistant:getMessages']({}, 'conv1')
+    const assistant = msgs.find((m: { role: string }) => m.role === 'assistant')
+    expect(assistant.content).toBe('The team agreed to migrate on Friday.')
+    expect(assistant.content).not.toContain('FORGED_RENDERER_CONTENT')
+  })
+
+  it('ADV20-1 — a renderer assistant write with NO generationId is redacted (never trusted, never renderer content)', async () => {
+    const returned = await handlers['assistant:addMessage'](
+      {}, 'conv1', 'assistant', 'FORGED_RENDERER_CONTENT', 'forged-sources' /* no generationId */
+    )
+    expect(returned.content).toBe(REDACTED_ANSWER)
+    expect(returned.content).not.toContain('FORGED_RENDERER_CONTENT')
+    expect(JSON.parse(returned.sources)).toEqual([])
+  })
+
+  it('ADV20-2 — POST-GENERATION EXCLUSION: recording excluded before persist ⇒ row persisted AND RETURNED redacted', async () => {
+    // Provider finished; the answer union names recR — but recR is excluded BEFORE persist.
+    run('UPDATE recordings SET deleted_at = ? WHERE id = ?', ['2026-07-15T00:00:00.000Z', 'recR'])
+    const returned = await handlers['assistant:addMessage'](
+      {}, 'conv1', 'assistant', 'FORGED_RENDERER_CONTENT', 'forged-sources', 'gen-1'
+    )
+    // The LIVE return is redacted (not just a later reload).
+    expect(returned.content).toBe(REDACTED_ANSWER)
+    expect(returned.content).not.toContain('migrate on Friday')
+    expect(JSON.parse(returned.sources)).toEqual([])
+    // Reload confirms the persisted row is redacted too.
+    const msgs = await handlers['assistant:getMessages']({}, 'conv1')
+    const assistant = msgs.find((m: { role: string }) => m.role === 'assistant')
+    expect(assistant.content).not.toContain('migrate on Friday')
+  })
+
+  it('a genuine kind:non-rag answer (main-owned error text) is PRESERVED on read', async () => {
+    ragMock.answer = { kind: 'non-rag', content: 'Failed to generate a response with Ollama.' }
+    await handlers['assistant:addMessage']({}, 'conv1', 'assistant', 'renderer-ignored', undefined, 'gen-err')
     // Even after excluding every recording, a non-rag message grounds on nothing.
     run('UPDATE recordings SET deleted_at = ? WHERE id = ?', ['2026-07-15T00:00:00.000Z', 'recR'])
     const msgs = await handlers['assistant:getMessages']({}, 'conv1')
     const assistant = msgs.find((m: { role: string }) => m.role === 'assistant')
-    expect(assistant.content).toBe('No relevant meetings found.')
+    expect(assistant.content).toBe('Failed to generate a response with Ollama.')
     expect(JSON.parse(assistant.sources)).toEqual([])
   })
 
-  it('FORGE — grounded content persisted without its generationId ⇒ main stamps rag/unverifiable ⇒ redacted', async () => {
-    // The real resolveAssistantProvenance returns a fail-closed unverifiable rag
-    // decision when a grounded generation is outstanding but no id is supplied —
-    // simulate that decision and assert the persisted answer is redacted on read
-    // (the renderer's forged "trusted" intent is ignored; the main envelope wins).
-    ragMock.decision = { kind: 'rag', prov: { recordingIds: [], captureIds: [], unverifiable: true } }
-    const sources = JSON.stringify([{ content: 'smuggled excerpt', meetingId: 'mtg1' }])
-    await handlers['assistant:addMessage']({}, 'conv1', 'assistant', 'Grounded content the renderer tried to keep.', sources)
-    const msgs = await handlers['assistant:getMessages']({}, 'conv1')
-    const assistant = msgs.find((m: { role: string }) => m.role === 'assistant')
-    expect(assistant.content).not.toContain('Grounded content')
-    expect(JSON.parse(assistant.sources)).toEqual([])
-  })
-
-  it('a null-sources assistant message with a kind:rag decision persists an envelope (redactable), not raw null', async () => {
-    // kind:rag with a verifiable, eligible union ⇒ preserved while eligible…
-    await handlers['assistant:addMessage']({}, 'conv1', 'assistant', 'Grounded answer.')
+  it('a kind:rag answer with NO chips still stamps a redactable envelope', async () => {
+    ragMock.answer = {
+      kind: 'rag',
+      content: 'Grounded answer.',
+      sources: '[]',
+      prov: { recordingIds: ['recR'], captureIds: [], unverifiable: false }
+    }
+    await handlers['assistant:addMessage']({}, 'conv1', 'assistant', 'ignored', undefined, 'gen-2')
     let msgs = await handlers['assistant:getMessages']({}, 'conv1')
     let assistant = msgs.find((m: { role: string }) => m.role === 'assistant')
     expect(assistant.content).toBe('Grounded answer.')
-    // …and redacted once its recording is excluded (proves an envelope was stamped
-    // even though the renderer passed no sources).
+    // …redacted once its recording is excluded (proves an envelope was stamped).
     run('UPDATE recordings SET personal = 1 WHERE id = ?', ['recR'])
     msgs = await handlers['assistant:getMessages']({}, 'conv1')
     assistant = msgs.find((m: { role: string }) => m.role === 'assistant')
     expect(assistant.content).not.toBe('Grounded answer.')
+  })
+})
+
+describe('assistant:addNotice — ADV20-1 main-owned non-RAG notice catalog', () => {
+  it('persists a fixed main-owned string (renderer supplies only a code) and preserves it on read', async () => {
+    const returned = await handlers['assistant:addNotice']({}, 'conv1', 'generic-error')
+    expect(returned.role).toBe('assistant')
+    expect(returned.content).toContain('encountered an error')
+    // A notice grounds on nothing ⇒ preserved even after excluding every recording.
+    run('UPDATE recordings SET deleted_at = ? WHERE id = ?', ['2026-07-15T00:00:00.000Z', 'recR'])
+    const msgs = await handlers['assistant:getMessages']({}, 'conv1')
+    const assistant = msgs.find((m: { role: string }) => m.role === 'assistant')
+    expect(assistant.content).toContain('encountered an error')
+    expect(JSON.parse(assistant.sources)).toEqual([])
+  })
+
+  it('an unknown code falls back to the generic notice', async () => {
+    const returned = await handlers['assistant:addNotice']({}, 'conv1', 'not-a-real-code')
+    expect(returned.content).toContain('encountered an error')
   })
 })
 

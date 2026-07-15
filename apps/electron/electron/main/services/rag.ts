@@ -11,7 +11,8 @@ import { getDatabase, queryOne, queryAll, escapeLikePattern } from './database'
 import { filterEligibleRecordingIds, filterEligibleCaptureIds } from './recording-eligibility'
 import {
   isProvenanceExcluded,
-  type MessageProvenance
+  type MessageProvenance,
+  type MessageKind
 } from './chat-source-provenance'
 import { stripDiacritics } from './entity-normalize'
 import { randomUUID } from 'crypto'
@@ -500,18 +501,42 @@ function filterEligibleKnowledge(_db: any, rows: any[]): any[] {
   return rows.filter((r) => eligible.has(r.id as string))
 }
 
-/** A pending answer awaiting persistence, bound to a unique generation id. */
+/**
+ * A pending answer awaiting persistence, bound to a unique generation id.
+ *
+ * ADV20-1 (round-21) — MAIN OWNS THE CONTENT. The generated answer TEXT and its
+ * authoritative citation `sources` are stored here at generation time, so the
+ * persist path consumes MAIN's content by generationId and NEVER trusts the
+ * renderer-supplied assistant content. `kind` distinguishes a grounded RAG answer
+ * (redactable via `prov`) from a genuine non-RAG emit (error/greeting/status;
+ * grounds on nothing, trusted).
+ */
 interface PendingGeneration {
   conversationId: string
+  kind: MessageKind
+  /** The main-generated answer text (RAG answer, or a non-RAG error/status string). */
+  content: string
+  /** JSON of the citation chips for a RAG answer; '[]' for non-RAG. */
+  sources: string
   prov: MessageProvenance
   /** True when the union has anything excludable (recordings/captures/unverifiable). */
   grounded: boolean
 }
 
-/** The main-issued envelope decision for a persisting assistant message. */
-export type AssistantProvenanceDecision =
-  | { kind: 'rag'; prov: MessageProvenance }
-  | { kind: 'non-rag' }
+/**
+ * ADV20-1 (round-21) — what the MAIN-OWNED persist path receives when it consumes a
+ * pending generation by id. The renderer supplies only conversationId + generationId;
+ * the CONTENT + sources + provenance come from here (main), never from the renderer:
+ *   • `rag`          — persist main's answer text + chips under a redactable `prov`;
+ *   • `non-rag`      — persist main's non-source emit text (trusted, grounds nothing);
+ *   • `unverifiable` — unknown/consumed/cross-conversation id, or a renderer trying to
+ *                      author assistant content with no valid id ⇒ fail-closed
+ *                      REDACTED_ANSWER, never renderer content.
+ */
+export type AssistantAnswerToPersist =
+  | { kind: 'rag'; content: string; sources: string; prov: MessageProvenance }
+  | { kind: 'non-rag'; content: string }
+  | { kind: 'unverifiable' }
 
 const UNVERIFIABLE_PROV: MessageProvenance = { recordingIds: [], captureIds: [], unverifiable: true }
 
@@ -541,15 +566,27 @@ class RAGService {
   /** Bound pending-generation memory; oldest evicted (evicted ⇒ fail-closed on persist). */
   private static readonly MAX_PENDING_GENERATIONS = 256
 
-  /** Register a completed generation's provenance under its unique id. */
-  private registerPendingGeneration(generationId: string, conversationId: string, prov: MessageProvenance): void {
-    const grounded = prov.unverifiable || prov.recordingIds.length > 0 || prov.captureIds.length > 0
+  /**
+   * Register a completed generation under its unique id. ADV20-1 (round-21) — stores
+   * MAIN's answer CONTENT + citation sources alongside the provenance union, so the
+   * persist path (assistant:addMessage) replays MAIN's content, never the renderer's.
+   */
+  private registerPendingGeneration(
+    generationId: string,
+    conversationId: string,
+    kind: MessageKind,
+    content: string,
+    sources: string,
+    prov: MessageProvenance
+  ): void {
+    const grounded =
+      kind === 'rag' && (prov.unverifiable || prov.recordingIds.length > 0 || prov.captureIds.length > 0)
     while (this.pendingGenerations.size >= RAGService.MAX_PENDING_GENERATIONS) {
       const oldest = this.pendingGenerations.keys().next().value
       if (oldest === undefined) break
       this.discardPendingGeneration(oldest)
     }
-    this.pendingGenerations.set(generationId, { conversationId, prov, grounded })
+    this.pendingGenerations.set(generationId, { conversationId, kind, content, sources, prov, grounded })
     if (grounded) {
       let set = this.groundedByConversation.get(conversationId)
       if (!set) { set = new Set(); this.groundedByConversation.set(conversationId, set) }
@@ -579,32 +616,33 @@ class RAGService {
   }
 
   /**
-   * ADV19-1/ADV19-4 (round-20) — decide the MAIN-ISSUED envelope kind + provenance
-   * for a persisting assistant message. The kind is derived from RAG PIPELINE STATE,
-   * NEVER from renderer input, so the renderer cannot forge a trusted 'non-rag'
-   * message carrying grounded content:
+   * ADV20-1 (round-21) — CONSUME the MAIN-OWNED answer for a persisting assistant
+   * message. The CONTENT + sources + provenance are all MAIN's (stored at generation
+   * time); the renderer supplies only conversationId + generationId, NEVER the
+   * content. Derived from RAG PIPELINE STATE, never from renderer input:
    *   • generationId matches an unconsumed pending generation for THIS conversation
-   *     ⇒ kind:'rag' with that generation's authoritative union (consumed here);
+   *     ⇒ replay MAIN's stored {kind, content, sources, prov} (consumed here). A
+   *     `rag` entry is redactable via its `prov`; a `non-rag` entry (a real
+   *     error/status emit main registered) is trusted;
    *   • generationId unknown / already-consumed / for another conversation ⇒
-   *     kind:'rag' UNVERIFIABLE (fail-closed ⇒ redacted on read);
-   *   • NO generationId but the conversation still has an unconsumed GROUNDED
-   *     generation outstanding ⇒ the renderer is persisting grounded content as a
-   *     non-source message ⇒ kind:'rag' UNVERIFIABLE (forge ignored);
-   *   • NO generationId and NO grounded generation outstanding ⇒ a genuine non-RAG
-   *     emit (error/greeting/status) ⇒ kind:'non-rag' (trusted, grounds nothing).
+   *     `unverifiable` (fail-closed ⇒ REDACTED_ANSWER, never renderer content);
+   *   • NO generationId (a renderer trying to author an assistant message directly,
+   *     with or without a grounded generation outstanding) ⇒ `unverifiable`
+   *     (fail-closed). Genuine non-RAG emits go through addNotice, not this path.
    */
-  resolveAssistantProvenance(conversationId: string, generationId?: string): AssistantProvenanceDecision {
+  consumeAssistantAnswer(conversationId: string, generationId?: string): AssistantAnswerToPersist {
     if (generationId) {
       const entry = this.pendingGenerations.get(generationId)
       if (entry && entry.conversationId === conversationId) {
         this.discardPendingGeneration(generationId)
-        return { kind: 'rag', prov: entry.prov }
+        return entry.kind === 'non-rag'
+          ? { kind: 'non-rag', content: entry.content }
+          : { kind: 'rag', content: entry.content, sources: entry.sources, prov: entry.prov }
       }
-      return { kind: 'rag', prov: UNVERIFIABLE_PROV }
+      return { kind: 'unverifiable' }
     }
-    const grounded = this.groundedByConversation.get(conversationId)
-    if (grounded && grounded.size > 0) return { kind: 'rag', prov: UNVERIFIABLE_PROV }
-    return { kind: 'non-rag' }
+    // No generationId ⇒ the renderer cannot author assistant content ⇒ fail closed.
+    return { kind: 'unverifiable' }
   }
 
   async isReady(): Promise<{ ready: boolean; reason?: string }> {
@@ -1004,13 +1042,15 @@ class RAGService {
       } catch {
         /* keep the generic message */
       }
-      return {
-        answer: '',
-        sources: [],
-        error: brainLabel
-          ? `Failed to generate a response with ${brainLabel}. Check that it is configured and reachable, then try again.`
-          : 'Failed to generate response. Please try again.'
-      }
+      this.activeControllers.delete(sessionId)
+      const errorText = brainLabel
+        ? `Failed to generate a response with ${brainLabel}. Check that it is configured and reachable, then try again.`
+        : 'Failed to generate response. Please try again.'
+      // ADV20-1 (round-21) — MAIN owns this error text too. Register it as a genuine
+      // NON-RAG emit under this generation's id so assistant:addMessage replays MAIN's
+      // string (not a renderer-supplied one) and stamps a trusted non-rag envelope.
+      this.registerPendingGeneration(generationId, sessionId, 'non-rag', errorText, '[]', UNVERIFIABLE_PROV)
+      return { answer: '', sources: [], error: errorText, generationId }
     }
 
     // ADV18-2 / ADV19-4 (round-20) — the authoritative provenance union for THIS
@@ -1034,8 +1074,17 @@ class RAGService {
       context.conversationHistory = context.conversationHistory.slice(-20)
     }
 
-    // Bind this answer's provenance to its unique generation id for the persist path.
-    this.registerPendingGeneration(generationId, sessionId, answerProv)
+    // ADV20-1 (round-21) — bind this answer's CONTENT + citation sources + provenance
+    // to its unique generation id. The persist path (assistant:addMessage) consumes
+    // MAIN's stored content by this id; the renderer NEVER authors the assistant text.
+    this.registerPendingGeneration(
+      generationId,
+      sessionId,
+      'rag',
+      answer,
+      JSON.stringify(sources),
+      answerProv
+    )
 
     // B-CHAT-005: Clean up controller after successful completion
     this.activeControllers.delete(sessionId)

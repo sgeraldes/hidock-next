@@ -66,9 +66,9 @@ export interface MessageProvenance {
  *   • `non-rag` — a genuine non-source assistant emit (error text, "no results",
  *                 greeting, status). It grounds on NOTHING, so it is TRUSTED and
  *                 preserved on read. The renderer cannot forge this: main derives
- *                 the kind from whether the RAG pipeline actually produced grounded
- *                 content (see rag.ts resolveAssistantProvenance), never from
- *                 renderer input, and always OVERWRITES the envelope.
+ *                 the kind from RAG pipeline state (see rag.ts consumeAssistantAnswer)
+ *                 or issues it from the fixed notice catalog (assistant:addNotice),
+ *                 never from renderer input, and always OWNS the content + envelope.
  * An assistant message WITHOUT a valid current-version envelope (null, `[]`,
  * legacy pre-v2, malformed, unknown version) is unverifiable ⇒ fail-closed redact.
  */
@@ -160,9 +160,10 @@ export function packSources(sourcesJson: string | null | undefined, prov?: Messa
 /**
  * PERSIST a genuine NON-RAG assistant emit (error text, "no results", greeting,
  * status) — a MAIN-ISSUED `kind:'non-rag'` envelope. It grounds on NOTHING, so it
- * is trusted and preserved on read. Only main may call this; the decision to stamp
- * non-rag is derived from RAG pipeline state (no unconsumed grounded generation),
- * never from renderer input (see rag.ts resolveAssistantProvenance).
+ * is trusted and preserved on read. Only main may call this; the content + the
+ * decision to stamp non-rag are main-owned — either the RAG service's stored error
+ * text (rag.ts consumeAssistantAnswer) or a fixed catalog string (assistant:addNotice),
+ * never renderer-supplied prose.
  */
 export function packNonRagAssistant(): string {
   return JSON.stringify({ v: SOURCE_PROVENANCE_V, kind: 'non-rag', sources: [] })

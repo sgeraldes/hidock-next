@@ -654,6 +654,8 @@ export interface ElectronAPI {
     deleteConversation: (id: string) => Promise<{ success: boolean; error?: string }>
     getMessages: (conversationId: string) => Promise<Message[]>
     addMessage: (conversationId: string, role: 'user' | 'assistant', content: string, sources?: string, generationId?: string) => Promise<Message>
+    /** ADV20-1 (round-21) — persist a main-owned non-RAG notice by fixed code (no free text). */
+    addNotice: (conversationId: string, code: string) => Promise<Message>
     updateConversationTitle: (conversationId: string, title: string) => Promise<{ success: boolean; error?: string }>
     addContext: (conversationId: string, knowledgeCaptureId: string) => Promise<{ success: boolean; error?: string }>
     removeContext: (conversationId: string, knowledgeCaptureId: string) => Promise<{ success: boolean; error?: string }>
@@ -1472,6 +1474,7 @@ const electronAPI: ElectronAPI = {
     deleteConversation: (id) => callIPC('assistant:deleteConversation', id),
     getMessages: (conversationId) => callIPC('assistant:getMessages', conversationId),
     addMessage: (conversationId, role, content, sources, generationId) => callIPC('assistant:addMessage', conversationId, role, content, sources, generationId),
+    addNotice: (conversationId, code) => callIPC('assistant:addNotice', conversationId, code),
     updateConversationTitle: (conversationId, title) => callIPC('assistant:updateConversationTitle', conversationId, title),
     addContext: (conversationId, knowledgeCaptureId) => callIPC('assistant:addContext', conversationId, knowledgeCaptureId),
     removeContext: (conversationId, knowledgeCaptureId) => callIPC('assistant:removeContext', conversationId, knowledgeCaptureId),

@@ -138,9 +138,11 @@ describe('ADV19-2 — post-await recheck of all prompt components', () => {
     // Its citation chip is dropped too.
     expect(resp.sources.some((s) => s.meetingId === 'mA')).toBe(false)
     expect(resp.sources.some((s) => s.meetingId === 'mB')).toBe(true)
-    // The answer's provenance binds ONLY the surviving recB.
-    expect(rag.resolveAssistantProvenance('conv1', resp.generationId!)).toEqual({
+    // The answer's provenance binds ONLY the surviving recB. ADV20-1 (round-21) —
+    // consumeAssistantAnswer also replays MAIN's stored content + sources.
+    expect(rag.consumeAssistantAnswer('conv1', resp.generationId!)).toMatchObject({
       kind: 'rag',
+      content: 'AI Response',
       prov: { recordingIds: ['recB'], captureIds: [], unverifiable: false }
     })
   })
@@ -153,8 +155,9 @@ describe('ADV19-2 — post-await recheck of all prompt components', () => {
     const userMsg = messages[messages.length - 1].content
     expect(userMsg).toContain('ALPHA_TEXT')
     expect(userMsg).toContain('BETA_TEXT')
-    expect(rag.resolveAssistantProvenance('conv1', resp.generationId!)).toEqual({
+    expect(rag.consumeAssistantAnswer('conv1', resp.generationId!)).toMatchObject({
       kind: 'rag',
+      content: 'AI Response',
       prov: { recordingIds: ['recA', 'recB'], captureIds: [], unverifiable: false }
     })
   })
@@ -183,50 +186,51 @@ describe('ADV19-4 — provenance bound to a unique generation id', () => {
     expect(a.generationId).not.toBe(b.generationId)
 
     // A's id resolves to recA; B's id resolves to recB — A can NEVER consume B's union.
-    expect(rag.resolveAssistantProvenance('conv1', a.generationId!)).toEqual({
+    expect(rag.consumeAssistantAnswer('conv1', a.generationId!)).toMatchObject({
       kind: 'rag',
       prov: { recordingIds: ['recA'], captureIds: [], unverifiable: false }
     })
-    expect(rag.resolveAssistantProvenance('conv1', b.generationId!)).toEqual({
+    expect(rag.consumeAssistantAnswer('conv1', b.generationId!)).toMatchObject({
       kind: 'rag',
       prov: { recordingIds: ['recB'], captureIds: [], unverifiable: false }
     })
   })
 
-  it('an unknown / missing generationId fails closed (kind:rag, unverifiable)', async () => {
+  it('an unknown / missing generationId fails closed (kind:unverifiable)', async () => {
     const rag = getRAGService()
-    expect(rag.resolveAssistantProvenance('conv1', 'does-not-exist')).toEqual({
-      kind: 'rag',
-      prov: { recordingIds: [], captureIds: [], unverifiable: true }
-    })
+    expect(rag.consumeAssistantAnswer('conv1', 'does-not-exist')).toEqual({ kind: 'unverifiable' })
   })
 
-  it('a consumed generationId cannot be reused (second resolve fails closed)', async () => {
+  it('a consumed generationId cannot be reused (second consume fails closed)', async () => {
     const rag = getRAGService()
     searchMock.mockResolvedValueOnce([vectorDoc('recA', 'mA', 'A')])
     const a = await rag.chat('conv1', 'q1')
-    expect(rag.resolveAssistantProvenance('conv1', a.generationId!).kind).toBe('rag')
+    expect(rag.consumeAssistantAnswer('conv1', a.generationId!).kind).toBe('rag')
     // Reuse ⇒ no longer pending ⇒ unverifiable.
-    expect(rag.resolveAssistantProvenance('conv1', a.generationId!)).toEqual({
-      kind: 'rag',
-      prov: { recordingIds: [], captureIds: [], unverifiable: true }
-    })
+    expect(rag.consumeAssistantAnswer('conv1', a.generationId!)).toEqual({ kind: 'unverifiable' })
   })
 
-  it('forging non-rag while a grounded generation is outstanding ⇒ main stamps rag (unverifiable)', async () => {
+  it('ADV20-1 — a persist attempt with NO generationId fails closed (renderer cannot author content)', async () => {
     const rag = getRAGService()
     searchMock.mockResolvedValueOnce([vectorDoc('recA', 'mA', 'A')])
     await rag.chat('conv1', 'q') // grounded generation registered, NOT consumed
-    // Renderer omits the generationId to try to persist grounded content as non-rag.
-    expect(rag.resolveAssistantProvenance('conv1')).toEqual({
-      kind: 'rag',
-      prov: { recordingIds: [], captureIds: [], unverifiable: true }
-    })
+    // The renderer cannot author an assistant message: no generationId ⇒ fail closed,
+    // never the outstanding grounded content, never a trusted non-rag.
+    expect(rag.consumeAssistantAnswer('conv1')).toEqual({ kind: 'unverifiable' })
+    // Even on a fresh conversation with nothing outstanding.
+    expect(rag.consumeAssistantAnswer('conv-fresh')).toEqual({ kind: 'unverifiable' })
   })
 
-  it('a genuine non-RAG emit (nothing grounded outstanding) ⇒ kind:non-rag', async () => {
+  it('ADV20-1 — a provider-failure error is a MAIN-owned non-rag emit consumable by its generationId', async () => {
     const rag = getRAGService()
-    expect(rag.resolveAssistantProvenance('conv-fresh')).toEqual({ kind: 'non-rag' })
+    searchMock.mockResolvedValueOnce([vectorDoc('recA', 'mA', 'A')])
+    generateMock.mockResolvedValueOnce('') // provider returns nothing ⇒ error path
+    const resp = await rag.chat('conv1', 'q')
+    expect(resp.error).toBeTruthy()
+    expect(resp.generationId).toBeTruthy()
+    const persisted = rag.consumeAssistantAnswer('conv1', resp.generationId!)
+    expect(persisted.kind).toBe('non-rag')
+    expect(persisted).toMatchObject({ kind: 'non-rag', content: resp.error })
   })
 
   it('rejects an overlapping generation for the same conversation (in-flight guard)', async () => {
