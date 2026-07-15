@@ -443,7 +443,10 @@ describe('useUnifiedRecordings', () => {
       // recordings.getAll() synchronously inside the initial-load effect body. So once
       // the later-declared recording-watcher effect has subscribed, the load-or-skip
       // decision has already been made — wait for that instead of a fixed sleep.
-      await vi.waitFor(() => expect(window.electronAPI.onRecordingAdded).toHaveBeenCalled(), { timeout: 15000, interval: 25 })
+      await vi.waitFor(
+        () => expect(window.electronAPI.onRecordingAdded).toHaveBeenCalled(),
+        { timeout: 15000, interval: 25 }
+      )
 
       // Should NOT have called any API because data is already loaded
       expect(window.electronAPI.recordings.getAll).not.toHaveBeenCalled()
