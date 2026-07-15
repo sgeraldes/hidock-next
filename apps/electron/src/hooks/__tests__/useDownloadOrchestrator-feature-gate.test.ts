@@ -59,8 +59,19 @@ import {
   drainDownloadQueue,
   isDeviceSyncInitiationBlocked,
   isFeatureDisabledRejection,
+  markDownloadCancelled,
+  cancelDownloads,
+  cancelDownloadsComplete,
+  clearAllDownloadBookkeeping,
 } from '../useDownloadOrchestrator'
 import { useFeatureStore } from '@/store/useFeatureStore'
+
+/** A FeatureDisabledError-shaped rejection, exactly as Electron surfaces it. */
+const FEATURE_DISABLED_ERROR = () =>
+  new Error(
+    "Error invoking remote method 'jensen:downloadFile': FeatureDisabledError: " +
+      'Feature "Device Sync" is disabled (channel jensen:downloadFile).'
+  )
 
 // ---- electronAPI harness ----------------------------------------------------
 
@@ -115,6 +126,10 @@ const ITEM_B: MainItem = {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  // Reset module-level cancellation state so a marker set in one test never
+  // leaks into the next (mount resets _cancelInProgress; this clears the sets).
+  clearAllDownloadBookkeeping()
+  cancelDownloadsComplete()
   mainQueue = [{ ...ITEM_A }, { ...ITEM_B }]
   stateUpdateCb = null
   statusCb = null
@@ -131,6 +146,10 @@ beforeEach(() => {
     removeFromDownloadQueue: vi.fn(),
     clearDownloadQueue: vi.fn(),
     cancelDeviceSync: vi.fn(),
+    // PR#77: onStateUpdate mirrors the main-process queue into the enriched store
+    // via syncDownloadQueue BEFORE the (gated) auto-start check. The mirror is a
+    // pure store mutation with no device I/O; the mock records that it ran.
+    syncDownloadQueue: vi.fn(),
   })
 
   harness.deviceService.isConnected.mockReturnValue(true)
@@ -230,12 +249,7 @@ describe('live-disable mid-queue (round-4 [HIGH])', () => {
   it('a FeatureDisabledError-shaped rejection is a gate transition: loop stops, no mark-failed', async () => {
     // The store still says enabled (race: disable landed in main between the
     // loop check and the USB call) — the rejection itself must stop the loop.
-    harness.deviceService.downloadRecording.mockRejectedValue(
-      new Error(
-        "Error invoking remote method 'jensen:downloadFile': FeatureDisabledError: " +
-          'Feature "Device Sync" is disabled (channel jensen:downloadFile).'
-      )
-    )
+    harness.deviceService.downloadRecording.mockRejectedValue(FEATURE_DISABLED_ERROR())
 
     renderHook(() => useDownloadOrchestrator())
     await drainAndSettle()
@@ -246,17 +260,108 @@ describe('live-disable mid-queue (round-4 [HIGH])', () => {
   })
 })
 
+describe('catch-block guard ordering — cancellation PRECEDES the gate (round-5 [MEDIUM])', () => {
+  // Single-item queue so each assertion keys on ONE processDownload catch.
+  beforeEach(() => {
+    mainQueue = [{ ...ITEM_A }]
+  })
+
+  const loggedCancelled = () =>
+    harness.deviceService.log.mock.calls.some((c: unknown[]) => c[1] === 'Download cancelled')
+  const loggedGated = () =>
+    harness.deviceService.log.mock.calls.some((c: unknown[]) => c[1] === 'Download paused')
+
+  it('(a) Cancel-All (signal.aborted) CONCURRENT with a FeatureDisabledError → CANCELLED, never gated, no markFailed', async () => {
+    // device-sync stays desired-ENABLED (the disable is a race in main). The mock
+    // models the race precisely: mid-transfer the user hits Cancel-All (aborts the
+    // shared renderer signal) AND the next USB touch throws FeatureDisabledError.
+    // Both catch guards are true; cancellation must win.
+    harness.deviceService.downloadRecording.mockImplementation(async () => {
+      cancelDownloads() // aborts downloadAbortControllerRef.current.signal
+      throw FEATURE_DISABLED_ERROR()
+    })
+
+    renderHook(() => useDownloadOrchestrator())
+    await drainAndSettle()
+
+    expect(loggedCancelled(), 'must log "Download cancelled"').toBe(true)
+    expect(loggedGated(), 'must NOT take the gated branch').toBe(false)
+    expect(downloadService.markFailed, 'must NOT mark failed').not.toHaveBeenCalled()
+  })
+
+  it('(b) per-file cancel (_cancelledDownloads) CONCURRENT with a FeatureDisabledError → CANCELLED, never gated, no markFailed', async () => {
+    harness.deviceService.downloadRecording.mockRejectedValue(FEATURE_DISABLED_ERROR())
+
+    renderHook(() => useDownloadOrchestrator())
+    // Mark AFTER mount: the orchestrator clears _cancelledDownloads on mount
+    // (stale-flag reset), so the per-file cancel must land after that. It aborts
+    // only the MAIN-process transfer; the renderer signal stays unaborted, so the
+    // marker (not signal.aborted) is what proves the cancel.
+    markDownloadCancelled('A.hda')
+    await drainAndSettle()
+
+    expect(loggedCancelled()).toBe(true)
+    expect(loggedGated()).toBe(false)
+    expect(downloadService.markFailed).not.toHaveBeenCalled()
+  })
+
+  it('pure gate transition (FeatureDisabledError, NO cancel) → GATED (pending), never cancelled, no markFailed', async () => {
+    harness.deviceService.downloadRecording.mockRejectedValue(FEATURE_DISABLED_ERROR())
+
+    renderHook(() => useDownloadOrchestrator())
+    await drainAndSettle()
+
+    expect(loggedGated(), 'must take the gated branch').toBe(true)
+    expect(loggedCancelled(), 'must NOT report cancelled').toBe(false)
+    expect(downloadService.markFailed).not.toHaveBeenCalled()
+    // Item stays pending (untouched) for resume after restart + re-enable.
+    expect(mainQueue.find((i) => i.filename === 'A.hda')?.status).toBe('pending')
+  })
+
+  it('a REAL USB failure (no cancel, no gate) still falls through to markFailed', async () => {
+    harness.deviceService.downloadRecording.mockRejectedValue(new Error('USB transfer failed'))
+
+    renderHook(() => useDownloadOrchestrator())
+    await drainAndSettle()
+
+    expect(downloadService.markFailed).toHaveBeenCalledWith(
+      'A.hda',
+      expect.stringContaining('USB transfer failed')
+    )
+    expect(loggedCancelled()).toBe(false)
+    expect(loggedGated()).toBe(false)
+  })
+})
+
 describe('scheduled initiation paths abort while disabled (round-4)', () => {
-  it('auto-start on state update does NOT begin a session', async () => {
+  it('auto-start on state update does NOT begin a session (PR#77 onStateUpdate → syncDownloadQueue → gated auto-start)', async () => {
     renderHook(() => useDownloadOrchestrator())
     setDeviceSyncDesired(false)
 
     expect(stateUpdateCb).toBeTruthy()
+    // Drive PR#77's real state-update mechanism: a state-update with pending items.
     stateUpdateCb!({ queue: mainQueue.map((i) => ({ ...i })) })
     await new Promise((r) => setTimeout(r, 0))
 
+    // PR#77's queue mirror STILL runs (it is a pure store mutation, no device I/O)…
+    const syncMirror = harness.appState.syncDownloadQueue as ReturnType<typeof vi.fn>
+    expect(syncMirror).toHaveBeenCalledTimes(1)
+    // …but the gated auto-start path did NOT begin a session while disabled.
     expect(downloadService.getState).not.toHaveBeenCalled() // session never started
     expect(harness.deviceService.downloadRecording).not.toHaveBeenCalled()
+  })
+
+  it('auto-start on state update DOES begin a session when device-sync is enabled (proves the mechanism is exercised)', async () => {
+    renderHook(() => useDownloadOrchestrator())
+    setDeviceSyncDesired(true) // enabled
+
+    expect(stateUpdateCb).toBeTruthy()
+    stateUpdateCb!({ queue: mainQueue.map((i) => ({ ...i })) })
+    await waitFor(() => expect(downloadService.getState).toHaveBeenCalled())
+    // The same state-update that no-ops while disabled DOES start a session here —
+    // confirming the disabled test above exercises the real (gated) path, not a
+    // dead one.
+    expect(harness.appState.syncDownloadQueue).toHaveBeenCalled()
   })
 
   it('reconnect retry does NOT re-initiate while disabled', async () => {

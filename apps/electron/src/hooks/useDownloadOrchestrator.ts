@@ -390,10 +390,28 @@ export function useDownloadOrchestrator() {
         return false
       }
     } catch (error) {
-      // Round-4 [HIGH]: a FeatureDisabledError-shaped rejection is a GATE
-      // TRANSITION (device-sync live-disabled between the loop's check and the
-      // USB call), never a download failure. Do NOT mark-failed — the item stays
-      // pending/untouched in the main queue and resumes after restart+re-enable.
+      // User cancellation takes PRECEDENCE over every other interpretation
+      // (round-5 [MEDIUM]). If the user hit Cancel-All (signal.aborted) or a
+      // per-file cancel (_cancelledDownloads) — even CONCURRENTLY with a
+      // device-sync live-disable — the main process has already persisted this
+      // item as user-CANCELLED. Report 'cancelled': never 'failed' (which would
+      // make a deliberate cancel look retryable and resurrect on reconnect), and
+      // never 'gated' (which would claim "queued until restart" and contradict
+      // the durable cancel state). This MUST run BEFORE the gate guard — the two
+      // signals are NOT mutually exclusive, so whichever is checked first wins,
+      // and cancellation must win.
+      if (signal.aborted || _cancelledDownloads.has(item.filename)) {
+        deviceService.log('info', 'Download cancelled', `${item.filename}: Cancelled by user`)
+        // Deterministic cleanup of the renderer Map entry; the main-process cancel
+        // path re-emits the transient 'cancelled' row for the brief flash.
+        removeFromDownloadQueue(item.filename)
+        return false
+      }
+      // Round-4 [HIGH]: a FeatureDisabledError-shaped rejection with NO concurrent
+      // cancel is a GATE TRANSITION (device-sync live-disabled between the loop's
+      // check and the USB call), never a download failure. Do NOT mark-failed —
+      // the item stays pending/untouched in the main queue and resumes after
+      // restart + re-enable.
       if (isFeatureDisabledRejection(error)) {
         if (shouldLogQa()) {
           console.log(`[useDownloadOrchestrator] Gate transition during ${item.filename} — stopping (item stays pending)`)
@@ -401,22 +419,6 @@ export function useDownloadOrchestrator() {
         deviceService.log('info', 'Download paused', `${item.filename}: Device Sync turned off — queued until restart`)
         removeFromDownloadQueue(item.filename) // renderer view only; main item untouched
         return 'gated'
-      }
-      // Check cancellation BEFORE any markFailed: a user cancellation must surface as
-      // 'cancelled', not 'failed'. Calling markFailed here used to clobber the main
-      // process's 'cancelling'/'cancelled' state to 'failed', making a deliberate
-      // cancel look retryable and resurrect on reconnect (the renderer bug this fixes).
-      // Covers both Cancel-All (signal.aborted) and a per-file cancel of this file
-      // (Finding 1: _cancelledDownloads, main-process-only abort → onChunk throws here).
-      // Ordered after the gate check: the two guards key on disjoint signals
-      // (FeatureDisabledError shape vs abort/cancel set), so a live-disable stays
-      // 'gated' (pending) while an explicit user cancel stays 'cancelled'.
-      if (signal.aborted || _cancelledDownloads.has(item.filename)) {
-        deviceService.log('info', 'Download cancelled', `${item.filename}: Cancelled by user`)
-        // Deterministic cleanup of the renderer Map entry; the main-process cancel path
-        // re-emits the transient 'cancelled' row for the brief flash.
-        removeFromDownloadQueue(item.filename)
-        return false
       }
       const libraryError = parseError(error, 'download')
       console.error(`[useDownloadOrchestrator] Error: ${item.filename}`, error)
