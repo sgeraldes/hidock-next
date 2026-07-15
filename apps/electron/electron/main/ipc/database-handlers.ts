@@ -183,11 +183,24 @@ export function registerDatabaseHandlers(): void {
       console.error('db:get-meeting-details auto-link failed:', e)
     }
 
+    // ADV15-1 (round-16) — MeetingDetail is a meeting-AGGREGATION DISPLAY surface,
+    // NOT the single-recording owner reader (SourceReader). So it GATES: run every
+    // linked recording id through the shared FAIL-CLOSED positive allowlist and
+    // omit any ineligible recording (personal/soft-deleted/value-excluded/hard-
+    // purged) — and therefore its transcript/summary/action-items — from the
+    // returned linked-recordings entirely. The owner still views an excluded
+    // recording via SourceReader's existence-scoped owner accessor
+    // (db:get-transcript-owner). Fail-closed → no linked recordings.
     const recordings = getRecordingsForMeeting(meetingId)
-    const recordingsWithTranscripts = recordings.map((recording) => ({
-      ...recording,
-      transcript: getTranscriptByRecordingId(recording.id)
-    }))
+    const { eligible, failClosed } = filterEligibleRecordingIds(recordings.map((r) => r.id))
+    const recordingsWithTranscripts = failClosed
+      ? []
+      : recordings
+          .filter((recording) => eligible.has(recording.id))
+          .map((recording) => ({
+            ...recording,
+            transcript: getTranscriptByRecordingId(recording.id)
+          }))
 
     return {
       meeting,

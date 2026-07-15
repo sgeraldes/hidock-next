@@ -1,39 +1,20 @@
 
 import { ipcMain } from 'electron'
-import { queryAll, queryOne, run } from '../services/database'
-import { filterEligibleRecordingIds } from '../services/recording-eligibility'
+import { queryAll, run } from '../services/database'
+import { filterEligibleActionableRows } from '../services/actionable-eligibility'
 import type { Actionable } from '@/types/knowledge'
 
 /**
- * RE7-3 (round-7) — actionables lists are assistant-facing DISPLAY of
- * recording-backed derivatives (title/description extracted from a transcript).
- * Route them through the shared fail-closed boundary: resolve each row's source
- * recording (source_knowledge_id → knowledge_captures.source_recording_id, or —
- * when no capture row exists — source_knowledge_id IS a recording id) and drop
- * rows whose recording is excluded (personal/soft-deleted/value-excluded) or,
- * fail-closed, whenever eligibility can't be established. Standalone actionables
- * (no source recording) are kept.
+ * ADV15 (round-16) — actionables lists route through the ONE shared capture-aware
+ * boundary {@link filterEligibleActionableRows}. It resolves each row's
+ * `source_knowledge_id` to a live capture (gated via filterEligibleCaptureIds:
+ * deleted_at + recording-derived delegation + standalone quality) or, for legacy
+ * rows, a recording id (filterEligibleRecordingIds); truly standalone actionables
+ * (null source) are kept. This replaces the round-7 per-handler predicate that
+ * unconditionally kept null-source (standalone) captures (ADV15-3).
  */
-function filterEligibleActionableRows<T extends { source_knowledge_id?: string | null }>(rows: T[]): T[] {
-  if (rows.length === 0) return rows
-  const recBySkid = new Map<string, string | null>()
-  for (const row of rows) {
-    const skid = row.source_knowledge_id
-    if (!skid || recBySkid.has(skid)) continue
-    const kc = queryOne<{ source_recording_id: string | null }>(
-      'SELECT source_recording_id FROM knowledge_captures WHERE id = ?',
-      [skid]
-    )
-    recBySkid.set(skid, kc ? kc.source_recording_id ?? null : skid)
-  }
-  const recIds = [...recBySkid.values()].filter((x): x is string => !!x)
-  const { eligible, failClosed } = filterEligibleRecordingIds(recIds)
-  return rows.filter((row) => {
-    const rec = row.source_knowledge_id ? recBySkid.get(row.source_knowledge_id) : null
-    if (!rec) return true // not recording-backed → keep
-    return !failClosed && eligible.has(rec) // recording-backed → eligible only
-  })
-}
+const gateActionables = <T extends { source_knowledge_id?: string | null }>(rows: T[]): T[] =>
+  filterEligibleActionableRows(rows, (r) => r.source_knowledge_id)
 
 export function registerActionablesHandlers(): void {
   // Get all actionables
@@ -51,7 +32,7 @@ export function registerActionablesHandlers(): void {
       sql += ' ORDER BY created_at DESC'
 
       const rows = queryAll<any>(sql, params)
-      return filterEligibleActionableRows(rows).map(mapToActionable)
+      return gateActionables(rows).map(mapToActionable)
     } catch (error) {
       console.error('Failed to get actionables:', error)
       return []
@@ -129,7 +110,7 @@ export function registerActionablesHandlers(): void {
            OR r.meeting_id = ?
         ORDER BY a.created_at DESC
       `
-      const rows = filterEligibleActionableRows(queryAll<any>(sql, [meetingId, meetingId]))
+      const rows = gateActionables(queryAll<any>(sql, [meetingId, meetingId]))
 
       // Log for debugging when no actionables found
       if (rows.length === 0) {

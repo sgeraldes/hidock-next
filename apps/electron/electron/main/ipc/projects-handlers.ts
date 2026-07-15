@@ -33,6 +33,8 @@ import {
   Project as DBProject,
   ProjectNote
 } from '../services/database'
+import { filterEligibleRecordingIds } from '../services/recording-eligibility'
+import { filterEligibleActionableRows } from '../services/actionable-eligibility'
 import { success, error, Result } from '../types/api'
 import {
   GetProjectsRequestSchema,
@@ -98,15 +100,25 @@ export function registerProjectsHandlers(): void {
 
         const meetings = getMeetingsForProject(parsed.data.id)
 
-        // Extract topics via single JOIN query (replaces N+1 nested loops)
+        // Extract topics via single JOIN query (replaces N+1 nested loops).
+        // ADV15 (round-16) — route every topic row's source recording through the
+        // shared filterEligibleRecordingIds boundary and derive the topic set ONLY
+        // from ELIGIBLE recordings (personal/soft-deleted/value-excluded/hard-purged
+        // dropped); fail-closed → no topics (the recurring-topics trap on Projects).
         const topicsSet = new Set<string>()
-        const topicsJsonStrings = getTopicsForProjectMeetings(parsed.data.id)
-        for (const topicsJson of topicsJsonStrings) {
-          try {
-            const meetingTopics = JSON.parse(topicsJson) as string[]
-            meetingTopics.forEach((topic) => topicsSet.add(topic))
-          } catch {
-            // Invalid JSON, skip
+        const topicRows = getTopicsForProjectMeetings(parsed.data.id)
+        const { eligible: eligibleTopicRecs, failClosed: topicsFailClosed } = filterEligibleRecordingIds(
+          topicRows.map((r) => r.recording_id)
+        )
+        if (!topicsFailClosed) {
+          for (const { recording_id, topics } of topicRows) {
+            if (!eligibleTopicRecs.has(recording_id)) continue
+            try {
+              const meetingTopics = JSON.parse(topics) as string[]
+              meetingTopics.forEach((topic) => topicsSet.add(topic))
+            } catch {
+              // Invalid JSON, skip
+            }
           }
         }
 
@@ -501,7 +513,15 @@ export function registerProjectsHandlers(): void {
         if (!parsed.success) {
           return error('VALIDATION_ERROR', 'Invalid project ID', parsed.error.format())
         }
-        const rows = getActionablesForProject(parsed.data)
+        // ADV15 (round-16) — project actionables are assistant-facing DISPLAY;
+        // route through the ONE shared capture-aware boundary (identical to
+        // actionables:getAll) so an actionable whose capture/recording is excluded
+        // (personal/soft-deleted/value-excluded/soft-deleted-capture/standalone-
+        // garbage) is dropped, fail-closed. Replaces the ungated pass-through.
+        const rows = filterEligibleActionableRows(
+          getActionablesForProject(parsed.data),
+          (r) => (r.source_knowledge_id as string | null | undefined) ?? null
+        )
         return success(rows.map(mapToActionable))
       } catch (err) {
         console.error('projects:getActionables error:', err)

@@ -1,7 +1,11 @@
 
 import { ipcMain } from 'electron'
 import { queryAll, queryOne, run, setKnowledgeProjects } from '../services/database'
-import { filterEligibleRecordingIds, existingRecordings } from '../services/recording-eligibility'
+import {
+  filterEligibleCaptureIds,
+  existingRecordings,
+  CAPTURE_VALUE_EXCLUDED_RATINGS
+} from '../services/recording-eligibility'
 import type { KnowledgeCapture } from '@/types/knowledge'
 import { success, error, Result } from '../types/api'
 import { z } from 'zod'
@@ -44,37 +48,41 @@ const KNOWLEDGE_CAPTURE_COLUMNS = `id, title, summary, category, status, quality
 //    which are audio and never shown on Today.
 // =============================================================================
 
-/** F16 value ratings that exclude a STANDALONE capture from assistant surfaces. */
-const CAPTURE_VALUE_EXCLUDED_RATINGS = new Set<string>(['garbage', 'low-value'])
-
 /** Raw capture row shape the eligibility gate needs (rest of the columns pass through). */
-type CaptureRow = { source_recording_id: string | null; quality_rating: string | null; [k: string]: unknown }
+type CaptureRow = { id: string; source_recording_id: string | null; quality_rating: string | null; [k: string]: unknown }
 
 /**
  * Apply the capture eligibility gate to a batch of raw capture rows.
- * Recording-derived captures resolve through the shared FAIL-CLOSED boundary
- * (positive allowlist for 'gated', row-existence for 'owner'); standalone
- * captures are value-checked identically in both tiers. Any eligibility-lookup
- * failure → failClosed=true with an empty kept set.
+ *
+ * GATED (assistant/DISPLAY-safe) routes EVERY row through the ONE shared central
+ * capture boundary {@link filterEligibleCaptureIds} (ADV15) — deleted_at +
+ * recording-derived delegation to the recording allowlist + standalone value
+ * quality, all fail-closed. This replaces the round-15b per-handler predicate
+ * (which never checked the capture's own `deleted_at`, ADV15-2).
+ *
+ * OWNER is the narrow existence-scoped exemption for the owner Library: a
+ * recording-derived capture is kept when its source recording ROW EXISTS
+ * (soft-deleted/personal/value-excluded allowed so the owner sees their own value
+ * badges; hard-purged/orphan dropped). Standalone captures use the SAME shared
+ * value-excluded set as the gated boundary so the store slice's assistant DISPLAY
+ * consumer (Today) can't leak value-excluded standalone captures.
+ *
+ * Any eligibility-lookup failure → failClosed=true with an empty kept set.
  */
 function applyCaptureEligibility(rows: CaptureRow[], tier: 'gated' | 'owner'): { kept: CaptureRow[]; failClosed: boolean } {
   if (rows.length === 0) return { kept: [], failClosed: false }
-  const sourceIds = rows.map((r) => r.source_recording_id).filter((id): id is string => !!id)
-  let allowed: Set<string>
-  let failClosed: boolean
-  if (tier === 'owner') {
-    const res = existingRecordings(sourceIds)
-    allowed = res.ids
-    failClosed = res.failClosed
-  } else {
-    const res = filterEligibleRecordingIds(sourceIds)
-    allowed = res.eligible
-    failClosed = res.failClosed
+  if (tier === 'gated') {
+    const { eligible, failClosed } = filterEligibleCaptureIds(rows.map((r) => r.id))
+    if (failClosed) return { kept: [], failClosed: true }
+    return { kept: rows.filter((r) => eligible.has(r.id)), failClosed: false }
   }
-  if (failClosed) return { kept: [], failClosed: true }
+  // OWNER tier — existence-scoped (unchanged).
+  const sourceIds = rows.map((r) => r.source_recording_id).filter((id): id is string => !!id)
+  const res = existingRecordings(sourceIds)
+  if (res.failClosed) return { kept: [], failClosed: true }
   const kept = rows.filter((r) =>
     r.source_recording_id
-      ? allowed.has(r.source_recording_id)
+      ? res.ids.has(r.source_recording_id)
       : !CAPTURE_VALUE_EXCLUDED_RATINGS.has(r.quality_rating ?? '')
   )
   return { kept, failClosed: false }

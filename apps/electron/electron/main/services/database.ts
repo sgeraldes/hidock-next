@@ -3365,6 +3365,48 @@ export function getExistingCaptureIds(candidateIds: Iterable<string>): IdExisten
   return idsPresentIn('knowledge_captures', candidateIds)
 }
 
+/**
+ * ADV15 (round-16) — raw capture rows the shared capture-eligibility boundary
+ * needs to decide eligibility: a capture's own soft-delete flag, its source
+ * recording (recording-derived vs standalone), and its own value rating (for the
+ * standalone case). Only captures that EXIST are returned — a missing/purged id
+ * is simply absent, so the positive-allowlist boundary treats it as ineligible.
+ * Chunked IN() to stay well under the SQLite bound-parameter limit; fail-closed
+ * on any DB error so the boundary drops everything rather than leaking.
+ */
+export interface CaptureEligibilityRow {
+  id: string
+  source_recording_id: string | null
+  quality_rating: string | null
+  deleted_at: string | null
+}
+export interface CaptureEligibilityRowsResult {
+  rows: CaptureEligibilityRow[]
+  failClosed: boolean
+}
+export function getCaptureEligibilityRows(captureIds: Iterable<string>): CaptureEligibilityRowsResult {
+  const unique = [...new Set([...captureIds].filter((id): id is string => !!id))]
+  if (unique.length === 0) return { rows: [], failClosed: false }
+  try {
+    const rows: CaptureEligibilityRow[] = []
+    const CHUNK = 400
+    for (let i = 0; i < unique.length; i += CHUNK) {
+      const chunk = unique.slice(i, i + CHUNK)
+      const placeholders = chunk.map(() => '?').join(',')
+      const batch = queryAll<CaptureEligibilityRow>(
+        `SELECT id, source_recording_id, quality_rating, deleted_at
+           FROM knowledge_captures WHERE id IN (${placeholders})`,
+        chunk
+      )
+      for (const row of batch) rows.push(row)
+    }
+    return { rows, failClosed: false }
+  } catch (e) {
+    console.error('[Database] capture-eligibility row lookup FAILED — failing closed:', e)
+    return { rows: [], failClosed: true }
+  }
+}
+
 /** Shared existence probe: the subset of `candidateIds` present as `id` rows in
  *  `table`, chunked, fail-closed. `table` is a fixed internal literal (never
  *  user input) so interpolation is safe. */
@@ -7972,15 +8014,23 @@ export function resolveMention(
  * Eliminates N+1: project -> meeting_projects -> recordings -> transcripts
  * Returns the raw topics JSON strings (caller parses them).
  */
-export function getTopicsForProjectMeetings(projectId: string): string[] {
-  const rows = queryAll<{ topics: string }>(
-    `SELECT t.topics FROM transcripts t
+/**
+ * ADV15 (round-16) — return topic rows WITH their source recording id so the
+ * projects:getById handler can route each through the shared
+ * filterEligibleRecordingIds boundary and derive the topic set only from
+ * ELIGIBLE recordings. Previously this JOINed transcripts→recordings→projects
+ * with NO personal/soft-deleted/value predicate (the recurring-topics trap on
+ * Projects), leaking excluded meetings' topics. Gating is done in the handler so
+ * the fail-closed policy lives at the one shared boundary.
+ */
+export function getTopicsForProjectMeetings(projectId: string): Array<{ recording_id: string; topics: string }> {
+  return queryAll<{ recording_id: string; topics: string }>(
+    `SELECT t.recording_id, t.topics FROM transcripts t
      JOIN recordings r ON t.recording_id = r.id
      JOIN meeting_projects mp ON r.meeting_id = mp.meeting_id
      WHERE mp.project_id = ? AND t.topics IS NOT NULL`,
     [projectId]
   )
-  return rows.map(r => r.topics)
 }
 
 // =============================================================================
