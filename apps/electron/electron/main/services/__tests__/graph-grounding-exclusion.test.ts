@@ -205,6 +205,42 @@ describe('ARF-2 — provenance-aware assistant grounding', () => {
     expect(exclusion.ids.has('recA')).toBe(true)
     expect(exclusion.ids.has('recB')).toBe(true)
   })
+
+  // ADV9 (round-9) — regression (a)/(b): a HARD-PURGED recording whose graph edge
+  // survived a deferred/failed cleanup (skipGraphCleanup / pending cleanup) is
+  // gone from `recordings`, so the OLD blocklist (getExcludedRecordingIds, LIVE
+  // rows only) never listed it and its residual edge kept grounding. The POSITIVE
+  // allowlist marks the now-missing id ineligible, so the residual edge is
+  // suppressed EVERYWHERE until the sweep removes it.
+  it('ADV9 — a purged recording with a residual graph edge is suppressed (positive allowlist)', () => {
+    // Simulate the partial cleanup: the row is gone (purge committed) but
+    // graph_edge_sources for recA remain (graph cleanup deferred/failed).
+    dbRun('DELETE FROM recordings WHERE id = ?', ['recA'])
+
+    const exclusion = getGroundingExclusionSet()
+    expect(exclusion.failClosed).toBe(false)
+    expect(exclusion.ids.has('recA')).toBe(true) // NEW: caught despite the missing row
+
+    const facts = neighborhoodFacts('Alice')
+    expect(facts).not.toContain('Alice mentioned Roadmap') // eA (sole source recA) suppressed
+    expect(facts).toContain('Alice mentioned Backlog') // eShared — recB still eligible
+    expect(facts).toContain('Alice relates to Bob') // legacy — unattributed
+    // The visual view suppresses it too.
+    const view = queryNeighborhood('Alice')
+    expect(view.nodes.map((n) => n.label)).not.toContain('Roadmap')
+  })
+
+  it('ADV9 — once the graph-cleanup sweep removes the residual edge, nothing remains to suppress', () => {
+    dbRun('DELETE FROM recordings WHERE id = ?', ['recA'])
+    // The deferred sweep finally removes recA's provenance/edges.
+    removeRecordingProvenanceCore('recA', {})
+    // eA is now GONE (not merely suppressed); Backlog + Bob remain.
+    const facts = neighborhoodFacts('Alice')
+    expect(facts).not.toContain('Alice mentioned Roadmap')
+    expect(facts).toContain('Alice mentioned Backlog')
+    // With recA no longer referenced by any edge, it drops out of the exclusion set.
+    expect(getGroundingExclusionSet().ids.has('recA')).toBe(false)
+  })
 })
 
 // ---------------------------------------------------------------------------

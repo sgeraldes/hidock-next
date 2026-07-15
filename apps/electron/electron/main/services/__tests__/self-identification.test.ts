@@ -45,10 +45,14 @@ vi.mock('../database', () => ({
   // P2 — used by the boot backfill; the direct runSelfIdentificationForRecording
   // tests pass shouldPersist explicitly so this default is unused there.
   isRecordingProcessable: () => true,
-  // RE8-3 (round-8) — runSelfIdentificationForRecording now gates internally on
-  // isRecordingEligible, which reads getExcludedRecordingIds. Mutable so the
-  // eligibility tests can exclude a recording / force fail-closed. Default: eligible.
-  getExcludedRecordingIds: () => selfIdExcluded
+  // RE8-3 (round-8) — runSelfIdentificationForRecording gates internally on
+  // isRecordingEligible. ADV9 (round-9): the boundary now uses the POSITIVE
+  // allowlist getEligibleRecordingIds; derive it from the same mutable source.
+  getExcludedRecordingIds: () => selfIdExcluded,
+  getEligibleRecordingIds: (ids: Iterable<string>) =>
+    selfIdExcluded.failClosed
+      ? { eligible: new Set<string>(), failClosed: true }
+      : { eligible: new Set([...ids].filter((i) => i && !selfIdExcluded.ids.has(i))), failClosed: false }
 }))
 
 let selfIdExcluded: { ids: Set<string>; failClosed: boolean } = { ids: new Set<string>(), failClosed: false }

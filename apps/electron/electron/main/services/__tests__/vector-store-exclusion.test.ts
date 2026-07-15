@@ -23,6 +23,11 @@ vi.mock('../database', () => ({
   // recording-backed docs).
   getExcludedRecordingIds: () =>
     deps.throwOnExclusion ? { ids: new Set<string>(), failClosed: true } : { ids: deps.excluded, failClosed: false },
+  // ADV9 (round-9) — positive allowlist derived from the same excluded source.
+  getEligibleRecordingIds: (ids: Iterable<string>) =>
+    deps.throwOnExclusion
+      ? { eligible: new Set<string>(), failClosed: true }
+      : { eligible: new Set([...ids].filter((i) => i && !deps.excluded.has(i))), failClosed: false },
   // P2 — used by the boot backfill; not exercised by the search tests.
   isRecordingProcessable: () => true
 }))

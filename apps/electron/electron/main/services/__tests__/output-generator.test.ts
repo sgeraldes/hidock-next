@@ -19,7 +19,13 @@ vi.mock('../database', () => ({
   queryOne: vi.fn(),
   // RE6-2 (round-6) — output generation routes every resolved recording id
   // through the shared eligibility boundary; default: all eligible.
-  getExcludedRecordingIds: () => excludedRecordingResult
+  getExcludedRecordingIds: () => excludedRecordingResult,
+  // ADV9 (round-9) — the boundary now uses the POSITIVE allowlist; derive it
+  // from the same excluded source (existing recordings minus excluded).
+  getEligibleRecordingIds: (ids: Iterable<string>) =>
+    excludedRecordingResult.failClosed
+      ? { eligible: new Set<string>(), failClosed: true }
+      : { eligible: new Set([...ids].filter((i) => i && !excludedRecordingResult.ids.has(i))), failClosed: false }
 }))
 
 // Stable Ollama spies so tests can assert whether the local fallback was invoked.

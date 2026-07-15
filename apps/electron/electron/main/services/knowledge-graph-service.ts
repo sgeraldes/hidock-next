@@ -55,7 +55,7 @@ import {
   queryAll,
   queryOne,
   getValueExcludedRecordingIds,
-  getExcludedRecordingIds,
+  getEligibleRecordingIds,
   isRecordingGraphIngestable,
   getContactById,
   getContactByName,
@@ -1130,10 +1130,25 @@ export interface GroundingExclusion {
  */
 export function getGroundingExclusionSet(): GroundingExclusion {
   try {
-    // Round-6 — getExcludedRecordingIds now surfaces { ids, failClosed }; a
-    // VALUE sub-lookup failure propagates here so grounding fails closed.
-    const { ids, failClosed } = getExcludedRecordingIds()
-    return { ids, failClosed }
+    // ADV9 (round-9) — derive the suppression blocklist from the POSITIVE
+    // eligibility allowlist over the recording ids actually referenced by graph
+    // provenance, rather than from getExcludedRecordingIds (which only reads LIVE
+    // recordings). A HARD-PURGED / pending-skipGraphCleanup provenance id is gone
+    // from `recordings`, so it was never in the old blocklist and its residual
+    // edges kept grounding. Here it is simply NOT in the allowlist → included in
+    // the suppression set. Every downstream consumer (provenanceSuppressedEdgeIds,
+    // node visibility, center-reachability) keeps working unchanged.
+    const store = getKnowledgeGraphStore()
+    const provRows = store.db.queryAll<{ recording_id: string }>(
+      'SELECT DISTINCT recording_id FROM graph_edge_sources WHERE recording_id IS NOT NULL'
+    )
+    const provIds = provRows.map((r) => r.recording_id).filter((x): x is string => !!x)
+    if (provIds.length === 0) return { ids: new Set<string>(), failClosed: false }
+    const { eligible, failClosed } = getEligibleRecordingIds(provIds)
+    if (failClosed) return { ids: new Set<string>(), failClosed: true }
+    const ids = new Set<string>()
+    for (const id of provIds) if (!eligible.has(id)) ids.add(id)
+    return { ids, failClosed: false }
   } catch (e) {
     console.error('[KnowledgeGraph] grounding exclusion lookup FAILED — failing closed (suppressing all attributed facts):', e)
     return { ids: new Set<string>(), failClosed: true }

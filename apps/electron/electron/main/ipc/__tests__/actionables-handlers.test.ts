@@ -10,15 +10,25 @@ vi.mock('electron', () => ({
 }))
 
 // Mock database
-vi.mock('../../services/database', () => ({
-  queryAll: vi.fn(),
-  queryOne: vi.fn(),
-  run: vi.fn(),
-  // RE7-3 (round-7) — getAll/getByMeeting route rows through the real
-  // eligibility boundary, which reads getExcludedRecordingIds. Default:
-  // nothing excluded, not fail-closed (so all rows remain eligible).
-  getExcludedRecordingIds: vi.fn(() => ({ ids: new Set<string>(), failClosed: false }))
-}))
+vi.mock('../../services/database', () => {
+  // RE7-3 (round-7) — getAll/getByMeeting route rows through the real eligibility
+  // boundary. ADV9 (round-9): the boundary now uses the POSITIVE allowlist
+  // getEligibleRecordingIds; tests drive getExcludedRecordingIds and the eligible
+  // form derives from it (existing candidates minus excluded).
+  const getExcludedRecordingIds = vi.fn(() => ({ ids: new Set<string>(), failClosed: false }))
+  return {
+    queryAll: vi.fn(),
+    queryOne: vi.fn(),
+    run: vi.fn(),
+    getExcludedRecordingIds,
+    getEligibleRecordingIds: (ids: Iterable<string>) => {
+      const { ids: excluded, failClosed } = getExcludedRecordingIds()
+      return failClosed
+        ? { eligible: new Set<string>(), failClosed: true }
+        : { eligible: new Set([...ids].filter((i) => i && !excluded.has(i))), failClosed: false }
+    }
+  }
+})
 
 describe('Actionables IPC Handlers', () => {
   let handlers: Record<string, Function> = {}

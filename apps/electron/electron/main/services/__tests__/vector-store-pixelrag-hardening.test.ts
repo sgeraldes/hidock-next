@@ -52,6 +52,8 @@ vi.mock('../database', () => ({
   getDatabase: () => fakeDb,
   // Round-6 — { ids, failClosed } shape.
   getExcludedRecordingIds: () => ({ ids: new Set<string>(), failClosed: false }),
+  // ADV9 (round-9) — positive allowlist; nothing excluded here → all eligible.
+  getEligibleRecordingIds: (ids: Iterable<string>) => ({ eligible: new Set([...ids].filter((i) => !!i)), failClosed: false }),
   isRecordingProcessable: () => true
 }))
 

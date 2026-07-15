@@ -429,11 +429,19 @@ class VectorStore {
    * dropped (fail closed). Non-recording docs (no recordingId) always pass.
    */
   private filterEligibleDocs(docs: VectorDocument[]): VectorDocument[] {
-    const recIds = docs.map((d) => d.metadata.recordingId).filter((x): x is string => !!x)
+    // ADV9 (round-9) — the recording allowlist is POSITIVE (an id must resolve to
+    // an existing eligible recording). Image/artifact docs carry their ARTIFACT
+    // id in `recordingId` (the vector_embeddings.recording_id column is reused),
+    // NOT a recording id — their OWN capture/artifact lifecycle governs them, so
+    // the recording allowlist must not apply (it would drop every image). This
+    // matches the prior blocklist behaviour, which never excluded artifact ids.
+    const isRecordingBacked = (d: VectorDocument): boolean =>
+      d.metadata.sourceType !== 'image' && !!d.metadata.recordingId
+    const recIds = docs.filter(isRecordingBacked).map((d) => d.metadata.recordingId!)
     const { eligible } = filterEligibleRecordingIds(recIds)
     return docs.filter((d) => {
-      const recId = d.metadata.recordingId
-      return !recId || eligible.has(recId) // failClosed ⇒ eligible is empty ⇒ recording docs dropped
+      if (!isRecordingBacked(d)) return true // non-recording (image/no id) — not gated here
+      return eligible.has(d.metadata.recordingId!) // failClosed ⇒ empty ⇒ recording docs dropped
     })
   }
 

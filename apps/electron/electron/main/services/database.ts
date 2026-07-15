@@ -3272,6 +3272,60 @@ export interface RecordingExclusion {
   failClosed: boolean
 }
 
+/** ADV9 (round-9) — positive-allowlist result: the subset of candidate ids that
+ *  are eligible to surface. `failClosed` = the lookup could not complete. */
+export interface RecordingEligibility {
+  eligible: Set<string>
+  failClosed: boolean
+}
+
+/**
+ * ADV9 (round-9) — THE positive eligibility allowlist. Returns the subset of the
+ * given candidate recording ids that are eligible to surface to AI / UI /
+ * exports: each must resolve to an EXISTING recording row that is non-personal,
+ * non-soft-deleted, AND not value-excluded. Any candidate NOT returned is
+ * ineligible — critically INCLUDING a HARD-PURGED id whose `recordings` row is
+ * gone (so it was in neither the table nor the old exclusion blocklist and was
+ * therefore wrongly treated as eligible, admitting a stale vector doc / graph
+ * edge that survived a deferred/failed cleanup). Fails CLOSED: any DB error
+ * yields an empty eligible set with `failClosed = true`.
+ *
+ * This INVERTS the previous blocklist model (subtract known-excluded ids, treat
+ * a MISSING id as eligible) — the root cause the 9th adversarial pass found.
+ * `getExcludedRecordingIds` (blocklist) is retained only for callers that need
+ * the LIVE excluded set for other purposes; all ELIGIBILITY decisions go through
+ * this positive query via recording-eligibility.ts.
+ */
+export function getEligibleRecordingIds(candidateIds: Iterable<string>): RecordingEligibility {
+  const unique = [...new Set([...candidateIds].filter((id): id is string => !!id))]
+  if (unique.length === 0) return { eligible: new Set<string>(), failClosed: false }
+  try {
+    const eligible = new Set<string>()
+    const CHUNK = 400 // stay under the SQL bound-parameter limit for large sets
+    for (let i = 0; i < unique.length; i += CHUNK) {
+      const chunk = unique.slice(i, i + CHUNK)
+      const placeholders = chunk.map(() => '?').join(',')
+      const rows = queryAll<{ id: string }>(
+        `SELECT r.id FROM recordings r
+          WHERE r.id IN (${placeholders})
+            AND r.deleted_at IS NULL
+            AND COALESCE(r.personal, 0) = 0
+            AND NOT EXISTS (
+              SELECT 1 FROM knowledge_captures kc
+               WHERE kc.source_recording_id = r.id
+                 AND kc.deleted_at IS NULL
+                 AND ${VALUE_EXCLUSION_PREDICATE})`,
+        [...chunk, ...VALUE_EXCLUDED_RATINGS, ...VALUE_KEEP_RATINGS]
+      )
+      for (const row of rows) eligible.add(row.id)
+    }
+    return { eligible, failClosed: false }
+  } catch (e) {
+    console.error('[Database] positive eligibility allowlist FAILED — failing closed:', e)
+    return { eligible: new Set<string>(), failClosed: true }
+  }
+}
+
 export function getExcludedRecordingIds(): RecordingExclusion {
   try {
     const rows = queryAll<{ id: string }>(

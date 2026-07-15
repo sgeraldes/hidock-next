@@ -14,48 +14,49 @@
  * whack-a-mole: many independent readers, no shared boundary).
  */
 
-import { getExcludedRecordingIds } from './database'
+import { getEligibleRecordingIds } from './database'
 
 export interface EligibilityResult {
   /** The subset of the input ids that are eligible to surface. Empty when failClosed. */
   eligible: Set<string>
-  /** True when the exclusion lookup could not complete → treat all as ineligible. */
+  /** True when the eligibility lookup could not complete → treat all as ineligible. */
   failClosed: boolean
 }
 
 /**
- * Given candidate recording ids, return the subset eligible for AI/UI
- * surfacing. Fail-closed: on any exclusion-lookup failure the eligible set is
- * empty and `failClosed` is true.
+ * ADV9 (round-9) — POSITIVE ALLOWLIST. Given candidate recording ids, return the
+ * subset eligible for AI/UI/export surfacing. An id is eligible ONLY if it
+ * resolves to an EXISTING recording that is non-personal, non-deleted, and not
+ * value-excluded (see database.ts getEligibleRecordingIds). A hard-purged /
+ * unknown id — whose `recordings` row is gone, so it was never in the old
+ * exclusion blocklist and used to slip through as "eligible" — is now correctly
+ * ineligible. Fail-closed: on any lookup failure the eligible set is empty and
+ * `failClosed` is true.
  */
 export function filterEligibleRecordingIds(candidateIds: Iterable<string>): EligibilityResult {
-  let excluded: Set<string>
-  let failClosed: boolean
   try {
-    ;({ ids: excluded, failClosed } = getExcludedRecordingIds())
+    const { eligible, failClosed } = getEligibleRecordingIds(candidateIds)
+    if (failClosed) return { eligible: new Set<string>(), failClosed: true }
+    return { eligible, failClosed: false }
   } catch (e) {
-    // Any unexpected failure computing the exclusion set → fail closed.
-    console.error('[Eligibility] exclusion lookup threw — failing closed:', e)
+    // Any unexpected failure computing the allowlist → fail closed.
+    console.error('[Eligibility] positive allowlist threw — failing closed:', e)
     return { eligible: new Set<string>(), failClosed: true }
   }
-  if (failClosed) return { eligible: new Set<string>(), failClosed: true }
-  const eligible = new Set<string>()
-  for (const id of candidateIds) {
-    if (id && !excluded.has(id)) eligible.add(id)
-  }
-  return { eligible, failClosed: false }
 }
 
 /**
  * Single-recording convenience for point-of-use gating (pinned context, output
- * generation). Fail-closed: any lookup failure → false (not eligible).
+ * generation, LLM callers). Positive allowlist + fail-closed: eligible ONLY when
+ * the id resolves to an existing, non-personal, non-deleted, non-value-excluded
+ * recording; any lookup failure → false (not eligible).
  */
 export function isRecordingEligible(recordingId: string): boolean {
   try {
-    const { ids: excluded, failClosed } = getExcludedRecordingIds()
-    return !failClosed && !excluded.has(recordingId)
+    const { eligible, failClosed } = getEligibleRecordingIds([recordingId])
+    return !failClosed && eligible.has(recordingId)
   } catch (e) {
-    console.error('[Eligibility] exclusion lookup threw — failing closed:', e)
+    console.error('[Eligibility] positive allowlist threw — failing closed:', e)
     return false
   }
 }

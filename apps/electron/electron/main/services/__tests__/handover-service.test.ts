@@ -24,6 +24,12 @@ vi.mock('../database', () => ({
   queryOne: vi.fn(),
   queryAll: vi.fn(() => []),
   getExcludedRecordingIds: () => handoverExclusion,
+  // ADV9 (round-9) — the boundary now uses the POSITIVE allowlist; derive it
+  // from the same mutable excluded source.
+  getEligibleRecordingIds: (ids: Iterable<string>) =>
+    handoverExclusion.failClosed
+      ? { eligible: new Set<string>(), failClosed: true }
+      : { eligible: new Set([...ids].filter((i) => i && !handoverExclusion.ids.has(i))), failClosed: false },
 }))
 vi.mock('../brains', () => ({
   getBrainRouter: vi.fn(() => ({ resolve: vi.fn(async () => null) })),

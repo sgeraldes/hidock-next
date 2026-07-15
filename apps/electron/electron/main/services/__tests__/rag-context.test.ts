@@ -65,7 +65,12 @@ vi.mock('../database', () => ({
   // reads this. Round-6 shape { ids, failClosed }; the real function surfaces
   // failClosed rather than throwing, so the mock mimics that.
   getExcludedRecordingIds: () =>
-    throwExclusionLookup ? { ids: new Set<string>(), failClosed: true } : { ids: excludedRecordingIds, failClosed: false }
+    throwExclusionLookup ? { ids: new Set<string>(), failClosed: true } : { ids: excludedRecordingIds, failClosed: false },
+  // ADV9 (round-9) — positive allowlist derived from the same excluded source.
+  getEligibleRecordingIds: (ids: Iterable<string>) =>
+    throwExclusionLookup
+      ? { eligible: new Set<string>(), failClosed: true }
+      : { eligible: new Set([...ids].filter((i) => i && !excludedRecordingIds.has(i))), failClosed: false }
 }))
 
 describe('RAGService Context Injection', () => {

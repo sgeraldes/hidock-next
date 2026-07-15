@@ -38,9 +38,13 @@ vi.mock('../database', () => ({
   // Simulate the audio transcription backlog: when busy, 'pending' is non-empty.
   getQueueItems: (status?: string) => (queueBusy && status === 'pending' ? [{ id: 'q1' }] : []),
   // RE8-1 (round-8) — reformatOne + the work-list filter route recording ids
-  // through the eligibility boundary, which reads getExcludedRecordingIds.
-  // Default: nothing excluded, not fail-closed (all eligible).
-  getExcludedRecordingIds: () => excludedResult
+  // through the eligibility boundary. ADV9 (round-9): the boundary now uses the
+  // POSITIVE allowlist getEligibleRecordingIds; derive it from the same source.
+  getExcludedRecordingIds: () => excludedResult,
+  getEligibleRecordingIds: (ids: Iterable<string>) =>
+    excludedResult.failClosed
+      ? { eligible: new Set<string>(), failClosed: true }
+      : { eligible: new Set([...ids].filter((i) => i && !excludedResult.ids.has(i))), failClosed: false }
 }))
 
 // RE8-1 (round-8) — mutable so eligibility-gating tests can exclude a recording
