@@ -2039,6 +2039,16 @@ Meeting ${i + 1}: "${m.subject}"
   }
 
   progressCallback?.('complete', 100) // spec-014: progress reporting
+  // RE4-4 / C (round-4) — if ANY post-persist gate tripped (the recording became
+  // ineligible mid-run: timeline/org/self-id/transcript-ready/wiki/vector all
+  // skipped), report 'cancelled' so NEITHER caller (processQueue,
+  // transcribeManually) claims completion or overwrites a soft-delete's
+  // 'cancelled' tombstone. processabilitySkipLogged is set the first time
+  // stillProcessable() returned false.
+  if (processabilitySkipLogged) {
+    console.log(`Transcription of ${recording.filename} completed the transcript but the recording became ineligible mid-run — reporting cancelled`)
+    return { status: 'cancelled' }
+  }
   console.log(`Transcription complete: ${recording.filename} (${wordCount} words)`)
   return { status: 'completed' }
 }
@@ -2046,7 +2056,14 @@ Meeting ${i + 1}: "${m.subject}"
 export async function transcribeManually(recordingId: string): Promise<void> {
   try {
     notifyRenderer('transcription:started', { recordingId })
-    await transcribeRecording(recordingId)
+    const outcome = await transcribeRecording(recordingId)
+    // RE4-4 (round-4) — the manual IPC path must also branch on the outcome:
+    // a recording trashed / marked personal / hard-purged mid-run must NOT emit
+    // transcription:completed (INC-2 fixed only the queue path).
+    if (outcome.status === 'cancelled') {
+      notifyRenderer('transcription:cancelled', { recordingId })
+      return
+    }
     notifyRenderer('transcription:completed', { recordingId })
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error'

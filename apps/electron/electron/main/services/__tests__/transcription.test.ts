@@ -364,6 +364,80 @@ describe('Transcription Service', () => {
       // Nothing was persisted (the early gate bailed before insertTranscript).
       expect(mockInsertTranscript).not.toHaveBeenCalled()
     })
+
+    it('C (round-4) — a recording ineligible AFTER the transcript persists is still marked cancelled, not completed', async () => {
+      mockConfig.transcription.provider = 'local-asr'
+      mockConfig.transcription.geminiApiKey = ''
+      // Eligible at the early gate, then trashed once the transcript persists:
+      // insertTranscript flips eligibility to false, so a LATER post-analysis
+      // gate trips and transcribeRecording must report cancelled.
+      mockIsRecordingProcessable.mockReturnValue(true)
+      mockInsertTranscript.mockImplementation(() => {
+        mockIsRecordingProcessable.mockReturnValue(false)
+      })
+      mockGetQueueItems.mockImplementation((status?: string) =>
+        status === 'pending'
+          ? [{ id: 'queue-late', recording_id: 'rec-late', filename: 'l.wav', status: 'pending', attempts: 0 }]
+          : []
+      )
+      mockGetRecordingById.mockReturnValue({
+        id: 'rec-late',
+        filename: 'l.wav',
+        file_path: 'G:\\Recordings\\l.wav',
+        status: 'complete'
+      })
+      mockExecFile.mockImplementation(() =>
+        makeFakeChildProcess(
+          JSON.stringify({ text: 'Speaker 1: hola.', language: 'es', duration_seconds: 5, processing_time_seconds: 1 })
+        )
+      )
+
+      const { startTranscriptionProcessor, stopTranscriptionProcessor } = await import('../transcription')
+      startTranscriptionProcessor()
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      stopTranscriptionProcessor()
+
+      // The transcript DID persist (eligible at the early gate)…
+      expect(mockInsertTranscript).toHaveBeenCalled()
+      const queueCalls = mockUpdateQueueItem.mock.calls
+      // …but a later gate tripped → cancelled, never completed.
+      expect(queueCalls.some((c: any[]) => c[0] === 'queue-late' && c[1] === 'cancelled')).toBe(true)
+      expect(queueCalls.some((c: any[]) => c[0] === 'queue-late' && c[1] === 'completed')).toBe(false)
+    })
+
+    it('RE4-4 (round-4) — transcribeManually does NOT emit transcription:completed for cancelled work', async () => {
+      mockConfig.transcription.provider = 'local-asr'
+      mockConfig.transcription.geminiApiKey = ''
+      mockIsRecordingProcessable.mockReturnValue(false) // trashed before the early gate
+      mockGetRecordingById.mockReturnValue({
+        id: 'rec-man',
+        filename: 'm.wav',
+        file_path: 'G:\\Recordings\\m.wav',
+        status: 'complete'
+      })
+      mockExecFile.mockImplementation(() =>
+        makeFakeChildProcess(
+          JSON.stringify({ text: 'hola.', language: 'es', duration_seconds: 5, processing_time_seconds: 1 })
+        )
+      )
+      const sent: string[] = []
+      const mod = await import('../transcription')
+      mod.setMainWindowForTranscription({
+        isDestroyed: () => false,
+        webContents: { send: (ch: string) => sent.push(ch) }
+      } as never)
+      try {
+        await mod.transcribeManually('rec-man')
+      } finally {
+        // Reset so the fake window doesn't leak into later tests.
+        mod.setMainWindowForTranscription({ isDestroyed: () => true } as never)
+      }
+
+      expect(sent).toContain('transcription:started')
+      expect(sent).toContain('transcription:cancelled')
+      expect(sent).not.toContain('transcription:completed')
+      expect(mockInsertTranscript).not.toHaveBeenCalled()
+    })
   })
 
   describe('vibevoice provider', () => {
