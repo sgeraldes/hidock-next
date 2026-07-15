@@ -138,7 +138,7 @@ describe('ARF-2 — provenance-aware assistant grounding', () => {
 
   it('soft-delete recA suppresses ONLY the fact solely sourced by recA', () => {
     deleteRecordingCascade('recA', { hard: false })
-    expect(getExcludedRecordingIds().has('recA')).toBe(true)
+    expect(getExcludedRecordingIds().ids.has('recA')).toBe(true)
 
     const facts = neighborhoodFacts('Alice')
     // eA — every source (recA) excluded → suppressed.
@@ -154,7 +154,7 @@ describe('ARF-2 — provenance-aware assistant grounding', () => {
     expect(neighborhoodFacts('Alice')).not.toContain('Alice mentioned Roadmap')
 
     restoreRecording('recA')
-    expect(getExcludedRecordingIds().has('recA')).toBe(false)
+    expect(getExcludedRecordingIds().ids.has('recA')).toBe(false)
     expect(neighborhoodFacts('Alice')).toContain('Alice mentioned Roadmap')
   })
 
@@ -171,7 +171,7 @@ describe('ARF-2 — provenance-aware assistant grounding', () => {
       'INSERT INTO knowledge_captures (id, title, captured_at, source_recording_id, quality_rating) VALUES (?, ?, ?, ?, ?)',
       ['capA', 'Cap', '2026-06-01', 'recA', 'garbage']
     )
-    expect(getExcludedRecordingIds().has('recA')).toBe(true)
+    expect(getExcludedRecordingIds().ids.has('recA')).toBe(true)
     expect(neighborhoodFacts('Alice')).not.toContain('Alice mentioned Roadmap')
     // Legacy + shared still present.
     expect(neighborhoodFacts('Alice')).toContain('Alice relates to Bob')

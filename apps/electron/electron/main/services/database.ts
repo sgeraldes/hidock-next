@@ -3258,18 +3258,42 @@ export function isRecordingProcessable(recordingId: string): boolean {
  * point-read pair above, rather than unioning everything into one Set like
  * this function does for RAG. Same net effect (both exclusions always apply
  * either way); this is a deliberate difference in composition, not drift.
+ *
+ * Round-6 FOUNDATION — this now returns `{ ids, failClosed }`. `failClosed` is
+ * true when EITHER sub-lookup (personal/deleted OR value-excluded) could not
+ * complete: the exclusion set is then INCOMPLETE, so every downstream reader
+ * MUST treat all recording-backed content as ineligible (previously a value
+ * sub-lookup failure was swallowed = fail-OPEN for value-excluded content,
+ * which defeated every "fail closed" consumer). All eligibility decisions go
+ * through the shared boundary in recording-eligibility.ts, built on this.
  */
-export function getExcludedRecordingIds(): Set<string> {
-  const rows = queryAll<{ id: string }>(
-    'SELECT id FROM recordings WHERE personal = 1 OR deleted_at IS NOT NULL'
-  )
-  const excluded = new Set(rows.map((r) => r.id))
+export interface RecordingExclusion {
+  ids: Set<string>
+  failClosed: boolean
+}
+
+export function getExcludedRecordingIds(): RecordingExclusion {
   try {
-    for (const id of getValueExcludedRecordingIds()) excluded.add(id)
+    const rows = queryAll<{ id: string }>(
+      'SELECT id FROM recordings WHERE personal = 1 OR deleted_at IS NOT NULL'
+    )
+    const ids = new Set(rows.map((r) => r.id))
+    let failClosed = false
+    try {
+      for (const id of getValueExcludedRecordingIds()) ids.add(id)
+    } catch (e) {
+      // The VALUE sub-lookup failed — we can no longer prove value-excluded
+      // content is filtered, so callers must fail closed (drop ALL
+      // recording-backed content) rather than surface it.
+      console.error('[Database] value-exclusion sub-lookup FAILED — exclusion set incomplete, callers must fail closed:', e)
+      failClosed = true
+    }
+    return { ids, failClosed }
   } catch (e) {
-    console.warn('[Database] getValueExcludedRecordingIds failed (privacy exclusion unaffected):', e)
+    // Even the privacy (personal/deleted) lookup failed → fully fail closed.
+    console.error('[Database] exclusion lookup FAILED — failing closed:', e)
+    return { ids: new Set<string>(), failClosed: true }
   }
-  return excluded
 }
 
 /**

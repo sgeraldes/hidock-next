@@ -90,6 +90,7 @@ import {
   isValueExcludedRecording
 } from '../database'
 import { ingestFromDbTranscripts, getKnowledgeGraphStore } from '../knowledge-graph-service'
+import { filterEligibleRecordingIds } from '../recording-eligibility'
 
 // Minimal-but-valid extraction JSON (same shape as knowledge-graph-service.test.ts).
 const FAKE_JSON = JSON.stringify({
@@ -257,7 +258,7 @@ describe('getExcludedRecordingIds() — privacy UNION value exclusions', () => {
     seedCapture('cap-garbage2', 'r-garbage2', 'garbage')
     seedRecording('r-normal')
 
-    const excluded = getExcludedRecordingIds()
+    const excluded = getExcludedRecordingIds().ids
 
     expect(excluded.has('r-personal')).toBe(true)
     expect(excluded.has('r-deleted')).toBe(true)
@@ -268,31 +269,61 @@ describe('getExcludedRecordingIds() — privacy UNION value exclusions', () => {
   it('privacy exclusion survives even when there are zero knowledge_captures at all', () => {
     seedRecording('r-personal-only', { personal: 1 })
 
-    expect(getExcludedRecordingIds().has('r-personal-only')).toBe(true)
+    expect(getExcludedRecordingIds().ids.has('r-personal-only')).toBe(true)
   })
 
-  // Opus F-1: the value union is defensively wrapped — a failure of the
-  // value-exclusion query must degrade to the privacy-only set, never drop a
-  // personal/deleted exclusion. Forced here by renaming the captures table
-  // away so the union query throws "no such table" (rename is not guarded by
-  // the mass-delete tripwire, and each test gets its own fresh temp DB).
-  it('privacy exclusions survive a value-union query failure (captures table unavailable)', () => {
+  // Opus F-1 + FOUNDATION (round-6): the value union is defensively wrapped —
+  // a failure of the value-exclusion query must keep the privacy-only ids AND
+  // now surface failClosed=true so every downstream reader fails closed for
+  // VALUE-excluded content (previously the failure was swallowed = fail-OPEN for
+  // value). Forced with the REAL composition — renaming the captures table away
+  // so the union query throws "no such table" against a real temp DB (NOT a
+  // mock throwing at the outer boundary).
+  it('FOUNDATION — a value-union query failure keeps privacy ids AND sets failClosed=true', () => {
     seedRecording('r-pu-personal', { personal: 1 })
     seedRecording('r-pu-deleted', { deleted_at: '2026-07-01T00:00:00.000Z' })
     seedRecording('r-pu-garbage')
     seedCapture('cap-pu-garbage', 'r-pu-garbage', 'garbage')
 
-    // Sanity: with a healthy captures table the union includes the value id.
-    expect(getExcludedRecordingIds().has('r-pu-garbage')).toBe(true)
+    // Sanity: with a healthy captures table the union includes the value id and
+    // is NOT fail-closed.
+    const healthy = getExcludedRecordingIds()
+    expect(healthy.ids.has('r-pu-garbage')).toBe(true)
+    expect(healthy.failClosed).toBe(false)
 
     dbRun('ALTER TABLE knowledge_captures RENAME TO knowledge_captures_offline')
     try {
-      const excluded = getExcludedRecordingIds()
-      expect(excluded.has('r-pu-personal')).toBe(true)
-      expect(excluded.has('r-pu-deleted')).toBe(true)
-      // The value union failed — it can only fail to ADD, so the value id is
-      // (correctly) absent while both privacy ids remain.
-      expect(excluded.has('r-pu-garbage')).toBe(false)
+      const result = getExcludedRecordingIds()
+      // Privacy ids remain…
+      expect(result.ids.has('r-pu-personal')).toBe(true)
+      expect(result.ids.has('r-pu-deleted')).toBe(true)
+      // …the value id is (correctly) absent (the union could only fail to ADD)…
+      expect(result.ids.has('r-pu-garbage')).toBe(false)
+      // …and the incomplete set is flagged fail-closed so callers drop ALL
+      // recording-backed content rather than leak value-excluded content.
+      expect(result.failClosed).toBe(true)
+    } finally {
+      dbRun('ALTER TABLE knowledge_captures_offline RENAME TO knowledge_captures')
+    }
+  })
+
+  it('FOUNDATION — the shared boundary filterEligibleRecordingIds fails closed on that failure', () => {
+    seedRecording('r-fb-ok')
+    seedRecording('r-fb-garbage')
+    seedCapture('cap-fb-garbage', 'r-fb-garbage', 'garbage')
+
+    // Healthy: ok is eligible, garbage is not.
+    const healthy = filterEligibleRecordingIds(['r-fb-ok', 'r-fb-garbage'])
+    expect(healthy.failClosed).toBe(false)
+    expect(healthy.eligible.has('r-fb-ok')).toBe(true)
+    expect(healthy.eligible.has('r-fb-garbage')).toBe(false)
+
+    dbRun('ALTER TABLE knowledge_captures RENAME TO knowledge_captures_offline')
+    try {
+      const failed = filterEligibleRecordingIds(['r-fb-ok', 'r-fb-garbage'])
+      // Fail closed — NOTHING is eligible, not even the otherwise-fine recording.
+      expect(failed.failClosed).toBe(true)
+      expect(failed.eligible.size).toBe(0)
     } finally {
       dbRun('ALTER TABLE knowledge_captures_offline RENAME TO knowledge_captures')
     }

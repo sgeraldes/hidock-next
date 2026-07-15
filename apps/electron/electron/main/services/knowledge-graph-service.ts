@@ -1130,7 +1130,10 @@ export interface GroundingExclusion {
  */
 export function getGroundingExclusionSet(): GroundingExclusion {
   try {
-    return { ids: getExcludedRecordingIds(), failClosed: false }
+    // Round-6 — getExcludedRecordingIds now surfaces { ids, failClosed }; a
+    // VALUE sub-lookup failure propagates here so grounding fails closed.
+    const { ids, failClosed } = getExcludedRecordingIds()
+    return { ids, failClosed }
   } catch (e) {
     console.error('[KnowledgeGraph] grounding exclusion lookup FAILED — failing closed (suppressing all attributed facts):', e)
     return { ids: new Set<string>(), failClosed: true }

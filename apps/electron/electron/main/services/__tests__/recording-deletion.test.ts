@@ -186,15 +186,15 @@ describe('Privacy source-deletion (v38)', () => {
     it('setRecordingPersonal toggles the flag and getExcludedRecordingIds reflects it', () => {
       seedRecording('r1')
       seedRecording('r2')
-      expect(getExcludedRecordingIds().size).toBe(0)
+      expect(getExcludedRecordingIds().ids.size).toBe(0)
 
       expect(setRecordingPersonal('r1', true)).toBe(true)
-      const excluded = getExcludedRecordingIds()
+      const excluded = getExcludedRecordingIds().ids
       expect(excluded.has('r1')).toBe(true)
       expect(excluded.has('r2')).toBe(false)
 
       expect(setRecordingPersonal('r1', false)).toBe(false)
-      expect(getExcludedRecordingIds().has('r1')).toBe(false)
+      expect(getExcludedRecordingIds().ids.has('r1')).toBe(false)
     })
 
     it('returns undefined for an unknown recording', () => {
@@ -258,7 +258,7 @@ describe('Privacy source-deletion (v38)', () => {
     it('soft-deleted recordings are in the excluded set', () => {
       seedRecording('r1')
       deleteRecordingCascade('r1', { hard: false })
-      expect(getExcludedRecordingIds().has('r1')).toBe(true)
+      expect(getExcludedRecordingIds().ids.has('r1')).toBe(true)
     })
   })
 
@@ -1087,7 +1087,7 @@ describe('Privacy source-deletion (v38)', () => {
       run('INSERT INTO knowledge_captures (id, title, captured_at, source_recording_id, quality_rating) VALUES (?, ?, ?, ?, ?)', [
         'r1-c', 'Cap', '2026-01-01T10:00:00.000Z', 'r1', 'garbage'
       ])
-      expect(getExcludedRecordingIds().has('r1')).toBe(true) // value-excluded from AI surfaces
+      expect(getExcludedRecordingIds().ids.has('r1')).toBe(true) // value-excluded from AI surfaces
       expect(isRecordingProcessable('r1')).toBe(true) // but still transcribable / its own derivatives allowed
     })
   })
