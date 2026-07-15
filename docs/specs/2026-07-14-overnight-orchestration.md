@@ -30,12 +30,29 @@
 | L | I3 Settings Features panel + presets (modular-features spec) — stretch, only if all above land | Opus 4.8 | P4 | pending |
 | M | Final: E-walk via CDP on integrated beta (no USB experiments), C/E/D re-scores, ledger close, final push, CI green confirmation | orchestrator | last | pending |
 
-## Waves
-1. A (codex) + B (opus) + C (opus)
-2. D (codex, after A integrates) + E (opus) + H (codex after D or slotted when codex free)
-3. F (codex) + G (opus) + I (codex review slot)
-4. J + K (+L stretch)
-5. M
+## Waves (AMENDED per Codex adversarial plan review — needs-attention, 6 findings)
+1. **A alone among device-adjacent lanes** (codex) ∥ B (opus, projects/identity — not device-adjacent) ∥ J (opus, python deps — fully disjoint)
+2. after A integrates: C (opus, rebased from post-A beta) + D (codex); I queued on the codex slot
+3. after D integrates: E (opus, rebases onto integrated D — same calendar ownership) + G (opus); H (codex, post-A)
+4. F (codex) + K (opus, after B integrates — same files)
+5. L stretch; M last
+
+## Integration protocol v2 (failure-atomic, no destructive git)
+1. Lane agent finishes with gates green on `lane/<x>` in its worktree.
+2. Orchestrator runs `/codex:review` on the lane diff; fix round in-lane if needed.
+3. In the LANE worktree: `git merge --no-edit beta/meeting-intelligence` (bring current beta in, hand-resolve any conflict), re-run FULL gates there — the gated tree is exactly what beta will become.
+4. Main checkout: `git merge --ff-only lane/<x>` → beta only ever fast-forwards to a fully-gated tree. Push. CI watch. Ledger + task update.
+5. Any failure at 3/4: beta untouched, lane branch preserved, stop-the-line for dependents, independent lanes continue.
+
+## Amendments log (from the adversarial review)
+- C & H reclassified device-adjacent → wait for A's integration (was: C in wave 1).
+- D → E serialized (overlapping calendar-sync ownership); E must rebase onto integrated D.
+- Integration: ff-only-after-gates protocol above (was: cherry-pick onto beta before gates).
+- Install recipe → checked-in `scripts/dev/bootstrap-lane.sh` (full CI sequence, mandatory for every electron lane; no discretionary partial installs).
+- Lane M no-hardware gate: device-sync disabled boot-effective BEFORE launch + assert zero jensen/device-IPC log lines during the walk; if not verifiable → component-level verification only, real-device walk deferred to owner-supervised session.
+- Stray root package-lock.json flagged by review: already gone (cleaned by the owner's parallel session); path-scoped staging remains the rule for every orchestrator commit.
 
 ## Ledger (append per integration)
-- 2026-07-14 ~00:4x — c5 orphan suites rescued to git (pre-plan hygiene). Plan written; adversarial plan review dispatched.
+- 2026-07-14 ~00:45 — c5 orphan suites rescued to git (pre-plan hygiene). Plan written; adversarial plan review dispatched.
+- 2026-07-14 ~00:50 — Codex plan review: needs-attention, 6 findings → amendments above. Dispatch was then paused overnight (permission stop); no agents ran.
+- 2026-07-14 (owner GO) — beta base now `38e31614` (owner's parallel session merged assistant RAG/graph fixes; CI green on it). Wave 1 dispatched: A (codex terra), B (opus), J (opus).
