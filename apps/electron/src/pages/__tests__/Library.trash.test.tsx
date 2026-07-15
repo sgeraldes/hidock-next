@@ -64,6 +64,15 @@ vi.mock('@/hooks/useUnifiedRecordings', async (importOriginal) => {
   }
 })
 
+// spec-006/F17 T6 F-INFO-6 — the Trash-context device-checkbox test needs
+// getHiDockDeviceService mocked (none of THIS file's other tests touch the
+// device path — its liveRecordings fixtures are all 'local-only' — so this
+// is a safe, file-wide addition, not a behavior change for existing tests).
+const deleteRecordingFromDeviceMock = vi.hoisted(() => vi.fn())
+vi.mock('@/services/hidock-device', () => ({
+  getHiDockDeviceService: () => ({ deleteRecording: deleteRecordingFromDeviceMock })
+}))
+
 vi.mock('@/store/useUIStore', () => {
   const state = {
     get currentlyPlayingId() { return harness.currentlyPlayingId },
@@ -288,11 +297,23 @@ function setElectronAPI() {
       markPersonal: vi.fn().mockResolvedValue({ success: true, personal: true }),
       deletionImpact: vi.fn().mockResolvedValue({
         success: true,
-        data: { transcripts: 1, actionItems: 0, embeddings: 0, captures: 0, artifacts: 0, hasAudioFile: true }
+        data: {
+          transcripts: 1,
+          actionItems: 0,
+          embeddings: 0,
+          captures: 0,
+          artifacts: 0,
+          hasAudioFile: true,
+          onDevice: false,
+          deviceFilename: null,
+          graphEstimate: null
+        }
       }),
       deleteCascade: vi.fn().mockResolvedValue({ success: true, mode: 'soft' }),
       restore: vi.fn().mockResolvedValue({ success: true }),
-      getTrash: getTrashMock
+      getTrash: getTrashMock,
+      markNotOnDevice: vi.fn().mockResolvedValue({ success: true }),
+      retryPendingCleanups: vi.fn().mockResolvedValue({ success: true, attempted: 0, cleared: 0, stillPending: {} })
     },
     downloadService: { queueDownloads: vi.fn() },
     onTranscriptionCompleted: vi.fn(() => vi.fn()),
@@ -488,6 +509,65 @@ describe('Permanent delete from Trash (AC#9)', () => {
     })
     await waitFor(() => expect(getTrashMock).toHaveBeenCalledTimes(2))
     await waitFor(() => expect(screen.queryByText(/trashed-newer\.wav/i)).not.toBeInTheDocument())
+  })
+
+  // spec-006/F17 T6 F-INFO-6 — a Trash row's UnifiedRecording ALWAYS
+  // flattens to 'local-only' (trashRowToUnified never sets deviceFilename),
+  // so the checkbox must key off impact.onDevice (from the DB row via
+  // deletionImpact), not recording.location, and the device delete must use
+  // impact.deviceFilename rather than a (nonexistent) recording.deviceFilename.
+  it('the device checkbox renders and works for a Trash row using impact.onDevice/deviceFilename, not recording.location', async () => {
+    vi.mocked(useUnifiedRecordings).mockReturnValue({
+      recordings: liveRecordings as any,
+      loading: false,
+      error: null,
+      refresh: mockRefresh,
+      deviceConnected: true, // live signal — connected
+      stats: { total: 3, deviceOnly: 0, localOnly: 3, both: 0, synced: 3, unsynced: 0, onSource: 0, locallyAvailable: 3 }
+    })
+    window.electronAPI.recordings.deletionImpact = vi.fn().mockResolvedValue({
+      success: true,
+      data: {
+        transcripts: 1,
+        actionItems: 0,
+        embeddings: 0,
+        captures: 0,
+        artifacts: 0,
+        hasAudioFile: true,
+        onDevice: true,
+        deviceFilename: 'trashed-newer.hda',
+        graphEstimate: 2
+      }
+    })
+    window.electronAPI.recordings.deleteCascade = vi.fn().mockResolvedValue({
+      success: true,
+      mode: 'hard',
+      removed: { transcripts: 1, embeddings: 0, captures: 0, actionItems: 0, artifacts: 0, speakerBindings: 0, candidates: 0, meetingLinksRemoved: 0, markersRemoved: 0, edgesRemoved: 2, edgeSourceRowsRemoved: 0, meetingNodesRemoved: 0, orphanNodesRemoved: 0 },
+      allFilesRemoved: true,
+      pendingFileKinds: []
+    })
+    deleteRecordingFromDeviceMock.mockResolvedValue(true)
+
+    renderLibrary()
+    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    fireEvent.click(trashToggleButton())
+    await screen.findByText(/trashed-newer\.wav/i)
+
+    openRowMenu(0)
+    fireEvent.click(await screen.findByRole('menuitem', { name: /delete permanently/i }))
+    await waitFor(() => expect(window.electronAPI.recordings.deletionImpact).toHaveBeenCalledWith('trash-1'))
+
+    // Renders (gated on impact.onDevice, NOT the trash row's flattened
+    // 'local-only' location) and defaults unchecked.
+    const checkbox = await screen.findByRole('checkbox', { name: /also delete from device/i })
+    expect(checkbox).not.toBeDisabled()
+    fireEvent.click(checkbox)
+    fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
+
+    await waitFor(() => expect(window.electronAPI.recordings.deleteCascade).toHaveBeenCalledWith('trash-1', true))
+    // Routed via impact.deviceFilename — trashRowToUnified never sets one.
+    await waitFor(() => expect(deleteRecordingFromDeviceMock).toHaveBeenCalledWith('trashed-newer.hda'))
+    await waitFor(() => expect(window.electronAPI.recordings.markNotOnDevice).toHaveBeenCalledWith('trash-1'))
   })
 })
 

@@ -45,7 +45,16 @@ import {
   deviceDeleteConfirmDescription,
   LABEL_MOVE_TO_TRASH,
   LABEL_DELETE_FROM_DEVICE,
-  TRASH_MODE_BANNER
+  TRASH_MODE_BANNER,
+  FAILURE_NOTHING_DELETED_TITLE,
+  graphCleanupFailedBody,
+  genericPermanentDeleteFailedBody,
+  LABEL_DELETE_ANYWAY_SKIP_GRAPH,
+  DEVICE_COPY_REMAINS_TITLE,
+  deviceCopyRemainsBody,
+  FILES_PENDING_TITLE,
+  filesPendingBody,
+  actualRemovalSummary
 } from '@/features/library/utils/deletionCopy'
 import type { TypeCounts } from '@/features/library/components/LibraryFilters'
 import { useLibraryStore, useLibrarySorting } from '@/store/useLibraryStore'
@@ -348,6 +357,18 @@ export function Library() {
     } catch (e) {
       console.error('[Library] Failed to load trash:', e)
       setTrashedRecordings([])
+    }
+    // spec-006/F17 T6 AR3-2 — piggyback a bounded, non-fatal sweep of any
+    // pending post-commit file-cleanup backlog on every Trash-view-entry
+    // load. Deliberately fire-and-forget: never awaited, never lets a
+    // missing/throwing IPC (older preload, a test harness that doesn't stub
+    // it) affect the Trash list itself.
+    try {
+      void window.electronAPI?.recordings?.retryPendingCleanups?.()?.catch((e: unknown) => {
+        console.error('[Library] Pending-cleanup retry sweep failed:', e)
+      })
+    } catch (e) {
+      console.error('[Library] Pending-cleanup retry sweep failed:', e)
     }
   }, [])
 
@@ -987,32 +1008,115 @@ export function Library() {
   }, [executeDeleteLocal])
 
   // Hard purge (privacy): irreversibly remove ALL derived data + files. Impact +
-  // strings are owned by the dedicated DeletePermanentDialog (§D6) now; this just
-  // executes. `opts` is the T5/T6 seam — T6 owns actually honoring
-  // alsoDeleteFromDevice (extending deleteCascade / recording-deletion-service);
-  // T5 only threads it through the call so the dialog's checkbox has somewhere
-  // to go.
+  // strings are owned by the dedicated DeletePermanentDialog (§D6). T6
+  // (spec-006) implements D2/D3/D5 + the AR3-2/AR3-3(c)/AR3-6(a,b) amendments:
+  //  1. Local purge FIRST (D3 step 1). A failure — including the AR3-1
+  //     fail-closed graph refusal, surfaced as `graphUnavailable` — is honest:
+  //     nothing was deleted, and the graph-refusal case offers the AR3-3(c)
+  //     escape hatch as an explicit toast action (re-invokes this function
+  //     with skipGraphCleanup:true — a second, user-initiated call).
+  //  2. Only on a successful local purge does the device branch run
+  //     (D3 step 2). AR3-6(a): the checkbox's intent is re-validated against
+  //     LIVE signals at EXECUTE time (deviceConnected, and a real device
+  //     filename) — a stale/disconnected state never silently claims success.
+  //     AR3-6(b): a confirmed device delete immediately reconciles on_device
+  //     locally so the UI doesn't show a stale 'both' row before the next scan.
+  //  3. AR3-2: the local purge's own file-cleanup outcome (allFilesRemoved/
+  //     pendingFileKinds) also gates the completion toast — success is only
+  //     claimed when everything was actually confirmed removed.
+  // impact.deviceFilename (F-INFO-6) is preferred over the UnifiedRecording's
+  // own field, since a Trash row's UnifiedRecording never carries one at all.
   const executeDeletePermanent = useCallback(async (
     recording: UnifiedRecording,
-    _opts?: { alsoDeleteFromDevice: boolean }
+    opts?: { alsoDeleteFromDevice: boolean; skipGraphCleanup?: boolean },
+    impact?: DeletePermanentDialogImpact
   ) => {
     setDeleting(recording.id)
     try {
-      const res = await window.electronAPI.recordings.deleteCascade(recording.id, true)
-      if (!res?.success) throw new Error(res?.error || 'Permanent delete failed')
+      const res = opts?.skipGraphCleanup
+        ? await window.electronAPI.recordings.deleteCascade(recording.id, true, { skipGraphCleanup: true })
+        : await window.electronAPI.recordings.deleteCascade(recording.id, true)
+
+      if (!res?.success) {
+        const graphUnavailable = !!(res as { graphUnavailable?: boolean } | undefined)?.graphUnavailable
+        import('@/components/ui/toaster').then(({ toast }) => {
+          if (graphUnavailable) {
+            toast.error(FAILURE_NOTHING_DELETED_TITLE, graphCleanupFailedBody(recording.filename), {
+              action: {
+                label: LABEL_DELETE_ANYWAY_SKIP_GRAPH,
+                onClick: () => {
+                  void executeDeletePermanent(
+                    recording,
+                    { alsoDeleteFromDevice: opts?.alsoDeleteFromDevice ?? false, skipGraphCleanup: true },
+                    impact
+                  )
+                }
+              }
+            })
+          } else {
+            toast.error(FAILURE_NOTHING_DELETED_TITLE, genericPermanentDeleteFailedBody(recording.filename))
+          }
+        })
+        return
+      }
+
       await refresh(false)
+
+      // AR3-2 — the local purge succeeded; determine whether every on-disk
+      // target was actually confirmed removed (the retry sweep may already
+      // have cleared this purge's own first-attempt failures).
+      const filesPending = res.allFilesRemoved === false
+      const pendingKinds: string[] = res.pendingFileKinds ?? []
+
+      // D3/AR3-6 — device branch, only after the local purge committed above.
+      let deviceOutcome: 'not-requested' | 'success' | 'partial' = 'not-requested'
+      if (opts?.alsoDeleteFromDevice) {
+        const targetDeviceFilename =
+          impact?.deviceFilename ?? ('deviceFilename' in recording ? recording.deviceFilename : undefined)
+        // AR3-6(a) TOCTOU — re-check live signals at EXECUTE time, not
+        // confirm time: disconnected, or no longer a real device filename.
+        if (!deviceConnected || !targetDeviceFilename) {
+          deviceOutcome = 'partial'
+        } else {
+          try {
+            const ok = await getHiDockDeviceService().deleteRecording(targetDeviceFilename)
+            if (ok) {
+              deviceOutcome = 'success'
+              // AR3-6(b) — reconcile immediately so the UI doesn't show a
+              // stale on-device row before the next authoritative scan.
+              try {
+                await window.electronAPI.recordings.markNotOnDevice(recording.id)
+              } catch (e) {
+                console.error('[Library] Failed to reconcile device presence after delete:', e)
+              }
+            } else {
+              deviceOutcome = 'partial'
+            }
+          } catch (e) {
+            console.error('[Library] Device delete during permanent purge failed:', e)
+            deviceOutcome = 'partial'
+          }
+        }
+      }
+
       import('@/components/ui/toaster').then(({ toast }) => {
-        toast.success('Deleted permanently', `"${recording.filename}" and all derived data were removed.`)
+        if (deviceOutcome === 'partial') {
+          toast.warning(DEVICE_COPY_REMAINS_TITLE, deviceCopyRemainsBody(recording.filename))
+        } else if (filesPending) {
+          toast.warning(FILES_PENDING_TITLE, filesPendingBody(recording.filename, pendingKinds))
+        } else {
+          toast.success('Deleted permanently', actualRemovalSummary(res.removed, deviceOutcome === 'success'))
+        }
       })
     } catch (e) {
       console.error('Failed to permanently delete:', e)
       import('@/components/ui/toaster').then(({ toast }) => {
-        toast.error('Delete Failed', `Failed to permanently delete "${recording.filename}".`)
+        toast.error(FAILURE_NOTHING_DELETED_TITLE, genericPermanentDeleteFailedBody(recording.filename))
       })
     } finally {
       setDeleting(null)
     }
-  }, [refresh])
+  }, [refresh, deviceConnected])
 
   // spec-005/F17 T5 §D6 — fetches the impact and opens the dedicated
   // DeletePermanentDialog (replaces the shared confirmDialog for this flow;
@@ -1029,9 +1133,13 @@ export function Library() {
           embeddings: imp.data.embeddings,
           captures: imp.data.captures,
           artifacts: imp.data.artifacts,
-          hasAudioFile: imp.data.hasAudioFile
-          // graphEstimate / onDevice: T6 (spec-006) fills these into the
-          // deletionImpact payload; absent here means "omitted" per §D6.
+          hasAudioFile: imp.data.hasAudioFile,
+          // spec-006/F17 T6 D5/AR3-8/F-INFO-6 — graph estimate (number = ~N,
+          // null = UNKNOWN, never omitted) + on-device signal + the DB-sourced
+          // device filename (a Trash row's UnifiedRecording never has one).
+          graphEstimate: imp.data.graphEstimate,
+          onDevice: imp.data.onDevice,
+          deviceFilename: imp.data.deviceFilename
         }
       }
     } catch (e) {
@@ -1045,15 +1153,16 @@ export function Library() {
   // dialog and (per §D1 step 7) refreshes the Trash count/list.
   const handleConfirmDeletePermanent = useCallback(async (opts: { alsoDeleteFromDevice: boolean }) => {
     const recording = deletePermanentDialog.recording
+    const impact = deletePermanentDialog.impact
     setDeletePermanentDialog((prev) => ({ ...prev, open: false }))
     if (!recording) return
-    await executeDeletePermanent(recording, opts)
+    await executeDeletePermanent(recording, opts, impact)
     // spec-005/F17 T5 §D1 step 7 — a purged row must leave the visible Trash
     // list too. Owned HERE (the T5 onConfirm wrapper), not inside
     // executeDeletePermanent — that function is T6's extension point
     // (alsoDeleteFromDevice), so Trash-list bookkeeping stays out of it.
     await loadTrash()
-  }, [deletePermanentDialog.recording, executeDeletePermanent, loadTrash])
+  }, [deletePermanentDialog.recording, deletePermanentDialog.impact, executeDeletePermanent, loadTrash])
 
   // spec-005/F17 T5 §D1 step 7 — undo a soft-delete from the Trash surface.
   // Refreshes BOTH the default pipeline (so the row reappears there) and the
@@ -1825,10 +1934,19 @@ export function Library() {
         onOpenChange={(open) => setDeletePermanentDialog((prev) => ({ ...prev, open }))}
         filename={deletePermanentDialog.recording?.filename ?? ''}
         impact={deletePermanentDialog.impact}
+        // F-INFO-6: a Trash row's UnifiedRecording ALWAYS flattens to
+        // 'local-only' (trashRowToUnified has no live device signal), so the
+        // T5 live-signal gating (recording.location === 'both') would always
+        // hide the checkbox there even when the underlying DB row genuinely
+        // is on-device. In Trash mode, key off the impact's onDevice instead
+        // (sourced straight from the DB row); live (non-trash) rows keep the
+        // original live-signal gating.
         deviceConnected={
           !!deletePermanentDialog.recording &&
-          deletePermanentDialog.recording.location === 'both' &&
-          deviceConnected
+          deviceConnected &&
+          (showTrash
+            ? deletePermanentDialog.impact?.onDevice === true
+            : deletePermanentDialog.recording.location === 'both')
         }
         onConfirm={handleConfirmDeletePermanent}
       />
