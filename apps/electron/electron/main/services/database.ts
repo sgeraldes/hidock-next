@@ -2591,7 +2591,7 @@ function repairPhase(): void {
     }
     if (!projectCols.includes('origin')) {
       console.log('[Database] Repairing projects: adding origin')
-      try { database.run('ALTER TABLE projects ADD COLUMN origin TEXT') } catch (e) { /* already exists */ }
+      try { database.run('ALTER TABLE projects ADD COLUMN origin TEXT') } catch { /* already exists */ }
     }
   }
 
