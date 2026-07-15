@@ -42,6 +42,7 @@ vi.mock('../file-storage', () => ({
 import {
   initializeDatabase,
   run as dbRun,
+  runInTransaction,
   setRecordingPersonal,
   deleteRecordingCascade,
   restoreRecording,
@@ -549,6 +550,103 @@ describe('ADV11-MED — graph-node search does bounded work (no per-node N+1)', 
       spy.mockRestore()
     }
   })
+})
+
+// ---------------------------------------------------------------------------
+// ADV12-MED (round-13) — the excluded-only set is pushed into SQL via a TEMP
+// TABLE + anti-join, so the search statement's BOUND-VARIABLE count is O(1) in
+// the exclusion size. The old `id NOT IN (?, ?, …)` build bound one parameter
+// per hidden id, so once the excluded-only set approached better-sqlite3's
+// MAX_VARIABLE_NUMBER (32766) the statement exceeded the limit and graph search
+// THREW. These cases run on the REAL better-sqlite3 engine at 0 / 1000 (>999) /
+// 32764 / >32766 excluded-only nodes: search must NOT throw and must still
+// surface an eligible node ranked behind the excluded block.
+// ---------------------------------------------------------------------------
+
+/**
+ * Seed `count` excluded-only nodes (each sourced solely by `dead`) plus ONE
+ * eligible node reachable via a legacy (zero-provenance) edge whose longer label
+ * sorts LAST under the LENGTH(label),id ordering. All share `prefix` so a single
+ * search query matches the whole block. Wrapped in a transaction so tens of
+ * thousands of rows insert quickly on the real engine.
+ */
+function seedExcludedOnlyBlock(prefix: string, dead: string, count: number): void {
+  runInTransaction(() => {
+    seedRecording(dead)
+    for (let i = 0; i < count; i++) {
+      const label = `${prefix}${i}`
+      seedNode(`n_${label}`, 'topic', label)
+      seedEdge(`e_${label}`, `n_${label}`, 'nAlice', 'MENTIONED')
+      seedEdgeSource(`e_${label}`, dead, `tx_${dead}`)
+    }
+    // Longer label → sorts after the entire excluded block; legacy edge → visible.
+    seedNode(`n_${prefix}Elig`, 'topic', `${prefix}EligibleLongLabel`)
+    seedEdge(`e_${prefix}Elig`, `n_${prefix}Elig`, 'nAlice', 'RELATES_TO')
+  })
+}
+
+describe('ADV12-MED — graph-node search bounds SQLite variables via a temp-table anti-join', () => {
+  it('no exclusions (0 hidden ids): fast path returns matches without throwing', () => {
+    seedNode('nParam0', 'topic', 'pzz0')
+    seedNode('nParam0b', 'topic', 'pzz0EligibleLongLabel')
+    seedEdge('eParam0', 'nParam0', 'nAlice', 'RELATES_TO') // legacy → visible
+    seedEdge('eParam0b', 'nParam0b', 'nAlice', 'RELATES_TO')
+    let labels: string[] = []
+    expect(() => {
+      labels = searchGraphNodes('pzz', 20).map((n) => n.label)
+    }).not.toThrow()
+    expect(labels).toContain('pzz0')
+    expect(labels).toContain('pzz0EligibleLongLabel')
+  })
+
+  it('1000 excluded-only nodes (>999): does not throw and surfaces the eligible match', () => {
+    seedExcludedOnlyBlock('pxa', 'recParam1k', 1000)
+    deleteRecordingCascade('recParam1k', { hard: false })
+    let labels: string[] = []
+    expect(() => {
+      labels = searchGraphNodes('pxa').map((n) => n.label)
+    }).not.toThrow()
+    expect(labels).toContain('pxaEligibleLongLabel')
+    expect(labels.some((l) => /^pxa\d+$/.test(l))).toBe(false)
+    expect(labels.length).toBeLessThanOrEqual(12)
+  }, 60000)
+
+  it('32764 excluded-only nodes (just under MAX_VARIABLE_NUMBER): does not throw', () => {
+    seedExcludedOnlyBlock('pxb', 'recParam32764', 32764)
+    deleteRecordingCascade('recParam32764', { hard: false })
+    let labels: string[] = []
+    expect(() => {
+      labels = searchGraphNodes('pxb').map((n) => n.label)
+    }).not.toThrow()
+    expect(labels).toContain('pxbEligibleLongLabel')
+    expect(labels.some((l) => /^pxb\d+$/.test(l))).toBe(false)
+  }, 120000)
+
+  it('32770 excluded-only nodes (>MAX_VARIABLE_NUMBER 32766): does not throw and still surfaces the eligible match', () => {
+    // With the old `id NOT IN (?, …)` build this exceeded the 32766 bound-variable
+    // ceiling and threw "too many SQL variables". The temp-table anti-join binds
+    // only the LIKE pattern + LIMIT, so it succeeds.
+    seedExcludedOnlyBlock('pxc', 'recParam32770', 32770)
+    deleteRecordingCascade('recParam32770', { hard: false })
+    let labels: string[] = []
+    expect(() => {
+      labels = searchGraphNodes('pxc').map((n) => n.label)
+    }).not.toThrow()
+    expect(labels).toContain('pxcEligibleLongLabel')
+    expect(labels.some((l) => /^pxc\d+$/.test(l))).toBe(false)
+    expect(labels.length).toBeLessThanOrEqual(12)
+  }, 120000)
+
+  it('leaves no _sgn_excluded_nodes temp table behind after a search', () => {
+    seedExcludedOnlyBlock('pxd', 'recParamLeak', 1000)
+    deleteRecordingCascade('recParamLeak', { hard: false })
+    searchGraphNodes('pxd')
+    const store = getKnowledgeGraphStore()
+    const leaked = store.db.queryOne<{ name: string }>(
+      "SELECT name FROM sqlite_temp_master WHERE type = 'table' AND name = '_sgn_excluded_nodes'"
+    )
+    expect(leaked).toBeUndefined()
+  }, 60000)
 })
 
 // ---------------------------------------------------------------------------

@@ -1090,10 +1090,10 @@ export function searchGraphNodes(query: string, limit = 12): ContextGraphNode[] 
   // synchronous main-thread scan that, under heavy/cleanup-stale exclusions,
   // could examine the whole table and freeze IPC/UI. Instead we materialize the
   // set of excluded-only node ids ONCE (a fixed, bounded number of queries — two
-  // full scans, NOT one-per-node), then let SQLite skip them via `id NOT IN(...)`
-  // so a single ordered page of `limit` rows is already the visible answer. No
-  // false-negative truncation: a genuinely eligible node beyond the first page is
-  // still returned because the DB filters before applying LIMIT.
+  // full scans, NOT one-per-node), then let SQLite skip them so a single ordered
+  // page of `limit` rows is already the visible answer. No false-negative
+  // truncation: a genuinely eligible node beyond the first page is still returned
+  // because the DB filters before applying LIMIT.
   const hidden = computeExcludedOnlyNodeIds(store, exclusion)
   if (hidden.size === 0) {
     // Exclusions active but they suppress no NODE (e.g. only shared-source edges) —
@@ -1101,22 +1101,47 @@ export function searchGraphNodes(query: string, limit = 12): ContextGraphNode[] 
     const rows = store.db.queryAll<GraphNode>(orderedQuery, [`%${q}%`, limit, 0])
     return toDTO({ center: undefined, nodes: rows.map((n) => ({ ...n, degree: 0 })), edges: [] }).nodes
   }
-  // Build `id NOT IN (chunk1) AND id NOT IN (chunk2) …` — chunked to stay under
-  // the SQL bound-parameter limit for large excluded-only sets.
-  const hiddenIds = [...hidden]
-  const CHUNK = 400
-  const notInClauses: string[] = []
-  const notInParams: string[] = []
-  for (let i = 0; i < hiddenIds.length; i += CHUNK) {
-    const chunk = hiddenIds.slice(i, i + CHUNK)
-    notInClauses.push(`id NOT IN (${chunk.map(() => '?').join(',')})`)
-    notInParams.push(...chunk)
+  // ADV12-MED (round-13) — materialize the excluded-only ids in a TEMP TABLE and
+  // ANTI-JOIN, instead of an `id NOT IN (?, ?, …)` list. The old build pushed
+  // EVERY hidden id into one param array, so the statement's bound-variable count
+  // grew with the exclusion size; better-sqlite3's MAX_VARIABLE_NUMBER is 32766,
+  // so ~32.7k excluded-only nodes made the statement exceed the ceiling and graph
+  // search THREW (realistic under a large excluded graph, or fail-closed
+  // suppressing nearly all attributed nodes). The temp-table anti-join keeps the
+  // SELECT's bound-variable count O(1) (just the LIKE pattern + LIMIT) regardless
+  // of exclusion size; the inserts are batched well under the parameter ceiling.
+  // LIMIT still applies to VISIBLE rows (the anti-join filters BEFORE LIMIT), so
+  // there is no false-negative truncation, and the stable LENGTH(label),id
+  // ordering is preserved.
+  const TEMP = '_sgn_excluded_nodes'
+  try {
+    // Drop first in case a prior call on this (singleton, per-connection) handle
+    // left the temp table behind — temp tables persist for the connection's life.
+    store.db.run(`DROP TABLE IF EXISTS ${TEMP}`)
+    store.db.run(`CREATE TEMP TABLE ${TEMP} (id TEXT PRIMARY KEY)`)
+    const hiddenIds = [...hidden]
+    // 500 bound variables per INSERT — far under the 32766 ceiling, so the
+    // bound-variable count is O(1) in the batch size, not in |hidden|.
+    const INSERT_CHUNK = 500
+    for (let i = 0; i < hiddenIds.length; i += INSERT_CHUNK) {
+      const chunk = hiddenIds.slice(i, i + INSERT_CHUNK)
+      store.db.run(
+        `INSERT OR IGNORE INTO ${TEMP} (id) VALUES ${chunk.map(() => '(?)').join(',')}`,
+        chunk
+      )
+    }
+    const filteredQuery =
+      `SELECT n.* FROM graph_nodes n ` +
+      `LEFT JOIN ${TEMP} x ON x.id = n.id ` +
+      `WHERE LOWER(n.label) LIKE ? AND x.id IS NULL ` +
+      `ORDER BY LENGTH(n.label) ASC, n.id ASC LIMIT ?`
+    const rows = store.db.queryAll<GraphNode>(filteredQuery, [`%${q}%`, limit])
+    return toDTO({ center: undefined, nodes: rows.map((n) => ({ ...n, degree: 0 })), edges: [] }).nodes
+  } finally {
+    // Drop so repeated searches on the singleton connection never inherit stale
+    // exclusion state or collide on the fixed table name.
+    store.db.run(`DROP TABLE IF EXISTS ${TEMP}`)
   }
-  const filteredQuery =
-    `SELECT * FROM graph_nodes WHERE LOWER(label) LIKE ? AND ${notInClauses.join(' AND ')} ` +
-    'ORDER BY LENGTH(label) ASC, id ASC LIMIT ?'
-  const rows = store.db.queryAll<GraphNode>(filteredQuery, [`%${q}%`, ...notInParams, limit])
-  return toDTO({ center: undefined, nodes: rows.map((n) => ({ ...n, degree: 0 })), edges: [] }).nodes
 }
 
 /**
