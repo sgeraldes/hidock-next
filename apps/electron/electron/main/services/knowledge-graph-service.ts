@@ -656,20 +656,75 @@ export function removeRecordingFromGraph(
 // so an excluded-only person/meeting/skill/label is never retrievable. See the
 // {endpoint → filtered?} audit table in .claude/changes/ARF-HIGHS-CHANGES.md.
 
+// INC1/INC2 (round-5) — eligibility for a ranking/relationship must be decided
+// at the EDGE that actually carries it, evaluated fail-closed, NOT inferred from
+// the resulting node's GLOBAL visibility: a person/meeting/skill whose
+// contributing path is entirely excluded must not appear (even if the node has
+// an eligible edge elsewhere), and counts/weights must sum over surviving edges.
+
 export function queryTopAttendees(name: string): AttendeeResult[] {
   const store = getKnowledgeGraphStore()
-  const results = topAttendeesForProjectOrTopic(store, name)
   const exclusion = getGroundingExclusionSet()
-  if (exclusionIsNoop(exclusion)) return results
-  return results.filter((r) => isNodeVisibleUnderExclusion(store, r.personId, exclusion))
+  if (exclusionIsNoop(exclusion)) return topAttendeesForProjectOrTopic(store, name)
+  const normName = name.toLowerCase().trim()
+  // Raw (person, meeting) attendance rows WITH the two connecting edge ids so
+  // each contributing path can be provenance-filtered before aggregation.
+  const rows = store.db.queryAll<{
+    person_id: string
+    person_label: string
+    meeting_id: string
+    ea_id: string
+    ab_id: string
+  }>(
+    `SELECT p.id AS person_id, p.label AS person_label, m.id AS meeting_id,
+            ea.id AS ea_id, ab.id AS ab_id
+       FROM graph_nodes p
+       JOIN graph_edges ea ON ea.source_id = p.id AND ea.type = 'ATTENDED'
+       JOIN graph_nodes m  ON m.id = ea.target_id AND m.type = 'meeting'
+       JOIN graph_edges ab ON ab.source_id = m.id AND ab.type = 'ABOUT'
+       JOIN graph_nodes t  ON t.id = ab.target_id AND (t.type = 'topic' OR t.type = 'project')
+      WHERE p.type = 'person' AND LOWER(t.norm_key) LIKE ?`,
+    [`%${normName}%`]
+  )
+  const edgeIds = [...new Set(rows.flatMap((r) => [r.ea_id, r.ab_id]))]
+  const suppressed = provenanceSuppressedEdgeIds(store, edgeIds, exclusion)
+  const byPerson = new Map<string, { label: string; meetings: Set<string> }>()
+  for (const r of rows) {
+    // BOTH the ATTENDED and the ABOUT edge must survive for this path to count.
+    if (suppressed.has(r.ea_id) || suppressed.has(r.ab_id)) continue
+    let e = byPerson.get(r.person_id)
+    if (!e) { e = { label: r.person_label, meetings: new Set() }; byPerson.set(r.person_id, e) }
+    e.meetings.add(r.meeting_id)
+  }
+  return [...byPerson.entries()]
+    .map(([personId, e]) => ({ person: e.label, personId, meetings: e.meetings.size }))
+    .sort((a, b) => b.meetings - a.meetings)
 }
 
 export function queryTopSkill(skill: string): SkillDemonstratorResult[] {
   const store = getKnowledgeGraphStore()
-  const results = topSkillDemonstrators(store, skill)
   const exclusion = getGroundingExclusionSet()
-  if (exclusionIsNoop(exclusion)) return results
-  return results.filter((r) => isNodeVisibleUnderExclusion(store, r.personId, exclusion))
+  if (exclusionIsNoop(exclusion)) return topSkillDemonstrators(store, skill)
+  const normSkill = skill.toLowerCase().trim()
+  const rows = store.db.queryAll<{ person_id: string; person_label: string; edge_id: string; weight: number }>(
+    `SELECT p.id AS person_id, p.label AS person_label, e.id AS edge_id, e.weight AS weight
+       FROM graph_nodes p
+       JOIN graph_edges e ON e.source_id = p.id AND e.type = 'DEMONSTRATED'
+       JOIN graph_nodes s ON s.id = e.target_id AND s.type = 'skill'
+      WHERE p.type = 'person' AND LOWER(s.norm_key) LIKE ?`,
+    [`%${normSkill}%`]
+  )
+  const suppressed = provenanceSuppressedEdgeIds(store, rows.map((r) => r.edge_id), exclusion)
+  const byPerson = new Map<string, { label: string; weight: number }>()
+  for (const r of rows) {
+    if (suppressed.has(r.edge_id)) continue // demonstration edge excluded
+    let e = byPerson.get(r.person_id)
+    if (!e) { e = { label: r.person_label, weight: 0 }; byPerson.set(r.person_id, e) }
+    e.weight += r.weight
+  }
+  return [...byPerson.entries()]
+    .map(([personId, e]) => ({ person: e.label, personId, weight: e.weight }))
+    .sort((a, b) => b.weight - a.weight)
 }
 
 export function queryPersonProfile(name: string): PersonProfile | undefined {
@@ -678,15 +733,29 @@ export function queryPersonProfile(name: string): PersonProfile | undefined {
   if (!profile) return undefined
   const exclusion = getGroundingExclusionSet()
   if (exclusionIsNoop(exclusion)) return profile
-  // An excluded-only person is not retrievable at all; otherwise drop any
-  // excluded-only related meetings/skills/action-items.
+  // An excluded-only person is not retrievable at all.
   if (!isNodeVisibleUnderExclusion(store, profile.personId, exclusion)) return undefined
-  const keep = (n: GraphNode): boolean => isNodeVisibleUnderExclusion(store, n.id, exclusion)
+  // INC2 — each relationship is filtered by ITS CONNECTING edge's provenance,
+  // not the related node's global visibility (a meeting reachable via an
+  // excluded ATTENDED edge is dropped even if the meeting is globally visible).
+  const related = (edgeType: string): GraphNode[] => {
+    const rows = store.db.queryAll<GraphNode & { __edge_id: string }>(
+      `SELECT n.id, n.type, n.label, n.norm_key, n.props, n.created_at, n.updated_at, e.id AS __edge_id
+         FROM graph_nodes n
+         JOIN graph_edges e ON e.target_id = n.id AND e.type = ?
+        WHERE e.source_id = ?`,
+      [edgeType, profile.personId]
+    )
+    const suppressed = provenanceSuppressedEdgeIds(store, rows.map((r) => r.__edge_id), exclusion)
+    return rows
+      .filter((r) => !suppressed.has(r.__edge_id))
+      .map(({ __edge_id, ...node }) => node as GraphNode)
+  }
   return {
     ...profile,
-    meetings: profile.meetings.filter(keep),
-    skills: profile.skills.filter(keep),
-    actionItems: profile.actionItems.filter(keep),
+    meetings: related('ATTENDED'),
+    skills: related('DEMONSTRATED'),
+    actionItems: related('OWNS'),
   }
 }
 
@@ -1412,7 +1481,16 @@ export function queryLens(
       return emptyLens
     }
   }
-  return suppressExcludedFromView(toLensDTO(lensGraph(store, centerNodeId, opts)), exclusion)
+  const filtered = suppressExcludedFromView(toLensDTO(lensGraph(store, centerNodeId, opts)), exclusion)
+  // INC5 (round-5) — decide center retention from the POST-FILTER survivor
+  // graph: the lens's windowDays / stratum node budget can drop the center's
+  // ONLY eligible edge while an excluded one remains, so suppression then prunes
+  // the center yet the DTO still points `center` at the now-missing node id
+  // (a blank, mislabelled lens). If the center did not survive, empty out.
+  if (centerNodeId && !filtered.nodes.some((n) => n.id === filtered.center)) {
+    return emptyLens
+  }
+  return filtered
 }
 
 /**

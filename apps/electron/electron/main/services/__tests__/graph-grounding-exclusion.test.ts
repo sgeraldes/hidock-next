@@ -602,3 +602,124 @@ describe('RE4-2 — centered views empty an excluded-only / fail-closed center',
     })
   })
 })
+
+// ---------------------------------------------------------------------------
+// INC1/INC2 (round-5) — eligibility decided at the CONTRIBUTING EDGE, not the
+// resulting node's global visibility.
+// ---------------------------------------------------------------------------
+
+describe('INC1/INC2 — edge-provenance for rankings + profile relationships', () => {
+  // Pat attends MeetingT (about TopicT) via recX, AND MeetingU (about TopicU)
+  // via recQ. Excluding recX must remove Pat from the TopicT ranking (their
+  // whole path to TopicT is excluded) even though Pat is globally visible via
+  // the TopicU path.
+  function seedPat(): void {
+    seedRecording('recX')
+    seedRecording('recQ')
+    seedNode('nPat', 'person', 'Pat')
+    seedNode('nMT', 'meeting', 'MeetingT')
+    seedNode('nTopicT', 'topic', 'TopicT')
+    seedNode('nMU', 'meeting', 'MeetingU')
+    seedNode('nTopicU', 'topic', 'TopicU')
+    seedEdge('ePT', 'nPat', 'nMT', 'ATTENDED')
+    seedEdgeSource('ePT', 'recX', 'txX')
+    seedEdge('eTA', 'nMT', 'nTopicT', 'ABOUT')
+    seedEdgeSource('eTA', 'recX', 'txX')
+    seedEdge('ePU', 'nPat', 'nMU', 'ATTENDED')
+    seedEdgeSource('ePU', 'recQ', 'txQ')
+    seedEdge('eUA', 'nMU', 'nTopicU', 'ABOUT')
+    seedEdgeSource('eUA', 'recQ', 'txQ')
+  }
+
+  it('INC1 — queryTopAttendees drops a person whose path to the topic is entirely excluded (kept for others)', () => {
+    seedPat()
+    // Control: Pat ranks for both topics.
+    expect(queryTopAttendees('TopicT').map((a) => a.person)).toContain('Pat')
+    expect(queryTopAttendees('TopicU').map((a) => a.person)).toContain('Pat')
+
+    deleteRecordingCascade('recX', { hard: false })
+    // Pat's TopicT path (ePT + eTA) is entirely excluded → gone from TopicT…
+    expect(queryTopAttendees('TopicT')).toEqual([])
+    // …but still ranked for TopicU (recQ eligible) even though Pat is the SAME
+    // globally-visible node.
+    expect(queryTopAttendees('TopicU').map((a) => a.person)).toContain('Pat')
+  })
+
+  it('INC1 — queryTopSkill sums only surviving demonstration edges', () => {
+    seedRecording('recX')
+    seedRecording('recQ')
+    seedNode('nDev', 'person', 'Dev')
+    seedNode('nGo', 'skill', 'Golang')
+    // A DISTINCT, non-substring skill so the '%golang%' LIKE match can't pick it
+    // up; it keeps Dev globally visible via an eligible demonstration edge.
+    seedNode('nRust', 'skill', 'Rust')
+    seedEdge('eDG', 'nDev', 'nGo', 'DEMONSTRATED')
+    seedEdgeSource('eDG', 'recX', 'txX')
+    seedEdge('eDR', 'nDev', 'nRust', 'DEMONSTRATED')
+    seedEdgeSource('eDR', 'recQ', 'txQ')
+
+    deleteRecordingCascade('recX', { hard: false })
+    // The Golang demonstration (recX) is suppressed → Dev absent for 'Golang'…
+    expect(queryTopSkill('Golang')).toEqual([])
+    // …but still ranked for the eligible Rust demonstration.
+    expect(queryTopSkill('Rust').map((s) => s.person)).toContain('Dev')
+  })
+
+  it('INC2 — queryPersonProfile filters a relationship by its CONNECTING edge, not the node global visibility', () => {
+    seedPat()
+    // A SharedMtg connected to Pat ONLY via an excluded ATTENDED edge, but
+    // globally visible through a bystander's legacy edge.
+    seedNode('nSharedMtg', 'meeting', 'SharedMtg')
+    seedEdge('ePShared', 'nPat', 'nSharedMtg', 'ATTENDED')
+    seedEdgeSource('ePShared', 'recX', 'txX')
+    seedNode('nBystander', 'person', 'Bystander')
+    seedEdge('eBystand', 'nBystander', 'nSharedMtg', 'ATTENDED') // legacy, no provenance
+
+    deleteRecordingCascade('recX', { hard: false })
+    const profile = queryPersonProfile('Pat')
+    expect(profile).toBeTruthy()
+    const meetingLabels = profile!.meetings.map((m) => m.label)
+    // MeetingU (recQ) survives; MeetingT (recX) and SharedMtg (connecting edge
+    // recX, though globally visible) are gone.
+    expect(meetingLabels).toContain('MeetingU')
+    expect(meetingLabels).not.toContain('MeetingT')
+    expect(meetingLabels).not.toContain('SharedMtg')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// INC5 (round-5) — a centered lens whose ONLY eligible edge is dropped by the
+// windowDays budget while an excluded edge remains must EMPTY (the center is
+// pruned post-filter; the DTO must not point center at a missing node).
+// ---------------------------------------------------------------------------
+
+describe('INC5 — lens center decided from the post-filter survivor graph', () => {
+  function seedDatedNode(id: string, type: string, label: string, dateIso: string): void {
+    dbRun(
+      'INSERT OR IGNORE INTO graph_nodes (id, type, label, norm_key, props, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [id, type, label, `${type}:${label.toLowerCase()}`, JSON.stringify({ date: dateIso }), dateIso, dateIso]
+    )
+  }
+
+  it('empties when the eligible edge is windowed out and only an excluded edge remains', () => {
+    seedRecording('recX')
+    seedRecording('recQ')
+    seedNode('nCara', 'person', 'Cara')
+    seedDatedNode('nMold', 'meeting', 'OldMtg', '2020-01-01T00:00:00Z') // dropped by windowDays
+    seedDatedNode('nMrecent', 'meeting', 'RecentMtg', '2026-07-01T00:00:00Z') // kept
+    // Cara's ELIGIBLE edge → the OLD meeting (windowed out); EXCLUDED edge → the
+    // RECENT meeting (kept). Pre-check passes (Cara has an eligible edge), but
+    // post-filter the eligible neighbor is gone and the excluded edge is pruned.
+    seedEdge('eCold', 'nCara', 'nMold', 'ATTENDED')
+    seedEdgeSource('eCold', 'recQ', 'txQ')
+    seedEdge('eCrecent', 'nCara', 'nMrecent', 'ATTENDED')
+    seedEdgeSource('eCrecent', 'recX', 'txX')
+
+    deleteRecordingCascade('recX', { hard: false })
+    const lens = queryLens('Cara', { hops: 1, windowDays: 30 })
+    // Center pruned by suppression after windowing → EMPTY, not a blank lens
+    // pointing at the missing center id.
+    expect(lens.center).toBeNull()
+    expect(lens.nodes).toEqual([])
+  })
+})
