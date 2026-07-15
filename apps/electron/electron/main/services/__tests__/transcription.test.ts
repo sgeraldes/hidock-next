@@ -185,7 +185,7 @@ describe('Transcription Service', () => {
   })
 
   describe('BUG-TX-001: recordings.status stuck at transcribing after failure', () => {
-    it('should update recordings.status to failed when transcription fails', async () => {
+    it('should update recordings.status to failed when transcription fails', { timeout: 20000 }, async () => {
       const mockQueueItem = {
         id: 'queue-1',
         recording_id: 'rec-123',
@@ -204,29 +204,33 @@ describe('Transcription Service', () => {
       const { startTranscriptionProcessor, stopTranscriptionProcessor } = await import('../transcription')
 
       startTranscriptionProcessor()
-      await new Promise(resolve => setTimeout(resolve, 500))
-      stopTranscriptionProcessor()
+      try {
+        // processQueue's failure path only reaches its catch block after a
+        // first-time dynamic import (./activity-log) whose latency is unbounded
+        // under full-suite CPU contention — a fixed sleep flakes here, so wait
+        // on the observable catch-block effects instead.
+        await vi.waitFor(() => {
+          // The key assertion: when transcription fails, the recording status
+          // must be updated to indicate failure so the UI stops showing "In Progress"
+          // After the fix, we expect:
+          // 1. updateRecordingTranscriptionStatus(rec-123, 'processing') - before attempt
+          // 2. updateRecordingTranscriptionStatus(rec-123, 'error') - after failure
+          // Even if the exact flow varies due to mocking, the FAILURE status call must exist
+          const hasFailureCall = mockUpdateRecordingStatus.mock.calls.some(
+            (call: any[]) => call[0] === 'rec-123' && call[1] === 'error'
+          )
 
-      // The key assertion: when transcription fails, the recording status
-      // must be updated to indicate failure so the UI stops showing "In Progress"
-      const statusCalls = mockUpdateRecordingStatus.mock.calls
+          // Also verify the queue item was marked as failed
+          const hasQueueFailure = mockUpdateQueueItem.mock.calls.some(
+            (call: any[]) => call[0] === 'queue-1' && call[1] === 'failed'
+          )
 
-      // After the fix, we expect:
-      // 1. updateRecordingTranscriptionStatus(rec-123, 'processing') - before attempt
-      // 2. updateRecordingTranscriptionStatus(rec-123, 'error') - after failure
-      // Even if the exact flow varies due to mocking, the FAILURE status call must exist
-      const hasFailureCall = statusCalls.some(
-        (call: any[]) => call[0] === 'rec-123' && call[1] === 'error'
-      )
-
-      // Also verify the queue item was marked as failed
-      const queueUpdateCalls = mockUpdateQueueItem.mock.calls
-      const hasQueueFailure = queueUpdateCalls.some(
-        (call: any[]) => call[0] === 'queue-1' && call[1] === 'failed'
-      )
-
-      expect(hasQueueFailure).toBe(true)
-      expect(hasFailureCall).toBe(true)
+          expect(hasQueueFailure).toBe(true)
+          expect(hasFailureCall).toBe(true)
+        }, { timeout: 15000, interval: 25 })
+      } finally {
+        stopTranscriptionProcessor()
+      }
     })
   })
 
@@ -258,7 +262,7 @@ describe('Transcription Service', () => {
   })
 
   describe('local ASR provider', () => {
-    it('should process local ASR transcripts without requiring a Gemini API key', async () => {
+    it('should process local ASR transcripts without requiring a Gemini API key', { timeout: 20000 }, async () => {
       mockConfig = {
         transcription: {
           provider: 'local-asr',
@@ -302,22 +306,27 @@ describe('Transcription Service', () => {
       const { startTranscriptionProcessor, stopTranscriptionProcessor } = await import('../transcription')
 
       startTranscriptionProcessor()
-      await new Promise(resolve => setTimeout(resolve, 500))
-      stopTranscriptionProcessor()
-
-      expect(mockExecFile).toHaveBeenCalled()
-      expect(mockInsertTranscript).toHaveBeenCalledWith(expect.objectContaining({
-        recording_id: 'rec-local',
-        full_text: 'Speaker 1: Hola equipo. Revisamos el plan.',
-        transcription_provider: 'local-asr',
-        transcription_model: 'CohereLabs/cohere-transcribe-03-2026'
-      }))
-      expect(mockUpdateRecordingStatus).toHaveBeenCalledWith('rec-local', 'complete')
+      try {
+        // Bounded wait on the terminal effects — a fixed sleep flakes under
+        // full-suite load (see the BUG-TX-001 test above for the mechanism).
+        await vi.waitFor(() => {
+          expect(mockExecFile).toHaveBeenCalled()
+          expect(mockInsertTranscript).toHaveBeenCalledWith(expect.objectContaining({
+            recording_id: 'rec-local',
+            full_text: 'Speaker 1: Hola equipo. Revisamos el plan.',
+            transcription_provider: 'local-asr',
+            transcription_model: 'CohereLabs/cohere-transcribe-03-2026'
+          }))
+          expect(mockUpdateRecordingStatus).toHaveBeenCalledWith('rec-local', 'complete')
+        }, { timeout: 15000, interval: 25 })
+      } finally {
+        stopTranscriptionProcessor()
+      }
     })
   })
 
   describe('vibevoice provider', () => {
-    it('transcribes via the vibevoice backend and stores speaker-labelled segments', async () => {
+    it('transcribes via the vibevoice backend and stores speaker-labelled segments', { timeout: 20000 }, async () => {
       mockConfig = {
         transcription: {
           provider: 'vibevoice',
@@ -366,22 +375,27 @@ describe('Transcription Service', () => {
       const { startTranscriptionProcessor, stopTranscriptionProcessor } = await import('../transcription')
 
       startTranscriptionProcessor()
-      await new Promise(resolve => setTimeout(resolve, 500))
-      stopTranscriptionProcessor()
-
-      expect(mockExecFile).toHaveBeenCalled()
-      expect(capturedArgs).toContain('--backend')
-      expect(capturedArgs).toContain('vibevoice')
-      expect(mockInsertTranscript).toHaveBeenCalledWith(expect.objectContaining({
-        recording_id: 'rec-vv',
-        full_text: 'Speaker 0: Hola equipo.\nSpeaker 1: Revisamos el plan.',
-        transcription_provider: 'vibevoice',
-        transcription_model: 'microsoft/VibeVoice-ASR'
-      }))
-      expect(mockUpdateRecordingStatus).toHaveBeenCalledWith('rec-vv', 'complete')
+      try {
+        // Bounded wait on the terminal effects — a fixed sleep flakes under
+        // full-suite load (see the BUG-TX-001 test above for the mechanism).
+        await vi.waitFor(() => {
+          expect(mockExecFile).toHaveBeenCalled()
+          expect(capturedArgs).toContain('--backend')
+          expect(capturedArgs).toContain('vibevoice')
+          expect(mockInsertTranscript).toHaveBeenCalledWith(expect.objectContaining({
+            recording_id: 'rec-vv',
+            full_text: 'Speaker 0: Hola equipo.\nSpeaker 1: Revisamos el plan.',
+            transcription_provider: 'vibevoice',
+            transcription_model: 'microsoft/VibeVoice-ASR'
+          }))
+          expect(mockUpdateRecordingStatus).toHaveBeenCalledWith('rec-vv', 'complete')
+        }, { timeout: 15000, interval: 25 })
+      } finally {
+        stopTranscriptionProcessor()
+      }
     })
 
-    it('honours a per-queue-item provider override over the global default', async () => {
+    it('honours a per-queue-item provider override over the global default', { timeout: 20000 }, async () => {
       // Global default is local-asr, but the queue item requests vibevoice.
       mockConfig = {
         transcription: {
@@ -425,15 +439,20 @@ describe('Transcription Service', () => {
 
       const { startTranscriptionProcessor, stopTranscriptionProcessor } = await import('../transcription')
       startTranscriptionProcessor()
-      await new Promise(resolve => setTimeout(resolve, 500))
-      stopTranscriptionProcessor()
-
-      expect(capturedArgs).toContain('--backend')
-      expect(capturedArgs).toContain('vibevoice')
-      expect(mockInsertTranscript).toHaveBeenCalledWith(expect.objectContaining({
-        recording_id: 'rec-ovr',
-        transcription_provider: 'vibevoice'
-      }))
+      try {
+        // Bounded wait on the terminal effects — a fixed sleep flakes under
+        // full-suite load (see the BUG-TX-001 test above for the mechanism).
+        await vi.waitFor(() => {
+          expect(capturedArgs).toContain('--backend')
+          expect(capturedArgs).toContain('vibevoice')
+          expect(mockInsertTranscript).toHaveBeenCalledWith(expect.objectContaining({
+            recording_id: 'rec-ovr',
+            transcription_provider: 'vibevoice'
+          }))
+        }, { timeout: 15000, interval: 25 })
+      } finally {
+        stopTranscriptionProcessor()
+      }
     })
   })
 })

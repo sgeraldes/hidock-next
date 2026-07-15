@@ -5,7 +5,7 @@
  * and listener management.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vitest'
 import type { ActivityLogEntry } from '../hidock-device'
 
 // Mock jensen module
@@ -58,19 +58,20 @@ vi.mock('../qa-monitor', () => ({
 //
 // Silence the service's own console output for the ENTIRE file lifetime (not just
 // per-test) so no message is ever forwarded to the worker RPC, including during
-// inter-test async work and teardown. Tests that assert on console.error re-spy
-// it themselves; those spies still record calls on top of these no-op stubs and
-// restore back to them (never to the real console) when done.
+// inter-test async work and teardown. Tests that assert on console output re-spy
+// the method — vi.spyOn returns this SAME spy instance (spies don't stack) — so
+// they MUST end with mockClear(), never mockRestore(): mockRestore() reinstalls
+// the REAL console method and un-silences the rest of the file.
 const SILENCED_CONSOLE_METHODS = ['log', 'info', 'warn', 'debug', 'error'] as const
-const silencedConsoleSpies: Array<ReturnType<typeof vi.spyOn>> = []
 beforeAll(() => {
   for (const method of SILENCED_CONSOLE_METHODS) {
-    silencedConsoleSpies.push(vi.spyOn(console, method).mockImplementation(() => {}))
+    vi.spyOn(console, method).mockImplementation(() => {})
   }
 })
-afterAll(() => {
-  silencedConsoleSpies.forEach((spy) => spy.mockRestore())
-})
+// Deliberately NO afterAll restore: the teardown window right after the last
+// test is exactly when the service's lingering timers/promises still log, so
+// restoring the real console here reintroduces the RPC race. Each test file
+// runs in its own isolated environment, so the stubs die with the worker.
 
 describe('HiDockDeviceService - Activity Log Historical Replay', () => {
   let HiDockDeviceService: any
@@ -208,7 +209,7 @@ describe('HiDockDeviceService - Activity Log Historical Replay', () => {
       expect.any(Error)
     )
 
-    consoleErrorSpy.mockRestore()
+    consoleErrorSpy.mockClear()
   })
 
   it('should handle initialization log and receive new logs', () => {
@@ -961,7 +962,7 @@ describe('HiDockDeviceService - Error Handling', () => {
       expect.any(Error)
     )
 
-    consoleErrorSpy.mockRestore()
+    consoleErrorSpy.mockClear()
   })
 
   it('should handle listener errors in connection change notification', () => {
@@ -987,7 +988,7 @@ describe('HiDockDeviceService - Error Handling', () => {
       expect.any(Error)
     )
 
-    consoleErrorSpy.mockRestore()
+    consoleErrorSpy.mockClear()
   })
 
   it('should handle listener errors in status change notification', () => {
@@ -1019,7 +1020,7 @@ describe('HiDockDeviceService - Error Handling', () => {
       expect.any(Error)
     )
 
-    consoleErrorSpy.mockRestore()
+    consoleErrorSpy.mockClear()
   })
 
   it('should handle listener errors in progress notification', () => {
@@ -1046,7 +1047,7 @@ describe('HiDockDeviceService - Error Handling', () => {
       expect.any(Error)
     )
 
-    consoleErrorSpy.mockRestore()
+    consoleErrorSpy.mockClear()
   })
 
   it('should handle listener errors in activity notification', () => {
@@ -1072,7 +1073,7 @@ describe('HiDockDeviceService - Error Handling', () => {
       expect.any(Error)
     )
 
-    consoleErrorSpy.mockRestore()
+    consoleErrorSpy.mockClear()
   })
 })
 
@@ -3497,7 +3498,7 @@ describe('HiDockDeviceService - QA Logging Path', () => {
     )
     expect(qaLogs.length).toBeGreaterThan(0)
 
-    consoleSpy.mockRestore()
+    consoleSpy.mockClear()
   })
 })
 
@@ -3675,7 +3676,7 @@ describe('HiDockDeviceService - persistCacheToStorage error path', () => {
       expect.any(Error)
     )
 
-    warnSpy.mockRestore()
+    warnSpy.mockClear()
     delete (globalThis as any).window
   })
 
