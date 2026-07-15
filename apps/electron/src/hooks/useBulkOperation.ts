@@ -195,6 +195,7 @@ export function useBulkOperation<T>(options: BulkOperationOptions<T>): BulkOpera
     if (options.items.length > 0) {
       start(options.items)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- auto-start with initial items on mount only
   }, []) // Only run on mount
 
   // Cleanup on unmount - abort any running operations
