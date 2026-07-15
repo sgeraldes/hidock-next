@@ -344,15 +344,26 @@ class VectorStore {
       sourceType?: string
       /** knowledge_capture id backing the source, carried onto every chunk. */
       captureId?: string
+      /**
+       * RE-1 (Codex adversarial re-review round 2) — optional eligibility gate
+       * re-checked AFTER embeddings are generated (an async await) and
+       * immediately BEFORE the synchronous write loop. Returns false ⇒ the
+       * caller's recording became ineligible (hard purge / trash / personal)
+       * while embeddings ran, so nothing is persisted (returns 0). Not stored on
+       * any chunk's metadata.
+       */
+      shouldPersist?: () => boolean
     }
   ): Promise<number> {
+    // Destructure the gate out so it never lands on a stored chunk's metadata.
+    const { shouldPersist, ...chunkMeta } = metadata
     // Check if already indexed
-    if (metadata.recordingId) {
+    if (chunkMeta.recordingId) {
       const existing = Array.from(this.documents.values()).filter(
-        (d) => d.metadata.recordingId === metadata.recordingId
+        (d) => d.metadata.recordingId === chunkMeta.recordingId
       )
       if (existing.length > 0) {
-        console.log(`Transcript ${metadata.recordingId} already indexed`)
+        console.log(`Transcript ${chunkMeta.recordingId} already indexed`)
         return 0
       }
     }
@@ -361,18 +372,26 @@ class VectorStore {
     const chunks = chunkText(transcript)
     const embeddings = await getEmbeddingsService().generateEmbeddings(chunks)
 
+    // RE-1 — re-check eligibility ADJACENT to the write, with no await between
+    // here and the synchronous INSERT loop below. A hard purge that committed
+    // while embeddings were generated must not leave orphaned vector rows.
+    if (shouldPersist && !shouldPersist()) {
+      console.log(`[VectorStore] ${chunkMeta.recordingId ?? 'doc'} no longer eligible — skipping index persist`)
+      return 0
+    }
+
     const db = getDatabase()
     let indexed = 0
     for (let i = 0; i < chunks.length; i++) {
       const embedding = embeddings[i]
       if (!embedding) continue
 
-      const id = `${metadata.recordingId || 'doc'}_${i}_${Date.now()}`
+      const id = `${chunkMeta.recordingId || 'doc'}_${i}_${Date.now()}`
       const doc: VectorDocument = {
         id,
         content: chunks[i],
         embedding,
-        metadata: { ...metadata, chunkIndex: i }
+        metadata: { ...chunkMeta, chunkIndex: i }
       }
       this.documents.set(id, doc)
       db.run(
@@ -383,13 +402,13 @@ class VectorStore {
           id,
           chunks[i],
           embeddingToBlob(embedding),
-          metadata.meetingId || null,
-          metadata.recordingId || null,
+          chunkMeta.meetingId || null,
+          chunkMeta.recordingId || null,
           i,
-          metadata.timestamp || null,
-          metadata.subject || null,
-          metadata.sourceType || null,
-          metadata.captureId || null
+          chunkMeta.timestamp || null,
+          chunkMeta.subject || null,
+          chunkMeta.sourceType || null,
+          chunkMeta.captureId || null
         ]
       )
       indexed++

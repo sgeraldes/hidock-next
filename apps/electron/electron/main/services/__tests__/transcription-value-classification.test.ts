@@ -639,16 +639,20 @@ describe('transcribeRecording — ARF-3 in-flight trash stops post-analysis deri
     )
   })
 
-  it('trashed mid-analysis (isRecordingProcessable=false): the transcript persists but ZERO derivatives do', async () => {
+  it('RE-1 — ineligible when the early gate is reached: NOTHING is persisted (not even the transcript/capture)', async () => {
+    // RE-1 tightens ARF-3: the early gate sits right after the analyze await,
+    // BEFORE insertTranscript / ensureCapture, so an already-ineligible
+    // recording never recreates the transcript or capture orphan rows.
     mockIsRecordingProcessable.mockReturnValue(false)
 
     const { transcribeManually } = await import('../transcription')
     await transcribeManually('rec-trash')
 
-    // Transcript row + status still written (its own primary artifact — accepted).
-    expect(mockInsertTranscript).toHaveBeenCalled()
+    // The primary artifact itself is NOT recreated for a purged recording.
+    expect(mockInsertTranscript).not.toHaveBeenCalled()
+    expect(mockEnsureCapture).not.toHaveBeenCalled()
 
-    // Every downstream derivative boundary is skipped.
+    // …and every downstream derivative is skipped too.
     expect(mockUpdateKnowledgeCaptureTitle).not.toHaveBeenCalled()
     expect(actionableInserts()).toHaveLength(0)
     expect(vi.mocked(analyzeTimeline)).not.toHaveBeenCalled()
@@ -658,6 +662,25 @@ describe('transcribeRecording — ARF-3 in-flight trash stops post-analysis deri
     expect(mockEmitDomainEvent).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: 'entity:transcript-ready' })
     )
+  })
+
+  it('RE-1 — a purge landing DURING the analysis await recreates no transcript/capture', async () => {
+    // The recording is eligible when transcription starts, then the purge
+    // commits WHILE analyzeTranscriptWithGemini (the model.generateContent
+    // await) is in flight. The early gate re-checks AFTER that await and must
+    // persist nothing.
+    mockGenerateContent.mockImplementationOnce(async () => {
+      mockIsRecordingProcessable.mockReturnValue(false)
+      return geminiJsonResponse(BASE_ANALYSIS)
+    })
+
+    const { transcribeManually } = await import('../transcription')
+    await transcribeManually('rec-trash')
+
+    expect(mockGenerateContent).toHaveBeenCalledTimes(1) // analysis DID run
+    expect(mockInsertTranscript).not.toHaveBeenCalled() // but nothing persisted
+    expect(mockEnsureCapture).not.toHaveBeenCalled()
+    expect(vi.mocked(exportMeetingWiki)).not.toHaveBeenCalled()
   })
 
   it('trashed AFTER the timeline stage: later boundaries (org-reconcile, wiki, transcript-ready) skip (per-boundary re-check)', async () => {

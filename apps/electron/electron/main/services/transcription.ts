@@ -1665,6 +1665,37 @@ Meeting ${i + 1}: "${m.subject}"
   progressCallback?.('analyzing', 50) // spec-014: progress reporting
   const analysis = await analyzeTranscriptWithGemini(fullText, candidateMeetings)
 
+  // RE-1 (Codex adversarial re-review round 2, BINDING — CX-ARF-3a/b): the
+  // transcribe + analyze awaits ABOVE may have straddled a hard purge / soft
+  // delete / mark-personal. Define the eligibility gate NOW and re-check it
+  // ADJACENT to every persistence boundary below (no await between a re-check
+  // and its write), mirroring the graph ingest gate — a purge landing during
+  // any await stops the very next persist and everything after it. Without this
+  // the meeting-candidate / transcript / capture / vector rows are RECREATED
+  // after the purge transaction, orphaned to a recording that no longer exists.
+  let processabilitySkipLogged = false
+  const stillProcessable = (): boolean => {
+    if (isRecordingProcessable(recordingId)) return true
+    if (!processabilitySkipLogged) {
+      processabilitySkipLogged = true
+      console.log(
+        `[Transcription] Recording ${recordingId} was trashed or marked personal during ` +
+          'transcribe/analysis — persisting no transcript, capture, or downstream derivatives'
+      )
+    }
+    return false
+  }
+
+  // Earliest gate: if the recording was purged/trashed while transcribe+analyze
+  // ran, persist NOTHING (no candidate, transcript, capture, status, or any
+  // derivative). The meeting-candidate loop, insertTranscript, and
+  // ensureKnowledgeCaptureForRecording below are all synchronous with no await
+  // between here and them, so this single check-then-return covers them all.
+  if (!stillProcessable()) {
+    progressCallback?.('complete', 100)
+    return
+  }
+
   // Process AI meeting selection
   if (candidateMeetings.length > 0) {
     // Add all candidates to the database
@@ -1771,34 +1802,9 @@ Meeting ${i + 1}: "${m.subject}"
     saveDatabase()
   }
 
-  // ARF-3 (Codex adversarial FINAL review, BINDING) — from here on every step
-  // PERSISTS a NEW derivative (title, actionables, timeline, org-reconcile,
-  // self-identification, transcript-ready emit, wiki export, vector index).
-  // Each of those boundaries is separated by an async LLM/IO await, during
-  // which the user may have moved this recording to Trash (soft delete) or
-  // marked it personal. Soft delete already removes queued rows and tombstones
-  // the processing queue row, but this in-flight worker keeps running — so we
-  // re-check a cheap point-read immediately before each boundary and, on the
-  // first ineligible result, log ONCE and skip ALL remaining steps. The
-  // transcript row + status were already persisted above (acceptable — that is
-  // the recording's own primary artifact); this gate protects the downstream
-  // DERIVATIVES the trashed recording must not spawn. The graph path is gated
-  // separately at ingest time by isRecordingGraphIngestable.
-  let processabilitySkipLogged = false
-  const stillProcessable = (): boolean => {
-    if (isRecordingProcessable(recordingId)) return true
-    if (!processabilitySkipLogged) {
-      processabilitySkipLogged = true
-      console.log(
-        `[Transcription] Recording ${recordingId} was trashed or marked personal mid-analysis — ` +
-          'skipping all remaining post-analysis derivatives (title, actionables, timeline, ' +
-          'org-reconcile, identity, transcript-ready, wiki, vector index)'
-      )
-    }
-    return false
-  }
-
-  // Auto-update recording title if we have a title suggestion
+  // Auto-update recording title if we have a title suggestion. `stillProcessable`
+  // (defined above, right after the analysis await) is re-checked adjacent to
+  // this synchronous write — no await between, per RE-1.
   if (analysis.title_suggestion && stillProcessable()) {
     updateKnowledgeCaptureTitle(recordingId, analysis.title_suggestion)
   }
@@ -1891,35 +1897,42 @@ Meeting ${i + 1}: "${m.subject}"
   // without a manual analyzeTimeline() call. Dynamic import avoids a static
   // cycle (timeline-analysis is otherwise a leaf). Non-fatal — the transcript is
   // already persisted; a timeline failure must not fail the transcription.
-  if (stillProcessable()) try {
+  try {
     const { analyzeTimeline } = await import('./timeline-analysis')
-    const timeline = await analyzeTimeline(recordingId)
-    console.log(
-      `[Timeline] Recording ${recordingId}: ${timeline.sentimentSegments.length} sentiment segment(s), ` +
-        `${timeline.eventMarkers.length} event marker(s)`
-    )
+    // RE-1 — re-check AFTER the import await, adjacent to the write.
+    if (stillProcessable()) {
+      const timeline = await analyzeTimeline(recordingId)
+      console.log(
+        `[Timeline] Recording ${recordingId}: ${timeline.sentimentSegments.length} sentiment segment(s), ` +
+          `${timeline.eventMarkers.length} event marker(s)`
+      )
+    }
   } catch (e) {
     console.error('[Timeline] Timeline analysis failed (non-fatal):', e instanceof Error ? e.message : e)
   }
 
   // Persist people + project the analysis extracted from the conversation
   // (the ICS feed has no attendee data — the transcript is the source).
-  if (stillProcessable()) try {
+  try {
     const { applyTranscriptEntities } = await import('./org-reconciler')
-    const linkedMeetingId =
-      (analysis.selected_meeting_id && analysis.selected_meeting_id !== 'none'
-        ? analysis.selected_meeting_id
-        : undefined) ?? recording.meeting_id ?? getRecordingById(recordingId)?.meeting_id
-    const applied = applyTranscriptEntities({
-      meetingId: linkedMeetingId ?? undefined,
-      recordingId,
-      participants: analysis.participants,
-      project: analysis.project
-    })
-    if (applied.contacts > 0 || applied.projectLinked) {
-      console.log(
-        `[OrgReconciler] Transcript entities: +${applied.contacts} people${applied.projectLinked ? ', project linked' : ''}`
-      )
+    // RE-1 — re-check AFTER the import await; applyTranscriptEntities is a
+    // synchronous write, so this fully closes the race window.
+    if (stillProcessable()) {
+      const linkedMeetingId =
+        (analysis.selected_meeting_id && analysis.selected_meeting_id !== 'none'
+          ? analysis.selected_meeting_id
+          : undefined) ?? recording.meeting_id ?? getRecordingById(recordingId)?.meeting_id
+      const applied = applyTranscriptEntities({
+        meetingId: linkedMeetingId ?? undefined,
+        recordingId,
+        participants: analysis.participants,
+        project: analysis.project
+      })
+      if (applied.contacts > 0 || applied.projectLinked) {
+        console.log(
+          `[OrgReconciler] Transcript entities: +${applied.contacts} people${applied.projectLinked ? ', project linked' : ''}`
+        )
+      }
     }
   } catch (e) {
     console.error('[OrgReconciler] Transcript entity extraction failed:', e)
@@ -1931,14 +1944,17 @@ Meeting ${i + 1}: "${m.subject}"
   // speaker map. LLM-gated by a cheap lexical prefilter; non-fatal. Runs AFTER
   // applyTranscriptEntities so its 'self-identification' tier upgrades any
   // weaker attendee-context resolution just written for the same name.
-  if (stillProcessable()) try {
+  try {
     const { runSelfIdentificationForRecording } = await import('./self-identification')
-    const selfId = await runSelfIdentificationForRecording(recordingId)
-    if (selfId.bound > 0 || selfId.mergeSuspected > 0) {
-      console.log(
-        `[SelfID] Recording ${recordingId}: +${selfId.bound} speaker(s) named` +
-          (selfId.mergeSuspected > 0 ? `, ${selfId.mergeSuspected} merge-suspected` : '')
-      )
+    // RE-1 — re-check AFTER the import await, adjacent to the write.
+    if (stillProcessable()) {
+      const selfId = await runSelfIdentificationForRecording(recordingId)
+      if (selfId.bound > 0 || selfId.mergeSuspected > 0) {
+        console.log(
+          `[SelfID] Recording ${recordingId}: +${selfId.bound} speaker(s) named` +
+            (selfId.mergeSuspected > 0 ? `, ${selfId.mergeSuspected} merge-suspected` : '')
+        )
+      }
     }
   } catch (e) {
     console.error('[SelfID] Self-identification pass failed:', e)
@@ -1949,23 +1965,31 @@ Meeting ${i + 1}: "${m.subject}"
   // trashed/personal recording never even triggers the debounced graph ingest
   // (isRecordingGraphIngestable is the ultimate backstop at ingest time, but
   // not emitting is cheaper and clearer).
-  if (stillProcessable()) try {
+  try {
     const { getEventBus } = await import('./event-bus')
-    getEventBus().emitDomainEvent({
-      type: 'entity:transcript-ready',
-      timestamp: new Date().toISOString(),
-      payload: { transcriptId: `trans_${recordingId}`, recordingId }
-    })
+    // RE-1 — re-check AFTER the import await; the emit is synchronous, so this
+    // fully closes the window (a purged recording never triggers graph ingest).
+    if (stillProcessable()) {
+      getEventBus().emitDomainEvent({
+        type: 'entity:transcript-ready',
+        timestamp: new Date().toISOString(),
+        payload: { transcriptId: `trans_${recordingId}`, recordingId }
+      })
+    }
   } catch (e) {
     console.warn('[GraphSync] transcript-ready emit failed:', e)
   }
 
   // Export the per-meeting wiki page (plain markdown knowledge base readable
   // by the user and by external agents like Claude Code). Non-fatal.
-  if (stillProcessable()) try {
+  try {
     const { exportMeetingWiki } = await import('./meeting-wiki')
-    const wikiPath = exportMeetingWiki(recordingId)
-    if (wikiPath) console.log(`[MeetingWiki] Exported ${wikiPath}`)
+    // RE-1 — re-check AFTER the import await; exportMeetingWiki is a synchronous
+    // file write, so this fully closes the window.
+    if (stillProcessable()) {
+      const wikiPath = exportMeetingWiki(recordingId)
+      if (wikiPath) console.log(`[MeetingWiki] Exported ${wikiPath}`)
+    }
   } catch (e) {
     console.error('[MeetingWiki] Export failed:', e)
   }
@@ -1991,7 +2015,13 @@ Meeting ${i + 1}: "${m.subject}"
       meetingId: meetingId || undefined,
       recordingId,
       timestamp: recording.created_at,
-      subject: meetingSubject
+      subject: meetingSubject,
+      // RE-1 — indexTranscript's embeddings generation is an async await; a
+      // hard purge landing DURING it would otherwise let the synchronous write
+      // loop persist orphaned vector rows. This callback is re-checked INSIDE
+      // indexTranscript, immediately before the write loop, so the chunks are
+      // dropped if the recording became ineligible while embeddings ran.
+      shouldPersist: () => isRecordingProcessable(recordingId)
     })
 
     console.log(`Indexed ${indexedCount} chunks into vector store`)

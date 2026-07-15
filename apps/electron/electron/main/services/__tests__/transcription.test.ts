@@ -102,7 +102,11 @@ vi.mock('../database', () => ({
   // Default false (not excluded) — this suite doesn't exercise the value
   // gate itself (covered by value-gates.test.ts); keeps the mock's surface in
   // sync with the real module so the new call site doesn't throw.
-  isValueExcludedRecording: vi.fn(() => false)
+  isValueExcludedRecording: vi.fn(() => false),
+  // RE-1 — the early eligibility gate (right after the analyze await, before
+  // insertTranscript) calls this; default true so this suite's happy paths
+  // persist as before. Real predicate covered by recording-deletion tests.
+  isRecordingProcessable: vi.fn(() => true)
 }))
 
 // Mock electron
