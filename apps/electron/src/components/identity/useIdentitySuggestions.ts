@@ -564,6 +564,11 @@ export function useIdentitySuggestions(kind?: 'person' | 'project') {
                 action: {
                   label: 'Undo',
                   onClick: async () => {
+                    // Tracks whether the atomic backend unmerge has COMMITTED, so
+                    // the catch below can report honestly: once records are
+                    // separated, a later throw (e.g. the name-restore rejecting at
+                    // the IPC transport) must NOT be reported as "nothing undone".
+                    let unmergeCommitted = false
                     try {
                       // (1) Only unwind merges if any were actually recorded. A
                       // rename-only group (every candidate was a bare-mention
@@ -584,6 +589,7 @@ export function useIdentitySuggestions(kind?: 'person' | 'project') {
                           toast.error('Undo failed', failure)
                           return
                         }
+                        unmergeCommitted = true
                       }
                       // (2) Restore the prior canonical name. The rename was a
                       // separate contacts.update (never journaled), so it returns
@@ -602,10 +608,22 @@ export function useIdentitySuggestions(kind?: 'person' | 'project') {
                       }
                       toast.info('Group merge undone', 'The separate records were restored.')
                     } catch (err) {
-                      toast.error(
-                        'Undo failed',
-                        err instanceof Error && err.message ? err.message : 'Some records could not be separated again.'
-                      )
+                      const detail = err instanceof Error && err.message ? err.message : undefined
+                      if (unmergeCommitted) {
+                        // The unmerge already committed (records ARE separated);
+                        // only a later step threw. A flat "Undo failed" would be
+                        // dishonest — the merges were reversed.
+                        toast.error(
+                          'Undo incomplete',
+                          detail
+                            ? `The records were separated, but the previous name could not be restored: ${detail}`
+                            : 'The records were separated, but the previous name could not be restored.'
+                        )
+                      } else {
+                        // The unmerge itself failed/threw (or there was nothing to
+                        // unmerge) — nothing was undone.
+                        toast.error('Undo failed', detail || 'Some records could not be separated again.')
+                      }
                     } finally {
                       load(true)
                     }

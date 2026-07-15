@@ -319,4 +319,40 @@ describe('group-merge Undo (single atomic backend call)', () => {
     expect(toast.error).toHaveBeenCalledWith('Undo incomplete', expect.stringMatching(/name locked/))
     expect(toast.info).not.toHaveBeenCalled()
   })
+
+  it('a THROWN name-restore after a committed unmerge reports "Undo incomplete" (records separated), NOT "Undo failed"', async () => {
+    mockAccept
+      .mockResolvedValueOnce({ success: true, data: { id: 'g1', status: 'accepted', mergeJournalId: 'j1' } })
+      .mockResolvedValueOnce({ success: true, data: { id: 'g2', status: 'accepted', mergeJournalId: 'j2' } })
+
+    const { result } = renderHook(() => useIdentitySuggestions('person'))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    await act(async () => {
+      await result.current.mergeGroup({
+        keeperId: 'c1',
+        keeperName: 'Old Name',
+        suggestionIds: ['g1', 'g2'],
+        finalName: 'Canonical Name'
+      })
+    })
+    const undo = lastUndoAction()
+    mockContactsUpdate.mockClear()
+
+    // The group unmerge COMMITS, then the name-restore THROWS at the IPC
+    // transport boundary (callIPC rethrows invoke failures — it does not return
+    // a Result). The generic catch must not claim "Undo failed": the merges
+    // were already reversed.
+    mockContactUnmergeGroup.mockResolvedValue({ success: true, data: [] })
+    mockContactsUpdate.mockRejectedValue(new Error('IPC transport lost'))
+    await act(async () => {
+      await undo!()
+    })
+
+    expect(mockContactUnmergeGroup).toHaveBeenCalledWith(['j1', 'j2'])
+    // Honest reporting: records ARE separated, only the name-restore failed.
+    expect(toast.error).toHaveBeenCalledWith('Undo incomplete', expect.stringMatching(/records were separated/i))
+    expect(toast.error).not.toHaveBeenCalledWith('Undo failed', expect.anything())
+    expect(toast.info).not.toHaveBeenCalled()
+  })
 })
