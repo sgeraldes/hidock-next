@@ -39,13 +39,12 @@ export default defineConfig({
           include: ['electron/**/__tests__/**/*.test.ts', 'electron/**/__tests__/**/*.test.tsx'],
           exclude: [...configDefaults.exclude, '**/*.smoke.test.ts'],
           setupFiles: ['./src/test/setup.ts', './src/test/setup-db.ts'],
-          // DB-backed suites run initializeDatabase() (40+ migrations, often on
-          // the sql.js/WASM engine) inside beforeAll/beforeEach hooks. That is
-          // fast locally but blew the 10s default hookTimeout on a loaded
-          // shared CI runner (run 29342252597: pixel-rag beforeAll,
-          // timeline-analysis beforeEach). 30s absorbs runner-speed variance
-          // while still failing fast on a genuine hang.
-          hookTimeout: 30_000
+          // Many main-db files run initializeDatabase() in beforeAll/beforeEach.
+          // That's sub-second warm, but on cold or starved CI runners it blows
+          // the default 10s hookTimeout (pixel-rag, timeline-analysis and
+          // merge-journal have each red-lighted CI this way). A hung hook still
+          // fails — it just gets a runner-realistic margin.
+          hookTimeout: 60000
         }
       },
       {
