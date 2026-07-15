@@ -5499,24 +5499,48 @@ function safeGraphQuery<T>(sql: string, params: unknown[]): T[] {
   }
 }
 
+/** Result of {@link filterEligibleGraphEdgeIds}: the visible-edge allowlist + a
+ *  fail-closed flag when the recording-eligibility lookup could not complete. */
+export interface GraphEdgeEligibility {
+  /** The subset of candidate edge ids that remain VISIBLE on a NON-OWNER surface. */
+  eligibleEdgeIds: Set<string>
+  /** True when the recording-eligibility lookup failed → every attributed edge suppressed. */
+  failClosed: boolean
+}
+
 /**
- * ADV14 round-15 sweep — edge-provenance suppression for the graph topic labels
- * surfaced by getPersonContext. Given (label, edge_id) rows for a person's ABOUT
- * edges, keep a topic label when at least ONE of its contributing edges is
- * visible under the SAME rule the graph-grounding path applies: an edge is
- * visible if it has NO provenance rows (legacy / unattributable, kept) OR ≥1
- * ELIGIBLE source recording. On a fail-closed eligibility lookup, only
- * unattributed (no-provenance) edges survive — recording-attributed topics are
- * suppressed rather than leaked. Dedupes labels and caps AFTER filtering.
+ * ADV24 (round-25) — THE ONE shared zero-provenance + exclusion suppression
+ * predicate for GRAPH EDGES surfaced on NON-OWNER discovery surfaces (identity
+ * merge cards: getPersonContext topics via {@link suppressExcludedTopicLabels} +
+ * identity-discovery graph closeness/sharedTopics). It mirrors the NON-OWNER
+ * (suppressZeroProvenance) rule that knowledge-graph-service's
+ * provenanceSuppressedEdgeIds already applies to the 13 gated graph read fns
+ * (ADV23-2, round-24), so identity / discovery inherit the EXACT same policy
+ * instead of re-deriving a per-site predicate.
+ *
+ * An edge is VISIBLE (in `eligibleEdgeIds`) iff it has ≥1 graph_edge_sources row
+ * from an ELIGIBLE recording (ADV24-1: "≥1 provenance row from an eligible
+ * recording"). It is SUPPRESSED when:
+ *   • it has NO provenance rows — legacy pre-F18 zero-provenance edge: it cannot
+ *     be proven NOT to derive from a now-excluded recording, so on a non-owner
+ *     surface it is dropped (the F21 rebuild restores it WITH attribution later);
+ *   • every source recording is excluded (personal/soft-deleted/value-excluded/
+ *     hard-purged); or
+ *   • the eligibility lookup fails (fail-closed — every provenance-bearing edge is
+ *     suppressed; failClosed is surfaced so callers can drop derived confidence).
+ * `safeGraphQuery` returning [] (graph_edge_sources absent pre-first-ingest OR a
+ * read error) collapses to "no provable provenance" ⇒ every edge zero-provenance
+ * ⇒ suppressed, which is the fail-closed outcome.
  */
-function suppressExcludedTopicLabels(rows: Array<{ label: string; edge_id: string }>, cap: number): string[] {
-  if (rows.length === 0) return []
-  const edgeIds = [...new Set(rows.map((r) => r.edge_id).filter((id): id is string => !!id))]
+export function filterEligibleGraphEdgeIds(edgeIds: Iterable<string>): GraphEdgeEligibility {
+  const unique = [...new Set([...edgeIds].filter((id): id is string => !!id))]
+  if (unique.length === 0) return { eligibleEdgeIds: new Set<string>(), failClosed: false }
+
   const provByEdge = new Map<string, string[]>()
   const allRecIds = new Set<string>()
   const CHUNK = 400
-  for (let i = 0; i < edgeIds.length; i += CHUNK) {
-    const chunk = edgeIds.slice(i, i + CHUNK)
+  for (let i = 0; i < unique.length; i += CHUNK) {
+    const chunk = unique.slice(i, i + CHUNK)
     const placeholders = chunk.map(() => '?').join(',')
     const srcs = safeGraphQuery<{ edge_id: string; recording_id: string }>(
       `SELECT edge_id, recording_id FROM graph_edge_sources
@@ -5530,24 +5554,43 @@ function suppressExcludedTopicLabels(rows: Array<{ label: string; edge_id: strin
     }
   }
   const { eligible, failClosed } = getEligibleRecordingIds(allRecIds)
+  const eligibleEdgeIds = new Set<string>()
+  for (const edgeId of unique) {
+    const prov = provByEdge.get(edgeId)
+    if (!prov || prov.length === 0) continue // zero-provenance (legacy) ⇒ suppressed on non-owner surface
+    if (failClosed) continue // attributed but eligibility unknown ⇒ suppressed (fail-closed)
+    if (prov.some((id) => eligible.has(id))) eligibleEdgeIds.add(edgeId) // ≥1 eligible source survives
+  }
+  return { eligibleEdgeIds, failClosed }
+}
+
+/**
+ * ADV24-1 (round-25) — edge-provenance suppression for the graph topic labels
+ * surfaced by getPersonContext (the Identity merge card, a NON-OWNER discovery
+ * surface). Given (label, edge_id) rows for a person's ABOUT edges, keep a topic
+ * label only when at least ONE of its contributing edges is VISIBLE under the
+ * shared non-owner rule ({@link filterEligibleGraphEdgeIds}): the edge has ≥1
+ * ELIGIBLE source recording. A ZERO-PROVENANCE (legacy pre-F18) edge is now
+ * SUPPRESSED (round-25 inverts the round-15 keep-legacy behavior — consistent
+ * with the ADV23-2 non-owner graph-view suppression); a fail-closed eligibility
+ * lookup suppresses every attributed edge too. Dedupes labels and caps AFTER
+ * filtering so a run of suppressed edges can't truncate eligible topics out.
+ */
+function suppressExcludedTopicLabels(rows: Array<{ label: string; edge_id: string }>, cap: number): string[] {
+  if (rows.length === 0) return []
+  const { eligibleEdgeIds } = filterEligibleGraphEdgeIds(
+    rows.map((r) => r.edge_id).filter((id): id is string => !!id)
+  )
   const seen = new Set<string>()
   const out: string[] = []
   for (const row of rows) {
     if (!row.label || seen.has(row.label)) continue
-    const prov = provByEdge.get(row.edge_id)
-    let visible: boolean
-    if (!prov || prov.length === 0) {
-      visible = true // no provenance (legacy) → keep, matches neighborhoodFacts
-    } else if (failClosed) {
-      visible = false // recording-attributed but eligibility unknown → suppress
-    } else {
-      visible = prov.some((id) => eligible.has(id)) // ≥1 eligible source survives
-    }
-    if (visible) {
-      seen.add(row.label)
-      out.push(row.label)
-      if (out.length >= cap) break
-    }
+    // Suppressed edge (zero-provenance / all-excluded / fail-closed) ⇒ skip WITHOUT
+    // marking the label seen, so a later eligible edge for the same label still wins.
+    if (!row.edge_id || !eligibleEdgeIds.has(row.edge_id)) continue
+    seen.add(row.label)
+    out.push(row.label)
+    if (out.length >= cap) break
   }
   return out
 }
@@ -5592,15 +5635,18 @@ export function getPersonContext(idOrName: string, limit = 4): PersonContext {
 
   // Topics via the graph; fall back to the person's meeting projects when empty.
   //
-  // ADV14 round-15 sweep — these topic labels come from ABOUT edges built from
+  // ADV24-1 round-25 — these topic labels come from ABOUT edges built from
   // transcript analysis, so a value-excluded / soft-deleted / personal
   // recording's edge would otherwise surface its topic label in the Identity
   // merge card (a non-exempt discovery surface, NOT the owner meeting-detail
-  // viewer). Apply the SAME edge-provenance suppression the graph-grounding path
-  // uses (keep a topic when its ABOUT edge has NO provenance [legacy /
-  // unattributable] OR ≥1 ELIGIBLE source recording; drop it when EVERY source
-  // is excluded). The `cap` is applied AFTER suppression so a run of excluded
-  // edges can't truncate eligible topics out of the result.
+  // viewer). Apply the shared NON-OWNER edge-provenance suppression
+  // (suppressExcludedTopicLabels → filterEligibleGraphEdgeIds): keep a topic only
+  // when its ABOUT edge has ≥1 ELIGIBLE source recording; drop it when every
+  // source is excluded, on a fail-closed lookup, OR when the edge is
+  // zero-provenance (legacy pre-F18) — round-25 inverts the round-15 keep-legacy
+  // behavior to match the ADV23-2 non-owner graph-view suppression. The `cap` is
+  // applied AFTER suppression so a run of excluded edges can't truncate eligible
+  // topics out of the result.
   const topicRows = safeGraphQuery<{ label: string; edge_id: string }>(
     `SELECT DISTINCT t.label AS label, ab.id AS edge_id
        FROM graph_nodes p

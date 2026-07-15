@@ -109,9 +109,14 @@ describe('getPersonContext', () => {
     expect(getPersonContext('c-alice').topics).toContain('Atlas')
   })
 
-  it('uses the knowledge graph for topics when the person has a node', () => {
-    // Bob has a person node with an ABOUT-topic path.
-    expect(getPersonContext('c-bob').topics).toContain('Latency')
+  it('suppresses a ZERO-PROVENANCE graph topic (ADV24-1 round-25 — legacy edge no longer surfaced)', () => {
+    // Bob's ABOUT edge (e2) has NO graph_edge_sources provenance (legacy pre-F18).
+    // Round-25 inverts the old keep-legacy behavior: a zero-provenance edge is
+    // suppressed on this non-owner discovery surface, so its topic ('Latency') is
+    // NOT surfaced and the merge card falls back to Bob's meeting_projects ('Atlas').
+    const topics = getPersonContext('c-bob').topics
+    expect(topics).not.toContain('Latency')
+    expect(topics).toContain('Atlas')
   })
 
   it('returns empty context for an unknown name', () => {

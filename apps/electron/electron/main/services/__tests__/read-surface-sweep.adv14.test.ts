@@ -196,7 +196,9 @@ describe('getPersonContext — graph topic-provenance gate (ADV14)', () => {
    * Person "Pat" attended three meetings, each ABOUT a distinct topic:
    *   - m-ok    → ABOUT edge sourced by an ELIGIBLE recording          → KEEP "Eligible"
    *   - m-bad   → ABOUT edge sourced by a VALUE-EXCLUDED recording     → DROP "Excluded"
-   *   - m-legacy→ ABOUT edge with NO provenance rows (pre-F18 / legacy) → KEEP "Legacy"
+   *   - m-legacy→ ABOUT edge with NO provenance rows (pre-F18 / legacy) → DROP "Legacy"
+   *              (ADV24-1 round-25: zero-provenance edges are suppressed on this
+   *              non-owner discovery surface, inverting the round-15 keep-legacy.)
    */
   function seedGraph(): void {
     createGraphTables()
@@ -223,24 +225,26 @@ describe('getPersonContext — graph topic-provenance gate (ADV14)', () => {
     // about-legacy intentionally has NO graph_edge_sources rows.
   }
 
-  it('keeps eligible + legacy topics, drops value-excluded-sourced topics', () => {
+  it('keeps eligible-sourced topics; drops value-excluded AND zero-provenance legacy topics (ADV24-1)', () => {
     seedGraph()
     const topics = getPersonContext('pat', 10).topics
     expect(topics).toContain('Eligible')
-    expect(topics).toContain('Legacy')
+    // ADV24-1 round-25: zero-provenance legacy edge is now suppressed on this
+    // non-owner discovery surface (inverts the round-15 keep-legacy behavior).
+    expect(topics).not.toContain('Legacy')
     expect(topics).not.toContain('Excluded')
   })
 
-  it('fails closed: recording-attributed topics suppressed, legacy survives', () => {
+  it('fails closed: EVERY graph topic suppressed (attributed + legacy) when eligibility cannot resolve', () => {
     seedGraph()
     // Force the positive allowlist to throw (see getMentionSnippets fail-closed
     // note). knowledge_captures has one row (cap-gp-bad) but no child rows, so the
     // FK-checked implicit DELETE during DROP succeeds.
     run('DROP TABLE knowledge_captures')
     const topics = getPersonContext('pat', 10).topics
-    // Legacy edge has no provenance → not recording-attributed → still kept.
-    expect(topics).toContain('Legacy')
-    // Both provenance-bearing edges are suppressed when eligibility can't resolve.
+    // ADV24-1 round-25: legacy zero-provenance edges are suppressed too, so with
+    // no fallback projects for 'pat' the graph topics are all gone.
+    expect(topics).not.toContain('Legacy')
     expect(topics).not.toContain('Eligible')
     expect(topics).not.toContain('Excluded')
   })
