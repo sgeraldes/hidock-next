@@ -1,14 +1,15 @@
 // @vitest-environment node
 
 /**
- * ADV17-2 (round-18) — end-to-end, real-temp-DB coverage of the persisted
+ * ADV18 (round-19) — end-to-end, real-temp-DB coverage of the persisted
  * RAG-answer replay gate on assistant:getMessages AND the legacy
  * db:get-chat-history sibling (both read the same chat_messages table).
  *
- * Seeds a recording linked to a meeting, persists an assistant message citing
- * that meeting, then transitions the recording through each exclusion state and
- * asserts the persisted snippet is dropped (and the answer redacted when it was
- * grounded solely on the now-excluded source).
+ * Seeds a recording linked to a meeting, persists an assistant message whose
+ * AUTHORITATIVE provenance union (supplied by the mocked RAG service, exactly as
+ * the real service would compute it main-side) names that recording, then
+ * transitions the recording through each exclusion state and asserts the WHOLE
+ * answer is redacted (round-19 redact-on-ANY) and the chips dropped.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
@@ -16,16 +17,21 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { existsSync, rmSync } from 'fs'
 
-const dbPath = join(tmpdir(), `hidock-adv17-assistant-${process.pid}.sqlite`)
+const dbPath = join(tmpdir(), `hidock-adv18-assistant-${process.pid}.sqlite`)
 
 vi.mock('../../services/file-storage', () => ({
   getDatabasePath: () => dbPath
 }))
 
-// The RAG service is only used by deleteConversation; stub it so importing the
-// handler module doesn't pull the whole embeddings/vector stack.
+// The RAG service is used by deleteConversation (clearSession) AND, in round-19,
+// by assistant:addMessage to consume the authoritative provenance union for an
+// assistant answer. Stub both — consumeAnswerProvenance returns the union the
+// real service would have computed for an answer grounded on recording 'recR'.
 vi.mock('../../services/rag', () => ({
-  getRAGService: () => ({ clearSession: vi.fn() })
+  getRAGService: () => ({
+    clearSession: vi.fn(),
+    consumeAnswerProvenance: () => ({ recordingIds: ['recR'], captureIds: [], unverifiable: false })
+  })
 }))
 
 vi.mock('electron', () => ({
@@ -92,8 +98,8 @@ afterEach(() => {
   if (existsSync(dbPath)) rmSync(dbPath, { force: true })
 })
 
-describe('assistant:getMessages — ADV17-2 provenance replay gate', () => {
-  it('returns the snippet while the cited recording is eligible', async () => {
+describe('assistant:getMessages — ADV18 provenance replay gate', () => {
+  it('returns the snippet + answer while the cited recording is eligible', async () => {
     await addAssistantMessageCitingMeeting()
     const msgs = await handlers['assistant:getMessages']({}, 'conv1')
     const assistant = msgs.find((m: { role: string }) => m.role === 'assistant')
@@ -105,7 +111,7 @@ describe('assistant:getMessages — ADV17-2 provenance replay gate', () => {
     expect(assistant.content).toContain('migrate on Friday')
   })
 
-  it('drops the snippet and redacts the answer after the recording is soft-deleted', async () => {
+  it('redacts the whole answer + drops chips after the recording is soft-deleted', async () => {
     await addAssistantMessageCitingMeeting()
     run('UPDATE recordings SET deleted_at = ? WHERE id = ?', ['2026-07-15T00:00:00.000Z', 'recR'])
     const msgs = await handlers['assistant:getMessages']({}, 'conv1')
@@ -114,24 +120,34 @@ describe('assistant:getMessages — ADV17-2 provenance replay gate', () => {
     expect(assistant.content).not.toContain('migrate on Friday')
   })
 
-  it('drops the snippet after the recording is marked personal', async () => {
+  it('redacts after the recording is marked personal', async () => {
     await addAssistantMessageCitingMeeting()
     run('UPDATE recordings SET personal = 1 WHERE id = ?', ['recR'])
     const msgs = await handlers['assistant:getMessages']({}, 'conv1')
     const assistant = msgs.find((m: { role: string }) => m.role === 'assistant')
     expect(JSON.parse(assistant.sources)).toEqual([])
+    expect(assistant.content).not.toContain('migrate on Friday')
   })
 
-  it('drops the snippet after the recording is value-excluded (garbage capture)', async () => {
+  it('redacts after the recording is value-excluded (garbage capture)', async () => {
     await addAssistantMessageCitingMeeting()
     run("UPDATE knowledge_captures SET quality_rating = 'garbage' WHERE id = ?", ['capR'])
     const msgs = await handlers['assistant:getMessages']({}, 'conv1')
     const assistant = msgs.find((m: { role: string }) => m.role === 'assistant')
     expect(JSON.parse(assistant.sources)).toEqual([])
+    expect(assistant.content).not.toContain('migrate on Friday')
   })
 
-  it('redacts snippets of a LEGACY (un-enveloped) message but keeps its text', async () => {
-    // Simulate a pre-round-18 persisted assistant message: bare sources array.
+  it('preserves USER-authored text even when its (unlikely) sources are excluded', async () => {
+    await handlers['assistant:addMessage']({}, 'conv1', 'user', 'What did we decide?')
+    run('UPDATE recordings SET deleted_at = ? WHERE id = ?', ['2026-07-15T00:00:00.000Z', 'recR'])
+    const msgs = await handlers['assistant:getMessages']({}, 'conv1')
+    const user = msgs.find((m: { role: string }) => m.role === 'user')
+    expect(user.content).toBe('What did we decide?')
+  })
+
+  it('redacts a LEGACY (un-enveloped) assistant message with sources (fail closed)', async () => {
+    // Simulate a pre-round-19 persisted assistant message: bare sources array.
     run(
       'INSERT INTO chat_messages (id, conversation_id, role, content, sources, created_at) VALUES (?, ?, ?, ?, ?, ?)',
       ['legacy1', 'conv1', 'assistant', 'Legacy answer body.', JSON.stringify([{ content: 'old excerpt', meetingId: 'mtg1' }]), '2026-01-02T10:00:00.000Z']
@@ -139,20 +155,21 @@ describe('assistant:getMessages — ADV17-2 provenance replay gate', () => {
     const msgs = await handlers['assistant:getMessages']({}, 'conv1')
     const legacy = msgs.find((m: { id: string }) => m.id === 'legacy1')
     expect(JSON.parse(legacy.sources)).toEqual([])
-    expect(legacy.content).toBe('Legacy answer body.') // message text preserved
+    expect(legacy.content).not.toBe('Legacy answer body.') // whole answer redacted (fail closed)
   })
 })
 
-describe('db:get-chat-history — ADV17-2 sibling gate', () => {
-  it('revalidates the same persisted sources when read via the legacy history IPC', async () => {
+describe('db:get-chat-history — ADV18 sibling gate', () => {
+  it('revalidates the same persisted answer when read via the legacy history IPC', async () => {
     await addAssistantMessageCitingMeeting()
 
-    // Eligible → snippet present.
+    // Eligible → snippet present + answer intact.
     let history = await handlers['db:get-chat-history']({}, 50)
     let assistant = history.find((m: { role: string }) => m.role === 'assistant')
     expect(JSON.parse(assistant.sources)).toHaveLength(1)
+    expect(assistant.content).toContain('migrate on Friday')
 
-    // Excluded → snippet dropped + answer redacted, exactly like getMessages.
+    // Excluded → answer redacted + chips dropped, exactly like getMessages.
     run('UPDATE recordings SET deleted_at = ? WHERE id = ?', ['2026-07-15T00:00:00.000Z', 'recR'])
     history = await handlers['db:get-chat-history']({}, 50)
     assistant = history.find((m: { role: string }) => m.role === 'assistant')

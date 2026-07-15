@@ -245,6 +245,57 @@ describe('ARF-2 — provenance-aware assistant grounding', () => {
 })
 
 // ---------------------------------------------------------------------------
+// ADV18-2 (round-19) — neighborhoodFacts collects the authoritative recording
+// ids behind the EMITTED facts into the optional provOut sink, so the RAG
+// service can fold graph provenance into the persisted answer's union.
+// ---------------------------------------------------------------------------
+
+describe('ADV18-2 — neighborhoodFacts fact-edge provenance capture', () => {
+  const noExclusion = { ids: new Set<string>(), failClosed: false }
+
+  it('captures ALL co-sources of the emitted facts; legacy zero-provenance contributes none', () => {
+    const provOut = { recordingIds: new Set<string>(), unresolved: false }
+    const facts = neighborhoodFacts('Alice', 1, 20, noExclusion, provOut)
+    // eA→recA, eShared→recA+recB emit; eLegacy has NO provenance rows.
+    expect(facts).toContain('Alice mentioned Roadmap')
+    expect([...provOut.recordingIds].sort()).toEqual(['recA', 'recB'])
+    expect(provOut.unresolved).toBe(false)
+  })
+
+  it('a suppressed (excluded) fact contributes no provenance to the union', () => {
+    // Exclude recA AND recB → eA + eShared both suppressed; only eLegacy emits.
+    deleteRecordingCascade('recA', { hard: false })
+    deleteRecordingCascade('recB', { hard: false })
+    const provOut = { recordingIds: new Set<string>(), unresolved: false }
+    const facts = neighborhoodFacts('Alice', 1, 20, getGroundingExclusionSet(), provOut)
+    expect(facts).toContain('Alice relates to Bob') // legacy only
+    expect(provOut.recordingIds.size).toBe(0) // no attributed fact emitted
+    expect(provOut.unresolved).toBe(false)
+  })
+
+  it('marks the union unverifiable when the fact-provenance read throws', () => {
+    // Throw ONLY for the graph_edge_sources read (the fact-provenance collection),
+    // leaving the node/edge reads that build the neighborhood intact. No-op
+    // exclusion means suppression never queries provenance, so facts still emit
+    // and only the provOut collection hits the failure.
+    const store = getKnowledgeGraphStore()
+    const orig = store.db.queryAll.bind(store.db)
+    const spy = vi.spyOn(store.db, 'queryAll').mockImplementation((sql: string, ...rest: unknown[]) => {
+      if (typeof sql === 'string' && sql.includes('graph_edge_sources')) throw new Error('boom')
+      return (orig as (s: string, ...r: unknown[]) => unknown[])(sql, ...rest)
+    })
+    try {
+      const provOut = { recordingIds: new Set<string>(), unresolved: false }
+      const facts = neighborhoodFacts('Alice', 1, 20, noExclusion, provOut)
+      expect(facts).not.toBe('') // facts still emit
+      expect(provOut.unresolved).toBe(true)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
 // RE-4 — provenance suppression on the VISUAL view paths (queryNeighborhood,
 // queryContextGraph, queryLens): an excluded post-F18 recording's attributed
 // edges (and nodes they orphan) must not show; legacy + shared-source stay.

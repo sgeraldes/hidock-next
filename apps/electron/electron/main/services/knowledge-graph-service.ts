@@ -1465,6 +1465,21 @@ function suppressExcludedFromView<
 }
 
 /**
+ * ADV18-2 (round-19) — provenance sink for graph grounding. When passed to
+ * {@link neighborhoodFacts}, it accumulates the authoritative recording ids that
+ * back the EMITTED fact edges (from graph_edge_sources), across every call, so
+ * the RAG service can fold graph provenance into the persisted answer's union.
+ * `unresolved` is set if a provenance read THREW (⇒ the answer's provenance is
+ * unverifiable ⇒ fail-closed redaction on later re-read). Legacy zero-provenance
+ * fact edges contribute NO recording id and do NOT set `unresolved` — they are an
+ * accepted residual (RE-3 ruling: pre-F18 content can't be retracted per-record).
+ */
+export interface NeighborhoodFactProvenance {
+  recordingIds: Set<string>
+  unresolved: boolean
+}
+
+/**
  * Compact, human-readable facts about an entity's neighborhood — one line per
  * connected entity. Used to ground the assistant/RAG with graph context.
  * Returns '' when nothing is found (caller appends nothing).
@@ -1480,12 +1495,17 @@ function suppressExcludedFromView<
  * the promise covers for post-F18 content). `excluded` is computed once per
  * query by the caller (rag.ts) and threaded in; it defaults to a fresh read so
  * this function stays independently correct + testable.
+ *
+ * ADV18-2 (round-19) — when `provOut` is supplied, the recording ids backing the
+ * EMITTED fact edges are collected into it so the answer's persisted provenance
+ * union covers graph facts, not just vector snippets.
  */
 export function neighborhoodFacts(
   entityId: string,
   hops = 1,
   maxFacts = 20,
-  exclusion: GroundingExclusion = getGroundingExclusionSet()
+  exclusion: GroundingExclusion = getGroundingExclusionSet(),
+  provOut?: NeighborhoodFactProvenance
 ): string {
   // Build the RAW neighborhood directly — NOT via queryNeighborhood, which
   // (RE4-2, round-4) empties a centered VIEW on an excluded-only / fail-closed
@@ -1509,6 +1529,7 @@ export function neighborhoodFacts(
   )
 
   const lines: string[] = []
+  const emittedEdgeIds: string[] = []
   for (const e of data.edges) {
     if (lines.length >= maxFacts) break
     if (suppressed.has(e.id)) continue // ARF-2 — fully-excluded provenance
@@ -1518,8 +1539,23 @@ export function neighborhoodFacts(
     if (src.id !== center.id && tgt.id !== center.id) continue
     const rel = e.type.toLowerCase().replace(/_/g, ' ')
     lines.push(`- ${src.label} ${rel} ${tgt.label}`)
+    if (provOut) emittedEdgeIds.push(e.id)
   }
   if (lines.length === 0) return ''
+
+  // ADV18-2 — record the authoritative recording ids behind the EMITTED facts so
+  // the persisted answer can be redacted if any of them is later excluded.
+  if (provOut && emittedEdgeIds.length) {
+    try {
+      for (const r of edgeProvenanceRows(store, emittedEdgeIds)) {
+        if (r.recording_id) provOut.recordingIds.add(r.recording_id)
+      }
+    } catch (e) {
+      provOut.unresolved = true
+      console.error('[KnowledgeGraph] fact provenance read failed — marking answer provenance unverifiable:', e)
+    }
+  }
+
   return `Context graph — ${center.label} (${center.type}):\n${lines.join('\n')}`
 }
 

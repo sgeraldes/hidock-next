@@ -145,7 +145,7 @@ describe('buildGraphContext — entity detection tiers', () => {
 
     const parts = await buildGraphContext('what did Alice decide?')
     expect(parts).toContain('FACT-ALICE')
-    expect(kgMock.neighborhoodFacts).toHaveBeenCalledWith('p1', 1, 20, expect.objectContaining({ ids: expect.any(Set) }))
+    expect(kgMock.neighborhoodFacts).toHaveBeenCalledWith('p1', 1, 20, expect.objectContaining({ ids: expect.any(Set) }), undefined)
   })
 
   it('Tier 2 (accent-fold): matches "Yaravi" against a node labelled "Yaraví"', async () => {
@@ -334,9 +334,9 @@ describe('buildGraphContext — meeting scope resolves app id → graph node id'
     const parts = await buildGraphContext('summarize this', 'meeting-123')
     expect(parts).toContain('FACT-MEETING')
     expect(kgMock.resolveEntityToNodeId).toHaveBeenCalledWith('meeting-123')
-    expect(kgMock.neighborhoodFacts).toHaveBeenCalledWith('node-m1', 1, 20, expect.objectContaining({ ids: expect.any(Set) }))
+    expect(kgMock.neighborhoodFacts).toHaveBeenCalledWith('node-m1', 1, 20, expect.objectContaining({ ids: expect.any(Set) }), undefined)
     // The raw app meeting id must never reach the facts call.
-    expect(kgMock.neighborhoodFacts).not.toHaveBeenCalledWith('meeting-123', 1, 20, expect.objectContaining({ ids: expect.any(Set) }))
+    expect(kgMock.neighborhoodFacts).not.toHaveBeenCalledWith('meeting-123', 1, 20, expect.objectContaining({ ids: expect.any(Set) }), undefined)
   })
 
   it('skips cleanly when the meeting has no graph node', async () => {

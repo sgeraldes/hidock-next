@@ -99,9 +99,15 @@ export function registerAssistantHandlers(): void {
       const id = randomUUID()
       const now = new Date().toISOString()
 
-      // ADV17-2 — persist normalized provenance alongside the snippets so a later
-      // read can revalidate them against the shared eligibility boundaries.
-      const packedSources = packSources(sources)
+      // ADV18-2 (round-19) — persist the AUTHORITATIVE provenance union alongside
+      // the snippets so a later read can redact the answer if ANY contributing
+      // recording/capture is excluded. The union is computed main-side by the RAG
+      // service (over vector + pinned + graph) and consumed here by session id
+      // (== conversationId); the renderer never supplies or can tamper with it. A
+      // missing union (non-RAG assistant message, or an absent stash) yields no
+      // envelope, so that assistant message fails closed (redacted) on read.
+      const prov = role === 'assistant' ? getRAGService().consumeAnswerProvenance(conversationId) : undefined
+      const packedSources = packSources(sources, prov)
 
       runInTransaction(() => {
         run('INSERT INTO chat_messages (id, conversation_id, role, content, sources, created_at) VALUES (?, ?, ?, ?, ?, ?)',
