@@ -651,28 +651,76 @@ export function removeRecordingFromGraph(
 // Query wrappers
 // ---------------------------------------------------------------------------
 
+// RE4-3 (round-4) — the whole family of raw graph reads exposed via graph:* IPC.
+// Each applies fail-closed getGroundingExclusionSet + node-visibility suppression
+// so an excluded-only person/meeting/skill/label is never retrievable. See the
+// {endpoint → filtered?} audit table in .claude/changes/ARF-HIGHS-CHANGES.md.
+
 export function queryTopAttendees(name: string): AttendeeResult[] {
   const store = getKnowledgeGraphStore()
-  return topAttendeesForProjectOrTopic(store, name)
+  const results = topAttendeesForProjectOrTopic(store, name)
+  const exclusion = getGroundingExclusionSet()
+  if (exclusionIsNoop(exclusion)) return results
+  return results.filter((r) => isNodeVisibleUnderExclusion(store, r.personId, exclusion))
 }
 
 export function queryTopSkill(skill: string): SkillDemonstratorResult[] {
   const store = getKnowledgeGraphStore()
-  return topSkillDemonstrators(store, skill)
+  const results = topSkillDemonstrators(store, skill)
+  const exclusion = getGroundingExclusionSet()
+  if (exclusionIsNoop(exclusion)) return results
+  return results.filter((r) => isNodeVisibleUnderExclusion(store, r.personId, exclusion))
 }
 
 export function queryPersonProfile(name: string): PersonProfile | undefined {
   const store = getKnowledgeGraphStore()
-  return personProfile(store, name)
+  const profile = personProfile(store, name)
+  if (!profile) return undefined
+  const exclusion = getGroundingExclusionSet()
+  if (exclusionIsNoop(exclusion)) return profile
+  // An excluded-only person is not retrievable at all; otherwise drop any
+  // excluded-only related meetings/skills/action-items.
+  if (!isNodeVisibleUnderExclusion(store, profile.personId, exclusion)) return undefined
+  const keep = (n: GraphNode): boolean => isNodeVisibleUnderExclusion(store, n.id, exclusion)
+  return {
+    ...profile,
+    meetings: profile.meetings.filter(keep),
+    skills: profile.skills.filter(keep),
+    actionItems: profile.actionItems.filter(keep),
+  }
 }
 
 export function queryMeetingGraph(meetingId: string): MeetingGraph {
   const store = getKnowledgeGraphStore()
-  return meetingSummaryGraph(store, meetingId)
+  const graph = meetingSummaryGraph(store, meetingId)
+  const exclusion = getGroundingExclusionSet()
+  if (exclusionIsNoop(exclusion) || !graph.meeting) return graph
+  // Centered on a meeting: fail closed + never expose an excluded-only meeting.
+  if (exclusion.failClosed || !isNodeVisibleUnderExclusion(store, graph.meeting.id, exclusion)) {
+    return { meeting: undefined, nodes: [], edges: [] }
+  }
+  const suppressed = provenanceSuppressedEdgeIds(store, graph.edges.map((e) => e.id), exclusion)
+  const keptEdges = graph.edges.filter((e) => !suppressed.has(e.id))
+  const incident = new Set<string>([graph.meeting.id])
+  for (const e of keptEdges) {
+    incident.add(e.source_id)
+    incident.add(e.target_id)
+  }
+  return { meeting: graph.meeting, nodes: graph.nodes.filter((n) => incident.has(n.id)), edges: keptEdges }
 }
 
 export function queryStats(): { nodes: number; edges: number; nodesByType: Record<string, number> } {
   const store = getKnowledgeGraphStore()
+  const exclusion = getGroundingExclusionSet()
+  if (!exclusionIsNoop(exclusion)) {
+    // RE4-3 — counts must reflect only VISIBLE (eligible) content, so an
+    // excluded recording's attributed nodes/edges aren't counted. Build the
+    // suppressed full graph and count survivors.
+    const full = suppressExcludedFromView(toDTO(fullGraph(store)), exclusion)
+    const nodesByType: Record<string, number> = {}
+    for (const n of full.nodes) nodesByType[n.type] = (nodesByType[n.type] ?? 0) + 1
+    return { nodes: full.nodes.length, edges: full.edges.length, nodesByType }
+  }
   const nodes = store.db.queryAll<{ count: number }>('SELECT COUNT(*) AS count FROM graph_nodes')
   const edges = store.db.queryAll<{ count: number }>('SELECT COUNT(*) AS count FROM graph_edges')
   const byType = store.db.queryAll<{ type: string; count: number }>(
@@ -691,7 +739,10 @@ export function queryStats(): { nodes: number; edges: number; nodesByType: Recor
 
 export function queryListNodes(type?: string): GraphNode[] {
   const store = getKnowledgeGraphStore()
-  return store.findNodes(type ? { type: type as any } : {})
+  const nodes = store.findNodes(type ? { type: type as any } : {})
+  const exclusion = getGroundingExclusionSet()
+  if (exclusionIsNoop(exclusion)) return nodes
+  return nodes.filter((n) => isNodeVisibleUnderExclusion(store, n.id, exclusion))
 }
 
 // ---------------------------------------------------------------------------
@@ -936,8 +987,13 @@ export function queryNeighborhood(entityId: string, hops = 1): ContextGraphData 
   const store = getKnowledgeGraphStore()
   const nodeId = resolveEntityToNodeId(entityId)
   if (!nodeId) return { center: null, nodes: [], edges: [] }
-  // RE-4 — provenance suppression for the visual neighborhood view.
-  return suppressExcludedFromView(toDTO(neighborhood(store, nodeId, hops)), getGroundingExclusionSet())
+  const exclusion = getGroundingExclusionSet()
+  // RE4-2 (round-4) — a centered view fails closed and never exposes an
+  // excluded-only center: check center visibility BEFORE building.
+  if (exclusion.failClosed || !isNodeVisibleUnderExclusion(store, nodeId, exclusion)) {
+    return { center: null, nodes: [], edges: [] }
+  }
+  return suppressExcludedFromView(toDTO(neighborhood(store, nodeId, hops)), exclusion)
 }
 
 /** Find graph nodes whose label matches a query — powers search-to-focus. */
@@ -1107,6 +1163,46 @@ function isNodeVisibleUnderExclusion(
 }
 
 /**
+ * RE4-1 (round-4) — the set of nodes REACHABLE from `centerId` within `hops`
+ * traversing ONLY surviving (non-suppressed) edges. Stricter than
+ * isNodeVisibleUnderExclusion: a node with eligible edges ELSEWHERE but reachable
+ * from this center only via an excluded edge is NOT in the set. Used to derive a
+ * centered provenance/subgraph solely from survivors.
+ */
+function centerReachableSurvivorIds(
+  store: KnowledgeGraphStore,
+  centerId: string,
+  hops: number,
+  exclusion: GroundingExclusion
+): Set<string> {
+  const sub = neighborhood(store, centerId, hops)
+  const suppressed = provenanceSuppressedEdgeIds(store, sub.edges.map((e) => e.id), exclusion)
+  const adj = new Map<string, Set<string>>()
+  const link = (a: string, b: string): void => {
+    let s = adj.get(a)
+    if (!s) { s = new Set(); adj.set(a, s) }
+    s.add(b)
+  }
+  for (const e of sub.edges) {
+    if (suppressed.has(e.id)) continue
+    link(e.source_id, e.target_id)
+    link(e.target_id, e.source_id)
+  }
+  const reachable = new Set<string>([centerId])
+  const queue = [centerId]
+  while (queue.length) {
+    const cur = queue.shift() as string
+    for (const nb of adj.get(cur) ?? []) {
+      if (!reachable.has(nb)) {
+        reachable.add(nb)
+        queue.push(nb)
+      }
+    }
+  }
+  return reachable
+}
+
+/**
  * RE-4 (Codex adversarial re-review round 2) — apply the SAME provenance-aware
  * suppression used for assistant grounding to a Context Graph VIEW DTO (nodes +
  * edges): drop every edge whose provenance is entirely excluded (post-F18
@@ -1147,7 +1243,12 @@ function suppressExcludedFromView<
     }
   }
   const keptNodes = data.nodes.filter((n) => {
-    if (n.id === data.center) return true // never prune the center
+    // RE4-2 (round-4) — the center is NOT exempt from pruning. Centered callers
+    // (queryNeighborhood/queryLens) pre-check center visibility and bail EMPTY
+    // for an excluded-only / fail-closed center BEFORE building, so a surviving
+    // center always retains ≥1 eligible incident edge here and is kept via
+    // incidentToKept below; an excluded-only center is never allowed to reach
+    // this function.
     if (incidentToKept.has(n.id)) return true // still connected
     // Orphaned strictly BY the removal (was only on suppressed edges) → prune.
     if (incidentToSuppressed.has(n.id)) return false
@@ -1179,7 +1280,15 @@ export function neighborhoodFacts(
   maxFacts = 20,
   exclusion: GroundingExclusion = getGroundingExclusionSet()
 ): string {
-  const data = queryNeighborhood(entityId, hops)
+  // Build the RAW neighborhood directly — NOT via queryNeighborhood, which
+  // (RE4-2, round-4) empties a centered VIEW on an excluded-only / fail-closed
+  // center. GROUNDING has a different fail-closed policy (round-3 P1): suppress
+  // attributed edges but KEEP legacy zero-provenance facts so the assistant is
+  // not gutted on a transient DB error. The edge suppression below enforces it.
+  const store = getKnowledgeGraphStore()
+  const nodeId = resolveEntityToNodeId(entityId)
+  if (!nodeId) return ''
+  const data = toDTO(neighborhood(store, nodeId, hops))
   if (!data.center || data.nodes.length <= 1) return ''
 
   const byId = new Map(data.nodes.map((n) => [n.id, n]))
@@ -1289,14 +1398,21 @@ export function queryLens(
   opts: { hops?: number; cap?: number; windowDays?: number | null } = {}
 ): ContextLensData {
   const store = getKnowledgeGraphStore()
+  const emptyLens: ContextLensData = { center: null, nodes: [], edges: [], referenceMs: null, strata: [] }
+  const exclusion = getGroundingExclusionSet()
   let centerNodeId: string | null = null
   if (centerEntityId) {
     centerNodeId = resolveEntityToNodeId(centerEntityId)
-    if (!centerNodeId) return { center: null, nodes: [], edges: [], referenceMs: null, strata: [] }
+    if (!centerNodeId) return emptyLens
+    // RE4-2 (round-4) — a CENTERED lens fails closed and never exposes an
+    // excluded-only center. (A null-center whole-graph lens is not "centered";
+    // it falls through to suppressExcludedFromView, which under fail-closed
+    // suppresses attributed edges and keeps only legacy, like the overview.)
+    if (exclusion.failClosed || !isNodeVisibleUnderExclusion(store, centerNodeId, exclusion)) {
+      return emptyLens
+    }
   }
-  // RE-4 — provenance suppression for the visual lens view (extra lens fields
-  // pass through the generic helper untouched).
-  return suppressExcludedFromView(toLensDTO(lensGraph(store, centerNodeId, opts)), getGroundingExclusionSet())
+  return suppressExcludedFromView(toLensDTO(lensGraph(store, centerNodeId, opts)), exclusion)
 }
 
 /**
@@ -1335,13 +1451,10 @@ export function queryProvenance(entityId: string): ProvenanceDTO {
     dateMs: null,
   }
   if (!nodeId) return empty
-  // P3 (round-3) — an excluded-only center has no eligible provenance to show;
-  // and each listed entity is filtered so an excluded edge's contribution
-  // (e.g. a meeting reachable only via excluded provenance) is absent.
   const exclusion = getGroundingExclusionSet()
-  if (!isNodeVisibleUnderExclusion(store, nodeId, exclusion)) return empty
-  const visible = (e: { id: string }): boolean =>
-    exclusionIsNoop(exclusion) || isNodeVisibleUnderExclusion(store, e.id, exclusion)
+  // RE4-2 — centered read: fail closed, and never expose an excluded-only center.
+  if (exclusion.failClosed || !isNodeVisibleUnderExclusion(store, nodeId, exclusion)) return empty
+
   const prov: Provenance = provenance(store, nodeId)
   const projects = projectNameIndex()
   const mapEntity = (e: {
@@ -1363,15 +1476,48 @@ export function queryProvenance(entityId: string): ProvenanceDTO {
       dateMs: e.dateMs,
     }
   }
+
+  // RE4-1 (round-4) — the round-3 residual (pathIds + narrative + dateMs came
+  // from the UNFILTERED graph) leaked excluded NAMES via the label-derived
+  // type:slug node ids and the narrative. Derive EVERYTHING solely from
+  // survivors: keep only entities REACHABLE from the center via non-suppressed
+  // edges (a node reachable only via an excluded edge is dropped even if it has
+  // eligible edges elsewhere). pathIds rebuilt from survivors; narrative dropped
+  // when anything was suppressed (it embeds excluded labels); dateMs recomputed
+  // from the newest SURVIVING meeting.
+  const survivors = exclusionIsNoop(exclusion)
+    ? null // fast path — no suppression, keep the package result verbatim
+    : centerReachableSurvivorIds(store, nodeId, 2, exclusion)
+  const keep = (e: { id: string }): boolean => survivors === null || survivors.has(e.id)
+
+  const meetings = prov.meetings.filter(keep)
+  const people = prov.people.filter(keep)
+  const projectsArr = prov.projects.filter(keep)
+  const actions = prov.actions.filter(keep)
+  const suppressedAny =
+    survivors !== null &&
+    (meetings.length !== prov.meetings.length ||
+      people.length !== prov.people.length ||
+      projectsArr.length !== prov.projects.length ||
+      actions.length !== prov.actions.length)
+
+  const pathIds =
+    survivors === null
+      ? prov.pathIds
+      : [...new Set([nodeId, ...meetings, ...people, ...projectsArr, ...actions].map((x) => (typeof x === 'string' ? x : x.id)))]
+  // Package sorts meetings newest-first; the newest SURVIVING meeting drives dateMs.
+  const dateMs = survivors === null ? prov.dateMs : (meetings[0]?.dateMs ?? prov.node?.dateMs ?? null)
+  const narrative = suppressedAny ? '' : prov.narrative
+
   return {
     node: prov.node ? mapEntity(prov.node) : null,
-    meetings: prov.meetings.filter(visible).map(mapEntity),
-    people: prov.people.filter(visible).map(mapEntity),
-    projects: prov.projects.filter(visible).map(mapEntity),
-    actions: prov.actions.filter(visible).map(mapEntity),
-    pathIds: prov.pathIds,
-    narrative: prov.narrative,
-    dateMs: prov.dateMs,
+    meetings: meetings.map(mapEntity),
+    people: people.map(mapEntity),
+    projects: projectsArr.map(mapEntity),
+    actions: actions.map(mapEntity),
+    pathIds,
+    narrative,
+    dateMs,
   }
 }
 

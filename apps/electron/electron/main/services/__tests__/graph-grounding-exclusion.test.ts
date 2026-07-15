@@ -58,6 +58,12 @@ import {
   searchGraphNodes,
   queryProvenance,
   getNodeDetail,
+  queryTopAttendees,
+  queryTopSkill,
+  queryPersonProfile,
+  queryMeetingGraph,
+  queryStats,
+  queryListNodes,
   removeRecordingProvenanceCore,
 } from '../knowledge-graph-service'
 
@@ -305,9 +311,11 @@ describe('P1 — grounding fails closed on exclusion-lookup error', () => {
     expect(facts).toContain('Alice relates to Bob')
   })
 
-  it('the Context Graph view also fails closed (attributed edges hidden, legacy kept)', () => {
+  it('the non-centered overview fails closed (attributed edges hidden, legacy kept)', () => {
+    // The OVERVIEW is not centered, so it suppresses attributed edges and keeps
+    // legacy under fail-closed (a centered view empties instead — see RE4-2).
     dbRun('DROP TABLE recordings')
-    const data = queryNeighborhood('Alice')
+    const data = queryContextGraph(100)
     const byId = new Map(data.nodes.map((n) => [n.id, n.label]))
     const edgeLabels = data.edges.map((e) => `${byId.get(e.source)}→${byId.get(e.target)}`)
     expect(edgeLabels).not.toContain('Alice→Roadmap')
@@ -427,5 +435,170 @@ describe('RE-3 — legacy zero-provenance edges persist through permanent delete
     } finally {
       setGraphProvenanceCleanup(null)
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// RE4-3 (round-4) — the whole family of raw graph reads (rankings, profile,
+// meeting subgraph, list, stats) must not expose excluded-only nodes.
+// ---------------------------------------------------------------------------
+
+describe('RE4-3 — ranking / profile / meeting / list / stats hide excluded-only nodes', () => {
+  // Zoe attends a meeting about a topic and demonstrates a skill, ALL sourced by
+  // recP → excluding recP makes Zoe (+ the meeting/topic/skill) excluded-only.
+  function seedAttendanceChain(): void {
+    seedRecording('recP')
+    seedNode('nZoe', 'person', 'Zoe')
+    seedNode('nStandup', 'meeting', 'Standup')
+    seedNode('nPlanning', 'topic', 'Planning')
+    seedNode('nK8s', 'skill', 'Kubernetes')
+    seedEdge('eAtt', 'nZoe', 'nStandup', 'ATTENDED')
+    seedEdgeSource('eAtt', 'recP', 'txP')
+    seedEdge('eAbout', 'nStandup', 'nPlanning', 'ABOUT')
+    seedEdgeSource('eAbout', 'recP', 'txP')
+    seedEdge('eDem', 'nZoe', 'nK8s', 'DEMONSTRATED')
+    seedEdgeSource('eDem', 'recP', 'txP')
+  }
+
+  it('control (no exclusion): Zoe is retrievable everywhere', () => {
+    seedAttendanceChain()
+    expect(queryTopAttendees('Planning').map((a) => a.person)).toContain('Zoe')
+    expect(queryTopSkill('Kubernetes').map((s) => s.person)).toContain('Zoe')
+    expect(queryPersonProfile('Zoe')).toBeTruthy()
+    expect(queryMeetingGraph('nStandup').meeting).toBeTruthy()
+    expect(queryListNodes('person').map((n) => n.label)).toContain('Zoe')
+  })
+
+  it('excluding recP removes Zoe + her attributed nodes from every read', () => {
+    seedAttendanceChain()
+    deleteRecordingCascade('recP', { hard: false })
+
+    expect(queryTopAttendees('Planning').map((a) => a.person)).not.toContain('Zoe')
+    expect(queryTopSkill('Kubernetes').map((s) => s.person)).not.toContain('Zoe')
+    expect(queryPersonProfile('Zoe')).toBeUndefined()
+    expect(queryMeetingGraph('nStandup')).toEqual({ meeting: undefined, nodes: [], edges: [] })
+    const labels = queryListNodes().map((n) => n.label)
+    expect(labels).not.toContain('Zoe')
+    expect(labels).not.toContain('Standup')
+    expect(labels).not.toContain('Kubernetes')
+    // The eligible Alice cluster is untouched.
+    expect(queryListNodes('person').map((n) => n.label)).toContain('Alice')
+  })
+
+  it('queryStats counts only visible (eligible) nodes under exclusion', () => {
+    seedAttendanceChain()
+    const before = queryStats().nodes
+    deleteRecordingCascade('recP', { hard: false })
+    const after = queryStats()
+    // Zoe/Standup/Planning/Kubernetes (4 excluded-only nodes) drop out.
+    expect(after.nodes).toBeLessThan(before)
+    expect(after.nodesByType.person ?? 0).toBeGreaterThan(0) // Alice/Bob remain
+  })
+
+  it('a shared-provenance person (one excluded + one eligible edge) STAYS retrievable', () => {
+    seedRecording('recP')
+    seedRecording('recQ')
+    seedNode('nShared', 'person', 'Sam')
+    seedNode('nM1', 'meeting', 'M1')
+    seedNode('nM2', 'meeting', 'M2')
+    seedEdge('eS1', 'nShared', 'nM1', 'ATTENDED')
+    seedEdgeSource('eS1', 'recP', 'txP') // excluded when recP goes
+    seedEdge('eS2', 'nShared', 'nM2', 'ATTENDED')
+    seedEdgeSource('eS2', 'recQ', 'txQ') // stays eligible
+
+    deleteRecordingCascade('recP', { hard: false })
+    expect(queryListNodes('person').map((n) => n.label)).toContain('Sam')
+    expect(queryPersonProfile('Sam')).toBeTruthy()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// RE4-1 (round-4) — queryProvenance derives EVERYTHING from center-reachable
+// survivors: no excluded label / label-derived id in pathIds/narrative/arrays,
+// and a node reachable only via an excluded edge is dropped.
+// ---------------------------------------------------------------------------
+
+describe('RE4-1 — queryProvenance suppresses the subgraph first', () => {
+  function seedProvenanceGraph(): void {
+    // Alice ATTENDED SecretMeeting via recA (excluded when recA goes).
+    seedNode('nSecret', 'meeting', 'SecretMeeting')
+    seedEdge('eAx', 'nAlice', 'nSecret', 'ATTENDED')
+    seedEdgeSource('eAx', 'recA', 'txA')
+    // SecretMeeting ALSO has a legacy edge elsewhere → globally "visible", but
+    // from Alice it is reachable ONLY via the excluded eAx.
+    seedNode('nFaraway', 'person', 'Faraway')
+    seedEdge('eFar', 'nSecret', 'nFaraway', 'MENTIONED') // legacy, no provenance
+  }
+
+  it('control: SecretMeeting appears in Alice provenance with no exclusion', () => {
+    seedProvenanceGraph()
+    const prov = queryProvenance('Alice')
+    const labels = [...prov.meetings, ...prov.people].map((e) => e.label)
+    expect(labels).toContain('SecretMeeting')
+  })
+
+  it('excluding recA drops SecretMeeting from arrays, pathIds, and narrative (no excluded label/id anywhere)', () => {
+    seedProvenanceGraph()
+    deleteRecordingCascade('recA', { hard: false })
+
+    const prov = queryProvenance('Alice')
+    const dtoStr = JSON.stringify(prov).toLowerCase()
+    // No excluded label OR label-derived node id (meeting:secretmeeting) anywhere.
+    expect(dtoStr).not.toContain('secretmeeting')
+    // The center is still present (Alice is eligible via legacy/shared edges).
+    expect(prov.node?.label).toBe('Alice')
+    // Reachable-only-via-excluded node is absent even though it is globally
+    // visible (it has a legacy edge to Faraway).
+    expect(prov.meetings.map((m) => m.label)).not.toContain('SecretMeeting')
+  })
+
+  it('an excluded-only center yields empty provenance', () => {
+    deleteRecordingCascade('recA', { hard: false }) // Roadmap reachable only via eA
+    const prov = queryProvenance('Roadmap')
+    expect(prov.node).toBeNull()
+    expect(prov.pathIds).toEqual([])
+    expect(prov.narrative).toBe('')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// RE4-2 (round-4) — centered views prune/empty an excluded-only or fail-closed
+// center (never expose its label/metadata).
+// ---------------------------------------------------------------------------
+
+describe('RE4-2 — centered views empty an excluded-only / fail-closed center', () => {
+  it('queryNeighborhood on an excluded-only center returns an EMPTY DTO', () => {
+    deleteRecordingCascade('recA', { hard: false }) // Roadmap becomes excluded-only
+    expect(queryNeighborhood('Roadmap')).toEqual({ center: null, nodes: [], edges: [] })
+  })
+
+  it('queryLens on an excluded-only center returns an EMPTY DTO', () => {
+    deleteRecordingCascade('recA', { hard: false })
+    expect(queryLens('Roadmap', { hops: 1 })).toEqual({
+      center: null,
+      nodes: [],
+      edges: [],
+      referenceMs: null,
+      strata: []
+    })
+  })
+
+  it('a still-eligible center is NOT emptied', () => {
+    deleteRecordingCascade('recA', { hard: false })
+    const data = queryNeighborhood('Alice')
+    expect(data.center).not.toBeNull()
+    expect(data.nodes.map((n) => n.label)).toContain('Alice')
+  })
+
+  it('fail-closed lookup failure empties a centered view (queryNeighborhood + queryLens)', () => {
+    dbRun('DROP TABLE recordings') // forces getExcludedRecordingIds to throw
+    expect(queryNeighborhood('Alice')).toEqual({ center: null, nodes: [], edges: [] })
+    expect(queryLens('Alice', { hops: 1 })).toEqual({
+      center: null,
+      nodes: [],
+      edges: [],
+      referenceMs: null,
+      strata: []
+    })
   })
 })
