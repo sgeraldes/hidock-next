@@ -12,21 +12,49 @@
  *
  * Ids arriving from the renderer's unified view may be synced_files ids — every
  * handler resolves through resolveRecordingId first, mirroring recording-handlers.
+ *
+ * F17/T6 (spec-006) additions:
+ *   - Wires the graph-provenance cleanup DI seam (D1) at registration time —
+ *     see main/index.ts's post-registration startup tripwire for the loud
+ *     "unwired" guard.
+ *   - recordings:deletionImpact merges a graph dry-run estimate (D5/AR3-8).
+ *   - recordings:deleteCascade runs the AR3-3(a) ensureGraphReady() pre-flight
+ *     before a hard purge (outside the delete transaction) and accepts the
+ *     AR3-3(c) skipGraphCleanup escape hatch as an explicit third argument.
+ *   - recordings:markNotOnDevice (AR3-6b) and recordings:retryPendingCleanups
+ *     (AR3-2) are new, small, deletion-domain-adjacent handlers.
  */
 
 import { ipcMain } from 'electron'
 import { z } from 'zod'
-import { resolveRecordingId, setKnowledgeCaptureRatingByRecording } from '../services/database'
+import {
+  resolveRecordingId,
+  setKnowledgeCaptureRatingByRecording,
+  setGraphProvenanceCleanup,
+  markRecordingNotOnDeviceById
+} from '../services/database'
+import {
+  removeRecordingProvenanceCore,
+  removeRecordingFromGraph,
+  ensureGraphReady
+} from '../services/knowledge-graph-service'
 import {
   markRecordingPersonal,
   getDeletionImpact,
   deleteRecording as deleteRecordingCascadeService,
-  restoreDeletedRecording
+  restoreDeletedRecording,
+  retryPendingFileCleanups
 } from '../services/recording-deletion-service'
 
 const RecordingIdSchema = z.string().min(1).max(200)
 const MarkPersonalSchema = z.object({ id: RecordingIdSchema, personal: z.boolean() })
-const DeleteCascadeSchema = z.object({ id: RecordingIdSchema, hard: z.boolean() })
+const DeleteCascadeSchema = z.object({
+  id: RecordingIdSchema,
+  hard: z.boolean(),
+  // spec-006/F17 T6 AR3-3(c) — escape hatch, optional so every prior call
+  // shape (id, hard) keeps working unchanged.
+  skipGraphCleanup: z.boolean().optional()
+})
 // F16/spec-003: manual per-row value-rating override. Validated + capture-scoped
 // (resolved from the recording id) — distinct from the unvalidated knowledge:update
 // handler, and distinct from quality:set (the separate quality_assessments system).
@@ -36,6 +64,14 @@ const SetValueRatingSchema = z.object({
 })
 
 export function registerRecordingDeletionHandlers(): void {
+  // spec-006/F17 T6 D1 — wire the graph-provenance cleanup seam. Runs once at
+  // registration time (app startup); main/index.ts's post-registration
+  // tripwire (AR3-1) logs a loud console.error if this is ever skipped by a
+  // future refactor. removeRecordingProvenanceCore does no DDL of its own
+  // beyond the already-initialized store (AR3-3a — the DDL/readiness check
+  // itself is the deleteCascade handler's ensureGraphReady() pre-flight below).
+  setGraphProvenanceCleanup((recordingId, opts) => removeRecordingProvenanceCore(recordingId, opts))
+
   // Mark / unmark a recording personal ("ignore").
   ipcMain.handle('recordings:markPersonal', async (_, id: unknown, personal: unknown) => {
     try {
@@ -73,7 +109,11 @@ export function registerRecordingDeletionHandlers(): void {
     }
   })
 
-  // Read-only impact for the confirm dialog.
+  // Read-only impact for the confirm dialog. spec-006/F17 T6 D5/AR3-8: merges
+  // a graph dry-run estimate — number is a point-in-time ESTIMATE ("~N graph
+  // links"); null means the dry-run explicitly failed (UNKNOWN — the dialog
+  // renders a warning, never a silent omission). Computed HERE (not in
+  // database.ts) so database.ts stays graph-free except for the cleanup seam.
   ipcMain.handle('recordings:deletionImpact', async (_, id: unknown) => {
     try {
       const parsed = RecordingIdSchema.safeParse(id)
@@ -82,23 +122,57 @@ export function registerRecordingDeletionHandlers(): void {
       if (!rec) return { success: false, error: 'Recording not found' }
       const data = getDeletionImpact(rec.id)
       if (!data) return { success: false, error: 'Recording not found' }
-      return { success: true, data }
+
+      let graphEstimate: number | null = null
+      try {
+        const g = removeRecordingFromGraph(rec.id, { dryRun: true })
+        if (g?.ok) {
+          graphEstimate = g.edgesRemoved + g.meetingNodesRemoved + g.orphanNodesRemoved
+        }
+      } catch (e) {
+        console.error('recordings:deletionImpact graph dry-run failed:', e)
+        graphEstimate = null
+      }
+
+      return { success: true, data: { ...data, graphEstimate } }
     } catch (e) {
       console.error('recordings:deletionImpact error:', e)
       return { success: false, error: e instanceof Error ? e.message : 'Unknown error' }
     }
   })
 
-  // Soft (default) or hard cascade delete.
-  ipcMain.handle('recordings:deleteCascade', async (_, id: unknown, hard: unknown) => {
+  // Soft (default) or hard cascade delete. spec-006/F17 T6 AR3-3(a): a hard
+  // delete (unless the skipGraphCleanup escape hatch is set) runs a graph
+  // readiness pre-flight BEFORE calling the service — an honest, fast
+  // "graph cleanup unavailable" failure outside the delete transaction,
+  // rather than only discovering it via the fail-closed throw deep inside
+  // deleteRecordingCascade's own transaction (AR3-1, still the ultimate
+  // backstop if this pre-flight is ever bypassed).
+  ipcMain.handle('recordings:deleteCascade', async (_, id: unknown, hard: unknown, opts: unknown) => {
     try {
-      const parsed = DeleteCascadeSchema.safeParse({ id, hard })
+      const skipGraphCleanup = (opts as { skipGraphCleanup?: unknown } | undefined)?.skipGraphCleanup
+      const parsed = DeleteCascadeSchema.safeParse({ id, hard, skipGraphCleanup })
       if (!parsed.success) {
         return { success: false, error: parsed.error.issues[0]?.message || 'Invalid request' }
       }
       const rec = resolveRecordingId(parsed.data.id)
       if (!rec) return { success: false, error: 'Recording not found' }
-      return await deleteRecordingCascadeService(rec.id, { hard: parsed.data.hard })
+
+      if (parsed.data.hard && !parsed.data.skipGraphCleanup) {
+        const ready = ensureGraphReady()
+        if (!ready.ok) {
+          return {
+            success: false,
+            error: `Graph cleanup unavailable: ${ready.error ?? 'unknown error'}`,
+            graphUnavailable: true
+          }
+        }
+      }
+
+      return await deleteRecordingCascadeService(rec.id, {
+        hard: parsed.data.hard,
+        ...(parsed.data.skipGraphCleanup ? { skipGraphCleanup: true } : {})
+      })
     } catch (e) {
       console.error('recordings:deleteCascade error:', e)
       return { success: false, error: e instanceof Error ? e.message : 'Unknown error' }
@@ -116,6 +190,37 @@ export function registerRecordingDeletionHandlers(): void {
     } catch (e) {
       console.error('recordings:restore error:', e)
       return { success: false }
+    }
+  })
+
+  // spec-006/F17 T6 AR3-6(b) — immediately reconcile a single recording's
+  // device presence after a CONFIRMED device delete (the permanent-delete
+  // device checkbox, and the synced-row "Delete from device" item), so the
+  // UI doesn't show a stale on-device row until the next authoritative scan.
+  ipcMain.handle('recordings:markNotOnDevice', async (_, id: unknown) => {
+    try {
+      const parsed = RecordingIdSchema.safeParse(id)
+      if (!parsed.success) return { success: false, error: 'Invalid recording id' }
+      const rec = resolveRecordingId(parsed.data)
+      if (!rec) return { success: false, error: 'Recording not found' }
+      markRecordingNotOnDeviceById(rec.id)
+      return { success: true }
+    } catch (e) {
+      console.error('recordings:markNotOnDevice error:', e)
+      return { success: false, error: e instanceof Error ? e.message : 'Unknown error' }
+    }
+  })
+
+  // spec-006/F17 T6 AR3-2 — bounded, non-fatal sweep of any post-commit
+  // file-cleanup backlog from an earlier hard purge. The renderer calls this
+  // on Trash-view entry, in addition to it running on every hard purge.
+  ipcMain.handle('recordings:retryPendingCleanups', async () => {
+    try {
+      const result = await retryPendingFileCleanups()
+      return { success: true, ...result }
+    } catch (e) {
+      console.error('recordings:retryPendingCleanups error:', e)
+      return { success: false, error: e instanceof Error ? e.message : 'Unknown error' }
     }
   })
 

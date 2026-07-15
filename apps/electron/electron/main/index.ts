@@ -17,7 +17,7 @@ const USB_PRODUCT_IDS = [
   0xaf0f,  // P1 Mini
   0x2041   // P1 Mini (alternate)
 ]
-import { initializeDatabase, closeDatabase } from './services/database'
+import { initializeDatabase, closeDatabase, isGraphProvenanceCleanupRegistered } from './services/database'
 import { initializeConfig, getConfig } from './services/config'
 import { setAutoConnectChecker } from './services/jensen'
 import { initializeFileStorage } from './services/file-storage'
@@ -188,6 +188,19 @@ async function initializeServices(): Promise<void> {
 
   registerIpcHandlers()
   console.log('IPC handlers registered')
+
+  // spec-006/F17 T6 AR3-1 — loud startup tripwire. registerRecordingDeletionHandlers()
+  // (called from registerIpcHandlers() above) wires the graph-provenance
+  // cleanup seam as a side effect of registration; the hard-purge branch
+  // itself already fails closed if this is ever skipped (a refactor that
+  // reorders registration, an early throw, etc.), but that failure would
+  // otherwise only surface the next time a user tries to permanently delete
+  // something. Converts a silent wiring regression into a loud boot error.
+  if (!isGraphProvenanceCleanupRegistered()) {
+    console.error(
+      '[startup] graph provenance cleanup NOT wired — permanent deletes will leak graph residue'
+    )
+  }
 
   // Living knowledge graph (v27): subscribe graph-sync to entity events now, so
   // renames/merges and finished transcripts keep the graph in step. DB-only +

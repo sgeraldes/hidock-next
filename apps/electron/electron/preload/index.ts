@@ -426,10 +426,20 @@ export interface ElectronAPI {
         artifacts: number
         meetingLinks: number
         hasAudioFile: boolean
+        // spec-006/F17 T6 D5/F-INFO-6
+        onDevice: boolean
+        deviceFilename: string | null
+        // spec-006/F17 T6 D5/AR3-8 — number = point-in-time estimate; null =
+        // the graph dry-run explicitly failed (UNKNOWN, never omitted).
+        graphEstimate: number | null
       }
       error?: string
     }>
-    deleteCascade: (id: string, hard: boolean) => Promise<{
+    // spec-006/F17 T6 AR3-3(c): the 3rd argument is the explicit
+    // skipGraphCleanup escape hatch — omit it (2-arg call) for the normal
+    // path; only pass it after an honest graphUnavailable failure and an
+    // explicit second user action.
+    deleteCascade: (id: string, hard: boolean, opts?: { skipGraphCleanup?: boolean }) => Promise<{
       success: boolean
       mode?: 'soft' | 'hard'
       removed?: {
@@ -441,11 +451,37 @@ export interface ElectronAPI {
         speakerBindings: number
         candidates: number
         meetingLinksRemoved: number
+        // spec-006/F17 T6 D1/D5 — actual (not estimated) graph cleanup counts.
+        markersRemoved: number
+        edgesRemoved: number
+        edgeSourceRowsRemoved: number
+        meetingNodesRemoved: number
+        orphanNodesRemoved: number
       }
       filesRemoved?: { audio: boolean; wikiPages: number; artifactBlobs: number }
+      // spec-006/F17 T6 AR3-2 — post-commit file-cleanup partial-result contract.
+      allFilesRemoved?: boolean
+      pendingFileKinds?: string[]
+      // spec-006/F17 T6 AR3-3(c)
+      graphCleanupSkipped?: boolean
+      journalId?: string
       error?: string
+      // spec-006/F17 T6 AR3-1/AR3-3 — set when the failure specifically means
+      // "the graph cleanup seam is unavailable"; the caller offers the
+      // skipGraphCleanup escape hatch only then, never automatically.
+      graphUnavailable?: boolean
     }>
     restore: (id: string) => Promise<{ success: boolean }>
+    // spec-006/F17 T6 AR3-6(b) — immediate single-recording device reconciliation.
+    markNotOnDevice: (id: string) => Promise<{ success: boolean; error?: string }>
+    // spec-006/F17 T6 AR3-2 — bounded, non-fatal pending-file-cleanup retry sweep.
+    retryPendingCleanups: () => Promise<{
+      success: boolean
+      attempted?: number
+      cleared?: number
+      stillPending?: Record<string, string[]>
+      error?: string
+    }>
     // F16/spec-003: manual per-row value-rating override (validated, capture-scoped).
     setValueRating: (
       id: string,
@@ -1309,8 +1345,10 @@ const electronAPI: ElectronAPI = {
     deleteBatch: (ids) => callIPC('recordings:deleteBatch', ids),
     markPersonal: (id, personal) => callIPC('recordings:markPersonal', id, personal),
     deletionImpact: (id) => callIPC('recordings:deletionImpact', id),
-    deleteCascade: (id, hard) => callIPC('recordings:deleteCascade', id, hard),
+    deleteCascade: (id, hard, opts) => callIPC('recordings:deleteCascade', id, hard, opts),
     restore: (id) => callIPC('recordings:restore', id),
+    markNotOnDevice: (id) => callIPC('recordings:markNotOnDevice', id),
+    retryPendingCleanups: () => callIPC('recordings:retryPendingCleanups'),
     setValueRating: (id, rating) => callIPC('recordings:setValueRating', id, rating),
     // Recording-Meeting linking dialog methods
     getCandidates: (recordingId) => callIPC('recordings:getCandidates', recordingId),

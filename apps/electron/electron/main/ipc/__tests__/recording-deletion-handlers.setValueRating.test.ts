@@ -22,14 +22,31 @@ const setKnowledgeCaptureRatingByRecordingMock = vi.fn()
 
 vi.mock('../../services/database', () => ({
   resolveRecordingId: (...args: unknown[]) => resolveRecordingIdMock(...args),
-  setKnowledgeCaptureRatingByRecording: (...args: unknown[]) => setKnowledgeCaptureRatingByRecordingMock(...args)
+  setKnowledgeCaptureRatingByRecording: (...args: unknown[]) => setKnowledgeCaptureRatingByRecordingMock(...args),
+  // spec-006/F17 T6 — recording-deletion-handlers.ts now wires the graph
+  // seam (setGraphProvenanceCleanup) at registration time and exposes
+  // markRecordingNotOnDeviceById; both need a stub so the real module
+  // doesn't throw calling an undefined export from this mocked module.
+  setGraphProvenanceCleanup: vi.fn(),
+  markRecordingNotOnDeviceById: vi.fn()
+}))
+
+// spec-006/F17 T6 — once recording-deletion-handlers.ts imports
+// knowledge-graph-service (for the seam wiring + the deletionImpact graph
+// dry-run + the deleteCascade pre-flight), this suite must mock it so the
+// real graph package is never loaded.
+vi.mock('../../services/knowledge-graph-service', () => ({
+  removeRecordingProvenanceCore: vi.fn(),
+  removeRecordingFromGraph: vi.fn(),
+  ensureGraphReady: vi.fn(() => ({ ok: true }))
 }))
 
 vi.mock('../../services/recording-deletion-service', () => ({
   markRecordingPersonal: vi.fn(),
   getDeletionImpact: vi.fn(),
   deleteRecording: vi.fn(),
-  restoreDeletedRecording: vi.fn()
+  restoreDeletedRecording: vi.fn(),
+  retryPendingFileCleanups: vi.fn()
 }))
 
 function getSetValueRatingHandler(): (...args: unknown[]) => Promise<unknown> {

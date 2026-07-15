@@ -19,21 +19,44 @@ vi.mock('electron', () => ({
 
 const resolveRecordingIdMock = vi.fn()
 const setKnowledgeCaptureRatingByRecordingMock = vi.fn()
+const setGraphProvenanceCleanupMock = vi.fn()
+const markRecordingNotOnDeviceByIdMock = vi.fn()
 const markRecordingPersonalMock = vi.fn()
 const getDeletionImpactMock = vi.fn()
 const deleteRecordingMock = vi.fn()
 const restoreDeletedRecordingMock = vi.fn()
+const retryPendingFileCleanupsMock = vi.fn()
+const removeRecordingProvenanceCoreMock = vi.fn()
+const removeRecordingFromGraphMock = vi.fn()
+// Defaulted to a healthy store so existing hard-delete tests (which don't
+// care about the AR3-3(a) pre-flight) aren't blocked by it. vi.clearAllMocks()
+// (below, in beforeEach) resets call history but NOT this configured return
+// value, so it stands unless a specific test overrides it.
+const ensureGraphReadyMock = vi.fn().mockReturnValue({ ok: true })
 
 vi.mock('../../services/database', () => ({
   resolveRecordingId: (...args: unknown[]) => resolveRecordingIdMock(...args),
-  setKnowledgeCaptureRatingByRecording: (...args: unknown[]) => setKnowledgeCaptureRatingByRecordingMock(...args)
+  setKnowledgeCaptureRatingByRecording: (...args: unknown[]) => setKnowledgeCaptureRatingByRecordingMock(...args),
+  setGraphProvenanceCleanup: (...args: unknown[]) => setGraphProvenanceCleanupMock(...args),
+  markRecordingNotOnDeviceById: (...args: unknown[]) => markRecordingNotOnDeviceByIdMock(...args)
+}))
+
+// spec-006/F17 T6 — recording-deletion-handlers.ts now imports
+// knowledge-graph-service (seam wiring + deletionImpact's graph dry-run +
+// deleteCascade's ensureGraphReady pre-flight) — mock it so the real graph
+// package is never loaded here.
+vi.mock('../../services/knowledge-graph-service', () => ({
+  removeRecordingProvenanceCore: (...args: unknown[]) => removeRecordingProvenanceCoreMock(...args),
+  removeRecordingFromGraph: (...args: unknown[]) => removeRecordingFromGraphMock(...args),
+  ensureGraphReady: (...args: unknown[]) => ensureGraphReadyMock(...args)
 }))
 
 vi.mock('../../services/recording-deletion-service', () => ({
   markRecordingPersonal: (...args: unknown[]) => markRecordingPersonalMock(...args),
   getDeletionImpact: (...args: unknown[]) => getDeletionImpactMock(...args),
   deleteRecording: (...args: unknown[]) => deleteRecordingMock(...args),
-  restoreDeletedRecording: (...args: unknown[]) => restoreDeletedRecordingMock(...args)
+  restoreDeletedRecording: (...args: unknown[]) => restoreDeletedRecordingMock(...args),
+  retryPendingFileCleanups: (...args: unknown[]) => retryPendingFileCleanupsMock(...args)
 }))
 
 function getHandler(channel: string): (...args: unknown[]) => Promise<unknown> {
@@ -138,6 +161,67 @@ describe('recording-deletion-handlers', () => {
       expect(result).toEqual({ success: false, error: 'Invalid recording id' })
       expect(resolveRecordingIdMock).not.toHaveBeenCalled()
     })
+
+    // spec-006/F17 T6 D5/AR3-8 — graphEstimate computation.
+    describe('graphEstimate (D5/AR3-8)', () => {
+      const baseImpactData = {
+        recordingId: 'resolved-1',
+        filename: 'r1.wav',
+        transcripts: 1,
+        actionItems: 0,
+        embeddings: 0,
+        captures: 0,
+        artifacts: 0,
+        meetingLinks: 0,
+        hasAudioFile: true,
+        onDevice: false,
+        deviceFilename: null
+      }
+
+      it('sums edges + meetingNodes + orphanNodes from a successful dry run', async () => {
+        resolveRecordingIdMock.mockReturnValue({ id: 'resolved-1' })
+        getDeletionImpactMock.mockReturnValue(baseImpactData)
+        removeRecordingFromGraphMock.mockReturnValue({
+          ok: true,
+          edgesRemoved: 3,
+          meetingNodesRemoved: 1,
+          orphanNodesRemoved: 2
+        })
+        const handler = getHandler('recordings:deletionImpact')
+
+        const result: any = await handler(null, 'rec-1')
+
+        expect(result.success).toBe(true)
+        expect(result.data.graphEstimate).toBe(6)
+        expect(removeRecordingFromGraphMock).toHaveBeenCalledWith('resolved-1', { dryRun: true })
+      })
+
+      it('is null when the dry run reports {ok:false}', async () => {
+        resolveRecordingIdMock.mockReturnValue({ id: 'resolved-1' })
+        getDeletionImpactMock.mockReturnValue(baseImpactData)
+        removeRecordingFromGraphMock.mockReturnValue({ ok: false, error: 'graph store unavailable' })
+        const handler = getHandler('recordings:deletionImpact')
+
+        const result: any = await handler(null, 'rec-1')
+
+        expect(result.success).toBe(true)
+        expect(result.data.graphEstimate).toBeNull()
+      })
+
+      it('is null (never throws across IPC) when the dry run itself throws', async () => {
+        resolveRecordingIdMock.mockReturnValue({ id: 'resolved-1' })
+        getDeletionImpactMock.mockReturnValue(baseImpactData)
+        removeRecordingFromGraphMock.mockImplementation(() => {
+          throw new Error('boom')
+        })
+        const handler = getHandler('recordings:deletionImpact')
+
+        const result: any = await handler(null, 'rec-1')
+
+        expect(result.success).toBe(true)
+        expect(result.data.graphEstimate).toBeNull()
+      })
+    })
   })
 
   describe('recordings:deleteCascade', () => {
@@ -150,6 +234,8 @@ describe('recording-deletion-handlers', () => {
 
       expect(result).toEqual({ success: true, mode: 'soft' })
       expect(deleteRecordingMock).toHaveBeenCalledWith('resolved-1', { hard: false })
+      // Soft deletes never consult graph readiness — no graph coupling at all.
+      expect(ensureGraphReadyMock).not.toHaveBeenCalled()
     })
 
     it('delegates to the service with hard=true (permanent — including from Trash)', async () => {
@@ -165,6 +251,7 @@ describe('recording-deletion-handlers', () => {
 
       expect(result).toEqual({ success: true, mode: 'hard' })
       expect(deleteRecordingMock).toHaveBeenCalledWith('resolved-1', { hard: true })
+      expect(ensureGraphReadyMock).toHaveBeenCalled()
     })
 
     it('returns "Recording not found" when resolveRecordingId fails', async () => {
@@ -175,6 +262,58 @@ describe('recording-deletion-handlers', () => {
 
       expect(result).toEqual({ success: false, error: 'Recording not found' })
       expect(deleteRecordingMock).not.toHaveBeenCalled()
+    })
+
+    // spec-006/F17 T6 AR3-3(a) — pre-flight graph readiness check for a hard
+    // delete, BEFORE the service (and its transaction) is even called.
+    describe('ensureGraphReady pre-flight (AR3-3a)', () => {
+      it('refuses with graphUnavailable:true when the graph store is not ready, without calling the service', async () => {
+        resolveRecordingIdMock.mockReturnValue({ id: 'resolved-1' })
+        ensureGraphReadyMock.mockReturnValueOnce({ ok: false, error: 'disk I/O error' })
+        const handler = getHandler('recordings:deleteCascade')
+
+        const result: any = await handler(null, 'rec-1', true)
+
+        expect(result.success).toBe(false)
+        expect(result.graphUnavailable).toBe(true)
+        expect(result.error).toContain('disk I/O error')
+        expect(deleteRecordingMock).not.toHaveBeenCalled()
+      })
+
+      it('does not run the pre-flight for a soft delete', async () => {
+        resolveRecordingIdMock.mockReturnValue({ id: 'resolved-1' })
+        deleteRecordingMock.mockResolvedValue({ success: true, mode: 'soft' })
+        const handler = getHandler('recordings:deleteCascade')
+
+        await handler(null, 'rec-1', false)
+
+        expect(ensureGraphReadyMock).not.toHaveBeenCalled()
+      })
+    })
+
+    // spec-006/F17 T6 AR3-3(c) — the explicit skipGraphCleanup escape hatch.
+    describe('skipGraphCleanup escape hatch (AR3-3c)', () => {
+      it('bypasses the ensureGraphReady pre-flight entirely and threads the flag to the service', async () => {
+        resolveRecordingIdMock.mockReturnValue({ id: 'resolved-1' })
+        deleteRecordingMock.mockResolvedValue({ success: true, mode: 'hard', graphCleanupSkipped: true })
+        const handler = getHandler('recordings:deleteCascade')
+
+        const result = await handler(null, 'rec-1', true, { skipGraphCleanup: true })
+
+        expect(ensureGraphReadyMock).not.toHaveBeenCalled()
+        expect(deleteRecordingMock).toHaveBeenCalledWith('resolved-1', { hard: true, skipGraphCleanup: true })
+        expect(result).toEqual({ success: true, mode: 'hard', graphCleanupSkipped: true })
+      })
+
+      it('a falsy skipGraphCleanup does not change the call shape (backward compatible)', async () => {
+        resolveRecordingIdMock.mockReturnValue({ id: 'resolved-1' })
+        deleteRecordingMock.mockResolvedValue({ success: true, mode: 'hard' })
+        const handler = getHandler('recordings:deleteCascade')
+
+        await handler(null, 'rec-1', true, { skipGraphCleanup: false })
+
+        expect(deleteRecordingMock).toHaveBeenCalledWith('resolved-1', { hard: true })
+      })
     })
   })
 
@@ -205,6 +344,69 @@ describe('recording-deletion-handlers', () => {
       const result = await handler(null, 'rec-1')
 
       expect(result).toEqual({ success: false })
+    })
+  })
+
+  // spec-006/F17 T6 AR3-6(b)
+  describe('recordings:markNotOnDevice', () => {
+    it('resolves the id then reconciles device presence', async () => {
+      resolveRecordingIdMock.mockReturnValue({ id: 'resolved-1' })
+      const handler = getHandler('recordings:markNotOnDevice')
+
+      const result = await handler(null, 'rec-1')
+
+      expect(result).toEqual({ success: true })
+      expect(markRecordingNotOnDeviceByIdMock).toHaveBeenCalledWith('resolved-1')
+    })
+
+    it('returns an error without throwing when the recording is unknown', async () => {
+      resolveRecordingIdMock.mockReturnValue(undefined)
+      const handler = getHandler('recordings:markNotOnDevice')
+
+      const result = await handler(null, 'ghost')
+
+      expect(result).toEqual({ success: false, error: 'Recording not found' })
+      expect(markRecordingNotOnDeviceByIdMock).not.toHaveBeenCalled()
+    })
+
+    it('rejects an invalid (empty) id without throwing', async () => {
+      const handler = getHandler('recordings:markNotOnDevice')
+      const result = await handler(null, '')
+      expect(result).toEqual({ success: false, error: 'Invalid recording id' })
+      expect(resolveRecordingIdMock).not.toHaveBeenCalled()
+    })
+
+    it('never throws across IPC — an unexpected service error is caught', async () => {
+      resolveRecordingIdMock.mockReturnValue({ id: 'resolved-1' })
+      markRecordingNotOnDeviceByIdMock.mockImplementation(() => {
+        throw new Error('db exploded')
+      })
+      const handler = getHandler('recordings:markNotOnDevice')
+
+      const result = await handler(null, 'rec-1')
+
+      expect(result).toEqual({ success: false, error: 'db exploded' })
+    })
+  })
+
+  // spec-006/F17 T6 AR3-2 — the Trash-view-entry sweep IPC.
+  describe('recordings:retryPendingCleanups', () => {
+    it('delegates to retryPendingFileCleanups and reports its summary', async () => {
+      retryPendingFileCleanupsMock.mockResolvedValue({ attempted: 2, cleared: 1, stillPending: { j1: ['audio'] } })
+      const handler = getHandler('recordings:retryPendingCleanups')
+
+      const result = await handler(null)
+
+      expect(result).toEqual({ success: true, attempted: 2, cleared: 1, stillPending: { j1: ['audio'] } })
+    })
+
+    it('never throws across IPC — an unexpected service error is caught', async () => {
+      retryPendingFileCleanupsMock.mockRejectedValue(new Error('db exploded'))
+      const handler = getHandler('recordings:retryPendingCleanups')
+
+      const result = await handler(null)
+
+      expect(result).toEqual({ success: false, error: 'db exploded' })
     })
   })
 })
