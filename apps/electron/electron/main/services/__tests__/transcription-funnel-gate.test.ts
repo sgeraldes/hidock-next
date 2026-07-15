@@ -34,13 +34,16 @@ vi.mock('@hidock/transcription', () => ({ GeminiEngine: class {} }))
 vi.mock('@google/generative-ai', () => ({ GoogleGenerativeAI: class {} }))
 vi.mock('../brains', () => ({
   getBrainRegistry: vi.fn(),
-  resolveGeminiApiKey: vi.fn(() => null),
+  // A configured key so the queue-drain tests get past the provider check; the
+  // funnel tests never reach it (they stop at the lock or earlier).
+  resolveGeminiApiKey: vi.fn(() => 'test-key'),
 }))
 vi.mock('electron', () => ({ BrowserWindow: { getAllWindows: () => [] } }))
 vi.mock('../vector-store', () => ({ getVectorStore: vi.fn() }))
 vi.mock('../knowledge-capture-backfill', () => ({
   ensureKnowledgeCaptureForRecording: vi.fn(),
 }))
+vi.mock('../activity-log', () => ({ emitActivityLog: vi.fn() }))
 
 // Database: every named export transcription.ts imports becomes a spy.
 // acquireTranscriptionLock's undefined return makes any accidental processQueue
@@ -85,7 +88,7 @@ vi.mock('../database', () => {
   return mod
 })
 
-import { queueTranscriptionIfEnabled } from '../transcription'
+import { queueTranscriptionIfEnabled, processQueueManually } from '../transcription'
 
 beforeEach(() => {
   for (const spy of Object.values(dbSpies.spies)) spy.mockClear()
@@ -131,5 +134,76 @@ describe('queueTranscriptionIfEnabled × transcription feature gate', () => {
     featuresConfig = undefined
     expect(queueTranscriptionIfEnabled('rec-5')).toBe(true)
     expect(dbSpies.spies['addToQueue']).toHaveBeenCalledWith('rec-5')
+  })
+})
+
+describe('processQueue drain × mid-run disable (round-3 [HIGH])', () => {
+  // Drives the REAL processQueue (via processQueueManually) with a mocked DB:
+  // two pending items; recordings resolve to nothing so each item fails fast
+  // inside transcribeRecording ("Recording not found") — which is exactly what
+  // we need: the loop mechanics run, no engine work happens.
+  type QueueItem = {
+    id: string
+    recording_id: string
+    created_at: string
+    date_recorded: string | null
+    retry_count: number
+  }
+  const ITEMS: QueueItem[] = [
+    { id: 'q1', recording_id: 'rec-1', created_at: '2026-07-15T10:00:00Z', date_recorded: null, retry_count: 0 },
+    { id: 'q2', recording_id: 'rec-2', created_at: '2026-07-15T10:01:00Z', date_recorded: null, retry_count: 0 },
+  ]
+
+  function armQueue(): Record<string, string> {
+    const statuses: Record<string, string> = { q1: 'pending', q2: 'pending' }
+    dbSpies.spies['getQueueItems'].mockImplementation((status?: string) => {
+      if (status === 'pending') return ITEMS.filter((i) => statuses[i.id] === 'pending')
+      return []
+    })
+    dbSpies.spies['updateQueueItem'].mockImplementation((id: string, status: string) => {
+      statuses[id] = status
+    })
+    dbSpies.spies['acquireTranscriptionLock'].mockReturnValue(true)
+    return statuses
+  }
+
+  const processingCalls = () =>
+    dbSpies.spies['updateQueueItem'].mock.calls
+      .filter((c: unknown[]) => c[1] === 'processing')
+      .map((c: unknown[]) => c[0])
+
+  it('control: with the feature enabled throughout, BOTH items are dequeued', async () => {
+    featuresConfig = { preset: 'full', flags: {} }
+    armQueue()
+    await processQueueManually()
+    expect(processingCalls()).toEqual(['q1', 'q2'])
+  })
+
+  it('disabling transcription mid-first-item stops the drain: item 2 never starts', async () => {
+    featuresConfig = { preset: 'full', flags: {} }
+    const statuses = armQueue()
+    // The moment item 1 goes 'processing' (mid-first-item), the user disables
+    // the transcription feature. The in-flight item finishes (fails fast here);
+    // the between-items gate check must then stop the drain.
+    dbSpies.spies['updateQueueItem'].mockImplementation((id: string, status: string) => {
+      statuses[id] = status
+      if (id === 'q1' && status === 'processing') {
+        featuresConfig = { preset: 'full', flags: { transcription: false } }
+      }
+    })
+
+    await processQueueManually()
+
+    expect(processingCalls()).toEqual(['q1']) // item 2 NEVER started
+    expect(statuses['q2']).toBe('pending') // still queued, untouched
+  })
+
+  it('with the feature already disabled, a queue pass is a total no-op (no lock, no bookkeeping)', async () => {
+    featuresConfig = { preset: 'full', flags: { transcription: false } }
+    armQueue()
+    dbSpies.spies['acquireTranscriptionLock'].mockClear()
+    await processQueueManually()
+    expect(dbSpies.spies['acquireTranscriptionLock']).not.toHaveBeenCalled()
+    expect(processingCalls()).toEqual([])
   })
 })
