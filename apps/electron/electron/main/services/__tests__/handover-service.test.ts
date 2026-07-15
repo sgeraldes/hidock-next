@@ -17,6 +17,14 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, mkdirSync
 // boundary (recording-eligibility.ts → getExcludedRecordingIds), so the mock
 // must provide it. Mutable so a test can exclude a recording / force failClosed.
 let handoverExclusion: { ids: Set<string>; failClosed: boolean } = { ids: new Set<string>(), failClosed: false }
+// ADV16-4 (round-17) — the pre-agent revalidateBundleEligibility path uses the
+// REAL isCaptureEligible → filterEligibleCaptureIds → getCaptureEligibilityRows,
+// so the mock must supply capture rows. Mutable so a runAgent test can present a
+// standalone capture that became excluded after assembly.
+let handoverCaptureRows: {
+  rows: Array<{ id: string; source_recording_id: string | null; quality_rating: string | null; deleted_at: string | null }>
+  failClosed: boolean
+} = { rows: [], failClosed: false }
 vi.mock('../database', () => ({
   getTranscriptByRecordingId: vi.fn(),
   getMeetingById: vi.fn(),
@@ -30,6 +38,11 @@ vi.mock('../database', () => ({
     handoverExclusion.failClosed
       ? { eligible: new Set<string>(), failClosed: true }
       : { eligible: new Set([...ids].filter((i) => i && !handoverExclusion.ids.has(i))), failClosed: false },
+  getCaptureEligibilityRows: (ids: Iterable<string>) => {
+    if (handoverCaptureRows.failClosed) return { rows: [], failClosed: true }
+    const want = new Set([...ids])
+    return { rows: handoverCaptureRows.rows.filter((r) => want.has(r.id)), failClosed: false }
+  },
 }))
 vi.mock('../brains', () => ({
   getBrainRouter: vi.fn(() => ({ resolve: vi.fn(async () => null) })),
@@ -77,6 +90,9 @@ function makeDeps(over: Partial<HandoverDataDeps> = {}): HandoverDataDeps {
     // RE7-2 (round-7) — default all recordings eligible; a test overrides this
     // to exercise the exclusion / fail-closed refusal path.
     isRecordingEligible: () => true,
+    // ADV16-4 (round-17) — default all captures eligible; a test overrides this
+    // to exercise the standalone-capture exclusion refusal path.
+    isCaptureEligible: () => true,
     ...over,
   }
 }
@@ -405,6 +421,51 @@ describe('assembleHandoverBundle', () => {
       })
     ).toThrow(HANDOVER_INELIGIBLE_ERROR)
   })
+
+  // ADV16-4 (round-17) — a STANDALONE capture has NO source recording, so
+  // recordingIds is empty and the recording-only gate would let its
+  // title/summary/actionables be exported. The capture gate must catch it.
+  it('refuses (throws, writes nothing) when a STANDALONE excluded capture is the source', () => {
+    expect(() =>
+      assembleHandoverBundle({
+        targetDir: root,
+        handoverContent: 'x',
+        source: { knowledgeCaptureId: 'kc-standalone' },
+        now: () => FIXED,
+        data: makeDeps({
+          getKnowledgeCapture: (id) =>
+            id === 'kc-standalone' ? { id: 'kc-standalone', title: 'Standalone note', summary: 'S' } : undefined,
+          // Recording gate would pass (no recordingId); only the capture gate catches it.
+          isRecordingEligible: () => true,
+          isCaptureEligible: () => false,
+        }),
+      })
+    ).toThrow(HANDOVER_INELIGIBLE_ERROR)
+    const slugDirs = existsSync(join(root, 'handover')) ? readdirSync(join(root, 'handover')) : []
+    for (const d of slugDirs) {
+      expect(existsSync(join(root, 'handover', d, 'manifest.json'))).toBe(false)
+    }
+  })
+
+  it('assembles a bundle for an ELIGIBLE standalone capture (no recording)', () => {
+    const res = assembleHandoverBundle({
+      targetDir: root,
+      handoverContent: 'x',
+      source: { knowledgeCaptureId: 'kc-standalone' },
+      now: () => FIXED,
+      data: makeDeps({
+        getKnowledgeCapture: (id) =>
+          id === 'kc-standalone'
+            ? { id: 'kc-standalone', title: 'Standalone note', summary: 'Standalone summary.' }
+            : undefined,
+        isCaptureEligible: () => true,
+      }),
+    })
+    expect(readFileSync(join(res.bundleDir, 'context', 'summary.md'), 'utf-8')).toContain('Standalone summary.')
+    const manifest = JSON.parse(readFileSync(join(res.bundleDir, 'manifest.json'), 'utf-8'))
+    expect(manifest.source.knowledgeCaptureId).toBe('kc-standalone')
+    expect(manifest.source.recordingIds).toEqual([])
+  })
 })
 
 describe('runHandoverAgent', () => {
@@ -430,6 +491,7 @@ describe('runHandoverAgent', () => {
     writeFileSync(join(bundleDir, 'manifest.json'), JSON.stringify({ source: { recordingIds: [] } }), 'utf-8')
     record = { bundleDir, targetDir, createdAt: FIXED.toISOString() }
     handoverExclusion = { ids: new Set<string>(), failClosed: false }
+    handoverCaptureRows = { rows: [], failClosed: false }
   })
   afterEach(() => {
     rmSync(root, { recursive: true, force: true })
@@ -594,6 +656,57 @@ describe('runHandoverAgent', () => {
     expect(events).toEqual(['handover:run-failed'])
     expect(brain.generate).not.toHaveBeenCalled()
     expect(existsSync(join(bundleDir, 'RUN.log'))).toBe(false)
+  })
+
+  // ADV16-4 (round-17) — a STANDALONE capture bundle (empty recordingIds) whose
+  // capture became soft-deleted / value-excluded after assembly must abort the
+  // agent run; the recording-only re-check would have passed on the empty array.
+  it('refuses to run when a STANDALONE capture source became excluded since assembly', async () => {
+    writeFileSync(
+      join(bundleDir, 'manifest.json'),
+      JSON.stringify({ source: { recordingIds: [], knowledgeCaptureId: 'kc-standalone' } }),
+      'utf-8'
+    )
+    // Standalone capture now soft-deleted → isCaptureEligible resolves false.
+    handoverCaptureRows = {
+      rows: [{ id: 'kc-standalone', source_recording_id: null, quality_rating: 'valuable', deleted_at: '2026-07-11T00:00:00.000Z' }],
+      failClosed: false,
+    }
+    const events: string[] = []
+    const brain = mockBrain('Did the work.')
+    const res = await runHandoverAgent({
+      bundleId: 'bundle-1',
+      now: () => at(9, 30, 0),
+      resolveBrain: async () => brain as any,
+      emit: (type) => events.push(type),
+      lookupBundle: lookup,
+    })
+    expect(res.ok).toBe(false)
+    expect(res.error).toBe(HANDOVER_INELIGIBLE_ERROR)
+    expect(brain.generate).not.toHaveBeenCalled()
+    expect(existsSync(join(bundleDir, 'RUN.log'))).toBe(false)
+  })
+
+  it('runs when a STANDALONE capture source is still eligible', async () => {
+    writeFileSync(
+      join(bundleDir, 'manifest.json'),
+      JSON.stringify({ source: { recordingIds: [], knowledgeCaptureId: 'kc-standalone' } }),
+      'utf-8'
+    )
+    handoverCaptureRows = {
+      rows: [{ id: 'kc-standalone', source_recording_id: null, quality_rating: 'valuable', deleted_at: null }],
+      failClosed: false,
+    }
+    const brain = mockBrain('Did the work.')
+    const res = await runHandoverAgent({
+      bundleId: 'bundle-1',
+      now: () => at(9, 30, 0),
+      resolveBrain: async () => brain as any,
+      emit: () => {},
+      lookupBundle: lookup,
+    })
+    expect(res.ok).toBe(true)
+    expect(brain.generate).toHaveBeenCalledTimes(1)
   })
 
   it('refuses to run when the manifest cannot be read (fail closed)', async () => {

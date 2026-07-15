@@ -35,7 +35,7 @@ import {
   queryOne,
   queryAll,
 } from './database'
-import { isRecordingEligible, filterEligibleRecordingIds } from './recording-eligibility'
+import { isRecordingEligible, isCaptureEligible, filterEligibleRecordingIds } from './recording-eligibility'
 import { getBrainRouter, getBrainRegistry } from './brains'
 import type { AIBrain } from './brains'
 import { getEventBus } from './event-bus'
@@ -117,6 +117,13 @@ export interface HandoverDataDeps {
   getActionablesForKnowledge: (knowledgeId: string) => Array<{ title: string; description?: string; type?: string; status?: string }>
   /** RE7-2 (round-7) — the shared fail-closed recording-eligibility boundary. */
   isRecordingEligible: (recordingId: string) => boolean
+  /**
+   * ADV16-4 (round-17) — the shared fail-closed CAPTURE-eligibility boundary. A
+   * STANDALONE capture has no recordingId, so the recording gate alone would let
+   * its title/summary/actionables through unchecked. Gate every resolved capture
+   * through this (deleted_at + standalone quality, or recording delegation).
+   */
+  isCaptureEligible: (captureId: string) => boolean
 }
 
 const defaultDataDeps: HandoverDataDeps = {
@@ -132,6 +139,7 @@ const defaultDataDeps: HandoverDataDeps = {
       [knowledgeId]
     ),
   isRecordingEligible: (recordingId) => isRecordingEligible(recordingId),
+  isCaptureEligible: (captureId) => isCaptureEligible(captureId),
 }
 
 /** RE7-2 — thrown when a handover's source recording is excluded / ineligible. */
@@ -480,6 +488,16 @@ function resolveSource(ref: HandoverSourceRef, deps: HandoverDataDeps): Resolved
   const rec = recordingId ? deps.getRecording(recordingId) : undefined
   if (rec) meetingId = meetingId ?? rec.meeting_id ?? null
 
+  // ADV16-4 (round-17) — a STANDALONE capture has NO recordingId, so the recording
+  // gate below would let its title/summary/detected-actionables through unchecked
+  // (and recordingIds=[] would make the later pre-write & pre-agent revalidations
+  // pass on an empty array). Gate the resolved capture through the shared
+  // fail-closed CAPTURE boundary (deleted_at + standalone quality, or recording
+  // delegation) BEFORE reading any capture-derived derivative.
+  if (knowledgeCaptureId && !deps.isCaptureEligible(knowledgeCaptureId)) {
+    throw new Error(HANDOVER_INELIGIBLE_ERROR)
+  }
+
   // RE7-2 (round-7) — resolve recording identity FIRST, then gate through the
   // shared fail-closed boundary BEFORE reading any transcript/summary/action
   // derivatives. A stale actionable/handover prompt must not export a
@@ -623,8 +641,13 @@ export function assembleHandoverBundle(params: AssembleBundleParams): AssembleBu
   // RE7-2 — revalidate eligibility IMMEDIATELY before the writes (the source
   // could have been trashed/personal/value-excluded between resolveSource and
   // here). Fail closed: abort the whole bundle rather than persist an excluded
-  // recording's derivatives to disk.
+  // recording's derivatives to disk. ADV16-4 (round-17): also revalidate the
+  // resolved CAPTURE — a standalone excluded capture has an empty recordingIds
+  // array, so the recording check alone would let it through.
   {
+    if (resolved.knowledgeCaptureId && !deps.isCaptureEligible(resolved.knowledgeCaptureId)) {
+      throw new Error(HANDOVER_INELIGIBLE_ERROR)
+    }
     const { eligible, failClosed } = filterEligibleRecordingIds(resolved.recordingIds)
     if (failClosed || resolved.recordingIds.some((id) => !eligible.has(id))) {
       throw new Error(HANDOVER_INELIGIBLE_ERROR)
@@ -730,13 +753,20 @@ function buildRunPrompt(bundleDir: string, targetDir: string): string {
  */
 function revalidateBundleEligibility(bundleDir: string): string | null {
   let recordingIds: string[]
+  let knowledgeCaptureId: string | null
   try {
     const manifest = JSON.parse(readFileSync(join(bundleDir, 'manifest.json'), 'utf-8')) as HandoverManifest
     recordingIds = manifest.source?.recordingIds ?? []
+    knowledgeCaptureId = manifest.source?.knowledgeCaptureId ?? null
   } catch (e) {
     console.error('[handover] could not read bundle manifest for eligibility re-check — failing closed:', e)
     return HANDOVER_INELIGIBLE_ERROR
   }
+  // ADV16-4 (round-17) — revalidate the resolved CAPTURE too. A STANDALONE
+  // capture has no recordingId, so a recording-only check would run an agent over
+  // an excluded standalone capture's derivatives. isCaptureEligible is
+  // fail-closed (excluded / soft-deleted / value-excluded / lookup error ⇒ false).
+  if (knowledgeCaptureId && !isCaptureEligible(knowledgeCaptureId)) return HANDOVER_INELIGIBLE_ERROR
   if (recordingIds.length === 0) return null // no recording-backed content
   const { eligible, failClosed } = filterEligibleRecordingIds(recordingIds)
   if (failClosed || recordingIds.some((id) => !eligible.has(id))) return HANDOVER_INELIGIBLE_ERROR
