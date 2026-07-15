@@ -8,8 +8,9 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, waitFor } from '@testing-library/react'
-import { useDownloadOrchestrator, cancelDownloads } from '../useDownloadOrchestrator'
+import { useDownloadOrchestrator, cancelDownloads, markDownloadCancelled } from '../useDownloadOrchestrator'
 import { useAppStore } from '@/store/useAppStore'
+import { toast } from '@/components/ui/toaster'
 
 vi.mock('@/services/qa-monitor', () => ({ shouldLogQa: () => false }))
 vi.mock('@/components/ui/toaster', () => ({ toast: vi.fn() }))
@@ -86,6 +87,41 @@ describe('useDownloadOrchestrator cancel path', () => {
     // The core assertion: the cancel was never downgraded to a failure.
     expect(mockMarkFailed).not.toHaveBeenCalled()
     // And the renderer Map entry was deterministically cleaned up.
+    expect(useAppStore.getState().downloadQueue.has('REC0001.WAV')).toBe(false)
+  })
+
+  it('PER-ITEM cancel of the ACTIVE download surfaces as cancelled, not failed (Finding 1)', async () => {
+    // A per-file cancel aborts ONLY the main-process transfer; the renderer queue signal
+    // stays UNaborted. useOperations.cancelDownload marks the file via markDownloadCancelled
+    // before the aborted transfer resolves-false back to processDownload. Without that
+    // marker, processDownload's !success branch would markFailed + toast an error + log an
+    // error + count it as a failure — contradicting the cancellation.
+    mockDownloadRecording.mockImplementation(async (name: string) => {
+      // Simulate useOperations.cancelDownload having marked THIS file cancelled while the
+      // main-process transfer was aborted; the renderer AbortSignal is NOT aborted.
+      markDownloadCancelled(name)
+      return false // aborted main transfer resolves false back to the renderer
+    })
+
+    renderHook(() => useDownloadOrchestrator())
+
+    expect(stateUpdateCb).toBeTypeOf('function')
+    stateUpdateCb!({ queue: [pending], session: null, isProcessing: false, isPaused: false })
+
+    // Wait until the cancel branch has run (logged as info, not error).
+    await waitFor(() =>
+      expect(mockLog).toHaveBeenCalledWith('info', 'Download cancelled', expect.stringContaining('REC0001.WAV'))
+    )
+
+    // Never downgraded to a failure.
+    expect(mockMarkFailed).not.toHaveBeenCalled()
+    // No error-severity device log.
+    expect(mockLog).not.toHaveBeenCalledWith('error', expect.anything(), expect.anything())
+    // No error toast (neither a per-file "Download failed" nor a "completed with errors").
+    const toastMock = toast as unknown as ReturnType<typeof vi.fn>
+    expect(toastMock).not.toHaveBeenCalledWith(expect.objectContaining({ variant: 'error' }))
+    expect(toastMock).not.toHaveBeenCalledWith(expect.objectContaining({ title: 'Sync completed with errors' }))
+    // Renderer Map entry deterministically cleaned up.
     expect(useAppStore.getState().downloadQueue.has('REC0001.WAV')).toBe(false)
   })
 })

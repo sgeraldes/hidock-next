@@ -69,7 +69,39 @@ let _lastProcessedEpoch = 0
 const _requestedDownloads = new Set<string>()
 
 export function requestScopedDownloads(filenames: string[]): void {
-  for (const f of filenames) _requestedDownloads.add(f)
+  for (const f of filenames) {
+    _requestedDownloads.add(f)
+    // An explicit (re-)request clears any stale renderer cancellation marker so a
+    // deliberate re-download of a previously user-cancelled file is not mistaken for
+    // a cancellation by processDownload (see _cancelledDownloads below).
+    _cancelledDownloads.delete(f)
+  }
+}
+
+// Finding 1 (per-file cancel ≠ failure): renderer-side set of filenames the user
+// explicitly cancelled via useOperations.cancelDownload. Unlike Cancel-All (which
+// aborts the shared renderer AbortController), a per-file cancel only aborts the
+// MAIN-process transfer — the renderer's queue signal stays unaborted. Without this
+// marker, the resulting resolved-false transfer would fall into processDownload's
+// failure branch (markFailed + error toast + error log + failed++), contradicting the
+// cancellation. Consulted alongside signal.aborted so a per-file cancel of the ACTIVE
+// download surfaces as 'cancelled', never 'failed'. A genuine USB failure (marker
+// absent, signal not aborted) still surfaces as a failure.
+const _cancelledDownloads = new Set<string>()
+
+/** Mark a file as user-cancelled so processDownload treats its resolved-false/throw as a cancellation. */
+export function markDownloadCancelled(filename: string): void {
+  _cancelledDownloads.add(filename)
+}
+
+/** True while a per-file user cancellation for `filename` is pending recognition. */
+export function isDownloadCancelled(filename: string): boolean {
+  return _cancelledDownloads.has(filename)
+}
+
+/** Clear a file's renderer cancellation marker (consumed by the loop / re-download / a failed cancel). */
+export function clearDownloadCancelled(filename: string): void {
+  _cancelledDownloads.delete(filename)
 }
 
 // Defect C (recency ordering): user-explicit SINGLE downloads jump the queue and
@@ -103,6 +135,7 @@ export function releaseDownloadBookkeeping(filename: string): void {
 export function clearAllDownloadBookkeeping(): void {
   _requestedDownloads.clear()
   _priorityDownloads.clear()
+  _cancelledDownloads.clear()
 }
 
 /**
@@ -255,7 +288,9 @@ export function useDownloadOrchestrator() {
         item.filename,
         item.fileSize,
         (chunk) => {
-          if (signal.aborted) throw new Error('Download cancelled')
+          // Stop promptly on either a queue-wide abort (Cancel-All) or a per-file
+          // user cancel for THIS file (Finding 1) — both are cancellations, not errors.
+          if (signal.aborted || _cancelledDownloads.has(item.filename)) throw new Error('Download cancelled')
           chunks.push(chunk)
           totalReceived += chunk.length
           window.electronAPI.downloadService.updateProgress(item.filename, totalReceived)
@@ -268,10 +303,13 @@ export function useDownloadOrchestrator() {
 
       if (!success) {
         // A resolved-false can be a user cancellation that landed as a falsy return
-        // rather than a throw. Check aborted FIRST: never downgrade a user cancel to
-        // 'failed' (the main process owns the durable 'cancelled' state, and a 'failed'
-        // downgrade would look retryable and resurrect on reconnect).
-        if (signal.aborted) {
+        // rather than a throw. Check cancellation FIRST: never downgrade a user cancel
+        // to 'failed' (the main process owns the durable 'cancelled' state, and a
+        // 'failed' downgrade would look retryable and resurrect on reconnect).
+        //   - signal.aborted → Cancel-All aborted the whole renderer queue.
+        //   - _cancelledDownloads.has → a PER-FILE cancel aborted this file's transfer
+        //     in the main process only (Finding 1); the renderer signal stays unaborted.
+        if (signal.aborted || _cancelledDownloads.has(item.filename)) {
           if (shouldLogQa()) console.log(`[QA-MONITOR][Operation] Download cancelled: ${item.filename}`)
           deviceService.log('info', 'Download cancelled', `${item.filename}: Cancelled by user`)
           removeFromDownloadQueue(item.filename)
@@ -319,11 +357,13 @@ export function useDownloadOrchestrator() {
         return false
       }
     } catch (error) {
-      // Check aborted BEFORE any markFailed: a user cancellation must surface as
+      // Check cancellation BEFORE any markFailed: a user cancellation must surface as
       // 'cancelled', not 'failed'. Calling markFailed here used to clobber the main
       // process's 'cancelling'/'cancelled' state to 'failed', making a deliberate
       // cancel look retryable and resurrect on reconnect (the renderer bug this fixes).
-      if (signal.aborted) {
+      // Covers both Cancel-All (signal.aborted) and a per-file cancel of this file
+      // (Finding 1: _cancelledDownloads, main-process-only abort → onChunk throws here).
+      if (signal.aborted || _cancelledDownloads.has(item.filename)) {
         deviceService.log('info', 'Download cancelled', `${item.filename}: Cancelled by user`)
         // Deterministic cleanup of the renderer Map entry; the main-process cancel path
         // re-emits the transient 'cancelled' row for the brief flash.
@@ -478,6 +518,15 @@ export function useDownloadOrchestrator() {
         // failed items stay scoped so a retry re-processes them (auto-download OFF).
         _requestedDownloads.delete(item.filename)
         clearDownloadPriority(item.filename)
+      } else if (_cancelledDownloads.has(item.filename)) {
+        // Finding 1: a per-file user cancel of this file (not Cancel-All). It was
+        // surfaced as 'cancelled' by processDownload — do NOT count it as a failure
+        // (no "completed with errors" summary) and do NOT leave it scoped. Consume the
+        // marker so a later explicit re-download of the same file is not mistaken for a
+        // cancellation.
+        _cancelledDownloads.delete(item.filename)
+        _requestedDownloads.delete(item.filename)
+        clearDownloadPriority(item.filename)
       } else {
         failed++
       }
@@ -553,6 +602,7 @@ export function useDownloadOrchestrator() {
     _cancelInProgress = false
     _cancelEpoch = 0
     _lastProcessedEpoch = 0
+    _cancelledDownloads.clear()
 
     // Defect A: expose the queue drain so useDeviceSubscriptions can fire already-queued
     // pending downloads once the device is ready and the file-list scan has completed.
