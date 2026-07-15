@@ -24,8 +24,8 @@ blocked by upstream constraints and are tracked below with remediation paths.
 All five constraints in `pyproject.toml` already permitted the patched versions, so these are
 pure lockfile bumps (`uv lock --upgrade-package …`), no manifest change.
 
-| Alert | Sev | Package | Scope | Was | Now | Patched at |
-| --- | --- | --- | --- | --- | --- | --- |
+| Alert | Sev | Package | Scope | Was | Now | Patched at | CVE |
+| --- | --- | --- | --- | --- | --- | --- | --- |
 | #73  | HIGH   | black    | dev (direct: `black>=24.4`)       | 26.1.0 | 26.5.1 | 26.3.1 | CVE-2026-32274 (arbitrary file write via cache filename) |
 | #91  | MEDIUM | requests | runtime (direct: `requests>=2.32.0`) | 2.32.5 | 2.34.2 | 2.33.0 | CVE-2026-25645 (insecure temp-file reuse in `extract_zipped_paths`) |
 | #200 | MEDIUM | pytest   | dev (direct: `pytest>=8.2`)       | 9.0.2  | 9.1.1  | 9.0.3  | CVE-2025-71176 (vulnerable tmpdir handling) |
