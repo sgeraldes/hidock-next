@@ -14,7 +14,8 @@ import { useAppStore } from '@/store/useAppStore'
 import { hasDeviceFile, type DeviceOnlyRecording, type BothLocationsRecording } from '@/types/unified-recording'
 import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
 import { useDeviceConnection } from '@/hooks/useDeviceConnection'
-import { cancelDownloads, requestScopedDownloads } from '@/hooks/useDownloadOrchestrator'
+import { requestScopedDownloads } from '@/hooks/useDownloadOrchestrator'
+import { useOperations } from '@/hooks/useOperations'
 
 import { formatEta, formatBytes } from '@/utils/formatters'
 import { DeviceFileList } from '@/components/DeviceFileList'
@@ -93,10 +94,14 @@ export function Device() {
   // Track if auto-sync has been triggered for this connection session (prevents duplicate triggers)
   const autoSyncTriggeredRef = useRef(false)
 
-  // DV-04: Cancel handler that aborts the in-progress USB transfer AND sets store state
+  // DV-04: Cancel handler routed through the SAME awaitable cancel-all path the bell /
+  // Operations overlay use — it stops the renderer loop immediately AND awaits the
+  // main-process USB abort + drain settlement (don't flip UI to "done" before it
+  // settles). cancelAllDownloads owns the toast + bookkeeping cleanup.
+  const { cancelAllDownloads } = useOperations()
   const cancelDeviceSync = useCallback(() => {
-    cancelDownloads() // Aborts the USB transfer via AbortController + sets store state
-  }, [])
+    void cancelAllDownloads()
+  }, [cancelAllDownloads])
 
   // Helper to clean up connection timers
   const clearConnectionTimers = useCallback(() => {

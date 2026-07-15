@@ -15,6 +15,12 @@ import { ipcMain, BrowserWindow } from 'electron'
 import { getJensenDevice } from '../services/jensen'
 import { emitActivityLog } from '../services/activity-log'
 import {
+  trackActiveTransfer,
+  cancelActiveTransfer,
+  abortActiveTransfer,
+  getActiveTransferFilename,
+} from '../services/download-transfer-controller'
+import {
   JensenDeleteFileSchema,
   JensenSetAutoRecordSchema,
   JensenDownloadFileSchema,
@@ -23,10 +29,11 @@ import {
 } from './jensen-validation'
 
 // ---------------------------------------------------------------------------
-// Download abort controller — allows jensen:cancelDownload to abort in-flight downloads
+// In-flight download abort is owned by the shared download-transfer-controller
+// (also used by the higher-level download-service cancel/cancel-all handlers).
+// jensen:downloadFile registers the active transfer; jensen:cancelDownload aborts
+// it and awaits USB settlement; jensen:disconnect aborts it for teardown.
 // ---------------------------------------------------------------------------
-
-let currentDownloadAbort: AbortController | null = null
 
 // ---------------------------------------------------------------------------
 // Serialize device operations (connect / tryConnect / disconnect / reset /
@@ -113,7 +120,7 @@ async function pollRecordingOnce(): Promise<void> {
   const device = getJensenDevice()
   if (!device.isConnected()) return
   // Do NOT interleave with an in-flight transfer / scan on the USB bus.
-  if (device.isOperationInProgress() || currentDownloadAbort) return
+  if (device.isOperationInProgress() || getActiveTransferFilename() !== null) return
 
   let result: { recording: string | null } | null = null
   try {
@@ -237,7 +244,9 @@ export function registerJensenHandlers(): void {
       // that out of the IN FIFO before closing (see below). The 'disconnect' reason
       // tells downloadFile's settlement that TEARDOWN owns the drain — so it resolves
       // false and stands down instead of advancing the command queue mid-stream.
-      if (currentDownloadAbort) currentDownloadAbort.abort('disconnect')
+      // Fire-and-forget (do NOT await settlement): teardown owns the drain, and the
+      // disconnect is serialized behind any in-flight scan below.
+      abortActiveTransfer('disconnect')
 
       // Do NOT preempt an in-flight scan: disconnect is serialized, so it waits
       // for the running listFiles/getFileCount to finish first. That lets the
@@ -379,7 +388,6 @@ export function registerJensenHandlers(): void {
       const { filename, fileSize } = JensenDownloadFileSchema.parse(args)
 
       const abortController = new AbortController()
-      currentDownloadAbort = abortController
 
       const BATCH_SIZE = 262144 // 256 KB
       let pendingBuffer: Buffer[] = []
@@ -410,19 +418,24 @@ export function registerJensenHandlers(): void {
         }
       }
 
-      try {
-        const result = await getJensenDevice().downloadFile(
-          filename,
-          fileSize,
-          onChunk,
-          onProgress,
-          abortController.signal
-        )
-        flushChunks() // flush any remaining buffered chunks
-        return result
-      } finally {
-        currentDownloadAbort = null
-      }
+      // Register with the shared controller for the lifetime of the transfer so
+      // jensen:cancelDownload and download-service cancel/cancel-all can find and
+      // abort it (and await its settlement).
+      const result = await trackActiveTransfer(filename, abortController, async () => {
+        const device = getJensenDevice()
+        const r = await device.downloadFile(filename, fileSize, onChunk, onProgress, abortController.signal)
+        // Phase-2 settlement contract: downloadFile resolves the instant a
+        // user-cancel/stall abort fires — BEFORE its async byte-boundary drain
+        // completes. Await the device's POST-DRAIN settlement so the tracked transfer
+        // (and thus cancelActiveTransfer / cancelActiveTransferByName) stays registered,
+        // and the active pointer stays set, until the device has truly settled. Resolves
+        // immediately on normal completion (no drain) or if the device lacks the
+        // accessor (older build / test stub).
+        await device.getActiveDownloadSettlement?.()
+        return r
+      })
+      flushChunks() // flush any remaining buffered chunks
+      return result
     } catch {
       return null
     }
@@ -430,12 +443,11 @@ export function registerJensenHandlers(): void {
 
   ipcMain.handle('jensen:cancelDownload', async () => {
     try {
-      if (currentDownloadAbort) {
-        // 'user-cancel' reason: downloadFile's settlement drains to quiescence and,
-        // only once the bus is proven quiet, releases the slot so the connection
-        // stays usable (unlike the 'disconnect' reason, which stands down for teardown).
-        currentDownloadAbort.abort('user-cancel')
-      }
+      // 'user-cancel' reason: downloadFile's settlement drains to quiescence and,
+      // only once the bus is proven quiet, releases the slot so the connection stays
+      // usable (unlike the 'disconnect' reason, which stands down for teardown).
+      // Await settlement so the renderer/UI can treat resolution as "cancel done".
+      await cancelActiveTransfer('user-cancel')
       return null
     } catch {
       return null

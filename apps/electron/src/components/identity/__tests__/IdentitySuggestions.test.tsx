@@ -49,6 +49,7 @@ const mockAccept = vi.fn()
 const mockReject = vi.fn()
 const mockContactGetById = vi.fn()
 const mockContactUnmerge = vi.fn()
+const mockContactUnmergeGroup = vi.fn()
 const mockProjectUnmerge = vi.fn()
 const mockGetMentionSnippets = vi.fn()
 const mockGetMergeImpact = vi.fn()
@@ -75,7 +76,8 @@ global.window.electronAPI = {
     getAll: mockContactsGetAll,
     merge: mockContactsMerge,
     update: mockContactsUpdate,
-    unmerge: mockContactUnmerge
+    unmerge: mockContactUnmerge,
+    unmergeGroup: mockContactUnmergeGroup
   },
   projects: {
     getById: vi.fn().mockResolvedValue({ success: true, data: { project: { name: 'Proj' } } }),
@@ -102,6 +104,9 @@ beforeEach(() => {
     data: { contact: { name: 'Sebastián', role: 'Engineer', email: 'seba@dfx5.com', meeting_count: 4 } }
   })
   mockContactUnmerge.mockResolvedValue({ success: true })
+  // r6: group Undo goes through ONE atomic backend call; the renderer still
+  // issues the separate name-restore (the canonical rename was never journaled).
+  mockContactUnmergeGroup.mockResolvedValue({ success: true, data: [] })
   mockGetMentionSnippets.mockResolvedValue({ success: true, data: { snippets: [], recordingIds: [] } })
   mockGetMergeImpact.mockResolvedValue({ success: true, data: { keeper: 1, loser: 1 } })
   mockGetPersonContext.mockResolvedValue({ success: true, data: { people: [], topics: [] } })

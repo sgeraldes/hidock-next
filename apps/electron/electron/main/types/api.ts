@@ -87,6 +87,8 @@ export type ErrorCode =
   | 'INTERNAL_ERROR'
   | 'UNAUTHORIZED'
   | 'RATE_LIMITED'
+  /** Unmerge rejected: a newer open merge depends on this journal's entities (undo it first). */
+  | 'MERGE_ORDER_CONFLICT'
 
 // =============================================================================
 // RAG Filter Types

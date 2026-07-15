@@ -124,6 +124,41 @@ describe('entity-resolver', () => {
     expect(r.method).toBe('alias')
   })
 
+  it('resolves a project whose stored name differs only by Unicode form (NFKC-exact, tier 1b)', () => {
+    // Stored decomposed (e + U+0301), queried composed (U+00E9): SQLite's
+    // ASCII-only LOWER can't equate them and tier 3 skips pNorm === norm, so
+    // without the NFKC-exact scan this mention would resolve to nothing and the
+    // reconciler would auto-create a byte-twin project.
+    const decomposed = 'Café Project'
+    const composed = 'Café Project'
+    expect(decomposed).not.toBe(composed)
+    dbInstance.run("INSERT INTO projects (id, name) VALUES ('p-cafe', ?)", [decomposed])
+    const r = resolveProject(composed)
+    expect(r.id).toBe('p-cafe')
+    expect(r.confidence).toBe(0.95)
+    expect(r.method).toBe('exact-name')
+  })
+
+  it('NFKC-exact project name beats a competing positive alias with the same key (tier 1b before tier 2)', () => {
+    // A project stored under the decomposed form of the name...
+    const decomposed = 'Café Project'
+    const composed = 'Café Project'
+    expect(decomposed).not.toBe(composed)
+    dbInstance.run("INSERT INTO projects (id, name) VALUES ('p-cafe', ?)", [decomposed])
+    // ...and a positive alias for the SAME NFKC key pointing at a DIFFERENT project.
+    dbInstance.run(
+      "INSERT INTO project_aliases (id, alias_norm, project_id, source, confidence) VALUES ('pa-hijack', ?, 'p-atlas', 'merge', 1.0)",
+      [composed.normalize('NFKC').toLowerCase()]
+    )
+    // The project's own exact name must win — the same precedence the SQL
+    // exact tier gives ASCII names over aliases. Resolving to p-atlas here
+    // would be wrong-project linkage under an exact-name confidence contract.
+    const r = resolveProject(composed)
+    expect(r.id).toBe('p-cafe')
+    expect(r.method).toBe('exact-name')
+    expect(r.confidence).toBe(0.95)
+  })
+
   describe('ambiguous bare first names', () => {
     beforeEach(() => {
       dbInstance.run(`

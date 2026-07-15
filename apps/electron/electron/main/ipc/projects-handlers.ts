@@ -29,7 +29,9 @@ import {
   updateProjectNote,
   deleteProjectNote,
   getActionablesForProject,
-  addProjectDiscoveryRejection,
+  dismissDiscoveredProject,
+  DismissDiscoveredError,
+  MergeOrderConflictError,
   Project as DBProject,
   ProjectNote
 } from '../services/database'
@@ -223,11 +225,14 @@ export function registerProjectsHandlers(): void {
   )
 
   /**
-   * Dismiss an auto-discovered project: record a durable discovery tombstone
-   * (normalized name + the source meeting, v41) THEN delete the project. The
-   * tombstone blocks the reconciler's auto-create path from silently
-   * re-creating the same project on the next transcript re-analysis; a manual
-   * create with the same name clears it (manual beats rejection).
+   * Dismiss an auto-discovered project: durable tombstone + delete (v41), with
+   * provenance ENFORCED IN THE DATABASE LAYER (v42). dismissDiscoveredProject
+   * verifies the row's origin is 'discovered' and runs the check + tombstone +
+   * delete in one transaction — a stale UI, bug, or compromised renderer calling
+   * this channel directly with a manual project's id gets a clear rejection, not
+   * a cascade delete. The tombstone blocks the reconciler's auto-create path
+   * from re-creating the same project; a manual create with the same name
+   * clears it (manual beats rejection).
    */
   ipcMain.handle(
     'projects:dismissDiscovered',
@@ -238,17 +243,12 @@ export function registerProjectsHandlers(): void {
           return error('VALIDATION_ERROR', 'Invalid project ID', parsed.error.format())
         }
 
-        const project = getProjectById(parsed.data)
-        if (!project) {
-          return error('NOT_FOUND', `Project with ID ${parsed.data} not found`)
-        }
-
-        const meetings = getMeetingsForProject(parsed.data)
-        addProjectDiscoveryRejection(project.name, meetings[0]?.id ?? null)
-        deleteProject(parsed.data)
-
+        dismissDiscoveredProject(parsed.data)
         return success(undefined)
       } catch (err) {
+        if (err instanceof DismissDiscoveredError) {
+          return error(err.code === 'NOT_FOUND' ? 'NOT_FOUND' : 'VALIDATION_ERROR', err.message)
+        }
         console.error('projects:dismissDiscovered error:', err)
         return error('DATABASE_ERROR', 'Failed to dismiss discovered project', err)
       }
@@ -358,6 +358,15 @@ export function registerProjectsHandlers(): void {
       }
       return success(unmergeProjects(parsed.data))
     } catch (err) {
+      if (err instanceof MergeOrderConflictError) {
+        // Ordering rejection, not a database failure: a newer open merge
+        // depends on this journal's entities. Structured details let the undo
+        // UI point at the exact blocking merge.
+        return error('MERGE_ORDER_CONFLICT', err.message, {
+          blockingJournalId: err.blockingJournalId,
+          blockingLoserName: err.blockingLoserName
+        })
+      }
       console.error('projects:unmerge error:', err)
       return error('DATABASE_ERROR', err instanceof Error ? err.message : 'Failed to unmerge projects', err)
     }
@@ -579,6 +588,7 @@ function mapToProject(dbProject: DBProject): Project & { knowledgeIds?: string[]
     status: (dbProject.status === 'archived' ? 'archived' : 'active') as 'active' | 'archived',
     folderPath: dbProject.folder_path ?? null,
     url: dbProject.url ?? null,
+    origin: dbProject.origin ?? null,
     createdAt: dbProject.created_at
   }
 }

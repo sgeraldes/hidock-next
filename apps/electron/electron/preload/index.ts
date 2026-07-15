@@ -364,6 +364,8 @@ export interface ElectronAPI {
     delete: (id: string) => Promise<Result<void>>
     merge: (request: { keeperId: string; loserId: string }) => Promise<Result<Person>>
     unmerge: (journalId: string) => Promise<Result<UnmergeResult>>
+    /** Atomic group Undo: unwinds all journals newest-first in ONE transaction — any rejection rolls back the whole group. */
+    unmergeGroup: (journalIds: string[]) => Promise<Result<UnmergeResult[]>>
     getForMeeting: (meetingId: string) => Promise<Result<Contact[]>>
   }
 
@@ -736,7 +738,9 @@ export interface ElectronAPI {
         filename: string
         fileSize: number
         progress: number
-        status: 'pending' | 'downloading' | 'completed' | 'failed' | 'cancelled'
+        // 'cancelling' is a transient state emitted while an in-flight USB transfer is
+        // being aborted; it settles to 'cancelled'. See DownloadService (Phase-1 cancel).
+        status: 'pending' | 'downloading' | 'cancelling' | 'completed' | 'failed' | 'cancelled'
         error?: string
       }>
       session: {
@@ -1235,6 +1239,7 @@ const electronAPI: ElectronAPI = {
     delete: (id) => callIPC('contacts:delete', id),
     merge: (request) => callIPC('contacts:merge', request),
     unmerge: (journalId) => callIPC('contacts:unmerge', journalId),
+    unmergeGroup: (journalIds) => callIPC('contacts:unmergeGroup', journalIds),
     getForMeeting: (meetingId) => callIPC('contacts:getForMeeting', meetingId)
   },
 

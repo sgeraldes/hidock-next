@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   X,
@@ -17,10 +17,12 @@ import {
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
+import { formatBytes } from '@/utils/formatters'
 import {
   useDownloadQueue,
   useUnifiedRecordings
 } from '@/store/useAppStore'
+import type { DownloadQueueEntry } from '@/store/useAppStore'
 import {
   useTranscriptionStore,
   useTranscriptionStats,
@@ -66,6 +68,39 @@ function displayName(filename: string): string {
   return filename.replace(/\.(hda|wav|mp3|m4a)$/i, '')
 }
 
+/** Human-readable status line for a download row. */
+function downloadStatusLabel(dl: DownloadQueueEntry): string {
+  switch (dl.status) {
+    case 'pending':
+      return 'Queued'
+    case 'cancelling':
+      return 'Cancelling…'
+    case 'cancelled':
+      return 'Cancelled'
+    default:
+      return `Downloading… ${Math.round(dl.progress)}%`
+  }
+}
+
+/** A download the user can still cancel (queued or actively transferring). */
+function isCancelableDownload(dl: DownloadQueueEntry): boolean {
+  return dl.status === 'pending' || dl.status === 'downloading'
+}
+
+/** Active-first ordering: downloading, then cancelling, then queued, then cancelled. */
+function downloadStatusRank(dl: DownloadQueueEntry): number {
+  switch (dl.status) {
+    case 'downloading':
+      return 0
+    case 'cancelling':
+      return 1
+    case 'pending':
+      return 2
+    default:
+      return 3
+  }
+}
+
 /** Resolve a net-new, human title for the source behind a transcription item. */
 function sourceTitleFor(item: TranscriptionItem, rec?: UnifiedRecording): string | null {
   const title = rec?.title ?? rec?.meetingSubject
@@ -96,7 +131,14 @@ export function OperationsPanel({ sidebarOpen }: OperationsPanelProps) {
     else pauseQueue()
   }, [queuePaused, pauseQueue, resumeQueue])
   const recordings = useUnifiedRecordings()
-  const { cancelTranscription } = useOperations()
+  const { cancelTranscription, cancelDownload, cancelAllDownloads } = useOperations()
+
+  // Downloads shown in the unified overlay come from the single renderer store Map
+  // (mirrored from the main-process queue by useDownloadOrchestrator). Active-first.
+  const downloads = useMemo(
+    () => Array.from(downloadQueue.values()).sort((a, b) => downloadStatusRank(a) - downloadStatusRank(b)),
+    [downloadQueue]
+  )
 
   const overlayOpen = useOperationsOverlayOpen()
   const openOverlay = useUIStore((s) => s.openOperationsOverlay)
@@ -156,6 +198,7 @@ export function OperationsPanel({ sidebarOpen }: OperationsPanelProps) {
       open={overlayOpen}
       onClose={closeOverlay}
       items={orderedTranscriptions}
+      downloads={downloads}
       recordings={recordings}
       paused={queuePaused}
       onTogglePause={toggleQueuePaused}
@@ -164,6 +207,8 @@ export function OperationsPanel({ sidebarOpen }: OperationsPanelProps) {
       onDeprioritize={deprioritize}
       onCancel={cancelTranscription}
       onRetry={retryItem}
+      onCancelDownload={cancelDownload}
+      onCancelAllDownloads={cancelAllDownloads}
     />
   )
 
@@ -255,6 +300,7 @@ interface OperationsOverlayProps {
   open: boolean
   onClose: () => void
   items: TranscriptionItem[]
+  downloads: DownloadQueueEntry[]
   recordings: UnifiedRecording[]
   paused: boolean
   onTogglePause: () => void
@@ -263,12 +309,15 @@ interface OperationsOverlayProps {
   onDeprioritize: (id: string) => void
   onCancel: (recordingId: string) => void
   onRetry: (id: string) => void
+  onCancelDownload: (filename: string) => void
+  onCancelAllDownloads: () => void
 }
 
 function OperationsOverlay({
   open,
   onClose,
   items,
+  downloads,
   recordings,
   paused,
   onTogglePause,
@@ -276,7 +325,9 @@ function OperationsOverlay({
   onPrioritize,
   onDeprioritize,
   onCancel,
-  onRetry
+  onRetry,
+  onCancelDownload,
+  onCancelAllDownloads
 }: OperationsOverlayProps) {
   useEffect(() => {
     if (!open) return
@@ -287,6 +338,9 @@ function OperationsOverlay({
 
   if (!open) return null
 
+  const totalCount = items.length + downloads.length
+  const canCancelAllDownloads = downloads.some(isCancelableDownload)
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-6" role="dialog" aria-modal="true" aria-label="Operations detail">
       <button type="button" aria-label="Close" className="absolute inset-0 bg-black/50" onClick={onClose} />
@@ -294,13 +348,25 @@ function OperationsOverlay({
         <div className="flex items-center justify-between border-b border-slate-700 px-4 py-3">
           <div className="flex items-center gap-2">
             <Sparkles className="h-4 w-4 text-purple-400" />
-            <h2 className="text-sm font-semibold">Transcription queue</h2>
-            <span className="rounded-full bg-slate-700 px-1.5 text-[10px] text-slate-300">{items.length}</span>
+            <h2 className="text-sm font-semibold">Operations</h2>
+            <span className="rounded-full bg-slate-700 px-1.5 text-[10px] text-slate-300">{totalCount}</span>
             {paused && (
               <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-300">Paused</span>
             )}
           </div>
           <div className="flex items-center gap-1">
+            {canCancelAllDownloads && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 gap-1.5 px-2 text-xs text-red-400 hover:text-red-300"
+                onClick={onCancelAllDownloads}
+                aria-label="Cancel all downloads"
+              >
+                <X className="h-3.5 w-3.5" />
+                Cancel all downloads
+              </Button>
+            )}
             {items.some((i) => i.status === 'pending' || i.status === 'processing') && (
               <Button
                 variant="ghost"
@@ -320,10 +386,57 @@ function OperationsOverlay({
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto p-3">
-          {items.length === 0 ? (
-            <p className="py-8 text-center text-sm text-slate-500">No active transcriptions.</p>
+          {totalCount === 0 ? (
+            <p className="py-8 text-center text-sm text-slate-500">No active operations.</p>
           ) : (
-            <ul className="space-y-1">
+            <div className="space-y-3">
+              {downloads.length > 0 && (
+                <section aria-label="Downloads">
+                  <h3 className="mb-1 flex items-center gap-1.5 px-2 text-[11px] font-medium uppercase tracking-wide text-slate-500">
+                    <Download className="h-3 w-3" />
+                    Downloads
+                    <span className="rounded-full bg-slate-700 px-1.5 text-[10px] text-slate-300">{downloads.length}</span>
+                  </h3>
+                  <ul className="space-y-1">
+                    {downloads.map((dl) => (
+                      <li key={`dl-${dl.filename}`} className="flex items-center gap-3 rounded-md px-2 py-2 hover:bg-slate-800">
+                        {dl.status === 'cancelling' ? (
+                          <RefreshCw className="h-4 w-4 shrink-0 animate-spin text-amber-400" />
+                        ) : (
+                          <Download className={cn('h-4 w-4 shrink-0', dl.status === 'cancelled' ? 'text-slate-500' : 'text-emerald-400')} />
+                        )}
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-sm text-slate-100">{displayName(dl.filename)}</div>
+                          <div className="truncate text-[11px] text-slate-500">
+                            {downloadStatusLabel(dl)}
+                            {dl.size > 0 ? ` · ${formatBytes(dl.size)}` : ''}
+                            {dl.error ? ` · ${dl.error}` : ''}
+                          </div>
+                        </div>
+                        {(isCancelableDownload(dl) || dl.status === 'cancelling') && (
+                          <IconBtn
+                            label={`Cancel download ${displayName(dl.filename)}`}
+                            danger
+                            disabled={dl.status === 'cancelling'}
+                            onClick={() => onCancelDownload(dl.filename)}
+                          >
+                            <X className="h-4 w-4" />
+                          </IconBtn>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
+
+              {items.length > 0 && (
+                <section aria-label="Transcriptions">
+                  <h3 className="mb-1 flex items-center gap-1.5 px-2 text-[11px] font-medium uppercase tracking-wide text-slate-500">
+                    <Sparkles className="h-3 w-3" />
+                    Transcriptions
+                    <span className="rounded-full bg-slate-700 px-1.5 text-[10px] text-slate-300">{items.length}</span>
+                  </h3>
+                  <ul className="space-y-1">
               {items.map((item) => {
                 const rec = recordings.find((r) => r.id === item.recordingId)
                 const title = sourceTitleFor(item, rec)
@@ -375,7 +488,10 @@ function OperationsOverlay({
                   </li>
                 )
               })}
-            </ul>
+                  </ul>
+                </section>
+              )}
+            </div>
           )}
         </div>
       </div>
@@ -387,11 +503,13 @@ function IconBtn({
   label,
   onClick,
   danger,
+  disabled,
   children
 }: {
   label: string
   onClick: () => void
   danger?: boolean
+  disabled?: boolean
   children: React.ReactNode
 }) {
   return (
@@ -403,6 +521,7 @@ function IconBtn({
             size="icon"
             className={cn('h-6 w-6 text-slate-400', danger ? 'hover:text-red-400' : 'hover:text-slate-100')}
             onClick={onClick}
+            disabled={disabled}
             aria-label={label}
           >
             {children}

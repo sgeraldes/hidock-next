@@ -283,6 +283,23 @@ export function resolveProject(name: string, ctx?: ResolveContext): ResolveResul
   const exact = queryOne<{ id: string }>('SELECT id FROM projects WHERE LOWER(name) = ? LIMIT 1', [norm])
   if (exact && !blocked(exact.id)) return { id: exact.id, confidence: 0.95, method: 'exact-name' }
 
+  const candidates = queryAll<{ id: string; name: string }>('SELECT id, name FROM projects')
+
+  // Tier 1b — NFKC-exact name. The SQL fast-path above compares SQLite's
+  // ASCII-only LOWER(name) against the NFKC-normalized key, so a stored name
+  // whose bytes differ from the query only by Unicode form (NFC vs NFD accents,
+  // compatibility ligatures) never matches it — and tier 3 skips pNorm === norm
+  // candidates. Without this scan such a mention fell through every tier and
+  // auto-created a byte-twin project. Runs BEFORE alias resolution so a
+  // project's own exact name beats a competing alias holding the same NFKC
+  // key — the same precedence the SQL exact tier already gives ASCII names.
+  for (const p of candidates) {
+    if (blocked(p.id)) continue
+    if (normalizeName(p.name) === norm) {
+      return { id: p.id, confidence: 0.95, method: 'exact-name' }
+    }
+  }
+
   // Tier 2 — positive alias.
   if (aliasRow && aliasRow.source !== 'rejected') {
     const p = getProjectById(aliasRow.project_id)
@@ -291,7 +308,6 @@ export function resolveProject(name: string, ctx?: ResolveContext): ResolveResul
     }
   }
 
-  const candidates = queryAll<{ id: string; name: string }>('SELECT id, name FROM projects')
   const foldedTarget = accentFoldedKey(raw)
 
   // Tier 3 — accent/diacritic-folded name.

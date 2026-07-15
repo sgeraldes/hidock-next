@@ -17,6 +17,8 @@ import {
   getContactsForMeeting,
   mergeContacts,
   unmergeContacts,
+  unmergeContactsGroup,
+  MergeOrderConflictError,
   UnmergeResult,
   Contact
 } from '../services/database'
@@ -270,8 +272,41 @@ export function registerContactsHandlers(): void {
       }
       return success(unmergeContacts(parsed.data))
     } catch (err) {
+      if (err instanceof MergeOrderConflictError) {
+        // Ordering rejection, not a database failure: a newer open merge
+        // depends on this journal's entities. Structured details let the undo
+        // UI point at the exact blocking merge.
+        return error('MERGE_ORDER_CONFLICT', err.message, {
+          blockingJournalId: err.blockingJournalId,
+          blockingLoserName: err.blockingLoserName
+        })
+      }
       console.error('contacts:unmerge error:', err)
       return error('DATABASE_ERROR', err instanceof Error ? err.message : 'Failed to unmerge contacts', err)
+    }
+  })
+
+  /**
+   * Atomically reverse a GROUP of contact merges (the group-merge Undo): all
+   * journals unwind newest-first inside ONE transaction — any rejection rolls
+   * the whole group back, so the group is always fully re-attemptable.
+   */
+  ipcMain.handle('contacts:unmergeGroup', async (_, journalIds: unknown): Promise<Result<UnmergeResult[]>> => {
+    try {
+      const parsed = z.array(z.string().min(1).max(200)).min(1).max(100).safeParse(journalIds)
+      if (!parsed.success) {
+        return error('VALIDATION_ERROR', 'Invalid journal ids', parsed.error.format())
+      }
+      return success(unmergeContactsGroup(parsed.data))
+    } catch (err) {
+      if (err instanceof MergeOrderConflictError) {
+        return error('MERGE_ORDER_CONFLICT', err.message, {
+          blockingJournalId: err.blockingJournalId,
+          blockingLoserName: err.blockingLoserName
+        })
+      }
+      console.error('contacts:unmergeGroup error:', err)
+      return error('DATABASE_ERROR', err instanceof Error ? err.message : 'Failed to undo the group merge', err)
     }
   })
 
