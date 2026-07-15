@@ -41,6 +41,17 @@ export function deviceDeleteConfirmDescription(filename: string): string {
 // Trash-mode banner (§D1 step 8).
 export const TRASH_MODE_BANNER = 'Items here are hidden and excluded from AI. Restore, or delete permanently.'
 
+// spec-005/F17 T5 — success/partial-summary toast TITLES for the
+// menu-triggered actions elsewhere in Library.tsx (soft delete, device-only
+// delete, restore, bulk delete). Bodies stay inline at each call site
+// (single-use, interpolating the filename/counts directly) — only the
+// titles are shared copy. Phase-3 integration-review S1: these used to be
+// literals that bypassed this module despite its single-source claim.
+export const SUCCESS_MOVED_TO_TRASH_TITLE = 'Moved to Trash'
+export const SUCCESS_REMOVED_FROM_DEVICE_TITLE = 'Removed from device'
+export const SUCCESS_RESTORED_TITLE = 'Restored'
+export const PARTIAL_DELETE_TITLE = 'Partial Delete'
+
 // =============================================================================
 // spec-006/F17 T6 — permanent-delete OUTCOME copy (D2/D3/D5/AR3-2/AR3-3c/AR3-6a).
 // The dialog's own body copy (impact sentence, graph-unknown warning) stays in
@@ -137,7 +148,7 @@ export function combinedPartialBody(filename: string, kinds: string[]): string {
 
 // --- Success (D5 — actual counts, not the dialog's estimate) ---------------
 
-interface ActualRemovedCounts {
+export interface ActualRemovedCounts {
   transcripts?: number
   actionItems?: number
   embeddings?: number
@@ -156,4 +167,73 @@ export function actualRemovalSummary(removed: ActualRemovedCounts | undefined, a
   const removedText = joinParts(parts) || 'its data'
   const deviceSuffix = alsoDeviceRemoved ? ' and the device copy' : ''
   return `Removed ${removedText}${deviceSuffix}.`
+}
+
+export const SUCCESS_DELETED_PERMANENTLY_TITLE = 'Deleted permanently'
+
+/** The three device-branch outcomes `executeDeletePermanent` can reach. */
+export type DeviceDeleteOutcome = 'not-requested' | 'success' | 'partial'
+
+export interface CompletionToastInputs {
+  filename: string
+  deviceOutcome: DeviceDeleteOutcome
+  /** AR3-2 — true when the local purge's own post-commit file cleanup left something pending. */
+  filesPending: boolean
+  pendingKinds: string[]
+  /** CX-T6-5/CX-T6-6 — true when the device copy WAS removed but the
+   *  view-bookkeeping reconciliation or the local rebuild failed, so the
+   *  list may still show it until the next authoritative device scan. */
+  viewMayBeStale: boolean
+  removed: ActualRemovedCounts | undefined
+}
+
+export interface CompletionToast {
+  variant: 'success' | 'warning'
+  title: string
+  body: string
+}
+
+/**
+ * The permanent-delete completion-toast outcome ladder (T6 fix rounds
+ * CX-T6-1..6), extracted to a pure function of its inputs so the priority
+ * order — combined-partial > device-partial > files-pending > stale-view >
+ * plain success — is unit-testable directly instead of only through the
+ * rendered Library flow (phase-3 integration-review `/simplify` candidate
+ * #2). `executeDeletePermanent` (Library.tsx) computes the inputs — live
+ * device calls, IPC reconciliation, refreshLocal outcomes — and simply
+ * dispatches whatever this returns; it owns no copy decisions of its own.
+ */
+export function selectCompletionToast(inputs: CompletionToastInputs): CompletionToast {
+  const { filename, deviceOutcome, filesPending, pendingKinds, viewMayBeStale, removed } = inputs
+  const staleNote = viewMayBeStale ? ` ${VIEW_MAY_BE_STALE_NOTE}` : ''
+
+  if (deviceOutcome === 'partial' && filesPending) {
+    // CX-T6-3 — both partial outcomes must surface together; the
+    // device-only body would otherwise overclaim full local removal.
+    return { variant: 'warning', title: COMBINED_PARTIAL_TITLE, body: combinedPartialBody(filename, pendingKinds) }
+  }
+  if (deviceOutcome === 'partial') {
+    return { variant: 'warning', title: DEVICE_COPY_REMAINS_TITLE, body: deviceCopyRemainsBody(filename) }
+  }
+  if (filesPending) {
+    return {
+      variant: 'warning',
+      title: FILES_PENDING_TITLE,
+      body: filesPendingBody(filename, pendingKinds) + staleNote
+    }
+  }
+  if (viewMayBeStale) {
+    // Everything WAS deleted (local + device) — the honest partial path
+    // applies: warning variant, with the stale-view note appended.
+    return {
+      variant: 'warning',
+      title: SUCCESS_DELETED_PERMANENTLY_TITLE,
+      body: `${actualRemovalSummary(removed, true)}${staleNote}`
+    }
+  }
+  return {
+    variant: 'success',
+    title: SUCCESS_DELETED_PERMANENTLY_TITLE,
+    body: actualRemovalSummary(removed, deviceOutcome === 'success')
+  }
 }

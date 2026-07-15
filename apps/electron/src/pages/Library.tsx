@@ -50,14 +50,11 @@ import {
   graphCleanupFailedBody,
   genericPermanentDeleteFailedBody,
   LABEL_DELETE_ANYWAY_SKIP_GRAPH,
-  DEVICE_COPY_REMAINS_TITLE,
-  deviceCopyRemainsBody,
-  FILES_PENDING_TITLE,
-  filesPendingBody,
-  COMBINED_PARTIAL_TITLE,
-  combinedPartialBody,
-  VIEW_MAY_BE_STALE_NOTE,
-  actualRemovalSummary
+  SUCCESS_MOVED_TO_TRASH_TITLE,
+  SUCCESS_REMOVED_FROM_DEVICE_TITLE,
+  SUCCESS_RESTORED_TITLE,
+  PARTIAL_DELETE_TITLE,
+  selectCompletionToast
 } from '@/features/library/utils/deletionCopy'
 import type { TypeCounts } from '@/features/library/components/LibraryFilters'
 import { useLibraryStore, useLibrarySorting } from '@/store/useLibraryStore'
@@ -862,7 +859,7 @@ export function Library() {
       // Step 4: Show summary to user via toast if errors
       if (errors.length > 0) {
         import('@/components/ui/toaster').then(({ toast }) => {
-          toast.warning('Partial Delete', `Deleted ${successCount} of ${selectedRecordings.length} items. ${errors.length} failed.`)
+          toast.warning(PARTIAL_DELETE_TITLE, `Deleted ${successCount} of ${selectedRecordings.length} items. ${errors.length} failed.`)
         })
       }
     } finally {
@@ -934,7 +931,7 @@ export function Library() {
       // spec-005/F17 T5 §D2 — device delete previously only ever toasted on
       // error; a real removal now confirms success too.
       import('@/components/ui/toaster').then(({ toast }) => {
-        toast.success('Removed from device', `"${recording.filename}" was erased from the HiDock.`)
+        toast.success(SUCCESS_REMOVED_FROM_DEVICE_TITLE, `"${recording.filename}" was erased from the HiDock.`)
       })
     } catch (e) {
       console.error('Failed to delete from device:', e)
@@ -976,7 +973,7 @@ export function Library() {
       if (currentlyPlayingId === recording.id) audioControls.stop()
       if (selectedSourceId === recording.id) setSelectedSourceId(null)
       import('@/components/ui/toaster').then(({ toast }) => {
-        toast.success('Moved to Trash', `"${recording.filename}" is hidden and excluded from processing.`, {
+        toast.success(SUCCESS_MOVED_TO_TRASH_TITLE, `"${recording.filename}" is hidden and excluded from processing.`, {
           duration: 8000,
           action: {
             label: 'Undo',
@@ -1154,28 +1151,19 @@ export function Library() {
       }
 
       import('@/components/ui/toaster').then(({ toast }) => {
-        // CX-T6-5/CX-T6-6: appended when the device copy WAS removed but the
-        // view may still show it — reconciliation or the local rebuild failed.
-        const staleNote = viewMayBeStale ? ` ${VIEW_MAY_BE_STALE_NOTE}` : ''
-        if (deviceOutcome === 'partial' && filesPending) {
-          // CX-T6-3 (fix round): BOTH partial outcomes must surface together —
-          // the device-only body claims full local removal, which is untrue
-          // while the pending-cleanup ledger is non-empty.
-          toast.warning(COMBINED_PARTIAL_TITLE, combinedPartialBody(recording.filename, pendingKinds))
-        } else if (deviceOutcome === 'partial') {
-          toast.warning(DEVICE_COPY_REMAINS_TITLE, deviceCopyRemainsBody(recording.filename))
-        } else if (filesPending) {
-          toast.warning(FILES_PENDING_TITLE, filesPendingBody(recording.filename, pendingKinds) + staleNote)
-        } else if (viewMayBeStale) {
-          // Everything WAS deleted (local + device) — but the honest partial
-          // path applies: warning variant, with the stale-view note.
-          toast.warning(
-            'Deleted permanently',
-            `${actualRemovalSummary(res.removed, true)}${staleNote}`
-          )
-        } else {
-          toast.success('Deleted permanently', actualRemovalSummary(res.removed, deviceOutcome === 'success'))
-        }
+        // The outcome ladder itself (priority: combined-partial >
+        // device-partial > files-pending > stale-view > plain success) is a
+        // pure function of these five inputs — see selectCompletionToast's
+        // own doc comment for the full CX-T6-1..6 rationale.
+        const { variant, title, body } = selectCompletionToast({
+          filename: recording.filename,
+          deviceOutcome,
+          filesPending,
+          pendingKinds,
+          viewMayBeStale,
+          removed: res.removed
+        })
+        toast[variant](title, body)
       })
     } catch (e) {
       console.error('Failed to permanently delete:', e)
@@ -1245,7 +1233,7 @@ export function Library() {
       await loadTrash()
       announce(`Restored "${recording.filename}"`)
       import('@/components/ui/toaster').then(({ toast }) => {
-        toast.success('Restored', `"${recording.filename}" is back in your Library.`)
+        toast.success(SUCCESS_RESTORED_TITLE, `"${recording.filename}" is back in your Library.`)
       })
     } catch (e) {
       console.error('Failed to restore recording:', e)

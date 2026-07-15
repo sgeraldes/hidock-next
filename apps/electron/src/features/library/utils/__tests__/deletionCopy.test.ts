@@ -18,7 +18,13 @@ import {
   COMBINED_PARTIAL_TITLE,
   combinedPartialBody,
   VIEW_MAY_BE_STALE_NOTE,
-  actualRemovalSummary
+  actualRemovalSummary,
+  SUCCESS_MOVED_TO_TRASH_TITLE,
+  SUCCESS_REMOVED_FROM_DEVICE_TITLE,
+  SUCCESS_DELETED_PERMANENTLY_TITLE,
+  SUCCESS_RESTORED_TITLE,
+  PARTIAL_DELETE_TITLE,
+  selectCompletionToast
 } from '../deletionCopy'
 
 describe('GRAPH_CLEANUP_RETRY_SAFETY_LINE (D2, fail-closed honesty)', () => {
@@ -178,5 +184,141 @@ describe('actualRemovalSummary (D5 — actual counts, not the dialog estimate)',
 
   it('appends the device suffix even on the "its data" fallback', () => {
     expect(actualRemovalSummary(undefined, true)).toBe('Removed its data and the device copy.')
+  })
+})
+
+// spec-005/F17 T5 success/partial toast TITLES (phase-3 integration-review
+// S1) — Library.tsx's menu-triggered actions (soft delete, device-only
+// delete, restore, bulk delete) source their titles from here instead of
+// inline literals.
+describe('T5 success/partial toast titles (S1)', () => {
+  it('SUCCESS_MOVED_TO_TRASH_TITLE', () => {
+    expect(SUCCESS_MOVED_TO_TRASH_TITLE).toBe('Moved to Trash')
+  })
+
+  it('SUCCESS_REMOVED_FROM_DEVICE_TITLE', () => {
+    expect(SUCCESS_REMOVED_FROM_DEVICE_TITLE).toBe('Removed from device')
+  })
+
+  it('SUCCESS_DELETED_PERMANENTLY_TITLE', () => {
+    expect(SUCCESS_DELETED_PERMANENTLY_TITLE).toBe('Deleted permanently')
+  })
+
+  it('SUCCESS_RESTORED_TITLE', () => {
+    expect(SUCCESS_RESTORED_TITLE).toBe('Restored')
+  })
+
+  it('PARTIAL_DELETE_TITLE', () => {
+    expect(PARTIAL_DELETE_TITLE).toBe('Partial Delete')
+  })
+})
+
+// The executeDeletePermanent outcome ladder (T6 fix rounds CX-T6-1..6),
+// extracted to a pure function (phase-3 integration-review `/simplify`
+// candidate #2). Library.deletePermanent.test.tsx keeps exercising the same
+// matrix end-to-end through the rendered component (unchanged); these tests
+// cover the decision function directly.
+describe('selectCompletionToast — outcome ladder (T6 fix rounds CX-T6-1..6)', () => {
+  const baseInputs = {
+    filename: 'meeting.wav',
+    deviceOutcome: 'not-requested' as const,
+    filesPending: false,
+    pendingKinds: [] as string[],
+    viewMayBeStale: false,
+    removed: { transcripts: 2 }
+  }
+
+  it('plain success: device not requested, nothing pending, view not stale', () => {
+    const result = selectCompletionToast(baseInputs)
+    expect(result).toEqual({
+      variant: 'success',
+      title: SUCCESS_DELETED_PERMANENTLY_TITLE,
+      body: actualRemovalSummary({ transcripts: 2 }, false)
+    })
+  })
+
+  it('plain success WITH a confirmed device removal appends "and the device copy"', () => {
+    const result = selectCompletionToast({ ...baseInputs, deviceOutcome: 'success' })
+    expect(result.variant).toBe('success')
+    expect(result.title).toBe(SUCCESS_DELETED_PERMANENTLY_TITLE)
+    expect(result.body).toBe(actualRemovalSummary({ transcripts: 2 }, true))
+  })
+
+  it('device-partial alone: warning, DEVICE_COPY_REMAINS_TITLE', () => {
+    const result = selectCompletionToast({ ...baseInputs, deviceOutcome: 'partial' })
+    expect(result).toEqual({
+      variant: 'warning',
+      title: DEVICE_COPY_REMAINS_TITLE,
+      body: deviceCopyRemainsBody('meeting.wav')
+    })
+  })
+
+  it('files-pending alone: warning, FILES_PENDING_TITLE, no stale note', () => {
+    const result = selectCompletionToast({
+      ...baseInputs,
+      filesPending: true,
+      pendingKinds: ['wiki']
+    })
+    expect(result).toEqual({
+      variant: 'warning',
+      title: FILES_PENDING_TITLE,
+      body: filesPendingBody('meeting.wav', ['wiki'])
+    })
+  })
+
+  // CX-T6-3 — BOTH partial outcomes at once take priority over the
+  // files-pending-only branch: one combined toast, never two stacked ones.
+  it('device-partial + files-pending: warning, COMBINED_PARTIAL_TITLE (priority over device-partial-only and files-pending-only)', () => {
+    const result = selectCompletionToast({
+      ...baseInputs,
+      deviceOutcome: 'partial',
+      filesPending: true,
+      pendingKinds: ['audio']
+    })
+    expect(result).toEqual({
+      variant: 'warning',
+      title: COMBINED_PARTIAL_TITLE,
+      body: combinedPartialBody('meeting.wav', ['audio'])
+    })
+  })
+
+  // CX-T6-5/CX-T6-6 — the device copy WAS removed but the view-bookkeeping
+  // reconciliation or local rebuild failed: warning variant with the
+  // stale-view note, never plain success.
+  it('view-may-be-stale alone (device succeeded, nothing pending): warning, stale note appended', () => {
+    const result = selectCompletionToast({
+      ...baseInputs,
+      deviceOutcome: 'success',
+      viewMayBeStale: true
+    })
+    expect(result).toEqual({
+      variant: 'warning',
+      title: SUCCESS_DELETED_PERMANENTLY_TITLE,
+      body: `${actualRemovalSummary({ transcripts: 2 }, true)} ${VIEW_MAY_BE_STALE_NOTE}`
+    })
+  })
+
+  // Priority ordering: files-pending outranks the stale-view note when both
+  // are true at once (device succeeded, reconciliation/rebuild ALSO failed,
+  // AND the purge's own file cleanup is pending) — the stale note is still
+  // appended, but under the FILES_PENDING_TITLE, not the success title.
+  it('files-pending + view-may-be-stale: warning, FILES_PENDING_TITLE, stale note appended to the pending body', () => {
+    const result = selectCompletionToast({
+      ...baseInputs,
+      deviceOutcome: 'success',
+      filesPending: true,
+      pendingKinds: ['vector'],
+      viewMayBeStale: true
+    })
+    expect(result).toEqual({
+      variant: 'warning',
+      title: FILES_PENDING_TITLE,
+      body: `${filesPendingBody('meeting.wav', ['vector'])} ${VIEW_MAY_BE_STALE_NOTE}`
+    })
+  })
+
+  it('falls back to "its data" body when removed is undefined', () => {
+    const result = selectCompletionToast({ ...baseInputs, removed: undefined })
+    expect(result.body).toBe('Removed its data.')
   })
 })
