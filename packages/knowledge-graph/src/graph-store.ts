@@ -121,8 +121,23 @@ export class KnowledgeGraphStore {
     for (const sql of statements) {
       try {
         this.db.run(sql)
-      } catch {
-        // Ignore "already exists" errors — schema is idempotent
+      } catch (e) {
+        // Every GRAPH_SCHEMA statement already uses IF NOT EXISTS, so a
+        // genuine "already exists" error should never actually fire here —
+        // this tolerance is defensive only, for a driver that races the
+        // conditional check. spec-006/F17 T6 AR3-3(b): anything ELSE (a
+        // corrupt DB, disk full, permission denied, a real syntax error from
+        // a future schema edit) is a real failure and MUST surface. Silently
+        // swallowing it here previously let downstream graph operations fail
+        // in confusing ways far from the actual cause — including, for the
+        // hard-purge cleanup seam, initSchema being re-run INSIDE the delete
+        // transaction (see ensureGraphReady in the app's
+        // knowledge-graph-service.ts), where a swallowed failure could look
+        // like a successful purge.
+        const message = e instanceof Error ? e.message : String(e)
+        if (!/already exists/i.test(message)) {
+          throw e
+        }
       }
     }
   }

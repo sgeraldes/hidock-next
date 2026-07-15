@@ -6,7 +6,7 @@ import { join } from 'path'
 import { existsSync, rmSync } from 'fs'
 import Database from 'better-sqlite3'
 import { DatabaseEngine } from '@hidock/database'
-import { KnowledgeGraphStore } from '../src/graph-store.js'
+import { KnowledgeGraphStore, type GraphDb } from '../src/graph-store.js'
 
 function tempPath(name: string) {
   return join(tmpdir(), `hidock-kg-store-${name}-${Date.now()}-${Math.random().toString(36).slice(2)}.sqlite`)
@@ -194,5 +194,61 @@ describe('KnowledgeGraphStore', () => {
     const people = store.findNodes({ type: 'person' })
     expect(people).toHaveLength(2)
     expect(people.every((n) => n.type === 'person')).toBe(true)
+  })
+})
+
+// spec-006/F17 T6 AR3-3(b): initSchema() previously swallowed EVERY error from
+// EVERY DDL statement (a blanket try/catch with an empty catch block), on the
+// theory that IF NOT EXISTS makes them idempotent. That masks a genuine
+// failure (corrupt DB, disk full, permission denied, a future schema-edit
+// typo) as silent success. It must now tolerate ONLY an "already exists"
+// message and re-throw everything else. Uses a hand-written GraphDb stub
+// (not a real engine) so a specific statement can be made to fail on demand.
+describe('KnowledgeGraphStore.initSchema — DDL error surfacing (AR3-3b)', () => {
+  function makeFailingDb(shouldFail: (sql: string) => Error | null): GraphDb {
+    return {
+      run(sql: string) {
+        const err = shouldFail(sql)
+        if (err) throw err
+      },
+      queryAll: () => [],
+      queryOne: () => undefined,
+    }
+  }
+
+  it('tolerates an "already exists" error and keeps running the remaining statements', () => {
+    let ranCount = 0
+    const db = makeFailingDb((sql) => {
+      ranCount++
+      return sql.includes('graph_nodes') ? new Error('table graph_nodes already exists') : null
+    })
+    const store = new KnowledgeGraphStore(db)
+    expect(() => store.initSchema()).not.toThrow()
+    // More than one statement ran — the loop didn't stop at the tolerated error.
+    expect(ranCount).toBeGreaterThan(1)
+  })
+
+  it('is case-insensitive when matching "already exists"', () => {
+    const db = makeFailingDb((sql) => (sql.includes('graph_nodes') ? new Error('Table Graph_Nodes ALREADY EXISTS') : null))
+    const store = new KnowledgeGraphStore(db)
+    expect(() => store.initSchema()).not.toThrow()
+  })
+
+  it('surfaces (does not swallow) a non-"already exists" DDL failure', () => {
+    const db = makeFailingDb((sql) => (sql.includes('graph_edges') ? new Error('disk I/O error') : null))
+    const store = new KnowledgeGraphStore(db)
+    expect(() => store.initSchema()).toThrow('disk I/O error')
+  })
+
+  it('surfaces a non-Error throw (stringified) as well', () => {
+    const db: GraphDb = {
+      run(sql: string) {
+        if (sql.includes('graph_nodes')) throw 'weird string throw'
+      },
+      queryAll: () => [],
+      queryOne: () => undefined,
+    }
+    const store = new KnowledgeGraphStore(db)
+    expect(() => store.initSchema()).toThrow()
   })
 })
