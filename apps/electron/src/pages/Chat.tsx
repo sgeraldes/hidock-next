@@ -253,6 +253,7 @@ export function Chat() {
       }
     }
     initialize()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- initialize chat once on mount
   }, [])
 
   // Load recording context
@@ -525,7 +526,7 @@ export function Chat() {
     try {
       const result = await window.electronAPI.rag.status()
       setStatus(result.success ? result.data : unavailable)
-    } catch (error) {
+    } catch {
       setStatus(unavailable)
     }
   }
@@ -1286,7 +1287,7 @@ export function Chat() {
                         </span>
                       </div>
                       <p className="text-xs line-clamp-3 text-muted-foreground italic">
-                        "{chunk.content}"
+                        &quot;{chunk.content}&quot;
                       </p>
                     </div>
                   ))}

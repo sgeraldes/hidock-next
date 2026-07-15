@@ -25,7 +25,7 @@ vi.mock('../../services/database', () => ({
 }))
 
 describe('Calendar IPC Handlers', () => {
-  let handlers: Record<string, Function> = {}
+  let handlers: Record<string, (...args: any[]) => any> = {}
 
   // Default config returned by getConfig
   const defaultConfig = {
@@ -45,7 +45,7 @@ describe('Calendar IPC Handlers', () => {
     const { getConfig } = await import('../../services/config')
     vi.mocked(getConfig).mockReturnValue(defaultConfig as any)
 
-    vi.mocked(ipcMain.handle).mockImplementation((channel: string, handler: Function) => {
+    vi.mocked(ipcMain.handle).mockImplementation((channel: string, handler: (...args: any[]) => any) => {
       handlers[channel] = handler
       return undefined as any
     })
@@ -332,7 +332,7 @@ describe('Calendar IPC Handlers', () => {
       // Re-register to trigger initialization with new config
       handlers = {}
       vi.mocked(ipcMain.handle).mockClear()
-      vi.mocked(ipcMain.handle).mockImplementation((channel: string, handler: Function) => {
+      vi.mocked(ipcMain.handle).mockImplementation((channel: string, handler: (...args: any[]) => any) => {
         handlers[channel] = handler
         return undefined as any
       })
