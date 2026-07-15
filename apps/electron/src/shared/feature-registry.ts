@@ -91,9 +91,18 @@ export const FEATURES: Record<FeatureId, FeatureDefinition> = {
       'self-id:',
       'transcript-upgrade:',
       'quality:',
-      // recording-handlers mixes library reads with transcription triggers —
-      // gate the transcription trigger at CHANNEL granularity (spec §A.1).
+      // recording-handlers mixes library reads with transcription TRIGGERS on the
+      // shared `recordings:` namespace. Gate every transcription trigger/control
+      // channel at CHANNEL granularity (spec §A.1) so they fail closed when
+      // transcription is off — Review-2 [HIGH]: these previously slipped through
+      // unclassified and stayed callable with transcription disabled.
       'recordings:reDiarize',
+      'recordings:transcribe',
+      'recordings:addToQueue',
+      'recordings:processQueue',
+      'recordings:reprocessWith',
+      'recordings:startTranscriptionProcessor',
+      'recordings:stopTranscriptionProcessor',
     ],
     dependsOn: [],
     softDependsOn: [],
@@ -469,4 +478,104 @@ export function routeFeature(pathname: string): FeatureId | null {
     }
   }
   return null
+}
+
+// ---------------------------------------------------------------------------
+// Channel classification (Review-2 [HIGH]: no channel may slip through the gate
+// unclassified)
+// ---------------------------------------------------------------------------
+
+/**
+ * Namespaces that are wholly `core` / shared floor and are NEVER gated. Every
+ * channel under one of these prefixes is intentionally open (config, database,
+ * storage, the always-on Library floor, connector management, …). A prefix ends
+ * in `:`.
+ *
+ * NOTE: this is deliberately a prefix allowlist for namespaces that belong
+ * entirely to core. Namespaces that MIX feature-owned and core channels (today
+ * only `recordings:`) are NOT listed here — their core channels are exact-listed
+ * in `CORE_CHANNELS` so a newly-added `recordings:*` trigger cannot silently
+ * default to open; it stays `unclassified` until a human classifies it.
+ */
+export const CORE_CHANNEL_PREFIXES: string[] = [
+  'app:',
+  'config:',
+  'db:',
+  'storage:',
+  'integrity:',
+  'migration:',
+  'repair:',
+  'brains:',
+  'knowledge:',
+  'artifacts:',
+  'waveform:',
+  'handover:',
+  'outputs:',
+  // Connector management surface (list/configure/connect/disconnect for ALL
+  // connectors). Per-connector IPC gating is a later phase (spec §C.3); the host
+  // enforces per-instance enable today, so these stay open.
+  'connectors:',
+]
+
+/**
+ * Exact `core` channels that live on the SHARED `recordings:` namespace (Library
+ * reads, deletes, imports, watcher control, meeting-linking, status reads/writes).
+ * They stay open even when transcription is off. Transcription TRIGGERS and the
+ * meeting-intelligence timeline channels on the same namespace are feature-owned
+ * (see `FEATURES[*].ipcNamespaces`) and are NOT listed here.
+ */
+export const CORE_CHANNELS: string[] = [
+  'recordings:addExternal',
+  'recordings:addExternalByPath',
+  'recordings:backfillDurations',
+  'recordings:clearPreassignment',
+  'recordings:delete',
+  'recordings:deleteBatch',
+  'recordings:deleteCascade',
+  'recordings:deletionImpact',
+  'recordings:getAll',
+  'recordings:getAllWithTranscripts',
+  'recordings:getById',
+  'recordings:getCandidates',
+  'recordings:getForMeeting',
+  'recordings:getMeetingsNearDate',
+  'recordings:getPreassignment',
+  'recordings:getTranscript',
+  'recordings:getTranscriptionStatus',
+  'recordings:getWatcherStatus',
+  'recordings:linkToMeeting',
+  'recordings:markPersonal',
+  'recordings:preassign',
+  'recordings:restore',
+  'recordings:scanFolder',
+  'recordings:selectMeeting',
+  'recordings:startWatcher',
+  'recordings:stopWatcher',
+  'recordings:unlinkFromMeeting',
+  'recordings:updateDuration',
+  'recordings:updateStatus',
+  'recordings:updateTranscriptionStatus',
+]
+
+/** Result of classifying an IPC channel for the gate + the completeness test. */
+export type ChannelClass =
+  | { kind: 'feature'; feature: FeatureId }
+  | { kind: 'core' }
+  | { kind: 'unclassified' }
+
+/**
+ * Classify an IPC channel as owned by a feature, intentionally core (never
+ * gated), or `unclassified`. The registrar-inventory completeness test asserts
+ * that NO registered channel is `unclassified`, so any future channel must be
+ * mapped to a feature (in `FEATURES[*].ipcNamespaces`) or explicitly declared
+ * core (a `CORE_CHANNEL_PREFIXES` prefix or a `CORE_CHANNELS` exact entry).
+ */
+export function classifyChannel(channel: string): ChannelClass {
+  const feature = channelFeature(channel)
+  if (feature) return { kind: 'feature', feature }
+  if (CORE_CHANNELS.includes(channel)) return { kind: 'core' }
+  for (const prefix of CORE_CHANNEL_PREFIXES) {
+    if (channel.startsWith(prefix)) return { kind: 'core' }
+  }
+  return { kind: 'unclassified' }
 }
