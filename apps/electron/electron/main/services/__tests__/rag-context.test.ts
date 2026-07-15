@@ -137,4 +137,39 @@ describe('RAGService Context Injection', () => {
     expect(userMessage).not.toContain('Full transcript text from knowledge capture')
     expect(userMessage).not.toContain('PINNED CONTEXT: Test Title')
   })
+
+  // ADV18-1 (round-19) — the RAG conversation-history resend path revalidates
+  // each cached assistant turn's provenance BEFORE prepending it to the next LLM
+  // prompt. Turn 1 grounds its answer on the pinned recording rec-1; turn 2
+  // asserts the presence/absence of that prior answer in the messages array
+  // actually sent to the provider.
+  function assistantTurnsInCall(callIndex: number): unknown[] {
+    const messages = vi.mocked(mockChatLLMService.generate).mock.calls[callIndex][0]
+    return (messages as Array<{ role: string }>).filter((m) => m.role === 'assistant')
+  }
+
+  it('ADV18-1 — keeps a prior answer in the resent history while its recording is eligible', async () => {
+    const rag = getRAGService()
+    await rag.chat('session-1', 'first question') // grounded on pinned rec-1 (eligible)
+    await rag.chat('session-1', 'second question')
+    // The turn-1 assistant answer is revalidated-eligible → resent as history.
+    expect(assistantTurnsInCall(1)).toHaveLength(1)
+  })
+
+  it('ADV18-1 — DROPS a prior answer from the resent history once its recording is excluded', async () => {
+    const rag = getRAGService()
+    await rag.chat('session-1', 'first question') // grounded on pinned rec-1 (eligible)
+    excludedRecordingIds = new Set(['rec-1']) // rec-1 trashed/personal/value-excluded before turn 2
+    await rag.chat('session-1', 'second question')
+    // The turn-1 answer's provenance is now excluded → it is NOT resent to the LLM.
+    expect(assistantTurnsInCall(1)).toHaveLength(0)
+  })
+
+  it('ADV18-1 — fails closed (drops prior answer) when the resend eligibility lookup throws', async () => {
+    const rag = getRAGService()
+    await rag.chat('session-1', 'first question')
+    throwExclusionLookup = true
+    await rag.chat('session-1', 'second question')
+    expect(assistantTurnsInCall(1)).toHaveLength(0)
+  })
 })

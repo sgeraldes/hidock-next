@@ -9,13 +9,32 @@ import { getChatLLMService } from './chat-llm'
 import { getEmbeddingsService } from './embeddings'
 import { getDatabase, queryOne, queryAll, escapeLikePattern } from './database'
 import { filterEligibleRecordingIds, filterEligibleCaptureIds } from './recording-eligibility'
+import {
+  isProvenanceExcluded,
+  type MessageProvenance
+} from './chat-source-provenance'
 import { stripDiacritics } from './entity-normalize'
 import type { BrainId } from './brains/types'
+// Type-only — erased at compile so RAG's runtime import graph stays free of the
+// knowledge-graph/ingest/LLM stack (loaded lazily inside buildGraphContext).
+import type { NeighborhoodFactProvenance } from './knowledge-graph-service'
 import { Result, success, error } from '../types/api'
+
+/**
+ * One in-memory conversation-history turn. ADV18-1 (round-19): assistant turns
+ * carry their authoritative provenance union so the history-resend path can
+ * revalidate them through the shared boundary BEFORE prepending them to the next
+ * LLM prompt (a contributing recording trashed mid-session must not be resent).
+ */
+interface HistoryEntry {
+  role: OllamaChatMessage['role']
+  content: string
+  prov?: MessageProvenance
+}
 
 interface ChatContext {
   meetingId?: string
-  conversationHistory: OllamaChatMessage[]
+  conversationHistory: HistoryEntry[]
 }
 
 interface RAGResponse {
@@ -351,7 +370,8 @@ function detectNormalizedEntities(
  */
 export async function buildGraphContext(
   message: string,
-  meetingFilter?: string
+  meetingFilter?: string,
+  provOut?: NeighborhoodFactProvenance
 ): Promise<string[]> {
   const parts: string[] = []
   try {
@@ -371,7 +391,9 @@ export async function buildGraphContext(
     const addFacts = (entityId: string | null | undefined, hops = 1): void => {
       if (!entityId || seenEntities.has(entityId)) return
       seenEntities.add(entityId)
-      const facts = kg.neighborhoodFacts(entityId, hops, 20, exclusion)
+      // ADV18-2 — thread provOut so the recording ids backing the EMITTED facts
+      // are folded into the answer's persisted provenance union.
+      const facts = kg.neighborhoodFacts(entityId, hops, 20, exclusion, provOut)
       if (!facts) return
       const cost = estimateTokens(facts)
       if (usedTokens + cost > budget) return // per-brain graph budget spent
@@ -474,6 +496,23 @@ class RAGService {
   private contexts: LRUSessionCache = new LRUSessionCache()
   // B-CHAT-005: Active AbortControllers for cancellable requests
   private activeControllers: Map<string, AbortController> = new Map()
+  /**
+   * ADV18-2 (round-19) — authoritative provenance union for the LAST answer of
+   * each session, computed main-side over ALL prompt components (vector + pinned
+   * + graph). assistant:addMessage consumes it by session id (== conversation id)
+   * so the persisted envelope carries provenance the renderer NEVER supplies or
+   * can tamper with. A missing entry ⇒ the persist path fails closed (no
+   * envelope ⇒ redact on read). Cleared at the start of every chat() turn and on
+   * clearSession.
+   */
+  private answerProvenance: Map<string, MessageProvenance> = new Map()
+
+  /** Consume (and clear) the last answer's provenance union for a session. */
+  consumeAnswerProvenance(sessionId: string): MessageProvenance | undefined {
+    const prov = this.answerProvenance.get(sessionId)
+    this.answerProvenance.delete(sessionId)
+    return prov
+  }
 
   async isReady(): Promise<{ ready: boolean; reason?: string }> {
     const vectorStore = getVectorStore()
@@ -548,6 +587,12 @@ class RAGService {
         error: 'Failed to validate conversation. Please try again.'
       }
     }
+
+    // ADV18-2 (round-19) — clear any stale provenance for this session at the
+    // START of the turn; it is set ONLY on the successful return path below, so
+    // an error turn (or an abandoned generation) leaves no provenance for the
+    // next assistant:addMessage to consume (⇒ that message would fail closed).
+    this.answerProvenance.delete(sessionId)
 
     // B-CHAT-005: Create AbortController for this request
     // Cancel any existing in-flight request for this session
@@ -637,6 +682,26 @@ class RAGService {
     const contextParts: string[] = []
     const sources: RAGResponse['sources'] = []
 
+    // ADV18-2 (round-19) — accumulate the AUTHORITATIVE provenance union over
+    // EVERY prompt component (vector chunks here, pinned + graph below). These
+    // ids are what the persisted answer is redacted against on re-read, so a
+    // later exclusion of ANY of them removes the whole answer + chips.
+    const provRecordingIds = new Set<string>()
+    const provCaptureIds = new Set<string>()
+    let provUnverifiable = false
+
+    // A vector doc is recording-backed via its `recordingId` ONLY when it is a
+    // transcript chunk; ALL artifact/capture indexing sets `captureId` (ADV10-P1,
+    // and `recordingId` there is the artifact id). Discriminate on captureId
+    // exactly like vector-store.filterEligibleDocs so we validate captures via the
+    // capture boundary and recordings via the recording boundary on read. A chunk
+    // with NEITHER id cannot be attributed ⇒ mark the answer unverifiable.
+    const captureVectorProvenance = (meta: { recordingId?: string; captureId?: string }): void => {
+      if (meta.captureId) provCaptureIds.add(meta.captureId)
+      else if (meta.recordingId) provRecordingIds.add(meta.recordingId)
+      else provUnverifiable = true
+    }
+
     for (const result of searchResults) {
       if (result.score < 0.3) continue // Skip low-relevance results
 
@@ -660,6 +725,7 @@ class RAGService {
           sourceType: 'image',
           captureId: doc.metadata.captureId
         })
+        captureVectorProvenance(doc.metadata)
         continue
       }
 
@@ -677,6 +743,7 @@ class RAGService {
         timestamp: doc.metadata.timestamp,
         score
       })
+      captureVectorProvenance(doc.metadata)
     }
 
     // Ground with Context Graph facts (F4): the assistant walks graph edges, not
@@ -685,7 +752,13 @@ class RAGService {
     // is scoped to a meeting, that meeting's neighborhood. Trimmed to a per-brain
     // token budget. Loaded lazily inside buildGraphContext so RAG's static import
     // graph stays free of the ingest/LLM stack.
-    const graphContextParts = await buildGraphContext(message, context.meetingId)
+    // ADV18-2 — collect the recording ids backing the graph facts we actually
+    // emit, so the answer's provenance union covers graph grounding (not just
+    // vector snippets). `unresolved` (a provenance read threw) ⇒ unverifiable.
+    const graphProv: NeighborhoodFactProvenance = { recordingIds: new Set<string>(), unresolved: false }
+    const graphContextParts = await buildGraphContext(message, context.meetingId, graphProv)
+    for (const id of graphProv.recordingIds) provRecordingIds.add(id)
+    if (graphProv.unresolved) provUnverifiable = true
 
     // ADV5/INC (round-5/6) — revalidate pinned recordings through the shared
     // fail-closed boundary HERE, immediately before prompt construction and
@@ -695,6 +768,8 @@ class RAGService {
     // is dropped (fail closed).
     const { eligible: eligiblePinned } = filterEligibleRecordingIds(pinnedEntries.map((e) => e.recordingId))
     const pinnedContextParts = pinnedEntries.filter((e) => eligiblePinned.has(e.recordingId)).map((e) => e.part)
+    // ADV18-2 — the pinned recordings actually injected are authoritative sources.
+    for (const e of pinnedEntries) if (eligiblePinned.has(e.recordingId)) provRecordingIds.add(e.recordingId)
 
     // Combine pinned context, graph facts, and search results
     const allContextParts = [...pinnedContextParts, ...graphContextParts, ...contextParts]
@@ -707,8 +782,22 @@ class RAGService {
 
     const userMessage = `Context:\n${contextText}\n\nQuestion: ${message}`
 
+    // ADV18-1 (round-19) — revalidate the CACHED conversation history through the
+    // shared fail-closed boundary IMMEDIATELY before prompt construction: DROP any
+    // prior ASSISTANT turn whose provenance is now excluded or unverifiable so it
+    // is NOT resent to the provider (a recording trashed/personal/value-excluded
+    // mid-session must not keep grounding via replayed history). User-authored
+    // turns are always kept. Revalidating on READ (rather than trusting the
+    // in-memory cache) covers eligibility transitions since the turn was cached.
+    const safeHistory = context.conversationHistory.filter(
+      (h) => h.role !== 'assistant' || !isProvenanceExcluded(h.prov)
+    )
+
     // B-CHAT-006: Build messages for LLM with token-aware trimming
-    const trimmedHistory = trimHistoryByTokens(context.conversationHistory, 4096)
+    const trimmedHistory = trimHistoryByTokens(
+      safeHistory.map((h) => ({ role: h.role, content: h.content })),
+      4096
+    )
     const messages: OllamaChatMessage[] = [
       ...trimmedHistory,
       { role: 'user', content: userMessage }
@@ -751,14 +840,27 @@ class RAGService {
       }
     }
 
-    // Add assistant response to history
-    context.conversationHistory.push({ role: 'assistant', content: answer })
+    // ADV18-2 (round-19) — the authoritative provenance union for THIS answer,
+    // over vector + pinned + graph. Attached to the cached history turn (so the
+    // resend gate above can revalidate it next turn) AND stashed for the
+    // persist path (assistant:addMessage consumes it by session id).
+    const answerProv: MessageProvenance = {
+      recordingIds: [...provRecordingIds],
+      captureIds: [...provCaptureIds],
+      unverifiable: provUnverifiable
+    }
+
+    // Add assistant response to history (with its provenance for resend revalidation)
+    context.conversationHistory.push({ role: 'assistant', content: answer, prov: answerProv })
 
     // B-CHAT-006: Token-aware history pruning replaces simple slice
     // Keep the history manageable but let trimHistoryByTokens do the real work at query time
     if (context.conversationHistory.length > 40) {
       context.conversationHistory = context.conversationHistory.slice(-20)
     }
+
+    // Stash provenance for the persist path (consumed by assistant:addMessage).
+    this.answerProvenance.set(sessionId, answerProv)
 
     // B-CHAT-005: Clean up controller after successful completion
     this.activeControllers.delete(sessionId)
@@ -845,6 +947,8 @@ ${transcript.substring(0, 8000)}`
 
   clearSession(sessionId: string): void {
     this.contexts.delete(sessionId)
+    // ADV18-2 — drop any stashed answer provenance for this session too.
+    this.answerProvenance.delete(sessionId)
     // Also cancel any in-flight request for this session
     const controller = this.activeControllers.get(sessionId)
     if (controller) {
