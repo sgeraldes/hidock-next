@@ -56,6 +56,7 @@ import {
   filesPendingBody,
   COMBINED_PARTIAL_TITLE,
   combinedPartialBody,
+  VIEW_MAY_BE_STALE_NOTE,
   actualRemovalSummary
 } from '@/features/library/utils/deletionCopy'
 import type { TypeCounts } from '@/features/library/components/LibraryFilters'
@@ -66,7 +67,7 @@ import { ConfirmDialog } from '@/components/ConfirmDialog'
 export function Library() {
   const navigate = useNavigate()
   const location = useLocation()
-  const { recordings, loading, error, refresh, deviceConnected, stats } = useUnifiedRecordings()
+  const { recordings, loading, error, refresh, refreshLocal, deviceConnected, stats } = useUnifiedRecordings()
 
   // Selected source for center panel
   const selectedSourceId = useLibraryStore((state) => state.selectedSourceId)
@@ -1072,6 +1073,10 @@ export function Library() {
 
       // D3/AR3-6 — device branch, only after the local purge committed above.
       let deviceOutcome: 'not-requested' | 'success' | 'partial' = 'not-requested'
+      // CX-T6-5 (fix round 2): the device copy was removed but the
+      // view-bookkeeping reconciliation failed — an honest "list may be
+      // stale" note replaces the plain success toast.
+      let deviceReconcileFailed = false
       if (opts?.alsoDeleteFromDevice) {
         const targetDeviceFilename =
           impact?.deviceFilename ?? ('deviceFilename' in recording ? recording.deviceFilename : undefined)
@@ -1091,24 +1096,40 @@ export function Library() {
               // device filename too, which reconciles the offline device
               // cache (the only remaining source that would resurrect this
               // file as a ghost device-only row).
+              // CX-T6-5 (fix round 2): the IPC now propagates a real cache-
+              // delete failure ({success:false}) instead of swallowing it —
+              // treat that (or a thrown IPC) as reconcile-failed and say so.
               try {
-                await window.electronAPI.recordings.markNotOnDevice(recording.id, targetDeviceFilename)
+                const reconciled = await window.electronAPI.recordings.markNotOnDevice(
+                  recording.id,
+                  targetDeviceFilename
+                )
+                if (!reconciled?.success) {
+                  deviceReconcileFailed = true
+                  console.error(
+                    '[Library] Device-presence reconciliation failed:',
+                    (reconciled as { error?: string } | undefined)?.error
+                  )
+                }
               } catch (e) {
+                deviceReconcileFailed = true
                 console.error('[Library] Failed to reconcile device presence after delete:', e)
               }
-              // CX-T6-1 (fix round): rebuild the unified view NOW — nothing
-              // else refreshes after the device branch, so without this the
-              // pre-device-delete view (built while the file was still on the
-              // device) lingered until the next scan despite the success
-              // toast. force=true deliberately: it bypasses the hook's 2s
-              // load debounce (the post-cascade refresh above just ran) and
-              // re-fetches the authoritative device list via the EXISTING
-              // refresh path — same single-fetch semantics as the app's
-              // other force refreshes, no new USB code.
+              // CX-T6-4 (fix round 2): rebuild the unified view from the
+              // ALREADY-RECONCILED local state — DB + device_file_cache +
+              // the device service's (just-invalidated) in-memory list —
+              // with NO device fetch. The previous refresh(true) here forced
+              // a FULL device list scan (~90s on a loaded device), awaited
+              // before the toast/`deleting` clear, so successful deletions
+              // looked stuck and the un-cancelled scan kept running.
+              // refreshLocal is also not subject to the hook's 2s load
+              // debounce (which the post-cascade refresh(false) just armed).
+              // Optional-chained only for older hook mocks in tests — the
+              // real hook always provides it.
               try {
-                await refresh(true)
+                await refreshLocal?.()
               } catch (e) {
-                console.error('[Library] Post-device-delete refresh failed:', e)
+                console.error('[Library] Post-device-delete local rebuild failed:', e)
               }
             } else {
               deviceOutcome = 'partial'
@@ -1121,6 +1142,9 @@ export function Library() {
       }
 
       import('@/components/ui/toaster').then(({ toast }) => {
+        // CX-T6-5: appended when the device copy WAS removed but the view
+        // bookkeeping failed — the list may lag until the next scan.
+        const staleNote = deviceReconcileFailed ? ` ${VIEW_MAY_BE_STALE_NOTE}` : ''
         if (deviceOutcome === 'partial' && filesPending) {
           // CX-T6-3 (fix round): BOTH partial outcomes must surface together —
           // the device-only body claims full local removal, which is untrue
@@ -1129,7 +1153,14 @@ export function Library() {
         } else if (deviceOutcome === 'partial') {
           toast.warning(DEVICE_COPY_REMAINS_TITLE, deviceCopyRemainsBody(recording.filename))
         } else if (filesPending) {
-          toast.warning(FILES_PENDING_TITLE, filesPendingBody(recording.filename, pendingKinds))
+          toast.warning(FILES_PENDING_TITLE, filesPendingBody(recording.filename, pendingKinds) + staleNote)
+        } else if (deviceReconcileFailed) {
+          // Everything WAS deleted (local + device) — but the honest partial
+          // path applies: warning variant, with the stale-view note.
+          toast.warning(
+            'Deleted permanently',
+            `${actualRemovalSummary(res.removed, true)}${staleNote}`
+          )
         } else {
           toast.success('Deleted permanently', actualRemovalSummary(res.removed, deviceOutcome === 'success'))
         }
@@ -1142,7 +1173,7 @@ export function Library() {
     } finally {
       setDeleting(null)
     }
-  }, [refresh, deviceConnected])
+  }, [refresh, refreshLocal, deviceConnected])
 
   // spec-005/F17 T5 §D6 — fetches the impact and opens the dedicated
   // DeletePermanentDialog (replaces the shared confirmDialog for this flow;

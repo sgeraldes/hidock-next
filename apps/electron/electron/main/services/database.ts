@@ -3987,8 +3987,18 @@ export function markRecordingNotOnDeviceById(id: string): void {
 export function removeDeviceFileCacheEntry(deviceFilename: string): void {
   try {
     run('DELETE FROM device_file_cache WHERE filename = ?', [deviceFilename])
-  } catch {
-    /* device_file_cache not yet created — nothing cached, nothing to remove */
+  } catch (e) {
+    // CX-T6-5 (fix round 2): ONLY the missing-table condition is a legitimate
+    // no-op (the table is created lazily by deviceCache:saveAll — absent =
+    // nothing cached = nothing to remove). Every OTHER error (corrupt DB,
+    // I/O failure, ...) must propagate: swallowing it here made
+    // recordings:markNotOnDevice report a false success while the stale
+    // cache row — the exact ghost this function exists to prevent — survived
+    // and could resurface after restart.
+    const message = e instanceof Error ? e.message : String(e)
+    if (!/no such table/i.test(message)) {
+      throw e
+    }
   }
 }
 

@@ -419,6 +419,22 @@ describe('recording-deletion-handlers', () => {
       expect(removeDeviceFileCacheEntryMock).not.toHaveBeenCalled()
     })
 
+    // CX-T6-5 (fix round 2) — removeDeviceFileCacheEntry no longer swallows
+    // real DB failures; the handler surfaces them as an honest
+    // {success:false} instead of a false success that leaves the ghost
+    // cache row to resurface after restart.
+    it('reports {success:false} when the device-cache reconciliation itself fails (real DB error)', async () => {
+      resolveRecordingIdMock.mockReturnValue(undefined) // post-purge: row already gone
+      removeDeviceFileCacheEntryMock.mockImplementationOnce(() => {
+        throw new Error('disk I/O error')
+      })
+      const handler = getHandler('recordings:markNotOnDevice')
+
+      const result = await handler(null, 'purged-rec-id', 'purged.hda')
+
+      expect(result).toEqual({ success: false, error: 'disk I/O error' })
+    })
+
     it('never throws across IPC — an unexpected service error is caught', async () => {
       resolveRecordingIdMock.mockReturnValue({ id: 'resolved-1' })
       markRecordingNotOnDeviceByIdMock.mockImplementation(() => {

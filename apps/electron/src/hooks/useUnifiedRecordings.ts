@@ -382,6 +382,19 @@ interface UseUnifiedRecordingsResult {
   loading: boolean
   error: string | null
   refresh: (forceDeviceRefresh?: boolean) => Promise<void>
+  /**
+   * spec-006/F17 T6 fix round 2 (CX-T6-4) — cache-only rebuild: re-reads DB +
+   * synced_files + device_file_cache + captures and rebuilds the unified list
+   * with NO device fetch and NO debounce. For call sites that have already
+   * reconciled main-process state themselves (e.g. the post-device-delete
+   * path, whose IPC just removed the cache entry) and only need the view to
+   * catch up — `refresh(false)` is swallowed by the 2s debounce there, and
+   * `refresh(true)` forces a FULL device list scan (~90s on a loaded device).
+   * Typed optional ONLY so existing tests' partial hook mocks stay valid
+   * (mirrors UnifiedRecording.sourceKind's precedent) — the real hook always
+   * returns it; callers use `refreshLocal?.()`.
+   */
+  refreshLocal?: () => Promise<void>
   deviceConnected: boolean
   stats: {
     total: number
@@ -606,6 +619,46 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
     }
   }, [deviceService, setRecordings, incrementLoading, decrementLoading, setError, markLoaded])
 
+  // spec-006/F17 T6 fix round 2 (CX-T6-4) — cache-only rebuild. Re-reads the
+  // LOCAL sources (DB recordings, synced_files, device_file_cache, captures)
+  // plus the device service's in-memory list, and rebuilds the unified view
+  // WITHOUT any device fetch: no listRecordings() call, no Phase-2, no cache
+  // save-back. Used after a confirmed device delete, where the main process
+  // has already been reconciled (the markNotOnDevice IPC removed the
+  // device_file_cache entry, and the device service invalidated its in-memory
+  // list) and forcing a full device scan (~90s on a loaded device, awaited
+  // before the completion toast) is exactly what must NOT happen. Deliberately
+  // not gated by loadRecordings' 2s debounce (this is cheap, local-only work)
+  // and not contending for loadingRef — a concurrent full load would only
+  // re-set the same or fresher data afterwards.
+  const refreshLocal = useCallback(async () => {
+    try {
+      if (!window.electronAPI?.recordings) return
+      const isConnected = deviceService.isConnected()
+      setDeviceConnected(isConnected)
+      const [dbRecs, syncedFiles, cachedDeviceFiles, knowledgeCaptures] = await Promise.all([
+        window.electronAPI.recordings.getAll() as Promise<DatabaseRecording[]>,
+        window.electronAPI.syncedFiles.getAll() as Promise<SyncedFile[]>,
+        window.electronAPI.deviceCache.getAll() as Promise<CachedDeviceFile[]>,
+        window.electronAPI.knowledge.getAll() as Promise<KnowledgeCapture[]>
+      ])
+      const memoryCachedDeviceRecs = isConnected ? deviceService.getCachedRecordings() : []
+      const rebuilt = buildRecordingMap(
+        memoryCachedDeviceRecs,
+        dbRecs,
+        syncedFiles,
+        cachedDeviceFiles,
+        isConnected,
+        knowledgeCaptures
+      )
+      setRecordings(rebuilt)
+    } catch (e) {
+      // Never fatal — the caller's action already succeeded; the next full
+      // refresh/scan corrects the view.
+      console.error('[useUnifiedRecordings] refreshLocal failed:', e)
+    }
+  }, [deviceService, setRecordings])
+
   const loadRecordingsRef = useRef(loadRecordings)
   loadRecordingsRef.current = loadRecordings
 
@@ -802,6 +855,7 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
     loading,
     error,
     refresh: loadRecordings,
+    refreshLocal,
     deviceConnected,
     stats
   }

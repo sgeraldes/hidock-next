@@ -111,6 +111,15 @@ export function filesPendingBody(filename: string, kinds: string[]): string {
   return `Removed "${filename}"'s data, but ${list} couldn't be deleted yet. It will retry automatically.`
 }
 
+/** CX-T6-5 (fix round 2) — the device copy WAS removed and the local purge
+ *  succeeded, but the view-bookkeeping reconciliation (markNotOnDevice: row
+ *  flip + device-cache entry removal) failed — so the list may keep showing
+ *  the file until the next authoritative device scan corrects it. Appended
+ *  as a small note to the (warning-variant) completion toast; never claims
+ *  the view is already consistent. */
+export const VIEW_MAY_BE_STALE_NOTE =
+  'The list may still show the device copy until the next device scan.'
+
 /** CX-T6-3 (fix round) — BOTH partial outcomes at once: the device copy
  *  wasn't removed AND local file cleanup is still pending. One toast that
  *  enumerates both; never a body that claims full local removal while the

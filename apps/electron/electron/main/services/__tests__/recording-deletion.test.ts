@@ -916,6 +916,27 @@ describe('Privacy source-deletion (v38)', () => {
       expect(() => removeDeviceFileCacheEntry('never-cached.hda')).not.toThrow()
       expect(queryAll('SELECT filename FROM device_file_cache').length).toBe(1)
     })
+
+    // CX-T6-5 (fix round 2): ONLY the missing-table condition is tolerated —
+    // any REAL DB failure must propagate, so recordings:markNotOnDevice
+    // reports {success:false} instead of a false success that lets the
+    // ghost cache row survive a restart. Injected via a RAISE(ABORT)
+    // trigger — a genuine sqlite error whose message is NOT "no such table".
+    it('propagates a real (non-missing-table) DB failure instead of swallowing it', () => {
+      run(`CREATE TABLE IF NOT EXISTS device_file_cache (
+        filename TEXT PRIMARY KEY, size INTEGER, duration REAL, dateCreated TEXT
+      )`)
+      run("INSERT INTO device_file_cache (filename, size, duration, dateCreated) VALUES ('stuck.hda', 10, 1.0, '2026-01-01')")
+      run(`CREATE TRIGGER fail_cache_delete BEFORE DELETE ON device_file_cache
+           BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END`)
+      try {
+        expect(() => removeDeviceFileCacheEntry('stuck.hda')).toThrow(/disk I\/O error/)
+        // ...and the row genuinely survived (the failure was real, not cosmetic).
+        expect(queryAll('SELECT filename FROM device_file_cache').length).toBe(1)
+      } finally {
+        run('DROP TRIGGER IF EXISTS fail_cache_delete')
+      }
+    })
   })
 
   // -------------------------------------------------------------------------

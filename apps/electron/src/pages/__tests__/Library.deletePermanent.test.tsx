@@ -130,6 +130,9 @@ vi.mock('@/features/library/hooks', () => ({
 }))
 
 const mockRefresh = vi.fn()
+// CX-T6-4 (fix round 2): the cache-only rebuild used after a confirmed
+// device delete — must be called INSTEAD of any device-fetching refresh.
+const mockRefreshLocal = vi.fn()
 const syncedRecording = {
   id: 'synced-1',
   filename: 'synced.wav',
@@ -216,6 +219,7 @@ function mockRecordingState(deviceConnected: boolean) {
     loading: false,
     error: null,
     refresh: mockRefresh,
+    refreshLocal: mockRefreshLocal,
     deviceConnected,
     stats: { total: 1, deviceOnly: 0, localOnly: 0, both: 1, synced: 1, unsynced: 0, onSource: 1, locallyAvailable: 1 }
   })
@@ -275,10 +279,14 @@ describe('executeDeletePermanent — device checkbox (D3/AR3-6)', () => {
     expect(deleteCascadeOrder).toBeLessThan(deviceDeleteOrder)
   })
 
-  // CX-T6-1 — the unified view must rebuild WITHOUT waiting for the next
-  // scan: a forced refresh (bypasses the hook's 2s load debounce, which the
-  // post-cascade refresh just armed) runs AFTER the confirmed device delete.
-  it('a confirmed device delete force-refreshes the unified view after reconciling', async () => {
+  // CX-T6-1 + CX-T6-4 (fix round 2) — the unified view must rebuild WITHOUT
+  // waiting for the next scan AND without triggering one: the post-delete
+  // path calls the cache-only refreshLocal() (which the hook implements with
+  // NO device fetch — asserted in useUnifiedRecordings.refreshLocal.test.ts)
+  // strictly after the device delete, and NEVER the device-fetching
+  // refresh(true), whose full list scan (~90s on a loaded device) is exactly
+  // what made successful deletions look stuck.
+  it('a confirmed device delete rebuilds via refreshLocal (cache-only) after reconciling — never a forced device refresh', async () => {
     deleteRecordingMock.mockResolvedValue(true)
     renderLibrary()
     await openPermanentDeleteDialog()
@@ -287,21 +295,38 @@ describe('executeDeletePermanent — device checkbox (D3/AR3-6)', () => {
     fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
 
     await waitFor(() => expect(deleteRecordingMock).toHaveBeenCalledWith('synced.hda'))
-    await waitFor(() => expect(mockRefresh).toHaveBeenCalledWith(true))
-    // Ordering: the forced refresh runs strictly AFTER the device delete confirmed.
+    await waitFor(() => expect(mockRefreshLocal).toHaveBeenCalled())
+    // NO device fetch is triggered by the post-delete path: the only
+    // refresh() call is the post-cascade refresh(false); refresh is never
+    // forced.
+    expect(mockRefresh).not.toHaveBeenCalledWith(true)
+    // Ordering: the local rebuild runs strictly AFTER the device delete confirmed.
     const deviceDeleteOrder = deleteRecordingMock.mock.invocationCallOrder[0]
-    const forcedRefreshCall = mockRefresh.mock.calls.findIndex((c) => c[0] === true)
-    const forcedRefreshOrder = mockRefresh.mock.invocationCallOrder[forcedRefreshCall]
-    expect(deviceDeleteOrder).toBeLessThan(forcedRefreshOrder)
+    const localRebuildOrder = mockRefreshLocal.mock.invocationCallOrder[0]
+    expect(deviceDeleteOrder).toBeLessThan(localRebuildOrder)
   })
 
-  it('no forced refresh when the device branch was not requested (unchecked)', async () => {
+  it('no local rebuild and no forced refresh when the device branch was not requested (unchecked)', async () => {
     renderLibrary()
     await openPermanentDeleteDialog()
 
     fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
 
     await waitFor(() => expect(toastMock.success).toHaveBeenCalled())
+    expect(mockRefresh).not.toHaveBeenCalledWith(true)
+    expect(mockRefreshLocal).not.toHaveBeenCalled()
+  })
+
+  it('no local rebuild on a partial device outcome (nothing was reconciled)', async () => {
+    deleteRecordingMock.mockResolvedValue(false)
+    renderLibrary()
+    await openPermanentDeleteDialog()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: /also delete from device/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
+
+    await waitFor(() => expect(toastMock.warning).toHaveBeenCalled())
+    expect(mockRefreshLocal).not.toHaveBeenCalled()
     expect(mockRefresh).not.toHaveBeenCalledWith(true)
   })
 
@@ -479,5 +504,65 @@ describe('executeDeletePermanent — AR3-2 partial file-cleanup toast', () => {
     const [, body] = toastMock.warning.mock.calls[0]
     expect(body).not.toMatch(/and its data from this computer/i)
     expect(toastMock.success).not.toHaveBeenCalled()
+  })
+})
+
+// CX-T6-5 (fix round 2) — a real reconciliation failure (the markNotOnDevice
+// IPC now propagates cache-delete errors instead of swallowing them) must be
+// handled honestly: everything WAS deleted, but the view may keep showing
+// the device copy until the next scan — warning variant with the stale note,
+// never the plain success toast.
+describe('executeDeletePermanent — reconciliation failure honesty (CX-T6-5)', () => {
+  it('markNotOnDevice {success:false} → warning toast with the stale-view note, never plain success', async () => {
+    deleteRecordingMock.mockResolvedValue(true)
+    global.window.electronAPI = baseElectronAPI({
+      markNotOnDevice: vi.fn().mockResolvedValue({ success: false, error: 'disk I/O error' })
+    }) as any
+
+    renderLibrary()
+    await openPermanentDeleteDialog()
+    fireEvent.click(screen.getByRole('checkbox', { name: /also delete from device/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
+
+    await waitFor(() => {
+      expect(toastMock.warning).toHaveBeenCalledWith(
+        'Deleted permanently',
+        expect.stringMatching(/and the device copy.*may still show the device copy until the next device scan/i)
+      )
+    })
+    expect(toastMock.success).not.toHaveBeenCalled()
+  })
+
+  it('a thrown markNotOnDevice IPC is handled the same way', async () => {
+    deleteRecordingMock.mockResolvedValue(true)
+    global.window.electronAPI = baseElectronAPI({
+      markNotOnDevice: vi.fn().mockRejectedValue(new Error('ipc dead'))
+    }) as any
+
+    renderLibrary()
+    await openPermanentDeleteDialog()
+    fireEvent.click(screen.getByRole('checkbox', { name: /also delete from device/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
+
+    await waitFor(() => {
+      expect(toastMock.warning).toHaveBeenCalledWith(
+        'Deleted permanently',
+        expect.stringContaining('may still show the device copy')
+      )
+    })
+    expect(toastMock.success).not.toHaveBeenCalled()
+  })
+
+  it('a successful reconciliation keeps the plain success toast (no stale note)', async () => {
+    deleteRecordingMock.mockResolvedValue(true)
+    renderLibrary()
+    await openPermanentDeleteDialog()
+    fireEvent.click(screen.getByRole('checkbox', { name: /also delete from device/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
+
+    await waitFor(() => expect(toastMock.success).toHaveBeenCalled())
+    const [, successBody] = toastMock.success.mock.calls[0]
+    expect(successBody).not.toMatch(/may still show the device copy/i)
+    expect(toastMock.warning).not.toHaveBeenCalled()
   })
 })

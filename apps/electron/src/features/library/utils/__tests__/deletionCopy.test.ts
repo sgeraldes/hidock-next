@@ -17,6 +17,7 @@ import {
   filesPendingBody,
   COMBINED_PARTIAL_TITLE,
   combinedPartialBody,
+  VIEW_MAY_BE_STALE_NOTE,
   actualRemovalSummary
 } from '../deletionCopy'
 
@@ -122,6 +123,20 @@ describe('combined-partial copy (CX-T6-3)', () => {
     expect(COMBINED_PARTIAL_TITLE).toMatch(/partially removed/i)
     expect(COMBINED_PARTIAL_TITLE).toMatch(/device copy remains/i)
     expect(COMBINED_PARTIAL_TITLE).not.toMatch(/^deleted permanently$/i)
+  })
+})
+
+// CX-T6-5 (fix round 2) — the stale-view note appended when the device copy
+// WAS removed but the view-bookkeeping reconciliation failed.
+describe('VIEW_MAY_BE_STALE_NOTE (CX-T6-5)', () => {
+  it('says the list may lag and names the next device scan as the corrector', () => {
+    expect(VIEW_MAY_BE_STALE_NOTE).toMatch(/may still show the device copy/i)
+    expect(VIEW_MAY_BE_STALE_NOTE).toMatch(/next device scan/i)
+  })
+
+  it('never claims the device copy itself survived — only the VIEW may lag', () => {
+    expect(VIEW_MAY_BE_STALE_NOTE).not.toMatch(/copy is still there/i)
+    expect(VIEW_MAY_BE_STALE_NOTE).not.toMatch(/couldn't be deleted/i)
   })
 })
 
