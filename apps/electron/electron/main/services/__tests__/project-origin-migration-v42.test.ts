@@ -65,4 +65,25 @@ describe('schema v42: projects.origin (provenance-enforced discovered-project di
     // …tombstone before delete.
     expect(body.indexOf('addProjectDiscoveryRejection')).toBeLessThan(body.indexOf('DELETE FROM projects'))
   })
+
+  it('v42 also adds queryable merge_journal ordering columns (loser_id + explicit seq, backfilled)', () => {
+    // Fresh schema carries both columns…
+    const createBlock = source.match(/CREATE TABLE IF NOT EXISTS merge_journal \([\s\S]*?\);/)
+    expect(createBlock).not.toBeNull()
+    expect(createBlock![0]).toMatch(/loser_id TEXT/)
+    expect(createBlock![0]).toMatch(/seq INTEGER/)
+    // …the migration ALTER-adds and backfills them (loser_id from the snapshot,
+    // seq from rowid — after which ordering NEVER keys on rowid again)…
+    const migration = source.match(/42: \(\) => \{[\s\S]*?\n {2}\}/)
+    expect(migration).not.toBeNull()
+    expect(migration![0]).toContain('ALTER TABLE merge_journal ADD COLUMN loser_id TEXT')
+    expect(migration![0]).toContain('ALTER TABLE merge_journal ADD COLUMN seq INTEGER')
+    expect(migration![0]).toContain("json_extract(loser_snapshot, '$.id')")
+    expect(migration![0]).toContain('SET seq = rowid WHERE seq IS NULL')
+    // …and the shared unmerge guard orders strictly by seq, never rowid.
+    const guard = source.match(/function assertNewestFirstUnmerge[\s\S]*?\n\}/)
+    expect(guard).not.toBeNull()
+    expect(guard![0]).toMatch(/seq > \?/)
+    expect(guard![0]).not.toMatch(/rowid/)
+  })
 })

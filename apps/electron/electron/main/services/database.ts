@@ -662,6 +662,14 @@ CREATE TABLE IF NOT EXISTS merge_journal (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL CHECK(kind IN ('contact', 'project')),
     keeper_id TEXT NOT NULL,
+    -- loser_id (v42): queryable loser identity for the dependency-aware
+    -- newest-first unmerge guard (also inside loser_snapshot, but the guard
+    -- must not JSON-parse every open journal on every unmerge).
+    loser_id TEXT,
+    -- seq (v42): explicit immutable merge order. rowid is an implementation
+    -- detail (VACUUM and dump/restore may renumber it), so ordering guards key
+    -- on this instead.
+    seq INTEGER,
     loser_snapshot TEXT NOT NULL,
     repointed_manifest TEXT NOT NULL,
     folded_fields TEXT,
@@ -2155,6 +2163,43 @@ const MIGRATIONS: Record<number, () => void> = {
       }
     }
 
+    // merge_journal.loser_id + seq (still v42 — this version exists only on
+    // this lane and was never integrated or published, so the journal columns
+    // for the dependency-aware newest-first unmerge guard extend the SAME
+    // migration instead of minting v43). loser_id makes the loser queryable
+    // without JSON-parsing every snapshot; seq is the explicit immutable merge
+    // order (rowid can be renumbered by VACUUM/dump-restore). Backfill:
+    // loser_id from the snapshot's $.id, seq from rowid — rowid is monotonic
+    // for rows that have never been renumbered, and any historical renumbering
+    // predates the guard, so it is the best available witness of merge order.
+    const journalCols = getTableColumns(database, 'merge_journal')
+    if (journalCols.length > 0) {
+      if (!journalCols.includes('loser_id')) {
+        try {
+          database.run('ALTER TABLE merge_journal ADD COLUMN loser_id TEXT')
+        } catch (e) {
+          console.warn('[Migration v42] add merge_journal.loser_id failed:', e)
+        }
+      }
+      if (!journalCols.includes('seq')) {
+        try {
+          database.run('ALTER TABLE merge_journal ADD COLUMN seq INTEGER')
+        } catch (e) {
+          console.warn('[Migration v42] add merge_journal.seq failed:', e)
+        }
+      }
+      // Backfill runs UNCONDITIONALLY (WHERE ... IS NULL makes it idempotent):
+      // repairPhase may have force-added the columns on this same boot, in
+      // which case the includes-guards above skip the ALTERs but legacy rows
+      // still need their values.
+      try {
+        database.run("UPDATE merge_journal SET loser_id = json_extract(loser_snapshot, '$.id') WHERE loser_id IS NULL")
+        database.run('UPDATE merge_journal SET seq = rowid WHERE seq IS NULL')
+      } catch (e) {
+        console.warn('[Migration v42] merge_journal backfill failed:', e)
+      }
+    }
+
     // Re-key v41 tombstones under the NFKC name normalization that ships with
     // v42. v41 wrote name_norm with the pre-NFKC normalizeName, so a tombstone
     // recorded under a decomposed (NFD) or compatibility form no longer matches
@@ -2517,6 +2562,28 @@ function repairPhase(): void {
     if (!projectCols.includes('origin')) {
       console.log('[Database] Repairing projects: adding origin')
       try { database.run('ALTER TABLE projects ADD COLUMN origin TEXT') } catch (e) { /* already exists */ }
+    }
+  }
+
+  // Repair merge_journal (v42): loser_id + seq for the dependency-aware
+  // newest-first unmerge guard. Force-add AND backfill so an older on-disk
+  // schema that skipped the migration still gets ordered, queryable journals
+  // before any unmerge runs. Idempotent (backfills are WHERE ... IS NULL).
+  const journalCols = getTableColumns(database, 'merge_journal')
+  if (journalCols.length > 0) {
+    if (!journalCols.includes('loser_id')) {
+      console.log('[Database] Repairing merge_journal: adding loser_id')
+      try {
+        database.run('ALTER TABLE merge_journal ADD COLUMN loser_id TEXT')
+        database.run("UPDATE merge_journal SET loser_id = json_extract(loser_snapshot, '$.id') WHERE loser_id IS NULL")
+      } catch { /* already exists */ }
+    }
+    if (!journalCols.includes('seq')) {
+      console.log('[Database] Repairing merge_journal: adding seq')
+      try {
+        database.run('ALTER TABLE merge_journal ADD COLUMN seq INTEGER')
+        database.run('UPDATE merge_journal SET seq = rowid WHERE seq IS NULL')
+      } catch { /* already exists */ }
     }
   }
 
@@ -4898,6 +4965,10 @@ interface MergeJournalRow {
   id: string
   kind: MergeKind
   keeper_id: string
+  /** Queryable loser identity (v42). Null only on pre-backfill legacy rows. */
+  loser_id: string | null
+  /** Explicit immutable merge order (v42). Null only on pre-backfill legacy rows. */
+  seq: number | null
   loser_snapshot: string
   repointed_manifest: string
   folded_fields: string | null
@@ -5043,7 +5114,7 @@ export function mergeContacts(keeperId: string, loserId: string): Contact {
       loserAliases,
       keeperBefore: { meetingIds: keeperMeetingIds, speakerIds: keeperSpeakerIds }
     }
-    writeMergeJournalNoSave('contact', keeperId, loser, manifest, foldedFields)
+    writeMergeJournalNoSave('contact', keeperId, loser.id, loser, manifest, foldedFields)
 
     return queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [keeperId])!
   })
@@ -5086,22 +5157,92 @@ function diffFoldedFields(
 function writeMergeJournalNoSave(
   kind: MergeKind,
   keeperId: string,
+  loserId: string,
   loserRow: unknown,
   manifest: ContactMergeManifest | ProjectMergeManifest,
   foldedFields: Record<string, { from: string | null; to: string | null }>
 ): void {
+  // seq: explicit immutable merge order (v42) — assigned monotonically at write
+  // time so the newest-first unmerge guard never depends on rowid or timestamps.
   runNoSave(
-    `INSERT INTO merge_journal (id, kind, keeper_id, loser_snapshot, repointed_manifest, folded_fields, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO merge_journal (id, kind, keeper_id, loser_id, seq, loser_snapshot, repointed_manifest, folded_fields, created_at)
+     VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM merge_journal), ?, ?, ?, ?)`,
     [
       randomUUID(),
       kind,
       keeperId,
+      loserId,
       JSON.stringify(loserRow),
       JSON.stringify(manifest),
       Object.keys(foldedFields).length ? JSON.stringify(foldedFields) : null,
       new Date().toISOString()
     ]
+  )
+}
+
+/**
+ * Typed ordering failure for unmerge: a newer, still-open merge depends on one
+ * of this journal's entities. Carries the blocking journal's id (and its
+ * loser's display name when parseable) so the IPC layer can surface a precise,
+ * actionable rejection instead of a generic database error.
+ */
+export class MergeOrderConflictError extends Error {
+  constructor(
+    public readonly blockingJournalId: string,
+    public readonly blockingLoserName: string | null,
+    message: string
+  ) {
+    super(message)
+    this.name = 'MergeOrderConflictError'
+  }
+}
+
+/**
+ * Dependency-aware newest-first guard, shared by {@link unmergeContacts} and
+ * {@link unmergeProjects}. Journals are delta-based: folded_fields records the
+ * change from the state the PREVIOUS merge left behind, and a merge's manifest
+ * assumes its keeper/loser rows exist exactly as the merges before it arranged
+ * them. Undoing a journal while a NEWER open journal touches either of its
+ * entities therefore corrupts state two ways:
+ *   - same keeper: an older restore rewinds folded fields (origin, tags) out
+ *     from under the newer merge's still-folded data (provenance laundering);
+ *   - keeper-of-keeper chains: J1 = A->D, then J2 = D->E deletes D. Unmerging
+ *     J1 first "recreates" A against a keeper that no longer exists, skipping
+ *     every link move, while J2's snapshot of D still contains A's folded data
+ *     — duplication and misattribution on the later unwind.
+ * Blocking on ANY newer open journal (same kind) that shares the keeper or the
+ * loser id makes newest-first unwinding always legal and everything else
+ * rejected — correctness by induction, no delta reconstruction. Ordering keys
+ * on the explicit immutable seq column, never rowid.
+ */
+function assertNewestFirstUnmerge(row: MergeJournalRow): void {
+  const loserId = row.loser_id ?? ((): string | null => {
+    try {
+      return (JSON.parse(row.loser_snapshot) as { id?: string }).id ?? null
+    } catch {
+      return null
+    }
+  })()
+  const newer = queryOne<{ id: string; loser_snapshot: string }>(
+    `SELECT id, loser_snapshot FROM merge_journal
+     WHERE kind = ? AND undone_at IS NULL AND seq > ?
+       AND (keeper_id = ? OR keeper_id = ? OR loser_id = ? OR loser_id = ?)
+     ORDER BY seq DESC LIMIT 1`,
+    [row.kind, row.seq ?? 0, row.keeper_id, loserId, row.keeper_id, loserId]
+  )
+  if (!newer) return
+  let blockingName: string | null = null
+  try {
+    blockingName = (JSON.parse(newer.loser_snapshot) as { name?: string }).name ?? null
+  } catch {
+    /* name stays null */
+  }
+  throw new MergeOrderConflictError(
+    newer.id,
+    blockingName,
+    `Merges must be undone newest-first: undo the newer merge${
+      blockingName ? ` of "${blockingName}"` : ''
+    } (${newer.id}) before this one`
   )
 }
 
@@ -5156,6 +5297,13 @@ export function unmergeContacts(journalId: string): UnmergeResult {
   return runInTransaction(() => {
     const row = loadOpenJournal(journalId, 'contact')
     const keeperId = row.keeper_id
+
+    // Dependency-aware newest-first guard (v42): contacts share the delta-based
+    // merge_journal model, so out-of-order undo corrupts cumulative folded
+    // fields (tags union, widened seen-spans) and hits the same
+    // keeper-of-keeper hole as projects. One shared guard for both kinds.
+    assertNewestFirstUnmerge(row)
+
     const loser = JSON.parse(row.loser_snapshot) as Contact
     const manifest = JSON.parse(row.repointed_manifest) as ContactMergeManifest
 
@@ -6051,7 +6199,7 @@ export function mergeProjects(keeperId: string, loserId: string): Project {
       loserAliases,
       keeperBefore: { meetingIds: keeperMeetingIds, knowledgeIds: keeperKnowledgeIds }
     }
-    writeMergeJournalNoSave('project', keeperId, loser, manifest, foldedFields)
+    writeMergeJournalNoSave('project', keeperId, loser.id, loser, manifest, foldedFields)
 
     return queryOne<Project>('SELECT * FROM projects WHERE id = ?', [keeperId])!
   })
@@ -6070,29 +6218,12 @@ export function unmergeProjects(journalId: string): UnmergeResult {
     const row = loadOpenJournal(journalId, 'project')
     const keeperId = row.keeper_id
 
-    // LIFO guard (v42 follow-up): project merges onto one keeper must be undone
-    // NEWEST-FIRST. Merges form a stack — each journal's folded_fields records
-    // the delta from the state the PREVIOUS merge left behind, so restoring an
-    // older journal while a newer one is still open can rewind provenance out
-    // from under the newer merge's data. Concretely: discovered D absorbs
-    // manual M1 (origin fold discovered→manual journaled), then absorbs manual
-    // M2 (origin already manual, nothing journaled); unmerging M1 first would
-    // restore D to 'discovered' while M2's manual data is still folded in —
-    // making it dismissable. Popping newest-first makes every restore return
-    // the keeper to exactly its pre-merge state, by induction. rowid ordering
-    // (monotonic for inserts) breaks same-timestamp ties deterministically.
-    const newer = queryOne<{ id: string }>(
-      `SELECT id FROM merge_journal
-       WHERE kind = 'project' AND keeper_id = ? AND undone_at IS NULL
-         AND rowid > (SELECT rowid FROM merge_journal WHERE id = ?)
-       ORDER BY rowid DESC LIMIT 1`,
-      [keeperId, journalId]
-    )
-    if (newer) {
-      throw new Error(
-        `Project merges must be unmerged newest-first: undo merge ${newer.id} on this keeper before ${journalId}`
-      )
-    }
+    // Dependency-aware newest-first guard (v42): rejects this unmerge while any
+    // newer open project journal touches this journal's keeper OR loser — the
+    // same-keeper provenance-laundering case AND keeper-of-keeper chains
+    // (A->D then D->E), where D no longer exists and an early J1 undo would
+    // recreate A linkless while J2's snapshot of D still holds A's folded data.
+    assertNewestFirstUnmerge(row)
 
     const loser = JSON.parse(row.loser_snapshot) as Project
     const manifest = JSON.parse(row.repointed_manifest) as ProjectMergeManifest
