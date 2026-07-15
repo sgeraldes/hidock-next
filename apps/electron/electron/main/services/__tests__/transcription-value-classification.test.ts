@@ -210,7 +210,7 @@ function resetConfig(overrides: Partial<typeof mockConfig.transcription> = {}) {
   mockConfig = {
     transcription: {
       provider: 'local-asr',
-      geminiApiKey: 'test-api-key',
+      geminiApiKey: 'test-api-key', // pragma: allowlist secret
       geminiModel: 'gemini-2.0-flash',
       language: 'es',
       autoTranscribe: false,
