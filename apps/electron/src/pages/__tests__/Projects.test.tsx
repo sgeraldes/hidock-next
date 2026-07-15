@@ -458,6 +458,7 @@ describe('Projects Page', () => {
           status: 'active',
           createdAt: new Date().toISOString(),
           description: 'First project',
+          origin: 'discovered',
           knowledgeIds: ['k1', 'k2'],
           personIds: ['p1']
         },
@@ -493,6 +494,7 @@ describe('Projects Page', () => {
           status: 'active',
           createdAt: new Date().toISOString(),
           description: null,
+          origin: 'discovered',
           knowledgeIds: [],
           personIds: []
         },
@@ -530,9 +532,10 @@ describe('Projects Page', () => {
     expect((global.window.electronAPI as any).projects.delete).not.toHaveBeenCalled()
   })
 
-  // MEDIUM-4: a hand-created empty project is NOT "discovered" — the review card
-  // is gated on provenance (linked meetings). Manual empties get a neutral state.
-  it('renders a neutral empty state (not "Discovered automatically") for a manual empty project', async () => {
+  // MEDIUM-4 / v42: a hand-created project is NOT "discovered" even when it has
+  // meetings tagged — the review card is gated on the durable origin column
+  // ('manual'), not on linked meetings. Manual projects get a neutral state.
+  it('renders a neutral empty state (not "Discovered automatically") for a manual project with tagged meetings', async () => {
     ;(global.window.electronAPI as any).projects.getById = vi.fn().mockResolvedValue({
       success: true,
       data: {
@@ -542,10 +545,11 @@ describe('Projects Page', () => {
           status: 'active',
           createdAt: new Date().toISOString(),
           description: null,
+          origin: 'manual',
           knowledgeIds: [],
           personIds: []
         },
-        meetings: [], // no provenance → manual project
+        meetings: [{ id: 'm1', subject: 'Weekly Sync' }], // tagged, but origin='manual'
         topics: []
       }
     })

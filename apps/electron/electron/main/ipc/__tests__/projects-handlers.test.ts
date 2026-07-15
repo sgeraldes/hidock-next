@@ -41,6 +41,14 @@ vi.mock('../../services/database', () => ({
   deleteProjectNote: vi.fn(),
   getActionablesForProject: vi.fn(),
   addProjectDiscoveryRejection: vi.fn(),
+  dismissDiscoveredProject: vi.fn(),
+  // Real class so the handler's `err instanceof DismissDiscoveredError` guard works.
+  DismissDiscoveredError: class DismissDiscoveredError extends Error {
+    constructor(public readonly code: 'NOT_FOUND' | 'NOT_DISCOVERED', message: string) {
+      super(message)
+      this.name = 'DismissDiscoveredError'
+    }
+  },
   getDatabase: vi.fn(() => ({
     prepare: vi.fn(() => ({
       bind: vi.fn(),
@@ -240,28 +248,42 @@ describe('Projects IPC Handlers', () => {
 
   // v41: dismissing a discovered project records the tombstone BEFORE deleting,
   // with the source meeting id, so re-analysis cannot silently re-create it.
-  it('dismissDiscovered records a rejection tombstone (name + source meeting) then deletes', async () => {
-    const { getProjectById, getMeetingsForProject, addProjectDiscoveryRejection, deleteProject } =
-      await import('../../services/database')
-    vi.mocked(getProjectById).mockReturnValue({
-      id: PROJECT_ID, name: 'Phantom Initiative', description: null, status: 'active',
-      folder_path: null, url: null, created_at: 'x'
-    } as any)
-    vi.mocked(getMeetingsForProject).mockReturnValue([{ id: 'm1', subject: 'Weekly Sync' }] as any)
+  it('dismissDiscovered delegates to the provenance-enforcing DB function and returns success', async () => {
+    // Provenance check + tombstone + delete are now one atomic DB-layer call
+    // (unit-tested in project-discovery-rejection.test.ts). The handler just
+    // delegates and maps typed failures.
+    const { dismissDiscoveredProject } = await import('../../services/database')
+    vi.mocked(dismissDiscoveredProject).mockReturnValue(undefined)
 
     registerProjectsHandlers()
     const handler = getHandler('projects:dismissDiscovered')
     const result = await handler?.({} as any, PROJECT_ID) as any
 
     expect(result.success).toBe(true)
-    expect(addProjectDiscoveryRejection).toHaveBeenCalledWith('Phantom Initiative', 'm1')
-    expect(deleteProject).toHaveBeenCalledWith(PROJECT_ID)
+    expect(dismissDiscoveredProject).toHaveBeenCalledWith(PROJECT_ID)
   })
 
-  it('dismissDiscovered 404s for a missing project without writing a tombstone', async () => {
-    const { getProjectById, addProjectDiscoveryRejection, deleteProject } =
-      await import('../../services/database')
-    vi.mocked(getProjectById).mockReturnValue(undefined)
+  it('dismissDiscovered REJECTS a non-discovered (manual/legacy) project server-side with a VALIDATION_ERROR', async () => {
+    // The core provenance guard at the IPC boundary: a NOT_DISCOVERED failure
+    // from the DB layer must surface as a validation error, never a delete.
+    const { dismissDiscoveredProject, DismissDiscoveredError } = await import('../../services/database')
+    vi.mocked(dismissDiscoveredProject).mockImplementation(() => {
+      throw new DismissDiscoveredError('NOT_DISCOVERED', 'Only auto-discovered projects can be dismissed.')
+    })
+
+    registerProjectsHandlers()
+    const handler = getHandler('projects:dismissDiscovered')
+    const result = await handler?.({} as any, PROJECT_ID) as any
+
+    expect(result.success).toBe(false)
+    expect(result.error.code).toBe('VALIDATION_ERROR')
+  })
+
+  it('dismissDiscovered maps a NOT_FOUND failure to a NOT_FOUND result', async () => {
+    const { dismissDiscoveredProject, DismissDiscoveredError } = await import('../../services/database')
+    vi.mocked(dismissDiscoveredProject).mockImplementation(() => {
+      throw new DismissDiscoveredError('NOT_FOUND', `Project with ID ${PROJECT_ID} not found`)
+    })
 
     registerProjectsHandlers()
     const handler = getHandler('projects:dismissDiscovered')
@@ -269,7 +291,5 @@ describe('Projects IPC Handlers', () => {
 
     expect(result.success).toBe(false)
     expect(result.error.code).toBe('NOT_FOUND')
-    expect(addProjectDiscoveryRejection).not.toHaveBeenCalled()
-    expect(deleteProject).not.toHaveBeenCalled()
   })
 })

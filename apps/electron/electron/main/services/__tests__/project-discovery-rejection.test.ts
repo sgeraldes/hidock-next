@@ -27,7 +27,9 @@ import {
   deleteProject,
   addProjectDiscoveryRejection,
   isProjectDiscoveryRejected,
-  clearProjectDiscoveryRejection
+  clearProjectDiscoveryRejection,
+  dismissDiscoveredProject,
+  DismissDiscoveredError
 } from '../database'
 import { applyTranscriptEntities } from '../org-reconciler'
 
@@ -107,5 +109,123 @@ describe('project discovery rejection tombstones (v41)', () => {
     expect(isProjectDiscoveryRejected('Temp Reject')).toBe(true)
     clearProjectDiscoveryRejection('temp reject')
     expect(isProjectDiscoveryRejected('Temp Reject')).toBe(false)
+  })
+
+  /**
+   * v42: provenance is enforced in the DATABASE layer, not the renderer.
+   * dismissDiscoveredProject verifies the row's origin, writes the tombstone, and
+   * deletes — atomically — so a stale UI, a bug, or a compromised renderer that
+   * calls the IPC channel directly with a manual project's id gets a hard
+   * rejection instead of a cascade delete. Runs against the REAL engine. (Nested
+   * so it reuses the parent's open DB + seeded meeting m1.)
+   */
+  describe('v42: dismissDiscoveredProject enforces discovery provenance (fail-closed)', () => {
+    it('a DISCOVERED project CAN be dismissed: tombstone + delete, and re-analysis does not re-create it', () => {
+      const name = 'Meridian Alpha'
+      // A transcript mention auto-creates it → origin='discovered'.
+      const created = applyTranscriptEntities({ meetingId: 'm1', project: { name } })
+      expect(created.projectLinked).toBe(true)
+      const [row] = projectRowsByName(name)
+      expect(row).toBeDefined()
+      expect(
+        queryOne<{ origin: string | null }>('SELECT origin FROM projects WHERE id = ?', [row.id])?.origin
+      ).toBe('discovered')
+
+      // The real dismiss path: provenance check + tombstone + delete, atomic.
+      dismissDiscoveredProject(row.id)
+      expect(projectRowsByName(name)).toHaveLength(0)
+      expect(isProjectDiscoveryRejected(name)).toBe(true)
+      // The tombstone records the source meeting (join through meeting_projects).
+      const tomb = queryOne<{ source_meeting_id: string | null }>(
+        'SELECT source_meeting_id FROM project_discovery_rejections WHERE name_norm = ?',
+        [name.toLowerCase()]
+      )
+      expect(tomb?.source_meeting_id).toBe('m1')
+
+      // Tombstone survives re-analysis: the reconciler must NOT re-create it.
+      const reanalyze = applyTranscriptEntities({ meetingId: 'm1', project: { name } })
+      expect(reanalyze.projectLinked).toBe(false)
+      expect(projectRowsByName(name)).toHaveLength(0)
+    })
+
+    it('a MANUALLY created project CANNOT be dismissed (server-side rejection), and nothing is deleted or tombstoned', () => {
+      const name = 'Halcyon Bravo'
+      // createProject stamps origin='manual'.
+      createProject({ id: 'halcyon-manual', name, description: null, status: 'active' })
+      expect(projectRowsByName(name)).toHaveLength(1)
+
+      let caught: DismissDiscoveredError | undefined
+      try {
+        dismissDiscoveredProject('halcyon-manual')
+      } catch (e) {
+        caught = e as DismissDiscoveredError
+      }
+      expect(caught).toBeInstanceOf(DismissDiscoveredError)
+      expect(caught?.code).toBe('NOT_DISCOVERED')
+
+      // The transaction rolled back: the row survives and NO tombstone was written.
+      expect(projectRowsByName(name)).toHaveLength(1)
+      expect(isProjectDiscoveryRejected(name)).toBe(false)
+    })
+
+    it('a LEGACY project with NULL origin CANNOT be dismissed (fail-closed on unproven provenance)', () => {
+      const id = 'legacy-null-origin'
+      const name = 'Obsidian Charlie'
+      // Simulate a pre-v42 row inserted before provenance existed: origin stays NULL.
+      run('INSERT INTO projects (id, name, status) VALUES (?, ?, ?)', [id, name, 'active'])
+      expect(
+        queryOne<{ origin: string | null }>('SELECT origin FROM projects WHERE id = ?', [id])?.origin
+      ).toBeNull()
+
+      let caught: DismissDiscoveredError | undefined
+      try {
+        dismissDiscoveredProject(id)
+      } catch (e) {
+        caught = e as DismissDiscoveredError
+      }
+      expect(caught?.code).toBe('NOT_DISCOVERED')
+      expect(projectRowsByName(name)).toHaveLength(1)
+      expect(isProjectDiscoveryRejected(name)).toBe(false)
+    })
+
+    it('throws NOT_FOUND for an unknown id (and writes no tombstone)', () => {
+      let caught: DismissDiscoveredError | undefined
+      try {
+        dismissDiscoveredProject('does-not-exist')
+      } catch (e) {
+        caught = e as DismissDiscoveredError
+      }
+      expect(caught).toBeInstanceOf(DismissDiscoveredError)
+      expect(caught?.code).toBe('NOT_FOUND')
+    })
+
+    it('manual re-create after a discovered dismissal clears the tombstone, re-links, and is itself no longer dismissable', () => {
+      const name = 'Verdant Delta'
+      // 1) discovered → dismiss → tombstone.
+      const created = applyTranscriptEntities({ meetingId: 'm1', project: { name } })
+      expect(created.projectLinked).toBe(true)
+      const [row] = projectRowsByName(name)
+      dismissDiscoveredProject(row.id)
+      expect(isProjectDiscoveryRejected(name)).toBe(true)
+
+      // 2) explicit manual re-create with the same name: allowed, clears the tombstone.
+      createProject({ id: 'verdant-manual', name, description: null, status: 'active' })
+      expect(projectRowsByName(name)).toHaveLength(1)
+      expect(isProjectDiscoveryRejected(name)).toBe(false)
+
+      // 3) a later mention resolves to the manual row (no duplicate)…
+      const relink = applyTranscriptEntities({ meetingId: 'm1', project: { name } })
+      expect(relink.projectLinked).toBe(true)
+      expect(projectRowsByName(name)).toHaveLength(1)
+      // …and that manual row is fail-closed against the dismiss path.
+      let caught: DismissDiscoveredError | undefined
+      try {
+        dismissDiscoveredProject('verdant-manual')
+      } catch (e) {
+        caught = e as DismissDiscoveredError
+      }
+      expect(caught?.code).toBe('NOT_DISCOVERED')
+      expect(projectRowsByName(name)).toHaveLength(1)
+    })
   })
 })
