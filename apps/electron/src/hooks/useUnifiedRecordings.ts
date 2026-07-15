@@ -393,8 +393,13 @@ interface UseUnifiedRecordingsResult {
    * Typed optional ONLY so existing tests' partial hook mocks stay valid
    * (mirrors UnifiedRecording.sourceKind's precedent) — the real hook always
    * returns it; callers use `refreshLocal?.()`.
+   *
+   * CX-T6-6 (fix round 3) — explicit failure contract: resolves `true` only
+   * when the list was actually rebuilt; `false` when a local read failed
+   * (previous list state untouched — callers surface the stale-view warning
+   * instead of claiming success). Never throws.
    */
-  refreshLocal?: () => Promise<void>
+  refreshLocal?: () => Promise<boolean>
   deviceConnected: boolean
   stats: {
     total: number
@@ -631,9 +636,15 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
   // not gated by loadRecordings' 2s debounce (this is cheap, local-only work)
   // and not contending for loadingRef — a concurrent full load would only
   // re-set the same or fresher data afterwards.
-  const refreshLocal = useCallback(async () => {
+  // CX-T6-6 (fix round 3): explicit failure contract — resolves TRUE only
+  // when the list was actually rebuilt; FALSE when any local read failed (the
+  // previous state is left untouched). Never throws (the internal logging
+  // stays), so callers branch on the boolean: Library's post-device-delete
+  // path treats false as "the view may still show the pre-delete row" and
+  // shows the honest stale-view warning instead of a plain success toast.
+  const refreshLocal = useCallback(async (): Promise<boolean> => {
     try {
-      if (!window.electronAPI?.recordings) return
+      if (!window.electronAPI?.recordings) return false
       const isConnected = deviceService.isConnected()
       setDeviceConnected(isConnected)
       const [dbRecs, syncedFiles, cachedDeviceFiles, knowledgeCaptures] = await Promise.all([
@@ -652,10 +663,13 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
         knowledgeCaptures
       )
       setRecordings(rebuilt)
+      return true
     } catch (e) {
       // Never fatal — the caller's action already succeeded; the next full
-      // refresh/scan corrects the view.
+      // refresh/scan corrects the view. The FALSE return is the caller's
+      // signal to say so honestly (CX-T6-6).
       console.error('[useUnifiedRecordings] refreshLocal failed:', e)
+      return false
     }
   }, [deviceService, setRecordings])
 

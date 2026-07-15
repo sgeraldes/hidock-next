@@ -102,10 +102,13 @@ describe('useUnifiedRecordings.refreshLocal (CX-T6-4)', () => {
     global.window.electronAPI = createMockElectronAPI([CACHED_KEPT])
     const { result } = renderHook(() => useUnifiedRecordings())
 
+    let rebuilt: boolean | undefined
     await act(async () => {
-      await result.current.refreshLocal!()
+      rebuilt = await result.current.refreshLocal!()
     })
 
+    // CX-T6-6: a successful rebuild reports TRUE.
+    expect(rebuilt).toBe(true)
     // NO device fetch of any kind — the whole point of CX-T6-4.
     expect(deviceHarness.listRecordings).not.toHaveBeenCalled()
     // No cache save-back either (that belongs to the full load's Phase 2).
@@ -147,15 +150,38 @@ describe('useUnifiedRecordings.refreshLocal (CX-T6-4)', () => {
     expect(deviceHarness.listRecordings).not.toHaveBeenCalled()
   })
 
-  it('never throws — a failing local read is logged, not propagated', async () => {
+  // CX-T6-6 (fix round 3) — explicit failure contract: a rejecting local
+  // read resolves FALSE (never throws) and the list keeps its previous
+  // state, so the caller can surface the honest stale-view warning instead
+  // of a plain success toast over a possibly-unchanged list.
+  it('resolves FALSE on a failing local read and leaves the list untouched', async () => {
     global.window.electronAPI = createMockElectronAPI([])
     window.electronAPI.recordings.getAll = vi.fn().mockRejectedValue(new Error('db locked'))
     const { result } = renderHook(() => useUnifiedRecordings())
 
+    let rebuilt: boolean | undefined
     await expect(
       act(async () => {
-        await result.current.refreshLocal!()
+        rebuilt = await result.current.refreshLocal!()
       })
-    ).resolves.toBeUndefined()
+    ).resolves.toBeUndefined() // still never throws
+
+    expect(rebuilt).toBe(false)
+    // Previous list state untouched — no partial/empty overwrite.
+    expect(storeState.setUnifiedRecordings).not.toHaveBeenCalled()
+  })
+
+  it('resolves FALSE when a different local source (deviceCache) rejects', async () => {
+    global.window.electronAPI = createMockElectronAPI([])
+    window.electronAPI.deviceCache.getAll = vi.fn().mockRejectedValue(new Error('cache read failed'))
+    const { result } = renderHook(() => useUnifiedRecordings())
+
+    let rebuilt: boolean | undefined
+    await act(async () => {
+      rebuilt = await result.current.refreshLocal!()
+    })
+
+    expect(rebuilt).toBe(false)
+    expect(storeState.setUnifiedRecordings).not.toHaveBeenCalled()
   })
 })

@@ -555,6 +555,7 @@ describe('executeDeletePermanent — reconciliation failure honesty (CX-T6-5)', 
 
   it('a successful reconciliation keeps the plain success toast (no stale note)', async () => {
     deleteRecordingMock.mockResolvedValue(true)
+    mockRefreshLocal.mockResolvedValue(true) // explicit CX-T6-6 success signal
     renderLibrary()
     await openPermanentDeleteDialog()
     fireEvent.click(screen.getByRole('checkbox', { name: /also delete from device/i }))
@@ -563,6 +564,62 @@ describe('executeDeletePermanent — reconciliation failure honesty (CX-T6-5)', 
     await waitFor(() => expect(toastMock.success).toHaveBeenCalled())
     const [, successBody] = toastMock.success.mock.calls[0]
     expect(successBody).not.toMatch(/may still show the device copy/i)
+    expect(toastMock.warning).not.toHaveBeenCalled()
+  })
+})
+
+// CX-T6-6 (fix round 3) — refreshLocal now reports failure explicitly
+// (resolves false, or throws): a failed post-delete rebuild means the
+// pre-delete row may still be visible, so the same honest stale-view
+// warning as CX-T6-5 applies — never a plain success toast over a
+// possibly-unchanged list.
+describe('executeDeletePermanent — local rebuild failure honesty (CX-T6-6)', () => {
+  it('refreshLocal resolving FALSE → warning toast with the stale-view note, never plain success', async () => {
+    deleteRecordingMock.mockResolvedValue(true)
+    mockRefreshLocal.mockResolvedValue(false)
+
+    renderLibrary()
+    await openPermanentDeleteDialog()
+    fireEvent.click(screen.getByRole('checkbox', { name: /also delete from device/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
+
+    await waitFor(() => {
+      expect(toastMock.warning).toHaveBeenCalledWith(
+        'Deleted permanently',
+        expect.stringMatching(/and the device copy.*may still show the device copy until the next device scan/i)
+      )
+    })
+    expect(toastMock.success).not.toHaveBeenCalled()
+  })
+
+  it('a THROWING refreshLocal is handled the same way', async () => {
+    deleteRecordingMock.mockResolvedValue(true)
+    mockRefreshLocal.mockRejectedValue(new Error('store update failed'))
+
+    renderLibrary()
+    await openPermanentDeleteDialog()
+    fireEvent.click(screen.getByRole('checkbox', { name: /also delete from device/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
+
+    await waitFor(() => {
+      expect(toastMock.warning).toHaveBeenCalledWith(
+        'Deleted permanently',
+        expect.stringContaining('may still show the device copy')
+      )
+    })
+    expect(toastMock.success).not.toHaveBeenCalled()
+  })
+
+  it('refreshLocal resolving TRUE keeps the plain success toast', async () => {
+    deleteRecordingMock.mockResolvedValue(true)
+    mockRefreshLocal.mockResolvedValue(true)
+
+    renderLibrary()
+    await openPermanentDeleteDialog()
+    fireEvent.click(screen.getByRole('checkbox', { name: /also delete from device/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
+
+    await waitFor(() => expect(toastMock.success).toHaveBeenCalledWith('Deleted permanently', expect.any(String)))
     expect(toastMock.warning).not.toHaveBeenCalled()
   })
 })

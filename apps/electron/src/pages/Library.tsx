@@ -1073,10 +1073,12 @@ export function Library() {
 
       // D3/AR3-6 — device branch, only after the local purge committed above.
       let deviceOutcome: 'not-requested' | 'success' | 'partial' = 'not-requested'
-      // CX-T6-5 (fix round 2): the device copy was removed but the
-      // view-bookkeeping reconciliation failed — an honest "list may be
-      // stale" note replaces the plain success toast.
-      let deviceReconcileFailed = false
+      // CX-T6-5/CX-T6-6 (fix rounds 2-3): the device copy was removed but the
+      // VIEW may still show the pre-delete row — either because the
+      // main-process reconciliation failed (CX-T6-5) or because the local
+      // rebuild itself failed (CX-T6-6). Both replace the plain success
+      // toast with the honest stale-view warning.
+      let viewMayBeStale = false
       if (opts?.alsoDeleteFromDevice) {
         const targetDeviceFilename =
           impact?.deviceFilename ?? ('deviceFilename' in recording ? recording.deviceFilename : undefined)
@@ -1098,21 +1100,21 @@ export function Library() {
               // file as a ghost device-only row).
               // CX-T6-5 (fix round 2): the IPC now propagates a real cache-
               // delete failure ({success:false}) instead of swallowing it —
-              // treat that (or a thrown IPC) as reconcile-failed and say so.
+              // treat that (or a thrown IPC) as stale-view and say so.
               try {
                 const reconciled = await window.electronAPI.recordings.markNotOnDevice(
                   recording.id,
                   targetDeviceFilename
                 )
                 if (!reconciled?.success) {
-                  deviceReconcileFailed = true
+                  viewMayBeStale = true
                   console.error(
                     '[Library] Device-presence reconciliation failed:',
                     (reconciled as { error?: string } | undefined)?.error
                   )
                 }
               } catch (e) {
-                deviceReconcileFailed = true
+                viewMayBeStale = true
                 console.error('[Library] Failed to reconcile device presence after delete:', e)
               }
               // CX-T6-4 (fix round 2): rebuild the unified view from the
@@ -1126,9 +1128,19 @@ export function Library() {
               // debounce (which the post-cascade refresh(false) just armed).
               // Optional-chained only for older hook mocks in tests — the
               // real hook always provides it.
+              // CX-T6-6 (fix round 3): refreshLocal reports failure
+              // explicitly — false (or a throw) means the pre-delete row may
+              // still be visible, so the honest stale-view warning applies,
+              // never a plain success. `undefined` (an older partial hook
+              // mock without the boolean contract) is no-signal, not failure.
               try {
-                await refreshLocal?.()
+                const rebuilt = await refreshLocal?.()
+                if (rebuilt === false) {
+                  viewMayBeStale = true
+                  console.error('[Library] Post-device-delete local rebuild reported failure')
+                }
               } catch (e) {
+                viewMayBeStale = true
                 console.error('[Library] Post-device-delete local rebuild failed:', e)
               }
             } else {
@@ -1142,9 +1154,9 @@ export function Library() {
       }
 
       import('@/components/ui/toaster').then(({ toast }) => {
-        // CX-T6-5: appended when the device copy WAS removed but the view
-        // bookkeeping failed — the list may lag until the next scan.
-        const staleNote = deviceReconcileFailed ? ` ${VIEW_MAY_BE_STALE_NOTE}` : ''
+        // CX-T6-5/CX-T6-6: appended when the device copy WAS removed but the
+        // view may still show it — reconciliation or the local rebuild failed.
+        const staleNote = viewMayBeStale ? ` ${VIEW_MAY_BE_STALE_NOTE}` : ''
         if (deviceOutcome === 'partial' && filesPending) {
           // CX-T6-3 (fix round): BOTH partial outcomes must surface together —
           // the device-only body claims full local removal, which is untrue
@@ -1154,7 +1166,7 @@ export function Library() {
           toast.warning(DEVICE_COPY_REMAINS_TITLE, deviceCopyRemainsBody(recording.filename))
         } else if (filesPending) {
           toast.warning(FILES_PENDING_TITLE, filesPendingBody(recording.filename, pendingKinds) + staleNote)
-        } else if (deviceReconcileFailed) {
+        } else if (viewMayBeStale) {
           // Everything WAS deleted (local + device) — but the honest partial
           // path applies: warning variant, with the stale-view note.
           toast.warning(
