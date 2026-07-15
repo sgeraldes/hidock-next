@@ -1545,10 +1545,25 @@ export function neighborhoodFacts(
 
   // ADV18-2 — record the authoritative recording ids behind the EMITTED facts so
   // the persisted answer can be redacted if any of them is later excluded.
+  // ADV19-3 (round-20) — a legacy edge with NO graph_edge_sources rows is
+  // UNVERIFIABLE for CHAT grounding: we cannot prove it wasn't derived from a
+  // now-excluded recording, so an answer grounded (even partly) on it must fail
+  // closed on re-read. Mark the answer's provenance union `unresolved` whenever
+  // ANY emitted fact edge lacks provenance rows. This is scoped to the CHAT
+  // provenance sink (provOut) only — graph VIEWS keep the legacy caveat (RE-3
+  // ruling) and never pass a provOut, so their behaviour is unchanged.
   if (provOut && emittedEdgeIds.length) {
     try {
+      const attributedEdges = new Set<string>()
       for (const r of edgeProvenanceRows(store, emittedEdgeIds)) {
+        attributedEdges.add(r.edge_id)
         if (r.recording_id) provOut.recordingIds.add(r.recording_id)
+      }
+      for (const edgeId of emittedEdgeIds) {
+        if (!attributedEdges.has(edgeId)) {
+          provOut.unresolved = true // zero-provenance legacy fact ⇒ unverifiable for chat
+          break
+        }
       }
     } catch (e) {
       provOut.unresolved = true

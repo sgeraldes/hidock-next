@@ -253,23 +253,41 @@ describe('ARF-2 — provenance-aware assistant grounding', () => {
 describe('ADV18-2 — neighborhoodFacts fact-edge provenance capture', () => {
   const noExclusion = { ids: new Set<string>(), failClosed: false }
 
-  it('captures ALL co-sources of the emitted facts; legacy zero-provenance contributes none', () => {
+  it('captures ALL co-sources of the emitted facts (legacy zero-provenance contributes no recording id)', () => {
     const provOut = { recordingIds: new Set<string>(), unresolved: false }
     const facts = neighborhoodFacts('Alice', 1, 20, noExclusion, provOut)
     // eA→recA, eShared→recA+recB emit; eLegacy has NO provenance rows.
     expect(facts).toContain('Alice mentioned Roadmap')
     expect([...provOut.recordingIds].sort()).toEqual(['recA', 'recB'])
-    expect(provOut.unresolved).toBe(false)
+    // ADV19-3 (round-20) — eLegacy (zero-provenance) is EMITTED here, so the chat
+    // union is marked unresolved (unverifiable): we cannot prove it isn't from a
+    // now-excluded recording, so an answer grounded on it fails closed on re-read.
+    expect(provOut.unresolved).toBe(true)
   })
 
-  it('a suppressed (excluded) fact contributes no provenance to the union', () => {
-    // Exclude recA AND recB → eA + eShared both suppressed; only eLegacy emits.
+  it('ADV19-3 — a suppressed attributed fact contributes no id, but an emitted legacy fact marks the union unresolved', () => {
+    // Exclude recA AND recB → eA + eShared both suppressed; only the zero-provenance
+    // eLegacy emits — which is itself unverifiable for chat.
     deleteRecordingCascade('recA', { hard: false })
     deleteRecordingCascade('recB', { hard: false })
     const provOut = { recordingIds: new Set<string>(), unresolved: false }
     const facts = neighborhoodFacts('Alice', 1, 20, getGroundingExclusionSet(), provOut)
     expect(facts).toContain('Alice relates to Bob') // legacy only
     expect(provOut.recordingIds.size).toBe(0) // no attributed fact emitted
+    expect(provOut.unresolved).toBe(true) // zero-provenance legacy fact emitted ⇒ unverifiable for chat
+  })
+
+  it('ADV19-3 — an answer grounded ONLY on fully-attributed (non-legacy) facts stays verifiable', () => {
+    // Neighborhood of Bob touches ONLY the legacy edge, so use a center whose
+    // emitted facts are all attributed: exclude nothing, but restrict maxFacts so
+    // only attributed facts emit is not deterministic — instead assert the inverse
+    // via a graph with no legacy incident edge. Roadmap is reached solely via eA
+    // (attributed to recA); its neighborhood emits only the attributed eA.
+    const provOut = { recordingIds: new Set<string>(), unresolved: false }
+    const facts = neighborhoodFacts('Roadmap', 1, 20, noExclusion, provOut)
+    expect(facts).toContain('Alice mentioned Roadmap')
+    expect([...provOut.recordingIds]).toEqual(['recA'])
+    // No zero-provenance fact was emitted for Roadmap ⇒ union stays verifiable.
     expect(provOut.unresolved).toBe(false)
   })
 
