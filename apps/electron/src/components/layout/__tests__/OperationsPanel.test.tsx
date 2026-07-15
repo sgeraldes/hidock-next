@@ -36,11 +36,14 @@ const mockPauseQueue = vi.fn()
 const mockResumeQueue = vi.fn()
 const mockApplyQueueState = vi.fn()
 
+const mockCancelDownload = vi.fn()
+const mockCancelAllDownloads = vi.fn()
 vi.mock('@/hooks/useOperations', () => ({
   useOperations: () => ({
-    cancelAllDownloads: vi.fn(),
+    cancelAllDownloads: mockCancelAllDownloads,
     cancelAllTranscriptions: vi.fn(),
-    cancelTranscription: vi.fn()
+    cancelTranscription: vi.fn(),
+    cancelDownload: mockCancelDownload
   })
 }))
 
@@ -213,6 +216,60 @@ describe('OperationsPanel', () => {
 
       expect(screen.queryByText(/coming soon/i)).not.toBeInTheDocument()
       expect(screen.queryByLabelText(/Pause \(unavailable\)/)).not.toBeInTheDocument()
+    })
+  })
+
+  describe('overlay downloads section', () => {
+    function setupDownloadOverlay(downloads: Array<Record<string, unknown>>) {
+      const queue = new Map(downloads.map((d) => [d.filename as string, d]))
+      vi.mocked(useDownloadQueue).mockReturnValue(queue as any)
+      useUIStore.setState({ operationsOverlayOpen: true })
+    }
+
+    it('renders active downloads (not "No active transcriptions") in the unified overlay', () => {
+      setupDownloadOverlay([
+        { filename: 'REC0001.WAV', progress: 42, size: 1048576, status: 'downloading' }
+      ])
+      render(<OperationsPanel sidebarOpen={true} />)
+
+      // Overlay titled "Operations", lists the download with progress + size.
+      expect(screen.getByRole('dialog', { name: /operations detail/i })).toBeInTheDocument()
+      expect(screen.getByText('REC0001')).toBeInTheDocument()
+      expect(screen.getByText(/Downloading… 42%/)).toBeInTheDocument()
+      // The stale copy must never appear when a download is active.
+      expect(screen.queryByText('No active transcriptions.')).not.toBeInTheDocument()
+      expect(screen.queryByText('No active operations.')).not.toBeInTheDocument()
+    })
+
+    it('per-download Cancel calls cancelDownload(filename)', () => {
+      setupDownloadOverlay([
+        { filename: 'REC0001.WAV', progress: 42, size: 1000, status: 'downloading' }
+      ])
+      render(<OperationsPanel sidebarOpen={true} />)
+
+      fireEvent.click(screen.getByLabelText('Cancel download REC0001'))
+      expect(mockCancelDownload).toHaveBeenCalledWith('REC0001.WAV')
+    })
+
+    it('shows a disabled control while a download is cancelling', () => {
+      setupDownloadOverlay([
+        { filename: 'REC0001.WAV', progress: 80, size: 1000, status: 'cancelling' }
+      ])
+      render(<OperationsPanel sidebarOpen={true} />)
+
+      expect(screen.getByText(/Cancelling…/)).toBeInTheDocument()
+      expect(screen.getByLabelText('Cancel download REC0001')).toBeDisabled()
+    })
+
+    it('Cancel-all downloads control is wired to cancelAllDownloads', () => {
+      setupDownloadOverlay([
+        { filename: 'a.wav', progress: 10, size: 1000, status: 'downloading' },
+        { filename: 'b.wav', progress: 0, size: 1000, status: 'pending' }
+      ])
+      render(<OperationsPanel sidebarOpen={true} />)
+
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel all downloads' }))
+      expect(mockCancelAllDownloads).toHaveBeenCalledTimes(1)
     })
   })
 })

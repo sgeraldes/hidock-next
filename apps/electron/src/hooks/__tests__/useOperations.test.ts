@@ -12,7 +12,9 @@ vi.mock('@/hooks/useDownloadOrchestrator', () => ({
   cancelDownloads: vi.fn(),
   cancelDownloadsComplete: vi.fn(),
   requestScopedDownloads: vi.fn(),
-  markDownloadPriority: vi.fn()
+  markDownloadPriority: vi.fn(),
+  releaseDownloadBookkeeping: vi.fn(),
+  clearAllDownloadBookkeeping: vi.fn()
 }))
 
 // Mock transcription store
@@ -45,6 +47,7 @@ const mockCancelTranscription = vi.fn().mockResolvedValue(undefined)
 const mockCancelAllTranscriptions = vi.fn().mockResolvedValue({ count: 3 })
 const mockQueueDownloads = vi.fn().mockResolvedValue(undefined)
 const mockCancelAllDownloads = vi.fn().mockResolvedValue(undefined)
+const mockCancelDownload = vi.fn().mockResolvedValue({ success: true })
 
 const mockAddToQueueIPC = vi.fn().mockResolvedValue('queue-item-1')
 
@@ -57,7 +60,8 @@ global.window.electronAPI = {
   },
   downloadService: {
     queueDownloads: mockQueueDownloads,
-    cancelAll: mockCancelAllDownloads
+    cancelAll: mockCancelAllDownloads,
+    cancel: mockCancelDownload
   },
   config: {
     get: vi.fn().mockResolvedValue({
@@ -288,7 +292,8 @@ describe('useOperations', () => {
   })
 
   describe('cancelAllDownloads', () => {
-    it('calls IPC cancel', async () => {
+    it('awaits the main-process cancelAll and clears bookkeeping', async () => {
+      const { clearAllDownloadBookkeeping } = await import('@/hooks/useDownloadOrchestrator')
       const { result } = renderHook(() => useOperations())
 
       await act(async () => {
@@ -296,6 +301,35 @@ describe('useOperations', () => {
       })
 
       expect(mockCancelAllDownloads).toHaveBeenCalled()
+      expect(clearAllDownloadBookkeeping).toHaveBeenCalled()
+    })
+  })
+
+  describe('cancelDownload', () => {
+    it('cancels a single download via IPC and releases its bookkeeping', async () => {
+      const { releaseDownloadBookkeeping } = await import('@/hooks/useDownloadOrchestrator')
+      const { result } = renderHook(() => useOperations())
+
+      let ok: boolean | undefined
+      await act(async () => {
+        ok = await result.current.cancelDownload('REC0001.WAV')
+      })
+
+      expect(mockCancelDownload).toHaveBeenCalledWith('REC0001.WAV')
+      expect(releaseDownloadBookkeeping).toHaveBeenCalledWith('REC0001.WAV')
+      expect(ok).toBe(true)
+    })
+
+    it('returns false and does not throw when the item is unknown/terminal', async () => {
+      mockCancelDownload.mockResolvedValueOnce({ success: false, error: 'not found' })
+      const { result } = renderHook(() => useOperations())
+
+      let ok: boolean | undefined
+      await act(async () => {
+        ok = await result.current.cancelDownload('missing.wav')
+      })
+
+      expect(ok).toBe(false)
     })
   })
 })
