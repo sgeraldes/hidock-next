@@ -385,7 +385,9 @@ export function SourceReader({
     let cancelled = false
     ;(async () => {
       try {
-        const fetched = await window.electronAPI?.transcripts?.getByRecordingId(recording.id)
+        // ADV13: owner-management detail viewer — use the owner accessor so the
+        // owner can still read their OWN trashed/personal/value-excluded transcript.
+        const fetched = await window.electronAPI?.transcripts?.getByRecordingIdOwner(recording.id)
         if (!cancelled && fetched) setFallbackTranscript(fetched as Transcript)
       } catch (err) {
         console.error('[SourceReader] Transcript fallback fetch failed:', err)

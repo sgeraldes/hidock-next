@@ -393,7 +393,9 @@ export function Library() {
     try {
       await refresh(false)
 
-      const transcriptsObj = await window.electronAPI.transcripts.getByRecordingIds([recordingId])
+      // ADV13: owner Library management — owner accessor shows the owner their OWN
+      // excluded transcripts (gated getByRecordingIds is for assistant/discovery).
+      const transcriptsObj = await window.electronAPI.transcripts.getByRecordingIdsOwner([recordingId])
       const transcript = transcriptsObj?.[recordingId]
       if (!transcript) return
 
@@ -466,7 +468,8 @@ export function Library() {
       try {
         const [transcriptsObj, meetingsObj] = await Promise.all([
           recordingIdsForTranscripts.length > 0
-            ? window.electronAPI.transcripts.getByRecordingIds(recordingIdsForTranscripts)
+            // ADV13: owner Library enrichment uses the owner accessor (see above).
+            ? window.electronAPI.transcripts.getByRecordingIdsOwner(recordingIdsForTranscripts)
             : Promise.resolve({}),
           meetingIds.length > 0 ? window.electronAPI.meetings.getByIds(meetingIds) : Promise.resolve({})
         ])

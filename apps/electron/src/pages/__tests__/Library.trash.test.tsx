@@ -284,9 +284,12 @@ function setElectronAPI() {
   global.window.electronAPI = {
     transcripts: {
       getByRecordingIds: vi.fn().mockResolvedValue({}),
+      // ADV13: Library enrichment + SourceReader detail use the owner accessors.
+      getByRecordingIdsOwner: vi.fn().mockResolvedValue({}),
       // SourceReader's H6 fallback fetch — exercised when a live recording is
       // selected (transcriptionStatus 'complete') without a transcript prop.
-      getByRecordingId: vi.fn().mockResolvedValue(undefined)
+      getByRecordingId: vi.fn().mockResolvedValue(undefined),
+      getByRecordingIdOwner: vi.fn().mockResolvedValue(undefined)
     },
     meetings: { getByIds: vi.fn().mockResolvedValue({}) },
     storage: { openFolder: vi.fn() },

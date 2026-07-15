@@ -24,6 +24,7 @@ import {
   linkRecordingToMeeting
 } from '../services/database'
 import { getRecurringTopics } from '../services/recurring-topics'
+import { filterEligibleRecordingIds, existingRecordings } from '../services/recording-eligibility'
 
 export function registerDatabaseHandlers(): void {
   // Meetings
@@ -76,12 +77,33 @@ export function registerDatabaseHandlers(): void {
   )
 
   // Transcripts
+  //
+  // ADV13 (round-13) — TWO ELIGIBILITY TIERS on the transcript READ side.
+  // The three DEFAULT IPCs below are the ASSISTANT / DISPLAY-safe accessors:
+  // they resolve the recording id(s) through the shared FAIL-CLOSED positive
+  // allowlist (recording exists AND non-personal/non-deleted/non-value-excluded)
+  // so a soft-deleted / personal / value-excluded / hard-purged recording's
+  // transcript can NOT be fetched by id, batched, or discovered via full-text
+  // search — closing the DISPLAY-tier read bypass. The NARROW owner-management
+  // accessors further down (db:get-transcript-owner / *-owner batch) are the
+  // sanctioned exemption that lets the OWNER view their OWN trashed/excluded
+  // content in management UI (Library / SourceReader detail).
   ipcMain.handle('db:get-transcript', async (_, recordingId: string) => {
-    return getTranscriptByRecordingId(recordingId)
+    // ADV13: fail closed — null when ineligible or on any eligibility-lookup failure.
+    const { eligible, failClosed } = filterEligibleRecordingIds([recordingId])
+    if (failClosed || !eligible.has(recordingId)) return null
+    return getTranscriptByRecordingId(recordingId) ?? null
   })
 
   ipcMain.handle('db:search-transcripts', async (_, query: string) => {
-    return searchTranscripts(query)
+    // ADV13: full-text discovery must not surface excluded transcripts. searchTranscripts
+    // applies NO SQL LIMIT (returns every match), so filtering the rows here happens
+    // BEFORE any truncation — eligible matches are never dropped behind excluded ones.
+    const rows = searchTranscripts(query)
+    if (rows.length === 0) return []
+    const { eligible, failClosed } = filterEligibleRecordingIds(rows.map((r) => r.recording_id))
+    if (failClosed) return []
+    return rows.filter((r) => eligible.has(r.recording_id))
   })
 
   ipcMain.handle('db:get-recurring-topics', async () => {
@@ -89,8 +111,41 @@ export function registerDatabaseHandlers(): void {
   })
 
   ipcMain.handle('db:get-transcripts-by-recording-ids', async (_, recordingIds: string[]) => {
-    const transcriptsMap = getTranscriptsByRecordingIds(recordingIds)
+    // ADV13: filter the input ids through the positive allowlist BEFORE fetching so
+    // ineligible ids are omitted from the returned map; fail closed → empty map.
+    const ids = recordingIds ?? []
+    const { eligible, failClosed } = filterEligibleRecordingIds(ids)
+    if (failClosed) return {}
+    const eligibleIds = ids.filter((id) => eligible.has(id))
+    if (eligibleIds.length === 0) return {}
+    const transcriptsMap = getTranscriptsByRecordingIds(eligibleIds)
     // Convert Map to object for IPC serialization
+    return Object.fromEntries(transcriptsMap)
+  })
+
+  // ADV13 (round-13) TIER-2 — NARROW OWNER-MANAGEMENT transcript accessors.
+  // Scope = the recording ROW EXISTS (via getExistingRecordingIds): a
+  // soft-deleted / personal / value-excluded recording is EXISTING, so the owner
+  // can still view/manage their OWN excluded content before purge — but a
+  // HARD-PURGED / nonexistent id resolves to null / is omitted. These read the
+  // AUTHORITATIVE transcript by recording id (no renderer-supplied content).
+  // F17's promise is about AI processing + honest-deletion semantics, NOT
+  // preventing the owner from reading their own trashed item. ONLY the exempt
+  // owner viewers (Library batch, SourceReader detail) may call these; assistant /
+  // discovery callers stay on the gated default IPCs above.
+  ipcMain.handle('db:get-transcript-owner', async (_, recordingId: string) => {
+    const { ids, failClosed } = existingRecordings([recordingId])
+    if (failClosed || !ids.has(recordingId)) return null
+    return getTranscriptByRecordingId(recordingId) ?? null
+  })
+
+  ipcMain.handle('db:get-transcripts-by-recording-ids-owner', async (_, recordingIds: string[]) => {
+    const ids = recordingIds ?? []
+    const { ids: existing, failClosed } = existingRecordings(ids)
+    if (failClosed) return {}
+    const existingIds = ids.filter((id) => existing.has(id))
+    if (existingIds.length === 0) return {}
+    const transcriptsMap = getTranscriptsByRecordingIds(existingIds)
     return Object.fromEntries(transcriptsMap)
   })
 

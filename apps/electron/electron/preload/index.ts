@@ -548,6 +548,15 @@ export interface ElectronAPI {
   transcripts: {
     getByRecordingId: (recordingId: string) => Promise<any>
     getByRecordingIds: (recordingIds: string[]) => Promise<Record<string, any>>
+    /**
+     * ADV13 owner-management accessor — returns the transcript for an EXISTING
+     * recording even when it is soft-deleted / personal / value-excluded (owner
+     * viewing their OWN content), null for a hard-purged / nonexistent id. Use
+     * ONLY in owner-management UI (Library, SourceReader detail); assistant /
+     * discovery surfaces must use the gated getByRecordingId(s).
+     */
+    getByRecordingIdOwner: (recordingId: string) => Promise<any>
+    getByRecordingIdsOwner: (recordingIds: string[]) => Promise<Record<string, any>>
     search: (query: string) => Promise<any[]>
     getRecurringTopics: () => Promise<Array<{ topic: string; recordingCount: number }>>
     assignSpeaker: (request: { recordingId: string; speakerLabel: string; contactId?: string; newName?: string }) => Promise<Result<Contact>>
@@ -1384,6 +1393,8 @@ const electronAPI: ElectronAPI = {
   transcripts: {
     getByRecordingId: (recordingId) => callIPC('db:get-transcript', recordingId),
     getByRecordingIds: (recordingIds) => callIPC('db:get-transcripts-by-recording-ids', recordingIds),
+    getByRecordingIdOwner: (recordingId) => callIPC('db:get-transcript-owner', recordingId),
+    getByRecordingIdsOwner: (recordingIds) => callIPC('db:get-transcripts-by-recording-ids-owner', recordingIds),
     search: (query) => callIPC('db:search-transcripts', query),
     getRecurringTopics: () => callIPC('db:get-recurring-topics'),
     assignSpeaker: (request) => callIPC('transcripts:assignSpeaker', request),
