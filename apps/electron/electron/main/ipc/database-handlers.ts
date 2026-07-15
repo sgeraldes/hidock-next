@@ -52,8 +52,23 @@ export function registerDatabaseHandlers(): void {
     return getRecordingById(id)
   })
 
+  // ADV24-3 (round-25) — db:get-recordings-for-meeting is a NON-OWNER accessor.
+  // preload `recordings.getForMeeting` is called ONLY from non-owner surfaces:
+  // Today (Today.tsx), the meeting-recording-intelligence hover card
+  // (recorded/transcribed/wordCount), and the RecordingLinkDialog — none is an
+  // owner-management reader (Library/Trash/SourceReader/MeetingDetail use their
+  // own accessors). Returning raw linked recordings exposed an excluded
+  // recording's existence + linked/recorded/transcribed STATE outside the
+  // sanctioned owner reader. Gate the shared IPC through the fail-closed positive
+  // allowlist so ineligible (personal/soft-deleted/value-excluded/hard-purged)
+  // recordings are omitted; fail-closed → no recordings. No owner-only variant is
+  // needed because every caller is non-owner.
   ipcMain.handle('db:get-recordings-for-meeting', async (_, meetingId: string) => {
-    return getRecordingsForMeeting(meetingId)
+    const recordings = getRecordingsForMeeting(meetingId)
+    if (recordings.length === 0) return recordings
+    const { eligible, failClosed } = filterEligibleRecordingIds(recordings.map((r) => r.id))
+    if (failClosed) return []
+    return recordings.filter((r) => eligible.has(r.id))
   })
 
   ipcMain.handle('db:update-recording-status', async (_, id: string, status: string) => {
