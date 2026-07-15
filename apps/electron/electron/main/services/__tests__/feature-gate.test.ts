@@ -220,6 +220,17 @@ describe('boot-effective gate for restart-gated features (Review-2 [CRITICAL], U
       // INITIATES USB traffic (resets during live calls cut audio) and takes
       // the normal initiation gate, not the teardown one.
       'jensen:reset',
+      // Round-5 [HIGH]: command-sending "getters" are INITIATION, not passive
+      // observation — each issues sendCommand(new JensenMessage(CMD.*)) on the USB
+      // bus. A live-disabled renderer must not make the device talk through them.
+      'jensen:getDeviceInfo',
+      'jensen:getCardInfo',
+      'jensen:getFileCount',
+      'jensen:getSettings',
+      'jensen:getRealtimeSettings',
+      'jensen:getRealtimeData',
+      'jensen:getBatteryStatus',
+      'jensen:getBluetoothStatus',
       'device-pipeline:connect',
       'device-pipeline:sync',
       'download-service:queue-downloads',
@@ -233,12 +244,15 @@ describe('boot-effective gate for restart-gated features (Review-2 [CRITICAL], U
 
     // TEARDOWN/OBSERVATION half: mock-only regression for disable while
     // (a) connected, (b) scanning, (c) downloading — every cleanup channel and
-    // passive status read stays callable so boot-active state can be drained.
+    // GENUINELY passive (in-memory) read stays callable so boot-active state can
+    // be drained. NOTE: only the sync in-memory jensen reads (isConnected /
+    // getModel / isP1Device) belong here — NOT the command-sending getters above.
     const TEARDOWN_BY_SCENARIO: Record<string, string[]> = {
       connected: [
         'jensen:disconnect',
         'jensen:isConnected',
-        'jensen:getDeviceInfo',
+        'jensen:getModel',
+        'jensen:isP1Device',
         'device-pipeline:disconnect',
         'device-pipeline:get-state',
       ],
@@ -368,6 +382,74 @@ describe('boot-effective gate for restart-gated features (Review-2 [CRITICAL], U
     expect(svc.disconnect).toHaveBeenCalledTimes(1)
     expect(svc.cancel).toHaveBeenCalledTimes(2)
     expect(svc.readStatus).toHaveBeenCalledTimes(2)
+  })
+
+  it('command-sending getters are INITIATION, not observation (round-5 [HIGH], mocked Jensen device)', () => {
+    // Model the real device: sync getters read cached fields (NEVER sendCommand);
+    // async getters issue sendCommand(new JensenMessage(CMD.*)) — fresh USB traffic.
+    const sendCommand = vi.fn((cmd: string) => `resp:${cmd}`)
+    const device = {
+      // genuinely passive (jensen-device.ts: isConnected L632, getModel L1077, isP1Device L2630)
+      isConnected: vi.fn(() => true),
+      getModel: vi.fn(() => 'hidock-h1e'),
+      isP1Device: vi.fn(() => false),
+      // command-sending "getters" — each round-trips to the device
+      getDeviceInfo: vi.fn(() => sendCommand('GET_DEVICE_INFO')),
+      getCardInfo: vi.fn(() => sendCommand('GET_CARD_INFO')),
+      getFileCount: vi.fn(() => sendCommand('GET_FILE_COUNT')),
+      getSettings: vi.fn(() => sendCommand('GET_SETTINGS')),
+      getRealtimeSettings: vi.fn(() => sendCommand('GET_RT_SETTINGS')),
+      getRealtimeData: vi.fn(() => sendCommand('GET_RT_DATA')),
+      getBatteryStatus: vi.fn(() => sendCommand('GET_BATTERY')),
+      getBluetoothStatus: vi.fn(() => sendCommand('GET_BT_STATUS')),
+    }
+    const CHANNEL_TO_METHOD: Record<string, () => unknown> = {
+      // KEPT observation (sync, cached)
+      'jensen:isConnected': () => device.isConnected(),
+      'jensen:getModel': () => device.getModel(),
+      'jensen:isP1Device': () => device.isP1Device(),
+      // RECLASSIFIED to initiation (async, sendCommand)
+      'jensen:getDeviceInfo': () => device.getDeviceInfo(),
+      'jensen:getCardInfo': () => device.getCardInfo(),
+      'jensen:getFileCount': () => device.getFileCount(),
+      'jensen:getSettings': () => device.getSettings(),
+      'jensen:getRealtimeSettings': () => device.getRealtimeSettings(),
+      'jensen:getRealtimeData': () => device.getRealtimeData(),
+      'jensen:getBatteryStatus': () => device.getBatteryStatus(),
+      'jensen:getBluetoothStatus': () => device.getBluetoothStatus(),
+    }
+    const KEPT_OBSERVATION = ['jensen:isConnected', 'jensen:getModel', 'jensen:isP1Device']
+    const RECLASSIFIED = Object.keys(CHANNEL_TO_METHOD).filter(
+      (c) => !KEPT_OBSERVATION.includes(c)
+    )
+
+    // Pending-disable: boot-enabled, desired-disabled.
+    featuresConfig = { preset: 'full', flags: {} }
+    captureBootEffectiveFeatures()
+    featuresConfig = { preset: 'full', flags: { 'device-sync': false } }
+
+    // Retained observation channels still resolve — from CACHE, with zero sendCommand.
+    for (const ch of KEPT_OBSERVATION) {
+      const result = gateInvokeHandler(ch, () => CHANNEL_TO_METHOD[ch]())(event)
+      expect(result, ch).toBeDefined()
+    }
+    expect(sendCommand, 'observation channels must NOT issue USB commands').not.toHaveBeenCalled()
+
+    // Reclassified getters are rejected by the gate — the handler never runs, so
+    // no sendCommand can reach the device.
+    for (const ch of RECLASSIFIED) {
+      expect(() => gateInvokeHandler(ch, () => CHANNEL_TO_METHOD[ch]())(event), ch).toThrow(
+        FeatureDisabledError
+      )
+    }
+    expect(sendCommand, 'reclassified getters must be gated before any USB command').not.toHaveBeenCalled()
+
+    // Sanity: while device-sync is fully enabled, the same getters DO go through
+    // to the device (proves the wiring actually would call sendCommand).
+    featuresConfig = { preset: 'full', flags: {} }
+    captureBootEffectiveFeatures()
+    gateInvokeHandler('jensen:getDeviceInfo', () => CHANNEL_TO_METHOD['jensen:getDeviceInfo']())(event)
+    expect(sendCommand).toHaveBeenCalledWith('GET_DEVICE_INFO')
   })
 })
 

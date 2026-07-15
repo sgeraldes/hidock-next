@@ -595,41 +595,56 @@ export const CORE_CHANNELS: string[] = [
  *    immediately (connects, scans, downloads, pipeline starts, auto-connect).
  *  - TEARDOWN / OBSERVATION (listed here): requires boot-enabled ONLY. Callable
  *    regardless of the desired flag, so in-flight or boot-active state can
- *    always be drained (disconnect, cancel, reset, pipeline cleanup) and
- *    passive status reads keep working while the restart is pending.
+ *    always be drained (disconnect, cancel, stop/pause ops, pipeline cleanup) and
+ *    GENUINELY passive reads keep working while the restart is pending.
  *  - Boot-disabled keeps EVERYTHING closed (both halves) until the next boot.
  *
  * Runtime-toggleable features are unaffected (pure live gating; their teardown
  * is handled by feature-lifecycle stop actions).
  *
- * Defaulting unlisted channels to INITIATION is the fail-safe direction: a new
- * device channel cannot keep starting work after a live disable by omission.
+ * Membership rule (round-5 [HIGH]): a channel may be listed here ONLY if its
+ * handler either (a) STOPS/ABORTS device activity (teardown), or (b) reads purely
+ * cached / in-memory / DB state with ZERO device I/O (observation). Any channel
+ * whose handler can reach jensen.sendCommand — including "getter" reads that
+ * round-trip to the device — is INITIATION and MUST be left off this list (it
+ * then defaults to the boot-AND-desired gate). Verified against the actual
+ * handler → service call chain, never guessed from the channel name. Defaulting
+ * unlisted channels to INITIATION is the fail-safe direction.
  */
 export const TEARDOWN_CHANNELS: string[] = [
-  // --- device-sync / jensen: teardown ---
+  // --- device-sync / jensen: teardown (stop/abort ops) ---
   // NOTE (round-4 [HIGH]): jensen:reset is deliberately NOT listed. Reset sends
   // a full command sequence to the device — it INITIATES USB traffic (resets
   // during live calls have cut audio; the drain pattern is a manual recovery,
-  // not a routine channel). It takes the normal initiation gate. Only true
-  // disconnect/cancel/drain operations belong here.
+  // not a routine channel). It takes the normal initiation gate.
+  //
+  // disconnect/cancelDownload/stop*/pause* stay teardown even though some issue a
+  // device command: they STOP or ABORT activity (the whole point of teardown is
+  // to drain boot-active state), so they must remain reachable while a disable is
+  // pending. cancelDownload only aborts an AbortController — no device I/O at all.
   'jensen:disconnect',
   'jensen:cancelDownload',
   'jensen:stopBluetoothScan',
   'jensen:stopRealtime',
   'jensen:pauseRealtime',
-  // --- device-sync / jensen: passive status reads (no new device work) ---
+  // --- device-sync / jensen: GENUINELY passive reads (synchronous, in-memory) ---
+  // Round-5 [HIGH]: ONLY these three are safe as boot-only observation — their
+  // handlers return synchronously from in-memory state and NEVER call
+  // jensen.sendCommand (jensen-device.ts: isConnected():boolean L632,
+  // getModel():DeviceModel L1077, isP1Device():boolean L2630). The former
+  // "status getters" getDeviceInfo/getCardInfo/getFileCount/getSettings/
+  // getRealtimeSettings/getRealtimeData/getBatteryStatus/getBluetoothStatus are
+  // NOT passive: each is `async` and issues sendCommand(new JensenMessage(CMD.*))
+  // — fresh USB traffic — so they are INITIATION (removed from this list; they
+  // default to the boot-AND-desired gate). A live-disabled renderer must not be
+  // able to make the device talk through a "getter".
   'jensen:isConnected',
   'jensen:isP1Device',
   'jensen:getModel',
-  'jensen:getDeviceInfo',
-  'jensen:getBatteryStatus',
-  'jensen:getCardInfo',
-  'jensen:getSettings',
-  'jensen:getRealtimeSettings',
-  'jensen:getRealtimeData',
-  'jensen:getBluetoothStatus',
-  'jensen:getFileCount',
   // --- device-sync / pipeline teardown + observation ---
+  // get-state returns the projected PipelineState in-memory (pipeline.getState(),
+  // device-pipeline-handlers.ts L80-81) — no device I/O. disconnect/cancel are
+  // stop ops (teardown).
   'device-pipeline:disconnect',
   'device-pipeline:cancel',
   'device-pipeline:get-state',

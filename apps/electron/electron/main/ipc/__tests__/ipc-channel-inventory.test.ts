@@ -142,6 +142,16 @@ describe('IPC channel registrar inventory', () => {
       // initiation, never routine teardown (the drain pattern is a manual
       // recovery procedure, not a channel).
       'jensen:reset',
+      // Round-5 [HIGH]: command-sending "getters" issue sendCommand on the USB
+      // bus — INITIATION, not passive observation. They must NOT be teardown.
+      'jensen:getDeviceInfo',
+      'jensen:getCardInfo',
+      'jensen:getFileCount',
+      'jensen:getSettings',
+      'jensen:getRealtimeSettings',
+      'jensen:getRealtimeData',
+      'jensen:getBatteryStatus',
+      'jensen:getBluetoothStatus',
       'device-pipeline:connect',
       'device-pipeline:sync',
       'download-service:queue-downloads',
@@ -149,5 +159,13 @@ describe('IPC channel registrar inventory', () => {
     ]) {
       expect(TEARDOWN_CHANNELS, `${ch} must be initiation`).not.toContain(ch)
     }
+  })
+
+  it('the ONLY jensen reads left as observation are the sync in-memory ones (round-5 [HIGH])', () => {
+    // isConnected / getModel / isP1Device return synchronously from cached state
+    // and never call sendCommand — the sole safe jensen observation reads.
+    const jensenTeardown = TEARDOWN_CHANNELS.filter((c) => c.startsWith('jensen:'))
+    const jensenReads = jensenTeardown.filter((c) => /^jensen:(is|get)/.test(c))
+    expect(jensenReads.sort()).toEqual(['jensen:getModel', 'jensen:isConnected', 'jensen:isP1Device'])
   })
 })
