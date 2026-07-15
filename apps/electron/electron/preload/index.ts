@@ -473,12 +473,19 @@ export interface ElectronAPI {
     }>
     restore: (id: string) => Promise<{ success: boolean }>
     // spec-006/F17 T6 AR3-6(b) — immediate single-recording device reconciliation.
-    markNotOnDevice: (id: string) => Promise<{ success: boolean; error?: string }>
+    // CX-T6-1 (fix round): deviceFilename is the fallback reconciliation key
+    // for the offline device cache when the id no longer resolves — i.e. the
+    // permanent flow, where the hard cascade already deleted the row before
+    // the device delete confirmed.
+    markNotOnDevice: (id: string, deviceFilename?: string) => Promise<{ success: boolean; error?: string }>
     // spec-006/F17 T6 AR3-2 — bounded, non-fatal pending-file-cleanup retry sweep.
     retryPendingCleanups: () => Promise<{
       success: boolean
       attempted?: number
       cleared?: number
+      // OP-LOW-2 (fix round): journal ids the sweep fully cleared, so callers
+      // can distinguish "swept clean" from "not swept at all".
+      clearedJournalIds?: string[]
       stillPending?: Record<string, string[]>
       error?: string
     }>
@@ -1347,7 +1354,7 @@ const electronAPI: ElectronAPI = {
     deletionImpact: (id) => callIPC('recordings:deletionImpact', id),
     deleteCascade: (id, hard, opts) => callIPC('recordings:deleteCascade', id, hard, opts),
     restore: (id) => callIPC('recordings:restore', id),
-    markNotOnDevice: (id) => callIPC('recordings:markNotOnDevice', id),
+    markNotOnDevice: (id, deviceFilename) => callIPC('recordings:markNotOnDevice', id, deviceFilename),
     retryPendingCleanups: () => callIPC('recordings:retryPendingCleanups'),
     setValueRating: (id, rating) => callIPC('recordings:setValueRating', id, rating),
     // Recording-Meeting linking dialog methods

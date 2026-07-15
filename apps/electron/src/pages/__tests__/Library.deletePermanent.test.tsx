@@ -259,7 +259,13 @@ describe('executeDeletePermanent — device checkbox (D3/AR3-6)', () => {
     await waitFor(() => expect(window.electronAPI.recordings.deleteCascade).toHaveBeenCalledWith('synced-1', true))
     await waitFor(() => expect(deleteRecordingMock).toHaveBeenCalledWith('synced.hda'))
     expect(deleteRecordingMock).toHaveBeenCalledTimes(1)
-    await waitFor(() => expect(window.electronAPI.recordings.markNotOnDevice).toHaveBeenCalledWith('synced-1'))
+    // CX-T6-1: reconciliation passes the DEVICE FILENAME too — the hard
+    // cascade already deleted the recordings row, so the id alone no longer
+    // resolves in the main process; the filename is what reconciles the
+    // offline device cache (the only remaining source of a ghost device row).
+    await waitFor(() =>
+      expect(window.electronAPI.recordings.markNotOnDevice).toHaveBeenCalledWith('synced-1', 'synced.hda')
+    )
     await waitFor(() => {
       expect(toastMock.success).toHaveBeenCalledWith('Deleted permanently', expect.stringContaining('and the device copy'))
     })
@@ -267,6 +273,36 @@ describe('executeDeletePermanent — device checkbox (D3/AR3-6)', () => {
     const deleteCascadeOrder = (window.electronAPI.recordings.deleteCascade as any).mock.invocationCallOrder[0]
     const deviceDeleteOrder = deleteRecordingMock.mock.invocationCallOrder[0]
     expect(deleteCascadeOrder).toBeLessThan(deviceDeleteOrder)
+  })
+
+  // CX-T6-1 — the unified view must rebuild WITHOUT waiting for the next
+  // scan: a forced refresh (bypasses the hook's 2s load debounce, which the
+  // post-cascade refresh just armed) runs AFTER the confirmed device delete.
+  it('a confirmed device delete force-refreshes the unified view after reconciling', async () => {
+    deleteRecordingMock.mockResolvedValue(true)
+    renderLibrary()
+    await openPermanentDeleteDialog()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: /also delete from device/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
+
+    await waitFor(() => expect(deleteRecordingMock).toHaveBeenCalledWith('synced.hda'))
+    await waitFor(() => expect(mockRefresh).toHaveBeenCalledWith(true))
+    // Ordering: the forced refresh runs strictly AFTER the device delete confirmed.
+    const deviceDeleteOrder = deleteRecordingMock.mock.invocationCallOrder[0]
+    const forcedRefreshCall = mockRefresh.mock.calls.findIndex((c) => c[0] === true)
+    const forcedRefreshOrder = mockRefresh.mock.invocationCallOrder[forcedRefreshCall]
+    expect(deviceDeleteOrder).toBeLessThan(forcedRefreshOrder)
+  })
+
+  it('no forced refresh when the device branch was not requested (unchecked)', async () => {
+    renderLibrary()
+    await openPermanentDeleteDialog()
+
+    fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
+
+    await waitFor(() => expect(toastMock.success).toHaveBeenCalled())
+    expect(mockRefresh).not.toHaveBeenCalledWith(true)
   })
 
   it('device delete returns false: local purge kept, honest partial toast, no retry', async () => {
@@ -407,6 +443,41 @@ describe('executeDeletePermanent — AR3-2 partial file-cleanup toast', () => {
         expect.stringContaining('audio file')
       )
     })
+    expect(toastMock.success).not.toHaveBeenCalled()
+  })
+
+  // CX-T6-3 (fix round) — BOTH partial outcomes at once must surface in ONE
+  // combined toast: the device-only body claims full local removal, which is
+  // untrue while the pending-cleanup ledger is non-empty.
+  it('device-partial + files-pending shows the combined toast enumerating BOTH, never claiming full local removal', async () => {
+    global.window.electronAPI = baseElectronAPI({
+      deleteCascade: vi.fn().mockResolvedValue({
+        success: true,
+        mode: 'hard',
+        removed: baseRemoved,
+        allFilesRemoved: false,
+        pendingFileKinds: ['audio']
+      })
+    }) as any
+    deleteRecordingMock.mockResolvedValue(false) // device delete fails too
+
+    renderLibrary()
+    await openPermanentDeleteDialog()
+    fireEvent.click(screen.getByRole('checkbox', { name: /also delete from device/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
+
+    await waitFor(() => {
+      expect(toastMock.warning).toHaveBeenCalledWith(
+        'Partially removed — device copy remains',
+        expect.stringMatching(/audio file[\s\S]*device copy is still there/i)
+      )
+    })
+    // Exactly ONE warning — not two stacked partial toasts.
+    expect(toastMock.warning).toHaveBeenCalledTimes(1)
+    // The overclaiming device-only body ("...and its data from this
+    // computer") must NOT have been used.
+    const [, body] = toastMock.warning.mock.calls[0]
+    expect(body).not.toMatch(/and its data from this computer/i)
     expect(toastMock.success).not.toHaveBeenCalled()
   })
 })

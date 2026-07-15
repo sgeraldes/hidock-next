@@ -567,7 +567,12 @@ describe('Permanent delete from Trash (AC#9)', () => {
     await waitFor(() => expect(window.electronAPI.recordings.deleteCascade).toHaveBeenCalledWith('trash-1', true))
     // Routed via impact.deviceFilename — trashRowToUnified never sets one.
     await waitFor(() => expect(deleteRecordingFromDeviceMock).toHaveBeenCalledWith('trashed-newer.hda'))
-    await waitFor(() => expect(window.electronAPI.recordings.markNotOnDevice).toHaveBeenCalledWith('trash-1'))
+    // CX-T6-1 (fix round): reconciliation carries the device filename too —
+    // the hard cascade already deleted the recordings row, so the id alone
+    // can no longer reconcile anything in the main process.
+    await waitFor(() =>
+      expect(window.electronAPI.recordings.markNotOnDevice).toHaveBeenCalledWith('trash-1', 'trashed-newer.hda')
+    )
   })
 })
 

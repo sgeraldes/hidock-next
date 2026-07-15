@@ -54,6 +54,8 @@ import {
   deviceCopyRemainsBody,
   FILES_PENDING_TITLE,
   filesPendingBody,
+  COMBINED_PARTIAL_TITLE,
+  combinedPartialBody,
   actualRemovalSummary
 } from '@/features/library/utils/deletionCopy'
 import type { TypeCounts } from '@/features/library/components/LibraryFilters'
@@ -1084,10 +1086,29 @@ export function Library() {
               deviceOutcome = 'success'
               // AR3-6(b) — reconcile immediately so the UI doesn't show a
               // stale on-device row before the next authoritative scan.
+              // CX-T6-1 (fix round): the hard cascade already deleted the
+              // recordings row, so the id alone no longer resolves — pass the
+              // device filename too, which reconciles the offline device
+              // cache (the only remaining source that would resurrect this
+              // file as a ghost device-only row).
               try {
-                await window.electronAPI.recordings.markNotOnDevice(recording.id)
+                await window.electronAPI.recordings.markNotOnDevice(recording.id, targetDeviceFilename)
               } catch (e) {
                 console.error('[Library] Failed to reconcile device presence after delete:', e)
+              }
+              // CX-T6-1 (fix round): rebuild the unified view NOW — nothing
+              // else refreshes after the device branch, so without this the
+              // pre-device-delete view (built while the file was still on the
+              // device) lingered until the next scan despite the success
+              // toast. force=true deliberately: it bypasses the hook's 2s
+              // load debounce (the post-cascade refresh above just ran) and
+              // re-fetches the authoritative device list via the EXISTING
+              // refresh path — same single-fetch semantics as the app's
+              // other force refreshes, no new USB code.
+              try {
+                await refresh(true)
+              } catch (e) {
+                console.error('[Library] Post-device-delete refresh failed:', e)
               }
             } else {
               deviceOutcome = 'partial'
@@ -1100,7 +1121,12 @@ export function Library() {
       }
 
       import('@/components/ui/toaster').then(({ toast }) => {
-        if (deviceOutcome === 'partial') {
+        if (deviceOutcome === 'partial' && filesPending) {
+          // CX-T6-3 (fix round): BOTH partial outcomes must surface together —
+          // the device-only body claims full local removal, which is untrue
+          // while the pending-cleanup ledger is non-empty.
+          toast.warning(COMBINED_PARTIAL_TITLE, combinedPartialBody(recording.filename, pendingKinds))
+        } else if (deviceOutcome === 'partial') {
           toast.warning(DEVICE_COPY_REMAINS_TITLE, deviceCopyRemainsBody(recording.filename))
         } else if (filesPending) {
           toast.warning(FILES_PENDING_TITLE, filesPendingBody(recording.filename, pendingKinds))

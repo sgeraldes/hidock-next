@@ -48,6 +48,7 @@ import {
   getPendingFileCleanups,
   updatePendingFileCleanups,
   markRecordingNotOnDeviceById,
+  removeDeviceFileCacheEntry,
   type GraphProvenanceCleanupResult
 } from '../database'
 
@@ -76,6 +77,7 @@ const DATA_TABLES = [
   'knowledge_captures',
   'quality_assessments',
   'deletion_journal',
+  'device_file_cache',
   'recordings',
   'contacts',
   'projects',
@@ -844,6 +846,75 @@ describe('Privacy source-deletion (v38)', () => {
         [res.journalId!]
       )
       expect(JSON.parse(row!.recording_snapshot).pending_files).toEqual([{ kind: 'wiki' }])
+    })
+
+    // OP-NIT (T6 fix round): a rewrite of a missing/malformed snapshot must
+    // keep the JSON self-describing — seeded with {mode:'hard'}, matching
+    // recordPendingFileCleanups (the mode COLUMN stays authoritative either
+    // way; this is consistency, not correctness).
+    it('updatePendingFileCleanups preserves the in-JSON mode field when rewriting a malformed snapshot', () => {
+      seedRecording('r1')
+      const res = deleteRecordingCascade('r1', { hard: true })!
+      run("UPDATE deletion_journal SET recording_snapshot = 'not-json' WHERE id = ?", [res.journalId!])
+
+      updatePendingFileCleanups(res.journalId!, [{ kind: 'wiki' }])
+
+      const row = queryOne<{ recording_snapshot: string }>(
+        'SELECT recording_snapshot FROM deletion_journal WHERE id = ?',
+        [res.journalId!]
+      )
+      expect(JSON.parse(row!.recording_snapshot)).toEqual({ mode: 'hard', pending_files: [{ kind: 'wiki' }] })
+    })
+
+    it('updatePendingFileCleanups keeps the in-JSON mode when writing pending_files onto a NULL snapshot', () => {
+      seedRecording('r1')
+      const res = deleteRecordingCascade('r1', { hard: true })! // snapshot NULL per AR3-7
+
+      updatePendingFileCleanups(res.journalId!, [{ kind: 'audio', path: '/data/r1.wav' }])
+
+      const row = queryOne<{ recording_snapshot: string }>(
+        'SELECT recording_snapshot FROM deletion_journal WHERE id = ?',
+        [res.journalId!]
+      )
+      expect(JSON.parse(row!.recording_snapshot)).toEqual({
+        mode: 'hard',
+        pending_files: [{ kind: 'audio', path: '/data/r1.wav' }]
+      })
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // CX-T6-1 (fix round) — offline device-cache reconciliation by filename
+  // -------------------------------------------------------------------------
+  describe('removeDeviceFileCacheEntry (CX-T6-1)', () => {
+    it('does not throw when the device_file_cache table does not exist yet', () => {
+      run('DROP TABLE IF EXISTS device_file_cache')
+      expect(() => removeDeviceFileCacheEntry('ghost.hda')).not.toThrow()
+    })
+
+    it('removes exactly the named cache entry, leaving others intact', () => {
+      // The table is created lazily by deviceCache:saveAll in production;
+      // mirror its DDL here.
+      run(`CREATE TABLE IF NOT EXISTS device_file_cache (
+        filename TEXT PRIMARY KEY, size INTEGER, duration REAL, dateCreated TEXT
+      )`)
+      run("INSERT INTO device_file_cache (filename, size, duration, dateCreated) VALUES ('purged.hda', 10, 1.0, '2026-01-01')")
+      run("INSERT INTO device_file_cache (filename, size, duration, dateCreated) VALUES ('kept.hda', 20, 2.0, '2026-01-02')")
+
+      removeDeviceFileCacheEntry('purged.hda')
+
+      const rows = queryAll<{ filename: string }>('SELECT filename FROM device_file_cache')
+      expect(rows.map((r) => r.filename)).toEqual(['kept.hda'])
+    })
+
+    it('is a no-op for a filename that is not cached', () => {
+      run(`CREATE TABLE IF NOT EXISTS device_file_cache (
+        filename TEXT PRIMARY KEY, size INTEGER, duration REAL, dateCreated TEXT
+      )`)
+      run("INSERT INTO device_file_cache (filename, size, duration, dateCreated) VALUES ('kept.hda', 20, 2.0, '2026-01-02')")
+
+      expect(() => removeDeviceFileCacheEntry('never-cached.hda')).not.toThrow()
+      expect(queryAll('SELECT filename FROM device_file_cache').length).toBe(1)
     })
   })
 

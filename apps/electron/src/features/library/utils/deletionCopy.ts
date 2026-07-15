@@ -111,6 +111,21 @@ export function filesPendingBody(filename: string, kinds: string[]): string {
   return `Removed "${filename}"'s data, but ${list} couldn't be deleted yet. It will retry automatically.`
 }
 
+/** CX-T6-3 (fix round) — BOTH partial outcomes at once: the device copy
+ *  wasn't removed AND local file cleanup is still pending. One toast that
+ *  enumerates both; never a body that claims full local removal while the
+ *  pending-cleanup ledger is non-empty. */
+export const COMBINED_PARTIAL_TITLE = 'Partially removed — device copy remains'
+
+export function combinedPartialBody(filename: string, kinds: string[]): string {
+  const unique = Array.from(new Set(kinds)).map((k) => CLEANUP_KIND_LABELS[k] ?? `a ${k} file`)
+  const list = joinParts(unique) || 'a file'
+  return (
+    `Removed "${filename}"'s data, but ${list} couldn't be deleted yet (it will retry automatically), ` +
+    'and the device copy is still there — it will reconcile on the next device scan.'
+  )
+}
+
 // --- Success (D5 — actual counts, not the dialog's estimate) ---------------
 
 interface ActualRemovedCounts {

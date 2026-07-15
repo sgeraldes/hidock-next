@@ -199,10 +199,24 @@ export async function deleteRecording(
   if (cascade.mode === 'hard') {
     try {
       const sweep = await retryPendingFileCleanups()
-      const stillPending = cascade.journalId ? sweep.stillPending[cascade.journalId] : undefined
-      if (stillPending !== undefined) {
-        allFilesRemoved = stillPending.length === 0
-        pendingFileKinds = stillPending
+      if (cascade.journalId) {
+        const stillPending = sweep.stillPending[cascade.journalId]
+        if (stillPending !== undefined) {
+          // Swept, and something is STILL pending — report the post-sweep set.
+          allFilesRemoved = stillPending.length === 0
+          pendingFileKinds = stillPending
+        } else if (sweep.clearedJournalIds.includes(cascade.journalId)) {
+          // OP-LOW-2 (T6 fix round): the sweep CLEARED this purge's own fresh
+          // failure within the same call — previously indistinguishable from
+          // "not swept" (both were `undefined` in stillPending), which kept
+          // the stale pre-sweep counts and over-warned "will retry" on a
+          // purge whose cleanup had in fact fully completed.
+          allFilesRemoved = true
+          pendingFileKinds = []
+        }
+        // else: this journal row wasn't in the sweep window (bounded limit) —
+        // keep the pre-sweep counts. Safe direction: over-warns, never
+        // over-claims.
       }
     } catch (e) {
       console.warn('[RecordingDeletion] pending-cleanup retry sweep failed (non-fatal):', e)
@@ -222,8 +236,17 @@ export async function deleteRecording(
  */
 export async function retryPendingFileCleanups(
   limit = 25
-): Promise<{ attempted: number; cleared: number; stillPending: Record<string, string[]> }> {
+): Promise<{
+  attempted: number
+  cleared: number
+  /** OP-LOW-2: journal ids the sweep fully cleared, so a same-call caller can
+   *  distinguish "swept clean" from "not swept at all" (both used to be an
+   *  absent stillPending key). */
+  clearedJournalIds: string[]
+  stillPending: Record<string, string[]>
+}> {
   const stillPending: Record<string, string[]> = {}
+  const clearedJournalIds: string[] = []
   let attempted = 0
   let cleared = 0
   try {
@@ -238,6 +261,7 @@ export async function retryPendingFileCleanups(
       updatePendingFileCleanups(row.journalId, remaining)
       if (remaining.length === 0) {
         cleared++
+        clearedJournalIds.push(row.journalId)
       } else {
         stillPending[row.journalId] = remaining.map((t) => t.kind)
       }
@@ -245,7 +269,7 @@ export async function retryPendingFileCleanups(
   } catch (e) {
     console.warn('[RecordingDeletion] retryPendingFileCleanups failed (non-fatal):', e)
   }
-  return { attempted, cleared, stillPending }
+  return { attempted, cleared, clearedJournalIds, stillPending }
 }
 
 /** Re-attempt exactly one pending cleanup target. Returns true when it is now
@@ -254,7 +278,15 @@ async function retryOneCleanupTarget(recordingId: string, target: PendingCleanup
   try {
     switch (target.kind) {
       case 'audio':
-        return target.path ? deleteRecordingFile(target.path) : true
+        if (!target.path) return true
+        // CX-T6-2/OP-LOW-1 (T6 fix round): an already-gone file IS clean —
+        // deleteRecordingFile returns false for a missing path, which
+        // previously kept an externally-removed (or actually-unlinked-but-
+        // reported-false) pending audio target failing forever, so the
+        // ledger row was retried futilely on every sweep. Mirrors the
+        // artifact branch's guard below.
+        if (!existsSync(target.path)) return true
+        return deleteRecordingFile(target.path)
       case 'artifact':
         if (!target.path) return true
         if (!existsSync(target.path)) return true

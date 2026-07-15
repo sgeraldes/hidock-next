@@ -287,18 +287,75 @@ describe('AR3-2 — partial file-cleanup + retry ledger round-trip', () => {
     expect(db.recordPendingFileCleanups).not.toHaveBeenCalled() // no journalId to key it by
   })
 
+  // OP-LOW-2 (T6 fix round) — when the same-call sweep clears this purge's
+  // OWN fresh failure, the result must report clean (previously "swept
+  // clean" was indistinguishable from "not swept" and the stale pre-sweep
+  // counts over-warned "will retry" on a fully-completed cleanup).
+  it('reports allFilesRemoved:true when the piggybacked sweep clears this purge\'s own fresh failure', async () => {
+    db.deleteRecordingCascade.mockReturnValue({
+      mode: 'hard',
+      recordingId: 'r1',
+      filename: 'r1.wav',
+      filePath: '/data/r1.wav',
+      artifactPaths: [],
+      removed: {},
+      journalId: 'journal-locked'
+    })
+    // First unlink attempt fails (file locked), the sweep's retry succeeds
+    // (lock released within the same call).
+    files.deleteRecording.mockReturnValueOnce(false).mockReturnValueOnce(true)
+    files.existsSync.mockReturnValue(true)
+    files.removeMeetingWiki.mockReturnValue(0)
+    files.vectorDeleteByRecording.mockResolvedValue(0)
+    db.getPendingFileCleanups.mockReturnValueOnce([
+      { journalId: 'journal-locked', recordingId: 'r1', targets: [{ kind: 'audio', path: '/data/r1.wav' }] }
+    ])
+
+    const res = await deleteRecording('r1', { hard: true })
+    expect(res.success).toBe(true)
+    if (!res.success) return
+
+    // The failure WAS recorded first (durable even if the process dies
+    // mid-sweep) and then cleared by the sweep.
+    expect(db.recordPendingFileCleanups).toHaveBeenCalledWith('journal-locked', [
+      { kind: 'audio', path: '/data/r1.wav' }
+    ])
+    expect(db.updatePendingFileCleanups).toHaveBeenCalledWith('journal-locked', [])
+    // ...so the outcome reports CLEAN, not a false "will retry" partial.
+    expect(res.allFilesRemoved).toBe(true)
+    expect(res.pendingFileKinds).toEqual([])
+  })
+
   describe('retryPendingFileCleanups', () => {
     it('clears a pending target once the retry succeeds', async () => {
       db.getPendingFileCleanups.mockReturnValueOnce([
         { journalId: 'journal-1', recordingId: 'r1', targets: [{ kind: 'audio', path: '/data/r1.wav' }] }
       ])
-      files.deleteRecording.mockReturnValue(true) // retry succeeds this time
+      files.existsSync.mockReturnValue(true) // file still there...
+      files.deleteRecording.mockReturnValue(true) // ...and the retry unlink succeeds this time
 
       const result = await retryPendingFileCleanups()
 
       expect(files.deleteRecording).toHaveBeenCalledWith('/data/r1.wav')
       expect(db.updatePendingFileCleanups).toHaveBeenCalledWith('journal-1', [])
-      expect(result).toEqual({ attempted: 1, cleared: 1, stillPending: {} })
+      expect(result).toEqual({ attempted: 1, cleared: 1, clearedJournalIds: ['journal-1'], stillPending: {} })
+    })
+
+    // CX-T6-2/OP-LOW-1 (T6 fix round) — an externally-removed pending audio
+    // file is CLEAN, not a forever-failing retry: deleteRecordingFile returns
+    // false for a missing path, which previously kept the ledger row alive
+    // and futilely re-attempted on every sweep.
+    it('clears a pending audio target whose file was removed externally, without another unlink attempt', async () => {
+      db.getPendingFileCleanups.mockReturnValueOnce([
+        { journalId: 'journal-1', recordingId: 'r1', targets: [{ kind: 'audio', path: '/data/r1.wav' }] }
+      ])
+      files.existsSync.mockReturnValue(false) // already gone
+
+      const result = await retryPendingFileCleanups()
+
+      expect(files.deleteRecording).not.toHaveBeenCalled()
+      expect(db.updatePendingFileCleanups).toHaveBeenCalledWith('journal-1', [])
+      expect(result).toEqual({ attempted: 1, cleared: 1, clearedJournalIds: ['journal-1'], stillPending: {} })
     })
 
     it('keeps a target pending when the retry fails again', async () => {
@@ -311,7 +368,7 @@ describe('AR3-2 — partial file-cleanup + retry ledger round-trip', () => {
       const result = await retryPendingFileCleanups()
 
       expect(db.updatePendingFileCleanups).toHaveBeenCalledWith('journal-1', [{ kind: 'audio', path: '/data/r1.wav' }])
-      expect(result).toEqual({ attempted: 1, cleared: 0, stillPending: { 'journal-1': ['audio'] } })
+      expect(result).toEqual({ attempted: 1, cleared: 0, clearedJournalIds: [], stillPending: { 'journal-1': ['audio'] } })
     })
 
     it('retries wiki and vector targets by recordingId, and artifact targets by path', async () => {
@@ -333,13 +390,19 @@ describe('AR3-2 — partial file-cleanup + retry ledger round-trip', () => {
       expect(files.unlinkSync).toHaveBeenCalledWith('/data/artifacts/a.pdf')
       expect(db.updatePendingFileCleanups).toHaveBeenCalledWith('journal-2', [])
       expect(result.cleared).toBe(1)
+      expect(result.clearedJournalIds).toEqual(['journal-2'])
     })
 
     it('is bounded and non-fatal — a read failure resolves cleanly instead of throwing', async () => {
       db.getPendingFileCleanups.mockImplementationOnce(() => {
         throw new Error('db unavailable')
       })
-      await expect(retryPendingFileCleanups()).resolves.toEqual({ attempted: 0, cleared: 0, stillPending: {} })
+      await expect(retryPendingFileCleanups()).resolves.toEqual({
+        attempted: 0,
+        cleared: 0,
+        clearedJournalIds: [],
+        stillPending: {}
+      })
     })
   })
 })

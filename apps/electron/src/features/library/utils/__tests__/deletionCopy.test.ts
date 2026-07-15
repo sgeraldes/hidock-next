@@ -15,6 +15,8 @@ import {
   deviceCopyRemainsBody,
   FILES_PENDING_TITLE,
   filesPendingBody,
+  COMBINED_PARTIAL_TITLE,
+  combinedPartialBody,
   actualRemovalSummary
 } from '../deletionCopy'
 
@@ -88,6 +90,38 @@ describe('partial-outcome copy (D3/AR3-2/AR3-6a)', () => {
 
   it('FILES_PENDING_TITLE never implies plain success', () => {
     expect(FILES_PENDING_TITLE).not.toMatch(/^deleted permanently$/i)
+  })
+})
+
+// CX-T6-3 (T6 fix round) — the both-partial outcome: device copy remains AND
+// local file cleanup is still pending. One toast enumerating BOTH; never a
+// body claiming full local removal while the ledger is non-empty.
+describe('combined-partial copy (CX-T6-3)', () => {
+  it('combinedPartialBody enumerates BOTH the pending kinds and the remaining device copy', () => {
+    const body = combinedPartialBody('meeting.wav', ['audio'])
+    expect(body).toContain('meeting.wav')
+    expect(body).toMatch(/the audio file/i)
+    expect(body).toMatch(/retry automatically/i)
+    expect(body).toMatch(/device copy is still there/i)
+    expect(body).toMatch(/next device scan/i)
+  })
+
+  it('never claims full local removal — the device-only body\'s "and its data from this computer" phrasing is absent', () => {
+    const body = combinedPartialBody('meeting.wav', ['audio', 'wiki'])
+    expect(body).not.toMatch(/and its data from this computer/i)
+  })
+
+  it('joins and de-duplicates multiple pending kinds like filesPendingBody', () => {
+    const body = combinedPartialBody('meeting.wav', ['wiki', 'vector', 'wiki'])
+    expect(body).toMatch(/a wiki page and a search index entry/i)
+    const occurrences = body.match(/a wiki page/gi) ?? []
+    expect(occurrences).toHaveLength(1)
+  })
+
+  it('COMBINED_PARTIAL_TITLE says partial and that the device copy remains', () => {
+    expect(COMBINED_PARTIAL_TITLE).toMatch(/partially removed/i)
+    expect(COMBINED_PARTIAL_TITLE).toMatch(/device copy remains/i)
+    expect(COMBINED_PARTIAL_TITLE).not.toMatch(/^deleted permanently$/i)
   })
 })
 

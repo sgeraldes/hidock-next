@@ -31,7 +31,8 @@ import {
   resolveRecordingId,
   setKnowledgeCaptureRatingByRecording,
   setGraphProvenanceCleanup,
-  markRecordingNotOnDeviceById
+  markRecordingNotOnDeviceById,
+  removeDeviceFileCacheEntry
 } from '../services/database'
 import {
   removeRecordingProvenanceCore,
@@ -48,6 +49,14 @@ import {
 
 const RecordingIdSchema = z.string().min(1).max(200)
 const MarkPersonalSchema = z.object({ id: RecordingIdSchema, personal: z.boolean() })
+// T6 fix round (CX-T6-1): the id may no longer resolve after a hard purge
+// (the recordings row is gone by design), so the caller can pass the device
+// filename it just deleted as a fallback reconciliation key for the offline
+// device cache.
+const MarkNotOnDeviceSchema = z.object({
+  id: RecordingIdSchema,
+  deviceFilename: z.string().min(1).max(200).optional()
+})
 const DeleteCascadeSchema = z.object({
   id: RecordingIdSchema,
   hard: z.boolean(),
@@ -197,13 +206,39 @@ export function registerRecordingDeletionHandlers(): void {
   // device presence after a CONFIRMED device delete (the permanent-delete
   // device checkbox, and the synced-row "Delete from device" item), so the
   // UI doesn't show a stale on-device row until the next authoritative scan.
-  ipcMain.handle('recordings:markNotOnDevice', async (_, id: unknown) => {
+  //
+  // T6 fix round (CX-T6-1): in the PERMANENT flow the hard cascade has
+  // already deleted the recordings row by the time the device delete
+  // confirms, so the id no longer resolves — previously that made this whole
+  // call a dead no-op ("Recording not found", ignored by the caller) while
+  // the offline device cache (`device_file_cache`) still held the filename
+  // and resurrected the deleted file as a ghost device-only row. The handler
+  // now ALSO reconciles by filename: the caller passes the device filename it
+  // just deleted, and the cache entry is removed for it (plus, when the row
+  // DOES still resolve — the synced-row flow — for the row's own filename
+  // variants too). Unresolvable id + a filename is therefore a SUCCESS, not
+  // an error.
+  ipcMain.handle('recordings:markNotOnDevice', async (_, id: unknown, deviceFilename: unknown) => {
     try {
-      const parsed = RecordingIdSchema.safeParse(id)
+      const parsed = MarkNotOnDeviceSchema.safeParse({ id, deviceFilename: deviceFilename ?? undefined })
       if (!parsed.success) return { success: false, error: 'Invalid recording id' }
-      const rec = resolveRecordingId(parsed.data)
-      if (!rec) return { success: false, error: 'Recording not found' }
-      markRecordingNotOnDeviceById(rec.id)
+      const rec = resolveRecordingId(parsed.data.id)
+      if (rec) {
+        markRecordingNotOnDeviceById(rec.id)
+      }
+      // Clear every plausible device-cache key: the explicit filename the
+      // caller just deleted from the device, plus (when the row still exists)
+      // its own filename variants. Deleting an uncached name is a no-op.
+      const cacheKeys = new Set<string>()
+      if (parsed.data.deviceFilename) cacheKeys.add(parsed.data.deviceFilename)
+      if (rec?.filename) cacheKeys.add(rec.filename)
+      if (rec?.original_filename) cacheKeys.add(rec.original_filename)
+      for (const key of cacheKeys) {
+        removeDeviceFileCacheEntry(key)
+      }
+      if (!rec && !parsed.data.deviceFilename) {
+        return { success: false, error: 'Recording not found' }
+      }
       return { success: true }
     } catch (e) {
       console.error('recordings:markNotOnDevice error:', e)

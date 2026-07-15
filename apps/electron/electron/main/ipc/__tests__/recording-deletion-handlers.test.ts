@@ -21,6 +21,7 @@ const resolveRecordingIdMock = vi.fn()
 const setKnowledgeCaptureRatingByRecordingMock = vi.fn()
 const setGraphProvenanceCleanupMock = vi.fn()
 const markRecordingNotOnDeviceByIdMock = vi.fn()
+const removeDeviceFileCacheEntryMock = vi.fn()
 const markRecordingPersonalMock = vi.fn()
 const getDeletionImpactMock = vi.fn()
 const deleteRecordingMock = vi.fn()
@@ -38,7 +39,8 @@ vi.mock('../../services/database', () => ({
   resolveRecordingId: (...args: unknown[]) => resolveRecordingIdMock(...args),
   setKnowledgeCaptureRatingByRecording: (...args: unknown[]) => setKnowledgeCaptureRatingByRecordingMock(...args),
   setGraphProvenanceCleanup: (...args: unknown[]) => setGraphProvenanceCleanupMock(...args),
-  markRecordingNotOnDeviceById: (...args: unknown[]) => markRecordingNotOnDeviceByIdMock(...args)
+  markRecordingNotOnDeviceById: (...args: unknown[]) => markRecordingNotOnDeviceByIdMock(...args),
+  removeDeviceFileCacheEntry: (...args: unknown[]) => removeDeviceFileCacheEntryMock(...args)
 }))
 
 // spec-006/F17 T6 — recording-deletion-handlers.ts now imports
@@ -347,7 +349,7 @@ describe('recording-deletion-handlers', () => {
     })
   })
 
-  // spec-006/F17 T6 AR3-6(b)
+  // spec-006/F17 T6 AR3-6(b) + CX-T6-1 (fix round: filename-keyed fallback)
   describe('recordings:markNotOnDevice', () => {
     it('resolves the id then reconciles device presence', async () => {
       resolveRecordingIdMock.mockReturnValue({ id: 'resolved-1' })
@@ -359,7 +361,39 @@ describe('recording-deletion-handlers', () => {
       expect(markRecordingNotOnDeviceByIdMock).toHaveBeenCalledWith('resolved-1')
     })
 
-    it('returns an error without throwing when the recording is unknown', async () => {
+    // CX-T6-1 — the POST-PURGE path: the hard cascade already deleted the
+    // recordings row, so the id no longer resolves. Previously this returned
+    // "Recording not found" and did NOTHING, leaving the offline device
+    // cache to resurrect the deleted file as a ghost device-only row.
+    it('post-purge (unresolvable id) with a deviceFilename still succeeds, reconciling the device cache by filename', async () => {
+      resolveRecordingIdMock.mockReturnValue(undefined)
+      const handler = getHandler('recordings:markNotOnDevice')
+
+      const result = await handler(null, 'purged-rec-id', 'purged.hda')
+
+      expect(result).toEqual({ success: true })
+      expect(markRecordingNotOnDeviceByIdMock).not.toHaveBeenCalled() // no row to flip
+      expect(removeDeviceFileCacheEntryMock).toHaveBeenCalledWith('purged.hda')
+    })
+
+    it('a resolvable id clears the device cache for the explicit filename AND the row\'s own filename variants', async () => {
+      resolveRecordingIdMock.mockReturnValue({
+        id: 'resolved-1',
+        filename: 'row-name.wav',
+        original_filename: 'row-name.hda'
+      })
+      const handler = getHandler('recordings:markNotOnDevice')
+
+      const result = await handler(null, 'rec-1', 'explicit.hda')
+
+      expect(result).toEqual({ success: true })
+      expect(markRecordingNotOnDeviceByIdMock).toHaveBeenCalledWith('resolved-1')
+      expect(removeDeviceFileCacheEntryMock).toHaveBeenCalledWith('explicit.hda')
+      expect(removeDeviceFileCacheEntryMock).toHaveBeenCalledWith('row-name.wav')
+      expect(removeDeviceFileCacheEntryMock).toHaveBeenCalledWith('row-name.hda')
+    })
+
+    it('returns an error without throwing when the recording is unknown AND no filename was given', async () => {
       resolveRecordingIdMock.mockReturnValue(undefined)
       const handler = getHandler('recordings:markNotOnDevice')
 
@@ -367,6 +401,7 @@ describe('recording-deletion-handlers', () => {
 
       expect(result).toEqual({ success: false, error: 'Recording not found' })
       expect(markRecordingNotOnDeviceByIdMock).not.toHaveBeenCalled()
+      expect(removeDeviceFileCacheEntryMock).not.toHaveBeenCalled()
     })
 
     it('rejects an invalid (empty) id without throwing', async () => {
@@ -374,6 +409,14 @@ describe('recording-deletion-handlers', () => {
       const result = await handler(null, '')
       expect(result).toEqual({ success: false, error: 'Invalid recording id' })
       expect(resolveRecordingIdMock).not.toHaveBeenCalled()
+    })
+
+    it('rejects an invalid (non-string) deviceFilename without acting on anything', async () => {
+      const handler = getHandler('recordings:markNotOnDevice')
+      const result = await handler(null, 'rec-1', 42)
+      expect(result).toEqual({ success: false, error: 'Invalid recording id' })
+      expect(resolveRecordingIdMock).not.toHaveBeenCalled()
+      expect(removeDeviceFileCacheEntryMock).not.toHaveBeenCalled()
     })
 
     it('never throws across IPC — an unexpected service error is caught', async () => {

@@ -3930,12 +3930,17 @@ export function updatePendingFileCleanups(journalId: string, remaining: PendingC
     'SELECT recording_snapshot FROM deletion_journal WHERE id = ?',
     [journalId]
   )
-  let snapshot: Record<string, unknown> = {}
+  // OP-NIT (T6 fix round): seed with {mode:'hard'} — matching
+  // recordPendingFileCleanups — so a rewrite of a missing/malformed snapshot
+  // doesn't drop the in-JSON mode marker (cosmetic: the mode COLUMN stays
+  // authoritative and getPendingFileCleanups filters on the column, but the
+  // JSON should stay self-describing).
+  let snapshot: Record<string, unknown> = { mode: 'hard' }
   if (row?.recording_snapshot) {
     try {
       snapshot = JSON.parse(row.recording_snapshot) as Record<string, unknown>
     } catch {
-      snapshot = {}
+      snapshot = { mode: 'hard' }
     }
   }
   if (remaining.length > 0) {
@@ -3962,6 +3967,29 @@ export function markRecordingNotOnDeviceById(id: string): void {
   if (!rec || !rec.on_device) return
   const newLocation = rec.on_local ? 'local-only' : 'deleted'
   updateRecordingLifecycle(id, { on_device: 0, location: newLocation as Recording['location'] })
+}
+
+/**
+ * F17/T6 fix round (CX-T6-1) — remove one filename from the offline device
+ * cache (`device_file_cache`, owned by device-cache-handlers.ts). The unified
+ * view synthesizes a device-only row from this cache whenever the in-memory
+ * device list is empty (buildRecordingMap's shouldUseCachedFiles branch) —
+ * and a confirmed device delete invalidates that in-memory list, so after a
+ * HARD PURGE + device delete (recordings/synced_files rows already gone) the
+ * stale cache entry is the ONLY data left, and it resurrects the deleted
+ * file as a ghost device-only row until the next full scan rewrites the
+ * cache. Row-level reconciliation (markRecordingNotOnDeviceById above) can't
+ * help there — the row no longer exists — so the post-purge path reconciles
+ * by FILENAME instead. Deleting a filename that isn't cached is a harmless
+ * no-op; the table is created lazily by deviceCache:saveAll, so its absence
+ * just means nothing is cached.
+ */
+export function removeDeviceFileCacheEntry(deviceFilename: string): void {
+  try {
+    run('DELETE FROM device_file_cache WHERE filename = ?', [deviceFilename])
+  } catch {
+    /* device_file_cache not yet created — nothing cached, nothing to remove */
+  }
 }
 
 /**

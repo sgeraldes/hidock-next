@@ -25,10 +25,12 @@ vi.mock('../../services/database', () => ({
   setKnowledgeCaptureRatingByRecording: (...args: unknown[]) => setKnowledgeCaptureRatingByRecordingMock(...args),
   // spec-006/F17 T6 — recording-deletion-handlers.ts now wires the graph
   // seam (setGraphProvenanceCleanup) at registration time and exposes
-  // markRecordingNotOnDeviceById; both need a stub so the real module
-  // doesn't throw calling an undefined export from this mocked module.
+  // markRecordingNotOnDeviceById/removeDeviceFileCacheEntry; all need a stub
+  // so the real module doesn't throw calling an undefined export from this
+  // mocked module.
   setGraphProvenanceCleanup: vi.fn(),
-  markRecordingNotOnDeviceById: vi.fn()
+  markRecordingNotOnDeviceById: vi.fn(),
+  removeDeviceFileCacheEntry: vi.fn()
 }))
 
 // spec-006/F17 T6 — once recording-deletion-handlers.ts imports
