@@ -21,6 +21,7 @@ vi.mock('../recording-eligibility', () => ({
 import { filterEligibleRecordingIds, filterEligibleCaptureIds } from '../recording-eligibility'
 import {
   packSources,
+  packNonRagAssistant,
   presentSourcesNoRevalidate,
   revalidateStoredSources,
   isProvenanceExcluded,
@@ -49,17 +50,26 @@ beforeEach(() => {
 })
 
 describe('packSources', () => {
-  it('builds a versioned envelope with the message-level provenance union', () => {
+  it('builds a versioned kind:rag envelope with the message-level provenance union', () => {
     const packed = packSources(
       JSON.stringify([{ content: 'excerpt', meetingId: 'm1' }]),
       prov(['recA', 'recB'], ['capX'])
     )!
     const env = JSON.parse(packed)
     expect(env.v).toBe(SOURCE_PROVENANCE_V)
+    expect(env.kind).toBe('rag')
     expect(env.sources).toEqual([{ content: 'excerpt', meetingId: 'm1' }])
     expect(env.prov.recordingIds.sort()).toEqual(['recA', 'recB'])
     expect(env.prov.captureIds).toEqual(['capX'])
     expect(env.prov.unverifiable).toBe(false)
+  })
+
+  it('packNonRagAssistant builds a trusted kind:non-rag envelope', () => {
+    const env = JSON.parse(packNonRagAssistant())
+    expect(env.v).toBe(SOURCE_PROVENANCE_V)
+    expect(env.kind).toBe('non-rag')
+    expect(env.sources).toEqual([])
+    expect(env.prov).toBeUndefined()
   })
 
   it('writes an envelope even when the sources array is empty (pinned/graph-only answer)', () => {
@@ -212,9 +222,31 @@ describe('revalidateStoredSources — redact on ANY excluded / unverifiable', ()
     expect(revalidateStoredSources(broken, 'assistant').redactContent).toBe(true)
   })
 
-  it('leaves a null / empty-sources message untouched', () => {
-    expect(revalidateStoredSources(null, 'assistant')).toEqual({ sources: null, redactContent: false })
-    expect(revalidateStoredSources('[]', 'assistant')).toEqual({ sources: '[]', redactContent: false })
+  it('ADV19-1 — null / empty-[] assistant message ⇒ REDACTED (fail closed)', () => {
+    // Round-20: an assistant message WITHOUT a valid main-issued envelope is
+    // unverifiable, so null and bare '[]' now redact (previously left untouched).
+    expect(revalidateStoredSources(null, 'assistant')).toEqual({ sources: '[]', redactContent: true })
+    expect(revalidateStoredSources('[]', 'assistant')).toEqual({ sources: '[]', redactContent: true })
+  })
+
+  it('ADV19-1 — explicit kind:non-rag assistant message ⇒ PRESERVED (trusted, grounds nothing)', () => {
+    const nonRag = packNonRagAssistant()
+    const { sources, redactContent } = revalidateStoredSources(nonRag, 'assistant')
+    expect(redactContent).toBe(false)
+    expect(JSON.parse(sources!)).toEqual([])
+    // Even a fail-closed eligibility lookup cannot redact a non-rag message.
+    vi.mocked(filterEligibleRecordingIds).mockReturnValue(failClosed())
+    expect(revalidateStoredSources(nonRag, 'assistant').redactContent).toBe(false)
+  })
+
+  it('a v2 envelope MISSING kind (pre-round-20) ⇒ redacted (not a valid current envelope)', () => {
+    const noKind = JSON.stringify({ v: SOURCE_PROVENANCE_V, sources: [{ content: 'x' }], prov: { recordingIds: [], captureIds: [], unverifiable: false } })
+    expect(revalidateStoredSources(noKind, 'assistant').redactContent).toBe(true)
+  })
+
+  it('null / empty on a USER message is preserved verbatim', () => {
+    expect(revalidateStoredSources(null, 'user')).toEqual({ sources: null, redactContent: false })
+    expect(revalidateStoredSources('[]', 'user')).toEqual({ sources: '[]', redactContent: false })
   })
 
   it('NEVER redacts a USER message, even with an excluded union', () => {

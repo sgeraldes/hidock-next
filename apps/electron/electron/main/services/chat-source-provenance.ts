@@ -58,8 +58,26 @@ export interface MessageProvenance {
   unverifiable: boolean
 }
 
+/**
+ * ADV19-1 (round-20) — the MAIN-ISSUED message-kind marker. EVERY persisted
+ * role=assistant message carries an explicit envelope stamped MAIN-SIDE:
+ *   • `rag`     — a RAG answer grounded on recordings/captures. Its `prov` union
+ *                 drives redaction (redact on ANY excluded/unverifiable source).
+ *   • `non-rag` — a genuine non-source assistant emit (error text, "no results",
+ *                 greeting, status). It grounds on NOTHING, so it is TRUSTED and
+ *                 preserved on read. The renderer cannot forge this: main derives
+ *                 the kind from whether the RAG pipeline actually produced grounded
+ *                 content (see rag.ts resolveAssistantProvenance), never from
+ *                 renderer input, and always OVERWRITES the envelope.
+ * An assistant message WITHOUT a valid current-version envelope (null, `[]`,
+ * legacy pre-v2, malformed, unknown version) is unverifiable ⇒ fail-closed redact.
+ */
+export type MessageKind = 'rag' | 'non-rag'
+
 interface ProvenanceEnvelope {
   v: number
+  /** Main-issued message kind — 'rag' (redactable via `prov`) or 'non-rag' (trusted). */
+  kind: MessageKind
   /** The plain renderer source objects shown as citation chips. */
   sources: Array<Record<string, unknown>>
   /** Authoritative union; `undefined` when the stored envelope's prov is malformed. */
@@ -114,12 +132,13 @@ export function isProvenanceExcluded(prov: MessageProvenance | undefined): boole
 }
 
 /**
- * PERSIST — wrap an assistant answer's renderer-supplied `sources` array together
- * with the authoritative provenance union in a versioned envelope. When `prov`
- * is supplied (an assistant answer from the RAG service), an envelope is ALWAYS
- * written — EVEN IF the sources array is empty — so a pinned/graph-only answer is
- * still verifiable (and redactable) on read. Without `prov` (user messages, error
- * messages, non-RAG writes) the raw sources are stored verbatim, or null.
+ * PERSIST a RAG assistant answer — wrap the renderer-supplied `sources` array
+ * together with the authoritative provenance union in a versioned, MAIN-ISSUED
+ * `kind:'rag'` envelope. An envelope is ALWAYS written — EVEN IF the sources array
+ * is empty — so a pinned/graph-only answer is still verifiable (and redactable) on
+ * read. Without `prov` (user messages) the raw sources are stored verbatim, or
+ * null. Assistant messages MUST route through this (with a `prov`) or through
+ * {@link packNonRagAssistant}; a raw/enveloped-less assistant blob fails closed.
  */
 export function packSources(sourcesJson: string | null | undefined, prov?: MessageProvenance): string | null {
   if (prov) {
@@ -132,13 +151,28 @@ export function packSources(sourcesJson: string | null | undefined, prov?: Messa
         /* keep [] — the union, not the chips, drives redaction */
       }
     }
-    return JSON.stringify({ v: SOURCE_PROVENANCE_V, sources, prov: normalizeProv(prov) })
+    return JSON.stringify({ v: SOURCE_PROVENANCE_V, kind: 'rag', sources, prov: normalizeProv(prov) })
   }
   if (!sourcesJson) return null
   return sourcesJson
 }
 
-/** Parse a stored blob to the CURRENT-version envelope, or null if it isn't one. */
+/**
+ * PERSIST a genuine NON-RAG assistant emit (error text, "no results", greeting,
+ * status) — a MAIN-ISSUED `kind:'non-rag'` envelope. It grounds on NOTHING, so it
+ * is trusted and preserved on read. Only main may call this; the decision to stamp
+ * non-rag is derived from RAG pipeline state (no unconsumed grounded generation),
+ * never from renderer input (see rag.ts resolveAssistantProvenance).
+ */
+export function packNonRagAssistant(): string {
+  return JSON.stringify({ v: SOURCE_PROVENANCE_V, kind: 'non-rag', sources: [] })
+}
+
+/**
+ * Parse a stored blob to the CURRENT-version, valid-kind envelope, or null if it
+ * isn't one. A v2 blob missing/invalid `kind` (e.g. a pre-round-20 envelope) is
+ * NOT a valid current envelope ⇒ null ⇒ fail-closed on the assistant read path.
+ */
 function parseEnvelope(stored: string): ProvenanceEnvelope | null {
   let parsed: unknown
   try {
@@ -146,17 +180,20 @@ function parseEnvelope(stored: string): ProvenanceEnvelope | null {
   } catch {
     return null
   }
+  const kind = (parsed as { kind?: unknown })?.kind
   if (
     parsed &&
     typeof parsed === 'object' &&
     !Array.isArray(parsed) &&
     (parsed as ProvenanceEnvelope).v === SOURCE_PROVENANCE_V &&
+    (kind === 'rag' || kind === 'non-rag') &&
     Array.isArray((parsed as ProvenanceEnvelope).sources)
   ) {
     return {
       v: SOURCE_PROVENANCE_V,
+      kind,
       sources: (parsed as ProvenanceEnvelope).sources,
-      prov: coerceProv((parsed as { prov?: unknown }).prov)
+      prov: kind === 'rag' ? coerceProv((parsed as { prov?: unknown }).prov) : undefined
     }
   }
   return null
@@ -177,43 +214,41 @@ export function presentSourcesNoRevalidate(stored: string | null | undefined): s
 /**
  * READ — revalidate a stored sources blob against the shared boundary. Returns
  * the sanitized sources JSON for the renderer plus whether the assistant answer
- * content must be redacted. Policy (round-19): redact the ENTIRE assistant answer
- * (and drop ALL chips) whenever ANY contributing source is excluded OR the
- * provenance is unverifiable. User-authored text is never redacted.
+ * content must be redacted.
+ *
+ * Policy (ADV19-1, round-20) — for an ASSISTANT message we FAIL CLOSED: the answer
+ * is trusted ONLY when the blob is a valid CURRENT-VERSION MAIN-ISSUED envelope
+ * that is EITHER `kind:'non-rag'` (grounds on nothing) OR `kind:'rag'` with a
+ * verifiable, fully-eligible provenance union. Everything else — null, `[]`, a
+ * legacy pre-v2 raw array, an older/unknown envelope version, a malformed blob, or
+ * a `kind:'rag'` union that is unverifiable / references ANY excluded
+ * recording/capture — is redacted (whole answer + all chips dropped). User-authored
+ * (role=user) text is ALWAYS preserved verbatim.
  */
 export function revalidateStoredSources(
   stored: string | null | undefined,
   role: string
 ): { sources: string | null; redactContent: boolean } {
-  if (!stored) return { sources: stored ?? null, redactContent: false }
-
   const isAssistant = role === 'assistant'
 
-  const env = parseEnvelope(stored)
+  // User-authored text is ALWAYS preserved verbatim (never redacted, envelope or
+  // not — the renderer never packs a user message with a provenance envelope).
+  if (!isAssistant) return { sources: stored ?? null, redactContent: false }
+
+  // ASSISTANT — only a valid current-version main-issued envelope is trusted.
+  const env = stored ? parseEnvelope(stored) : null
   if (env) {
-    // A malformed/absent `prov` inside a current-version envelope ⇒ coerceProv
-    // returned undefined ⇒ isProvenanceExcluded fails closed.
-    const redact = isAssistant && isProvenanceExcluded(env.prov)
-    if (redact) return { sources: '[]', redactContent: true }
+    if (env.kind === 'non-rag') {
+      // Main issued this; it grounds on nothing → trusted, never redacted.
+      return { sources: '[]', redactContent: false }
+    }
+    // kind === 'rag' — a malformed/absent `prov` ⇒ coerceProv returned undefined ⇒
+    // isProvenanceExcluded fails closed. Redact on ANY excluded/unverifiable source.
+    if (isProvenanceExcluded(env.prov)) return { sources: '[]', redactContent: true }
     return { sources: JSON.stringify(env.sources), redactContent: false }
   }
 
-  // NOT a current-version envelope: a legacy raw array, an older/unknown envelope
-  // version, or a malformed blob. User text is always preserved. For an assistant
-  // message we fail closed: unverifiable provenance ⇒ redact whenever the blob
-  // carries any sources payload (an empty '[]' grounds nothing → keep).
-  if (!isAssistant) return { sources: stored, redactContent: false }
-
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(stored)
-  } catch {
-    // Malformed/parse-error blob on an assistant message → cannot verify → redact.
-    return { sources: '[]', redactContent: true }
-  }
-  const hasSourcesPayload =
-    (Array.isArray(parsed) && parsed.length > 0) ||
-    (!!parsed && typeof parsed === 'object' && !Array.isArray(parsed))
-  if (hasSourcesPayload) return { sources: '[]', redactContent: true }
-  return { sources: stored, redactContent: false }
+  // Not a valid current-version envelope (null, [], legacy raw array, older/unknown
+  // version, malformed/parse-error) ⇒ unverifiable ⇒ fail-closed redact.
+  return { sources: '[]', redactContent: true }
 }
