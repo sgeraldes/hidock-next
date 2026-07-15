@@ -1063,9 +1063,19 @@ export class DownloadService {
       this.state.isPaused = true
 
       const activeFilename = getActiveTransferFilename()
+      const activeItem = activeFilename ? this.state.queue.get(activeFilename) : undefined
       const itemsToCancel: DownloadQueueItem[] = []
       for (const item of this.state.queue.values()) {
         if (item.status === 'pending' || item.status === 'downloading') {
+          // The file actively streaming on the bus takes the SAME transient
+          // 'cancelling' → 'cancelled' path as single-cancel: it is not yet terminal
+          // until the USB transfer has drained/settled below. Marking it 'cancelled'
+          // here (as pending items correctly are) would let the renderer's 3.5s
+          // flash-dismiss drop the row before the device has settled on a large file.
+          if (item === activeItem) {
+            item.status = 'cancelling' // transient — settled to 'cancelled' after the drain
+            continue
+          }
           item.status = 'cancelled'
           item.error = 'Cancelled by user'
           item.cancelReason = 'user' // HIGH-3: deliberate cancel — terminal until manual retry
@@ -1080,7 +1090,6 @@ export class DownloadService {
             this.persistQueueItem(item)
           }
         })
-        emitActivityLog('info', 'All downloads cancelled', `${itemsToCancel.length} items`)
       }
 
       if (this.state.currentSession) {
@@ -1088,13 +1097,30 @@ export class DownloadService {
       }
 
       this.markDirty()
-      this.emitStateUpdate(true)
+      this.emitStateUpdate(true) // emit the transient 'cancelling' row + terminal others
 
       // Abort the file actively streaming on the bus and wait for USB settlement.
       // markFailed() is guarded against clobbering the 'cancelled' state the renderer's
       // abort-triggered error path would otherwise set to 'failed'.
       if (activeFilename) {
         await cancelActiveTransfer('user-cancel')
+      }
+
+      // Now settle the active row to its terminal 'cancelled' state (after the drain),
+      // mirroring single-cancel. Guarded so a raced completion isn't clobbered.
+      if (activeItem && activeItem.status === 'cancelling') {
+        activeItem.status = 'cancelled'
+        activeItem.error = 'Cancelled by user'
+        activeItem.cancelReason = 'user'
+        activeItem.completedAt = new Date()
+        this.persistQueueItem(activeItem)
+        itemsToCancel.push(activeItem)
+        this.markDirty()
+        this.emitStateUpdate(true)
+      }
+
+      if (itemsToCancel.length > 0) {
+        emitActivityLog('info', 'All downloads cancelled', `${itemsToCancel.length} items`)
       }
 
       // HIGH-3: NO delayed cleanup — the retained user-cancelled rows are the
