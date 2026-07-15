@@ -2202,7 +2202,15 @@ const MIGRATIONS: Record<number, () => void> = {
         }
       })
     } catch (e) {
+      // Rethrow: the transaction has rolled back, and schema_version must NOT
+      // advance to 42 on a failed rewrite — swallowing here would strand the
+      // v41 keys permanently (the migration never retries once 42 is recorded).
+      // The engine records each version only AFTER its migration returns, so
+      // failing loudly leaves the DB at 41 and the next boot retries the
+      // re-key. (The guarded ALTER above may have committed — that's fine:
+      // it is idempotent and repairPhase force-adds the column anyway.)
       console.warn('[Migration v42] tombstone re-key failed:', e)
+      throw e
     }
     console.log('Migration v42 complete')
   }
@@ -6061,6 +6069,31 @@ export function unmergeProjects(journalId: string): UnmergeResult {
   return runInTransaction(() => {
     const row = loadOpenJournal(journalId, 'project')
     const keeperId = row.keeper_id
+
+    // LIFO guard (v42 follow-up): project merges onto one keeper must be undone
+    // NEWEST-FIRST. Merges form a stack — each journal's folded_fields records
+    // the delta from the state the PREVIOUS merge left behind, so restoring an
+    // older journal while a newer one is still open can rewind provenance out
+    // from under the newer merge's data. Concretely: discovered D absorbs
+    // manual M1 (origin fold discovered→manual journaled), then absorbs manual
+    // M2 (origin already manual, nothing journaled); unmerging M1 first would
+    // restore D to 'discovered' while M2's manual data is still folded in —
+    // making it dismissable. Popping newest-first makes every restore return
+    // the keeper to exactly its pre-merge state, by induction. rowid ordering
+    // (monotonic for inserts) breaks same-timestamp ties deterministically.
+    const newer = queryOne<{ id: string }>(
+      `SELECT id FROM merge_journal
+       WHERE kind = 'project' AND keeper_id = ? AND undone_at IS NULL
+         AND rowid > (SELECT rowid FROM merge_journal WHERE id = ?)
+       ORDER BY rowid DESC LIMIT 1`,
+      [keeperId, journalId]
+    )
+    if (newer) {
+      throw new Error(
+        `Project merges must be unmerged newest-first: undo merge ${newer.id} on this keeper before ${journalId}`
+      )
+    }
+
     const loser = JSON.parse(row.loser_snapshot) as Project
     const manifest = JSON.parse(row.repointed_manifest) as ProjectMergeManifest
 

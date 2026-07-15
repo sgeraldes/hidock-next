@@ -327,5 +327,45 @@ describe('project discovery rejection tombstones (v41)', () => {
       expect(originOf(keeperId)).toBe('discovered')
       expect(originOf('manual-dune')).toBe('manual')
     })
+
+    it('out-of-order unmerge is rejected (newest-first): stacked manual merges cannot be laundered back to discovered', () => {
+      // The composition attack: D absorbs M1 (origin fold discovered->manual
+      // journaled), then absorbs M2 (origin already manual, nothing journaled).
+      // Unmerging M1 FIRST would restore D to 'discovered' while M2's manual
+      // data is still folded in — making the hub dismissable. The LIFO guard
+      // rejects it; only newest-first unwinding is allowed.
+      const keeperId = createDiscovered('Cinder Falcon')
+      createProject({ id: 'manual-anchor', name: 'Pewter Anchor', description: null, status: 'active' })
+      createProject({ id: 'manual-kite', name: 'Saffron Kite', description: null, status: 'active' })
+
+      mergeProjects(keeperId, 'manual-anchor') // J1: discovered -> manual (fold journaled)
+      mergeProjects(keeperId, 'manual-kite') // J2: manual -> manual (no origin fold)
+      expect(originOf(keeperId)).toBe('manual')
+
+      const journals = queryAll<{ id: string }>(
+        "SELECT id FROM merge_journal WHERE kind = 'project' AND keeper_id = ? AND undone_at IS NULL ORDER BY rowid",
+        [keeperId]
+      )
+      expect(journals).toHaveLength(2)
+      const [j1, j2] = journals
+
+      // Unmerging the OLDER merge first must be rejected…
+      expect(() => unmergeProjects(j1.id)).toThrow(/newest-first/)
+      // …and provenance is untouched: still manual, still guarded against dismissal.
+      expect(originOf(keeperId)).toBe('manual')
+      expectNotDismissable(keeperId)
+
+      // The legal order works: pop J2 (keeper stays manual — M1 is still folded
+      // in), then J1 (restores the keeper's own discovered provenance).
+      unmergeProjects(j2.id)
+      expect(originOf(keeperId)).toBe('manual')
+      unmergeProjects(j1.id)
+      expect(originOf(keeperId)).toBe('discovered')
+
+      // Only with every merge unwound is the keeper dismissable again.
+      dismissDiscoveredProject(keeperId)
+      expect(queryOne('SELECT 1 FROM projects WHERE id = ?', [keeperId])).toBeUndefined()
+      expect(isProjectDiscoveryRejected('Cinder Falcon')).toBe(true)
+    })
   })
 })
