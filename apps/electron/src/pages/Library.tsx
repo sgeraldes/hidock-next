@@ -1162,6 +1162,9 @@ export function Library() {
           filesPending,
           pendingKinds,
           viewMayBeStale,
+          // ARF-4 — the escape hatch deferred graph cleanup; force the honest
+          // warning toast (never plain "Deleted permanently").
+          graphCleanupDeferred: res.graphCleanupSkipped === true,
           removed: res.removed
         })
         toast[variant](title, body)

@@ -183,6 +183,25 @@ export function actualRemovalSummary(removed: ActualRemovedCounts | undefined, a
 
 export const SUCCESS_DELETED_PERMANENTLY_TITLE = 'Deleted permanently'
 
+/** ARF-4 — the skipGraphCleanup escape hatch was used, so the knowledge-graph
+ *  residue is DEFERRED to an automatic retry sweep rather than removed now.
+ *  This must NEVER surface as the plain "Deleted permanently" success toast —
+ *  the plain success claim is honest only when no cleanup remains pending. */
+export const GRAPH_CLEANUP_DEFERRED_TITLE = 'Deleted — graph cleanup deferred'
+
+/** Appended to whichever completion body fires when graph cleanup was
+ *  deferred, so no branch overclaims that the graph was fully cleaned. */
+export const GRAPH_CLEANUP_DEFERRED_NOTE =
+  ' Knowledge-graph cleanup was skipped and will retry automatically.'
+
+export function graphCleanupDeferredBody(filename: string, alsoDeviceRemoved: boolean): string {
+  const deviceSuffix = alsoDeviceRemoved ? ' and the device copy' : ''
+  return (
+    `Removed "${filename}"'s data${deviceSuffix}, but the knowledge-graph cleanup couldn't run now. ` +
+    'It will retry automatically.'
+  )
+}
+
 /** The three device-branch outcomes `executeDeletePermanent` can reach. */
 export type DeviceDeleteOutcome = 'not-requested' | 'success' | 'partial'
 
@@ -196,6 +215,10 @@ export interface CompletionToastInputs {
    *  view-bookkeeping reconciliation or the local rebuild failed, so the
    *  list may still show it until the next authoritative device scan. */
   viewMayBeStale: boolean
+  /** ARF-4 — true when the skipGraphCleanup escape hatch deferred graph
+   *  cleanup to the retry sweep; forces a warning variant + honest note and
+   *  forbids the plain success toast. */
+  graphCleanupDeferred?: boolean
   removed: ActualRemovedCounts | undefined
 }
 
@@ -216,22 +239,38 @@ export interface CompletionToast {
  * dispatches whatever this returns; it owns no copy decisions of its own.
  */
 export function selectCompletionToast(inputs: CompletionToastInputs): CompletionToast {
-  const { filename, deviceOutcome, filesPending, pendingKinds, viewMayBeStale, removed } = inputs
+  const { filename, deviceOutcome, filesPending, pendingKinds, viewMayBeStale, graphCleanupDeferred, removed } = inputs
   const staleNote = viewMayBeStale ? ` ${VIEW_MAY_BE_STALE_NOTE}` : ''
+  // ARF-4 — appended to EVERY partial branch so none overclaims the graph was
+  // cleaned; when it is the SOLE caveat, its own dedicated branch below fires.
+  const graphNote = graphCleanupDeferred ? GRAPH_CLEANUP_DEFERRED_NOTE : ''
 
   if (deviceOutcome === 'partial' && filesPending) {
     // CX-T6-3 — both partial outcomes must surface together; the
     // device-only body would otherwise overclaim full local removal.
-    return { variant: 'warning', title: COMBINED_PARTIAL_TITLE, body: combinedPartialBody(filename, pendingKinds) }
+    return {
+      variant: 'warning',
+      title: COMBINED_PARTIAL_TITLE,
+      body: combinedPartialBody(filename, pendingKinds) + graphNote
+    }
   }
   if (deviceOutcome === 'partial') {
-    return { variant: 'warning', title: DEVICE_COPY_REMAINS_TITLE, body: deviceCopyRemainsBody(filename) }
+    return { variant: 'warning', title: DEVICE_COPY_REMAINS_TITLE, body: deviceCopyRemainsBody(filename) + graphNote }
   }
   if (filesPending) {
     return {
       variant: 'warning',
       title: FILES_PENDING_TITLE,
-      body: filesPendingBody(filename, pendingKinds) + staleNote
+      body: filesPendingBody(filename, pendingKinds) + staleNote + graphNote
+    }
+  }
+  if (graphCleanupDeferred) {
+    // ARF-4 — escape hatch used and nothing else pending: graph residue is
+    // deferred to the sweep. NEVER the plain success toast.
+    return {
+      variant: 'warning',
+      title: GRAPH_CLEANUP_DEFERRED_TITLE,
+      body: graphCleanupDeferredBody(filename, deviceOutcome === 'success') + staleNote
     }
   }
   if (viewMayBeStale) {

@@ -24,6 +24,9 @@ import {
   SUCCESS_DELETED_PERMANENTLY_TITLE,
   SUCCESS_RESTORED_TITLE,
   PARTIAL_DELETE_TITLE,
+  GRAPH_CLEANUP_DEFERRED_TITLE,
+  GRAPH_CLEANUP_DEFERRED_NOTE,
+  graphCleanupDeferredBody,
   selectCompletionToast
 } from '../deletionCopy'
 
@@ -320,5 +323,64 @@ describe('selectCompletionToast — outcome ladder (T6 fix rounds CX-T6-1..6)', 
   it('falls back to "its data" body when removed is undefined', () => {
     const result = selectCompletionToast({ ...baseInputs, removed: undefined })
     expect(result.body).toBe('Removed its data.')
+  })
+
+  // ARF-4 — the skipGraphCleanup escape hatch defers graph cleanup to the retry
+  // sweep; it must NEVER surface the plain success toast.
+  describe('ARF-4 — graph-cleanup deferred', () => {
+    it('deferred alone: warning, GRAPH_CLEANUP_DEFERRED_TITLE, never plain success', () => {
+      const result = selectCompletionToast({ ...baseInputs, graphCleanupDeferred: true })
+      expect(result.variant).toBe('warning')
+      expect(result.title).toBe(GRAPH_CLEANUP_DEFERRED_TITLE)
+      expect(result.title).not.toBe(SUCCESS_DELETED_PERMANENTLY_TITLE)
+      expect(result.body).toBe(graphCleanupDeferredBody('meeting.wav', false))
+    })
+
+    it('deferred + confirmed device removal folds "and the device copy" into the body', () => {
+      const result = selectCompletionToast({
+        ...baseInputs,
+        deviceOutcome: 'success',
+        graphCleanupDeferred: true
+      })
+      expect(result.variant).toBe('warning')
+      expect(result.title).toBe(GRAPH_CLEANUP_DEFERRED_TITLE)
+      expect(result.body).toBe(graphCleanupDeferredBody('meeting.wav', true))
+    })
+
+    it('deferred note is appended to the files-pending body too (no branch overclaims)', () => {
+      const result = selectCompletionToast({
+        ...baseInputs,
+        filesPending: true,
+        pendingKinds: ['wiki'],
+        graphCleanupDeferred: true
+      })
+      expect(result.variant).toBe('warning')
+      expect(result.title).toBe(FILES_PENDING_TITLE)
+      expect(result.body).toBe(filesPendingBody('meeting.wav', ['wiki']) + GRAPH_CLEANUP_DEFERRED_NOTE)
+    })
+
+    it('deferred note is appended to the device-partial body', () => {
+      const result = selectCompletionToast({
+        ...baseInputs,
+        deviceOutcome: 'partial',
+        graphCleanupDeferred: true
+      })
+      expect(result.variant).toBe('warning')
+      expect(result.title).toBe(DEVICE_COPY_REMAINS_TITLE)
+      expect(result.body).toBe(deviceCopyRemainsBody('meeting.wav') + GRAPH_CLEANUP_DEFERRED_NOTE)
+    })
+
+    it('deferred note is appended to the combined-partial body', () => {
+      const result = selectCompletionToast({
+        ...baseInputs,
+        deviceOutcome: 'partial',
+        filesPending: true,
+        pendingKinds: ['audio'],
+        graphCleanupDeferred: true
+      })
+      expect(result.variant).toBe('warning')
+      expect(result.title).toBe(COMBINED_PARTIAL_TITLE)
+      expect(result.body).toBe(combinedPartialBody('meeting.wav', ['audio']) + GRAPH_CLEANUP_DEFERRED_NOTE)
+    })
   })
 })

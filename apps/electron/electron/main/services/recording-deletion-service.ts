@@ -33,6 +33,7 @@ import {
   recordPendingFileCleanups,
   getPendingFileCleanups,
   updatePendingFileCleanups,
+  retryPendingGraphCleanups,
   type RecordingDeletionResult,
   type RecordingDeletionImpact,
   type PendingCleanupTarget
@@ -197,6 +198,16 @@ export async function deleteRecording(
   let allFilesRemoved = pendingTargets.length === 0
   let pendingFileKinds: string[] = pendingTargets.map((t) => t.kind)
   if (cascade.mode === 'hard') {
+    // ARF-4 — opportunistically finish any DEFERRED graph cleanup left by an
+    // earlier skipGraphCleanup escape-hatch purge. Non-fatal, and skipped in
+    // practice for the escape-hatch purge that just deferred (the graph seam
+    // was unavailable a moment ago); a later HEALTHY hard purge — or the
+    // Trash-view-entry sweep — is what actually clears it.
+    try {
+      retryPendingGraphCleanups()
+    } catch (e) {
+      console.warn('[RecordingDeletion] pending graph-cleanup retry sweep failed (non-fatal):', e)
+    }
     try {
       const sweep = await retryPendingFileCleanups()
       if (cascade.journalId) {

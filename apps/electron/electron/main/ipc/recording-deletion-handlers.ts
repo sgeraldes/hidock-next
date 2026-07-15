@@ -32,7 +32,8 @@ import {
   setKnowledgeCaptureRatingByRecording,
   setGraphProvenanceCleanup,
   markRecordingNotOnDeviceById,
-  removeDeviceFileCacheEntry
+  removeDeviceFileCacheEntry,
+  retryPendingGraphCleanups
 } from '../services/database'
 import {
   removeRecordingProvenanceCore,
@@ -262,8 +263,17 @@ export function registerRecordingDeletionHandlers(): void {
   // on Trash-view entry, in addition to it running on every hard purge.
   ipcMain.handle('recordings:retryPendingCleanups', async () => {
     try {
+      // ARF-4 — also retry any DEFERRED graph cleanup left by a
+      // skipGraphCleanup escape-hatch purge (the graph seam may now be ready).
+      // Non-fatal; the file sweep's outcome is what the caller acts on.
+      let graph
+      try {
+        graph = retryPendingGraphCleanups()
+      } catch (e) {
+        console.warn('recordings:retryPendingCleanups graph sweep failed (non-fatal):', e)
+      }
       const result = await retryPendingFileCleanups()
-      return { success: true, ...result }
+      return { success: true, ...result, graph }
     } catch (e) {
       console.error('recordings:retryPendingCleanups error:', e)
       return { success: false, error: e instanceof Error ? e.message : 'Unknown error' }

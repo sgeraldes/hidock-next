@@ -424,7 +424,15 @@ describe('executeDeletePermanent — AR3-3(c) skipGraphCleanup escape hatch', ()
 
     await waitFor(() => expect(deleteCascadeMock).toHaveBeenCalledTimes(2))
     expect(deleteCascadeMock).toHaveBeenNthCalledWith(2, 'synced-1', true, { skipGraphCleanup: true })
-    await waitFor(() => expect(toastMock.success).toHaveBeenCalled())
+    // ARF-4 — the escape-hatch purge defers graph cleanup, so its completion is
+    // an HONEST WARNING ("Deleted — graph cleanup deferred"), never plain success.
+    await waitFor(() =>
+      expect(toastMock.warning).toHaveBeenCalledWith(
+        'Deleted — graph cleanup deferred',
+        expect.stringContaining('retry automatically')
+      )
+    )
+    expect(toastMock.success).not.toHaveBeenCalled()
   })
 
   it('a non-graph failure shows the generic failure toast with NO escape-hatch action', async () => {

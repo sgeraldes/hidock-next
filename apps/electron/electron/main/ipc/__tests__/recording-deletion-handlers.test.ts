@@ -27,6 +27,7 @@ const getDeletionImpactMock = vi.fn()
 const deleteRecordingMock = vi.fn()
 const restoreDeletedRecordingMock = vi.fn()
 const retryPendingFileCleanupsMock = vi.fn()
+const retryPendingGraphCleanupsMock = vi.fn()
 const removeRecordingProvenanceCoreMock = vi.fn()
 const removeRecordingFromGraphMock = vi.fn()
 // Defaulted to a healthy store so existing hard-delete tests (which don't
@@ -40,7 +41,8 @@ vi.mock('../../services/database', () => ({
   setKnowledgeCaptureRatingByRecording: (...args: unknown[]) => setKnowledgeCaptureRatingByRecordingMock(...args),
   setGraphProvenanceCleanup: (...args: unknown[]) => setGraphProvenanceCleanupMock(...args),
   markRecordingNotOnDeviceById: (...args: unknown[]) => markRecordingNotOnDeviceByIdMock(...args),
-  removeDeviceFileCacheEntry: (...args: unknown[]) => removeDeviceFileCacheEntryMock(...args)
+  removeDeviceFileCacheEntry: (...args: unknown[]) => removeDeviceFileCacheEntryMock(...args),
+  retryPendingGraphCleanups: (...args: unknown[]) => retryPendingGraphCleanupsMock(...args)
 }))
 
 // spec-006/F17 T6 — recording-deletion-handlers.ts now imports
@@ -450,13 +452,22 @@ describe('recording-deletion-handlers', () => {
 
   // spec-006/F17 T6 AR3-2 — the Trash-view-entry sweep IPC.
   describe('recordings:retryPendingCleanups', () => {
-    it('delegates to retryPendingFileCleanups and reports its summary', async () => {
+    it('delegates to retryPendingFileCleanups + retryPendingGraphCleanups and reports the summary', async () => {
       retryPendingFileCleanupsMock.mockResolvedValue({ attempted: 2, cleared: 1, stillPending: { j1: ['audio'] } })
+      retryPendingGraphCleanupsMock.mockReturnValue({ attempted: 1, cleared: 1, clearedJournalIds: ['g1'], stillPending: [] })
       const handler = getHandler('recordings:retryPendingCleanups')
 
       const result = await handler(null)
 
-      expect(result).toEqual({ success: true, attempted: 2, cleared: 1, stillPending: { j1: ['audio'] } })
+      // ARF-4 — the graph sweep also runs; its summary rides along under `graph`.
+      expect(retryPendingGraphCleanupsMock).toHaveBeenCalled()
+      expect(result).toEqual({
+        success: true,
+        attempted: 2,
+        cleared: 1,
+        stillPending: { j1: ['audio'] },
+        graph: { attempted: 1, cleared: 1, clearedJournalIds: ['g1'], stillPending: [] }
+      })
     })
 
     it('never throws across IPC — an unexpected service error is caught', async () => {

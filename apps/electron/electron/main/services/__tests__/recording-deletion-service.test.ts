@@ -19,7 +19,10 @@ const db = vi.hoisted(() => ({
   // a true no-op unless a test explicitly wires backlog rows.
   recordPendingFileCleanups: vi.fn(),
   getPendingFileCleanups: vi.fn().mockReturnValue([]),
-  updatePendingFileCleanups: vi.fn()
+  updatePendingFileCleanups: vi.fn(),
+  // ARF-4 — the deferred graph-cleanup sweep, piggybacked on every hard purge.
+  // Defaulted to a benign no-op so existing tests aren't affected.
+  retryPendingGraphCleanups: vi.fn().mockReturnValue({ attempted: 0, cleared: 0, clearedJournalIds: [], stillPending: [] })
 }))
 const files = vi.hoisted(() => ({
   deleteRecording: vi.fn(),

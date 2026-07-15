@@ -3815,6 +3815,17 @@ export function deleteRecordingCascade(
 
       // 8. Finally the recording row itself, and an audit journal entry.
       runNoSave('DELETE FROM recordings WHERE id = ?', [recordingId])
+
+      // ARF-1 (Codex adversarial FINAL review, BINDING): a prior SOFT
+      // deletion_journal row for this recording still carries the FULL
+      // JSON.stringify(rec) snapshot (filename, on-disk paths, meeting
+      // linkage) written when it was moved to Trash. "Delete permanently" must
+      // retain ONLY the minimal opaque hard audit row (AR3-7), so purge EVERY
+      // prior journal row for this recording — soft snapshots included — in
+      // this SAME transaction, immediately before writing the minimal hard row
+      // below. (Restore fidelity is moot once we hard-purge: the recording row
+      // is gone, so no soft row will ever be restored again.)
+      runNoSave('DELETE FROM deletion_journal WHERE recording_id = ?', [recordingId])
       const removed = {
         transcripts: transcriptRows.length,
         embeddings: embeddingsCount,
@@ -3838,15 +3849,26 @@ export function deleteRecordingCascade(
       // this INSERT never writes it. The soft-delete journal above is
       // UNCHANGED (full snapshot — restore fidelity requires it).
       const journalId = randomUUID()
+      // ARF-4 (Codex adversarial FINAL review, BINDING): the skipGraphCleanup
+      // escape hatch purges the DB rows but leaves graph residue behind with
+      // no way to retry — the recording is gone, so it can never be resolved
+      // again. Persist a durable pending-graph-cleanup LEDGER in the SAME
+      // journal row's snapshot: exactly the ids removeRecordingProvenanceCore
+      // needs (it takes explicit recordingId/meetingId/transcriptIds precisely
+      // for this), so the sweep (retryPendingGraphCleanups) can finish the
+      // cleanup by ids on a later pass / next boot. A normal hard purge (graph
+      // cleaned inline) still journals NULL (AR3-7 privacy default).
+      const hardSnapshot = graphCleanupSkipped
+        ? JSON.stringify({
+            mode: 'hard',
+            graph_cleanup_skipped: true,
+            pending_graph: { recordingId, meetingId, transcriptIds }
+          })
+        : null
       runNoSave(
         `INSERT INTO deletion_journal (id, recording_id, mode, recording_snapshot, removed_counts, created_at)
          VALUES (?, ?, 'hard', ?, NULL, ?)`,
-        [
-          journalId,
-          recordingId,
-          graphCleanupSkipped ? JSON.stringify({ mode: 'hard', graph_cleanup_skipped: true }) : null,
-          new Date().toISOString()
-        ]
+        [journalId, recordingId, hardSnapshot, new Date().toISOString()]
       )
 
       return {
@@ -3981,6 +4003,137 @@ export function updatePendingFileCleanups(journalId: string, remaining: PendingC
   const hasOtherFields = Object.keys(snapshot).some((k) => k !== 'mode' && k !== 'pending_files')
   const next = remaining.length > 0 || hasOtherFields ? JSON.stringify(snapshot) : null
   runNoSave('UPDATE deletion_journal SET recording_snapshot = ? WHERE id = ?', [next, journalId])
+}
+
+// =============================================================================
+// ARF-4 (Codex adversarial FINAL review) — durable pending-GRAPH-cleanup ledger
+// + retry sweep. Sibling of the file-cleanup ledger above. The skipGraphCleanup
+// escape hatch writes a `pending_graph` entry into the hard journal row's
+// snapshot (deleteRecordingCascade, above); this sweep re-runs the graph
+// provenance cleanup by the stored ids and clears the entry on success. It
+// survives a crash/restart because the ledger is on disk in deletion_journal.
+// =============================================================================
+
+export interface PendingGraphCleanupRow {
+  journalId: string
+  recordingId: string
+  meetingId?: string
+  transcriptIds: string[]
+}
+
+/**
+ * Bounded scan for hard journal rows still carrying a `pending_graph` entry —
+ * the ARF-4 graph-cleanup retry sweep's read side. Newest first, capped.
+ * Tolerates a malformed snapshot (skips that row rather than crashing).
+ */
+export function getPendingGraphCleanups(limit = 25): PendingGraphCleanupRow[] {
+  const rows = queryAll<{ id: string; recording_id: string; recording_snapshot: string | null }>(
+    `SELECT id, recording_id, recording_snapshot FROM deletion_journal
+      WHERE mode = 'hard' AND recording_snapshot LIKE '%pending_graph%'
+      ORDER BY created_at DESC LIMIT ?`,
+    [limit]
+  )
+  const out: PendingGraphCleanupRow[] = []
+  for (const row of rows) {
+    if (!row.recording_snapshot) continue
+    try {
+      const snapshot = JSON.parse(row.recording_snapshot) as {
+        pending_graph?: { recordingId?: string; meetingId?: string; transcriptIds?: string[] }
+      }
+      const pg = snapshot.pending_graph
+      if (pg && (pg.recordingId || row.recording_id)) {
+        out.push({
+          journalId: row.id,
+          recordingId: pg.recordingId ?? row.recording_id,
+          meetingId: pg.meetingId,
+          transcriptIds: Array.isArray(pg.transcriptIds) ? pg.transcriptIds : []
+        })
+      }
+    } catch {
+      /* malformed snapshot — skip, don't crash the sweep */
+    }
+  }
+  return out
+}
+
+/**
+ * Clear the `pending_graph` entry from a hard journal row after a successful
+ * graph-cleanup retry, preserving any other snapshot field (e.g.
+ * graph_cleanup_skipped); nulls the whole column if nothing else remains.
+ */
+export function clearPendingGraphCleanup(journalId: string): void {
+  const row = queryOne<{ recording_snapshot: string | null }>(
+    'SELECT recording_snapshot FROM deletion_journal WHERE id = ?',
+    [journalId]
+  )
+  let snapshot: Record<string, unknown> = { mode: 'hard' }
+  if (row?.recording_snapshot) {
+    try {
+      snapshot = JSON.parse(row.recording_snapshot) as Record<string, unknown>
+    } catch {
+      snapshot = { mode: 'hard' }
+    }
+  }
+  delete snapshot.pending_graph
+  const hasOtherFields = Object.keys(snapshot).some((k) => k !== 'mode')
+  const next = hasOtherFields ? JSON.stringify(snapshot) : null
+  runNoSave('UPDATE deletion_journal SET recording_snapshot = ? WHERE id = ?', [next, journalId])
+}
+
+/**
+ * ARF-4 retry sweep: for every hard journal row still carrying a deferred
+ * `pending_graph` entry (from a skipGraphCleanup escape-hatch purge), re-run
+ * the injected graph provenance cleanup by the stored ids and clear the entry
+ * on success. Uses the SAME injected seam (`_graphProvenanceCleanup`) the
+ * cascade uses, so it needs no graph-package import. Non-fatal and idempotent —
+ * a failure just leaves the entry for the next sweep (Trash-view entry / next
+ * hard purge / next boot). When the seam is unwired it does nothing (the
+ * entries survive until it is available again).
+ */
+export function retryPendingGraphCleanups(limit = 25): {
+  attempted: number
+  cleared: number
+  clearedJournalIds: string[]
+  stillPending: string[]
+} {
+  const clearedJournalIds: string[] = []
+  const stillPending: string[] = []
+  let attempted = 0
+  let cleared = 0
+  if (!_graphProvenanceCleanup) {
+    return { attempted, cleared, clearedJournalIds, stillPending }
+  }
+  try {
+    const rows = getPendingGraphCleanups(limit)
+    for (const row of rows) {
+      attempted++
+      try {
+        // The provenance cleanup touches protected graph tables, so run it in
+        // the same mass-delete-allowed transaction envelope the cascade uses.
+        const g = runWithMassDeleteAllowed(() =>
+          runInTransaction(() =>
+            _graphProvenanceCleanup!(row.recordingId, {
+              meetingId: row.meetingId,
+              transcriptIds: row.transcriptIds
+            })
+          )
+        )
+        if (g.ok) {
+          clearPendingGraphCleanup(row.journalId)
+          cleared++
+          clearedJournalIds.push(row.journalId)
+        } else {
+          stillPending.push(row.journalId)
+        }
+      } catch (e) {
+        console.warn(`[Database] pending graph-cleanup retry failed for ${row.journalId} (non-fatal):`, e)
+        stillPending.push(row.journalId)
+      }
+    }
+  } catch (e) {
+    console.warn('[Database] retryPendingGraphCleanups failed (non-fatal):', e)
+  }
+  return { attempted, cleared, clearedJournalIds, stillPending }
 }
 
 /**
