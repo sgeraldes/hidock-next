@@ -1,140 +1,215 @@
 // @vitest-environment node
 
 /**
- * ADV17-2 (round-18) — chat-source provenance boundary.
+ * ADV18 (round-19) — chat/RAG persisted-provenance boundary.
  *
- * Deterministic unit coverage of packSources + revalidateStoredSources +
- * presentSourcesNoRevalidate with the DB resolution and the shared eligibility
- * boundaries MOCKED, so every branch (eligible / excluded / all-excluded /
- * legacy / fail-closed / capture-source) is exercised without a live DB.
+ * Deterministic unit coverage of the message-level provenance union model:
+ * packSources (persist) + revalidateStoredSources (read) + isProvenanceExcluded
+ * (the shared fail-closed decision) + presentSourcesNoRevalidate, with the shared
+ * eligibility boundaries MOCKED so every branch (eligible / one-excluded /
+ * capture-excluded / unverifiable / legacy / older-version / malformed /
+ * fail-closed) is exercised without a live DB.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-vi.mock('../database', () => ({
-  getRecordingsForMeeting: vi.fn()
-}))
 vi.mock('../recording-eligibility', () => ({
   filterEligibleRecordingIds: vi.fn(),
   filterEligibleCaptureIds: vi.fn()
 }))
 
-import { getRecordingsForMeeting } from '../database'
 import { filterEligibleRecordingIds, filterEligibleCaptureIds } from '../recording-eligibility'
 import {
   packSources,
   presentSourcesNoRevalidate,
   revalidateStoredSources,
+  isProvenanceExcluded,
   REDACTED_ANSWER,
-  SOURCE_PROVENANCE_V
+  SOURCE_PROVENANCE_V,
+  type MessageProvenance
 } from '../chat-source-provenance'
 
 const setOf = (ids: string[]) => ({ eligible: new Set(ids), failClosed: false })
 const failClosed = () => ({ eligible: new Set<string>(), failClosed: true })
 
+const prov = (recordingIds: string[], captureIds: string[] = [], unverifiable = false): MessageProvenance => ({
+  recordingIds,
+  captureIds,
+  unverifiable
+})
+
+/** Build a stored v2 envelope with the given sources array + provenance union. */
+const packWith = (sources: unknown[], p: MessageProvenance): string =>
+  packSources(JSON.stringify(sources), p)!
+
 beforeEach(() => {
   vi.clearAllMocks()
-  vi.mocked(getRecordingsForMeeting).mockReturnValue([])
   vi.mocked(filterEligibleRecordingIds).mockReturnValue(setOf([]))
   vi.mocked(filterEligibleCaptureIds).mockReturnValue(setOf([]))
 })
 
 describe('packSources', () => {
-  it('resolves meetingId → recording ids and keeps captureId as provenance', () => {
-    vi.mocked(getRecordingsForMeeting).mockReturnValue([{ id: 'recA' } as never, { id: 'recB' } as never])
-    const packed = packSources(JSON.stringify([{ content: 'excerpt', meetingId: 'm1' }, { content: 'img', captureId: 'capX', sourceType: 'image' }]))
-    const env = JSON.parse(packed!)
+  it('builds a versioned envelope with the message-level provenance union', () => {
+    const packed = packSources(
+      JSON.stringify([{ content: 'excerpt', meetingId: 'm1' }]),
+      prov(['recA', 'recB'], ['capX'])
+    )!
+    const env = JSON.parse(packed)
     expect(env.v).toBe(SOURCE_PROVENANCE_V)
-    expect(env.sources[0]._prov.recordingIds.sort()).toEqual(['recA', 'recB'])
-    expect(env.sources[1]._prov.captureIds).toEqual(['capX'])
+    expect(env.sources).toEqual([{ content: 'excerpt', meetingId: 'm1' }])
+    expect(env.prov.recordingIds.sort()).toEqual(['recA', 'recB'])
+    expect(env.prov.captureIds).toEqual(['capX'])
+    expect(env.prov.unverifiable).toBe(false)
   })
 
-  it('returns null for empty / missing sources and stores a bare [] verbatim', () => {
+  it('writes an envelope even when the sources array is empty (pinned/graph-only answer)', () => {
+    const packed = packSources(undefined, prov(['recA']))!
+    const env = JSON.parse(packed)
+    expect(env.v).toBe(SOURCE_PROVENANCE_V)
+    expect(env.sources).toEqual([])
+    expect(env.prov.recordingIds).toEqual(['recA'])
+  })
+
+  it('normalizes the union (dedup + drop non-string ids)', () => {
+    const packed = packSources('[]', {
+      recordingIds: ['recA', 'recA', '', 1 as never],
+      captureIds: [],
+      unverifiable: false
+    })!
+    expect(JSON.parse(packed).prov.recordingIds).toEqual(['recA'])
+  })
+
+  it('without a provenance union, stores raw sources verbatim / null', () => {
     expect(packSources(undefined)).toBeNull()
     expect(packSources(null)).toBeNull()
     expect(packSources('[]')).toBe('[]')
+    expect(packSources(JSON.stringify([{ a: 1 }]))).toBe(JSON.stringify([{ a: 1 }]))
   })
 })
 
 describe('presentSourcesNoRevalidate', () => {
-  it('unwraps the envelope and strips internal _prov', () => {
-    vi.mocked(getRecordingsForMeeting).mockReturnValue([{ id: 'recA' } as never])
-    const packed = packSources(JSON.stringify([{ content: 'excerpt', meetingId: 'm1', subject: 'Sync' }]))!
-    const out = JSON.parse(presentSourcesNoRevalidate(packed)!)
-    expect(out).toEqual([{ content: 'excerpt', meetingId: 'm1', subject: 'Sync' }])
-    expect(out[0]).not.toHaveProperty('_prov')
+  it('unwraps the envelope to the plain sources array', () => {
+    const packed = packWith([{ content: 'excerpt', meetingId: 'm1', subject: 'Sync' }], prov(['recA']))
+    expect(JSON.parse(presentSourcesNoRevalidate(packed)!)).toEqual([
+      { content: 'excerpt', meetingId: 'm1', subject: 'Sync' }
+    ])
+  })
+
+  it('passes through non-envelope blobs untouched', () => {
+    expect(presentSourcesNoRevalidate(null)).toBeNull()
+    expect(presentSourcesNoRevalidate('[]')).toBe('[]')
   })
 })
 
-describe('revalidateStoredSources', () => {
-  function packWithMeeting(recIds: string[]): string {
-    vi.mocked(getRecordingsForMeeting).mockReturnValue(recIds.map((id) => ({ id }) as never))
-    return packSources(JSON.stringify([{ content: 'excerpt', meetingId: 'm1', subject: 'Sync' }]))!
-  }
+describe('isProvenanceExcluded (shared fail-closed decision)', () => {
+  it('true for undefined provenance (unverifiable)', () => {
+    expect(isProvenanceExcluded(undefined)).toBe(true)
+  })
 
-  it('keeps a source whose recording is still eligible (unchanged)', () => {
-    const stored = packWithMeeting(['recA'])
+  it('true when explicitly marked unverifiable', () => {
+    expect(isProvenanceExcluded(prov(['recA'], [], true))).toBe(true)
+  })
+
+  it('false for an all-eligible union', () => {
+    vi.mocked(filterEligibleRecordingIds).mockReturnValue(setOf(['recA']))
+    vi.mocked(filterEligibleCaptureIds).mockReturnValue(setOf(['capX']))
+    expect(isProvenanceExcluded(prov(['recA'], ['capX']))).toBe(false)
+  })
+
+  it('false for an empty, verifiable union (nothing excludable)', () => {
+    expect(isProvenanceExcluded(prov([], []))).toBe(false)
+    expect(filterEligibleRecordingIds).not.toHaveBeenCalled()
+    expect(filterEligibleCaptureIds).not.toHaveBeenCalled()
+  })
+
+  it('true when ANY recording is excluded', () => {
+    vi.mocked(filterEligibleRecordingIds).mockReturnValue(setOf(['recA'])) // recB excluded
+    expect(isProvenanceExcluded(prov(['recA', 'recB']))).toBe(true)
+  })
+
+  it('true when ANY capture is excluded', () => {
+    vi.mocked(filterEligibleRecordingIds).mockReturnValue(setOf(['recA']))
+    vi.mocked(filterEligibleCaptureIds).mockReturnValue(setOf([])) // capX excluded
+    expect(isProvenanceExcluded(prov(['recA'], ['capX']))).toBe(true)
+  })
+
+  it('true (fail closed) when the recording eligibility lookup fails', () => {
+    vi.mocked(filterEligibleRecordingIds).mockReturnValue(failClosed())
+    expect(isProvenanceExcluded(prov(['recA']))).toBe(true)
+  })
+
+  it('true (fail closed) when the capture eligibility lookup fails', () => {
+    vi.mocked(filterEligibleCaptureIds).mockReturnValue(failClosed())
+    expect(isProvenanceExcluded(prov([], ['capX']))).toBe(true)
+  })
+})
+
+describe('revalidateStoredSources — redact on ANY excluded / unverifiable', () => {
+  it('keeps a fully-eligible answer unchanged', () => {
+    const stored = packWith([{ content: 'excerpt', subject: 'Sync' }], prov(['recA']))
     vi.mocked(filterEligibleRecordingIds).mockReturnValue(setOf(['recA']))
     const { sources, redactContent } = revalidateStoredSources(stored, 'assistant')
-    expect(JSON.parse(sources!)).toEqual([{ content: 'excerpt', meetingId: 'm1', subject: 'Sync' }])
+    expect(JSON.parse(sources!)).toEqual([{ content: 'excerpt', subject: 'Sync' }])
     expect(redactContent).toBe(false)
   })
 
-  it('drops the snippet + redacts the answer when the only source becomes excluded', () => {
-    const stored = packWithMeeting(['recA'])
-    vi.mocked(filterEligibleRecordingIds).mockReturnValue(setOf([])) // recA no longer eligible
+  it('mixed-source answer with ONE excluded ⇒ WHOLE answer redacted + all chips dropped', () => {
+    const stored = packWith(
+      [{ content: 'good' }, { content: 'bad' }],
+      prov(['recGood', 'recBad'])
+    )
+    vi.mocked(filterEligibleRecordingIds).mockReturnValue(setOf(['recGood'])) // recBad excluded
     const { sources, redactContent } = revalidateStoredSources(stored, 'assistant')
     expect(JSON.parse(sources!)).toEqual([])
     expect(redactContent).toBe(true)
   })
 
-  it('keeps the eligible source and drops the excluded one on a mixed message (content NOT redacted)', () => {
-    vi.mocked(getRecordingsForMeeting)
-      .mockReturnValueOnce([{ id: 'recGood' } as never])
-      .mockReturnValueOnce([{ id: 'recBad' } as never])
-    const stored = packSources(
-      JSON.stringify([
-        { content: 'good', meetingId: 'mGood' },
-        { content: 'bad', meetingId: 'mBad' }
-      ])
-    )!
-    vi.mocked(filterEligibleRecordingIds).mockReturnValue(setOf(['recGood']))
+  it('pinned/graph-only answer (empty chips) whose recording is excluded ⇒ redacted', () => {
+    const stored = packSources(undefined, prov(['recPinned']))! // no chips, only union
+    vi.mocked(filterEligibleRecordingIds).mockReturnValue(setOf([])) // recPinned excluded
     const { sources, redactContent } = revalidateStoredSources(stored, 'assistant')
-    const kept = JSON.parse(sources!)
-    expect(kept).toHaveLength(1)
-    expect(kept[0].content).toBe('good')
-    expect(redactContent).toBe(false)
+    expect(JSON.parse(sources!)).toEqual([])
+    expect(redactContent).toBe(true)
   })
 
-  it('drops a capture-backed source when the capture is excluded', () => {
-    const stored = packSources(JSON.stringify([{ content: 'img', captureId: 'capX', sourceType: 'image' }]))!
+  it('capture-backed answer whose capture is excluded ⇒ redacted', () => {
+    const stored = packWith([{ content: 'img', captureId: 'capX' }], prov([], ['capX']))
     vi.mocked(filterEligibleCaptureIds).mockReturnValue(setOf([])) // capX excluded
-    const { sources, redactContent } = revalidateStoredSources(stored, 'assistant')
-    expect(JSON.parse(sources!)).toEqual([])
+    const { redactContent } = revalidateStoredSources(stored, 'assistant')
     expect(redactContent).toBe(true)
   })
 
-  it('keeps a capture-backed source when the capture is eligible', () => {
-    const stored = packSources(JSON.stringify([{ content: 'img', captureId: 'capX', sourceType: 'image' }]))!
-    vi.mocked(filterEligibleCaptureIds).mockReturnValue(setOf(['capX']))
-    const { sources } = revalidateStoredSources(stored, 'assistant')
-    expect(JSON.parse(sources!)).toHaveLength(1)
+  it('unverifiable union ⇒ redacted', () => {
+    const stored = packWith([{ content: 'x' }], prov(['recA'], [], true))
+    vi.mocked(filterEligibleRecordingIds).mockReturnValue(setOf(['recA']))
+    expect(revalidateStoredSources(stored, 'assistant').redactContent).toBe(true)
   })
 
-  it('fails closed (drops + redacts) when the recording eligibility lookup fails', () => {
-    const stored = packWithMeeting(['recA'])
-    vi.mocked(filterEligibleRecordingIds).mockReturnValue(failClosed())
-    const { sources, redactContent } = revalidateStoredSources(stored, 'assistant')
-    expect(JSON.parse(sources!)).toEqual([])
-    expect(redactContent).toBe(true)
+  it('empty verifiable union ⇒ kept (grounded on nothing excludable)', () => {
+    const stored = packSources(undefined, prov([], []))!
+    const { redactContent } = revalidateStoredSources(stored, 'assistant')
+    expect(redactContent).toBe(false)
   })
 
-  it('conservatively drops snippets of a LEGACY (un-enveloped) message but keeps its text', () => {
-    // A pre-round-18 message: a bare JSON array of sources, no provenance envelope.
+  it('LEGACY (un-enveloped) assistant message with sources ⇒ redacted (fail closed)', () => {
     const legacy = JSON.stringify([{ content: 'old excerpt', meetingId: 'm1' }])
     const { sources, redactContent } = revalidateStoredSources(legacy, 'assistant')
     expect(JSON.parse(sources!)).toEqual([])
-    expect(redactContent).toBe(false) // legacy: snippets redacted, message text kept
+    expect(redactContent).toBe(true)
+  })
+
+  it('OLDER envelope version (v1) ⇒ treated conservatively (redacted)', () => {
+    const v1 = JSON.stringify({ v: 1, sources: [{ content: 'x', _prov: {} }] })
+    expect(revalidateStoredSources(v1, 'assistant').redactContent).toBe(true)
+  })
+
+  it('MALFORMED / parse-error blob on an assistant message ⇒ redacted', () => {
+    expect(revalidateStoredSources('{not valid json', 'assistant').redactContent).toBe(true)
+  })
+
+  it('a current-version envelope with MALFORMED prov ⇒ unverifiable ⇒ redacted', () => {
+    const broken = JSON.stringify({ v: SOURCE_PROVENANCE_V, sources: [{ content: 'x' }], prov: 5 })
+    expect(revalidateStoredSources(broken, 'assistant').redactContent).toBe(true)
   })
 
   it('leaves a null / empty-sources message untouched', () => {
@@ -142,11 +217,12 @@ describe('revalidateStoredSources', () => {
     expect(revalidateStoredSources('[]', 'assistant')).toEqual({ sources: '[]', redactContent: false })
   })
 
-  it('never redacts a USER message content even if its (unlikely) sources are excluded', () => {
-    const stored = packWithMeeting(['recA'])
-    vi.mocked(filterEligibleRecordingIds).mockReturnValue(setOf([]))
-    const { redactContent } = revalidateStoredSources(stored, 'user')
-    expect(redactContent).toBe(false)
+  it('NEVER redacts a USER message, even with an excluded union', () => {
+    const stored = packWith([{ content: 'x' }], prov(['recA']))
+    vi.mocked(filterEligibleRecordingIds).mockReturnValue(setOf([])) // recA excluded
+    expect(revalidateStoredSources(stored, 'user').redactContent).toBe(false)
+    // A legacy user message keeps its sources verbatim too.
+    expect(revalidateStoredSources(JSON.stringify([{ content: 'y' }]), 'user').redactContent).toBe(false)
   })
 })
 
