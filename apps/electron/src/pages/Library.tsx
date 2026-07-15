@@ -46,7 +46,7 @@ import {
   LABEL_MOVE_TO_TRASH,
   LABEL_DELETE_FROM_DEVICE,
   TRASH_MODE_BANNER,
-  TRASH_LEGACY_GRAPH_CAVEAT,
+  LEGACY_GRAPH_DISCLOSURE,
   FAILURE_NOTHING_DELETED_TITLE,
   graphCleanupFailedBody,
   genericPermanentDeleteFailedBody,
@@ -1572,10 +1572,10 @@ export function Library() {
               <Trash2 className="h-4 w-4 shrink-0" aria-hidden="true" />
               {TRASH_MODE_BANNER}
             </div>
-            {/* ARF-2 — honest caveat: legacy pre-F18 graph content stays in
-                Context Graph VIEWS until a permanent delete, even though
-                Assistant grounding now excludes trashed recordings. */}
-            <p className="mt-0.5 pl-6 text-xs text-muted-foreground/80">{TRASH_LEGACY_GRAPH_CAVEAT}</p>
+            {/* RE-3 — honest disclosure: trashing excludes THIS-version content
+                from AI + views, but legacy (earlier-version) graph facts can't
+                be retracted per recording and persist until a full rebuild. */}
+            <p className="mt-0.5 pl-6 text-xs text-muted-foreground/80">{LEGACY_GRAPH_DISCLOSURE}</p>
           </div>
         ) : (
           <div className={isFilterPending ? 'opacity-70 pointer-events-none transition-opacity' : 'transition-opacity'}>

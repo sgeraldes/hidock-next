@@ -25,6 +25,7 @@ import { ConnectorsSettings } from '@/components/settings/ConnectorsSettings'
 import { AIBrainsSettings } from '@/components/settings/AIBrainsSettings'
 import { FeaturesSettings } from '@/components/settings/FeaturesSettings'
 import { toast } from '@/components/ui/toaster'
+import { LEGACY_GRAPH_DISCLOSURE } from '@/features/library/utils/deletionCopy'
 import type { StorageInfo, AppConfig } from '@/types'
 
 // RAG configuration constants — MAX_CONTEXT_CHUNKS must match config.ts default (10)
@@ -1083,11 +1084,16 @@ export function Settings() {
                 The AI reads the transcript of each recording you haven&apos;t rated yet and judges whether the
                 conversation is actually useful — or noise, like personal chatter, a call where nobody showed up, or
                 background audio picked up by mistake. Recordings judged as noise get a Low-value or Garbage badge in
-                the Library, and from then on they are left out of Assistant answers, the Context Graph, and
-                action-item extraction. Nothing is deleted, and ratings you set yourself are never changed — you can
-                re-rate any recording from its row menu. Uses your configured AI provider (one request per recording);
-                runs in the background, and you can cancel and resume anytime.
+                the Library, and from then on — going forward — they are left out of Assistant answers, the Context
+                Graph, and action-item extraction. Nothing is deleted, and ratings you set yourself are never changed —
+                you can re-rate any recording from its row menu. Uses your configured AI provider (one request per
+                recording); runs in the background, and you can cancel and resume anytime.
               </CardDescription>
+              {/* RE-3 — scope the promise honestly: the exclusion applies going
+                  forward to content this version rates + attributes; it does not
+                  retroactively pull already-woven graph facts from recordings an
+                  earlier version analyzed. */}
+              <p className="mt-1 px-6 text-xs text-muted-foreground">{LEGACY_GRAPH_DISCLOSURE}</p>
             </CardHeader>
             <CardContent className="space-y-3">
               {!hasValueProvider && (

@@ -27,7 +27,7 @@ import {
   AlertDialogTitle
 } from '@/components/ui/alert-dialog'
 import { Checkbox } from '@/components/ui/checkbox'
-import { GRAPH_CLEANUP_RETRY_SAFETY_LINE } from '@/features/library/utils/deletionCopy'
+import { GRAPH_CLEANUP_RETRY_SAFETY_LINE, LEGACY_GRAPH_DISCLOSURE } from '@/features/library/utils/deletionCopy'
 
 export interface DeletePermanentDialogImpact {
   transcripts: number
@@ -138,6 +138,10 @@ export function DeletePermanentDialog({
                   unconditionally (true regardless of whether the graph
                   estimate above is known or not). */}
               <p className="text-xs text-muted-foreground">{GRAPH_CLEANUP_RETRY_SAFETY_LINE}</p>
+              {/* RE-3 — honest disclosure: the removal above covers this
+                  recording's file + attributed (this-version) graph facts;
+                  legacy graph contributions can't be retracted per recording. */}
+              <p className="text-xs text-muted-foreground">{LEGACY_GRAPH_DISCLOSURE}</p>
               {graphUnknown && (
                 <div
                   role="alert"

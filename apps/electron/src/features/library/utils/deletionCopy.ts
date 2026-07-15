@@ -42,16 +42,22 @@ export function deviceDeleteConfirmDescription(filename: string): string {
 export const TRASH_MODE_BANNER = 'Items here are hidden and excluded from AI. Restore, or delete permanently.'
 
 /**
- * ARF-2 (copy reconciliation) — since ARF-2, a trashed recording's facts are
- * dropped from Assistant grounding (provenance-aware read filter). But the
- * VISUAL Context Graph view still renders graph edges that were woven in before
- * this update (legacy, pre-F18 content carries no per-recording provenance, so
- * it cannot be attributed and hidden per-recording); only a permanent delete
- * removes them. Shown as a precise secondary caveat so the "excluded from AI"
- * promise is not overstated for legacy graph content.
+ * RE-3 (Codex adversarial re-review round 2, orchestrator ruling — ONE honest
+ * disclosure, shared across EVERY surface so the wording can't drift).
+ *
+ * Recordings analyzed by THIS version carry per-recording graph provenance, so
+ * trashing excludes them and a permanent delete removes their attributed graph
+ * facts. Recordings analyzed by an EARLIER version were woven into the
+ * knowledge graph WITHOUT that provenance, so their contribution can't be
+ * retracted per recording — it persists in Context Graph views AND Assistant
+ * answers until a future full graph rebuild. The previous ARF-2 caveat
+ * ("...until permanently deleted") was INACCURATE — permanent delete cannot
+ * remove those legacy facts — and is replaced by this.
  */
-export const TRASH_LEGACY_GRAPH_CAVEAT =
-  'Recordings analyzed before this update may still appear in Context Graph views until permanently deleted.'
+export const LEGACY_GRAPH_DISCLOSURE =
+  'Recordings analyzed by an earlier version were woven into the knowledge graph without ' +
+  'per-recording tracking, so their content can still appear in Context Graph views and ' +
+  'Assistant answers until a future graph rebuild — trashing or deleting them can’t remove that.'
 
 // spec-005/F17 T5 — success/partial-summary toast TITLES for the
 // menu-triggered actions elsewhere in Library.tsx (soft delete, device-only

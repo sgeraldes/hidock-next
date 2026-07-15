@@ -841,7 +841,10 @@ function toDTO(sub: SubGraph): ContextGraphData {
  */
 export function queryContextGraph(limit: number = DEFAULT_OVERVIEW_NODE_LIMIT): ContextGraphData {
   const store = getKnowledgeGraphStore()
-  return toDTO(fullGraph(store, limit))
+  // RE-4 — suppress attributed edges/nodes of excluded (soft-deleted / personal
+  // / value-excluded) recordings from the visual view, matching the grounding
+  // filter and the honest deletion copy.
+  return suppressExcludedFromView(toDTO(fullGraph(store, limit)), getGroundingExclusionSet())
 }
 
 /**
@@ -902,7 +905,8 @@ export function queryNeighborhood(entityId: string, hops = 1): ContextGraphData 
   const store = getKnowledgeGraphStore()
   const nodeId = resolveEntityToNodeId(entityId)
   if (!nodeId) return { center: null, nodes: [], edges: [] }
-  return toDTO(neighborhood(store, nodeId, hops))
+  // RE-4 — provenance suppression for the visual neighborhood view.
+  return suppressExcludedFromView(toDTO(neighborhood(store, nodeId, hops)), getGroundingExclusionSet())
 }
 
 /** Find graph nodes whose label matches a query — powers search-to-focus. */
@@ -991,6 +995,56 @@ function provenanceSuppressedEdgeIds(
     if (recIds.every((id) => excluded.has(id))) suppressed.add(edgeId)
   }
   return suppressed
+}
+
+/**
+ * RE-4 (Codex adversarial re-review round 2) — apply the SAME provenance-aware
+ * suppression used for assistant grounding to a Context Graph VIEW DTO (nodes +
+ * edges): drop every edge whose provenance is entirely excluded (post-F18
+ * attributed excluded recording), then prune any node ORPHANED by that removal
+ * (it had incident edges, all now suppressed). The center node and nodes still
+ * incident to a kept edge, and isolated nodes not touched by the removal, are
+ * kept. Legacy ZERO-provenance edges are never suppressed (RE-3 ruling), so
+ * pre-F18 content persists in views until a future full graph rebuild.
+ * Generic over ContextGraphData / ContextLensData — extra fields (weight,
+ * stratum, strata, referenceMs) pass through untouched.
+ */
+function suppressExcludedFromView<
+  T extends {
+    center: string | null
+    nodes: Array<{ id: string }>
+    edges: Array<{ id: string; source: string; target: string }>
+  }
+>(data: T, excluded: Set<string>): T {
+  if (excluded.size === 0 || data.edges.length === 0) return data
+  const suppressed = provenanceSuppressedEdgeIds(
+    getKnowledgeGraphStore(),
+    data.edges.map((e) => e.id),
+    excluded
+  )
+  if (suppressed.size === 0) return data
+
+  const keptEdges = data.edges.filter((e) => !suppressed.has(e.id))
+  const incidentToKept = new Set<string>()
+  for (const e of keptEdges) {
+    incidentToKept.add(e.source)
+    incidentToKept.add(e.target)
+  }
+  const incidentToSuppressed = new Set<string>()
+  for (const e of data.edges) {
+    if (suppressed.has(e.id)) {
+      incidentToSuppressed.add(e.source)
+      incidentToSuppressed.add(e.target)
+    }
+  }
+  const keptNodes = data.nodes.filter((n) => {
+    if (n.id === data.center) return true // never prune the center
+    if (incidentToKept.has(n.id)) return true // still connected
+    // Orphaned strictly BY the removal (was only on suppressed edges) → prune.
+    if (incidentToSuppressed.has(n.id)) return false
+    return true // isolated node untouched by the removal → keep
+  })
+  return { ...data, nodes: keptNodes, edges: keptEdges }
 }
 
 /**
@@ -1131,7 +1185,9 @@ export function queryLens(
     centerNodeId = resolveEntityToNodeId(centerEntityId)
     if (!centerNodeId) return { center: null, nodes: [], edges: [], referenceMs: null, strata: [] }
   }
-  return toLensDTO(lensGraph(store, centerNodeId, opts))
+  // RE-4 — provenance suppression for the visual lens view (extra lens fields
+  // pass through the generic helper untouched).
+  return suppressExcludedFromView(toLensDTO(lensGraph(store, centerNodeId, opts)), getGroundingExclusionSet())
 }
 
 /**

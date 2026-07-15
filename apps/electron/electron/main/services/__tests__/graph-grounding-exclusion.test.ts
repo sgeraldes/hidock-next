@@ -46,8 +46,17 @@ import {
   deleteRecordingCascade,
   restoreRecording,
   getExcludedRecordingIds,
+  setGraphProvenanceCleanup,
 } from '../database'
-import { neighborhoodFacts, getGroundingExclusionSet, getKnowledgeGraphStore } from '../knowledge-graph-service'
+import {
+  neighborhoodFacts,
+  getGroundingExclusionSet,
+  getKnowledgeGraphStore,
+  queryNeighborhood,
+  queryContextGraph,
+  queryLens,
+  removeRecordingProvenanceCore,
+} from '../knowledge-graph-service'
 
 function seedRecording(id: string): void {
   dbRun('INSERT OR IGNORE INTO recordings (id, filename, date_recorded) VALUES (?, ?, ?)', [
@@ -185,5 +194,118 @@ describe('ARF-2 — provenance-aware assistant grounding', () => {
     const set = getGroundingExclusionSet()
     expect(set.has('recA')).toBe(true)
     expect(set.has('recB')).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// RE-4 — provenance suppression on the VISUAL view paths (queryNeighborhood,
+// queryContextGraph, queryLens): an excluded post-F18 recording's attributed
+// edges (and nodes they orphan) must not show; legacy + shared-source stay.
+// ---------------------------------------------------------------------------
+
+describe('RE-4 — Context Graph views suppress excluded provenance', () => {
+  const labelsOf = (data: { nodes: Array<{ label: string }> }) => data.nodes.map((n) => n.label)
+  const edgeTargets = (data: { edges: Array<{ target: string }>; nodes: Array<{ id: string; label: string }> }) => {
+    const byId = new Map(data.nodes.map((n) => [n.id, n.label]))
+    return data.edges.map((e) => byId.get(e.target) ?? e.target)
+  }
+
+  it('queryNeighborhood(Alice): baseline shows all neighbors', () => {
+    const data = queryNeighborhood('Alice')
+    expect(labelsOf(data)).toEqual(expect.arrayContaining(['Alice', 'Roadmap', 'Backlog', 'Bob']))
+  })
+
+  it('soft-delete recA drops the sole-sourced edge AND prunes its orphaned node', () => {
+    deleteRecordingCascade('recA', { hard: false })
+    const data = queryNeighborhood('Alice')
+    // Roadmap was reachable ONLY via eA (recA) → edge suppressed, node pruned.
+    expect(labelsOf(data)).not.toContain('Roadmap')
+    // Backlog (shared, recB eligible) and Bob (legacy) stay.
+    expect(labelsOf(data)).toEqual(expect.arrayContaining(['Alice', 'Backlog', 'Bob']))
+    expect(edgeTargets(data)).not.toContain('Roadmap')
+  })
+
+  it('restore recA returns the pruned node + edge to the view', () => {
+    deleteRecordingCascade('recA', { hard: false })
+    expect(labelsOf(queryNeighborhood('Alice'))).not.toContain('Roadmap')
+    restoreRecording('recA')
+    expect(labelsOf(queryNeighborhood('Alice'))).toContain('Roadmap')
+  })
+
+  it('personal + value-excluded transitions suppress the view too', () => {
+    setRecordingPersonal('recA', true)
+    expect(labelsOf(queryNeighborhood('Alice'))).not.toContain('Roadmap')
+    setRecordingPersonal('recA', false)
+    expect(labelsOf(queryNeighborhood('Alice'))).toContain('Roadmap')
+
+    dbRun(
+      'INSERT INTO knowledge_captures (id, title, captured_at, source_recording_id, quality_rating) VALUES (?, ?, ?, ?, ?)',
+      ['capA', 'Cap', '2026-06-01', 'recA', 'garbage']
+    )
+    expect(labelsOf(queryNeighborhood('Alice'))).not.toContain('Roadmap')
+  })
+
+  it('a shared-source edge is KEPT while any source stays eligible, suppressed only when all excluded', () => {
+    deleteRecordingCascade('recA', { hard: false })
+    // eShared (recA + recB) — recB eligible → Backlog stays.
+    expect(labelsOf(queryNeighborhood('Alice'))).toContain('Backlog')
+    deleteRecordingCascade('recB', { hard: false })
+    // Now both sources excluded → Backlog's only edge suppressed → pruned.
+    expect(labelsOf(queryNeighborhood('Alice'))).not.toContain('Backlog')
+    // Legacy Bob still there.
+    expect(labelsOf(queryNeighborhood('Alice'))).toContain('Bob')
+  })
+
+  it('queryContextGraph (full view) suppresses excluded attributed edges', () => {
+    deleteRecordingCascade('recA', { hard: false })
+    const data = queryContextGraph(100)
+    // The Alice→Roadmap edge is gone from the whole-graph view.
+    const byId = new Map(data.nodes.map((n) => [n.id, n.label]))
+    const edgeLabels = data.edges.map((e) => `${byId.get(e.source)}→${byId.get(e.target)}`)
+    expect(edgeLabels).not.toContain('Alice→Roadmap')
+    // Legacy edge survives.
+    expect(edgeLabels).toContain('Alice→Bob')
+  })
+
+  it('queryLens suppresses excluded attributed edges (lens fields still present)', () => {
+    deleteRecordingCascade('recA', { hard: false })
+    const lens = queryLens('Alice', { hops: 1 })
+    expect(lens).toHaveProperty('strata')
+    const byId = new Map(lens.nodes.map((n) => [n.id, n.label]))
+    const edgeLabels = lens.edges.map((e) => `${byId.get(e.source)}→${byId.get(e.target)}`)
+    expect(edgeLabels).not.toContain('Alice→Roadmap')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// RE-3 — legacy ZERO-provenance edges CANNOT be attributed, so a permanent
+// delete never removes them and grounding keeps them (documented behavior).
+// ---------------------------------------------------------------------------
+
+describe('RE-3 — legacy zero-provenance edges persist through permanent delete', () => {
+  it('permanent-deleting recA leaves the unattributed legacy edge intact + still grounding', () => {
+    // Wire the real provenance cleanup so a hard purge is allowed (fail-closed).
+    setGraphProvenanceCleanup((id, opts) => removeRecordingProvenanceCore(id, opts))
+    try {
+      const store = getKnowledgeGraphStore()
+      const legacyBefore = store.db.queryOne('SELECT id FROM graph_edges WHERE id = ?', ['eLegacy'])
+      expect(legacyBefore).toBeTruthy()
+
+      // Permanent delete of recA: removes eA (sole-source recA), decrements
+      // eShared (shared w/ recB). eLegacy has NO provenance → untouchable.
+      deleteRecordingCascade('recA', { hard: true })
+
+      const eLegacy = store.db.queryOne('SELECT id FROM graph_edges WHERE id = ?', ['eLegacy'])
+      const eA = store.db.queryOne('SELECT id FROM graph_edges WHERE id = ?', ['eA'])
+      expect(eLegacy).toBeTruthy() // legacy edge PERSISTS (can't be attributed/removed)
+      expect(eA).toBeFalsy() // this-version attributed edge WAS removed
+
+      // Grounding still surfaces the legacy fact (recA is gone from exclusion set).
+      const facts = neighborhoodFacts('Alice')
+      expect(facts).toContain('Alice relates to Bob')
+      expect(facts).not.toContain('Alice mentioned Roadmap')
+    } finally {
+      setGraphProvenanceCleanup(null)
+    }
   })
 })
