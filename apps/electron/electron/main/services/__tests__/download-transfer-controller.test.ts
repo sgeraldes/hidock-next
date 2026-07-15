@@ -114,6 +114,51 @@ describe('download-transfer-controller', () => {
     await run
   })
 
+  it('stays registered until a post-drain settlement resolves (Phase-2 contract)', async () => {
+    // Mirrors jensen-handlers: the wrapped run() awaits downloadFile (which resolves the
+    // instant a user-cancel abort fires — BEFORE the device drains to its byte boundary)
+    // AND THEN the device's POST-DRAIN settlement. The controller's active pointer and
+    // cancelActiveTransfer's await must both stay pending until that settlement resolves.
+    const abort = new AbortController()
+    // downloadFile: resolves false as soon as the transfer is aborted (early resolve).
+    const downloadFile = new Promise<boolean>((resolve) => {
+      abort.signal.addEventListener('abort', () => resolve(false), { once: true })
+    })
+    // The device's post-drain settlement, resolved separately when the drain finishes.
+    let finishDrain!: () => void
+    const settlement = new Promise<void>((resolve) => { finishDrain = resolve })
+
+    const run = trackActiveTransfer('big.hda', abort, async () => {
+      const r = await downloadFile
+      await settlement // jensen-handlers awaits device.getActiveDownloadSettlement() here
+      return r
+    })
+    await Promise.resolve()
+    expect(hasActiveTransfer()).toBe(true)
+
+    // Cancel aborts + awaits settlement. downloadFile resolves false at once, but the
+    // drain has NOT finished, so cancel must stay pending and the pointer must stay set.
+    let cancelSettled = false
+    const cancel = cancelActiveTransferByName('big.hda', 'user-cancel').then((v) => {
+      cancelSettled = true
+      return v
+    })
+    // Let the abort handler + early downloadFile resolution flush.
+    await new Promise((r) => setTimeout(r, 0))
+    expect(abort.signal.aborted).toBe(true)
+    expect(cancelSettled).toBe(false) // still pending — drain not done
+    expect(hasActiveTransfer()).toBe(true) // pointer still set until drain completes
+    expect(getActiveTransferFilename()).toBe('big.hda')
+
+    // The byte-boundary drain completes → run() returns → cancel resolves, pointer clears.
+    finishDrain()
+    const result = await cancel
+    expect(result).toBe(true)
+    await run
+    expect(hasActiveTransfer()).toBe(false)
+    expect(getActiveTransferFilename()).toBeNull()
+  })
+
   it('returns false when there is nothing to cancel', async () => {
     expect(await cancelActiveTransfer()).toBe(false)
     expect(await cancelActiveTransferByName('a.hda')).toBe(false)

@@ -249,6 +249,68 @@ describe('JensenDevice (transport-agnostic core)', () => {
     }
   })
 
+  it('getActiveDownloadSettlement resolves only AFTER the byte-boundary drain (Phase-2 contract)', async () => {
+    // downloadFile's OWN promise resolves false the instant a user-cancel abort fires
+    // (so the UI can react at once), but the async byte-boundary drain is still running.
+    // getActiveDownloadSettlement() exposes the POST-DRAIN settlement so a cancel
+    // coordinator (jensen-handlers → download-transfer-controller) can stay registered
+    // until the device has truly settled. It must stay PENDING through the drain and
+    // resolve only once the boundary is reached.
+    const ep = makePollEndpoint()
+    const device = new JensenDevice(makeFakeUsb())
+    const dev = makePollDevice(ep, vi.fn(async () => {}), vi.fn(async () => {}))
+    const transferOut = dev.transferOut as unknown as ReturnType<typeof vi.fn>
+    await device.tryConnect(dev)
+    ;(device as unknown as { startReadLoop: () => void }).startReadLoop()
+
+    vi.useFakeTimers()
+    try {
+      const FILE_SIZE = 12_288 // 3 packets of 4096
+      const controller = new AbortController()
+      const dl = device.downloadFile('small.hda', FILE_SIZE, vi.fn(), undefined, controller.signal)
+
+      await vi.advanceTimersByTimeAsync(1)
+      expect(transferOut).toHaveBeenCalledTimes(1)
+
+      // First packet arrives (4096/12288), then the user cancels mid-stream.
+      ep.emit('data', makeResponsePacket(CMD.TRANSFER_FILE, 0, new Uint8Array(4096)))
+      await vi.advanceTimersByTimeAsync(1000)
+
+      controller.abort('user-cancel')
+      // downloadFile's own promise resolves false immediately…
+      await expect(dl).resolves.toBe(false)
+
+      // …but the POST-DRAIN settlement is still pending (drain has not reached the
+      // byte boundary yet).
+      const settlement = device.getActiveDownloadSettlement()
+      expect(settlement).not.toBeNull()
+      let settlementResolved = false
+      void settlement!.then(() => { settlementResolved = true })
+
+      // Let the drain run through a legitimate inter-packet pause — settlement must NOT
+      // resolve while bytes are still owed against the boundary.
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(settlementResolved).toBe(false)
+
+      // Second packet (8192/12288) — boundary still not reached.
+      ep.emit('data', makeResponsePacket(CMD.TRANSFER_FILE, 0, new Uint8Array(4096)))
+      await vi.advanceTimersByTimeAsync(1_100)
+      expect(settlementResolved).toBe(false)
+
+      // Final packet reaches the protocol byte boundary (12288/12288) → drain completes
+      // (releaseSlotAndAdvance) → the settlement resolves.
+      ep.emit('data', makeResponsePacket(CMD.TRANSFER_FILE, 0, new Uint8Array(4096)))
+      await vi.advanceTimersByTimeAsync(1_200)
+
+      expect(settlementResolved).toBe(true)
+      // Boundary-proven cancel keeps the connection healthy and clears the handle.
+      expect(device.isPoisoned()).toBe(false)
+      expect(device.getActiveDownloadSettlement()).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('a user-cancel that stalls before its byte boundary quarantines (never advances)', async () => {
     // If the cancelled stream dies before delivering fileSize bytes, the boundary can
     // never be proven — the drain times out on no-progress and the ONLY safe move is

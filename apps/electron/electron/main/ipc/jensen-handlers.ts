@@ -421,9 +421,19 @@ export function registerJensenHandlers(): void {
       // Register with the shared controller for the lifetime of the transfer so
       // jensen:cancelDownload and download-service cancel/cancel-all can find and
       // abort it (and await its settlement).
-      const result = await trackActiveTransfer(filename, abortController, () =>
-        getJensenDevice().downloadFile(filename, fileSize, onChunk, onProgress, abortController.signal)
-      )
+      const result = await trackActiveTransfer(filename, abortController, async () => {
+        const device = getJensenDevice()
+        const r = await device.downloadFile(filename, fileSize, onChunk, onProgress, abortController.signal)
+        // Phase-2 settlement contract: downloadFile resolves the instant a
+        // user-cancel/stall abort fires — BEFORE its async byte-boundary drain
+        // completes. Await the device's POST-DRAIN settlement so the tracked transfer
+        // (and thus cancelActiveTransfer / cancelActiveTransferByName) stays registered,
+        // and the active pointer stays set, until the device has truly settled. Resolves
+        // immediately on normal completion (no drain) or if the device lacks the
+        // accessor (older build / test stub).
+        await device.getActiveDownloadSettlement?.()
+        return r
+      })
       flushChunks() // flush any remaining buffered chunks
       return result
     } catch {
