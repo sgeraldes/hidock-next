@@ -25,7 +25,7 @@ import {
 } from '../services/database'
 import { getRecurringTopics } from '../services/recurring-topics'
 import { filterEligibleRecordingIds, existingRecordings } from '../services/recording-eligibility'
-import { packSources, revalidateStoredSources, REDACTED_ANSWER } from '../services/chat-source-provenance'
+import { revalidateStoredSources, REDACTED_ANSWER } from '../services/chat-source-provenance'
 
 export function registerDatabaseHandlers(): void {
   // Meetings
@@ -171,29 +171,27 @@ export function registerDatabaseHandlers(): void {
   })
 
   ipcMain.handle('db:add-chat-message', async (_, role: unknown, content: string, sources?: string) => {
-    // ADV21 (round-22) — EXACT runtime role allowlist (the TS union is compile-time
-    // only). REJECT anything that is not the exact string 'user' or 'assistant' —
-    // no trim/lowercase; 'system'/'Assistant'/' assistant '/''/null/non-string all
-    // rejected (no insert). Otherwise a smuggled role would ride the user branch and
-    // its content would be preserved on read.
-    if (role !== 'user' && role !== 'assistant') {
+    // ADV22-2 (round-23) — USER-ONLY. Assistant messages may be created ONLY through
+    // the main-owned assistant:addMessage(generationId) path (main owns the generated
+    // content + authoritative provenance and is the SOLE sanitized release path). This
+    // legacy write door must NOT be a second assistant-write surface: REJECT any role
+    // other than the exact string 'user' — no 'assistant', no normalization, no
+    // smuggled/legacy roles ('system'/'Assistant'/' assistant '/''/null/non-string).
+    // Rejection = no insert.
+    if (role !== 'user') {
       const error = new Error(
-        `db:add-chat-message rejected invalid role: ${typeof role === 'string' ? JSON.stringify(role) : typeof role}`
+        `db:add-chat-message is user-only; rejected role: ${typeof role === 'string' ? JSON.stringify(role) : typeof role}`
       )
       console.error(error.message)
       throw error
     }
-    // ADV19-1 (round-20) — this legacy chat path has NO RAG generation context and
-    // no conversation id, so it cannot resolve an authoritative provenance union.
-    // Stamp assistant rows with a fail-closed UNVERIFIABLE main-issued envelope
-    // (redacted on read via the shared boundary); an un-enveloped assistant row must
-    // never be trusted. User rows keep their raw sources verbatim.
-    const packed =
-      role === 'assistant'
-        ? packSources(undefined, { recordingIds: [], captureIds: [], unverifiable: true })
-        : sources ?? null
-    const id = addChatMessage(role, content, packed ?? undefined)
-    return { id, role, content, sources: packed }
+    // User rows keep their raw sources verbatim (no provenance envelope).
+    const packed = sources ?? null
+    const id = addChatMessage('user', content, packed ?? undefined)
+    // Route the returned row through the shared read-time sanitizer for consistency
+    // with every other write door. For user text this is a no-op (always preserved).
+    const { sources: sanitized, redactContent } = revalidateStoredSources(packed, 'user')
+    return { id, role: 'user', content: redactContent ? REDACTED_ANSWER : content, sources: sanitized }
   })
 
   ipcMain.handle('db:clear-chat-history', async () => {

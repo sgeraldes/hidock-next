@@ -357,15 +357,21 @@ describe('ADV21 (round-22) — exact runtime role allowlist (WRITE) + fail-close
     expect(assistant.content).not.toContain('migrate on Friday')
   })
 
-  it('db:add-chat-message admits exact "user" and "assistant" (assistant fail-closed unverifiable envelope)', async () => {
+  it('ADV22-2 (round-23) — db:add-chat-message admits exact "user" and REJECTS "assistant" (user-only write door)', async () => {
     const u = await handlers['db:add-chat-message']({}, 'user', 'legacy user text', JSON.stringify([{ content: 'x' }]))
     expect(u.role).toBe('user')
-    const a = await handlers['db:add-chat-message']({}, 'assistant', 'legacy assistant text')
-    expect(a.role).toBe('assistant')
-    // The legacy assistant row is redacted on read (no resolvable provenance).
-    const history = await handlers['db:get-chat-history']({}, 50)
-    const assistant = history.find((m: { id: string }) => m.id === a.id)
-    expect(assistant.content).toBe(REDACTED_ANSWER)
+
+    // Round-23: assistant messages may be created ONLY through the main-owned
+    // assistant:addMessage(generationId) path. db:add-chat-message must NOT be a second
+    // assistant-write door — an exact 'assistant' role is now rejected with no insert.
+    const before = queryAll<{ n: number }>('SELECT COUNT(*) AS n FROM chat_messages')[0].n
+    await expect(
+      handlers['db:add-chat-message']({}, 'assistant', 'legacy assistant text')
+    ).rejects.toThrow()
+    const after = queryAll<{ n: number }>('SELECT COUNT(*) AS n FROM chat_messages')[0].n
+    expect(after).toBe(before)
+    const leaked = queryAll<{ id: string }>('SELECT id FROM chat_messages WHERE content = ?', ['legacy assistant text'])
+    expect(leaked).toHaveLength(0)
   })
 })
 

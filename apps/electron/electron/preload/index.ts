@@ -665,7 +665,12 @@ export interface ElectronAPI {
   // Chat
   chat: {
     getHistory: (limit?: number) => Promise<any[]>
-    addMessage: (role: 'user' | 'assistant', content: string, sources?: string) => Promise<any>
+    /**
+     * ADV22-2 (round-23) — USER-ONLY. Assistant messages are created exclusively via
+     * the main-owned assistant.addMessage(generationId) path (main owns the content).
+     * This legacy write door accepts ONLY role='user'.
+     */
+    addMessage: (role: 'user', content: string, sources?: string) => Promise<any>
     clearHistory: () => Promise<boolean>
   }
 
