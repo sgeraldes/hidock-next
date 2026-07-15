@@ -21,7 +21,9 @@ interface DownloadQueueItem {
   filename: string
   fileSize: number
   progress: number
-  status: 'pending' | 'downloading' | 'completed' | 'failed' | 'cancelled'
+  // 'cancelling' is a transient state emitted by the main process while an in-flight
+  // USB transfer is being aborted; it settles to 'cancelled' (Phase-1 cancellation).
+  status: 'pending' | 'downloading' | 'cancelling' | 'completed' | 'failed' | 'cancelled'
   error?: string
   // HIGH-3 (Codex): origin of a 'cancelled' status (see download-service). 'user' =
   // deliberate cancel → terminal until manual retry; 'interrupted' = disconnect/re-sync.
