@@ -41,6 +41,18 @@ export function deviceDeleteConfirmDescription(filename: string): string {
 // Trash-mode banner (§D1 step 8).
 export const TRASH_MODE_BANNER = 'Items here are hidden and excluded from AI. Restore, or delete permanently.'
 
+/**
+ * ARF-2 (copy reconciliation) — since ARF-2, a trashed recording's facts are
+ * dropped from Assistant grounding (provenance-aware read filter). But the
+ * VISUAL Context Graph view still renders graph edges that were woven in before
+ * this update (legacy, pre-F18 content carries no per-recording provenance, so
+ * it cannot be attributed and hidden per-recording); only a permanent delete
+ * removes them. Shown as a precise secondary caveat so the "excluded from AI"
+ * promise is not overstated for legacy graph content.
+ */
+export const TRASH_LEGACY_GRAPH_CAVEAT =
+  'Recordings analyzed before this update may still appear in Context Graph views until permanently deleted.'
+
 // spec-005/F17 T5 — success/partial-summary toast TITLES for the
 // menu-triggered actions elsewhere in Library.tsx (soft delete, device-only
 // delete, restore, bulk delete). Bodies stay inline at each call site

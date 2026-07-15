@@ -55,6 +55,7 @@ import {
   queryAll,
   queryOne,
   getValueExcludedRecordingIds,
+  getExcludedRecordingIds,
   isRecordingGraphIngestable,
   getContactById,
   getContactByName,
@@ -940,21 +941,81 @@ export function findMentionedEntity(text: string): ContextGraphNode | null {
 }
 
 /**
+ * ARF-2 (Codex adversarial FINAL review) — the excluded-recording id set whose
+ * provenance-sourced facts must NOT ground the assistant: soft-deleted
+ * (deleted_at) OR personal OR value-excluded. Reuses the EXACT predicate the
+ * vector store already enforces (getExcludedRecordingIds), so graph grounding
+ * and vector retrieval agree on "excluded". Defensive: a failure degrades to
+ * "exclude nothing" (grounding stays best-effort) rather than dropping all
+ * grounding — the hard-purge path remains the enforceable backstop; this read
+ * filter is the honest best-effort for the reversible soft exclusions.
+ * Exported so the assistant path (rag.ts buildGraphContext) can compute it ONCE
+ * per query and thread it through every neighborhoodFacts call.
+ */
+export function getGroundingExclusionSet(): Set<string> {
+  try {
+    return getExcludedRecordingIds()
+  } catch (e) {
+    console.warn('[KnowledgeGraph] grounding exclusion set unavailable — facts unfiltered:', e)
+    return new Set<string>()
+  }
+}
+
+/**
+ * ARF-2 — given candidate graph edge ids, return the subset to SUPPRESS from
+ * assistant grounding because EVERY graph_edge_sources row for the edge belongs
+ * to an excluded recording. An edge with NO provenance rows (legacy pre-F18
+ * content) or with ≥1 source from an eligible recording is KEPT. Empty excluded
+ * set ⇒ nothing suppressed (fast path).
+ */
+function provenanceSuppressedEdgeIds(
+  store: KnowledgeGraphStore,
+  edgeIds: string[],
+  excluded: Set<string>
+): Set<string> {
+  const suppressed = new Set<string>()
+  if (excluded.size === 0 || edgeIds.length === 0) return suppressed
+  const placeholders = edgeIds.map(() => '?').join(',')
+  const rows = store.db.queryAll<{ edge_id: string; recording_id: string }>(
+    `SELECT edge_id, recording_id FROM graph_edge_sources WHERE edge_id IN (${placeholders})`,
+    edgeIds
+  )
+  const byEdge = new Map<string, string[]>()
+  for (const r of rows) {
+    const list = byEdge.get(r.edge_id)
+    if (list) list.push(r.recording_id)
+    else byEdge.set(r.edge_id, [r.recording_id])
+  }
+  for (const [edgeId, recIds] of byEdge) {
+    // Has ≥1 provenance row (it is in the map) AND every source is excluded.
+    if (recIds.every((id) => excluded.has(id))) suppressed.add(edgeId)
+  }
+  return suppressed
+}
+
+/**
  * Compact, human-readable facts about an entity's neighborhood — one line per
  * connected entity. Used to ground the assistant/RAG with graph context.
  * Returns '' when nothing is found (caller appends nothing).
  *
- * Honesty note (phase-3 integration-review S3, todo-005's SCOPE HONESTY
- * NOTE): this reads graph_nodes/graph_edges via queryNeighborhood with no
- * recordings.deleted_at filter. A recording ingested while live, then
- * soft-deleted (moved to Trash), keeps contributing its already-ingested
- * person/topic/edge facts here until it is HARD purged — F17's soft delete
- * stops future AI processing, not past graph grounding. Deliberate: soft
- * delete stays reversible, and cleanup is hard-purge-only by design (F17
- * T6). Revisit under F20 if tombstoned recordings should also hide from
- * graph grounding before a hard purge.
+ * ARF-2 (Codex adversarial FINAL review, BINDING) — provenance-aware: a fact
+ * (edge) is SUPPRESSED when EVERY graph_edge_sources row backing it belongs to
+ * an excluded recording (soft-deleted / personal / value-excluded), so the
+ * assistant is never grounded on content the UI promises is "excluded from all
+ * AI processing / the Context Graph". Facts with NO provenance rows (legacy
+ * pre-F18 content) or with ≥1 eligible source remain — matching the honest
+ * scope of the deletion copy (legacy graph content may still appear in Context
+ * Graph VIEWS until a hard purge; the assistant grounding filtered here is what
+ * the promise covers for post-F18 content). `excluded` is computed once per
+ * query by the caller (rag.ts) and threaded in; it defaults to a fresh read so
+ * this function stays independently correct + testable.
  */
-export function neighborhoodFacts(entityId: string, hops = 1, maxFacts = 20): string {
+export function neighborhoodFacts(
+  entityId: string,
+  hops = 1,
+  maxFacts = 20,
+  excluded: Set<string> = getGroundingExclusionSet()
+): string {
   const data = queryNeighborhood(entityId, hops)
   if (!data.center || data.nodes.length <= 1) return ''
 
@@ -962,9 +1023,16 @@ export function neighborhoodFacts(entityId: string, hops = 1, maxFacts = 20): st
   const center = byId.get(data.center)
   if (!center) return ''
 
+  const suppressed = provenanceSuppressedEdgeIds(
+    getKnowledgeGraphStore(),
+    data.edges.map((e) => e.id),
+    excluded
+  )
+
   const lines: string[] = []
   for (const e of data.edges) {
     if (lines.length >= maxFacts) break
+    if (suppressed.has(e.id)) continue // ARF-2 — fully-excluded provenance
     const src = byId.get(e.source)
     const tgt = byId.get(e.target)
     if (!src || !tgt) continue

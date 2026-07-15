@@ -359,10 +359,16 @@ export async function buildGraphContext(
     const seenEntities = new Set<string>()
     let usedTokens = 0
 
+    // ARF-2 — compute the excluded-recording set ONCE per query and thread it
+    // through every neighborhoodFacts call, so facts sourced solely from
+    // soft-deleted / personal / value-excluded recordings never ground the
+    // assistant (the UI promises they are "excluded from all AI processing").
+    const excluded = kg.getGroundingExclusionSet()
+
     const addFacts = (entityId: string | null | undefined, hops = 1): void => {
       if (!entityId || seenEntities.has(entityId)) return
       seenEntities.add(entityId)
-      const facts = kg.neighborhoodFacts(entityId, hops)
+      const facts = kg.neighborhoodFacts(entityId, hops, 20, excluded)
       if (!facts) return
       const cost = estimateTokens(facts)
       if (usedTokens + cost > budget) return // per-brain graph budget spent

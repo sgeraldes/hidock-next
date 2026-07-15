@@ -46,6 +46,7 @@ import {
   LABEL_MOVE_TO_TRASH,
   LABEL_DELETE_FROM_DEVICE,
   TRASH_MODE_BANNER,
+  TRASH_LEGACY_GRAPH_CAVEAT,
   FAILURE_NOTHING_DELETED_TITLE,
   graphCleanupFailedBody,
   genericPermanentDeleteFailedBody,
@@ -1563,9 +1564,15 @@ export function Library() {
           for tombstones; a one-line banner sets Trash's own expectation instead). */}
       <div className="px-2 sm:px-4 lg:px-6 pb-3 border-b border-border relative">
         {showTrash ? (
-          <div className="flex items-center gap-2 py-1.5 text-sm text-muted-foreground" role="status">
-            <Trash2 className="h-4 w-4 shrink-0" aria-hidden="true" />
-            {TRASH_MODE_BANNER}
+          <div className="py-1.5" role="status">
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Trash2 className="h-4 w-4 shrink-0" aria-hidden="true" />
+              {TRASH_MODE_BANNER}
+            </div>
+            {/* ARF-2 — honest caveat: legacy pre-F18 graph content stays in
+                Context Graph VIEWS until a permanent delete, even though
+                Assistant grounding now excludes trashed recordings. */}
+            <p className="mt-0.5 pl-6 text-xs text-muted-foreground/80">{TRASH_LEGACY_GRAPH_CAVEAT}</p>
           </div>
         ) : (
           <div className={isFilterPending ? 'opacity-70 pointer-events-none transition-opacity' : 'transition-opacity'}>

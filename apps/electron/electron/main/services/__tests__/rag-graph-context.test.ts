@@ -27,6 +27,9 @@ const kgMock = {
   neighborhoodFacts: vi.fn(),
   queryListNodes: vi.fn(),
   resolveEntityToNodeId: vi.fn(),
+  // ARF-2 — buildGraphContext now computes the grounding exclusion set once
+  // per query and threads it into every neighborhoodFacts call.
+  getGroundingExclusionSet: vi.fn(() => new Set<string>()),
 }
 vi.mock('../knowledge-graph-service', () => kgMock)
 
@@ -131,6 +134,7 @@ beforeEach(() => {
   kgMock.queryListNodes.mockReturnValue([])
   kgMock.resolveEntityToNodeId.mockImplementation((id: string) => id)
   kgMock.neighborhoodFacts.mockReturnValue('')
+  kgMock.getGroundingExclusionSet.mockReturnValue(new Set<string>())
   mockBrainChat.mockResolvedValue('AI Response')
 })
 
@@ -141,7 +145,7 @@ describe('buildGraphContext — entity detection tiers', () => {
 
     const parts = await buildGraphContext('what did Alice decide?')
     expect(parts).toContain('FACT-ALICE')
-    expect(kgMock.neighborhoodFacts).toHaveBeenCalledWith('p1', 1)
+    expect(kgMock.neighborhoodFacts).toHaveBeenCalledWith('p1', 1, 20, expect.any(Set))
   })
 
   it('Tier 2 (accent-fold): matches "Yaravi" against a node labelled "Yaraví"', async () => {
@@ -330,9 +334,9 @@ describe('buildGraphContext — meeting scope resolves app id → graph node id'
     const parts = await buildGraphContext('summarize this', 'meeting-123')
     expect(parts).toContain('FACT-MEETING')
     expect(kgMock.resolveEntityToNodeId).toHaveBeenCalledWith('meeting-123')
-    expect(kgMock.neighborhoodFacts).toHaveBeenCalledWith('node-m1', 1)
+    expect(kgMock.neighborhoodFacts).toHaveBeenCalledWith('node-m1', 1, 20, expect.any(Set))
     // The raw app meeting id must never reach the facts call.
-    expect(kgMock.neighborhoodFacts).not.toHaveBeenCalledWith('meeting-123', 1)
+    expect(kgMock.neighborhoodFacts).not.toHaveBeenCalledWith('meeting-123', 1, 20, expect.any(Set))
   })
 
   it('skips cleanly when the meeting has no graph node', async () => {
