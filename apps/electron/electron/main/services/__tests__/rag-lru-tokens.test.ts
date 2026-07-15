@@ -258,18 +258,19 @@ describe('RAGService cancelRequest', () => {
     // Start the chat but don't await - it will block on the chat-llm generate call
     const chatPromise = rag.chat('active-session', 'test message')
 
-    // Yield to microtask queue so the RAG service reaches the generate call
-    await new Promise(resolve => setTimeout(resolve, 10))
+    try {
+      // Poll until the RAG service reaches the generate call — the abort controller
+      // is registered before generate is invoked, so this proves the session is active.
+      await vi.waitFor(() => expect(mockChatLLMService.generate).toHaveBeenCalled(), { timeout: 15000, interval: 25 })
 
-    // Cancel - the controller should have been set before generate was called
-    const cancelled = rag.cancelRequest('active-session')
-    expect(cancelled).toBe(true)
-
-    // Unblock the mock so the promise can settle
-    resolveChat('cancelled response')
-    await chatPromise
-
-    // Restore mock
-    mockChatLLMService.generate.mockResolvedValue('AI Response')
+      // Cancel - the controller should have been set before generate was called
+      const cancelled = rag.cancelRequest('active-session')
+      expect(cancelled).toBe(true)
+    } finally {
+      // Unblock the mock so the promise can settle, then restore it
+      resolveChat('cancelled response')
+      await chatPromise
+      mockChatLLMService.generate.mockResolvedValue('AI Response')
+    }
   })
 })
