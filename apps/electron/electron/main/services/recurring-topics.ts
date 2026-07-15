@@ -1,4 +1,5 @@
 import { queryAll } from './database'
+import { filterEligibleRecordingIds } from './recording-eligibility'
 
 export interface RecurringTopicRow {
   recording_id: string
@@ -88,5 +89,18 @@ export function getRecurringTopics(
     [`-${lookbackDays} days`]
   )
 
-  return aggregateRecurringTopics(rows, limit)
+  // ADV14 (merge-gate round 14) — the SQL above filters soft-deleted + personal
+  // but NOT the F16 value predicate (value-excluded / low-value / garbage).
+  // db:get-recurring-topics is a non-exempt discovery surface (Explore.tsx calls
+  // it on mount), so route every contributing recording_id through the shared
+  // fail-closed positive allowlist BEFORE aggregation. Value-excluded topics can
+  // then neither contribute nor inflate counts, and can't displace eligible
+  // topics in the top-N slice. Fail-closed → return [] (leak nothing on a
+  // transient DB error). The deleted+personal SQL filter stays as
+  // defense-in-depth; the allowlist is the authoritative gate.
+  const { eligible, failClosed } = filterEligibleRecordingIds(rows.map((row) => row.recording_id))
+  if (failClosed) return []
+  const eligibleRows = rows.filter((row) => eligible.has(row.recording_id))
+
+  return aggregateRecurringTopics(eligibleRows, limit)
 }
