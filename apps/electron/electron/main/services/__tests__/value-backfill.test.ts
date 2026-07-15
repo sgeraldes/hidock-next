@@ -251,7 +251,7 @@ describe('value-backfill', () => {
     applyCaptureValueClassificationMock.mockReset()
     applyCaptureValueClassificationMock.mockImplementation((...args: unknown[]) => applySeam.actual!(...args))
     getProviderConfigFromSettingsMock.mockReset()
-    getProviderConfigFromSettingsMock.mockReturnValue({ provider: 'google', model: 'gemini-3.5-flash', apiKey: 'test-key' })
+    getProviderConfigFromSettingsMock.mockReturnValue({ provider: 'google', model: 'gemini-3.5-flash', apiKey: 'test-key' }) // pragma: allowlist secret
     mockConfig.transcription.valueClassificationMinConfidence = 0.6
     _resetValueBackfillForTests()
     // Fast, deterministic tests: no real waiting, small chunks so yield/chunk

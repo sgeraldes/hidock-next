@@ -534,7 +534,7 @@ describe('classifyCaptureValue (standalone re-classifier, real engine + mocked c
     wipeData()
     mockComplete.mockReset()
     mockGetProviderConfig.mockReset()
-    mockGetProviderConfig.mockReturnValue({ provider: 'google', model: 'gemini-3.5-flash', apiKey: 'test-key' })
+    mockGetProviderConfig.mockReturnValue({ provider: 'google', model: 'gemini-3.5-flash', apiKey: 'test-key' }) // pragma: allowlist secret
     mockConfig.transcription.valueClassificationMinConfidence = 0.6
   })
 
@@ -912,7 +912,7 @@ describe('classifyCaptureValueRaw (no persistence — AR-3 seam split)', () => {
     wipeData()
     mockComplete.mockReset()
     mockGetProviderConfig.mockReset()
-    mockGetProviderConfig.mockReturnValue({ provider: 'google', model: 'gemini-3.5-flash', apiKey: 'test-key' })
+    mockGetProviderConfig.mockReturnValue({ provider: 'google', model: 'gemini-3.5-flash', apiKey: 'test-key' }) // pragma: allowlist secret
     mockConfig.transcription.valueClassificationMinConfidence = 0.6
   })
 
