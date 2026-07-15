@@ -880,7 +880,7 @@ export function Projects() {
                             <div className="min-w-0 space-y-1">
                               <h3 className="text-sm font-bold">No items yet</h3>
                               <p className="text-sm text-muted-foreground">
-                                Add knowledge or link meetings to start building this project's hub.
+                                Add knowledge or link meetings to start building this project&apos;s hub.
                               </p>
                             </div>
                           </div>
@@ -1316,7 +1316,7 @@ export function Projects() {
                       <h3 className="font-bold text-sm uppercase tracking-wider">AI Project Insight</h3>
                     </div>
                     <p className="text-sm leading-relaxed text-muted-foreground italic">
-                      AI-generated insights for "{activeProject.name}" will appear here once knowledge items are linked to this project.
+                      AI-generated insights for &quot;{activeProject.name}&quot; will appear here once knowledge items are linked to this project.
                     </p>
                     <div className="mt-4 flex gap-2">
                       <Button

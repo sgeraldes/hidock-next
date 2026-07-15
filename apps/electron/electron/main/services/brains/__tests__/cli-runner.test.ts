@@ -449,11 +449,16 @@ describe('Windows executable resolution (HIGH-1)', () => {
   }, 20000)
 
   itWin('runCli resolves spawnError when a bare name is not found on PATH', async () => {
-    const res = await runCli('definitely-not-a-real-binary-xyz', [], {
-      timeoutMs: 5000,
-      env: { PATH: mkdtempSync(join(tmpdir(), 'empty-')) },
-    })
-    expect(res.spawnError).toBe(true)
+    const emptyDir = mkdtempSync(join(tmpdir(), 'empty-'))
+    try {
+      const res = await runCli('definitely-not-a-real-binary-xyz', [], {
+        timeoutMs: 5000,
+        env: { PATH: emptyDir },
+      })
+      expect(res.spawnError).toBe(true)
+    } finally {
+      rmSync(emptyDir, { recursive: true, force: true })
+    }
   })
 })
 

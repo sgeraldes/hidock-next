@@ -236,7 +236,9 @@ describe('F5 PixelRAG — image captures as RAG sources', () => {
 
   const fixtures: { healthyIds: string[]; poisonIds: string[] } = { healthyIds: [], poisonIds: [] }
 
-  it('poison captures cool down after a failed attempt — older healthy captures still progress, vision bounded', async () => {
+  it(
+    'poison captures cool down after a failed attempt — older healthy captures still progress, vision bounded',
+    async () => {
     // Healthy OLDER captures: imported with no key → no vision, no text, no state.
     h.geminiKey = ''
     for (const tag of ['h1', 'h2']) {
@@ -365,7 +367,13 @@ describe('F5 PixelRAG — image captures as RAG sources', () => {
     expect(h.visionCalls).toBe(0)
   })
 
-  it('SQL-side eligibility: 500+ terminal rows ahead cannot hide an older eligible capture', async () => {
+  // 520 sequential INSERTs blow the default 5s testTimeout on starved CI runners
+  // (failed the beta push run of #66 at exactly this line) — same runner-speed
+  // class as the #61/#66 margins, so give the test the established 20s budget.
+  it(
+    'SQL-side eligibility: 500+ terminal rows ahead cannot hide an older eligible capture',
+    { timeout: 20000 },
+    async () => {
     // 520 NEWER terminal rows — more than any scan window. Inserted directly
     // (they need no files: SQL eligibility must exclude them before retrieval).
     const terminalMeta = JSON.stringify({

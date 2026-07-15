@@ -299,8 +299,10 @@ describe('HiDockDeviceService - auto-connect contract (real service)', () => {
     const service = new HiDockDeviceService()
     const serviceAny = service as any
 
-    // Wait for config to load (config says autoConnect: true)
-    await new Promise(resolve => setTimeout(resolve, 50))
+    // Wait for config to load (config says autoConnect: true); the service flips
+    // configLoaded once loadAutoConnectConfig() settles, so poll that instead of
+    // racing the async load with a fixed sleep.
+    await vi.waitUntil(() => serviceAny.configLoaded === true, { timeout: 15000, interval: 25 })
 
     service.disableAutoConnect()
 
