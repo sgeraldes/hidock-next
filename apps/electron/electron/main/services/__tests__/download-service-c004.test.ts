@@ -86,10 +86,10 @@ describe('DownloadService C-004 Fixes', () => {
   })
 
   describe('C-004-DS-001: cancelDownload uses cancelled status', () => {
-    it('should set status to cancelled (not failed) on user cancellation', () => {
+    it('should set status to cancelled (not failed) on user cancellation', async () => {
       service.queueDownloads([{ filename: 'cancel-test.hda', size: 5000 }])
 
-      const result = service.cancelDownload('cancel-test.hda')
+      const result = await service.cancelDownload('cancel-test.hda')
       expect(result.success).toBe(true)
 
       const state = service.getState()
@@ -98,18 +98,18 @@ describe('DownloadService C-004 Fixes', () => {
       expect(item?.error).toBe('Cancelled by user')
     })
 
-    it('should return error when file is not in queue', () => {
-      const result = service.cancelDownload('nonexistent.hda')
+    it('should return error when file is not in queue', async () => {
+      const result = await service.cancelDownload('nonexistent.hda')
       expect(result.success).toBe(false)
       expect(result.error).toContain('not found')
     })
 
-    it('should reject cancellation of already completed items', () => {
+    it('should reject cancellation of already completed items', async () => {
       service.queueDownloads([{ filename: 'done.hda', size: 1000 }])
       // Mark as failed first
       service.markFailed('done.hda', 'test')
 
-      const result = service.cancelDownload('done.hda')
+      const result = await service.cancelDownload('done.hda')
       expect(result.success).toBe(false)
       expect(result.error).toContain('Cannot cancel')
     })

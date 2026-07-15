@@ -150,12 +150,12 @@ describe('DownloadService B-007 Fixes', () => {
   })
 
   describe('HIGH-3 (supersedes B-DWN-006): user cancel is a durable suppression marker', () => {
-    it('marks as cancelled with origin "user" and RETAINS the row (no 5s cleanup)', () => {
+    it('marks as cancelled with origin "user" and RETAINS the row (no 5s cleanup)', async () => {
       vi.useFakeTimers()
 
       service.queueDownloads([{ filename: 'test.wav', size: 1024 }])
 
-      const result = service.cancelDownload('test.wav')
+      const result = await service.cancelDownload('test.wav')
       expect(result.success).toBe(true)
 
       // C-004: Item should be marked as cancelled (not failed) immediately

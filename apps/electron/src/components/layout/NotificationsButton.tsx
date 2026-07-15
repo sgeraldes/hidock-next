@@ -16,12 +16,14 @@
  */
 
 import { useMemo, useState } from 'react'
-import { Bell, Download, AlertCircle, RefreshCw, ArrowRight } from 'lucide-react'
+import { Bell, Download, AlertCircle, RefreshCw, ArrowRight, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useDownloadQueue } from '@/store/useAppStore'
+import type { DownloadQueueEntry } from '@/store/useAppStore'
 import { useTranscriptionStats, useTranscriptionStore } from '@/store/features/useTranscriptionStore'
 import type { TranscriptionItem, TranscriptionStatus } from '@/store/features/useTranscriptionStore'
 import { useUIStore } from '@/store/ui/useUIStore'
+import { useOperations } from '@/hooks/useOperations'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 
 /** Strip the recording extension for a cleaner display name (keeps the date stamp). */
@@ -41,17 +43,32 @@ function statusRank(s: TranscriptionStatus): number {
   return s === 'processing' ? 0 : s === 'pending' ? 1 : s === 'failed' ? 2 : 3
 }
 
+/** Human-readable status line for a download row. */
+function downloadStatusLabel(dl: DownloadQueueEntry): string {
+  switch (dl.status) {
+    case 'pending':
+      return 'Queued'
+    case 'cancelling':
+      return 'Cancelling…'
+    case 'cancelled':
+      return 'Cancelled'
+    default:
+      return `Downloading… ${Math.round(dl.progress)}%`
+  }
+}
+
+/** A download the user can still cancel (queued or actively transferring). */
+function isCancelableDownload(dl: DownloadQueueEntry): boolean {
+  return dl.status === 'pending' || dl.status === 'downloading'
+}
+
 export function NotificationsButton() {
   const downloadQueue = useDownloadQueue()
   const txStats = useTranscriptionStats()
   const txQueue = useTranscriptionStore((s) => s.queue)
   const openOperationsOverlay = useUIStore((s) => s.openOperationsOverlay)
+  const { cancelDownload, cancelAllDownloads } = useOperations()
   const [open, setOpen] = useState(false)
-
-  const active = txStats.processing + txStats.pending + downloadQueue.size
-  const errors = txStats.failed
-  const total = active + errors
-  const hasActivity = total > 0
 
   // Derive the popover list from the same Maps that feed the badge. Computed in a
   // memo keyed on the Map refs so we don't hand Zustand a fresh array selector.
@@ -63,6 +80,20 @@ export function NotificationsButton() {
     [txQueue]
   )
   const downloads = useMemo(() => Array.from(downloadQueue.values()), [downloadQueue])
+  // Only pending/downloading/cancelling count as "in progress"; a briefly-shown
+  // 'cancelled' row is winding down, not active.
+  const activeDownloadCount = useMemo(
+    () => downloads.filter((d) => d.status !== 'cancelled').length,
+    [downloads]
+  )
+  const canCancelAllDownloads = useMemo(() => downloads.some(isCancelableDownload), [downloads])
+
+  const active = txStats.processing + txStats.pending + activeDownloadCount
+  const errors = txStats.failed
+  const total = active + errors
+  // Keep the popover populated while a cancelled row flashes, even if the badge count
+  // has already dropped to zero.
+  const hasActivity = total > 0 || downloads.length > 0
 
   const viewAll = () => {
     setOpen(false)
@@ -75,7 +106,7 @@ export function NotificationsButton() {
         <button
           type="button"
           aria-label={
-            hasActivity
+            active > 0 || errors > 0
               ? `Notifications: ${active} operation${active === 1 ? '' : 's'} in progress${errors ? `, ${errors} failed` : ''}`
               : 'Notifications'
           }
@@ -84,7 +115,7 @@ export function NotificationsButton() {
           className="titlebar-no-drag relative flex h-7 w-7 items-center justify-center rounded-md text-slate-300 transition-colors hover:bg-slate-700 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 data-[state=open]:bg-slate-700 data-[state=open]:text-white"
         >
           <Bell className={cn('h-4 w-4', active > 0 && 'animate-pulse motion-reduce:animate-none')} />
-          {hasActivity && (
+          {total > 0 && (
             <span
               aria-hidden="true"
               className={cn(
@@ -101,7 +132,7 @@ export function NotificationsButton() {
       <PopoverContent align="end" className="w-80 p-0" aria-label="Notifications">
         <div className="flex items-center justify-between border-b px-3 py-2">
           <h2 className="text-sm font-semibold">Notifications</h2>
-          {hasActivity && (
+          {total > 0 && (
             <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
               {total} active
             </span>
@@ -131,25 +162,55 @@ export function NotificationsButton() {
               ))}
               {downloads.map((dl) => (
                 <li key={`dl-${dl.filename}`} className="flex items-center gap-2.5 rounded-md px-2 py-1.5">
-                  <Download className="h-4 w-4 shrink-0 text-emerald-500" />
+                  {dl.status === 'cancelling' ? (
+                    <RefreshCw className="h-4 w-4 shrink-0 animate-spin text-amber-500 motion-reduce:animate-none" />
+                  ) : (
+                    <Download
+                      className={cn(
+                        'h-4 w-4 shrink-0',
+                        dl.status === 'cancelled' ? 'text-slate-400' : 'text-emerald-500'
+                      )}
+                    />
+                  )}
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm text-foreground">{displayName(dl.filename)}</div>
-                    <div className="truncate text-[11px] text-muted-foreground">
-                      Downloading… {Math.round(dl.progress)}%
-                    </div>
+                    <div className="truncate text-[11px] text-muted-foreground">{downloadStatusLabel(dl)}</div>
                   </div>
+                  {(isCancelableDownload(dl) || dl.status === 'cancelling') && (
+                    <button
+                      type="button"
+                      onClick={() => cancelDownload(dl.filename)}
+                      disabled={dl.status === 'cancelling'}
+                      aria-label={`Cancel download ${displayName(dl.filename)}`}
+                      title="Cancel download"
+                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-red-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  )}
                 </li>
               ))}
             </ul>
           )}
         </div>
 
-        {hasActivity && (
-          <div className="border-t p-1.5">
+        {(hasActivity || canCancelAllDownloads) && (
+          <div className="flex items-center gap-1.5 border-t p-1.5">
+            {canCancelAllDownloads && (
+              <button
+                type="button"
+                onClick={() => cancelAllDownloads()}
+                aria-label="Cancel all downloads"
+                className="flex items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-red-600 transition-colors hover:bg-red-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400 dark:text-red-400"
+              >
+                <X className="h-3.5 w-3.5" />
+                Cancel all downloads
+              </button>
+            )}
             <button
               type="button"
               onClick={viewAll}
-              className="flex w-full items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+              className="ml-auto flex items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
             >
               View all in Operations
               <ArrowRight className="h-3.5 w-3.5" />

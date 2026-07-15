@@ -738,7 +738,9 @@ export interface ElectronAPI {
         filename: string
         fileSize: number
         progress: number
-        status: 'pending' | 'downloading' | 'completed' | 'failed' | 'cancelled'
+        // 'cancelling' is a transient state emitted while an in-flight USB transfer is
+        // being aborted; it settles to 'cancelled'. See DownloadService (Phase-1 cancel).
+        status: 'pending' | 'downloading' | 'cancelling' | 'completed' | 'failed' | 'cancelled'
         error?: string
       }>
       session: {
