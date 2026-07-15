@@ -23,6 +23,9 @@ const mockExecFile = vi.fn()
 const mockAddToQueue = vi.fn()
 // INC-2 — controllable so a test can make transcribeRecording bail 'cancelled'.
 const mockIsRecordingProcessable = vi.fn((..._args: any[]) => true)
+// INC3/INC4 (round-5) — controllable vector store + queue-progress spy.
+const mockGetVectorStore = vi.fn((..._args: any[]) => null as any)
+const mockUpdateQueueProgress = vi.fn()
 
 // spawnStreaming uses `spawn`, not `execFile`. We create a helper that manufactures
 // a fake ChildProcess whose stdout/stderr are minimal EventEmitters so spawnStreaming
@@ -86,7 +89,7 @@ vi.mock('../database', () => ({
   insertTranscript: (...args: any[]) => mockInsertTranscript(...args),
   getQueueItems: (...args: any[]) => mockGetQueueItems(...args),
   updateQueueItem: (...args: any[]) => mockUpdateQueueItem(...args),
-  updateQueueProgress: vi.fn(),
+  updateQueueProgress: (...args: any[]) => mockUpdateQueueProgress(...args),
   getMeetingById: vi.fn(),
   findCandidateMeetingsForRecording: vi.fn(() => []),
   addRecordingMeetingCandidate: vi.fn(),
@@ -168,7 +171,7 @@ vi.mock('fs', async (importOriginal) => {
 
 // Mock vector store
 vi.mock('../vector-store', () => ({
-  getVectorStore: vi.fn(() => null)
+  getVectorStore: (...args: any[]) => mockGetVectorStore(...args)
 }))
 
 vi.mock('child_process', () => ({
@@ -180,9 +183,10 @@ vi.mock('child_process', () => ({
 describe('Transcription Service', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    // clearAllMocks keeps mockReturnValue impls, so re-assert the eligibility
-    // default so an INC-2 test that flips it to false cannot leak into others.
+    // clearAllMocks keeps mockReturnValue impls, so re-assert the defaults so an
+    // INC-2/INC3 test that flips them cannot leak into others.
     mockIsRecordingProcessable.mockReturnValue(true)
+    mockGetVectorStore.mockReturnValue(null as any)
     mockConfig = {
       transcription: {
         provider: 'gemini',
@@ -437,6 +441,51 @@ describe('Transcription Service', () => {
       expect(sent).toContain('transcription:cancelled')
       expect(sent).not.toContain('transcription:completed')
       expect(mockInsertTranscript).not.toHaveBeenCalled()
+    })
+
+    it('INC3/INC4 (round-5) — deletion during the embedding await → cancelled, no false 100% progress', async () => {
+      mockConfig.transcription.provider = 'local-asr'
+      mockConfig.transcription.geminiApiKey = ''
+      // Eligible through the whole pipeline (no gate trips → processabilitySkip-
+      // Logged stays false). Then, as if the recording were deleted DURING
+      // indexTranscript's embedding await, getVectorStore flips eligibility to
+      // false — AFTER the vector block's own stillProcessable() pre-check. Only
+      // the round-5 FINAL point-read catches this.
+      mockIsRecordingProcessable.mockReturnValue(true)
+      mockGetVectorStore.mockImplementation(() => {
+        mockIsRecordingProcessable.mockReturnValue(false)
+        return null as any
+      })
+      mockGetQueueItems.mockImplementation((status?: string) =>
+        status === 'pending'
+          ? [{ id: 'queue-emb', recording_id: 'rec-emb', filename: 'e.wav', status: 'pending', attempts: 0 }]
+          : []
+      )
+      mockGetRecordingById.mockReturnValue({
+        id: 'rec-emb',
+        filename: 'e.wav',
+        file_path: 'G:\\Recordings\\e.wav',
+        status: 'complete'
+      })
+      mockExecFile.mockImplementation(() =>
+        makeFakeChildProcess(
+          JSON.stringify({ text: 'Speaker 1: hola.', language: 'es', duration_seconds: 5, processing_time_seconds: 1 })
+        )
+      )
+
+      const { startTranscriptionProcessor, stopTranscriptionProcessor } = await import('../transcription')
+      startTranscriptionProcessor()
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      stopTranscriptionProcessor()
+
+      // Transcript persisted (eligible until the embedding stage)…
+      expect(mockInsertTranscript).toHaveBeenCalled()
+      const queueCalls = mockUpdateQueueItem.mock.calls
+      // INC3 — the final point-read caught the late deletion → cancelled tombstone kept.
+      expect(queueCalls.some((c: any[]) => c[0] === 'queue-emb' && c[1] === 'cancelled')).toBe(true)
+      expect(queueCalls.some((c: any[]) => c[0] === 'queue-emb' && c[1] === 'completed')).toBe(false)
+      // INC4 — no brief false 100% progress for cancelled work.
+      expect(mockUpdateQueueProgress.mock.calls.some((c: any[]) => c[0] === 'queue-emb' && c[1] === 100)).toBe(false)
     })
   })
 

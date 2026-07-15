@@ -2038,17 +2038,22 @@ Meeting ${i + 1}: "${m.subject}"
     console.warn('Failed to index transcript into vector store:', e)
   }
 
-  progressCallback?.('complete', 100) // spec-014: progress reporting
-  // RE4-4 / C (round-4) — if ANY post-persist gate tripped (the recording became
-  // ineligible mid-run: timeline/org/self-id/transcript-ready/wiki/vector all
-  // skipped), report 'cancelled' so NEITHER caller (processQueue,
-  // transcribeManually) claims completion or overwrites a soft-delete's
-  // 'cancelled' tombstone. processabilitySkipLogged is set the first time
-  // stillProcessable() returned false.
-  if (processabilitySkipLogged) {
+  // RE4-4 / C (round-4) + INC3/INC4 (round-5) — report 'cancelled' if ANY
+  // post-persist gate tripped mid-run (timeline/org/self-id/transcript-ready/
+  // wiki/vector), so NEITHER caller (processQueue, transcribeManually) claims
+  // completion or overwrites a soft-delete's 'cancelled' tombstone.
+  // INC3 — the vector block's shouldPersist gate calls isRecordingProcessable
+  // directly and never sets processabilitySkipLogged, so a deletion landing
+  // during the embedding await would slip past the flag. Do a REAL final
+  // point-read here (not just the flag) to catch it.
+  // INC4 — the 'complete' 100% progress event fires ONLY on the completed
+  // branch, AFTER the cancellation check, so a cancelled run never emits a
+  // brief false 100%.
+  if (processabilitySkipLogged || !isRecordingProcessable(recordingId)) {
     console.log(`Transcription of ${recording.filename} completed the transcript but the recording became ineligible mid-run — reporting cancelled`)
     return { status: 'cancelled' }
   }
+  progressCallback?.('complete', 100) // spec-014: progress reporting (completed only)
   console.log(`Transcription complete: ${recording.filename} (${wordCount} words)`)
   return { status: 'completed' }
 }
