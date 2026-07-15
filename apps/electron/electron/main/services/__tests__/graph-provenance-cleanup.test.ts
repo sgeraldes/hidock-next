@@ -59,6 +59,9 @@ import {
   queryOne as dbQueryOne,
   queryAll as dbQueryAll,
   runInTransaction,
+  deleteRecordingCascade,
+  getRecordingById,
+  setGraphProvenanceCleanup,
 } from '../database'
 import {
   ingestFromDbTranscripts,
@@ -468,5 +471,70 @@ describe('removeRecordingProvenanceCore: transaction-neutral contract (AR2-2)', 
     expect(res.edgesRemoved).toBe(1)
     expect(res.meetingNodesRemoved).toBe(1)
     expect(store.getNode(meeting)).toBeUndefined()
+  })
+})
+
+// =============================================================================
+// spec-006/F17 T6 (D1 + Design Review point 1/2) — deleteRecordingCascade's
+// hard branch wired to the REAL removeRecordingProvenanceCore (not a stub),
+// proving the seam's whole point: one purge, one commit, cascade rows AND
+// graph residue removed atomically. Every other T6 seam test (fail-closed,
+// N2 crash-rollback, journal shape, escape hatch) uses a lightweight stub in
+// recording-deletion.test.ts — this is the one place that proves the REAL
+// function composes correctly inside deleteRecordingCascade's transaction.
+// =============================================================================
+
+describe('deleteRecordingCascade — hard purge wired to the REAL removeRecordingProvenanceCore', () => {
+  afterEach(() => {
+    setGraphProvenanceCleanup(null)
+  })
+
+  it('removes cascade rows AND graph provenance (edges/edge-sources/ingest markers) in the SAME purge', async () => {
+    seedRecording('rec-hard')
+    seedTranscript('tx-hard', 'rec-hard', 'Alice discussed the roadmap.')
+    const ingestResult = await ingestFromDbTranscripts()
+    expect(ingestResult.ingested).toBe(1)
+
+    const sourceRowsBefore = dbQueryAll('SELECT * FROM graph_edge_sources WHERE recording_id = ?', ['rec-hard'])
+    expect(sourceRowsBefore.length).toBeGreaterThan(0)
+    expect(ingestMarker('tx-hard')).toBeDefined()
+
+    setGraphProvenanceCleanup((id, opts) => removeRecordingProvenanceCore(id, opts))
+    const res = deleteRecordingCascade('rec-hard', { hard: true })
+
+    expect(res?.mode).toBe('hard')
+    expect(res?.removed.edgesRemoved).toBeGreaterThan(0)
+    // Cascade rows gone.
+    expect(getRecordingById('rec-hard')).toBeUndefined()
+    expect(dbQueryAll('SELECT id FROM transcripts WHERE recording_id = ?', ['rec-hard'])).toHaveLength(0)
+    // Graph residue gone too — committed together, not a separate step.
+    expect(dbQueryAll('SELECT * FROM graph_edge_sources WHERE recording_id = ?', ['rec-hard'])).toHaveLength(0)
+    expect(ingestMarker('tx-hard')).toBeUndefined()
+  })
+
+  it('the dry-run estimate (impact dialog) matches the real purge\'s actual counts (AR2-5)', async () => {
+    seedRecording('rec-est')
+    seedTranscript('tx-est', 'rec-est', 'Alice discussed the roadmap.')
+    await ingestFromDbTranscripts()
+
+    const dry = removeRecordingFromGraph('rec-est', { dryRun: true })
+    expect(dry.ok).toBe(true)
+
+    setGraphProvenanceCleanup((id, opts) => removeRecordingProvenanceCore(id, opts))
+    const res = deleteRecordingCascade('rec-est', { hard: true })
+
+    expect(res?.removed.edgesRemoved).toBe(dry.edgesRemoved)
+    expect(res?.removed.meetingNodesRemoved).toBe(dry.meetingNodesRemoved)
+    expect(res?.removed.orphanNodesRemoved).toBe(dry.orphanNodesRemoved)
+    expect(res?.removed.markersRemoved).toBe(dry.markersRemoved)
+  })
+
+  it('a recording with NO graph residue still purges cleanly through the real seam (nothing to clean up)', async () => {
+    seedRecording('rec-clean')
+    setGraphProvenanceCleanup((id, opts) => removeRecordingProvenanceCore(id, opts))
+    const res = deleteRecordingCascade('rec-clean', { hard: true })
+    expect(res?.mode).toBe('hard')
+    expect(res?.removed.edgesRemoved).toBe(0)
+    expect(getRecordingById('rec-clean')).toBeUndefined()
   })
 })
