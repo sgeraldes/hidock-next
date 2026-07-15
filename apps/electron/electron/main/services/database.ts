@@ -3272,6 +3272,36 @@ export function getExcludedRecordingIds(): Set<string> {
   return excluded
 }
 
+/**
+ * INC-3 (round-3) — failed/incomplete-analysis transcripts eligible for the
+ * boot reanalysis backfill, with EVERY exclusion baked into the query so the
+ * LIMIT counts only ELIGIBLE rows. Previously the caller applied LIMIT first
+ * then skipped value-excluded rows in JS, so the newest N garbage rows filled
+ * the slot every boot and permanently starved eligible failed transcripts.
+ * Excludes soft-deleted + personal + value-excluded (garbage/low-value with no
+ * keep capture). Fails CLOSED by construction: a DB error throws to the caller,
+ * which aborts the run (zero provider calls) rather than defaulting open.
+ */
+export function getFailedTranscriptsForReanalysis(
+  limit: number
+): Array<{ recording_id: string; full_text: string }> {
+  return queryAll<{ recording_id: string; full_text: string }>(
+    `SELECT t.recording_id AS recording_id, t.full_text AS full_text
+       FROM transcripts t JOIN recordings r ON r.id = t.recording_id
+      WHERE (t.summary IS NULL OR t.summary = 'Analysis failed' OR t.title_suggestion IS NULL)
+        AND t.full_text IS NOT NULL AND TRIM(t.full_text) != ''
+        AND r.deleted_at IS NULL AND COALESCE(r.personal, 0) = 0
+        AND NOT EXISTS (
+          SELECT 1 FROM knowledge_captures kc
+           WHERE kc.source_recording_id = t.recording_id
+             AND kc.deleted_at IS NULL
+             AND ${VALUE_EXCLUSION_PREDICATE})
+      ORDER BY t.created_at DESC
+      LIMIT ?`,
+    [...VALUE_EXCLUDED_RATINGS, ...VALUE_KEEP_RATINGS, limit]
+  )
+}
+
 /** All knowledge_capture ids owned by a recording (via source link or migration). */
 function getCaptureIdsForRecording(recordingId: string): string[] {
   const rec = queryOne<{ migrated_to_capture_id?: string | null }>(

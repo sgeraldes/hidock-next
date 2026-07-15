@@ -41,7 +41,10 @@ vi.mock('../database', () => ({
     mockAssignSpeaker(recordingId, label, opts),
   resolveMention: (recordingId: string, name: string, contactId: string, method: string, confidence: number) =>
     mockResolveMention(recordingId, name, contactId, method, confidence),
-  getQueueItems: vi.fn(() => [])
+  getQueueItems: vi.fn(() => []),
+  // P2 — used by the boot backfill; the direct runSelfIdentificationForRecording
+  // tests pass shouldPersist explicitly so this default is unused there.
+  isRecordingProcessable: () => true
 }))
 
 vi.mock('../entity-resolver', () => ({
@@ -381,6 +384,27 @@ describe('runSelfIdentificationForRecording — binding', () => {
       'self-identification',
       SELF_ID_CONFIDENCE
     )
+  })
+
+  it('P2 (round-3) — shouldPersist()=false persists no bindings/markers and sends nothing to the LLM', async () => {
+    currentSpeakers = JSON.stringify([
+      { speaker: 'Speaker 7', start: 0, end: 4, text: 'Yo también Seba, eh, Santiago de la Colina.' }
+    ])
+    const gatedLlm = vi.fn(async () => JSON.stringify([{ speaker: 'Speaker 7', name: 'Santiago de la Colina' }]))
+    mockResolveContact.mockReturnValue({ id: null, confidence: 0, method: 'none' })
+
+    const result = await runSelfIdentificationForRecording('rec-inelig', {
+      llm: gatedLlm,
+      shouldPersist: () => false
+    })
+
+    expect(result.skipped).toBe(true)
+    expect(result.bound).toBe(0)
+    // Pre-LLM gate — the turns are never sent to the provider…
+    expect(gatedLlm).not.toHaveBeenCalled()
+    // …and no contact/binding/mention is written.
+    expect(mockAssignSpeaker).not.toHaveBeenCalled()
+    expect(mockResolveMention).not.toHaveBeenCalled()
   })
 
   it('links an existing contact when the resolver is confident (no duplicate)', async () => {

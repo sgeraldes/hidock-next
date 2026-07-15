@@ -3,7 +3,7 @@
  * Simple in-memory vector store with SQLite persistence for meeting transcript embeddings
  */
 
-import { getDatabase, getExcludedRecordingIds } from './database'
+import { getDatabase, getExcludedRecordingIds, isRecordingProcessable } from './database'
 import { getEmbeddingsService } from './embeddings'
 
 interface VectorDocument {
@@ -429,11 +429,19 @@ class VectorStore {
     // assistant never surfaces private content. Filtering at query time (rather
     // than deleting chunks) makes marking a recording personal instantly
     // effective and fully reversible without re-indexing.
+    // P1 (round-3, FAIL CLOSED) — if the exclusion lookup THROWS, we cannot
+    // prove any recording eligible, so drop EVERY recording-backed result
+    // rather than defaulting to an empty set (fail-open would surface private
+    // content on a transient DB error). Non-recording docs (no recordingId)
+    // are unaffected.
     let excluded: Set<string>
+    let exclusionUnavailable = false
     try {
       excluded = getExcludedRecordingIds()
-    } catch {
+    } catch (e) {
+      console.error('[VectorStore] exclusion lookup FAILED — failing closed (no recording-backed results):', e)
       excluded = new Set()
+      exclusionUnavailable = true
     }
 
     // Calculate similarity scores
@@ -441,7 +449,7 @@ class VectorStore {
 
     for (const doc of this.documents.values()) {
       const recId = doc.metadata.recordingId
-      if (recId && excluded.has(recId)) continue
+      if (recId && (exclusionUnavailable || excluded.has(recId))) continue
       const score = cosineSimilarity(queryEmbedding, doc.embedding)
       results.push({ document: doc, score })
     }
@@ -483,7 +491,13 @@ class VectorStore {
         const count = await this.indexTranscript(row.full_text, {
           recordingId: row.recording_id,
           timestamp: row.date_recorded,
-          subject: row.filename
+          subject: row.filename,
+          // P2 (round-3) — the SELECT above snapshotted eligibility, but a hard
+          // purge / trash / mark-personal can land DURING indexTranscript's
+          // embeddings await. Re-check adjacent to the write (inside
+          // indexTranscript, after embeddings, before the INSERT loop) so this
+          // boot backfill never re-indexes a recording made ineligible mid-run.
+          shouldPersist: () => isRecordingProcessable(row.recording_id)
         })
         if (count > 0) indexed++
         else skipped++

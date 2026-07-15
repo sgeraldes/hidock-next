@@ -202,4 +202,42 @@ describe('RE-2 — reanalyzeFailedTranscripts excludes trashed/personal/value-ex
     expect(summaryOf('keep')).toBe('Healed summary.')
     expect(summaryOf('drop')).toBeNull()
   })
+
+  it('INC-3 — an eligible failed transcript behind N NEWER garbage rows still gets reanalyzed', async () => {
+    // 3 value-excluded (garbage) failed transcripts, all NEWER than the eligible
+    // one. Under the old LIMIT-before-exclusion bug, the newest N garbage rows
+    // filled the slot and the eligible transcript starved forever.
+    for (const g of ['g1', 'g2', 'g3']) {
+      seedRecording(g)
+      seedFailedTranscript(`t-${g}`, g)
+      dbRun("UPDATE transcripts SET created_at = '2026-06-10T00:00:00Z' WHERE recording_id = ?", [g])
+      dbRun(
+        'INSERT INTO knowledge_captures (id, title, captured_at, source_recording_id, quality_rating) VALUES (?, ?, ?, ?, ?)',
+        [`c-${g}`, 'C', '2026-06-01', g, 'garbage']
+      )
+    }
+    seedRecording('eligible')
+    seedFailedTranscript('t-eligible', 'eligible')
+    dbRun("UPDATE transcripts SET created_at = '2026-06-01T00:00:00Z' WHERE recording_id = ?", ['eligible'])
+
+    // Tight limit — the exclusion is baked into the query, so LIMIT counts only
+    // eligible rows and the eligible transcript is reached.
+    const healed = await reanalyzeFailedTranscripts(2)
+
+    expect(healed).toBe(1)
+    expect(mockGenerateContent).toHaveBeenCalledTimes(1)
+    expect(summaryOf('eligible')).toBe('Healed summary.')
+    expect(summaryOf('g1')).toBeNull()
+  })
+
+  it('P1 — aborts the run (zero provider calls) when the eligibility query fails', async () => {
+    seedRecording('ok')
+    seedFailedTranscript('t-ok', 'ok')
+    dbRun('DROP TABLE transcripts') // force getFailedTranscriptsForReanalysis to throw
+
+    const healed = await reanalyzeFailedTranscripts(10)
+
+    expect(healed).toBe(0)
+    expect(mockGenerateContent).not.toHaveBeenCalled() // fail CLOSED — no upload
+  })
 })

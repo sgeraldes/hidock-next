@@ -112,7 +112,7 @@ import {
   isValueExcludedRecording,
   isRecordingProcessable,
   isRecordingGraphIngestable,
-  getValueExcludedRecordingIds,
+  getFailedTranscriptsForReanalysis,
   acquireTranscriptionLock,
   releaseTranscriptionLock,
   clearStaleTranscriptionLock,
@@ -545,19 +545,31 @@ async function processQueue(): Promise<void> {
           })
         }
 
+        let outcome: TranscribeOutcome
         try {
-          await transcribeRecording(item.recording_id, progressCallback, item.provider)
+          outcome = await transcribeRecording(item.recording_id, progressCallback, item.provider)
         } finally {
           clearInterval(progressTicker) // Always clean up the ticker
         }
 
-        updateQueueProgress(item.id, 100) // spec-014: mark complete
-        updateQueueItem(item.id, 'completed')
-        clearQueueHints(item.recording_id) // request satisfied — drop priority hints
-        notifyRenderer('transcription:completed', { queueItemId: item.id, recordingId: item.recording_id })
-        const { emitActivityLog: emitDone } = await import('./activity-log')
-        const recDone = getRecordingById(item.recording_id)
-        emitDone('success', 'Transcription complete', recDone?.filename ?? item.recording_id)
+        if (outcome.status === 'cancelled') {
+          // INC-2 — the recording was trashed / marked personal / hard-purged
+          // mid-run and NOTHING was persisted. Do NOT claim completion: that
+          // would overwrite the soft-delete's 'cancelled' tombstone with
+          // 'completed', jump progress to 100, and emit transcription:completed
+          // for content that does not exist. Leave it cancelled.
+          updateQueueItem(item.id, 'cancelled')
+          clearQueueHints(item.recording_id)
+          console.log(`[Transcription] ${item.recording_id} cancelled mid-run (ineligible) — queue item marked cancelled`)
+        } else {
+          updateQueueProgress(item.id, 100) // spec-014: mark complete
+          updateQueueItem(item.id, 'completed')
+          clearQueueHints(item.recording_id) // request satisfied — drop priority hints
+          notifyRenderer('transcription:completed', { queueItemId: item.id, recordingId: item.recording_id })
+          const { emitActivityLog: emitDone } = await import('./activity-log')
+          const recDone = getRecordingById(item.recording_id)
+          emitDone('success', 'Transcription complete', recDone?.filename ?? item.recording_id)
+        }
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error'
         console.error('Transcription failed:', errorMessage)
@@ -1490,50 +1502,28 @@ export async function reanalyzeFailedTranscripts(limit = 3): Promise<number> {
     return 0
   }
 
-  // RE-2 (Codex adversarial re-review round 2, BINDING — privacy leak): this
-  // boot backfill used to SELECT straight from transcripts with NO recordings
-  // exclusion, then send full_text to the provider — so a trashed / personal /
-  // value-excluded recording's transcript got re-uploaded on every restart,
-  // directly contradicting "excluded from all AI processing". The SELECT now
-  // JOINs recordings and excludes soft-deleted + personal at the query level;
-  // value-excluded ids are filtered by a once-per-call pre-filter Set BEFORE
-  // the provider call (cost gate); and eligibility is re-checked FRESH after
-  // the analysis await, inside the same persist transaction (isRecordingGraph-
-  // Ingestable = exists AND not deleted AND not personal AND not value-excluded),
-  // so a rating/delete that lands mid-analysis still blocks the heal.
-  const rows = queryAll<{ recording_id: string; full_text: string }>(
-    `SELECT t.recording_id AS recording_id, t.full_text AS full_text
-       FROM transcripts t JOIN recordings r ON r.id = t.recording_id
-      WHERE (t.summary IS NULL OR t.summary = 'Analysis failed' OR t.title_suggestion IS NULL)
-        AND t.full_text IS NOT NULL AND TRIM(t.full_text) != ''
-        AND r.deleted_at IS NULL AND COALESCE(r.personal, 0) = 0
-      ORDER BY t.created_at DESC
-      LIMIT ?`,
-    [limit]
-  )
-  if (rows.length === 0) return 0
-
-  // Once-per-call value-exclusion snapshot (cost gate before the provider call).
-  // Defensive: a failure degrades to "no pre-filter"; the per-row post-await
-  // point-read below is the authoritative gate.
-  let valueExcluded: Set<string>
+  // RE-2 / INC-3 / P1 (round-3): the eligibility (soft-deleted + personal +
+  // value-excluded) is now baked INTO the query (getFailedTranscriptsForRe-
+  // analysis), so the LIMIT counts only ELIGIBLE rows — the newest N garbage
+  // rows can no longer fill the slot and starve eligible failed transcripts
+  // every boot. It also FAILS CLOSED: a DB error throws here and we abort the
+  // run (zero provider calls) rather than defaulting to "no exclusion". A fresh
+  // authoritative point-read after the await still gates a delete/rating that
+  // lands mid-analysis.
+  let rows: Array<{ recording_id: string; full_text: string }>
   try {
-    valueExcluded = getValueExcludedRecordingIds()
+    rows = getFailedTranscriptsForReanalysis(limit)
   } catch (e) {
-    console.warn('[Reanalyze] value pre-filter unavailable (post-await point-read still gates):', e)
-    valueExcluded = new Set<string>()
+    console.error('[Reanalyze] eligibility query failed — aborting run (fail closed, zero provider calls):', e)
+    return 0
   }
+  if (rows.length === 0) return 0
 
   console.log(`[Reanalyze] Re-running analysis for ${rows.length} transcript(s) with failed/missing analysis`)
 
   let healed = 0
   for (const row of rows) {
     try {
-      // Value-excluded at run start → never send full_text to the provider.
-      if (valueExcluded.has(row.recording_id)) {
-        console.log(`[Reanalyze] Skipped value-excluded recording ${row.recording_id} (no provider call)`)
-        continue
-      }
       // Re-run with no candidate meetings — backfill only heals the analysis
       // fields; meeting matching already ran (or will re-run) elsewhere.
       const analysis = await analyzeTranscriptWithGemini(row.full_text, [])
@@ -1614,11 +1604,20 @@ export async function reanalyzeFailedTranscripts(limit = 3): Promise<number> {
   return healed
 }
 
+/**
+ * INC-2 (round-3) — transcribeRecording's outcome. `cancelled` means the
+ * recording was trashed / marked personal / hard-purged mid-run and NOTHING was
+ * persisted; the queue caller must NOT run its success path (it would overwrite
+ * the soft-delete's 'cancelled' tombstone with 'completed' and emit
+ * transcription:completed for content that does not exist).
+ */
+type TranscribeOutcome = { status: 'completed' | 'cancelled' }
+
 async function transcribeRecording(
   recordingId: string,
   progressCallback?: (stage: string, progress: number) => void,
   providerOverride?: string
-): Promise<void> {
+): Promise<TranscribeOutcome> {
   // Resolve stale/foreign IDs (e.g. a synced_files id queued by an older
   // renderer build) to the real recordings row before failing.
   const recording = getRecordingById(recordingId) ?? resolveRecordingId(recordingId)
@@ -1691,9 +1690,10 @@ Meeting ${i + 1}: "${m.subject}"
   // derivative). The meeting-candidate loop, insertTranscript, and
   // ensureKnowledgeCaptureForRecording below are all synchronous with no await
   // between here and them, so this single check-then-return covers them all.
+  // INC-2 — signal CANCELLED so the queue caller does NOT claim completion or
+  // overwrite the soft-delete's 'cancelled' tombstone.
   if (!stillProcessable()) {
-    progressCallback?.('complete', 100)
-    return
+    return { status: 'cancelled' }
   }
 
   // Process AI meeting selection
@@ -1901,7 +1901,11 @@ Meeting ${i + 1}: "${m.subject}"
     const { analyzeTimeline } = await import('./timeline-analysis')
     // RE-1 — re-check AFTER the import await, adjacent to the write.
     if (stillProcessable()) {
-      const timeline = await analyzeTimeline(recordingId)
+      // P2 (round-3) — also thread the gate INTO analyzeTimeline so its own
+      // internal sentiment-LLM await is covered (re-checked before its UPDATE).
+      const timeline = await analyzeTimeline(recordingId, undefined, undefined, () =>
+        isRecordingProcessable(recordingId)
+      )
       console.log(
         `[Timeline] Recording ${recordingId}: ${timeline.sentimentSegments.length} sentiment segment(s), ` +
           `${timeline.eventMarkers.length} event marker(s)`
@@ -1948,7 +1952,12 @@ Meeting ${i + 1}: "${m.subject}"
     const { runSelfIdentificationForRecording } = await import('./self-identification')
     // RE-1 — re-check AFTER the import await, adjacent to the write.
     if (stillProcessable()) {
-      const selfId = await runSelfIdentificationForRecording(recordingId)
+      // P2 (round-3) — thread the gate IN so self-id's own LLM await is covered
+      // (its contacts/speaker-bindings/mention-resolutions/scan-marker writes
+      // are all re-checked after the await).
+      const selfId = await runSelfIdentificationForRecording(recordingId, {
+        shouldPersist: () => isRecordingProcessable(recordingId)
+      })
       if (selfId.bound > 0 || selfId.mergeSuspected > 0) {
         console.log(
           `[SelfID] Recording ${recordingId}: +${selfId.bound} speaker(s) named` +
@@ -2031,6 +2040,7 @@ Meeting ${i + 1}: "${m.subject}"
 
   progressCallback?.('complete', 100) // spec-014: progress reporting
   console.log(`Transcription complete: ${recording.filename} (${wordCount} words)`)
+  return { status: 'completed' }
 }
 
 export async function transcribeManually(recordingId: string): Promise<void> {

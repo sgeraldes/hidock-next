@@ -21,6 +21,8 @@ const mockGetRecordingById = vi.fn()
 const mockInsertTranscript = vi.fn()
 const mockExecFile = vi.fn()
 const mockAddToQueue = vi.fn()
+// INC-2 — controllable so a test can make transcribeRecording bail 'cancelled'.
+const mockIsRecordingProcessable = vi.fn((..._args: any[]) => true)
 
 // spawnStreaming uses `spawn`, not `execFile`. We create a helper that manufactures
 // a fake ChildProcess whose stdout/stderr are minimal EventEmitters so spawnStreaming
@@ -106,7 +108,7 @@ vi.mock('../database', () => ({
   // RE-1 — the early eligibility gate (right after the analyze await, before
   // insertTranscript) calls this; default true so this suite's happy paths
   // persist as before. Real predicate covered by recording-deletion tests.
-  isRecordingProcessable: vi.fn(() => true)
+  isRecordingProcessable: (...args: any[]) => mockIsRecordingProcessable(...args)
 }))
 
 // Mock electron
@@ -178,6 +180,9 @@ vi.mock('child_process', () => ({
 describe('Transcription Service', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    // clearAllMocks keeps mockReturnValue impls, so re-assert the eligibility
+    // default so an INC-2 test that flips it to false cannot leak into others.
+    mockIsRecordingProcessable.mockReturnValue(true)
     mockConfig = {
       transcription: {
         provider: 'gemini',
@@ -322,6 +327,42 @@ describe('Transcription Service', () => {
         transcription_model: 'CohereLabs/cohere-transcribe-03-2026'
       }))
       expect(mockUpdateRecordingStatus).toHaveBeenCalledWith('rec-local', 'complete')
+    })
+
+    it('INC-2 (round-3) — a recording ineligible mid-run is marked cancelled, NOT completed', async () => {
+      mockConfig.transcription.provider = 'local-asr'
+      mockConfig.transcription.geminiApiKey = ''
+      // The recording is trashed/personal by the time the early gate is reached.
+      mockIsRecordingProcessable.mockReturnValue(false)
+      mockGetQueueItems.mockImplementation((status?: string) =>
+        status === 'pending'
+          ? [{ id: 'queue-cancel', recording_id: 'rec-cancel', filename: 'c.wav', status: 'pending', attempts: 0 }]
+          : []
+      )
+      mockGetRecordingById.mockReturnValue({
+        id: 'rec-cancel',
+        filename: 'c.wav',
+        file_path: 'G:\\Recordings\\c.wav',
+        status: 'complete'
+      })
+      mockExecFile.mockImplementation(() =>
+        makeFakeChildProcess(
+          JSON.stringify({ text: 'Speaker 1: hola.', language: 'es', duration_seconds: 5, processing_time_seconds: 1 })
+        )
+      )
+
+      const { startTranscriptionProcessor, stopTranscriptionProcessor } = await import('../transcription')
+      startTranscriptionProcessor()
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      stopTranscriptionProcessor()
+
+      const queueCalls = mockUpdateQueueItem.mock.calls
+      // The soft-delete's 'cancelled' tombstone is honored, never overwritten
+      // with 'completed'.
+      expect(queueCalls.some((c: any[]) => c[0] === 'queue-cancel' && c[1] === 'cancelled')).toBe(true)
+      expect(queueCalls.some((c: any[]) => c[0] === 'queue-cancel' && c[1] === 'completed')).toBe(false)
+      // Nothing was persisted (the early gate bailed before insertTranscript).
+      expect(mockInsertTranscript).not.toHaveBeenCalled()
     })
   })
 

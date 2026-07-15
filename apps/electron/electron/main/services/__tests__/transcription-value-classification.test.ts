@@ -136,7 +136,12 @@ vi.mock('../database', () => ({
   isRecordingProcessable: (...args: any[]) => mockIsRecordingProcessable(...args),
   // RE-2 — boot-backfill exclusion gates.
   getValueExcludedRecordingIds: (...args: any[]) => mockGetValueExcludedRecordingIds(...args),
-  isRecordingGraphIngestable: (...args: any[]) => mockIsRecordingGraphIngestable(...args)
+  isRecordingGraphIngestable: (...args: any[]) => mockIsRecordingGraphIngestable(...args),
+  // INC-3 — reanalyze now fetches eligible rows via this query helper. Delegate
+  // to the same mockQueryAll('FROM transcripts') the existing reanalyze tests
+  // configure, so their row setups keep driving it.
+  getFailedTranscriptsForReanalysis: (limit: number) =>
+    (mockQueryAll('SELECT ... FROM transcripts backfill', [limit]) as any) ?? []
 }))
 
 vi.mock('electron', () => ({
@@ -416,6 +421,19 @@ Respond in JSON format:
 
     expect(mockApplyCaptureValueClassification).not.toHaveBeenCalled()
     expect(mockEmitDomainEvent).not.toHaveBeenCalled()
+  })
+
+  it('P1 (round-3) — aborts with ZERO provider calls when the eligibility query throws', async () => {
+    // getFailedTranscriptsForReanalysis (delegated to mockQueryAll) fails.
+    mockQueryAll.mockImplementation(() => {
+      throw new Error('exclusion query failed (simulated DB error)')
+    })
+
+    const { reanalyzeFailedTranscripts } = await import('../transcription')
+    const healed = await reanalyzeFailedTranscripts(3)
+
+    expect(healed).toBe(0)
+    expect(mockGenerateContent).not.toHaveBeenCalled() // fail CLOSED — no upload
   })
 })
 

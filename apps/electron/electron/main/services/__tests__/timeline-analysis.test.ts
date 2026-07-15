@@ -394,6 +394,17 @@ describe('analyzeTimeline (persist + idempotent)', () => {
     expect(persisted.sentimentSegments.length).toBe(result.sentimentSegments.length)
   })
 
+  it('P2 (round-3) — shouldPersist()=false returns the computed result WITHOUT persisting', async () => {
+    const result = await analyzeTimeline('rec3', undefined, { scoreWindows: fakeScorer }, () => false)
+    // Computed + returned to the caller…
+    expect(result.sentimentSegments.length).toBeGreaterThan(0)
+    expect(result.eventMarkers.length).toBe(2)
+    // …but NOTHING is written back (a purge landed during the sentiment await).
+    const persisted = getTimelineAnalysis('rec3')
+    expect(persisted.sentimentSegments.length).toBe(0)
+    expect(persisted.eventMarkers.length).toBe(0)
+  })
+
   it('is idempotent — re-running yields the same persisted result', async () => {
     const first = await analyzeTimeline('rec3', undefined, { scoreWindows: fakeScorer })
     const second = await analyzeTimeline('rec3', undefined, { scoreWindows: fakeScorer })

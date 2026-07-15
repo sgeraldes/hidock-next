@@ -884,7 +884,15 @@ export function getTimelineAnalysis(recordingId: string): TimelineAnalysis {
 export async function analyzeTimeline(
   recordingId: string,
   onProgress?: (p: AnalyzeProgress) => void,
-  sentimentOpts?: SentimentOptions
+  sentimentOpts?: SentimentOptions,
+  /**
+   * P2 (round-3) — eligibility gate re-checked AFTER the sentiment LLM await
+   * and immediately BEFORE the synchronous UPDATE write. Returns false ⇒ the
+   * recording was trashed / marked personal / hard-purged while sentiment
+   * scoring was in flight, so the computed results are returned WITHOUT
+   * persisting. Omitted ⇒ always persists (manual/direct callers).
+   */
+  shouldPersist?: () => boolean
 ): Promise<TimelineAnalysis> {
   const canonical = getRecordingById(recordingId) ?? resolveRecordingId(recordingId)
   const id = canonical?.id ?? recordingId
@@ -926,11 +934,18 @@ export async function analyzeTimeline(
     markersAnalyzed: true,
     segments: sentimentSegments
   }
-  run('UPDATE transcripts SET sentiment_segments = ?, event_markers = ? WHERE recording_id = ?', [
-    JSON.stringify(envelope),
-    JSON.stringify(eventMarkers),
-    id
-  ])
+  // P2 (round-3) — re-check eligibility ADJACENT to the write (no await between
+  // here and the UPDATE). A purge/trash landing during the sentiment await must
+  // not persist a timeline derivative for a now-ineligible recording.
+  if (shouldPersist && !shouldPersist()) {
+    console.log(`[Timeline] Recording ${id} became ineligible mid-analysis — timeline not persisted`)
+  } else {
+    run('UPDATE transcripts SET sentiment_segments = ?, event_markers = ? WHERE recording_id = ?', [
+      JSON.stringify(envelope),
+      JSON.stringify(eventMarkers),
+      id
+    ])
+  }
 
   onProgress?.({ stage: 'complete', progress: 100 })
   const analysisStatus: TimelineAnalysisStatus = {

@@ -11,12 +11,18 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const deps = vi.hoisted(() => ({
   excluded: new Set<string>(),
+  throwOnExclusion: false,
   generateEmbedding: vi.fn()
 }))
 
 vi.mock('../database', () => ({
   getDatabase: () => ({ run: vi.fn(), exec: () => [], prepare: () => ({ step: () => false, free: () => {} }) }),
-  getExcludedRecordingIds: () => deps.excluded
+  getExcludedRecordingIds: () => {
+    if (deps.throwOnExclusion) throw new Error('exclusion lookup failed (simulated DB error)')
+    return deps.excluded
+  },
+  // P2 — used by the boot backfill; not exercised by the search tests.
+  isRecordingProcessable: () => true
 }))
 vi.mock('../embeddings', () => ({
   getEmbeddingsService: () => ({
@@ -29,6 +35,7 @@ import { VectorStore } from '../vector-store'
 
 beforeEach(() => {
   deps.excluded = new Set<string>()
+  deps.throwOnExclusion = false
   deps.generateEmbedding.mockReset()
   deps.generateEmbedding.mockResolvedValue([1, 0, 0])
 })
@@ -51,12 +58,45 @@ describe('VectorStore.search exclusion', () => {
     expect(ids).not.toContain('r-personal')
   })
 
-  it('never throws if the exclusion lookup fails', async () => {
+  it('P1 (round-3) — FAILS CLOSED when the exclusion lookup throws: no recording-backed results', async () => {
     const store = new VectorStore()
     await store.addDocument('c', { recordingId: 'r-ok', chunkIndex: 0 })
-    // Force getExcludedRecordingIds to throw by making the set access blow up.
+    deps.throwOnExclusion = true
+    // The exclusion set is unknown, so a recording-backed chunk must NOT surface
+    // (fail-open would leak private content on a transient DB error).
+    const results = await store.search('q', 5)
+    expect(results.length).toBe(0)
+  })
+
+  it('P1 (round-3) — a NON-recording doc still surfaces when the exclusion lookup throws', async () => {
+    const store = new VectorStore()
+    // No recordingId → not privacy-scoped → unaffected by the fail-closed drop.
+    await store.addDocument('a general note', { chunkIndex: 0 })
+    deps.throwOnExclusion = true
     const results = await store.search('q', 5)
     expect(results.length).toBe(1)
+  })
+
+  it('P2 (round-3) — indexTranscript skips the write when shouldPersist() is false (ineligible mid-embeddings)', async () => {
+    const store = new VectorStore()
+    const count = await store.indexTranscript('a transcript worth indexing', {
+      recordingId: 'r-purged',
+      shouldPersist: () => false
+    })
+    expect(count).toBe(0)
+    const results = await store.search('anything', 10)
+    expect(results.map((r) => r.document.metadata.recordingId)).not.toContain('r-purged')
+  })
+
+  it('P2 (round-3) — indexTranscript persists when shouldPersist() is true (control)', async () => {
+    const store = new VectorStore()
+    const count = await store.indexTranscript('a transcript worth indexing', {
+      recordingId: 'r-live',
+      shouldPersist: () => true
+    })
+    expect(count).toBeGreaterThan(0)
+    const results = await store.search('anything', 10)
+    expect(results.map((r) => r.document.metadata.recordingId)).toContain('r-live')
   })
 
   // F16/spec-002 (T2): getExcludedRecordingIds() now also unions in

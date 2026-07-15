@@ -45,7 +45,8 @@ import {
   getSpeakerMap,
   assignSpeaker,
   resolveMention,
-  getQueueItems
+  getQueueItems,
+  isRecordingProcessable
 } from './database'
 import { resolveContact } from './entity-resolver'
 import { isGenericSpeakerLabel, normalizeName, accentFoldedKey } from './entity-normalize'
@@ -596,7 +597,7 @@ export interface SelfIdRunResult {
  */
 export async function runSelfIdentificationForRecording(
   recordingId: string,
-  opts: { force?: boolean; llm?: SelfIdLLM } = {}
+  opts: { force?: boolean; llm?: SelfIdLLM; shouldPersist?: () => boolean } = {}
 ): Promise<SelfIdRunResult> {
   if (!opts.force && isScanned(recordingId)) {
     return { bound: 0, mergeSuspected: 0, skipped: true }
@@ -611,7 +612,25 @@ export async function runSelfIdentificationForRecording(
     return { bound: 0, mergeSuspected: 0, skipped: false }
   }
 
+  // P2 (round-3) — pre-LLM eligibility gate: never send a trashed / personal /
+  // purged recording's turns to the provider (matters for the boot backfill,
+  // which can reach a recording deleted after its SELECT). Skip WITHOUT
+  // marking scanned so a later restore can still self-identify.
+  if (opts.shouldPersist && !opts.shouldPersist()) {
+    return { bound: 0, mergeSuspected: 0, skipped: true }
+  }
+
   const result = await extractSelfIdentifications(turns, { llm: opts.llm })
+
+  // P2 — post-await gate ADJACENT to the writes (assignSpeaker creates
+  // contacts + speaker bindings, resolveMention writes mention-resolutions,
+  // markMergeSuspected + markScanned write config markers — ALL below are
+  // synchronous, so this one check covers them). A delete/trash that landed
+  // while the LLM ran persists nothing and leaves the recording un-scanned.
+  if (opts.shouldPersist && !opts.shouldPersist()) {
+    console.log(`[SelfID] ${recordingId} became ineligible mid-analysis — no bindings/markers persisted`)
+    return { bound: 0, mergeSuspected: 0, skipped: true }
+  }
 
   const meetingId = getRecordingById(recordingId)?.meeting_id ?? undefined
   // Existing bindings are the user's / prior settled truth — never overwrite them.
@@ -761,7 +780,10 @@ export async function backfillSelfIdentifications(pollMs = 30000): Promise<numbe
       i++
       if (isScanned(id)) continue
       try {
-        await runSelfIdentificationForRecording(id)
+        // P2 (round-3) — the id list was snapshotted at the start; a recording
+        // trashed/personal/purged since then must not have its turns sent to
+        // the provider or any binding/marker persisted.
+        await runSelfIdentificationForRecording(id, { shouldPersist: () => isRecordingProcessable(id) })
         processed++
       } catch (e) {
         console.warn(`[SelfID] backfill failed for ${id}:`, e instanceof Error ? e.message : e)
