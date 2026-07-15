@@ -19,7 +19,7 @@ vi.mock('../../services/rag', () => ({
   }))
 }))
 
-const { indexTranscript } = vi.hoisted(() => ({ indexTranscript: vi.fn(async () => 3) }))
+const { indexTranscript } = vi.hoisted(() => ({ indexTranscript: vi.fn(async (..._args: unknown[]) => 3) }))
 vi.mock('../../services/vector-store', () => ({
   getVectorStore: vi.fn(() => ({
     getDocumentCount: vi.fn(),
