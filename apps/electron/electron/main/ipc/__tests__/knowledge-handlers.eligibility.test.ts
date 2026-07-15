@@ -253,6 +253,28 @@ describe('ADV14 OWNER — knowledge:getAllOwner (existence-scoped)', () => {
     expect(res.map((c: any) => c.id)).not.toContain(bad)
   })
 
+  it('ADV16-1 — excludes a SOFT-DELETED STANDALONE capture (must not reappear on Today outside Trash)', async () => {
+    // getAllOwner feeds the app-wide unified store that Today renders (non-audio
+    // standalone captures). A soft-deleted standalone capture must NOT come back.
+    const softDeleted = seedCapture({ source: null, quality: 'valuable', deletedAt: '2026-07-10T00:00:00.000Z' })
+    const good = seedCapture({ source: null, quality: 'valuable' })
+
+    const res = await invoke('knowledge:getAllOwner', { limit: 100 })
+    expect(res.map((c: any) => c.id)).toEqual([good])
+    expect(res.map((c: any) => c.id)).not.toContain(softDeleted)
+  })
+
+  it('ADV16-1 — still shows a recording-derived capture for an EXISTING excluded recording (existence-scoped)', async () => {
+    // The owner relaxation applies ONLY to the recording-derived branch: a
+    // soft-deleted RECORDING (audio, never on Today) stays visible in the owner
+    // Library so the owner can manage it.
+    seedRecording('rec-del', { deleted: true })
+    const recDerived = seedCapture({ source: 'rec-del' })
+
+    const res = await invoke('knowledge:getAllOwner', { limit: 100 })
+    expect(res.map((c: any) => c.id)).toContain(recDerived)
+  })
+
   it('fails closed (empty array) when the existence lookup throws', async () => {
     seedRecording('rec-del', { deleted: true })
     seedCapture({ source: 'rec-del' })

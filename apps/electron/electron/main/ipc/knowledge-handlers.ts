@@ -76,14 +76,22 @@ function applyCaptureEligibility(rows: CaptureRow[], tier: 'gated' | 'owner'): {
     if (failClosed) return { kept: [], failClosed: true }
     return { kept: rows.filter((r) => eligible.has(r.id)), failClosed: false }
   }
-  // OWNER tier — existence-scoped (unchanged).
+  // OWNER tier — existence-scoped for RECORDING-DERIVED captures only. ADV16-1
+  // (round-17): the owner relaxation must NOT extend to STANDALONE captures.
+  // getAllOwner feeds the app-wide unified-recordings store and Today renders
+  // non-audio STANDALONE captures, so a soft-deleted standalone capture kept here
+  // would reappear on Today OUTSIDE Trash. Standalone captures therefore go
+  // through FULL capture eligibility (deleted_at IS NULL AND own quality not
+  // value-excluded) — identical to the gated tier — while recording-derived
+  // captures keep the existence-scope (owner Library legitimately sees excluded
+  // recordings, which are audio and never shown on Today).
   const sourceIds = rows.map((r) => r.source_recording_id).filter((id): id is string => !!id)
   const res = existingRecordings(sourceIds)
   if (res.failClosed) return { kept: [], failClosed: true }
   const kept = rows.filter((r) =>
     r.source_recording_id
       ? res.ids.has(r.source_recording_id)
-      : !CAPTURE_VALUE_EXCLUDED_RATINGS.has(r.quality_rating ?? '')
+      : r.deleted_at == null && !CAPTURE_VALUE_EXCLUDED_RATINGS.has(r.quality_rating ?? '')
   )
   return { kept, failClosed: false }
 }
