@@ -51,6 +51,27 @@ vi.mock('../database', () => ({
     globalExclusion.failClosed
       ? { eligible: new Set<string>(), failClosed: true }
       : { eligible: new Set([...ids].filter((i) => i && !globalExclusion.ids.has(i))), failClosed: false },
+  // ADV16-2 (round-17) — filterEligibleKnowledge now routes through the central
+  // filterEligibleCaptureIds, which reads the capture rows via
+  // getCaptureEligibilityRows. In production getDatabase() and queryAll share ONE
+  // engine; this test keeps its data in the sql.js dbInstance, so answer the
+  // capture-row lookup from the SAME instance. Only the RECORDING sub-lookup
+  // honours failClosed (via getEligibleRecordingIds above).
+  getCaptureEligibilityRows: (ids: Iterable<string>) => {
+    const want = new Set([...ids].filter(Boolean))
+    const rows: Array<{ id: string; source_recording_id: string | null; quality_rating: string | null; deleted_at: unknown }> = []
+    if (dbInstance) {
+      const res = dbInstance.exec('SELECT id, source_recording_id, quality_rating, deleted_at FROM knowledge_captures')
+      if (res.length > 0 && res[0].values) {
+        for (const v of res[0].values) {
+          if (want.has(v[0] as string)) {
+            rows.push({ id: v[0] as string, source_recording_id: (v[1] as string) ?? null, quality_rating: (v[2] as string) ?? null, deleted_at: v[3] })
+          }
+        }
+      }
+    }
+    return { rows, failClosed: false }
+  },
   // Real escaping behavior — escapes % _ \ with a leading backslash, which requires a
   // working `ESCAPE '\'` clause in the query to be interpreted correctly.
   escapeLikePattern: vi.fn((pattern: string) => pattern.replace(/[%_\\]/g, '\\$&'))
@@ -67,7 +88,7 @@ describe('RAGService.globalSearch (real SQL)', () => {
     dbInstance = new SQL.Database()
 
     dbInstance.run(`
-      CREATE TABLE knowledge_captures (id TEXT, title TEXT, summary TEXT, captured_at TEXT, source_recording_id TEXT, deleted_at TEXT);
+      CREATE TABLE knowledge_captures (id TEXT, title TEXT, summary TEXT, captured_at TEXT, source_recording_id TEXT, quality_rating TEXT, deleted_at TEXT);
       CREATE TABLE contacts (id TEXT, name TEXT, email TEXT, type TEXT, company TEXT, role TEXT);
       CREATE TABLE projects (id TEXT, name TEXT, description TEXT, status TEXT);
 
@@ -152,6 +173,28 @@ describe('RAGService.globalSearch (real SQL)', () => {
     expect(ids).toContain('kc-1') // eligible standalone capture stays
     expect(ids).not.toContain('kc-rec') // recording-backed + excluded → gone
     expect(ids).not.toContain('kc-del') // soft-deleted capture → gone
+  })
+
+  // ADV16-2 (round-17) — the previous filterEligibleKnowledge kept every
+  // non-deleted STANDALONE capture unconditionally (it never read quality_rating).
+  // Routing through the central filterEligibleCaptureIds now drops value-excluded
+  // (garbage / low-value) standalone captures from Explore / globalSearch.
+  it('ADV16-2 — drops a value-excluded (garbage/low-value) STANDALONE capture; keeps a valuable one', async () => {
+    dbInstance.run(`
+      INSERT INTO knowledge_captures (id, title, summary, captured_at, source_recording_id, quality_rating, deleted_at) VALUES
+        ('kc-garb', 'Amazon garbage note', 'Amazon standalone garbage', '2026-01-07', NULL, 'garbage', NULL),
+        ('kc-low', 'Amazon low note', 'Amazon standalone low-value', '2026-01-08', NULL, 'low-value', NULL),
+        ('kc-val', 'Amazon valuable note', 'Amazon standalone valuable', '2026-01-09', NULL, 'valuable', NULL);
+    `)
+
+    const rag = getRAGService()
+    const result = await rag.globalSearch('Amazon', 10)
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    const ids = result.data.knowledge.map((k: any) => k.id)
+    expect(ids).toContain('kc-val') // valuable standalone stays
+    expect(ids).not.toContain('kc-garb') // garbage standalone dropped
+    expect(ids).not.toContain('kc-low') // low-value standalone dropped
   })
 
   it('RE6-3 — fails closed (drops recording-backed captures) when eligibility is unknown', async () => {

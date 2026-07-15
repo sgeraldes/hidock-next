@@ -8,7 +8,7 @@ import { getOllamaService, OllamaChatMessage } from './ollama'
 import { getChatLLMService } from './chat-llm'
 import { getEmbeddingsService } from './embeddings'
 import { getDatabase, queryOne, queryAll, escapeLikePattern } from './database'
-import { filterEligibleRecordingIds } from './recording-eligibility'
+import { filterEligibleRecordingIds, filterEligibleCaptureIds } from './recording-eligibility'
 import { stripDiacritics } from './entity-normalize'
 import type { BrainId } from './brains/types'
 import { Result, success, error } from '../types/api'
@@ -453,33 +453,21 @@ class LRUSessionCache {
 
 /**
  * RE6-3 (round-6) — filter Explore/global-search knowledge results through the
- * recording-eligibility boundary. A capture is dropped when the capture itself
- * is soft-deleted, OR it is recording-backed and its source recording is
- * excluded (personal/soft-deleted/value-excluded) — or, fail-closed, when
- * eligibility can't be established. Eligible STANDALONE captures (no source
- * recording) are kept. Excluded titles/summaries must not stay discoverable.
+ * ONE shared central capture boundary. ADV16-2 (round-17): the previous body was
+ * a RESIDUAL per-handler predicate that kept every non-soft-deleted STANDALONE
+ * capture UNCONDITIONALLY — it never read `quality_rating`, so garbage/low-value
+ * standalone captures leaked their titles/summaries into Explore / globalSearch.
+ * Route the candidate capture ids through {@link filterEligibleCaptureIds}
+ * instead, which enforces deleted_at + recording-derived delegation (personal /
+ * soft-deleted / value-excluded) + standalone own-quality, all fail-closed. The
+ * caller (collectEligibleKnowledge) preserves fill-until-limit pagination; a
+ * fail-closed lookup drops the whole page (returns []).
  */
-function filterEligibleKnowledge(db: any, rows: any[]): any[] {
+function filterEligibleKnowledge(_db: any, rows: any[]): any[] {
   if (rows.length === 0) return rows
-  const ids = rows.map((r) => r.id as string)
-  const placeholders = ids.map(() => '?').join(',')
-  const metaRes = db.exec(
-    `SELECT id, source_recording_id, deleted_at FROM knowledge_captures WHERE id IN (${placeholders})`,
-    ids
-  )
-  const meta = new Map<string, { rec: string | null; deleted: unknown }>()
-  if (metaRes.length > 0 && metaRes[0].values) {
-    for (const v of metaRes[0].values) meta.set(v[0] as string, { rec: (v[1] as string) ?? null, deleted: v[2] })
-  }
-  const recIds = [...meta.values()].map((m) => m.rec).filter((x): x is string => !!x)
-  const { eligible, failClosed } = filterEligibleRecordingIds(recIds)
-  return rows.filter((r) => {
-    const m = meta.get(r.id)
-    if (!m) return false // capture vanished
-    if (m.deleted) return false // capture soft-deleted
-    if (!m.rec) return true // standalone capture — not recording-backed
-    return !failClosed && eligible.has(m.rec) // recording-backed → eligible only
-  })
+  const { eligible, failClosed } = filterEligibleCaptureIds(rows.map((r) => r.id as string))
+  if (failClosed) return []
+  return rows.filter((r) => eligible.has(r.id as string))
 }
 
 class RAGService {
