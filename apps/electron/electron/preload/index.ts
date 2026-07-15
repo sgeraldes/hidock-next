@@ -364,6 +364,8 @@ export interface ElectronAPI {
     delete: (id: string) => Promise<Result<void>>
     merge: (request: { keeperId: string; loserId: string }) => Promise<Result<Person>>
     unmerge: (journalId: string) => Promise<Result<UnmergeResult>>
+    /** Atomic group Undo: unwinds all journals newest-first in ONE transaction — any rejection rolls back the whole group. */
+    unmergeGroup: (journalIds: string[]) => Promise<Result<UnmergeResult[]>>
     getForMeeting: (meetingId: string) => Promise<Result<Contact[]>>
   }
 
@@ -1242,6 +1244,7 @@ const electronAPI: ElectronAPI = {
     delete: (id) => callIPC('contacts:delete', id),
     merge: (request) => callIPC('contacts:merge', request),
     unmerge: (journalId) => callIPC('contacts:unmerge', journalId),
+    unmergeGroup: (journalIds) => callIPC('contacts:unmergeGroup', journalIds),
     getForMeeting: (meetingId) => callIPC('contacts:getForMeeting', meetingId)
   },
 

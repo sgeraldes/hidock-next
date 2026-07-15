@@ -5519,6 +5519,39 @@ export function unmergeContacts(journalId: string): UnmergeResult {
   })
 }
 
+/**
+ * ATOMICALLY reverse a GROUP of contact merges (the group-merge Undo). Every
+ * given journal is unwound newest-first (ordered by seq, regardless of caller
+ * order) inside ONE transaction: any rejection — order conflict, missing or
+ * unsequenced journal, unreadable snapshot, already-unmerged — rolls the WHOLE
+ * group back and rethrows that journal's typed error, leaving the group state
+ * exactly as before the call (fully re-attemptable).
+ *
+ * Why atomic: per-journal unmerges each commit independently, so a
+ * mid-sequence failure used to leave the newest journals undone and the older
+ * ones unreachable — a retry started at the already-undone newest journal, was
+ * rejected, and stopped. The engine's re-entrant runInTransaction folds each
+ * inner unmergeContacts transaction into this outer one, making the rollback
+ * total.
+ */
+export function unmergeContactsGroup(journalIds: string[]): UnmergeResult[] {
+  if (journalIds.length === 0) return []
+  return runInTransaction(() => {
+    // Newest-first by seq. Unknown ids sort last and fail inside
+    // unmergeContacts with the precise not-found error; NULL-seq rows are
+    // rejected fail-closed by the ordering guard. Duplicates are collapsed so
+    // one id cannot trip the already-unmerged rejection against itself.
+    const unique = [...new Set(journalIds)]
+    const seqOf = new Map<string, number>()
+    for (const id of unique) {
+      const r = queryOne<{ seq: number | null }>('SELECT seq FROM merge_journal WHERE id = ?', [id])
+      if (r && r.seq !== null) seqOf.set(id, r.seq)
+    }
+    const ordered = unique.sort((a, b) => (seqOf.get(b) ?? -1) - (seqOf.get(a) ?? -1))
+    return ordered.map((id) => unmergeContacts(id))
+  })
+}
+
 // =============================================================================
 // Transcript speaker identity (v25)
 // =============================================================================

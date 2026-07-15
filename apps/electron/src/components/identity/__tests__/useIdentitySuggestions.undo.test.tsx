@@ -30,6 +30,7 @@ const mockGetSuggestions = vi.fn()
 const mockAccept = vi.fn()
 const mockReject = vi.fn()
 const mockContactUnmerge = vi.fn()
+const mockContactUnmergeGroup = vi.fn()
 const mockProjectUnmerge = vi.fn()
 const mockGetMergeJournal = vi.fn()
 const mockSupersedeOrphaned = vi.fn()
@@ -51,7 +52,8 @@ global.window.electronAPI = {
     getById: vi.fn().mockResolvedValue({ success: true, data: { contact: { name: 'Someone' } } }),
     merge: mockContactsMerge,
     update: mockContactsUpdate,
-    unmerge: mockContactUnmerge
+    unmerge: mockContactUnmerge,
+    unmergeGroup: mockContactUnmergeGroup
   },
   projects: {
     getById: vi.fn().mockResolvedValue({ success: true, data: { project: { name: 'Proj' } } }),
@@ -83,6 +85,7 @@ beforeEach(() => {
   mockAccept.mockResolvedValue({ success: true, data: { id: 's1', status: 'accepted', mergeJournalId: 'j1' } })
   mockReject.mockResolvedValue({ success: true })
   mockContactUnmerge.mockResolvedValue({ success: true, data: {} })
+  mockContactUnmergeGroup.mockResolvedValue({ success: true, data: [] })
   mockGetMergeJournal.mockResolvedValue({ success: true, data: [{ id: 'j-direct' }] })
   mockSupersedeOrphaned.mockResolvedValue({ success: true, data: { superseded: 0 } })
   mockContactsMerge.mockResolvedValue({ success: true, data: { id: 'c1' } })
@@ -141,8 +144,8 @@ describe('direct-merge Undo (mergeInto / swapMerge)', () => {
   })
 })
 
-describe('group-merge Undo', () => {
-  it('stops on the first rejected unmerge, surfaces its message, skips the name restore, and never claims success', async () => {
+describe('group-merge Undo (single atomic backend call)', () => {
+  it('a rejected group unmerge surfaces its message, skips the name restore, and never claims success', async () => {
     mockAccept
       .mockResolvedValueOnce({ success: true, data: { id: 'g1', status: 'accepted', mergeJournalId: 'j1' } })
       .mockResolvedValueOnce({ success: true, data: { id: 'g2', status: 'accepted', mergeJournalId: 'j2' } })
@@ -162,23 +165,65 @@ describe('group-merge Undo', () => {
     expect(undo).toBeDefined()
     mockContactsUpdate.mockClear() // forget the rename performed by the merge itself
 
-    // Newest-first: the FIRST attempted unmerge (j2) is rejected.
-    mockContactUnmerge.mockResolvedValue(ORDER_CONFLICT)
+    // The atomic backend call rejects — the WHOLE group rolled back server-side.
+    mockContactUnmergeGroup.mockResolvedValue(ORDER_CONFLICT)
     await act(async () => {
       await undo!()
     })
 
-    // Stopped at the first failure: exactly one unmerge attempted (j2, newest).
-    expect(mockContactUnmerge).toHaveBeenCalledTimes(1)
-    expect(mockContactUnmerge).toHaveBeenCalledWith('j2')
+    // ONE call carrying every journal id — no per-journal looping in the UI,
+    // so a mid-sequence failure can never leave the group half-unwound.
+    expect(mockContactUnmergeGroup).toHaveBeenCalledTimes(1)
+    expect(mockContactUnmergeGroup).toHaveBeenCalledWith(['j1', 'j2'])
+    expect(mockContactUnmerge).not.toHaveBeenCalled()
     // Its message surfaced; no success toast; the old name was NOT restored
-    // (the keeper still holds merged data).
+    // (the backend rolled back — the keeper still holds merged data).
     expect(toast.error).toHaveBeenCalledWith('Undo failed', expect.stringMatching(/undo the newer merge of "Dora Delta"/))
     expect(toast.info).not.toHaveBeenCalled()
     expect(mockContactsUpdate).not.toHaveBeenCalled()
   })
 
-  it('reports success only when every unmerge succeeded (and then restores the name)', async () => {
+  it('a failed group Undo is fully re-attemptable: retrying the SAME action succeeds after the cause is fixed', async () => {
+    mockAccept
+      .mockResolvedValueOnce({ success: true, data: { id: 'g1', status: 'accepted', mergeJournalId: 'j1' } })
+      .mockResolvedValueOnce({ success: true, data: { id: 'g2', status: 'accepted', mergeJournalId: 'j2' } })
+
+    const { result } = renderHook(() => useIdentitySuggestions('person'))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    await act(async () => {
+      await result.current.mergeGroup({
+        keeperId: 'c1',
+        keeperName: 'Old Name',
+        suggestionIds: ['g1', 'g2'],
+        finalName: 'Canonical Name'
+      })
+    })
+    const undo = lastUndoAction()
+    mockContactsUpdate.mockClear()
+
+    // First click fails (backend rolled the group back)…
+    mockContactUnmergeGroup.mockResolvedValueOnce(ORDER_CONFLICT)
+    await act(async () => {
+      await undo!()
+    })
+    expect(toast.info).not.toHaveBeenCalled()
+
+    // …second click retries the SAME id list and now succeeds fully.
+    mockContactUnmergeGroup.mockResolvedValueOnce({ success: true, data: [] })
+    await act(async () => {
+      await undo!()
+    })
+    expect(mockContactUnmergeGroup).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(mockContactUnmergeGroup).mock.calls.map((c) => c[0])).toEqual([
+      ['j1', 'j2'],
+      ['j1', 'j2']
+    ])
+    expect(mockContactsUpdate).toHaveBeenCalledWith({ id: 'c1', name: 'Old Name' })
+    expect(toast.info).toHaveBeenCalledWith('Group merge undone', expect.any(String))
+  })
+
+  it('reports success and restores the name when the atomic call succeeds', async () => {
     mockAccept
       .mockResolvedValueOnce({ success: true, data: { id: 'g1', status: 'accepted', mergeJournalId: 'j1' } })
       .mockResolvedValueOnce({ success: true, data: { id: 'g2', status: 'accepted', mergeJournalId: 'j2' } })
@@ -201,8 +246,8 @@ describe('group-merge Undo', () => {
       await undo!()
     })
 
-    expect(mockContactUnmerge).toHaveBeenCalledTimes(2)
-    expect(vi.mocked(mockContactUnmerge).mock.calls.map((c) => c[0])).toEqual(['j2', 'j1'])
+    expect(mockContactUnmergeGroup).toHaveBeenCalledTimes(1)
+    expect(mockContactUnmergeGroup).toHaveBeenCalledWith(['j1', 'j2'])
     expect(mockContactsUpdate).toHaveBeenCalledWith({ id: 'c1', name: 'Old Name' })
     expect(toast.info).toHaveBeenCalledWith('Group merge undone', expect.any(String))
     expect(toast.error).not.toHaveBeenCalled()

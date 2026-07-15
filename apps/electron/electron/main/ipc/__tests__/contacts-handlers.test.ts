@@ -26,6 +26,7 @@ vi.mock('../../services/database', () => ({
   getContactsForMeeting: vi.fn(),
   mergeContacts: vi.fn(),
   unmergeContacts: vi.fn(),
+  unmergeContactsGroup: vi.fn(),
   // Real class so the handler's `err instanceof MergeOrderConflictError` guard works.
   MergeOrderConflictError: class MergeOrderConflictError extends Error {
     constructor(
@@ -283,6 +284,38 @@ describe('Contacts IPC Handlers', () => {
     // the undo UI can point at the exact blocking merge.
     expect(result.error.code).toBe('MERGE_ORDER_CONFLICT')
     expect(result.error.message).toMatch(/undo the newer merge of "Dora Delta"/)
+    expect(result.error.details).toMatchObject({ blockingJournalId: 'j-newer', blockingLoserName: 'Dora Delta' })
+  })
+
+  it('unmergeGroup delegates the id list to the atomic group function and returns its results', async () => {
+    const { unmergeContactsGroup } = await import('../../services/database')
+    vi.mocked(unmergeContactsGroup).mockReturnValue([{ loserId: 'L2' }, { loserId: 'L1' }] as any)
+
+    registerContactsHandlers()
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(call => call[0] === 'contacts:unmergeGroup')?.[1]
+    const result = await handler?.({} as any, ['j1', 'j2']) as any
+
+    expect(result.success).toBe(true)
+    expect(unmergeContactsGroup).toHaveBeenCalledWith(['j1', 'j2'])
+    expect(result.data).toHaveLength(2)
+  })
+
+  it('unmergeGroup maps an ordering rejection to MERGE_ORDER_CONFLICT (whole group rolled back)', async () => {
+    const { unmergeContactsGroup, MergeOrderConflictError } = await import('../../services/database')
+    vi.mocked(unmergeContactsGroup).mockImplementation(() => {
+      throw new (MergeOrderConflictError as any)(
+        'j-newer',
+        'Dora Delta',
+        'Merges must be undone newest-first: undo the newer merge of "Dora Delta" (j-newer) before this one'
+      )
+    })
+
+    registerContactsHandlers()
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(call => call[0] === 'contacts:unmergeGroup')?.[1]
+    const result = await handler?.({} as any, ['j1', 'j2']) as any
+
+    expect(result.success).toBe(false)
+    expect(result.error.code).toBe('MERGE_ORDER_CONFLICT')
     expect(result.error.details).toMatchObject({ blockingJournalId: 'j-newer', blockingLoserName: 'Dora Delta' })
   })
 })

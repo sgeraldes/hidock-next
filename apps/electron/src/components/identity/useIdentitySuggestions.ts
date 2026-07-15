@@ -565,16 +565,17 @@ export function useIdentitySuggestions(kind?: 'person' | 'project') {
                   label: 'Undo',
                   onClick: async () => {
                     try {
-                      // Reverse every merge newest-first, STOPPING on the first
-                      // rejected Result (e.g. MERGE_ORDER_CONFLICT) — success is
-                      // only reported when every unmerge actually succeeded.
-                      let failure: string | null = null
-                      for (const jid of [...journalIds].reverse()) {
-                        failure = unmergeFailureMessage(await window.electronAPI.contacts.unmerge(jid))
-                        if (failure) break
-                      }
+                      // ONE atomic backend call: the whole group unwinds
+                      // newest-first inside a single transaction. Any rejection
+                      // (e.g. MERGE_ORDER_CONFLICT) rolls the ENTIRE group back,
+                      // so a failed Undo leaves the group exactly as it was —
+                      // fully re-attemptable — instead of half-unwound with the
+                      // older journals unreachable behind an already-undone one.
+                      const failure = unmergeFailureMessage(
+                        await window.electronAPI.contacts.unmergeGroup(journalIds)
+                      )
                       if (failure) {
-                        // The keeper still holds merged data — do NOT restore the
+                        // Nothing changed on the backend — do NOT restore the
                         // old name and do NOT claim the group was undone.
                         toast.error('Undo failed', failure)
                       } else {

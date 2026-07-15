@@ -29,6 +29,7 @@ import {
   queryAll,
   mergeContacts,
   unmergeContacts,
+  unmergeContactsGroup,
   mergeProjects,
   MergeOrderConflictError,
   unmergeProjects,
@@ -482,5 +483,94 @@ describe('dependency-aware newest-first unmerge guard (v42)', () => {
     expect(contactMeetingIds('cA')).toEqual(['m-a'])
     expect(contactMeetingIds('cD')).toEqual(['m-d'])
     expect(contactMeetingIds('cE')).toEqual(['m-e'])
+  })
+})
+
+// ---------------------------------------------------------------------------
+
+describe('unmergeContactsGroup (atomic group Undo)', () => {
+  function seedGroup(): { j1: string; j2: string } {
+    seedContact({ id: 'K', name: 'Keeper Person' })
+    seedContact({ id: 'L1', name: 'First Loser' })
+    seedContact({ id: 'L2', name: 'Second Loser' })
+    seedMeeting('m1')
+    seedMeeting('m2')
+    seedMeeting('m3')
+    linkContact('m1', 'K')
+    linkContact('m2', 'L1')
+    linkContact('m3', 'L2')
+    mergeContacts('K', 'L1') // J1 (older)
+    mergeContacts('K', 'L2') // J2 (newest)
+    const rows = queryAll<{ id: string }>(
+      "SELECT id FROM merge_journal WHERE kind = 'contact' AND undone_at IS NULL ORDER BY seq"
+    )
+    expect(rows).toHaveLength(2)
+    return { j1: rows[0].id, j2: rows[1].id }
+  }
+
+  it('unwinds every journal newest-first in one call, regardless of input order', () => {
+    const { j1, j2 } = seedGroup()
+    // Deliberately pass OLDEST-first: the backend must order by seq itself.
+    const results = unmergeContactsGroup([j1, j2])
+    expect(results).toHaveLength(2)
+    expect(results.map((r) => r.loserId)).toEqual(['L2', 'L1']) // newest first
+    expect(contactMeetingIds('K')).toEqual(['m1'])
+    expect(contactMeetingIds('L1')).toEqual(['m2'])
+    expect(contactMeetingIds('L2')).toEqual(['m3'])
+  })
+
+  it('a mid-sequence failure rolls back the ENTIRE group: the already-undone newest journal is OPEN again', () => {
+    const { j1, j2 } = seedGroup()
+    // Corrupt the OLDER journal's snapshot so the sequence fails AFTER the
+    // newest journal has already been unwound inside the transaction.
+    const original = queryOne<{ loser_snapshot: string }>(
+      'SELECT loser_snapshot FROM merge_journal WHERE id = ?',
+      [j1]
+    )!.loser_snapshot
+    run("UPDATE merge_journal SET loser_snapshot = '{not json', loser_id = NULL WHERE id = ?", [j1])
+
+    expect(() => unmergeContactsGroup([j1, j2])).toThrow(/unreadable loser snapshot/)
+
+    // TOTAL rollback: J2 (which succeeded mid-transaction) is still OPEN, its
+    // loser was not recreated, and the keeper still holds every link — the
+    // group state is exactly as before the click, fully re-attemptable.
+    expect(
+      queryOne<{ undone_at: string | null }>('SELECT undone_at FROM merge_journal WHERE id = ?', [j2])?.undone_at ??
+        null
+    ).toBeNull()
+    expect(queryOne('SELECT 1 FROM contacts WHERE id = ?', ['L2'])).toBeUndefined()
+    expect(queryOne('SELECT 1 FROM contacts WHERE id = ?', ['L1'])).toBeUndefined()
+    expect(contactMeetingIds('K').sort()).toEqual(['m1', 'm2', 'm3'])
+
+    // Retry after fixing the cause: the SAME call now fully unwinds the group.
+    run('UPDATE merge_journal SET loser_snapshot = ?, loser_id = ? WHERE id = ?', [original, 'L1', j1])
+    const results = unmergeContactsGroup([j1, j2])
+    expect(results.map((r) => r.loserId)).toEqual(['L2', 'L1'])
+    expect(contactMeetingIds('K')).toEqual(['m1'])
+    expect(contactMeetingIds('L1')).toEqual(['m2'])
+    expect(contactMeetingIds('L2')).toEqual(['m3'])
+  })
+
+  it('an order-conflicting journal rejects the whole group with the typed error and rolls everything back', () => {
+    const { j1 } = seedGroup()
+    // Only the OLDER journal is passed: its blocker (J2) is outside the group,
+    // so the dependency guard fires — and nothing is left half-done.
+    let caught: unknown
+    try {
+      unmergeContactsGroup([j1])
+    } catch (e) {
+      caught = e
+    }
+    expect(caught).toBeInstanceOf(MergeOrderConflictError)
+    expect(contactMeetingIds('K').sort()).toEqual(['m1', 'm2', 'm3'])
+    expect(queryOne('SELECT 1 FROM contacts WHERE id = ?', ['L1'])).toBeUndefined()
+  })
+
+  it('returns [] for an empty group and collapses duplicate ids', () => {
+    expect(unmergeContactsGroup([])).toEqual([])
+    const { j1, j2 } = seedGroup()
+    const results = unmergeContactsGroup([j2, j2, j1, j1])
+    expect(results).toHaveLength(2)
+    expect(results.map((r) => r.loserId)).toEqual(['L2', 'L1'])
   })
 })
