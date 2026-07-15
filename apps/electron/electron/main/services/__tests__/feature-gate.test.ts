@@ -216,6 +216,10 @@ describe('boot-effective gate for restart-gated features (Review-2 [CRITICAL], U
       'jensen:downloadFile',
       'jensen:startBluetoothScan',
       'jensen:startRealtime',
+      // Round-4 [HIGH]: reset sends a FULL command sequence to the device — it
+      // INITIATES USB traffic (resets during live calls cut audio) and takes
+      // the normal initiation gate, not the teardown one.
+      'jensen:reset',
       'device-pipeline:connect',
       'device-pipeline:sync',
       'download-service:queue-downloads',
@@ -233,7 +237,6 @@ describe('boot-effective gate for restart-gated features (Review-2 [CRITICAL], U
     const TEARDOWN_BY_SCENARIO: Record<string, string[]> = {
       connected: [
         'jensen:disconnect',
-        'jensen:reset',
         'jensen:isConnected',
         'jensen:getDeviceInfo',
         'device-pipeline:disconnect',
@@ -319,6 +322,116 @@ describe('boot-effective gate for restart-gated features (Review-2 [CRITICAL], U
     expect(gateInvokeHandler('transcription:getQueue', vi.fn().mockReturnValue([]))(event)).toEqual(
       []
     )
+  })
+
+  it('behavior (round-4): after live-disable, NO reachable handler can start a transfer (mock service layer)', () => {
+    // Wire channels to a mock device-service layer: initiating handlers call
+    // startTransfer/sendCommandSequence; teardown handlers call cancel/disconnect;
+    // observation handlers only read status. This checks BEHAVIOR, not just list
+    // membership: whatever subset of handlers the gate lets through must be
+    // incapable of starting USB traffic.
+    const svc = {
+      startTransfer: vi.fn(),
+      sendCommandSequence: vi.fn(), // what jensen:reset does on the wire
+      cancel: vi.fn(),
+      disconnect: vi.fn(),
+      readStatus: vi.fn().mockReturnValue('status'),
+    }
+    const wire: Array<[string, () => unknown]> = [
+      ['jensen:connect', () => svc.startTransfer('connect')],
+      ['jensen:listFiles', () => svc.startTransfer('file-list')],
+      ['jensen:downloadFile', () => svc.startTransfer('download')],
+      ['jensen:reset', () => svc.sendCommandSequence('reset')], // full command sequence = USB traffic
+      ['jensen:disconnect', () => svc.disconnect()],
+      ['jensen:cancelDownload', () => svc.cancel('download')],
+      ['device-pipeline:cancel', () => svc.cancel('pipeline')],
+      ['jensen:isConnected', () => svc.readStatus()],
+      ['device-pipeline:get-state', () => svc.readStatus()],
+    ]
+
+    // Boot on, then live-disable device-sync.
+    featuresConfig = { preset: 'full', flags: {} }
+    captureBootEffectiveFeatures()
+    featuresConfig = { preset: 'full', flags: { 'device-sync': false } }
+
+    for (const [ch, handler] of wire) {
+      try {
+        gateInvokeHandler(ch, handler)(event)
+      } catch {
+        // gated — expected for the initiating half
+      }
+    }
+    // Nothing reachable can put NEW traffic on the wire…
+    expect(svc.startTransfer).not.toHaveBeenCalled()
+    expect(svc.sendCommandSequence).not.toHaveBeenCalled() // jensen:reset gated as initiation
+    // …while drain/observe operations went through.
+    expect(svc.disconnect).toHaveBeenCalledTimes(1)
+    expect(svc.cancel).toHaveBeenCalledTimes(2)
+    expect(svc.readStatus).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('lifetime gate — dynamic registrations (round-4 [HIGH])', () => {
+  const event = {} as never
+  function fakeIpcMain() {
+    const handlers = new Map<string, (...args: unknown[]) => unknown>()
+    const ipc = {
+      handlers,
+      handle: (channel: string, fn: (...args: unknown[]) => unknown) => {
+        handlers.set(channel, fn)
+      },
+    }
+    return ipc
+  }
+
+  it('a device channel registered AFTER startup fails closed under boot-disabled AND pending-disable', () => {
+    const ipc = fakeIpcMain()
+    installFeatureGate(ipc as never) // production mode: installed for the process lifetime
+
+    // …startup bulk registration happens here, time passes…
+
+    // Case 1: boot-disabled — a lazy service registers an UNLISTED device channel later.
+    featuresConfig = { preset: 'full', flags: { 'device-sync': false } }
+    captureBootEffectiveFeatures()
+    ipc.handle('jensen:someFutureCommand', vi.fn())
+    expect(() => ipc.handlers.get('jensen:someFutureCommand')!(event)).toThrow(
+      FeatureDisabledError
+    )
+
+    // Case 2: pending-disable (boot-on, desired-off) — unlisted defaults to
+    // INITIATION, so it fails closed too.
+    featuresConfig = { preset: 'full', flags: {} }
+    captureBootEffectiveFeatures()
+    featuresConfig = { preset: 'full', flags: { 'device-sync': false } }
+    ipc.handle('jensen:anotherFutureCommand', vi.fn())
+    expect(() => ipc.handlers.get('jensen:anotherFutureCommand')!(event)).toThrow(
+      FeatureDisabledError
+    )
+    // A listed teardown channel registered late still works (boot-enabled).
+    const teardown = vi.fn().mockReturnValue('ok')
+    ipc.handle('jensen:cancelDownload', teardown)
+    expect(ipc.handlers.get('jensen:cancelDownload')!(event)).toBe('ok')
+    // Core channels registered late are untouched.
+    const core = vi.fn().mockReturnValue('cfg')
+    ipc.handle('config:get', core)
+    expect(ipc.handlers.get('config:get')!(event)).toBe('cfg')
+  })
+
+  it('repeated install is idempotent — never double-wraps the registrar', () => {
+    const ipc = fakeIpcMain()
+    const restore1 = installFeatureGate(ipc as never)
+    const restore2 = installFeatureGate(ipc as never) // registrar re-run (tests) — no-op
+    const fn = vi.fn().mockReturnValue(42)
+    ipc.handle('assistant:getMessages', fn)
+    expect(ipc.handlers.get('assistant:getMessages')!(event)).toBe(42)
+    expect(fn).toHaveBeenCalledTimes(1)
+    restore2() // no-op
+    restore1()
+    // After the real restore, registrations are raw again (unit-test escape hatch).
+    featuresConfig = { preset: 'library-only', flags: {} }
+    const raw = vi.fn().mockReturnValue('raw')
+    ipc.handle('assistant:getConversations', raw)
+    expect(ipc.handlers.get('assistant:getConversations')!(event)).toBe('raw')
   })
 })
 

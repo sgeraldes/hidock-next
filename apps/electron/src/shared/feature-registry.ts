@@ -607,9 +607,13 @@ export const CORE_CHANNELS: string[] = [
  */
 export const TEARDOWN_CHANNELS: string[] = [
   // --- device-sync / jensen: teardown ---
+  // NOTE (round-4 [HIGH]): jensen:reset is deliberately NOT listed. Reset sends
+  // a full command sequence to the device — it INITIATES USB traffic (resets
+  // during live calls have cut audio; the drain pattern is a manual recovery,
+  // not a routine channel). It takes the normal initiation gate. Only true
+  // disconnect/cancel/drain operations belong here.
   'jensen:disconnect',
   'jensen:cancelDownload',
-  'jensen:reset',
   'jensen:stopBluetoothScan',
   'jensen:stopRealtime',
   'jensen:pauseRealtime',

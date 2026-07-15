@@ -160,10 +160,24 @@ export function gatedHandle(ipcMain: IpcMain, channel: string, handler: InvokeHa
   ipcMain.handle(channel, gateInvokeHandler(channel, handler))
 }
 
+/** Marker so a second install on the same ipcMain is a no-op (never double-wrap). */
+const GATE_INSTALLED = Symbol.for('hidock.featureGate.installed')
+
 /**
- * Install the gate across ALL `ipcMain.handle` registrations that happen inside
- * the returned scope. Replaces `ipcMain.handle` with a wrapper that auto-gates
- * feature-owned channels, and returns a restore function to undo the patch.
+ * Install the gate across ALL `ipcMain.handle` registrations from now on.
+ * Replaces `ipcMain.handle` with a wrapper that auto-gates feature-owned
+ * channels, and returns a restore function (unit tests only).
+ *
+ * Round-4 [HIGH]: in production the gate is installed ONCE and kept for the
+ * LIFETIME of the process — `registerIpcHandlers` deliberately never restores.
+ * Restoring after the synchronous bulk registrar left every DYNAMICALLY
+ * registered channel (lazy services, later feature code paths) ungated
+ * regardless of the classification lists. With the lifetime install, every
+ * registration flows through classification: unlisted channels of a
+ * restart-gated feature default to INITIATION (fail closed under boot-disabled
+ * AND under pending-disable), core channels pass untouched. Idempotent: a
+ * repeated install (tests re-run the registrar) returns a no-op restore
+ * instead of double-wrapping.
  *
  * Why interception here rather than migrating 38 handler files: it is a single,
  * contained wrapping at the ONE registrar choke point, it gates LIVE (re-enabling
@@ -173,10 +187,15 @@ export function gatedHandle(ipcMain: IpcMain, channel: string, handler: InvokeHa
  * fire-and-forget channels are left untouched.
  */
 export function installFeatureGate(ipcMain: IpcMain): () => void {
+  if ((ipcMain.handle as unknown as Record<symbol, boolean | undefined>)[GATE_INSTALLED]) {
+    return () => {} // already gated — never double-wrap
+  }
   const originalHandle = ipcMain.handle.bind(ipcMain)
-  ipcMain.handle = ((channel: string, handler: InvokeHandler) => {
+  const gated = ((channel: string, handler: InvokeHandler) => {
     return originalHandle(channel, gateInvokeHandler(channel, handler))
   }) as IpcMain['handle']
+  ;(gated as unknown as Record<symbol, boolean>)[GATE_INSTALLED] = true
+  ipcMain.handle = gated
   return () => {
     ipcMain.handle = originalHandle
   }

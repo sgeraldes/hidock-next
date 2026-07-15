@@ -12,6 +12,7 @@
 import { useEffect, useRef, useCallback } from 'react'
 import { getHiDockDeviceService } from '@/services/hidock-device'
 import { useAppStore } from '@/store/useAppStore'
+import { useFeatureStore } from '@/store/useFeatureStore'
 import { toast } from '@/components/ui/toaster'
 import { parseError, getErrorMessage } from '@/features/library/utils/errorHandling'
 import { shouldLogQa } from '@/services/qa-monitor'
@@ -148,6 +149,33 @@ export function drainDownloadQueue(): void {
 }
 
 /**
+ * Round-4 [HIGH]: is device-sync INITIATION blocked right now? True when the
+ * DESIRED feature state says device-sync is off — including the pending-disable
+ * window (live disable, boot-active, restart pending), where main's IPC gate
+ * rejects every initiating channel while keeping teardown open. The orchestrator
+ * must observe this BEFORE each new dequeue and before any scheduled
+ * auto-sync/reconnect initiation: otherwise the next jensen:downloadFile rejects
+ * and the catch would convert untouched pending work into persisted failures.
+ * Exported for tests.
+ */
+export function isDeviceSyncInitiationBlocked(): boolean {
+  return !(useFeatureStore.getState().resolved['device-sync']?.enabled ?? true)
+}
+
+/**
+ * Round-4 [HIGH]: does this rejection look like main's FeatureDisabledError?
+ * Electron wraps thrown handler errors, so match on the error NAME embedded in
+ * the message ("FeatureDisabledError") or its stable message shape
+ * (`… is disabled (channel …`). Such a rejection is a GATE TRANSITION, not a
+ * download failure — the loop stops and the item must NOT be marked failed.
+ * Exported for tests.
+ */
+export function isFeatureDisabledRejection(error: unknown): boolean {
+  const text = error instanceof Error ? `${error.name}: ${error.message}` : String(error ?? '')
+  return text.includes('FeatureDisabledError') || text.includes('is disabled (channel')
+}
+
+/**
  * Hard connectivity gate for STARTING a download session. A download must NEVER
  * touch the USB bus unless the device is genuinely connected AND past initialization
  * (step === 'ready'). Queuing while disconnected must persist the item as pending and
@@ -207,7 +235,12 @@ export function useDownloadOrchestrator() {
 
   // ---- Single file download ----
 
-  const processDownload = useCallback(async (item: { filename: string; fileSize: number }, signal: AbortSignal) => {
+  // Returns true (downloaded), false (failed), or 'gated' — the device-sync
+  // feature gate rejected mid-item (round-4): a gate transition, not a failure.
+  const processDownload = useCallback(async (
+    item: { filename: string; fileSize: number },
+    signal: AbortSignal
+  ): Promise<boolean | 'gated'> => {
     if (shouldLogQa()) console.log(`[QA-MONITOR][Operation] Processing download: ${item.filename}`)
 
     if (!deviceService.isConnected()) {
@@ -284,6 +317,18 @@ export function useDownloadOrchestrator() {
         return false
       }
     } catch (error) {
+      // Round-4 [HIGH]: a FeatureDisabledError-shaped rejection is a GATE
+      // TRANSITION (device-sync live-disabled between the loop's check and the
+      // USB call), never a download failure. Do NOT mark-failed — the item stays
+      // pending/untouched in the main queue and resumes after restart+re-enable.
+      if (isFeatureDisabledRejection(error)) {
+        if (shouldLogQa()) {
+          console.log(`[useDownloadOrchestrator] Gate transition during ${item.filename} — stopping (item stays pending)`)
+        }
+        deviceService.log('info', 'Download paused', `${item.filename}: Device Sync turned off — queued until restart`)
+        removeFromDownloadQueue(item.filename) // renderer view only; main item untouched
+        return 'gated'
+      }
       const libraryError = parseError(error, 'download')
       console.error(`[useDownloadOrchestrator] Error: ${item.filename}`, error)
       await window.electronAPI.downloadService.markFailed(item.filename, libraryError.message)
@@ -311,6 +356,14 @@ export function useDownloadOrchestrator() {
     if (isProcessingDownloads.current) return
     // DL-008: Set lock before first await to prevent double-processing
     isProcessingDownloads.current = true
+
+    // Round-4 [HIGH]: never START a session while device-sync initiation is
+    // blocked (feature off / live-disabled pending restart). Items stay pending.
+    if (isDeviceSyncInitiationBlocked()) {
+      if (shouldLogQa()) console.log('[useDownloadOrchestrator] Not starting downloads — Device Sync is disabled')
+      isProcessingDownloads.current = false
+      return
+    }
 
     // Hard connectivity gate: never start a session while disconnected. Queuing while
     // disconnected persists the item as pending and starts nothing; processing resumes
@@ -374,6 +427,9 @@ export function useDownloadOrchestrator() {
     let completed = 0
     let failed = 0
     let aborted = false
+    // Round-4: the device-sync gate closed mid-run (live disable). Remaining
+    // items stay PENDING — this is not a cancel and not a failure.
+    let gateStopped = false
     let bytesDownloaded = 0
     const initialTotal = pendingItems.length
     // Guards against re-selecting an item that already failed this run (failed items
@@ -384,6 +440,17 @@ export function useDownloadOrchestrator() {
     // newly-detected newer recording — or a user-explicit request — preempts the
     // remaining backlog immediately (recency-first, mirroring the transcription queue).
     while (true) {
+      // Round-4 [HIGH]: observe the device-sync gate BEFORE each new dequeue.
+      // A live disable mid-queue stops the loop here — the in-flight item has
+      // already finished, every remaining item stays PENDING (untouched, never
+      // mark-failed), and the session resumes after re-enable + restart.
+      if (isDeviceSyncInitiationBlocked()) {
+        if (shouldLogQa()) console.log('[useDownloadOrchestrator] Device Sync disabled — stopping before next dequeue (items stay pending)')
+        gateStopped = true
+        aborted = true
+        break
+      }
+
       // User-initiated cancel via cancelDownloads() — abort entire queue
       if (_cancelInProgress) {
         if (shouldLogQa()) console.log('[useDownloadOrchestrator] Download cancelled by user')
@@ -430,9 +497,16 @@ export function useDownloadOrchestrator() {
       })
 
       currentlyDownloadingRef.current = item.filename
-      const success = await processDownload(item, downloadAbortControllerRef.current.signal)
+      const result = await processDownload(item, downloadAbortControllerRef.current.signal)
       currentlyDownloadingRef.current = null
-      if (success) {
+      if (result === 'gated') {
+        // Round-4: FeatureDisabledError-shaped rejection = gate transition. The
+        // item was never marked failed; it and the rest of the queue stay pending.
+        gateStopped = true
+        aborted = true
+        break
+      }
+      if (result === true) {
         completed++
         bytesDownloaded += item.fileSize || 0
         // Consume the scope/priority entries only once the file is actually downloaded;
@@ -476,12 +550,16 @@ export function useDownloadOrchestrator() {
 
     if (completed > 0 || failed > 0 || aborted) {
       toast({
-        title: aborted ? 'Sync cancelled' : (failed === 0 ? 'Sync complete' : 'Sync completed with errors'),
-        description: aborted
-          ? `Downloaded ${completed} of ${pendingItems.length} file${pendingItems.length !== 1 ? 's' : ''}`
-          : (failed === 0
-            ? `Downloaded ${completed} file${completed !== 1 ? 's' : ''}`
-            : `Downloaded ${completed}, failed ${failed}`),
+        title: gateStopped
+          ? 'Device Sync turned off'
+          : aborted ? 'Sync cancelled' : (failed === 0 ? 'Sync complete' : 'Sync completed with errors'),
+        description: gateStopped
+          ? `Downloaded ${completed} of ${pendingItems.length}; the rest stay queued until Device Sync is back on (restart required)`
+          : aborted
+            ? `Downloaded ${completed} of ${pendingItems.length} file${pendingItems.length !== 1 ? 's' : ''}`
+            : (failed === 0
+              ? `Downloaded ${completed} file${completed !== 1 ? 's' : ''}`
+              : `Downloaded ${completed}, failed ${failed}`),
         variant: aborted ? 'default' : (failed === 0 ? 'success' : 'warning')
       })
 
@@ -517,8 +595,11 @@ export function useDownloadOrchestrator() {
 
     // Defect A: expose the queue drain so useDeviceSubscriptions can fire already-queued
     // pending downloads once the device is ready and the file-list scan has completed.
+    // Round-4: a scheduled drain is an INITIATION path — abort when device-sync is off.
     _drainQueueFn = () => {
-      if (!isProcessingDownloads.current) processDownloadQueueRef.current()
+      if (!isProcessingDownloads.current && !isDeviceSyncInitiationBlocked()) {
+        processDownloadQueueRef.current()
+      }
     }
 
     const isElectron = !!window.electronAPI?.downloadService
@@ -563,8 +644,15 @@ export function useDownloadOrchestrator() {
           // Strict connectivity gate (DL-001 + disconnected-download evidence): require BOTH
           // a live connection AND step === 'ready'. A pending item queued while disconnected
           // must NOT start here — it waits for the connect-driven drain instead.
+          // Round-4: scheduled auto-start is an INITIATION path — abort when
+          // device-sync is disabled (pending items stay pending, untouched).
           const step = useAppStore.getState().connectionStatus.step
-          if (hasPending && !isProcessingDownloads.current && canStartDownloadSession(deviceService.isConnected(), step)) {
+          if (
+            hasPending &&
+            !isProcessingDownloads.current &&
+            !isDeviceSyncInitiationBlocked() &&
+            canStartDownloadSession(deviceService.isConnected(), step)
+          ) {
             processDownloadQueueRef.current()
           }
         })
@@ -582,7 +670,15 @@ export function useDownloadOrchestrator() {
     // Starting downloads independently on 'ready' would race with the file list scan
     // on the USB bus, causing stalls and corrupted responses.
     const unsubDevice = deviceService.onStatusChange((status) => {
-      if (status.step === 'ready' && isElectron && !isProcessingDownloads.current) {
+      // Round-4: reconnect retry is an INITIATION path — abort when device-sync
+      // is disabled (retry-failed would be gate-rejected by main anyway; do not
+      // even ask, so nothing is re-queued or re-persisted while off).
+      if (
+        status.step === 'ready' &&
+        isElectron &&
+        !isProcessingDownloads.current &&
+        !isDeviceSyncInitiationBlocked()
+      ) {
         // Only retry INTERRUPTED items on reconnect — don't process the full pending queue.
         // Pending items will be processed when auto-sync calls startSession.
         // MEDIUM-4: include disconnect-'cancelled' (cancelActiveDownloads persists an

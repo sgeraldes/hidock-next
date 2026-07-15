@@ -138,6 +138,10 @@ describe('IPC channel registrar inventory', () => {
       'jensen:tryConnect',
       'jensen:listFiles',
       'jensen:downloadFile',
+      // Round-4 [HIGH]: reset sends a full command sequence — USB traffic
+      // initiation, never routine teardown (the drain pattern is a manual
+      // recovery procedure, not a channel).
+      'jensen:reset',
       'device-pipeline:connect',
       'device-pipeline:sync',
       'download-service:queue-downloads',
