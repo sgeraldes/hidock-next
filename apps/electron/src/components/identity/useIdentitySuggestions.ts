@@ -565,25 +565,42 @@ export function useIdentitySuggestions(kind?: 'person' | 'project') {
                   label: 'Undo',
                   onClick: async () => {
                     try {
-                      // ONE atomic backend call: the whole group unwinds
-                      // newest-first inside a single transaction. Any rejection
-                      // (e.g. MERGE_ORDER_CONFLICT) rolls the ENTIRE group back,
-                      // so a failed Undo leaves the group exactly as it was —
-                      // fully re-attemptable — instead of half-unwound with the
-                      // older journals unreachable behind an already-undone one.
-                      const failure = unmergeFailureMessage(
-                        await window.electronAPI.contacts.unmergeGroup(journalIds)
-                      )
-                      if (failure) {
-                        // Nothing changed on the backend — do NOT restore the
-                        // old name and do NOT claim the group was undone.
-                        toast.error('Undo failed', failure)
-                      } else {
-                        if (rename) {
-                          await window.electronAPI.contacts.update({ id: keeperId, name: keeperName })
+                      // (1) Only unwind merges if any were actually recorded. A
+                      // rename-only group (every candidate was a bare-mention
+                      // alias → empty journalIds) has nothing to unmerge, and the
+                      // unmergeGroup IPC schema rejects an empty list — so skip
+                      // straight to the name-restore. When journals DO exist, ONE
+                      // atomic backend call unwinds them newest-first in a single
+                      // transaction; any rejection (e.g. MERGE_ORDER_CONFLICT)
+                      // rolls the ENTIRE group back, leaving it fully
+                      // re-attemptable rather than half-unwound.
+                      if (journalIds.length > 0) {
+                        const failure = unmergeFailureMessage(
+                          await window.electronAPI.contacts.unmergeGroup(journalIds)
+                        )
+                        if (failure) {
+                          // Nothing changed on the backend — do NOT restore the
+                          // name and do NOT claim the group was undone.
+                          toast.error('Undo failed', failure)
+                          return
                         }
-                        toast.info('Group merge undone', 'The separate records were restored.')
                       }
+                      // (2) Restore the prior canonical name. The rename was a
+                      // separate contacts.update (never journaled), so it returns
+                      // a Result rather than throwing — a failure here must
+                      // surface, not be masked by a success toast.
+                      if (rename) {
+                        const restore = await window.electronAPI.contacts.update({ id: keeperId, name: keeperName })
+                        if (!restore.success) {
+                          const msg = (restore as { error?: { message?: string } }).error?.message
+                          toast.error(
+                            'Undo incomplete',
+                            msg || 'The merges were reversed but the previous name could not be restored.'
+                          )
+                          return
+                        }
+                      }
+                      toast.info('Group merge undone', 'The separate records were restored.')
                     } catch (err) {
                       toast.error(
                         'Undo failed',

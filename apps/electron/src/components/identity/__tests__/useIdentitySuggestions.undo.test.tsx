@@ -252,4 +252,71 @@ describe('group-merge Undo (single atomic backend call)', () => {
     expect(toast.info).toHaveBeenCalledWith('Group merge undone', expect.any(String))
     expect(toast.error).not.toHaveBeenCalled()
   })
+
+  it('a rename-ONLY group (zero journal ids) restores the name and never calls unmergeGroup', async () => {
+    // Every accepted candidate was a bare-mention alias → no merge journal ids,
+    // so journalIds stays empty. The action is still undoable because the group
+    // was renamed. Undo must NOT call unmergeGroup (its IPC schema rejects an
+    // empty list) and must go straight to the name-restore.
+    mockAccept.mockResolvedValue({ success: true, data: { id: 'x', status: 'accepted', mergeJournalId: null } })
+
+    const { result } = renderHook(() => useIdentitySuggestions('person'))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    await act(async () => {
+      await result.current.mergeGroup({
+        keeperId: 'c1',
+        keeperName: 'Old Name',
+        suggestionIds: ['g1', 'g2'],
+        finalName: 'Canonical Name'
+      })
+    })
+    const undo = lastUndoAction()
+    expect(undo).toBeDefined() // undoable via the rename alone
+    mockContactsUpdate.mockClear() // forget the merge-time rename
+
+    await act(async () => {
+      await undo!()
+    })
+
+    expect(mockContactUnmergeGroup).not.toHaveBeenCalled()
+    expect(mockContactsUpdate).toHaveBeenCalledWith({ id: 'c1', name: 'Old Name' })
+    expect(toast.info).toHaveBeenCalledWith('Group merge undone', expect.any(String))
+    expect(toast.error).not.toHaveBeenCalled()
+  })
+
+  it('a FAILED name-restore Result surfaces the failure and does NOT claim success (even though the merges were reversed)', async () => {
+    mockAccept
+      .mockResolvedValueOnce({ success: true, data: { id: 'g1', status: 'accepted', mergeJournalId: 'j1' } })
+      .mockResolvedValueOnce({ success: true, data: { id: 'g2', status: 'accepted', mergeJournalId: 'j2' } })
+
+    const { result } = renderHook(() => useIdentitySuggestions('person'))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    await act(async () => {
+      await result.current.mergeGroup({
+        keeperId: 'c1',
+        keeperName: 'Old Name',
+        suggestionIds: ['g1', 'g2'],
+        finalName: 'Canonical Name'
+      })
+    })
+    const undo = lastUndoAction()
+    mockContactsUpdate.mockClear()
+
+    // The group unmerge succeeds, but restoring the prior name returns a failed
+    // Result (contacts.update does NOT throw — it returns { success: false }).
+    mockContactUnmergeGroup.mockResolvedValue({ success: true, data: [] })
+    mockContactsUpdate.mockResolvedValue({ success: false, error: { code: 'DATABASE_ERROR', message: 'name locked' } })
+    await act(async () => {
+      await undo!()
+    })
+
+    // The merges WERE reversed…
+    expect(mockContactUnmergeGroup).toHaveBeenCalledWith(['j1', 'j2'])
+    expect(mockContactsUpdate).toHaveBeenCalledWith({ id: 'c1', name: 'Old Name' })
+    // …but the failed name-restore is surfaced and success is NOT claimed.
+    expect(toast.error).toHaveBeenCalledWith('Undo incomplete', expect.stringMatching(/name locked/))
+    expect(toast.info).not.toHaveBeenCalled()
+  })
 })
