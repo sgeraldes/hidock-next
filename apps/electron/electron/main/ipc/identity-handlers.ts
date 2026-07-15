@@ -32,7 +32,12 @@ import {
   AmbiguousBucket,
   BucketResolution
 } from '../services/database'
-import { discoverContactMerges, discoverProjectMerges, DiscoveryResult } from '../services/identity-discovery'
+import {
+  discoverContactMerges,
+  discoverProjectMerges,
+  revalidateSuggestionsForSurfacing,
+  DiscoveryResult
+} from '../services/identity-discovery'
 import { autoSplitAmbiguousBuckets } from '../services/org-reconciler'
 import { success, error, Result } from '../types/api'
 
@@ -68,7 +73,11 @@ export function registerIdentityHandlers(): void {
         }
         status = parsed.data
       }
-      return success(getIdentitySuggestions(status))
+      // ADV24-2 (round-25): revalidate persisted suggestions at surfacing time —
+      // redact now-excluded/zero-provenance graph topics and supersede (drop)
+      // any pending suggestion whose graph/topic evidence no longer clears the
+      // surfacing threshold. Non-destructive (no status write); fail-closed.
+      return success(revalidateSuggestionsForSurfacing(getIdentitySuggestions(status)))
     } catch (err) {
       console.error('identity:getSuggestions error:', err)
       return error('DATABASE_ERROR', 'Failed to fetch identity suggestions', err)

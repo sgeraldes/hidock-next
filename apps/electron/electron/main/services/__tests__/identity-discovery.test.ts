@@ -43,6 +43,15 @@ vi.mock('../database', () => ({
       [randomUUID(), kind, candidateName, targetId, confidence, JSON.stringify(evidence ?? {}), new Date().toISOString()]
     )
   },
+  // ADV24-2 (round-25): identity-discovery now routes graph neighbors through the
+  // shared edge-provenance boundary. These tests seed no ABOUT/RELATES_TO topic
+  // edges (graph closeness here comes from shared MEETINGS), so a pass-through
+  // (every candidate edge eligible) preserves their behavior. The real
+  // suppression is exercised in identity-suggestion-provenance.test.ts.
+  filterEligibleGraphEdgeIds: (edgeIds: Iterable<string>) => ({
+    eligibleEdgeIds: new Set([...edgeIds]),
+    failClosed: false,
+  }),
 }))
 
 import { discoverContactMerges, discoverProjectMerges } from '../identity-discovery'

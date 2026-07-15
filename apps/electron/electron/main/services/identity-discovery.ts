@@ -28,8 +28,8 @@
  * shape carries a `signals` map so a connector-derived signal slots in later.
  */
 
-import { queryAll, queryOne, insertIdentitySuggestion } from './database'
-import type { Contact, Project } from './database'
+import { queryAll, queryOne, insertIdentitySuggestion, filterEligibleGraphEdgeIds } from './database'
+import type { Contact, Project, IdentitySuggestion } from './database'
 import { normalizeName, accentFoldedKey, fuzzyNameScore, detectAmbiguousName } from './entity-normalize'
 import { nameRarity, type Rarity } from './name-rarity'
 
@@ -319,8 +319,13 @@ function suggestionExists(kind: 'person' | 'project', candidateName: string, tar
 // Graph closeness — shared topic/project neighbors via the knowledge graph
 // ---------------------------------------------------------------------------
 
+// ADV24-2 (round-25) — each neighbor row carries the id of the graph edge
+// (ABOUT / RELATES_TO) that produced it, so a neighbor derived SOLELY from a
+// zero-provenance (legacy pre-F18) or excluded-recording edge is suppressed
+// before it contributes graph confidence + sharedTopics to a persisted merge
+// suggestion (see makeNeighborLoader).
 const PERSON_NEIGHBORS_SQL = `
-  SELECT DISTINCT t.type || ':' || t.norm_key AS key, t.label AS label
+  SELECT DISTINCT t.type || ':' || t.norm_key AS key, t.label AS label, ab.id AS edge_id
   FROM graph_nodes p
   JOIN graph_edges ea ON ea.source_id = p.id AND ea.type = 'ATTENDED'
   JOIN graph_nodes m  ON m.id = ea.target_id AND m.type = 'meeting'
@@ -329,19 +334,30 @@ const PERSON_NEIGHBORS_SQL = `
   WHERE p.type = 'person' AND p.norm_key = ?`
 
 const PROJECT_NEIGHBORS_SQL = `
-  SELECT DISTINCT m.type || ':' || m.norm_key AS key, m.label AS label
+  SELECT DISTINCT m.type || ':' || m.norm_key AS key, m.label AS label, ab.id AS edge_id
   FROM graph_nodes pj
   JOIN graph_edges ab ON ab.target_id = pj.id AND ab.type = 'ABOUT'
   JOIN graph_nodes m  ON m.id = ab.source_id
   WHERE pj.type = 'project' AND pj.norm_key = ?
   UNION
-  SELECT DISTINCT tp.type || ':' || tp.norm_key AS key, tp.label AS label
+  SELECT DISTINCT tp.type || ':' || tp.norm_key AS key, tp.label AS label, rt.id AS edge_id
   FROM graph_nodes pj
   JOIN graph_edges rt ON rt.target_id = pj.id AND rt.type = 'RELATES_TO'
   JOIN graph_nodes tp ON tp.id = rt.source_id
   WHERE pj.type = 'project' AND pj.norm_key = ?`
 
-/** Cache norm_key → (neighbor key → label) so each entity hits the graph once. */
+/**
+ * Cache norm_key → (neighbor key → label) so each entity hits the graph once.
+ *
+ * ADV24-2 (round-25): a neighbor is kept only if ≥1 of its contributing edges is
+ * VISIBLE under the shared non-owner suppression ({@link filterEligibleGraphEdgeIds}).
+ * This routes discovery graph closeness + sharedTopics through the SAME
+ * zero-provenance + exclusion boundary as the gated graph read fns, so an
+ * excluded / legacy edge no longer inflates graph confidence or leaks a topic
+ * label into a persisted merge suggestion. Fail-closed: when eligibility can't
+ * resolve, filterEligibleGraphEdgeIds returns an empty allowlist ⇒ every
+ * attributed/legacy neighbor is dropped.
+ */
 function makeNeighborLoader(sql: string, paramCount: 1 | 2): (normKey: string) => Map<string, string> {
   const cache = new Map<string, Map<string, string>>()
   return (normKey: string): Map<string, string> => {
@@ -349,8 +365,13 @@ function makeNeighborLoader(sql: string, paramCount: 1 | 2): (normKey: string) =
     if (hit) return hit
     hit = new Map<string, string>()
     const params = paramCount === 2 ? [normKey, normKey] : [normKey]
-    for (const row of safeQueryAll<{ key: string; label: string | null }>(sql, params)) {
-      hit.set(row.key, row.label ?? row.key)
+    const rows = safeQueryAll<{ key: string; label: string | null; edge_id: string | null }>(sql, params)
+    const { eligibleEdgeIds } = filterEligibleGraphEdgeIds(
+      rows.map((r) => r.edge_id).filter((id): id is string => !!id)
+    )
+    for (const row of rows) {
+      if (!row.edge_id || !eligibleEdgeIds.has(row.edge_id)) continue // suppressed edge ⇒ drop this neighbor
+      if (!hit.has(row.key)) hit.set(row.key, row.label ?? row.key)
     }
     cache.set(normKey, hit)
     return hit
@@ -538,6 +559,138 @@ export function discoverProjectMerges(): DiscoveryResult {
   }
 
   return result
+}
+
+// ---------------------------------------------------------------------------
+// ADV24-2 (round-25) — read-time revalidation of PERSISTED merge suggestions
+// ---------------------------------------------------------------------------
+
+interface SuggestionEvidence {
+  signals?: { name?: number; email?: number; role?: number; graph?: number }
+  composite?: number
+  sharedTopics?: string[]
+  sharedMeetings?: number
+  keeperId?: string
+  keeperName?: string
+  loserId?: string
+  loserName?: string
+  emailMatch?: EmailRelation
+  [k: string]: unknown
+}
+
+/** Shared-meeting id set for one entity (person → meeting_contacts, project → meeting_projects). */
+function meetingSetForEntity(kind: 'person' | 'project', id: string): Set<string> {
+  const table = kind === 'person' ? 'meeting_contacts' : 'meeting_projects'
+  const idCol = kind === 'person' ? 'contact_id' : 'project_id'
+  return new Set(
+    safeQueryAll<{ meeting_id: string }>(`SELECT meeting_id FROM ${table} WHERE ${idCol} = ?`, [id]).map(
+      (r) => r.meeting_id
+    )
+  )
+}
+
+/**
+ * ADV24-2 (round-25) — revalidate PENDING identity suggestions at SURFACING time
+ * (identity:getSuggestions → the People/Projects merge queue). A suggestion's
+ * graph-derived evidence (sharedTopics + the `graph` confidence signal) was
+ * computed from ABOUT / RELATES_TO edges that may have since become excluded
+ * (their source recording trashed / personal / value-excluded / hard-purged) or
+ * that are legacy zero-provenance — either way they must NOT keep leaking topic
+ * labels or influencing a user-approved merge. This mirrors the chat-provenance
+ * model: NON-DESTRUCTIVE read-time suppression (no status write), so an
+ * eligibility restoration (un-trash) automatically re-surfaces the suggestion.
+ *
+ * For each pending suggestion whose evidence carried a graph/topic component:
+ *   • recompute the ELIGIBLE shared topics via the suppressed neighbor loaders
+ *     (zero-provenance / excluded edges already dropped) and redact
+ *     evidence.sharedTopics to that subset;
+ *   • recompute the graph signal = GRAPH_MAX_BOOST·clamp01(mJac + eligible-tJac)
+ *     (meeting overlap is a structural, non-graph signal and is preserved) and
+ *     re-derive the composite = oldComposite − oldGraph + newGraph;
+ *   • DROP the suggestion when the recomputed composite falls below
+ *     SUGGEST_THRESHOLD (its graph/topic evidence was load-bearing and is now
+ *     fully suppressed). Email-exact stragglers keep their floor.
+ * Fail-closed: any per-suggestion recompute error suppresses that pending
+ * suggestion. Non-pending rows (history) pass through unchanged.
+ */
+export function revalidateSuggestionsForSurfacing(suggestions: IdentitySuggestion[]): IdentitySuggestion[] {
+  const out: IdentitySuggestion[] = []
+  // Fresh (uncached) suppressed neighbor loaders for this surfacing pass.
+  const personNeighbors = makeNeighborLoader(PERSON_NEIGHBORS_SQL, 1)
+  const projectNeighbors = makeNeighborLoader(PROJECT_NEIGHBORS_SQL, 2)
+
+  for (const s of suggestions) {
+    if (s.status !== 'pending') {
+      out.push(s)
+      continue
+    }
+
+    let ev: SuggestionEvidence
+    try {
+      ev = s.evidence ? (JSON.parse(s.evidence) as SuggestionEvidence) : {}
+    } catch {
+      ev = {}
+    }
+
+    const oldGraph = Number(ev.signals?.graph ?? 0)
+    const hadTopics = Array.isArray(ev.sharedTopics) && ev.sharedTopics.length > 0
+    // No graph/topic component ⇒ nothing recording-attributed to revalidate.
+    if (oldGraph <= 0 && !hadTopics) {
+      out.push(s)
+      continue
+    }
+
+    try {
+      const kind = s.kind
+      const keeperId = ev.keeperId ?? s.target_id
+      const loserId = ev.loserId ?? null
+      const keeperName =
+        ev.keeperName ??
+        queryOne<{ name: string }>(
+          `SELECT name FROM ${kind === 'person' ? 'contacts' : 'projects'} WHERE id = ?`,
+          [s.target_id]
+        )?.name ??
+        ''
+      const loserName = ev.loserName ?? s.candidate_name
+
+      const neighborsFor = kind === 'person' ? personNeighbors : projectNeighbors
+      const aN = neighborsFor(normalizeName(keeperName))
+      const bN = neighborsFor(normalizeName(loserName))
+      const tJac = jaccard(new Set(aN.keys()), new Set(bN.keys()))
+      const eligibleSharedTopics = tJac.shared.map((k) => aN.get(k) ?? k).slice(0, 5)
+
+      // Meeting overlap is structural (not a provenance-bearing graph edge) → preserved.
+      // Only recomputable when we know both ids; otherwise treat as unknown (0) which
+      // conservatively lowers confidence (never raises it).
+      const canRecompute = !!loserId
+      const mJac = canRecompute
+        ? jaccard(meetingSetForEntity(kind, keeperId), meetingSetForEntity(kind, loserId!))
+        : { score: 0, shared: [] as string[] }
+      const newGraph = GRAPH_MAX_BOOST * clamp01(mJac.score + tJac.score)
+
+      const oldComposite = Number(ev.composite ?? s.confidence ?? 0)
+      let newComposite = clamp01(oldComposite - oldGraph + newGraph)
+      if (ev.emailMatch === 'exact') newComposite = Math.max(newComposite, EMAIL_EXACT_FLOOR)
+
+      ev.sharedTopics = eligibleSharedTopics
+      ev.signals = { ...(ev.signals ?? {}), graph: round2(newGraph) }
+      ev.composite = round2(newComposite)
+      if (canRecompute) ev.sharedMeetings = mJac.shared.length
+
+      // Drop only when we could fully recompute AND the graph/topic evidence was
+      // load-bearing (composite now below the surfacing bar). Without a resolvable
+      // loserId we can't separate meeting from topic contribution, so we keep the
+      // row but with topics already redacted (no leak).
+      if (canRecompute && newComposite < SUGGEST_THRESHOLD) continue
+
+      out.push({ ...s, confidence: round2(newComposite), evidence: JSON.stringify(ev) })
+    } catch (e) {
+      // Fail-closed: a recompute error suppresses this pending suggestion.
+      console.error('[identity-discovery] suggestion revalidation failed — suppressing (fail-closed):', e)
+      continue
+    }
+  }
+  return out
 }
 
 // ---------------------------------------------------------------------------
