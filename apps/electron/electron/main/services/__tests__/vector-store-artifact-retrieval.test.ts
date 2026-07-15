@@ -37,6 +37,9 @@ const deps = vi.hoisted(() => ({
   excluded: new Set<string>(),
   // Ids that EXIST as knowledge_captures rows (genuine artifact/capture ids).
   captures: new Set<string>(),
+  // ADV16-3 (round-17) — artifact captures that EXIST but are NOT eligible
+  // (soft-deleted or value-excluded). Existence ≠ eligibility.
+  capturesExcluded: new Set<string>(),
   throwOnExclusion: false
 }))
 
@@ -64,6 +67,24 @@ vi.mock('../database', () => ({
     deps.throwOnExclusion
       ? { ids: new Set<string>(), failClosed: true }
       : { ids: new Set([...ids].filter((i) => i && deps.captures.has(i))), failClosed: false },
+  // ADV16-3 (round-17) — the artifact branch now requires capture ELIGIBILITY (via
+  // filterEligibleCaptureIds → getCaptureEligibilityRows), not mere existence.
+  // These artifact captures are standalone (no source_recording_id); an excluded
+  // one is modeled with a value-excluded rating so eligibility drops it.
+  getCaptureEligibilityRows: (ids: Iterable<string>) =>
+    deps.throwOnExclusion
+      ? { rows: [], failClosed: true }
+      : {
+          rows: [...ids]
+            .filter((i) => i && deps.captures.has(i))
+            .map((id) => ({
+              id,
+              source_recording_id: null,
+              quality_rating: deps.capturesExcluded.has(id) ? 'garbage' : null,
+              deleted_at: null
+            })),
+          failClosed: false
+        },
   isRecordingProcessable: () => true
 }))
 vi.mock('../embeddings', () => ({
@@ -114,6 +135,7 @@ beforeEach(() => {
   deps.recordings = new Set(['rec-live'])
   deps.excluded = new Set<string>()
   deps.captures = new Set(['cap-pdf', 'cap-md', 'cap-txt', 'cap-img'])
+  deps.capturesExcluded = new Set<string>()
   deps.throwOnExclusion = false
 })
 
@@ -150,6 +172,21 @@ describe('ADV10-P1 — artifact docs are discriminated by captureId, not sourceT
     deps.recordings = new Set<string>()
     const ids = (await store.search('anything', 10)).map((r) => r.document.metadata.recordingId).sort()
     expect(ids).toEqual(['art-img', 'art-md', 'art-pdf', 'art-txt'])
+  })
+
+  it('ADV16-3 — an EXCLUDED artifact capture (exists but value-excluded/soft-deleted) is dropped', async () => {
+    const store = new VectorStore()
+    await seed(store)
+
+    // The pdf artifact's capture becomes value-excluded / soft-deleted. Existence
+    // alone is no longer enough — the artifact branch requires ELIGIBILITY.
+    deps.capturesExcluded = new Set(['cap-pdf'])
+    const ids = (await store.search('anything', 10)).map((r) => r.document.metadata.recordingId).sort()
+
+    // art-pdf gone (its capture is excluded); the other artifacts + the live
+    // transcript remain.
+    expect(ids).toEqual(['art-img', 'art-md', 'art-txt', 'rec-live'])
+    expect(ids).not.toContain('art-pdf')
   })
 
   it('fail-closed on lookup error drops everything that carries a recordingId', async () => {

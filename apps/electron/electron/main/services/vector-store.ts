@@ -4,7 +4,7 @@
  */
 
 import { getDatabase, isRecordingProcessable } from './database'
-import { filterEligibleRecordingIds, existingRecordings, existingCaptures } from './recording-eligibility'
+import { filterEligibleRecordingIds, existingRecordings, filterEligibleCaptureIds } from './recording-eligibility'
 import { getEmbeddingsService } from './embeddings'
 
 interface VectorDocument {
@@ -445,19 +445,29 @@ class VectorStore {
     // recording row (any state)? Then it is recording-backed and MUST obey the
     // eligibility allowlist — a forged captureId cannot exempt a real excluded
     // recording. If `recordingId` does NOT resolve to a recording, the doc is a
-    // genuine artifact ONLY when its `captureId` names a REAL knowledge_captures
-    // row; otherwise it is a forged chunk or a hard-purged recording orphan and
-    // is DROPPED (fail closed). Docs with no `recordingId` are never gated here.
+    // genuine artifact ONLY when its `captureId` names an ELIGIBLE
+    // knowledge_captures row; otherwise it is a forged chunk, a hard-purged
+    // recording orphan, or an EXCLUDED artifact capture and is DROPPED (fail
+    // closed). Docs with no `recordingId` are never gated here.
+    //
+    // ADV16-3 (round-17): the artifact branch previously kept a doc when its
+    // captureId merely EXISTED (getExistingCaptureIds). Existence includes
+    // soft-deleted + garbage/low-value captures, so excluded pdf/md/txt/image
+    // artifact chunks reached global chat / meeting retrieval / chunk display.
+    // Require ELIGIBILITY via the shared capture boundary instead of existence —
+    // this still subsumes the forged-provenance protection (an ineligible/forged
+    // captureId is absent from the eligible set ⇒ dropped) while keeping genuine
+    // eligible artifacts (round-11 regression).
     const recCandidates = docs.map((d) => d.metadata.recordingId).filter((x): x is string => !!x)
     const capCandidates = docs.map((d) => d.metadata.captureId).filter((x): x is string => !!x)
 
     const existRec = existingRecordings(recCandidates) // which ids are REAL recordings (any state)
     const eligibility = filterEligibleRecordingIds(recCandidates) // the allowlist over real recordings
-    const existCap = existingCaptures(capCandidates) // which captureIds are REAL captures
+    const capEligibility = filterEligibleCaptureIds(capCandidates) // eligible (not merely existing) captures
 
     // ANY provenance lookup failing ⇒ we cannot prove provenance for a doc that
     // has a recordingId ⇒ fail closed: keep only docs with NO recordingId.
-    const failClosed = existRec.failClosed || eligibility.failClosed || existCap.failClosed
+    const failClosed = existRec.failClosed || eligibility.failClosed || capEligibility.failClosed
 
     return docs.filter((d) => {
       const recId = d.metadata.recordingId
@@ -469,9 +479,10 @@ class VectorStore {
         return eligibility.eligible.has(recId)
       }
       // recordingId does NOT resolve to a recording ⇒ artifact or hard-purged
-      // orphan. Keep IFF a genuine captureId backs it; else drop (forged/orphan).
+      // orphan. Keep IFF a genuine ELIGIBLE captureId backs it; else drop
+      // (forged / orphan / soft-deleted / value-excluded artifact capture).
       const capId = d.metadata.captureId
-      return !!capId && existCap.ids.has(capId)
+      return !!capId && capEligibility.eligible.has(capId)
     })
   }
 
