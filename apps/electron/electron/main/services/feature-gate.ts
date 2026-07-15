@@ -40,7 +40,7 @@ export class FeatureDisabledError extends Error {
   }
 }
 
-/** Resolve the CURRENT effective feature state from config (live, per-call cheap). */
+/** Resolve the CURRENT (desired) effective feature state from config. Live, per-call cheap. */
 export function getResolvedFeatures(): ResolvedFeatures {
   let features
   try {
@@ -51,9 +51,60 @@ export function getResolvedFeatures(): ResolvedFeatures {
   return resolveFeatureState(features)
 }
 
-/** Is a single feature enabled right now? Defaults to enabled when config is unset. */
+/**
+ * The effective-runtime feature state captured at boot from the DESIRED config,
+ * kept SEPARATE from the desired config (Review-2 [CRITICAL]).
+ *
+ * Restart-gated features (`runtimeToggleable: false` — device-sync, assistant)
+ * are pinned to this boot snapshot for the IPC gate: a feature that was OFF at
+ * boot cannot be opened live just by writing the desired config. This is the USB
+ * safety boundary — enabling device-sync at runtime must NOT make jensen /
+ * device-pipeline IPC callable until the next boot (CLAUDE.md USB rules).
+ *
+ * `null` until `captureBootEffectiveFeatures()` runs at boot; the getter then
+ * falls back to the live desired state so unit tests (and any path that never
+ * boots) behave exactly as before — zero behavior change.
+ */
+let bootEffectiveFeatures: ResolvedFeatures | null = null
+
+/**
+ * Snapshot the effective feature state from the desired config. Called once at
+ * boot (after config init, before IPC handlers register) and again to SIMULATE a
+ * reboot in tests. Returns the captured snapshot.
+ */
+export function captureBootEffectiveFeatures(): ResolvedFeatures {
+  bootEffectiveFeatures = getResolvedFeatures()
+  return bootEffectiveFeatures
+}
+
+/**
+ * The boot-effective snapshot the gate enforces for restart-gated features. Falls
+ * back to the live desired state when not yet captured (uninitialised / tests).
+ */
+export function getBootEffectiveFeatures(): ResolvedFeatures {
+  return bootEffectiveFeatures ?? getResolvedFeatures()
+}
+
+/** Test-only: forget the boot snapshot so the next capture starts clean. */
+export function __resetBootEffectiveFeaturesForTests(): void {
+  bootEffectiveFeatures = null
+}
+
+/**
+ * Is a single feature enabled for enforcement right now? Defaults to enabled when
+ * config is unset (`full`).
+ *
+ * - Runtime-toggleable features read the LIVE desired state (enabling/disabling
+ *   takes effect immediately — this is what makes runtime toggles work).
+ * - Restart-gated features (`runtimeToggleable: false`) are gated on BOTH the
+ *   live state AND the boot snapshot: `live && boot`. So a live ENABLE cannot
+ *   open the feature until the next boot (USB safety), while a live DISABLE still
+ *   closes it immediately (fail-closed is always safe).
+ */
 export function isFeatureEnabled(id: FeatureId): boolean {
-  return getResolvedFeatures()[id].enabled
+  const live = getResolvedFeatures()[id].enabled
+  if (FEATURES[id].runtimeToggleable) return live
+  return live && getBootEffectiveFeatures()[id].enabled
 }
 
 type InvokeHandler = (event: IpcMainInvokeEvent, ...args: any[]) => any

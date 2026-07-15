@@ -19,10 +19,15 @@ import {
   installFeatureGate,
   isFeatureEnabled,
   getResolvedFeatures,
+  captureBootEffectiveFeatures,
+  __resetBootEffectiveFeaturesForTests,
 } from '../feature-gate'
 
 beforeEach(() => {
   featuresConfig = undefined // default `full`
+  // Forget any boot snapshot so the gate falls back to the live desired state —
+  // the behavior every pre-existing test below relies on.
+  __resetBootEffectiveFeaturesForTests()
 })
 
 describe('isFeatureEnabled / getResolvedFeatures', () => {
@@ -161,5 +166,108 @@ describe('gatedHandle + installFeatureGate (registrar interception)', () => {
     restore()
     expect(ipc.handlers.get('assistant:getMessages')!({} as never, 'conv')).toBe(42)
     expect(fn).toHaveBeenCalled()
+  })
+})
+
+describe('boot-effective gate for restart-gated features (Review-2 [CRITICAL], USB safety)', () => {
+  const event = {} as never
+
+  it('live-ENABLING device-sync does NOT open jensen/device-pipeline IPC until the next boot', () => {
+    // Boot with device-sync OFF.
+    featuresConfig = { preset: 'full', flags: { 'device-sync': false } }
+    captureBootEffectiveFeatures()
+    expect(isFeatureEnabled('device-sync')).toBe(false)
+    for (const ch of ['jensen:connect', 'device-pipeline:connect', 'deviceCache:getAll']) {
+      expect(() => gateInvokeHandler(ch, vi.fn())(event), ch).toThrow(FeatureDisabledError)
+    }
+
+    // User live-enables device-sync — the DESIRED config now has it on…
+    featuresConfig = { preset: 'full', flags: {} }
+    expect(getResolvedFeatures()['device-sync'].enabled).toBe(true) // desired says on
+    // …but the gate keeps rejecting because it was OFF at boot (never yank USB live).
+    expect(isFeatureEnabled('device-sync')).toBe(false)
+    expect(() => gateInvokeHandler('jensen:connect', vi.fn())(event)).toThrow(FeatureDisabledError)
+
+    // Simulate the next boot: re-capture the snapshot from the current desired config.
+    captureBootEffectiveFeatures()
+    expect(isFeatureEnabled('device-sync')).toBe(true)
+    const handler = vi.fn().mockReturnValue('ok')
+    expect(gateInvokeHandler('jensen:connect', handler)(event)).toBe('ok')
+    expect(handler).toHaveBeenCalled()
+  })
+
+  it('live-DISABLING a restart-gated feature closes its IPC immediately (fail-closed is safe)', () => {
+    // Boot with everything on (device-sync enabled at boot).
+    featuresConfig = { preset: 'full', flags: {} }
+    captureBootEffectiveFeatures()
+    expect(gateInvokeHandler('jensen:connect', vi.fn().mockReturnValue('ok'))(event)).toBe('ok')
+
+    // Disable device-sync live → gate rejects at once, no restart required to CLOSE.
+    featuresConfig = { preset: 'full', flags: { 'device-sync': false } }
+    expect(isFeatureEnabled('device-sync')).toBe(false)
+    expect(() => gateInvokeHandler('jensen:connect', vi.fn())(event)).toThrow(FeatureDisabledError)
+  })
+
+  it('runtime-toggleable features still read the flag LIVE (no boot pinning)', () => {
+    // Boot with transcription OFF.
+    featuresConfig = { preset: 'library-only', flags: {} }
+    captureBootEffectiveFeatures()
+    expect(isFeatureEnabled('transcription')).toBe(false)
+    // Live-enable transcription → available immediately (it is runtime-toggleable).
+    featuresConfig = { preset: 'library-only', flags: { transcription: true } }
+    expect(isFeatureEnabled('transcription')).toBe(true)
+    expect(gateInvokeHandler('transcription:getQueue', vi.fn().mockReturnValue([]))(event)).toEqual(
+      []
+    )
+  })
+})
+
+describe('transcription-owned recordings:* channels (Review-2 [HIGH])', () => {
+  const event = {} as never
+  // The trigger/control channels that previously slipped through unclassified.
+  const TRIGGERS = [
+    'recordings:transcribe',
+    'recordings:addToQueue',
+    'recordings:processQueue',
+    'recordings:reprocessWith',
+    'recordings:startTranscriptionProcessor',
+    'recordings:stopTranscriptionProcessor',
+    'recordings:reDiarize',
+  ]
+
+  it('rejects every transcription trigger when transcription is disabled', () => {
+    featuresConfig = { preset: 'library-only', flags: {} } // transcription off
+    for (const ch of TRIGGERS) {
+      let thrown: unknown
+      try {
+        gateInvokeHandler(ch, vi.fn())(event)
+      } catch (e) {
+        thrown = e
+      }
+      expect(thrown, ch).toBeInstanceOf(FeatureDisabledError)
+      expect((thrown as FeatureDisabledError).featureId, ch).toBe('transcription')
+    }
+  })
+
+  it('allows every transcription trigger when transcription is enabled', async () => {
+    featuresConfig = { preset: 'library-transcription', flags: {} } // transcription on
+    for (const ch of TRIGGERS) {
+      const handler = vi.fn().mockResolvedValue('ok')
+      await expect(gateInvokeHandler(ch, handler)(event), ch).resolves.toBe('ok')
+    }
+  })
+
+  it('keeps Library reads/ops on the shared recordings: namespace OPEN when transcription is off', async () => {
+    featuresConfig = { preset: 'library-only', flags: {} }
+    for (const ch of [
+      'recordings:getAll',
+      'recordings:delete',
+      'recordings:getTranscript',
+      'recordings:updateStatus',
+      'recordings:getTranscriptionStatus',
+    ]) {
+      const handler = vi.fn().mockResolvedValue('data')
+      await expect(gateInvokeHandler(ch, handler)(event), ch).resolves.toBe('data')
+    }
   })
 })

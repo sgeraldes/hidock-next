@@ -41,7 +41,7 @@ import { getIntegrityService } from './services/integrity-service'
 import { acquireSingleInstanceLock } from './single-instance'
 import { startBootScheduler } from './services/boot-scheduler'
 import { registerGatedBootTasks } from './services/boot-tasks'
-import { isFeatureEnabled } from './services/feature-gate'
+import { isFeatureEnabled, captureBootEffectiveFeatures } from './services/feature-gate'
 
 let mainWindow: BrowserWindow | null = null
 let splashWindow: BrowserWindow | null = null
@@ -155,6 +155,13 @@ async function initializeServices(): Promise<void> {
   updateSplashStatus('Loading configuration...', 10)
   await initializeConfig()
   console.log('Config initialized')
+
+  // Track I (Review-2 [CRITICAL]): snapshot the effective feature state from the
+  // desired config NOW, before any IPC handlers register or any USB path can run.
+  // Restart-gated features (device-sync, assistant) are pinned to this snapshot
+  // for the IPC gate, so enabling them at runtime cannot open their IPC until the
+  // next boot — the USB safety boundary.
+  captureBootEffectiveFeatures()
 
   updateSplashStatus('Setting up storage...', 20)
   await initializeFileStorage()
