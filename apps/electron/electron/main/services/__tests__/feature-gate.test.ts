@@ -196,16 +196,70 @@ describe('boot-effective gate for restart-gated features (Review-2 [CRITICAL], U
     expect(handler).toHaveBeenCalled()
   })
 
-  it('live-DISABLING a restart-gated feature closes its IPC immediately (fail-closed is safe)', () => {
+  it('live-DISABLING device-sync leaves it functional until restart (SYMMETRIC boot gate — never strand USB work)', () => {
     // Boot with everything on (device-sync enabled at boot).
     featuresConfig = { preset: 'full', flags: {} }
     captureBootEffectiveFeatures()
     expect(gateInvokeHandler('jensen:connect', vi.fn().mockReturnValue('ok'))(event)).toBe('ok')
 
-    // Disable device-sync live → gate rejects at once, no restart required to CLOSE.
+    // Disable device-sync live. The DESIRED config records the intent…
     featuresConfig = { preset: 'full', flags: { 'device-sync': false } }
+    expect(getResolvedFeatures()['device-sync'].enabled).toBe(false) // desired says off
+    // …but the gate consults boot-effective ONLY: the feature stays functional
+    // (status quo ante). Closing it live would strand an active connection /
+    // download / scan while making its own teardown channels unreachable.
+    expect(isFeatureEnabled('device-sync')).toBe(true)
+
+    // Mock-only regression: disable while (a) connected, (b) scanning,
+    // (c) downloading — every cleanup/teardown channel remains callable, and no
+    // channel is gated off prematurely.
+    const CLEANUP_CHANNELS: Record<string, string[]> = {
+      connected: ['jensen:disconnect', 'jensen:reset', 'device-pipeline:disconnect'],
+      scanning: ['jensen:stopBluetoothScan', 'jensen:listFiles', 'device-pipeline:cancel'],
+      downloading: [
+        'jensen:cancelDownload',
+        'download-service:cancel-active',
+        'download-service:cancel-all',
+      ],
+    }
+    for (const [scenario, channels] of Object.entries(CLEANUP_CHANNELS)) {
+      for (const ch of channels) {
+        const handler = vi.fn().mockReturnValue('done')
+        expect(gateInvokeHandler(ch, handler)(event), `${scenario}: ${ch}`).toBe('done')
+        expect(handler, `${scenario}: ${ch}`).toHaveBeenCalled()
+      }
+    }
+
+    // Disable-then-reenable within one session never transitions the gate at all.
+    featuresConfig = { preset: 'full', flags: {} } // re-enable
+    expect(isFeatureEnabled('device-sync')).toBe(true) // same gate state throughout
+
+    // Only the NEXT BOOT applies a pending disable.
+    featuresConfig = { preset: 'full', flags: { 'device-sync': false } }
+    captureBootEffectiveFeatures() // simulate reboot with the disable persisted
     expect(isFeatureEnabled('device-sync')).toBe(false)
-    expect(() => gateInvokeHandler('jensen:connect', vi.fn())(event)).toThrow(FeatureDisabledError)
+    expect(() => gateInvokeHandler('jensen:disconnect', vi.fn())(event)).toThrow(
+      FeatureDisabledError
+    )
+  })
+
+  it('the gate never transitions mid-session for restart-gated features, in EITHER direction', () => {
+    // Boot ON: stays on through any number of live flips.
+    featuresConfig = { preset: 'full', flags: {} }
+    captureBootEffectiveFeatures()
+    for (const flags of [{ 'device-sync': false }, {}, { 'device-sync': false }, {}]) {
+      featuresConfig = { preset: 'full', flags }
+      expect(isFeatureEnabled('device-sync')).toBe(true)
+      expect(isFeatureEnabled('assistant')).toBe(true)
+    }
+    // Boot OFF: stays off through any number of live flips.
+    featuresConfig = { preset: 'full', flags: { 'device-sync': false, assistant: false } }
+    captureBootEffectiveFeatures()
+    for (const flags of [{}, { 'device-sync': true, assistant: true }] as const) {
+      featuresConfig = { preset: 'full', flags: flags as never }
+      expect(isFeatureEnabled('device-sync')).toBe(false)
+      expect(isFeatureEnabled('assistant')).toBe(false)
+    }
   })
 
   it('runtime-toggleable features still read the flag LIVE (no boot pinning)', () => {

@@ -109,11 +109,12 @@ export async function applyFeatureChanges(
  * its boot state removes it from the set automatically.
  *
  * A restart is pending for a feature iff it is restart-gated
- * (`runtimeToggleable: false`) AND it is ENABLED in the desired state but was
- * DISABLED at boot — i.e. the user turned it on, but it cannot actually take
- * effect until the next boot (assistant's boot-blocking init; device-sync's USB
- * safety). Disables are excluded: they are always effective live (the IPC gate
- * fails closed immediately), matching the "disables are always live" invariant.
+ * (`runtimeToggleable: false`) AND its desired state differs from the
+ * boot-effective snapshot in EITHER direction (adversarial round-2): the gate for
+ * restart-gated features is symmetrically pinned to boot (see feature-gate.ts),
+ * so BOTH a live enable (not yet in force) and a live disable (still functional
+ * until restart — never strand active USB work by closing teardown channels)
+ * genuinely require a restart to take effect, and the banner must say so.
  */
 export function derivePendingRestart(
   desired: ResolvedFeatures,
@@ -122,7 +123,7 @@ export function derivePendingRestart(
   const pending: FeatureId[] = []
   for (const id of ALL_FEATURE_IDS) {
     if (FEATURES[id].runtimeToggleable) continue
-    if (desired[id].enabled && !bootEffective[id].enabled) pending.push(id)
+    if (desired[id].enabled !== bootEffective[id].enabled) pending.push(id)
   }
   return pending
 }

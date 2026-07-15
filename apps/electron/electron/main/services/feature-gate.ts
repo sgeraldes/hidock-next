@@ -56,10 +56,20 @@ export function getResolvedFeatures(): ResolvedFeatures {
  * kept SEPARATE from the desired config (Review-2 [CRITICAL]).
  *
  * Restart-gated features (`runtimeToggleable: false` — device-sync, assistant)
- * are pinned to this boot snapshot for the IPC gate: a feature that was OFF at
- * boot cannot be opened live just by writing the desired config. This is the USB
- * safety boundary — enabling device-sync at runtime must NOT make jensen /
- * device-pipeline IPC callable until the next boot (CLAUDE.md USB rules).
+ * are pinned to this boot snapshot for the IPC gate SYMMETRICALLY — in BOTH
+ * directions (adversarial round-2 [CRITICAL]):
+ *
+ *  - A feature OFF at boot cannot be opened live by writing the desired config
+ *    (USB safety: enabling device-sync at runtime must NOT make jensen /
+ *    device-pipeline IPC callable until the next boot — CLAUDE.md USB rules).
+ *  - A feature ON at boot stays functional until the next boot even if the user
+ *    disables it live. Closing the gate mid-session would strand active USB
+ *    work (a connection / download / scan keeps running in the main process)
+ *    while making its OWN teardown channels — `jensen:disconnect`,
+ *    `jensen:cancelDownload`, `jensen:reset`, pipeline cleanup — unreachable;
+ *    a later re-enable could then resume USB state that was never drained
+ *    (protocol desync / device-lockup risk). Instead the desired config records
+ *    the intent and `derivePendingRestart` surfaces the restart banner.
  *
  * `null` until `captureBootEffectiveFeatures()` runs at boot; the getter then
  * falls back to the live desired state so unit tests (and any path that never
@@ -96,15 +106,17 @@ export function __resetBootEffectiveFeaturesForTests(): void {
  *
  * - Runtime-toggleable features read the LIVE desired state (enabling/disabling
  *   takes effect immediately — this is what makes runtime toggles work).
- * - Restart-gated features (`runtimeToggleable: false`) are gated on BOTH the
- *   live state AND the boot snapshot: `live && boot`. So a live ENABLE cannot
- *   open the feature until the next boot (USB safety), while a live DISABLE still
- *   closes it immediately (fail-closed is always safe).
+ * - Restart-gated features (`runtimeToggleable: false`) consult the boot-effective
+ *   snapshot ONLY — symmetric in both directions. Live config edits never
+ *   transition the gate mid-session: an enable does not open the feature until
+ *   the next boot (USB safety), and a disable does not close it (which would
+ *   strand active USB work while blocking its teardown channels — see the
+ *   bootEffectiveFeatures doc above). Desired-vs-boot differences surface as
+ *   pendingRestart, never as a live gate flip.
  */
 export function isFeatureEnabled(id: FeatureId): boolean {
-  const live = getResolvedFeatures()[id].enabled
-  if (FEATURES[id].runtimeToggleable) return live
-  return live && getBootEffectiveFeatures()[id].enabled
+  if (FEATURES[id].runtimeToggleable) return getResolvedFeatures()[id].enabled
+  return getBootEffectiveFeatures()[id].enabled
 }
 
 type InvokeHandler = (event: IpcMainInvokeEvent, ...args: any[]) => any
