@@ -540,4 +540,41 @@ describe('rag.chat — graph context flows into BrainRouter.chat (a)', () => {
     expect(userMessage).toContain('Context graph — Alice')
     expect(userMessage).toContain('Alice attended Standup')
   })
+
+  // ADV20-3 (round-21) — unresolved graph provenance (a zero-provenance legacy edge
+  // OR a provenance-read failure, both surfaced as provOut.unresolved) must DROP the
+  // whole graph bundle from the PROMPT before the provider call — marking the answer
+  // unverifiable afterwards cannot un-send labels already disclosed to the LLM.
+  it('ADV20-3 — DROPS zero-provenance graph facts from the provider prompt (unresolved)', async () => {
+    kgMock.findMentionedEntity.mockReturnValue({ id: 'p1', label: 'Alice' })
+    kgMock.neighborhoodFacts.mockImplementation(
+      (_id: string, _hops?: number, _max?: number, _excl?: unknown, provOut?: { unresolved: boolean }) => {
+        if (provOut) provOut.unresolved = true // zero-provenance / read-failure ⇒ unresolved
+        return 'Context graph — Alice (person):\n- Alice attended SECRET_STANDUP'
+      }
+    )
+
+    const rag = getRAGService()
+    await rag.chat('session-1', 'tell me about Alice')
+
+    const userMessage = mockBrainChat.mock.calls[0][1].slice(-1)[0].content
+    // The unresolved graph labels NEVER cross the external LLM boundary.
+    expect(userMessage).not.toContain('SECRET_STANDUP')
+    expect(userMessage).not.toContain('Context graph — Alice')
+  })
+
+  it('ADV20-3 — KEEPS graph facts when provenance is RESOLVED (baseline: drop is unresolved-specific)', async () => {
+    kgMock.findMentionedEntity.mockReturnValue({ id: 'p1', label: 'Alice' })
+    kgMock.neighborhoodFacts.mockImplementation(
+      (_id: string, _hops?: number, _max?: number, _excl?: unknown, _provOut?: { unresolved: boolean }) =>
+        // provOut.unresolved stays false → the fact is attributed → kept in the prompt.
+        'Context graph — Alice (person):\n- Alice attended RESOLVED_STANDUP'
+    )
+
+    const rag = getRAGService()
+    await rag.chat('session-1', 'tell me about Alice')
+
+    const userMessage = mockBrainChat.mock.calls[0][1].slice(-1)[0].content
+    expect(userMessage).toContain('RESOLVED_STANDUP')
+  })
 })

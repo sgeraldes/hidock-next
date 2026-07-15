@@ -967,19 +967,28 @@ class RAGService {
     // Graph facts are a bundle with only AGGREGATE provenance. If ANY graph-backing
     // recording became ineligible during the await (or the lookup failed closed),
     // drop ALL graph parts (we can't attribute per-fact) so no excluded text is sent.
-    // A zero-provenance legacy fact (graphProv.unresolved, ADV19-3) stays in the
-    // prompt as an accepted grounding residual (RE-3) but marks the answer
-    // unverifiable ⇒ redacted on re-read.
+    //
+    // ADV20-3 (round-21) — ALSO drop the ENTIRE graph bundle from the PROMPT whenever
+    // graphProv.unresolved is true (a zero-provenance legacy edge, OR a provenance
+    // read that threw). Such an edge may derive SOLELY from a now-excluded recording;
+    // its labels/relationships must NOT cross the external LLM boundary, and marking
+    // the persisted answer unverifiable AFTER the fact cannot undo that disclosure.
+    // (Round-20 kept unresolved graph text in the prompt and only flagged the answer
+    // unverifiable — that leaked the labels to the provider.) Because the bundle is
+    // dropped here, no unresolved graph text contributes to the answer, so we do NOT
+    // mark the union unverifiable for it — the answer stays grounded only on the
+    // attributed vector/pinned components.
     let graphParts = graphContextParts
-    let dropGraph = false
-    for (const id of graphProv.recordingIds) {
-      if (!recEligible(id)) { dropGraph = true; break }
+    let dropGraph = graphProv.unresolved
+    if (!dropGraph) {
+      for (const id of graphProv.recordingIds) {
+        if (!recEligible(id)) { dropGraph = true; break }
+      }
     }
     if (dropGraph) {
       graphParts = []
     } else {
       for (const id of graphProv.recordingIds) provRecordingIds.add(id)
-      if (graphProv.unresolved) provUnverifiable = true
     }
 
     // Combine pinned context, graph facts, and search results
