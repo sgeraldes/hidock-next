@@ -10,6 +10,7 @@ import {
   updateMeeting,
   addMeetingAttendee,
   removeMeetingAttendee,
+  EntityVisibilityUnavailableError,
   Contact
 } from '../services/database'
 import { success, error, Result } from '../types/api'
@@ -103,6 +104,11 @@ export function registerMeetingsHandlers(): void {
         const contact = addMeetingAttendee(meetingId, { name, email })
         return success(contact)
       } catch (err) {
+        // ADV37-1 (round-39) — a fail-closed visibility lookup aborts the write; surface
+        // it as RETRYABLE so a transient DB fault never persists a reanimating link.
+        if (err instanceof EntityVisibilityUnavailableError) {
+          return error('RETRYABLE_ERROR', 'Could not verify this attendee. Please try again.')
+        }
         console.error('meetings:addAttendee error:', err)
         return error('DATABASE_ERROR', 'Failed to add attendee', err)
       }

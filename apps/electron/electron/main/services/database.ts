@@ -6200,6 +6200,57 @@ export function blankIneligibleContactFields<T extends { role?: string | null; r
 }
 
 /**
+ * ADV37 (round-39) — thrown by an entity-reference WRITE gate when the visible-
+ * identity boundary ({@link filterVisibleEntityIds}) cannot be evaluated (a hard DB
+ * lookup failure ⇒ failClosed). The enclosing transaction rolls back so NO membership
+ * is written and NO raw entity is returned; IPC handlers map it to a RETRYABLE error
+ * so a transient fault never persists a reanimating link or reveals a suppressed
+ * entity.
+ */
+export class EntityVisibilityUnavailableError extends Error {
+  constructor(message = 'Entity visibility could not be verified') {
+    super(message)
+    this.name = 'EntityVisibilityUnavailableError'
+  }
+}
+
+/**
+ * ADV37 (round-39) — reanimation-safe reuse decision for a resolve-by-name/email
+ * WRITE (addMeetingAttendee, assignSpeaker, per-turn/split binds). Given the raw
+ * exact-name / exact-email candidate rows already fetched, return the FIRST candidate
+ * that is currently VISIBLE on non-owner identity surfaces (safe to reuse), or
+ * undefined when EVERY candidate is SUPPRESSED — in which case the caller MUST mint a
+ * NEW distinct contact rather than reuse (and thereby reanimate, via an always-eligible
+ * source='calendar' membership) a suppressed transcript-derived entity. A
+ * source='calendar' membership is treated ALWAYS-ELIGIBLE by the boundary, so reusing a
+ * suppressed entity here and linking it would permanently re-expose its fields
+ * downstream. THROWS {@link EntityVisibilityUnavailableError} on a fail-closed
+ * visibility lookup so the enclosing transaction aborts with no write.
+ */
+function pickReusableVisibleContact(candidates: Contact[]): Contact | undefined {
+  if (candidates.length === 0) return undefined
+  const { visible, failClosed } = filterVisibleEntityIds(
+    'contact',
+    candidates.map((c) => c.id)
+  )
+  if (failClosed) throw new EntityVisibilityUnavailableError()
+  return candidates.find((c) => visible.has(c.id))
+}
+
+/**
+ * ADV37 (round-39) — is an EXISTING entity referenced by explicit id currently VISIBLE
+ * on non-owner identity surfaces? Used before a WRITE that links the referenced entity
+ * via an always-eligible source='calendar' membership (assignSpeaker/per-turn binds by
+ * contactId). A SUPPRESSED id must NOT be reanimated; a fail-closed lookup must NOT be
+ * trusted. Returns true ONLY when the id resolves to a visible entity AND the lookup
+ * succeeded — the caller refuses (treats as absent) otherwise.
+ */
+function isEntityReferenceVisible(kind: 'contact' | 'project', id: string): boolean {
+  const { visible, failClosed } = filterVisibleEntityIds(kind, [id])
+  return !failClosed && visible.has(id)
+}
+
+/**
  * Compact graph-neighborhood context for the identity merge card (B7 symmetric
  * context): the people this person most co-attends meetings with, and the
  * topics/projects closest to them. Accepts a contact id OR a raw name (resolver-band
@@ -7092,18 +7143,27 @@ export function assignSpeaker(
   return runInTransaction(() => {
     let contact: Contact | undefined
 
+    // ADV37 (round-39) — this WRITE links the resolved contact via an always-eligible
+    // source='calendar' membership (below), so resolving/reusing a SUPPRESSED entity here
+    // would reanimate it on non-owner surfaces. Gate BOTH resolution paths:
+    //   • explicit contactId ⇒ require it be currently VISIBLE (treat suppressed/
+    //     fail-closed as absent — a suppressed contact is never offered by the picker);
+    //   • newName ⇒ reuse ONLY a VISIBLE exact-name match; when every match is
+    //     SUPPRESSED, mint a NEW distinct contact rather than reanimate the hidden one.
     if (opts.contactId) {
+      if (!isEntityReferenceVisible('contact', opts.contactId)) throw new Error(`Contact ${opts.contactId} not found`)
       contact = queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [opts.contactId])
       if (!contact) throw new Error(`Contact ${opts.contactId} not found`)
     } else if (opts.newName && opts.newName.trim()) {
       const name = opts.newName.trim()
-      contact = queryOne<Contact>('SELECT * FROM contacts WHERE LOWER(name) = LOWER(?)', [name])
+      contact = pickReusableVisibleContact(getContactsByName(name))
       if (!contact) {
         const id = randomUUID()
         const now = new Date().toISOString()
+        // source='user': explicit owner speaker bind ⇒ structural (always visible).
         runNoSave(
-          `INSERT INTO contacts (id, name, type, first_seen_at, last_seen_at, meeting_count)
-           VALUES (?, ?, 'unknown', ?, ?, 0)`,
+          `INSERT INTO contacts (id, name, type, first_seen_at, last_seen_at, meeting_count, source)
+           VALUES (?, ?, 'unknown', ?, ?, 0, 'user')`,
           [id, name, now, now]
         )
         contact = queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [id])!
@@ -7167,20 +7227,27 @@ export interface SpeakerSplitEntry {
  * identities the same way. @throws if neither is usable or the id is unknown.
  */
 function resolveContactForBinding(opts: { contactId?: string; newName?: string }): Contact {
+  // ADV37 (round-39) — mirrors assignSpeaker's reanimation-safe resolution (callers
+  // setTurnOverride / assignSpeakerFromHere link the contact via an always-eligible
+  // source='calendar' membership). Explicit id ⇒ require VISIBLE; newName ⇒ reuse ONLY
+  // a VISIBLE exact-name match, else mint a NEW distinct contact (never reanimate a
+  // suppressed transcript entity).
   if (opts.contactId) {
+    if (!isEntityReferenceVisible('contact', opts.contactId)) throw new Error(`Contact ${opts.contactId} not found`)
     const contact = queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [opts.contactId])
     if (!contact) throw new Error(`Contact ${opts.contactId} not found`)
     return contact
   }
   if (opts.newName && opts.newName.trim()) {
     const name = opts.newName.trim()
-    const existing = queryOne<Contact>('SELECT * FROM contacts WHERE LOWER(name) = LOWER(?)', [name])
+    const existing = pickReusableVisibleContact(getContactsByName(name))
     if (existing) return existing
     const id = randomUUID()
     const now = new Date().toISOString()
+    // source='user': explicit owner speaker bind ⇒ structural (always visible).
     runNoSave(
-      `INSERT INTO contacts (id, name, type, first_seen_at, last_seen_at, meeting_count)
-       VALUES (?, ?, 'unknown', ?, ?, 0)`,
+      `INSERT INTO contacts (id, name, type, first_seen_at, last_seen_at, meeting_count, source)
+       VALUES (?, ?, 'unknown', ?, ?, 0, 'user')`,
       [id, name, now, now]
     )
     return queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [id])!
@@ -7376,20 +7443,45 @@ export function addMeetingAttendee(meetingId: string, payload: { name?: string; 
     const name = payload.name?.trim() || null
     if (!email && !name) throw new Error('addMeetingAttendee requires a name or an email')
 
-    let contact: Contact | undefined
+    // ADV37-1 (round-39) — resolve ALL email + exact-name candidates and REUSE ONLY a
+    // VISIBLE one. The old code reused the first raw email/name match with NO visibility
+    // filter, so typing a name/email that matched a SUPPRESSED transcript-derived contact
+    // (sole source recording excluded/deleted/personal/purged) would update the hidden
+    // row, attach an always-eligible source='calendar' membership, and return its RAW
+    // fields — permanently reanimating the suppressed entity and disclosing it. Now:
+    //   • ≥1 VISIBLE candidate ⇒ reuse it (a genuine existing contact);
+    //   • every candidate SUPPRESSED (or none) ⇒ mint a NEW distinct user-sourced
+    //     contact (a legitimate NEW calendar attendee still gets created — we simply
+    //     never reuse a suppressed transcript entity);
+    //   • visibility-eval FAILS ⇒ throw (transaction rolls back — no write, no raw return).
+    const candidates: Contact[] = []
+    const seenIds = new Set<string>()
     if (email) {
-      contact = queryOne<Contact>('SELECT * FROM contacts WHERE LOWER(email) = ?', [email])
+      for (const c of queryAll<Contact>('SELECT * FROM contacts WHERE LOWER(email) = ?', [email])) {
+        if (!seenIds.has(c.id)) {
+          seenIds.add(c.id)
+          candidates.push(c)
+        }
+      }
     }
-    if (!contact && name) {
-      contact = queryOne<Contact>('SELECT * FROM contacts WHERE LOWER(name) = LOWER(?)', [name])
+    if (name) {
+      for (const c of getContactsByName(name)) {
+        if (!seenIds.has(c.id)) {
+          seenIds.add(c.id)
+          candidates.push(c)
+        }
+      }
     }
+    let contact = pickReusableVisibleContact(candidates)
 
     if (!contact) {
       const id = randomUUID()
       const now = new Date().toISOString()
+      // source='user': an explicit owner "add attendee" ⇒ structural (always visible);
+      // never a reused suppressed entity.
       runNoSave(
-        `INSERT INTO contacts (id, name, email, type, first_seen_at, last_seen_at, meeting_count)
-         VALUES (?, ?, ?, 'unknown', ?, ?, 0)`,
+        `INSERT INTO contacts (id, name, email, type, first_seen_at, last_seen_at, meeting_count, source)
+         VALUES (?, ?, ?, 'unknown', ?, ?, 0, 'user')`,
         [id, name || (email ? email.split('@')[0] : 'Unknown'), email, now, now]
       )
       contact = queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [id])!

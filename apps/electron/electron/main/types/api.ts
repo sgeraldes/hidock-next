@@ -99,6 +99,9 @@ export type ErrorCode =
   // ADV36-3 (round-38) — a duplicate-name visibility check could not be evaluated
   // (transient failure); the create is refused RETRYABLY rather than minting a twin.
   | 'RETRYABLE_ERROR'
+  // ADV37 (round-39) — a bucket-mention resolve targeting a contact that is SUPPRESSED
+  // on the non-owner identity boundary (linking it would reanimate the hidden entity).
+  | 'CONTACT_INELIGIBLE'
 
 // =============================================================================
 // RAG Filter Types
