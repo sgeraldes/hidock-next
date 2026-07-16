@@ -1,4 +1,10 @@
-import { deleteEdgesCleanly, type KnowledgeGraphStore, type GraphNode, type GraphDb } from './graph-store.js'
+import {
+  deleteEdgesCleanly,
+  runInGraphTransaction,
+  type KnowledgeGraphStore,
+  type GraphNode,
+  type GraphDb,
+} from './graph-store.js'
 import { ownDateMs, neighborhood } from './queries.js'
 
 /**
@@ -187,25 +193,38 @@ export function mergeNodes(
   )
   const movedEdges = before?.c ?? 0
 
-  // AR2-1: transfer provenance + weight for every edge the repoint below is
-  // about to drop, BEFORE it runs.
-  transferCollidingEdgeProvenance(db, keeperId, loserId)
+  // ADV52-1 (round-54): the whole mutation below — provenance + weight transfer,
+  // edge repoints, cleanup deletes, and the loser-node delete — is ONE atomic
+  // transaction. A partial failure (e.g. a repoint or delete throws AFTER
+  // transferCollidingEdgeProvenance has already moved graph_edge_sources rows
+  // onto the keeper) would otherwise leave the loser edge present with its
+  // provenance gone, or the keeper with duplicated attribution/weight — either
+  // way a later recording-scoped deletion retains OR removes the WRONG facts and
+  // corrupts F18 honest-deletion topology. runInGraphTransaction rolls back
+  // graph_nodes, graph_edges, and graph_edge_sources together on any error and
+  // rethrows, so both the interactive merge and the automatic rekey path see the
+  // failure with the graph fully restored to its pre-merge state.
+  runInGraphTransaction(db, () => {
+    // AR2-1: transfer provenance + weight for every edge the repoint below is
+    // about to drop, BEFORE it runs.
+    transferCollidingEdgeProvenance(db, keeperId, loserId)
 
-  // Every edge delete goes through deleteEdgesCleanly (CX-T4-3) so the edge's
-  // graph_edge_sources rows die with it — never left to be inherited by a
-  // later re-created edge under the same deterministic id. The two leftover
-  // deletes remove only COLLIDING edges (whose rows the transfer above
-  // already moved — the cascade is a no-op there, kept for uniformity); the
-  // self-loop delete is the live case: a loser→keeper edge repointed into a
-  // keeper→keeper self-loop keeps its id (and rows) through the UPDATE, and
-  // is destroyed here WITH its rows.
-  db.run('UPDATE OR IGNORE graph_edges SET source_id = ? WHERE source_id = ?', [keeperId, loserId])
-  deleteEdgesCleanly(db, 'source_id = ?', [loserId])
-  db.run('UPDATE OR IGNORE graph_edges SET target_id = ? WHERE target_id = ?', [keeperId, loserId])
-  deleteEdgesCleanly(db, 'target_id = ?', [loserId])
-  // A self-loop (keeper→keeper) can form when loser and keeper were connected.
-  deleteEdgesCleanly(db, 'source_id = target_id')
-  db.run('DELETE FROM graph_nodes WHERE id = ?', [loserId])
+    // Every edge delete goes through deleteEdgesCleanly (CX-T4-3) so the edge's
+    // graph_edge_sources rows die with it — never left to be inherited by a
+    // later re-created edge under the same deterministic id. The two leftover
+    // deletes remove only COLLIDING edges (whose rows the transfer above
+    // already moved — the cascade is a no-op there, kept for uniformity); the
+    // self-loop delete is the live case: a loser→keeper edge repointed into a
+    // keeper→keeper self-loop keeps its id (and rows) through the UPDATE, and
+    // is destroyed here WITH its rows.
+    db.run('UPDATE OR IGNORE graph_edges SET source_id = ? WHERE source_id = ?', [keeperId, loserId])
+    deleteEdgesCleanly(db, 'source_id = ?', [loserId])
+    db.run('UPDATE OR IGNORE graph_edges SET target_id = ? WHERE target_id = ?', [keeperId, loserId])
+    deleteEdgesCleanly(db, 'target_id = ?', [loserId])
+    // A self-loop (keeper→keeper) can form when loser and keeper were connected.
+    deleteEdgesCleanly(db, 'source_id = target_id')
+    db.run('DELETE FROM graph_nodes WHERE id = ?', [loserId])
+  })
 
   return { keeperId, movedEdges, merged: true }
 }

@@ -86,6 +86,15 @@ const graphDbAdapter: GraphDb = {
   queryOne<T>(sql: string, params?: unknown[]): T | undefined {
     return queryOne<T>(sql, (params ?? []) as any[])
   },
+  // ADV52-1 (round-54): expose the engine's RE-ENTRANT transaction primitive so
+  // the package's mergeNodes runs atomically on the shared DB. Re-entrant means a
+  // mergeNodes called while an outer transaction is already open (e.g. inside an
+  // ingest/removeRecordingProvenance runInTransaction) joins that transaction
+  // rather than issuing a nested BEGIN — and a COMMIT persists (better-sqlite3 +
+  // WAL) only on success, so a rolled-back merge is never written to disk.
+  runInTransaction<T>(fn: () => T): T {
+    return runInTransaction(fn)
+  },
 }
 
 // ---------------------------------------------------------------------------

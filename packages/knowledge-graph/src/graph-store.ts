@@ -8,6 +8,51 @@ export interface GraphDb {
   run(sql: string, params?: unknown[]): void
   queryAll<T>(sql: string, params?: unknown[]): T[]
   queryOne<T>(sql: string, params?: unknown[]): T | undefined
+  /**
+   * OPTIONAL atomic-execution primitive (ADV52-1 / round-54). When the injected
+   * db exposes it, {@link runInGraphTransaction} routes a multi-statement graph
+   * mutation through it so a partial failure rolls back cleanly. The host's
+   * DatabaseEngine implements this as a RE-ENTRANT BEGIN/COMMIT/ROLLBACK (a
+   * nested call joins the open transaction rather than erroring). A bare GraphDb
+   * (test harness over raw sql.js) omits it and gets the SAVEPOINT fallback.
+   */
+  runInTransaction?<T>(fn: () => T): T
+}
+
+/**
+ * Run `fn` atomically against `db` (ADV52-1 / round-54): all of `fn`'s writes
+ * commit together, or — on ANY throw — roll back together so the graph, weights,
+ * and graph_edge_sources are restored to their pre-`fn` state, and the error is
+ * rethrown to the caller.
+ *
+ * Prefers the host db's own {@link GraphDb.runInTransaction} (re-entrant on the
+ * shared engine, so calling this while an outer transaction is open simply joins
+ * it). When the db has no such primitive (a bare GraphDb over raw sql.js, e.g.
+ * the package's unit tests) it falls back to a SAVEPOINT, which nests safely
+ * whether or not an outer transaction is already open — so this helper never
+ * issues a bare BEGIN that would fail inside an existing transaction.
+ */
+export function runInGraphTransaction<T>(db: GraphDb, fn: () => T): T {
+  if (typeof db.runInTransaction === 'function') {
+    return db.runInTransaction(fn)
+  }
+  db.run('SAVEPOINT graph_txn')
+  try {
+    const result = fn()
+    db.run('RELEASE SAVEPOINT graph_txn')
+    return result
+  } catch (error) {
+    // ROLLBACK TO rewinds every write since the savepoint but leaves the
+    // savepoint on the stack; the following RELEASE pops it. Guard the unwind
+    // so a rollback error never masks the original failure.
+    try {
+      db.run('ROLLBACK TO SAVEPOINT graph_txn')
+      db.run('RELEASE SAVEPOINT graph_txn')
+    } catch {
+      /* savepoint already unwound */
+    }
+    throw error
+  }
 }
 
 export interface GraphNode {

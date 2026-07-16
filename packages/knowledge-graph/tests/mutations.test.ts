@@ -277,3 +277,139 @@ describe('knowledge-graph mutations', () => {
     expect(stats.degree).toBe(3)
   })
 })
+
+// ---------------------------------------------------------------------------
+// ADV52-1 (round-54): mergeNodes is failure-ATOMIC. A partial failure that moved
+// provenance rows but left the loser edge (or vice-versa) corrupts the honest-
+// deletion topology, so the ENTIRE mergeNodes sequence must roll back on ANY
+// error. These tests inject a throw AFTER transferCollidingEdgeProvenance and at
+// each subsequent statement and assert the graph, weights, and graph_edge_sources
+// are byte-identical to the pre-merge snapshot (before == after) and the error
+// propagates. The GraphDb here has NO runInTransaction, so runInGraphTransaction's
+// SAVEPOINT fallback is what performs the rollback.
+// ---------------------------------------------------------------------------
+
+/**
+ * A GraphDb over raw sql.js whose `run` can be armed to throw ONCE when a
+ * predicate matches the executed SQL — letting a test force a fault at a chosen
+ * statement inside mergeNodes. It intentionally omits `runInTransaction`, so the
+ * fallback SAVEPOINT rollback path is exercised. The fault disarms after firing,
+ * so the ROLLBACK/RELEASE statements the helper issues afterwards still execute.
+ */
+function makeControllableStore(raw: SqlJsDatabase) {
+  const base = makeGraphDb(raw)
+  let predicate: ((sql: string) => boolean) | null = null
+  const db: GraphDb = {
+    queryAll: base.queryAll.bind(base),
+    queryOne: base.queryOne.bind(base),
+    run(sql: string, params: unknown[] = []) {
+      if (predicate && predicate(sql)) {
+        predicate = null
+        throw new Error(`injected fault at: ${sql.trim().slice(0, 48)}`)
+      }
+      base.run(sql, params)
+    },
+  }
+  const store = new KnowledgeGraphStore(db)
+  store.initSchema()
+  return { store, arm: (p: (sql: string) => boolean) => { predicate = p } }
+}
+
+function graphSnapshot(store: KnowledgeGraphStore) {
+  return {
+    nodes: store.db.queryAll('SELECT * FROM graph_nodes ORDER BY id'),
+    edges: store.db.queryAll('SELECT * FROM graph_edges ORDER BY id'),
+    sources: store.db.queryAll(
+      'SELECT * FROM graph_edge_sources ORDER BY edge_id, recording_id, transcript_id'
+    ),
+  }
+}
+
+/**
+ * A mergeable graph that exercises EVERY branch of mergeNodes: a colliding edge
+ * (meeting→loser collides with meeting→keeper ⇒ provenance transfer + weight
+ * fold), a non-colliding edge (loser→other ⇒ repoint), and the loser node
+ * delete. Returns the store, its fault-arming hook, and the node/edge ids.
+ */
+async function seedMergeable() {
+  const SQL = await initSqlJs()
+  const raw = new SQL.Database()
+  const { store, arm } = makeControllableStore(raw)
+  const now = '2026-01-01'
+  const meeting = store.upsertNode({ type: 'meeting', label: 'M', props: { meetingId: 'm', date: '2026-01-05' }, now })
+  const keeper = store.upsertNode({ type: 'topic', label: 'Roadmap', now })
+  const loser = store.upsertNode({ type: 'topic', label: 'Road-map', now })
+  const other = store.upsertNode({ type: 'person', label: 'Alice', now })
+
+  const keeperEdge = store.upsertEdge({ sourceId: meeting, targetId: keeper, type: 'ABOUT', now })
+  store.recordEdgeSource(keeperEdge, 'R1', 'T1', now)
+  const loserEdge = store.upsertEdge({ sourceId: meeting, targetId: loser, type: 'ABOUT', now }) // collides on repoint
+  store.recordEdgeSource(loserEdge, 'R2', 'T2', now)
+  const loserRel = store.upsertEdge({ sourceId: other, targetId: loser, type: 'MENTIONED', now }) // repoints (target side)
+  store.recordEdgeSource(loserRel, 'R3', 'T3', now)
+
+  return { store, arm, ids: { meeting, keeper, loser, other, keeperEdge, loserEdge, loserRel } }
+}
+
+describe('knowledge-graph mergeNodes atomicity (ADV52-1 / round-54)', () => {
+  // Every statement mergeNodes runs AFTER transferCollidingEdgeProvenance (which
+  // has already moved graph_edge_sources rows + weight onto the keeper by the
+  // time these fire). A throw at any one must roll the whole sequence back.
+  const injectionPoints: { name: string; match: (sql: string) => boolean }[] = [
+    { name: 'first source-side repoint (immediately after provenance transfer)', match: (s) => s.includes('UPDATE OR IGNORE graph_edges SET source_id') },
+    { name: 'source-side edge cleanup delete', match: (s) => s.includes('DELETE FROM graph_edges WHERE source_id = ?') },
+    { name: 'target-side repoint', match: (s) => s.includes('UPDATE OR IGNORE graph_edges SET target_id') },
+    { name: 'self-loop cleanup delete', match: (s) => s.includes('source_id = target_id') },
+    { name: 'loser node delete (final statement)', match: (s) => s.includes('DELETE FROM graph_nodes') },
+  ]
+
+  for (const point of injectionPoints) {
+    it(`rolls back the ENTIRE merge when it fails at the ${point.name}`, async () => {
+      const { store, arm, ids } = await seedMergeable()
+      const before = graphSnapshot(store)
+
+      arm(point.match)
+      expect(() => mergeNodes(store, ids.keeper, ids.loser)).toThrow(/injected fault/)
+
+      const after = graphSnapshot(store)
+      // Nodes, edges, weights, AND graph_edge_sources are ALL restored: the
+      // provenance transfer that ran before the fault is undone too.
+      expect(after).toEqual(before)
+    })
+  }
+
+  it('commits exactly as before on the happy path (no regression under the transaction wrapper)', async () => {
+    const { store, ids } = await seedMergeable()
+    const res = mergeNodes(store, ids.keeper, ids.loser)
+    expect(res.merged).toBe(true)
+
+    // Loser node gone; keeper survives.
+    expect(store.getNode(ids.loser)).toBeUndefined()
+    expect(store.getNode(ids.keeper)).toBeDefined()
+
+    // The colliding edge's provenance folded onto the keeper edge (R1 + R2),
+    // its weight summed to 2, and no rows dangle under the dropped loser edge.
+    const keeperSources = store.db.queryAll<{ recording_id: string }>(
+      'SELECT recording_id FROM graph_edge_sources WHERE edge_id = ?',
+      [ids.keeperEdge]
+    )
+    expect(keeperSources.map((r) => r.recording_id).sort()).toEqual(['R1', 'R2'])
+    expect(
+      store.db.queryOne<{ weight: number }>('SELECT weight FROM graph_edges WHERE id = ?', [ids.keeperEdge])?.weight
+    ).toBe(2)
+    expect(store.db.queryAll('SELECT * FROM graph_edge_sources WHERE edge_id = ?', [ids.loserEdge])).toHaveLength(0)
+
+    // The non-colliding edge repointed onto the keeper (target side) and kept R3.
+    const repointed = store.db.queryOne<{ id: string }>(
+      "SELECT id FROM graph_edges WHERE source_id = ? AND target_id = ? AND type = 'MENTIONED'",
+      [ids.other, ids.keeper]
+    )
+    expect(repointed).toBeDefined()
+    expect(
+      store.db.queryAll<{ recording_id: string }>(
+        'SELECT recording_id FROM graph_edge_sources WHERE edge_id = ?',
+        [repointed!.id]
+      ).map((r) => r.recording_id)
+    ).toEqual(['R3'])
+  })
+})
