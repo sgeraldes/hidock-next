@@ -56,6 +56,7 @@ import {
   queryOne,
   getValueExcludedRecordingIds,
   getEligibleRecordingIds,
+  getRecordingsForMeeting,
   isRecordingGraphIngestable,
   getContactById,
   blankIneligibleContactFields,
@@ -1271,8 +1272,9 @@ export function searchGraphNodes(query: string, limit = 12): ContextGraphNode[] 
  * zero-provenance) edge is NOT hidden; a node with all-suppressed incident edges IS
  * hidden; and (ADV35-1, round-37) an ISOLATED node is decided by NODE-LEVEL
  * provenance ({@link classifyIsolatedNodeVisible}) — a derived orphan of an
- * excluded/purged recording (or a legacy derived-kind orphan) is hidden, while a
- * manual/structural (or legacy structural-kind) orphan stays visible.
+ * excluded/purged recording is hidden, a manual/structural orphan stays visible,
+ * and a legacy (origin-NULL) orphan is hidden UNLESS it has positive backing
+ * ({@link legacyNodeBackingVisible}), regardless of its node type (ADV36-1).
  */
 function computeExcludedOnlyNodeIds(
   store: KnowledgeGraphStore,
@@ -1333,13 +1335,16 @@ function computeExcludedOnlyNodeIds(
   //    eligibility lookup ONCE (not per node) to preserve this function's bounded,
   //    non-N+1 contract.
   const allNodes = store.db.queryAll<NodeProvenanceRow & { id: string }>(
-    'SELECT id, type, origin, source_recording_id FROM graph_nodes'
+    'SELECT id, type, origin, source_recording_id, label, norm_key, props FROM graph_nodes'
   )
   const isolatedDerivedSourceIds = new Set<string>()
+  let hasLegacyIsolated = false
   for (const n of allNodes) {
     if (incident.has(n.id)) continue // has edges — decided above
     if (n.origin === 'derived' && n.source_recording_id && !exclusion.failClosed) {
       isolatedDerivedSourceIds.add(n.source_recording_id)
+    } else if (n.origin !== 'derived' && n.origin !== 'manual' && n.origin !== 'structural') {
+      hasLegacyIsolated = true // origin NULL ⇒ needs a positive-backing lookup
     }
   }
   const { eligible: eligibleIsolatedSources, failClosed: isolatedFailClosed } =
@@ -1348,9 +1353,14 @@ function computeExcludedOnlyNodeIds(
       : { eligible: new Set<string>(), failClosed: false }
   const sourceEligible = (recId: string): boolean =>
     !isolatedFailClosed && eligibleIsolatedSources.has(recId)
+  // ADV36-1 (round-38) — build the project name index ONCE (only if a legacy
+  // isolated node needs the positive-backing lookup) so legacyNodeBackingVisible
+  // does not re-scan `projects` per node.
+  const projectIndex = hasLegacyIsolated ? projectNameIndex() : undefined
   for (const n of allNodes) {
     if (incident.has(n.id)) continue
-    if (!classifyIsolatedNodeVisible(n, exclusion, sourceEligible)) hidden.add(n.id)
+    if (!classifyIsolatedNodeVisible(n, exclusion, sourceEligible, () => legacyNodeBackingVisible(n, projectIndex)))
+      hidden.add(n.id)
   }
   return hidden
 }
@@ -1524,40 +1534,93 @@ function provenanceSuppressedEdgeIds(
   return suppressed
 }
 
-/**
- * ADV35-1 (round-37) — node TYPES that carry an independently-gated STRUCTURAL
- * identity (person → contact, meeting → meetings row, project → projects row).
- * A LEGACY (pre-v47, origin-NULL) ISOLATED node of one of these kinds is treated
- * as manual/structural and stays visible; every other kind (risk/topic/decision/
- * action_item/next_step/skill) is a purely DERIVED extraction artifact, so a
- * legacy isolated one is suppressed fail-closed (it can't be proven manual and
- * has no edge/node provenance to associate to an eligible recording).
- */
-const LEGACY_STRUCTURAL_NODE_KINDS = new Set<string>(['person', 'meeting', 'project'])
-
 interface NodeProvenanceRow {
   type: string
   origin: string | null
   source_recording_id: string | null
+  label: string
+  norm_key: string
+  props: string | null
+}
+
+/** The node fields a legacy backing lookup needs (subset of {@link NodeProvenanceRow}). */
+type LegacyBackingRow = Pick<NodeProvenanceRow, 'type' | 'label' | 'norm_key' | 'props'>
+
+/**
+ * ADV36-1 (round-38) — POSITIVE backing check for a LEGACY (origin-NULL) ISOLATED
+ * node. Node TYPE is NOT provenance: ingestExtraction creates recording-DERIVED
+ * person / meeting / project nodes too, so the round-37 "structural kind ⇒ visible"
+ * heuristic fails OPEN (a legacy transcript-derived person/meeting/project leaked
+ * its label with no eligible backing). A legacy edgeless node is therefore visible
+ * ONLY when it resolves to a still-visible backing row:
+ *   • person  ⇒ its backing CONTACT is visible (filterVisibleEntityIds 'contact',
+ *     via props.contactId or the `contact:<id>` norm_key);
+ *   • meeting ⇒ an ELIGIBLE meeting/recording backs it (getEligibleRecordingIds
+ *     over the meeting's recordings + the meetingId itself as a candidate recording id);
+ *   • project ⇒ its backing PROJECT is visible (filterVisibleEntityIds 'project',
+ *     resolved by name);
+ *   • any other (purely DERIVED) kind — risk/topic/skill/decision/action_item/
+ *     next_step — has NO structural backing ⇒ SUPPRESS.
+ * Fail-closed: an unresolvable backing id, a suppressed/ineligible backing row, or
+ * any lookup failure ⇒ NOT visible.
+ */
+function legacyNodeBackingVisible(row: LegacyBackingRow, projectIndex?: Map<string, string>): boolean {
+  const props = parseProps(row.props)
+  if (row.type === 'person') {
+    let contactId: string | null = null
+    if (typeof props.contactId === 'string' && props.contactId) contactId = props.contactId
+    else if (row.norm_key.startsWith('contact:')) contactId = row.norm_key.slice('contact:'.length)
+    if (!contactId) return false
+    const { visible, failClosed } = filterVisibleEntityIds('contact', [contactId])
+    return !failClosed && visible.has(contactId)
+  }
+  if (row.type === 'meeting') {
+    let meetingId: string | null = null
+    if (typeof props.meetingId === 'string' && props.meetingId) meetingId = props.meetingId
+    else if (row.norm_key.startsWith('meeting:')) meetingId = row.norm_key.slice('meeting:'.length)
+    if (!meetingId) return false
+    // meetingId may itself be a recordingId (ingest keys meeting nodes by
+    // `recordings.meeting_id ?? recordingId`), so probe it directly too.
+    const recIds = new Set<string>([meetingId])
+    try {
+      for (const rec of getRecordingsForMeeting(meetingId)) recIds.add(rec.id)
+    } catch (e) {
+      console.error('[KnowledgeGraph] legacy meeting backing lookup failed — fail-closed:', e)
+      return false
+    }
+    const { eligible, failClosed } = getEligibleRecordingIds(recIds)
+    return !failClosed && eligible.size > 0
+  }
+  if (row.type === 'project') {
+    const idx = projectIndex ?? projectNameIndex()
+    const pid = idx.get((row.label || '').toLowerCase().trim())
+    if (!pid) return false
+    const { visible, failClosed } = filterVisibleEntityIds('project', [pid])
+    return !failClosed && visible.has(pid)
+  }
+  return false // derived-only kind ⇒ no structural backing ⇒ suppress (fail-closed)
 }
 
 /**
- * ADV35-1 (round-37) — PURE isolated-node visibility rule, shared by the per-node
- * {@link isIsolatedNodeVisible} (point reads / views / mutation guard) and the
- * batched {@link computeExcludedOnlyNodeIds} (search) so they never drift. Given a
- * node's provenance row + a predicate for whether a derived source recording is
- * currently eligible:
+ * ADV35-1 (round-37) / ADV36-1 (round-38) — PURE isolated-node visibility rule,
+ * shared by the per-node {@link isIsolatedNodeVisible} (point reads / views /
+ * mutation guard) and the batched {@link computeExcludedOnlyNodeIds} (search) so
+ * they never drift. Given a node's provenance row, a predicate for whether a derived
+ * source recording is currently eligible, and a lazy callback resolving legacy
+ * POSITIVE backing:
  *   • origin 'manual'/'structural' ⇒ VISIBLE (user/folder/calendar — not tied to a
  *     recording, nothing to exclude);
  *   • origin 'derived' ⇒ visible ONLY if its source_recording_id resolves ELIGIBLE
  *     (no source id, an ineligible/hard-purged source, or a fail-closed context ⇒
  *     SUPPRESSED);
- *   • origin NULL (legacy) ⇒ structural KIND visible, derived KIND suppressed.
+ *   • origin NULL (legacy) ⇒ visible ONLY if it has POSITIVE backing
+ *     ({@link legacyNodeBackingVisible}) — NO type heuristic (round-38 fix).
  */
 function classifyIsolatedNodeVisible(
   row: NodeProvenanceRow,
   exclusion: GroundingExclusion,
-  sourceEligible: (recId: string) => boolean
+  sourceEligible: (recId: string) => boolean,
+  legacyBackingVisible: () => boolean
 ): boolean {
   if (row.origin === 'manual' || row.origin === 'structural') return true
   if (row.origin === 'derived') {
@@ -1565,8 +1628,9 @@ function classifyIsolatedNodeVisible(
     if (exclusion.failClosed) return false // fail-closed context suppresses attributed content
     return sourceEligible(row.source_recording_id)
   }
-  // origin NULL = LEGACY pre-v47. Structural kind ⇒ visible; derived kind ⇒ suppress.
-  return LEGACY_STRUCTURAL_NODE_KINDS.has(row.type)
+  // origin NULL = LEGACY pre-v47. Require POSITIVE backing (no type heuristic —
+  // person/meeting/project are derived too, ADV36-1).
+  return legacyBackingVisible()
 }
 
 /**
@@ -1581,14 +1645,19 @@ function isIsolatedNodeVisible(
   exclusion: GroundingExclusion
 ): boolean {
   const row = store.db.queryOne<NodeProvenanceRow>(
-    'SELECT type, origin, source_recording_id FROM graph_nodes WHERE id = ?',
+    'SELECT type, origin, source_recording_id, label, norm_key, props FROM graph_nodes WHERE id = ?',
     [nodeId]
   )
   if (!row) return false // gone ⇒ not visible (fail-closed)
-  return classifyIsolatedNodeVisible(row, exclusion, (recId) => {
-    const { eligible, failClosed } = getEligibleRecordingIds([recId])
-    return !failClosed && eligible.has(recId)
-  })
+  return classifyIsolatedNodeVisible(
+    row,
+    exclusion,
+    (recId) => {
+      const { eligible, failClosed } = getEligibleRecordingIds([recId])
+      return !failClosed && eligible.has(recId)
+    },
+    () => legacyNodeBackingVisible(row)
+  )
 }
 
 /**

@@ -100,6 +100,43 @@ function seedNodeWithOrigin(
   )
 }
 
+/**
+ * ADV36-1 (round-38) — seed an ISOLATED node with an explicit norm_key + props so a
+ * LEGACY (origin-NULL) node can carry the backing identifiers (contact:<id> key,
+ * props.meetingId) the positive-backing rule resolves.
+ */
+function seedNodeFull(
+  id: string,
+  type: string,
+  label: string,
+  origin: 'derived' | 'manual' | 'structural' | null,
+  sourceRecordingId: string | null,
+  normKey: string,
+  props: string | null
+): void {
+  dbRun(
+    'INSERT OR IGNORE INTO graph_nodes (id, type, label, norm_key, props, origin, source_recording_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [id, type, label, normKey, props, origin, sourceRecordingId, '2026-06-01', '2026-06-01']
+  )
+}
+
+/** Seed a contacts row. source 'user' ⇒ structural/visible; 'transcript' ⇒ gated by its recording. */
+function seedContact(id: string, name: string, source: string | null, sourceRecordingId: string | null): void {
+  dbRun(
+    `INSERT OR IGNORE INTO contacts (id, name, first_seen_at, last_seen_at, source, source_recording_id)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [id, name, '2026-06-01', '2026-06-01', source, sourceRecordingId]
+  )
+}
+
+/** Seed a projects row. source 'user' ⇒ structural/visible; 'transcript' ⇒ gated by its recording. */
+function seedProject(id: string, name: string, source: string | null, sourceRecordingId: string | null): void {
+  dbRun(
+    `INSERT OR IGNORE INTO projects (id, name, source, source_recording_id) VALUES (?, ?, ?, ?)`,
+    [id, name, source, sourceRecordingId]
+  )
+}
+
 function seedEdge(id: string, sourceId: string, targetId: string, type: string): void {
   dbRun(
     'INSERT OR IGNORE INTO graph_edges (id, source_id, target_id, type, props, weight, created_at) VALUES (?, ?, ?, ?, NULL, 1, ?)',
@@ -520,9 +557,49 @@ describe('P3 — search / provenance / inspector hide excluded-only nodes', () =
     expect(searchGraphNodes('LegacyRisk').map((n) => n.label)).not.toContain('LegacyRisk')
   })
 
-  it('a legacy (origin-null) isolated STRUCTURAL-kind node stays visible', () => {
-    seedNodeWithOrigin('nLegacyProj', 'project', 'LegacyProject', null, null)
-    expect(searchGraphNodes('LegacyProject').map((n) => n.label)).toContain('LegacyProject')
+  // ADV36-1 (round-38) — node TYPE is NOT provenance: ingestExtraction creates
+  // recording-DERIVED person/meeting/project nodes too, so the round-37 "structural
+  // kind ⇒ visible" heuristic failed OPEN. A legacy (origin-NULL) isolated node is
+  // now visible ONLY with POSITIVE backing (visible contact / eligible meeting /
+  // visible project); otherwise suppressed fail-closed. (Replaces the round-37 test
+  // that codified the type-heuristic fail-open.)
+  it('a legacy (origin-null) isolated PROJECT node with NO backing project is suppressed (no type heuristic)', () => {
+    seedNodeWithOrigin('nLegacyProjNoBack', 'project', 'LegacyProjectNoBack', null, null)
+    expect(searchGraphNodes('LegacyProjectNoBack').map((n) => n.label)).not.toContain('LegacyProjectNoBack')
+    // Point-read path (isIsolatedNodeVisible via getNodeDetail) agrees.
+    expect(getNodeDetail('nLegacyProjNoBack').node).toBeNull()
+  })
+
+  it('a legacy (origin-null) isolated PROJECT node backed by a VISIBLE project stays visible', () => {
+    seedProject('projVis', 'BackedProject', 'user', null) // structural ⇒ always visible
+    seedNodeFull('nLegacyProjBacked', 'project', 'BackedProject', null, null, 'backedproject', null)
+    expect(searchGraphNodes('BackedProject').map((n) => n.label)).toContain('BackedProject')
+  })
+
+  it('a legacy (origin-null) isolated PERSON node backed by a VISIBLE contact stays visible', () => {
+    seedContact('ctVis', 'BackedPerson', 'user', null) // structural ⇒ always visible
+    seedNodeFull('nLegacyPersonVis', 'person', 'BackedPerson', null, null, 'contact:ctVis', null)
+    expect(searchGraphNodes('BackedPerson').map((n) => n.label)).toContain('BackedPerson')
+  })
+
+  it('a legacy (origin-null) isolated PERSON node backed by a SUPPRESSED contact is suppressed', () => {
+    // Contact minted from a transcript whose recording is soft-deleted ⇒ suppressed.
+    seedContact('ctSup', 'HiddenPerson', 'transcript', 'recA')
+    seedNodeFull('nLegacyPersonSup', 'person', 'HiddenPerson', null, null, 'contact:ctSup', null)
+    deleteRecordingCascade('recA', { hard: false })
+    expect(searchGraphNodes('HiddenPerson').map((n) => n.label)).not.toContain('HiddenPerson')
+  })
+
+  it('a legacy (origin-null) isolated MEETING node backed by an ELIGIBLE recording stays visible', () => {
+    seedNodeFull('nLegacyMtgVis', 'meeting', 'BackedMeeting', null, null, 'meeting:recB', '{"meetingId":"recB"}')
+    // recB is eligible (not excluded) ⇒ meeting has eligible backing.
+    expect(searchGraphNodes('BackedMeeting').map((n) => n.label)).toContain('BackedMeeting')
+  })
+
+  it('a legacy (origin-null) isolated MEETING node whose backing recording is excluded is suppressed', () => {
+    seedNodeFull('nLegacyMtgSup', 'meeting', 'ExcludedMeeting', null, null, 'meeting:recA', '{"meetingId":"recA"}')
+    deleteRecordingCascade('recA', { hard: false })
+    expect(searchGraphNodes('ExcludedMeeting').map((n) => n.label)).not.toContain('ExcludedMeeting')
   })
 
   it('an isolated DERIVED node returns to search when its source recording is restored', () => {
