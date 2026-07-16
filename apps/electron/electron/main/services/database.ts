@@ -8,7 +8,7 @@ import { normalizeName, isGenericSpeakerLabel, detectAmbiguousName } from './ent
 import { getEventBus } from './event-bus'
 import type { QualityRating } from '@/types/knowledge'
 
-const SCHEMA_VERSION = 43
+const SCHEMA_VERSION = 44
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -430,10 +430,21 @@ CREATE TABLE IF NOT EXISTS project_notes (
 );
 
 -- Junction table: Meeting-Contact relationship
+-- v44 (F18/round-27) per-row provenance. A membership row is written by TWO
+-- independent sources and the NON-OWNER identity surfaces must gate them per ROW,
+-- not per meeting (a calendar meeting also carries transcript-derived rows).
+--   source = calendar   -- structural (calendar/user-authored), always eligible
+--   source = transcript -- AI-extracted from source_recording_id, eligible only
+--                          while that recording is eligible
+--   source IS NULL      -- legacy/unclassified (pre-v44), ineligible fail-closed
+-- source_recording_id is the recording whose transcript produced a transcript
+-- row (NULL for calendar-authored / legacy).
 CREATE TABLE IF NOT EXISTS meeting_contacts (
     meeting_id TEXT NOT NULL,
     contact_id TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'attendee',
+    source TEXT,
+    source_recording_id TEXT,
     PRIMARY KEY (meeting_id, contact_id),
     FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE,
     FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
@@ -472,9 +483,15 @@ CREATE TABLE IF NOT EXISTS mention_resolutions (
 );
 
 -- Junction table: Meeting-Project relationship
+-- v44 (F18/round-27) per-row provenance -- see meeting_contacts above. Projects
+-- are never carried in calendar attendee data, so a calendar-marked row here is
+-- a USER-authored (manual) project tag. transcript rows are AI-extracted and
+-- gated by source_recording_id. NULL is legacy (ineligible fail-closed).
 CREATE TABLE IF NOT EXISTS meeting_projects (
     meeting_id TEXT NOT NULL,
     project_id TEXT NOT NULL,
+    source TEXT,
+    source_recording_id TEXT,
     PRIMARY KEY (meeting_id, project_id),
     FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE,
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -671,6 +688,12 @@ CREATE TABLE IF NOT EXISTS identity_suggestions (
     evidence TEXT,
     status TEXT CHECK(status IN ('pending', 'accepted', 'rejected')) DEFAULT 'pending',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    -- v44 (F18/round-27) — authoritative source recording id(s) for a
+    -- TRANSCRIPT-created suggestion (applyTranscriptEntities), stored as a JSON
+    -- array. Lets the surface + accept revalidation gate a suggestion that has NO
+    -- graph evidence through the recording allowlist (ADV26-1). NULL for
+    -- corpus/graph-derived (discovery) suggestions and legacy rows.
+    source_recording_ids TEXT,
     UNIQUE(kind, candidate_name, target_id)
 );
 
@@ -2213,6 +2236,43 @@ const MIGRATIONS: Record<number, () => void> = {
       console.warn('[Migration v43] create value_backfill_state failed:', e)
     }
     console.log('Migration v43 complete')
+  },
+
+  44: () => {
+    // v44 (F18/round-27): PER-ROW membership provenance. meeting_contacts and
+    // meeting_projects are written by BOTH the calendar/user path (structural) AND
+    // applyTranscriptEntities (AI-extracted from a specific recording), for the
+    // SAME meeting. A meeting-level eligibility check LAUNDERS transcript-derived
+    // rows on a calendar meeting (ADV26-2/-3), so we track provenance at the ROW:
+    //   source='calendar'|'transcript'; source_recording_id = the recording whose
+    //   transcript produced a 'transcript' row. identity_suggestions gets
+    //   source_recording_ids (JSON) so a transcript-created (non-graph) suggestion
+    //   can be revalidated through the recording allowlist (ADV26-1).
+    // Idempotent: guarded ALTERs (matching v42), then a one-time BEST-EFFORT
+    // backfill that classifies existing NULL-provenance rows conservatively.
+    console.log('Running migration to schema v44: per-row membership provenance')
+    const database = getDatabase()
+    const addCol = (table: string, col: string, def: string): void => {
+      const cols = getTableColumns(database, table)
+      if (cols.length > 0 && !cols.includes(col)) {
+        try {
+          database.run(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`)
+        } catch (e) {
+          console.warn(`[Migration v44] add ${table}.${col} failed:`, e)
+        }
+      }
+    }
+    addCol('meeting_contacts', 'source', 'TEXT')
+    addCol('meeting_contacts', 'source_recording_id', 'TEXT')
+    addCol('meeting_projects', 'source', 'TEXT')
+    addCol('meeting_projects', 'source_recording_id', 'TEXT')
+    addCol('identity_suggestions', 'source_recording_ids', 'TEXT')
+    try {
+      backfillMembershipProvenanceV44()
+    } catch (e) {
+      console.warn('[Migration v44] provenance backfill failed (non-fatal):', e)
+    }
+    console.log('Migration v44 complete')
   }
 
 }
@@ -2321,6 +2381,26 @@ function repairPhase(): void {
   if (dlqCols.length > 0 && !dlqCols.includes('cancel_reason')) {
     console.log('[Database] Repairing download_queue: adding cancel_reason')
     try { database.run('ALTER TABLE download_queue ADD COLUMN cancel_reason TEXT') } catch { /* column exists */ }
+  }
+
+  // Repair meeting_contacts / meeting_projects / identity_suggestions (v44/F18):
+  // per-row provenance columns — force-add so an older on-disk schema that skipped
+  // the migration still has them before any membership-eligibility read. Idempotent.
+  // NOTE: the repair only adds COLUMNS; the one-time provenance BACKFILL lives in
+  // the v44 migration (runs once per DB), so older rows stay NULL (fail-closed
+  // ineligible on non-owner surfaces) until the migration classifies them.
+  for (const [table, col] of [
+    ['meeting_contacts', 'source'],
+    ['meeting_contacts', 'source_recording_id'],
+    ['meeting_projects', 'source'],
+    ['meeting_projects', 'source_recording_id'],
+    ['identity_suggestions', 'source_recording_ids']
+  ] as const) {
+    const cols = getTableColumns(database, table)
+    if (cols.length > 0 && !cols.includes(col)) {
+      console.log(`[Database] Repairing ${table}: adding ${col}`)
+      try { database.run(`ALTER TABLE ${table} ADD COLUMN ${col} TEXT`) } catch { /* column exists */ }
+    }
   }
 
   // Repair recording_preassignments (v31): force-create so an older on-disk DB
@@ -3007,7 +3087,8 @@ function extractContactsFromMeetingDataInternal(meeting: Omit<Meeting, 'created_
       runNoSave(`INSERT INTO contacts (id, name, email, first_seen_at, last_seen_at, meeting_count) VALUES (?, ?, ?, ?, ?, 1)`,
         [contactId, meeting.organizer_name || 'Unknown', meeting.organizer_email || null, meeting.start_time, meeting.start_time])
     }
-    runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)',
+    // v44 provenance: calendar-authored (structural) — from ICS/M365 organizer field.
+    runNoSave("INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES (?, ?, ?, 'calendar')",
       [meeting.id, contactId, 'organizer'])
   }
 
@@ -3027,7 +3108,8 @@ function extractContactsFromMeetingDataInternal(meeting: Omit<Meeting, 'created_
       runNoSave(`INSERT INTO contacts (id, name, email, first_seen_at, last_seen_at, meeting_count) VALUES (?, ?, ?, ?, ?, 1)`,
         [contactId, attendee.name || attendee.email || 'Unknown', attendee.email || null, meeting.start_time, meeting.start_time])
     }
-    runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)',
+    // v44 provenance: calendar-authored (structural) — from ICS/M365 attendee list.
+    runNoSave("INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES (?, ?, ?, 'calendar')",
       [meeting.id, contactId, 'attendee'])
   }
 }
@@ -5595,109 +5677,164 @@ function suppressExcludedTopicLabels(rows: Array<{ label: string; edge_id: strin
   return out
 }
 
-/** Result of {@link eligibleMeetingIdsForIdentity}: the subset of candidate meeting
- *  ids allowed to contribute transcript-derived membership to a NON-OWNER identity
- *  surface, plus a fail-closed flag on a hard lookup error. */
-export interface MeetingIdentityEligibility {
-  /** Meetings allowed to contribute (calendar-authored OR backed by ≥1 eligible recording). */
-  eligible: Set<string>
-  /** True when the lookup could not complete at all → treat every candidate as ineligible. */
+/**
+ * v44/round-27 — a membership ROW (meeting_contacts / meeting_projects) with its
+ * per-row provenance. This is the RESOLUTION UNIT the non-owner identity surfaces
+ * consume: gate the ROW, not the parent meeting (a calendar meeting also carries
+ * transcript-derived rows — ADV26-2/-3).
+ */
+export interface MembershipRow {
+  /** 'calendar' (structural, calendar/user-authored) | 'transcript' (AI-extracted) | null (legacy). */
+  source?: string | null
+  /** The recording whose transcript produced a 'transcript' row (else null). */
+  source_recording_id?: string | null
+}
+
+/** Result of {@link filterEligibleMembershipRows}. */
+export interface MembershipRowEligibility<T> {
+  /** The subset of input rows eligible on a NON-OWNER identity surface. */
+  eligible: T[]
+  /** True only on a HARD lookup exception → callers suppress everything. */
   failClosed: boolean
 }
 
 /**
- * ADV25 (round-26) — THE shared eligible-MEETING boundary for NON-OWNER identity
- * surfaces (person-context project-label fallback + suggestion mJac).
+ * ADV26 (round-27) — THE shared per-ROW membership-eligibility boundary for
+ * NON-OWNER identity surfaces (person-context people + project-label fallback,
+ * suggestion mJac in discovery + revalidation). Supersedes the round-26
+ * meeting-level {@link eligibleMeetingIdsForIdentity}, which laundered
+ * transcript-derived rows on a calendar meeting.
  *
- * DATA-MODEL FINDING: `meeting_contacts` / `meeting_projects` have NO per-row
- * provenance column. Their rows are written by TWO independent sources:
- *   (a) CALENDAR/USER-authored — reconcileMeetingContacts + saveMeetings project a
- *       meeting's `organizer_email` / `attendees` JSON (ICS/M365 sync) into
- *       meeting_contacts, and the accept-alias path writes user-confirmed links.
- *       These are STRUCTURAL and independent of any recording.
- *   (b) TRANSCRIPT-derived — applyTranscriptEntities (org-reconciler.ts) inserts
- *       contacts/projects extracted by AI from a recording's transcript. Excluding
- *       (personal / soft-delete / value-exclude) or hard-purging that recording
- *       does NOT remove these rows, so they would otherwise keep inflating identity
- *       surfaces with content the user asked to exclude.
+ * A membership row is ELIGIBLE iff:
+ *   • source === 'transcript' → its `source_recording_id` resolves to an ELIGIBLE
+ *     recording (via {@link getEligibleRecordingIds}: non-personal, non-deleted,
+ *     non-value-excluded, still existing). A missing / excluded source recording
+ *     ⇒ ineligible.
+ *   • source is any OTHER non-null value ('calendar' — calendar-sync or
+ *     user-authored/manual) → STRUCTURAL, always eligible (independent of any
+ *     recording).
+ *   • source IS NULL → legacy / unclassified (pre-v44 or unassociable backfill)
+ *     ⇒ INELIGIBLE (fail-closed): provenance can't be established.
  *
- * Because there is no reliable per-row discriminator, this applies the conservative
- * fail-closed rule from the ADV25 triage: a meeting MAY contribute transcript-derived
- * membership to a non-owner identity surface ONLY when it either
- *   • has INDEPENDENT CALENDAR PROVENANCE (organizer_email / non-empty attendees /
- *     meeting_url / recurrence — fields only ever set by calendar sync, never by a
- *     transcript), in which case its membership is structural and always allowed; OR
- *   • is backed by ≥1 ELIGIBLE recording (via {@link getEligibleRecordingIds} over the
- *     meeting's recordings) — the transcript-derived membership still has a live,
- *     non-excluded source.
- * A meeting with NO calendar provenance whose only recordings are all excluded (or
- * which has no recordings at all) contributes NOTHING.
- *
- * FAIL-CLOSED, mirroring filterEligibleCaptureIds: a RECORDING sub-lookup failure
- * drops only the recording-backed branch (calendar-authored meetings, resolved from
- * a successful meetings query, still survive and never over-include, so `failClosed`
- * stays false); a hard error on the meetings query itself yields an empty set with
- * `failClosed = true` so callers suppress everything.
+ * FAIL-CLOSED: a recording sub-lookup failure drops ONLY the transcript-derived
+ * rows (structural rows survive and the result never over-includes, so the outer
+ * `failClosed` stays false — mirroring {@link filterEligibleCaptureIds}); a hard
+ * exception yields an empty set with `failClosed = true` so callers suppress all.
  */
-export function eligibleMeetingIdsForIdentity(meetingIds: Iterable<string>): MeetingIdentityEligibility {
-  const unique = [...new Set([...meetingIds].filter((id): id is string => !!id))]
-  if (unique.length === 0) return { eligible: new Set<string>(), failClosed: false }
+export function filterEligibleMembershipRows<T extends MembershipRow>(rows: T[]): MembershipRowEligibility<T> {
+  if (rows.length === 0) return { eligible: [], failClosed: false }
   try {
-    const eligible = new Set<string>()
-    const CHUNK = 400
-
-    // 1. Meetings with INDEPENDENT CALENDAR PROVENANCE (structural, always allowed).
-    //    These fields are only ever populated by the calendar-sync writer
-    //    (saveMeetings), never by transcript analysis.
-    for (let i = 0; i < unique.length; i += CHUNK) {
-      const chunk = unique.slice(i, i + CHUNK)
-      const placeholders = chunk.map(() => '?').join(',')
-      const rows = queryAll<{ id: string }>(
-        `SELECT id FROM meetings
-          WHERE id IN (${placeholders})
-            AND (organizer_email IS NOT NULL
-                 OR (attendees IS NOT NULL AND TRIM(attendees) NOT IN ('', '[]'))
-                 OR meeting_url IS NOT NULL
-                 OR recurrence_rule IS NOT NULL
-                 OR is_recurring = 1)`,
-        chunk
-      )
-      for (const r of rows) eligible.add(r.id)
+    const recIds = new Set<string>()
+    for (const r of rows) {
+      if (r.source === 'transcript' && r.source_recording_id) recIds.add(r.source_recording_id)
     }
-
-    // 2. Remaining meetings: eligible ONLY when backed by ≥1 eligible recording.
-    const remaining = unique.filter((id) => !eligible.has(id))
-    if (remaining.length > 0) {
-      const recToMeeting = new Map<string, string>()
-      const allRecIds: string[] = []
-      for (let i = 0; i < remaining.length; i += CHUNK) {
-        const chunk = remaining.slice(i, i + CHUNK)
-        const placeholders = chunk.map(() => '?').join(',')
-        const recs = queryAll<{ id: string; meeting_id: string }>(
-          `SELECT id, meeting_id FROM recordings WHERE meeting_id IN (${placeholders})`,
-          chunk
-        )
-        for (const rec of recs) {
-          recToMeeting.set(rec.id, rec.meeting_id)
-          allRecIds.push(rec.id)
-        }
-      }
-      const { eligible: eligibleRecs, failClosed: recFailClosed } = getEligibleRecordingIds(allRecIds)
-      // recFailClosed drops ONLY the recording-backed branch; calendar meetings (step 1)
-      // stay eligible and the result never over-includes, so failClosed stays false.
-      if (!recFailClosed) {
-        for (const recId of eligibleRecs) {
-          const meetingId = recToMeeting.get(recId)
-          if (meetingId) eligible.add(meetingId)
-        }
+    let eligibleRecs = new Set<string>()
+    let recFailClosed = false
+    if (recIds.size > 0) {
+      const res = getEligibleRecordingIds(recIds)
+      eligibleRecs = res.eligible
+      recFailClosed = res.failClosed
+    }
+    const eligible: T[] = []
+    for (const r of rows) {
+      if (r.source === 'transcript') {
+        // Recording-backed: keep iff the source recording is currently eligible.
+        if (!recFailClosed && r.source_recording_id && eligibleRecs.has(r.source_recording_id)) eligible.push(r)
+      } else if (r.source == null) {
+        // Legacy / unclassified provenance ⇒ fail-closed ineligible.
+      } else {
+        // Structural (calendar / user-authored) ⇒ always eligible.
+        eligible.push(r)
       }
     }
-
     return { eligible, failClosed: false }
   } catch (e) {
-    console.error('[Database] eligibleMeetingIdsForIdentity FAILED — failing closed:', e)
-    return { eligible: new Set<string>(), failClosed: true }
+    console.error('[Database] filterEligibleMembershipRows FAILED — failing closed:', e)
+    return { eligible: [], failClosed: true }
   }
+}
+
+/**
+ * v44/round-27 — one-time BEST-EFFORT provenance backfill for pre-v44
+ * meeting_contacts / meeting_projects rows (source IS NULL). Called by migration
+ * v44 (and directly by its test). Conservative + documented:
+ *   • meeting_contacts:
+ *       - role='organizer' OR the contact's email appears in the meeting's calendar
+ *         data (organizer_email / attendees JSON) ⇒ 'calendar' (structural).
+ *       - else if the meeting has ≥1 recording ⇒ 'transcript' + that recording id
+ *         (ambiguous rows are ASSOCIATED WITH THE RECORDING so they are gated by
+ *         recording eligibility rather than laundered as calendar).
+ *       - else ⇒ leave NULL (legacy / unassociable ⇒ ineligible on non-owner surfaces).
+ *   • meeting_projects: projects are never in calendar attendee data, so a row is
+ *       'transcript' + the meeting's recording when one exists, else NULL.
+ * Idempotent: only touches rows still NULL. Wrapped in one transaction.
+ */
+export function backfillMembershipProvenanceV44(): void {
+  runInTransaction(() => {
+    // Per-meeting calendar email set (organizer + attendees) for the calendar match.
+    const calEmails = new Map<string, Set<string>>()
+    for (const m of queryAll<{ id: string; organizer_email: string | null; attendees: string | null }>(
+      'SELECT id, organizer_email, attendees FROM meetings'
+    )) {
+      const set = new Set<string>()
+      if (m.organizer_email) set.add(m.organizer_email.trim().toLowerCase())
+      if (m.attendees) {
+        try {
+          const parsed = JSON.parse(m.attendees) as Array<{ email?: string }>
+          if (Array.isArray(parsed)) for (const a of parsed) if (a?.email) set.add(a.email.trim().toLowerCase())
+        } catch { /* malformed attendees JSON — skip */ }
+      }
+      if (set.size > 0) calEmails.set(m.id, set)
+    }
+
+    // Per-meeting first recording id (the 'transcript' association target).
+    const firstRec = new Map<string, string>()
+    for (const r of queryAll<{ meeting_id: string; id: string }>(
+      'SELECT meeting_id, id FROM recordings WHERE meeting_id IS NOT NULL ORDER BY date_recorded ASC'
+    )) {
+      if (!firstRec.has(r.meeting_id)) firstRec.set(r.meeting_id, r.id)
+    }
+
+    // meeting_contacts.
+    const mcRows = queryAll<{ meeting_id: string; contact_id: string; role: string | null; email: string | null }>(
+      `SELECT mc.meeting_id AS meeting_id, mc.contact_id AS contact_id, mc.role AS role, LOWER(c.email) AS email
+         FROM meeting_contacts mc LEFT JOIN contacts c ON c.id = mc.contact_id
+        WHERE mc.source IS NULL`
+    )
+    for (const row of mcRows) {
+      const emails = calEmails.get(row.meeting_id)
+      const calendarAuthored = row.role === 'organizer' || (!!row.email && !!emails && emails.has(row.email))
+      if (calendarAuthored) {
+        run(`UPDATE meeting_contacts SET source = 'calendar' WHERE meeting_id = ? AND contact_id = ?`, [
+          row.meeting_id,
+          row.contact_id
+        ])
+      } else {
+        const rec = firstRec.get(row.meeting_id)
+        if (rec) {
+          run(
+            `UPDATE meeting_contacts SET source = 'transcript', source_recording_id = ? WHERE meeting_id = ? AND contact_id = ?`,
+            [rec, row.meeting_id, row.contact_id]
+          )
+        }
+        // else: leave NULL (legacy / unassociable).
+      }
+    }
+
+    // meeting_projects.
+    const mpRows = queryAll<{ meeting_id: string; project_id: string }>(
+      `SELECT meeting_id, project_id FROM meeting_projects WHERE source IS NULL`
+    )
+    for (const row of mpRows) {
+      const rec = firstRec.get(row.meeting_id)
+      if (rec) {
+        run(
+          `UPDATE meeting_projects SET source = 'transcript', source_recording_id = ? WHERE meeting_id = ? AND project_id = ?`,
+          [rec, row.meeting_id, row.project_id]
+        )
+      }
+    }
+  })
 }
 
 /**
@@ -5722,21 +5859,46 @@ export function getPersonContext(idOrName: string, limit = 4): PersonContext {
   const contactId = contact?.id ?? null
   const normKey = (contact?.name ?? raw).toLowerCase().trim().replace(/\s+/g, ' ')
 
-  const people = contactId
-    ? queryAll<{ name: string }>(
-        `SELECT c.name AS name, COUNT(*) AS shared
-           FROM meeting_contacts mc1
-           JOIN meeting_contacts mc2 ON mc2.meeting_id = mc1.meeting_id AND mc2.contact_id <> mc1.contact_id
-           JOIN contacts c ON c.id = mc2.contact_id
-          WHERE mc1.contact_id = ?
-          GROUP BY mc2.contact_id
-          ORDER BY shared DESC, c.name ASC
-          LIMIT ?`,
-        [contactId, cap]
-      )
-        .map((r) => r.name)
-        .filter(Boolean)
-    : []
+  // ADV26-3 (round-27) — the co-attendee (people) list is built from
+  // meeting_contacts rows, which are written by BOTH calendar sync AND
+  // applyTranscriptEntities (transcript-derived). Two participants learned SOLELY
+  // from an excluded recording must NOT stay mutually visible on this NON-OWNER
+  // identity card. Fetch each co-attendance WITH the co-attendee's per-row
+  // provenance and gate it through {@link filterEligibleMembershipRows}: a
+  // co-attendee counts only via membership rows that are calendar/user-authored OR
+  // backed by an eligible source recording. Legacy (NULL-provenance) rows and a
+  // fail-closed lookup are dropped; the `cap` is applied AFTER filtering so a run
+  // of ineligible rows can't truncate eligible co-attendees out.
+  let people: string[] = []
+  if (contactId) {
+    const coRows = queryAll<{
+      name: string
+      co_id: string
+      source: string | null
+      source_recording_id: string | null
+    }>(
+      `SELECT c.name AS name, mc2.contact_id AS co_id, mc2.source AS source,
+              mc2.source_recording_id AS source_recording_id
+         FROM meeting_contacts mc1
+         JOIN meeting_contacts mc2 ON mc2.meeting_id = mc1.meeting_id AND mc2.contact_id <> mc1.contact_id
+         JOIN contacts c ON c.id = mc2.contact_id
+        WHERE mc1.contact_id = ?`,
+      [contactId]
+    )
+    const { eligible } = filterEligibleMembershipRows(coRows)
+    // Rank co-attendees by their count of ELIGIBLE shared memberships.
+    const counts = new Map<string, { name: string; shared: number }>()
+    for (const r of eligible) {
+      if (!r.name) continue
+      const cur = counts.get(r.co_id)
+      if (cur) cur.shared++
+      else counts.set(r.co_id, { name: r.name, shared: 1 })
+    }
+    people = [...counts.values()]
+      .sort((a, b) => (b.shared - a.shared) || a.name.localeCompare(b.name))
+      .slice(0, cap)
+      .map((r) => r.name)
+  }
 
   // Topics via the graph; fall back to the person's meeting projects when empty.
   //
@@ -5765,37 +5927,35 @@ export function getPersonContext(idOrName: string, limit = 4): PersonContext {
   let topics = suppressExcludedTopicLabels(topicRows, cap)
 
   if (topics.length === 0 && contactId) {
-    // ADV25-1 (round-26) — this relational fallback returns project labels from
-    // meeting_contacts⋈meeting_projects, which are TRANSCRIPT-derived
-    // (applyTranscriptEntities) with no per-row provenance. A personal /
-    // value-excluded / soft-deleted (or hard-purged) recording would otherwise keep
-    // exposing its project label on this NON-OWNER identity card. Gate each
-    // contributing meeting through the shared eligible-meeting boundary
-    // ({@link eligibleMeetingIdsForIdentity}): keep a label only when it is backed
-    // by ≥1 meeting that is calendar-authored OR has an eligible recording. The
-    // `cap` is applied AFTER filtering (labels carry their meeting id, no SQL LIMIT)
-    // so a run of ineligible meetings can't truncate eligible labels out.
-    // Fail-closed: on a hard eligibility failure no fallback labels are surfaced.
-    const rows = safeGraphQuery<{ label: string; meeting_id: string }>(
-      `SELECT DISTINCT pr.name AS label, mc.meeting_id AS meeting_id
+    // ADV26-2 (round-27) — this relational fallback returns project labels via
+    // meeting_projects rows, which are written by applyTranscriptEntities
+    // (transcript-derived) OR by a manual user tag. Round-26 gated the parent
+    // MEETING, which LAUNDERED a transcript-derived project row on a meeting that
+    // merely carried calendar metadata. Gate the meeting_projects ROW ITSELF
+    // through {@link filterEligibleMembershipRows}: a 'transcript' row surfaces
+    // only while its source recording is eligible; a 'calendar' (manual/structural)
+    // row is always allowed; a legacy NULL-provenance row is fail-closed ineligible
+    // — EVEN when the meeting has calendar metadata. The `cap` is applied AFTER
+    // filtering so a run of ineligible rows can't truncate eligible labels out.
+    const rows = safeGraphQuery<{
+      label: string
+      source: string | null
+      source_recording_id: string | null
+    }>(
+      `SELECT DISTINCT pr.name AS label, mp.source AS source, mp.source_recording_id AS source_recording_id
          FROM meeting_contacts mc
          JOIN meeting_projects mp ON mp.meeting_id = mc.meeting_id
          JOIN projects pr ON pr.id = mp.project_id
         WHERE mc.contact_id = ?`,
       [contactId]
     )
-    const { eligible: eligibleMeetings, failClosed } = eligibleMeetingIdsForIdentity(
-      rows.map((r) => r.meeting_id)
-    )
-    if (!failClosed) {
-      const seen = new Set<string>()
-      for (const row of rows) {
-        if (!row.label || seen.has(row.label)) continue
-        if (!row.meeting_id || !eligibleMeetings.has(row.meeting_id)) continue
-        seen.add(row.label)
-        topics.push(row.label)
-        if (topics.length >= cap) break
-      }
+    const { eligible } = filterEligibleMembershipRows(rows)
+    const seen = new Set<string>()
+    for (const row of eligible) {
+      if (!row.label || seen.has(row.label)) continue
+      seen.add(row.label)
+      topics.push(row.label)
+      if (topics.length >= cap) break
     }
   }
 
@@ -5973,8 +6133,10 @@ export function deleteContact(id: string): void {
 }
 
 export function linkContactToMeeting(meetingId: string, contactId: string, role: ContactRole): void {
+  // v44 provenance: this is a structural/user-driven link (not AI transcript
+  // extraction) ⇒ 'calendar' (always eligible on non-owner identity surfaces).
   run(
-    'INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)',
+    "INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES (?, ?, ?, 'calendar')",
     [meetingId, contactId, role]
   )
 }
@@ -6383,6 +6545,10 @@ export function unmergeContacts(journalId: string): UnmergeResult {
       meetingLinks++
     }
     // 3b. Re-insert the loser links the merge dropped as collisions (keeper keeps its own).
+    //     v44: the original per-row provenance was not captured in the merge manifest,
+    //     so a restored collision row is left NULL-provenance ⇒ ineligible (fail-closed)
+    //     on non-owner identity surfaces until the recording is re-analyzed. Safe (no
+    //     leak); the owner Library/meeting-detail views are exempt from the gate anyway.
     for (const l of manifest.meetingContacts.collided) {
       if (!queryOne('SELECT 1 FROM meetings WHERE id = ?', [l.key])) {
         skipped++
@@ -6539,7 +6705,8 @@ export function assignSpeaker(
 
     const rec = queryOne<{ meeting_id?: string | null }>('SELECT meeting_id FROM recordings WHERE id = ?', [recordingId])
     if (rec?.meeting_id) {
-      runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)', [
+      // v44 provenance: an explicit user speaker binding is a structural link ⇒ 'calendar'.
+      runNoSave("INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES (?, ?, ?, 'calendar')", [
         rec.meeting_id,
         contact.id,
         'attendee'
@@ -6631,7 +6798,8 @@ export function setTurnOverride(
     )
     const rec = queryOne<{ meeting_id?: string | null }>('SELECT meeting_id FROM recordings WHERE id = ?', [recordingId])
     if (rec?.meeting_id) {
-      runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)', [
+      // v44 provenance: an explicit user speaker binding is a structural link ⇒ 'calendar'.
+      runNoSave("INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES (?, ?, ?, 'calendar')", [
         rec.meeting_id,
         contact.id,
         'attendee'
@@ -6825,7 +6993,8 @@ export function addMeetingAttendee(meetingId: string, payload: { name?: string; 
       }
     }
 
-    runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)', [
+    // v44 provenance: manual "add attendee" is a structural/user link ⇒ 'calendar'.
+    runNoSave("INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES (?, ?, ?, 'calendar')", [
       meetingId,
       contact.id,
       'attendee'
@@ -7027,8 +7196,9 @@ export function getProjectsForMeeting(meetingId: string): Project[] {
 }
 
 export function tagMeetingToProject(meetingId: string, projectId: string): void {
+  // v44 provenance: a manual project tag is structural/user-authored ⇒ 'calendar'.
   run(
-    'INSERT OR IGNORE INTO meeting_projects (meeting_id, project_id) VALUES (?, ?)',
+    "INSERT OR IGNORE INTO meeting_projects (meeting_id, project_id, source) VALUES (?, ?, 'calendar')",
     [meetingId, projectId]
   )
 }
@@ -7223,6 +7393,9 @@ export function unmergeProjects(journalId: string): UnmergeResult {
       meetingLinks++
     }
     // 3b. Re-insert dropped meeting_projects collisions for the loser.
+    //     v44: original per-row provenance is not captured in the merge manifest, so
+    //     a restored collision row stays NULL ⇒ ineligible (fail-closed) on non-owner
+    //     identity surfaces until re-analysis. Safe (no leak).
     for (const meetingId of manifest.meetingProjects.collided) {
       if (!queryOne('SELECT 1 FROM meetings WHERE id = ?', [meetingId])) {
         skipped++
@@ -7626,6 +7799,14 @@ export interface IdentitySuggestion {
   evidence: string | null
   status: 'pending' | 'accepted' | 'rejected'
   created_at: string
+  /**
+   * v44/round-27 — JSON array of authoritative SOURCE recording id(s) for a
+   * TRANSCRIPT-created suggestion (applyTranscriptEntities). NULL for
+   * corpus/graph-derived (discovery) suggestions and legacy rows. The surface +
+   * accept revalidation gates a transcript suggestion (which has NO graph evidence)
+   * through the recording allowlist using this (ADV26-1).
+   */
+  source_recording_ids?: string | null
 }
 
 /**
@@ -7633,18 +7814,40 @@ export interface IdentitySuggestion {
  * UNIQUE(kind, candidate_name, target_id) so a settled pairing is never re-queued
  * — a prior 'rejected'/'accepted' row for the same pairing wins. Uses run() so it
  * composes with applyTranscriptEntities' existing run()-based transaction.
+ *
+ * v44/round-27: `sourceRecordingIds` persists the recording id(s) whose transcript
+ * produced this suggestion (applyTranscriptEntities). Pass it for transcript
+ * suggestions so revalidation can gate them through the recording allowlist even
+ * though they carry no graph evidence; OMIT it for discovery (graph-derived)
+ * suggestions, which keep NULL provenance and are revalidated via the graph path.
  */
 export function insertIdentitySuggestion(
   kind: 'person' | 'project',
   candidateName: string,
   targetId: string,
   confidence: number,
-  evidence: Record<string, unknown>
+  evidence: Record<string, unknown>,
+  sourceRecordingIds?: string[]
 ): void {
+  // undefined ⇒ NULL (discovery / no provenance); an array (even empty) ⇒ a
+  // TRANSCRIPT suggestion whose provenance is KNOWN (empty = no eligible source).
+  const srcJson =
+    sourceRecordingIds !== undefined
+      ? JSON.stringify(sourceRecordingIds.filter((id): id is string => !!id))
+      : null
   run(
-    `INSERT OR IGNORE INTO identity_suggestions (id, kind, candidate_name, target_id, confidence, evidence, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
-    [randomUUID(), kind, candidateName, targetId, confidence, JSON.stringify(evidence ?? {}), new Date().toISOString()]
+    `INSERT OR IGNORE INTO identity_suggestions (id, kind, candidate_name, target_id, confidence, evidence, status, created_at, source_recording_ids)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+    [
+      randomUUID(),
+      kind,
+      candidateName,
+      targetId,
+      confidence,
+      JSON.stringify(evidence ?? {}),
+      new Date().toISOString(),
+      srcJson
+    ]
   )
 }
 
@@ -7816,7 +8019,9 @@ export function acceptIdentitySuggestion(id: string): AcceptSuggestionResult {
     if (s.kind === 'person') {
       upsertContactAliasNoSave(s.target_id, s.candidate_name, 'manual', 1.0)
       if (meetingId) {
-        runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)', [
+        // v44 provenance: the user ACCEPTED this suggestion ⇒ user-confirmed
+        // structural link ⇒ 'calendar' (always eligible on non-owner surfaces).
+        runNoSave("INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES (?, ?, ?, 'calendar')", [
           meetingId,
           s.target_id,
           'attendee'
@@ -7826,7 +8031,7 @@ export function acceptIdentitySuggestion(id: string): AcceptSuggestionResult {
     } else {
       upsertProjectAliasNoSave(s.target_id, s.candidate_name, 'manual', 1.0)
       if (meetingId) {
-        runNoSave('INSERT OR IGNORE INTO meeting_projects (meeting_id, project_id) VALUES (?, ?)', [
+        runNoSave("INSERT OR IGNORE INTO meeting_projects (meeting_id, project_id, source) VALUES (?, ?, 'calendar')", [
           meetingId,
           s.target_id
         ])
@@ -8175,7 +8380,8 @@ export function resolveMention(
         recordingId
       ])
       if (rec?.meeting_id) {
-        runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)', [
+        // v44 provenance: a user "resolve mention" decision is structural ⇒ 'calendar'.
+        runNoSave("INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES (?, ?, ?, 'calendar')", [
           rec.meeting_id,
           contactId,
           'attendee'
