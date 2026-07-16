@@ -17,6 +17,7 @@ import {
   getContactsForMeeting,
   mergeContacts,
   unmergeContacts,
+  filterVisibleEntityIds,
   UnmergeResult,
   Contact
 } from '../services/database'
@@ -49,8 +50,18 @@ export function registerContactsHandlers(): void {
         const { search, type, limit, offset } = parsed.data
         const result = getContacts(search, type, limit, offset)
 
+        // ADV27-1 (round-28) — People is a NON-OWNER identity surface: a
+        // transcript-created contact ENTITY whose sole source recording is
+        // excluded (personal/soft-deleted/value-excluded/hard-purged) must not stay
+        // searchable/listed here. Route the page through the central visible-identity
+        // boundary (manual/calendar entities always survive; fail-closed). The total
+        // is left as the raw count (an over-count is a benign display artifact, never
+        // a leak — the suppressed rows themselves never cross the boundary).
+        const { visible } = filterVisibleEntityIds('contact', result.contacts.map((c) => c.id))
+        const contacts = result.contacts.filter((c) => visible.has(c.id))
+
         return success({
-          contacts: result.contacts.map(mapToPerson),
+          contacts: contacts.map(mapToPerson),
           total: result.total
         })
       } catch (err) {
@@ -74,6 +85,15 @@ export function registerContactsHandlers(): void {
 
         const contact = getContactById(parsed.data.id)
         if (!contact) {
+          return error('NOT_FOUND', `Contact with ID ${parsed.data.id} not found`)
+        }
+
+        // ADV27-1 (round-28) — POINT read on the same non-owner surface. A
+        // transcript-created contact whose provenance is fully excluded is treated
+        // as absent (NOT_FOUND), consistent with its suppression from the list;
+        // manual/calendar contacts pass. Fail-closed.
+        const { visible } = filterVisibleEntityIds('contact', [parsed.data.id])
+        if (!visible.has(parsed.data.id)) {
           return error('NOT_FOUND', `Contact with ID ${parsed.data.id} not found`)
         }
 

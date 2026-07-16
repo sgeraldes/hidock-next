@@ -41,6 +41,7 @@ import {
   DiscoveryResult
 } from '../services/identity-discovery'
 import { autoSplitAmbiguousBuckets } from '../services/org-reconciler'
+import { isRecordingEligible } from '../services/recording-eligibility'
 import { success, error, Result } from '../types/api'
 
 const StatusSchema = z.enum(['pending', 'accepted', 'rejected'])
@@ -320,6 +321,19 @@ export function registerIdentityHandlers(): void {
         return error('VALIDATION_ERROR', 'Invalid resolve-mention request', parsed.error.format())
       }
       const { recordingId, sourceName, contactId, method } = parsed.data
+      // ADV27-4 (round-28) — accept-time eligibility recheck. resolveMention WRITES
+      // a mention resolution + (for a chosen contact) a durable meeting_contacts
+      // link. A bucket card can be loaded while its recording is eligible and clicked
+      // after it was trashed / marked personal / value-excluded / hard-purged. Revalidate
+      // the recording SYNCHRONOUSLY here — there is NO await between this check and the
+      // write, so on the single-threaded main process (better-sqlite3 is synchronous)
+      // the check and the write are atomic. Refuse fail-closed when ineligible.
+      if (!isRecordingEligible(recordingId)) {
+        return error(
+          'RECORDING_INELIGIBLE',
+          'This recording can no longer be edited because it was excluded or deleted.'
+        )
+      }
       resolveMention(recordingId, sourceName, contactId, method ?? 'manual', 1.0)
       return success({ ok: true })
     } catch (err) {

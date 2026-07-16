@@ -30,6 +30,7 @@ import {
   deleteProjectNote,
   getActionablesForProject,
   addProjectDiscoveryRejection,
+  filterVisibleEntityIds,
   Project as DBProject,
   ProjectNote
 } from '../services/database'
@@ -70,8 +71,16 @@ export function registerProjectsHandlers(): void {
         const { search, limit, offset, status } = parsed.data
         const result = getProjects(search, limit, offset, status)
 
+        // ADV27-1 (round-28) — Projects is a NON-OWNER identity surface: a
+        // transcript-created project ENTITY whose sole source recording is excluded
+        // must not stay listed. Route the page through the central visible-identity
+        // boundary (manual/user projects always survive; fail-closed). Total kept as
+        // the raw count (benign display over-count, never a leak).
+        const { visible } = filterVisibleEntityIds('project', result.projects.map((p) => p.id))
+        const projects = result.projects.filter((p) => visible.has(p.id))
+
         return success({
-          projects: result.projects.map(mapToProject),
+          projects: projects.map(mapToProject),
           total: result.total
         })
       } catch (err) {
@@ -95,6 +104,14 @@ export function registerProjectsHandlers(): void {
 
         const dbProject = getProjectById(parsed.data.id)
         if (!dbProject) {
+          return error('NOT_FOUND', `Project with ID ${parsed.data.id} not found`)
+        }
+
+        // ADV27-1 (round-28) — POINT read on the non-owner surface: a
+        // transcript-created project whose provenance is fully excluded is treated
+        // as absent; manual/user projects pass. Fail-closed.
+        const { visible } = filterVisibleEntityIds('project', [parsed.data.id])
+        if (!visible.has(parsed.data.id)) {
           return error('NOT_FOUND', `Project with ID ${parsed.data.id} not found`)
         }
 

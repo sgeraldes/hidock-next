@@ -41,6 +41,10 @@ vi.mock('../../services/database', () => ({
   deleteProjectNote: vi.fn(),
   getActionablesForProject: vi.fn(),
   addProjectDiscoveryRejection: vi.fn(),
+  // ADV27-1 (round-28) — projects:getAll/getById route through the visible-identity
+  // boundary. Default to all-visible so these mapping/shape assertions are
+  // unaffected; behavioral suppression is covered by the real-temp-DB suites.
+  filterVisibleEntityIds: vi.fn((_kind: string, ids: Iterable<string>) => ({ visible: new Set([...ids]), failClosed: false })),
   // ADV15 (round-16) — getById topics + getActionables now route through the
   // shared eligibility boundaries. Default these DB helpers to no-op-eligible so
   // these mapping/shape assertions are unaffected; behavioral exclusion is covered

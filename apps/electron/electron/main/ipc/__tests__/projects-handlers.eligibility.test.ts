@@ -39,7 +39,10 @@ function invoke(channel: string, ...args: any[]): Promise<any> {
 const PROJECT_ID = '550e8400-e29b-41d4-a716-446655440000'
 
 function seedProject(): void {
-  run('INSERT INTO projects (id, name, status) VALUES (?, ?, ?)', [PROJECT_ID, 'Proj', 'active'])
+  // v45/round-28: a normal user-owned project (entity source 'user') — always
+  // visible under the ADV27-1 visible-identity boundary so these topic/actionable
+  // gating assertions exercise the recording/capture gates, not entity suppression.
+  run("INSERT INTO projects (id, name, status, source) VALUES (?, ?, ?, 'user')", [PROJECT_ID, 'Proj', 'active'])
 }
 function seedMeeting(id: string): void {
   run('INSERT INTO meetings (id, subject, start_time, end_time) VALUES (?, ?, ?, ?)', [id, `M ${id}`, '2026-06-01T10:00:00Z', '2026-06-01T11:00:00Z'])

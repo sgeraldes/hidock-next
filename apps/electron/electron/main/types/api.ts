@@ -90,6 +90,9 @@ export type ErrorCode =
   // ADV25-3 (round-26) — an identity merge suggestion whose supporting evidence
   // became excluded/deleted between surfacing and accept (accept-time TOCTOU guard).
   | 'SUGGESTION_STALE'
+  // ADV27-4 (round-28) — a bucket-mention resolve targeting a recording that became
+  // ineligible (excluded/deleted/hard-purged) between load and click (accept-time recheck).
+  | 'RECORDING_INELIGIBLE'
 
 // =============================================================================
 // RAG Filter Types

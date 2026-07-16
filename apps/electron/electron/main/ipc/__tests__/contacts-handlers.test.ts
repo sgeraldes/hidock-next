@@ -25,6 +25,10 @@ vi.mock('../../services/database', () => ({
   getMeetingsForContact: vi.fn(),
   getContactsForMeeting: vi.fn(),
   mergeContacts: vi.fn(),
+  // ADV27-1 (round-28) — contacts:getAll/getById route through the visible-identity
+  // boundary. Default to all-visible so these shape assertions are unaffected;
+  // behavioral suppression is covered by the real-temp-DB suite.
+  filterVisibleEntityIds: vi.fn((_kind: string, ids: Iterable<string>) => ({ visible: new Set([...ids]), failClosed: false })),
   getDatabase: vi.fn(() => ({
     prepare: vi.fn(() => ({
       bind: vi.fn(),
