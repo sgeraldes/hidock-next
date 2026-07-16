@@ -2917,9 +2917,25 @@ export function mergeGraphNodes(keeperEntityId: string, loserEntityId: string): 
   if (keeperContact && loserContact && keeperContact !== loserContact) {
     // Both backing contacts are VISIBLE (checked above) — real, journaled contacts
     // merge (undoable), then fold the graph nodes.
-    mergeContacts(keeperContact, loserContact)
-    const r = mergeNodes(store, keeperId, loserId)
-    return { keeperId: r.keeperId, movedEdges: r.movedEdges, path: 'contact' }
+    //
+    // ADV53-1 (round-55): the composite must be CROSS-LAYER failure-atomic. Round-54
+    // made mergeContacts and mergeNodes each atomic on their OWN transaction, but
+    // running them back-to-back committed the contact merge (relational rows +
+    // undo-journal) BEFORE mergeNodes ran. If mergeNodes then threw (DB I/O, schema,
+    // statement failure), the operation reported failure while the loser contact was
+    // already deleted/repointed and its graph node + edges survived — relational and
+    // graph identity go inconsistent, and provenance is stranded under a graph node
+    // backed by a now-deleted contact. Wrapping BOTH in ONE outer runInTransaction
+    // gives them a single rollback boundary: mergeContacts's inner runInTransaction
+    // and mergeNodes's runInGraphTransaction (→ graphDbAdapter.runInTransaction →
+    // engine.runInTransaction) are RE-ENTRANT — with a transaction already open they
+    // JOIN it (no illegal nested BEGIN) and defer to the outer COMMIT/ROLLBACK, so a
+    // throw anywhere in the graph phase rolls the contact merge + journal back too.
+    return runInTransaction(() => {
+      mergeContacts(keeperContact, loserContact)
+      const r = mergeNodes(store, keeperId, loserId)
+      return { keeperId: r.keeperId, movedEdges: r.movedEdges, path: 'contact' as const }
+    })
   }
 
   const r = mergeNodes(store, keeperId, loserId)

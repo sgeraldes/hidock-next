@@ -35,6 +35,7 @@ vi.mock('../file-storage', () => ({
 import {
   initializeDatabase,
   run as dbRun,
+  queryAll,
   getContactById,
   getContactByName,
   getContactAliases,
@@ -243,6 +244,125 @@ describe('Context Graph merge', () => {
     // The loser contact was folded (journaled) and its graph node removed.
     expect(getContactById('c-b')).toBeUndefined()
     expect(store.getNode(loser)).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADV53-1 (round-55): the composite contact+graph merge (path='contact') is
+// CROSS-LAYER failure-atomic. mergeContacts (relational rows + undo-journal) and
+// mergeNodes (graph surgery) share ONE outer runInTransaction, so a throw in the
+// GRAPH phase — AFTER the contact merge already ran within the transaction —
+// rolls BOTH layers back. Without the wrap, the contact merge + journal committed
+// first and only the graph fold failed, leaving relational and graph identity
+// inconsistent and stranding provenance under a now-deleted contact.
+// ---------------------------------------------------------------------------
+describe('Context Graph merge cross-layer atomicity (ADV53-1 / round-55)', () => {
+  /** Snapshot every table the composite merge touches, ordered for byte-identity. */
+  function snapshot() {
+    return {
+      graphNodes: JSON.stringify(queryAll('SELECT * FROM graph_nodes ORDER BY id')),
+      graphEdges: JSON.stringify(queryAll('SELECT * FROM graph_edges ORDER BY id')),
+      graphEdgeSources: JSON.stringify(
+        queryAll('SELECT * FROM graph_edge_sources ORDER BY edge_id, recording_id, transcript_id')
+      ),
+      meetingContacts: JSON.stringify(queryAll('SELECT * FROM meeting_contacts ORDER BY meeting_id, contact_id')),
+      journalCount: (queryAll<{ c: number }>('SELECT COUNT(*) AS c FROM merge_journal')[0]?.c ?? 0),
+    }
+  }
+
+  /** Seed two linked, visible person nodes (keeper c-a, loser c-b) + loser graph edges. */
+  function seedComposite() {
+    seedContact('c-a', 'Bob')
+    seedContact('c-b', 'Robert')
+    const { person: keeper } = seedGraph({ personLabel: 'Bob', contactId: 'c-a' })
+    const store = getKnowledgeGraphStore()
+    const loser = store.upsertNode({
+      type: 'person',
+      label: 'Robert',
+      key: 'contact:c-b',
+      props: { contactId: 'c-b' },
+      now: '2026-01-01',
+    })
+    const m = store.upsertNode({ type: 'meeting', label: 'Extra', props: { meetingId: 'mx', date: '2026-01-05' }, now: '2026-01-01' })
+    const eLoser = store.upsertEdge({ sourceId: loser, targetId: m, type: 'ATTENDED', now: '2026-01-01' })
+    dbRun(
+      'INSERT OR IGNORE INTO graph_edge_sources (edge_id, recording_id, transcript_id, assertion_count, created_at) VALUES (?, ?, ?, 1, ?)',
+      [eLoser, 'rec-seed', 'tx-seed', '2026-01-01']
+    )
+    // Give the loser contact a distinct membership so a leaked contact-merge would
+    // be visible as a repointed/collided meeting_contacts row.
+    dbRun('INSERT OR IGNORE INTO meetings (id, subject, start_time, end_time) VALUES (?, ?, ?, ?)', [
+      'mtg-loser',
+      'Loser Sync',
+      '2026-01-05T00:00:00.000Z',
+      '2026-01-05T01:00:00.000Z',
+    ])
+    dbRun('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)', [
+      'mtg-loser',
+      'c-b',
+      'attendee',
+    ])
+    return { keeper, loser, store }
+  }
+
+  it('rolls BOTH the contact merge AND the graph fold back when the graph phase throws', async () => {
+    const { keeper, loser, store } = seedComposite()
+
+    const before = snapshot()
+    // Sanity: the composite path IS the one under test (both contacts visible).
+    expect(mergeGraphPreview(keeper, loser).contactMerge).toBe(true)
+
+    // Inject a fault into the GRAPH phase only: throw once on the loser-node delete,
+    // which mergeNodes runs LAST — after mergeContacts has already deleted/repointed
+    // the loser contact + written its journal row within the shared transaction.
+    // mergeContacts uses the app-level run() (not store.db.run), so this spy lands
+    // strictly in the graph surgery, after the contact phase began.
+    const origRun = store.db.run.bind(store.db)
+    let fired = false
+    const spy = vi.spyOn(store.db, 'run').mockImplementation((sql: string, params?: unknown[]) => {
+      if (!fired && /DELETE\s+FROM\s+graph_nodes/i.test(sql)) {
+        fired = true
+        throw new Error('injected fault: graph_nodes delete')
+      }
+      return origRun(sql, params)
+    })
+
+    try {
+      expect(() => mergeGraphNodes(keeper, loser)).toThrow(/injected fault/)
+    } finally {
+      spy.mockRestore()
+    }
+    expect(fired).toBe(true)
+
+    const after = snapshot()
+
+    // The whole composite rolled back: loser contact survives, journal untouched,
+    // memberships unchanged, and graph tables byte-identical to the pre-merge snapshot.
+    expect(getContactById('c-b')).toBeTruthy()
+    expect(getContactById('c-a')).toBeTruthy()
+    expect(store.getNode(loser)).toBeTruthy()
+    expect(after.journalCount).toBe(before.journalCount)
+    expect(after.meetingContacts).toBe(before.meetingContacts)
+    expect(after.graphNodes).toBe(before.graphNodes)
+    expect(after.graphEdges).toBe(before.graphEdges)
+    expect(after.graphEdgeSources).toBe(before.graphEdgeSources)
+  })
+
+  it('happy path: a successful composite merge commits BOTH the contact fold and the graph fold', async () => {
+    const { keeper, loser, store } = seedComposite()
+    const before = snapshot()
+
+    const res = mergeGraphNodes(keeper, loser)
+    expect(res.path).toBe('contact')
+
+    // Contact layer folded (journaled): loser gone, keeper survives, journal grew.
+    expect(getContactById('c-b')).toBeUndefined()
+    expect(getContactById('c-a')).toBeTruthy()
+    expect(snapshot().journalCount).toBe(before.journalCount + 1)
+    // Graph layer folded: loser node removed, its membership repointed to keeper.
+    expect(store.getNode(loser)).toBeUndefined()
+    const repointed = queryAll<{ contact_id: string }>('SELECT contact_id FROM meeting_contacts WHERE meeting_id = ?', ['mtg-loser'])
+    expect(repointed).toEqual([{ contact_id: 'c-a' }])
   })
 })
 
