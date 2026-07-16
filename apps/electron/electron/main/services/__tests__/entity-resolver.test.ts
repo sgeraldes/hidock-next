@@ -36,6 +36,14 @@ vi.mock('../database', () => ({
   filterEligibleMembershipRows: (rows: Array<{ source?: string | null }>) => ({
     eligible: rows.filter((r) => r.source != null && r.source !== 'transcript'),
     failClosed: false
+  }),
+  // ADV29-1 (round-31): the resolver now bars SUPPRESSED entities as link targets.
+  // These tier-logic fixtures are all genuine resolvable people/projects, so treat
+  // every candidate as visible. The no-reanimation behavior is exercised against a
+  // real DB in entity-resolver-reanimation.round31.test.ts.
+  filterVisibleEntityIds: (_kind: string, ids: Iterable<string>) => ({
+    visible: new Set([...ids]),
+    failClosed: false
   })
 }))
 

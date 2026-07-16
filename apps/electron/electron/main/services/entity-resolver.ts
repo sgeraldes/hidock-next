@@ -19,7 +19,7 @@
  * for unit tests.
  */
 
-import { queryAll, queryOne, getContactById, getProjectById, filterEligibleMembershipRows } from './database'
+import { queryAll, queryOne, getContactById, getProjectById, filterEligibleMembershipRows, filterVisibleEntityIds } from './database'
 import type { MembershipRow } from './database'
 import {
   normalizeName,
@@ -189,6 +189,38 @@ function coOccurringProjectIds(ctx?: ResolveContext): Set<string> {
 }
 
 // ---------------------------------------------------------------------------
+// ADV29-1 (round-31) — resolver must not REANIMATE a suppressed entity
+// ---------------------------------------------------------------------------
+//
+// The resolver matches a raw name/email against EVERY contact/project row,
+// including entities that are currently SUPPRESSED on non-owner surfaces because
+// their sole source recording was excluded (personal / soft-deleted / value-
+// excluded / hard-purged) — see {@link filterVisibleEntityIds}. If the resolver
+// returned such a match, applyTranscriptEntities would attach the excluded entity
+// to the CURRENT eligible recording; that new eligible membership would then flip
+// filterVisibleEntityIds to VISIBLE, re-exposing the ENTIRE previously-suppressed
+// entity (its name, role, aliases learned from the excluded source). That is an
+// automatic WRITE laundering path that bypasses the round-30 merge partition.
+//
+// FIX: every automatic resolution tier gates its candidate ids through
+// filterVisibleEntityIds and BARS a SUPPRESSED candidate from being chosen as a
+// link target. A genuinely VISIBLE entity (structural calendar/user/manual, or a
+// transcript entity whose source recording is still eligible) resolves and links
+// exactly as before — only suppressed candidates are barred. When the sole/best
+// match is barred, the resolver returns no id so applyTranscriptEntities creates a
+// SEPARATE transcript-provenanced entity instead of reviving the suppressed one.
+// FAIL-CLOSED: if the visibility lookup fails, EVERY candidate is treated as barred
+// (create-new rather than risk linking into a possibly-excluded entity).
+//
+/** Build a predicate that reports whether an entity id is BARRED as a link target
+ *  (suppressed on non-owner surfaces, or fail-closed). Computed once per resolve
+ *  over the full candidate set so the accent/fuzzy loops don't re-query per row. */
+function entityVisibilityGate(kind: 'contact' | 'project', ids: string[]): (id: string) => boolean {
+  const { visible, failClosed } = filterVisibleEntityIds(kind, ids)
+  return (id: string) => failClosed || !visible.has(id)
+}
+
+// ---------------------------------------------------------------------------
 // Contact resolution
 // ---------------------------------------------------------------------------
 
@@ -207,13 +239,17 @@ export function resolveContact(name: string, ctx?: ResolveContext): ResolveResul
 
   const hasPositiveAlias = !!aliasRow && aliasRow.source !== 'rejected'
 
+  const candidates = queryAll<{ id: string; name: string }>('SELECT id, name FROM contacts')
+
+  // ADV29-1 (round-31) — bar SUPPRESSED entities from being chosen as a link
+  // target (no reanimation). Computed once over every candidate id; fail-closed.
+  const barred = entityVisibilityGate('contact', candidates.map((c) => c.id))
+
   // Tier 1 — exact email (only when the name is itself an email).
   if (looksLikeEmail(raw)) {
     const c = queryOne<{ id: string }>('SELECT id FROM contacts WHERE LOWER(email) = ? LIMIT 1', [raw.toLowerCase()])
-    if (c && !blocked(c.id)) return { id: c.id, confidence: 1.0, method: 'email' }
+    if (c && !blocked(c.id) && !barred(c.id)) return { id: c.id, confidence: 1.0, method: 'email' }
   }
-
-  const candidates = queryAll<{ id: string; name: string }>('SELECT id, name FROM contacts')
 
   // Ambiguous-bucket guard — runs BEFORE the exact-name/alias tiers so a literal
   // "Sergio" contact is never auto-linked as if it were a real person when the name
@@ -225,13 +261,13 @@ export function resolveContact(name: string, ctx?: ResolveContext): ResolveResul
     const amb: AmbiguityResult = detectAmbiguousName(raw, candidates)
     if (amb.ambiguous) {
       const attendees = coOccurringContactIds(ctx)
-      const present = amb.matches.filter((m) => attendees.has(m.id) && !blocked(m.id))
+      const present = amb.matches.filter((m) => attendees.has(m.id) && !blocked(m.id) && !barred(m.id))
       if (present.length === 1) {
         return { id: present[0].id, confidence: ATTENDEE_CONTEXT_CONFIDENCE, method: 'attendee-context' }
       }
       const bucket = queryOne<{ id: string }>('SELECT id FROM contacts WHERE LOWER(name) = ? LIMIT 1', [norm])
       return {
-        id: bucket && !blocked(bucket.id) ? bucket.id : null,
+        id: bucket && !blocked(bucket.id) && !barred(bucket.id) ? bucket.id : null,
         confidence: AMBIGUOUS_BUCKET_CONFIDENCE,
         method: 'ambiguous-bucket',
         ambiguous: true,
@@ -241,12 +277,12 @@ export function resolveContact(name: string, ctx?: ResolveContext): ResolveResul
 
   // Tier 2 — exact case-insensitive name.
   const exact = queryOne<{ id: string }>('SELECT id FROM contacts WHERE LOWER(name) = ? LIMIT 1', [norm])
-  if (exact && !blocked(exact.id)) return { id: exact.id, confidence: 0.95, method: 'exact-name' }
+  if (exact && !blocked(exact.id) && !barred(exact.id)) return { id: exact.id, confidence: 0.95, method: 'exact-name' }
 
   // Tier 3 — positive alias.
   if (hasPositiveAlias) {
     const c = getContactById(aliasRow!.contact_id)
-    if (c && !blocked(c.id)) {
+    if (c && !blocked(c.id) && !barred(c.id)) {
       return { id: c.id, confidence: aliasRow!.confidence ?? 0.9, method: 'alias' }
     }
   }
@@ -255,7 +291,7 @@ export function resolveContact(name: string, ctx?: ResolveContext): ResolveResul
 
   // Tier 4 — accent/diacritic-folded name (Oscar ~ Óscar).
   for (const c of candidates) {
-    if (blocked(c.id)) continue
+    if (blocked(c.id) || barred(c.id)) continue
     const cNorm = normalizeName(c.name)
     if (cNorm !== norm && accentFoldedKey(c.name) === foldedTarget) {
       return { id: c.id, confidence: 0.85, method: 'accent' }
@@ -267,7 +303,7 @@ export function resolveContact(name: string, ctx?: ResolveContext): ResolveResul
   let best: { id: string; score: number; boosted: boolean } | null = null
   let collisions = 0
   for (const c of candidates) {
-    if (blocked(c.id)) continue
+    if (blocked(c.id) || barred(c.id)) continue
     const cNorm = normalizeName(c.name)
     if (cNorm === norm) continue
     const base = fuzzyNameScore(norm, cNorm)
@@ -300,24 +336,29 @@ export function resolveProject(name: string, ctx?: ResolveContext): ResolveResul
   const rejectedId = aliasRow && aliasRow.source === 'rejected' ? aliasRow.project_id : null
   const blocked = (id: string): boolean => rejectedId !== null && id === rejectedId
 
+  const candidates = queryAll<{ id: string; name: string }>('SELECT id, name FROM projects')
+
+  // ADV29-1 (round-31) — bar SUPPRESSED projects from being chosen as a link
+  // target (no reanimation). Computed once over every candidate id; fail-closed.
+  const barred = entityVisibilityGate('project', candidates.map((p) => p.id))
+
   // Tier 1 — exact case-insensitive name.
   const exact = queryOne<{ id: string }>('SELECT id FROM projects WHERE LOWER(name) = ? LIMIT 1', [norm])
-  if (exact && !blocked(exact.id)) return { id: exact.id, confidence: 0.95, method: 'exact-name' }
+  if (exact && !blocked(exact.id) && !barred(exact.id)) return { id: exact.id, confidence: 0.95, method: 'exact-name' }
 
   // Tier 2 — positive alias.
   if (aliasRow && aliasRow.source !== 'rejected') {
     const p = getProjectById(aliasRow.project_id)
-    if (p && !blocked(p.id)) {
+    if (p && !blocked(p.id) && !barred(p.id)) {
       return { id: p.id, confidence: aliasRow.confidence ?? 0.9, method: 'alias' }
     }
   }
 
-  const candidates = queryAll<{ id: string; name: string }>('SELECT id, name FROM projects')
   const foldedTarget = accentFoldedKey(raw)
 
   // Tier 3 — accent/diacritic-folded name.
   for (const p of candidates) {
-    if (blocked(p.id)) continue
+    if (blocked(p.id) || barred(p.id)) continue
     const pNorm = normalizeName(p.name)
     if (pNorm !== norm && accentFoldedKey(p.name) === foldedTarget) {
       return { id: p.id, confidence: 0.85, method: 'accent' }
@@ -329,7 +370,7 @@ export function resolveProject(name: string, ctx?: ResolveContext): ResolveResul
   let best: { id: string; score: number; boosted: boolean } | null = null
   let collisions = 0
   for (const p of candidates) {
-    if (blocked(p.id)) continue
+    if (blocked(p.id) || barred(p.id)) continue
     const pNorm = normalizeName(p.name)
     if (pNorm === norm) continue
     const base = fuzzyNameScore(norm, pNorm)
