@@ -40,6 +40,13 @@ import {
   getContactByName,
   getContactAliases,
 } from '../database'
+// Namespace import so a graph-phase fault can be injected into the app-level run()
+// the service imports (renameGraphEntity's graph_nodes UPDATE and bindNodeToContact's
+// re-key both go through this run, as does the graphDbAdapter that setNodeProps/
+// mergeNodes use). database.ts's OWN internal self-calls (createContact / updateContact /
+// upsertContactAlias) use its module-local run and are NOT intercepted — so the spy lands
+// strictly in the GRAPH phase while the relational writes execute-then-roll-back.
+import * as database from '../database'
 import {
   getKnowledgeGraphStore,
   getNodeDetail,
@@ -363,6 +370,152 @@ describe('Context Graph merge cross-layer atomicity (ADV53-1 / round-55)', () =>
     expect(store.getNode(loser)).toBeUndefined()
     const repointed = queryAll<{ contact_id: string }>('SELECT contact_id FROM meeting_contacts WHERE meeting_id = ?', ['mtg-loser'])
     expect(repointed).toEqual([{ contact_id: 'c-a' }])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADV54-1 (round-56): the remaining contact+graph composite mutations are
+// CROSS-LAYER failure-atomic, mirroring the round-55 merge fix. Each writes the
+// RELATIONAL layer (contacts / contact_aliases) AND the GRAPH layer (graph_nodes
+// re-key/label/props) — running them as separate auto-commits left the relational
+// write persisted when the graph phase failed, so the app reported failure while a
+// half-applied identity survived (an always-visible source='user' contact, a
+// sovereign manual alias, or a renamed contact with a stale graph label). Each is
+// now wrapped in ONE re-entrant runInTransaction so both layers roll back together:
+//   - convertNodeToContact (fresh-create): createContact + bindNodeToContact
+//   - bindNodeToContact (via linkNodeToContact): manual alias + graph re-key
+//   - renameGraphEntity (contact scope): updateContact + graph_nodes label refresh
+// ---------------------------------------------------------------------------
+describe('Context Graph contact/graph composite atomicity (ADV54-1 / round-56)', () => {
+  /** Snapshot every table these composites touch, ordered for byte-identity. */
+  function snap() {
+    return {
+      contacts: JSON.stringify(queryAll('SELECT * FROM contacts ORDER BY id')),
+      contactAliases: JSON.stringify(queryAll('SELECT * FROM contact_aliases ORDER BY id')),
+      graphNodes: JSON.stringify(queryAll('SELECT * FROM graph_nodes ORDER BY id')),
+      graphEdges: JSON.stringify(queryAll('SELECT * FROM graph_edges ORDER BY id')),
+      graphEdgeSources: JSON.stringify(
+        queryAll('SELECT * FROM graph_edge_sources ORDER BY edge_id, recording_id, transcript_id')
+      ),
+      journalCount: queryAll<{ c: number }>('SELECT COUNT(*) AS c FROM merge_journal')[0]?.c ?? 0,
+    }
+  }
+
+  /**
+   * Install a one-shot graph-phase fault: the FIRST app-level run() whose SQL matches
+   * `pattern` throws. The relational writes (createContact/updateContact/upsertContactAlias)
+   * go through database.ts's module-local run and are NOT matched here, so they run first
+   * and must be undone by the transaction rollback the throw triggers.
+   */
+  function injectGraphFault(pattern: RegExp) {
+    const origRun = database.run
+    let fired = false
+    const spy = vi.spyOn(database, 'run').mockImplementation((sql: string, params?: unknown[]) => {
+      if (!fired && pattern.test(sql)) {
+        fired = true
+        throw new Error('injected fault: graph phase')
+      }
+      return origRun(sql, (params ?? []) as unknown[])
+    })
+    return { spy, fired: () => fired }
+  }
+
+  it('convertNodeToContact (fresh-create): rolls back the created contact AND the manual alias when the graph re-key throws', async () => {
+    const { person } = seedGraph({ personLabel: 'Jiarabi' })
+    const before = snap()
+    // Precondition: no contact exists yet — the create is what must roll back.
+    expect(getContactByName('Jiarabi')).toBeFalsy()
+
+    const { spy, fired } = injectGraphFault(/UPDATE\s+graph_nodes\s+SET\s+norm_key/i)
+    try {
+      expect(() => convertNodeToContact(person)).toThrow(/injected fault/)
+    } finally {
+      spy.mockRestore()
+    }
+    expect(fired()).toBe(true)
+
+    const after = snap()
+    // No half-applied identity: no new source='user' contact, no manual alias, graph intact.
+    expect(getContactByName('Jiarabi')).toBeFalsy()
+    expect(after.contacts).toBe(before.contacts)
+    expect(after.contactAliases).toBe(before.contactAliases)
+    expect(after.graphNodes).toBe(before.graphNodes)
+    expect(after.graphEdges).toBe(before.graphEdges)
+    expect(after.graphEdgeSources).toBe(before.graphEdgeSources)
+    expect(after.journalCount).toBe(before.journalCount)
+    // The graph node stays name-keyed (never re-keyed onto a contact identity).
+    expect(getKnowledgeGraphStore().getNode(person)!.norm_key).toBe('jiarabi')
+  })
+
+  it('bindNodeToContact (via linkNodeToContact): rolls back the manual alias when the graph re-key throws', async () => {
+    seedContact('c-yar', 'Yaraví')
+    const { person } = seedGraph({ personLabel: 'Jiarabi' })
+    const before = snap()
+
+    const { spy, fired } = injectGraphFault(/UPDATE\s+graph_nodes\s+SET\s+norm_key/i)
+    try {
+      expect(() => linkNodeToContact(person, 'c-yar')).toThrow(/injected fault/)
+    } finally {
+      spy.mockRestore()
+    }
+    expect(fired()).toBe(true)
+
+    const after = snap()
+    // The sovereign manual alias did NOT persist (it was written before the throw,
+    // within the same transaction, and rolled back).
+    expect(getContactAliases('c-yar').some((a) => a.alias === 'jiarabi')).toBe(false)
+    expect(after.contactAliases).toBe(before.contactAliases)
+    expect(after.contacts).toBe(before.contacts)
+    expect(after.graphNodes).toBe(before.graphNodes)
+    expect(after.graphEdges).toBe(before.graphEdges)
+    expect(after.graphEdgeSources).toBe(before.graphEdgeSources)
+    expect(after.journalCount).toBe(before.journalCount)
+    // The node is NOT re-keyed onto the contact — the bind fully rolled back.
+    expect(getKnowledgeGraphStore().getNode(person)!.norm_key).toBe('jiarabi')
+  })
+
+  it('renameGraphEntity (contact scope): rolls back the contact rename AND the graph label refresh when the graph phase throws', async () => {
+    seedContact('c-yar', 'Jiarabi')
+    const { person } = seedGraph({ personLabel: 'Jiarabi', contactId: 'c-yar' })
+    const before = snap()
+
+    const { spy, fired } = injectGraphFault(/UPDATE\s+graph_nodes\s+SET\s+label/i)
+    try {
+      expect(() => renameGraphEntity(person, 'Yaraví')).toThrow(/injected fault/)
+    } finally {
+      spy.mockRestore()
+    }
+    expect(fired()).toBe(true)
+
+    const after = snap()
+    // The contact name did NOT change (updateContact ran first, then rolled back with the graph).
+    expect(getContactById('c-yar')!.name).toBe('Jiarabi')
+    expect(after.contacts).toBe(before.contacts)
+    expect(after.graphNodes).toBe(before.graphNodes)
+    expect(after.contactAliases).toBe(before.contactAliases)
+    expect(after.graphEdges).toBe(before.graphEdges)
+    expect(after.graphEdgeSources).toBe(before.graphEdgeSources)
+    expect(after.journalCount).toBe(before.journalCount)
+    // The graph node label is unchanged (the display refresh rolled back too).
+    expect(getKnowledgeGraphStore().getNode(person)!.label).toBe('Jiarabi')
+  })
+
+  it('happy path: convertNodeToContact commits BOTH the contact create AND the graph re-key + alias', async () => {
+    const { person } = seedGraph({ personLabel: 'Jiarabi' })
+    const before = snap()
+
+    const res = convertNodeToContact(person)
+    expect(res.reusedExisting).toBe(false)
+
+    // Relational layer committed: a new contact + its sovereign manual alias.
+    const contact = getContactByName('Jiarabi')
+    expect(contact).toBeTruthy()
+    expect(res.contactId).toBe(contact!.id)
+    expect(getContactAliases(contact!.id).some((a) => a.alias === 'jiarabi')).toBe(true)
+    // Graph layer committed: the node is re-keyed onto the contact identity.
+    expect(getKnowledgeGraphStore().getNode(res.nodeId)!.norm_key).toBe(`contact:${contact!.id}`)
+    // The commit actually changed state (guards against a no-op false positive).
+    expect(snap().contacts).not.toBe(before.contacts)
   })
 })
 

@@ -2486,14 +2486,23 @@ export function renameGraphEntity(entityId: string, newLabel: string): RenameEnt
       if (normalizeGraphLabel(oldName) === normalizeGraphLabel(label)) {
         return { outcome: 'noop', scope: 'contact', nodeId }
       }
-      updateContact(contactId, { name: label })
-      // The contact-keyed graph node's label is display-only (its key stays
-      // contact:<id>); refresh it in place so the graph shows the correction now.
-      run('UPDATE graph_nodes SET label = ?, updated_at = ? WHERE id = ?', [
-        label,
-        new Date().toISOString(),
-        nodeId,
-      ])
+      // ADV54-1 (round-56): a contact-scoped rename is a CROSS-LAYER composite — the
+      // RELATIONAL contacts.name update PLUS the display-only GRAPH graph_nodes.label
+      // refresh. Run as separate auto-commits, a graph-phase failure left the contact
+      // renamed while the graph node kept the stale label — relational/graph identity
+      // diverge. Wrap BOTH writes in ONE re-entrant runInTransaction so they roll back
+      // together, and emit entity:contact-changed only AFTER the commit so listeners
+      // never observe a rename that rolled back.
+      runInTransaction(() => {
+        updateContact(contactId, { name: label })
+        // The contact-keyed graph node's label is display-only (its key stays
+        // contact:<id>); refresh it in place so the graph shows the correction now.
+        run('UPDATE graph_nodes SET label = ?, updated_at = ? WHERE id = ?', [
+          label,
+          new Date().toISOString(),
+          nodeId,
+        ])
+      })
       try {
         getEventBus().emitDomainEvent({
           type: 'entity:contact-changed',
@@ -2571,30 +2580,39 @@ function bindNodeToContact(nodeId: string, contactId: string): { outcome: 'linke
     }
   }
 
-  // Sovereign manual bind so the resolver links this spelling from now on.
-  try {
+  // ADV54-1 (round-56): the manual bind is a CROSS-LAYER composite — a RELATIONAL
+  // contact_aliases write (upsertContactAlias) PLUS GRAPH re-key/merge (mergeNodes /
+  // graph_nodes UPDATE / setNodeProps). Round-35..55 ran these as SEPARATE
+  // auto-commits, so a graph-phase failure (DB I/O, schema, statement error) left the
+  // sovereign manual alias committed while the caller reported failure — the resolver
+  // would then link this spelling through a bind the app NEVER completed, corrupting
+  // identity provenance. Wrap the whole mutation in ONE re-entrant runInTransaction
+  // (upsertContactAlias/run/mergeNodes/setNodeProps all write through the SAME engine)
+  // so the alias and the graph rekey roll back together. The alias write NO LONGER
+  // swallows failures — a swallowed alias error would defeat the atomicity (the graph
+  // would rekey without the resolver alias); let it propagate to trigger the rollback.
+  return runInTransaction(() => {
+    // Sovereign manual bind so the resolver links this spelling from now on.
     upsertContactAlias(contactId, node.label, 'manual', 1.0)
-  } catch (e) {
-    console.warn('[knowledge-graph] manual alias write failed:', e)
-  }
 
-  const now = new Date().toISOString()
+    const now = new Date().toISOString()
 
-  if (keeper && keeper.id !== nodeId) {
-    mergeNodes(store, keeper.id, nodeId)
-    run('UPDATE graph_nodes SET label = ?, updated_at = ? WHERE id = ?', [canonicalName, now, keeper.id])
-    setNodeProps(store, keeper.id, { contactId })
-    return { outcome: 'merged', nodeId: keeper.id }
-  }
+    if (keeper && keeper.id !== nodeId) {
+      mergeNodes(store, keeper.id, nodeId)
+      run('UPDATE graph_nodes SET label = ?, updated_at = ? WHERE id = ?', [canonicalName, now, keeper.id])
+      setNodeProps(store, keeper.id, { contactId })
+      return { outcome: 'merged' as const, nodeId: keeper.id }
+    }
 
-  run('UPDATE graph_nodes SET norm_key = ?, label = ?, updated_at = ? WHERE id = ?', [
-    contactKey,
-    canonicalName,
-    now,
-    nodeId,
-  ])
-  setNodeProps(store, nodeId, { contactId })
-  return { outcome: 'linked', nodeId }
+    run('UPDATE graph_nodes SET norm_key = ?, label = ?, updated_at = ? WHERE id = ?', [
+      contactKey,
+      canonicalName,
+      now,
+      nodeId,
+    ])
+    setNodeProps(store, nodeId, { contactId })
+    return { outcome: 'linked' as const, nodeId }
+  })
 }
 
 export interface LinkContactResult {
@@ -2683,15 +2701,26 @@ export function convertNodeToContact(
 
   // contacts.type is CHECK-constrained: team|candidate|customer|external|unknown.
   // An extracted person is an 'external' contact.
-  const contact = createContact({
-    name: node.label,
-    type: 'external',
-    role: opts?.role ?? null,
-    company: opts?.company ?? null,
-    email: opts?.email ?? null,
+  // ADV54-1 (round-56): fresh-create is a CROSS-LAYER composite — createContact
+  // commits an always-visible source='user' contact (RELATIONAL) and bindNodeToContact
+  // then writes the manual alias + re-keys/merges the GRAPH node. Run separately, a
+  // graph-phase failure inside bindNodeToContact propagated as failure to the IPC but
+  // left the always-visible contact (and possibly its manual alias) persisted — future
+  // extraction would resolve through a conversion the app reported as FAILED, laundering
+  // identity provenance. Wrap create+bind in ONE outer runInTransaction; bindNodeToContact's
+  // own runInTransaction is RE-ENTRANT and JOINS this one, so a throw anywhere rolls the
+  // contact create back too. Eligibility/visibility guards stay BEFORE the transaction.
+  return runInTransaction(() => {
+    const contact = createContact({
+      name: node.label,
+      type: 'external',
+      role: opts?.role ?? null,
+      company: opts?.company ?? null,
+      email: opts?.email ?? null,
+    })
+    const r = bindNodeToContact(nodeId, contact.id)
+    return { contactId: contact.id, outcome: r.outcome, nodeId: r.nodeId, reusedExisting: false }
   })
-  const r = bindNodeToContact(nodeId, contact.id)
-  return { contactId: contact.id, outcome: r.outcome, nodeId: r.nodeId, reusedExisting: false }
 }
 
 /** Set (or clear, with '') a person node's pronouns. Stored on the node props. */
