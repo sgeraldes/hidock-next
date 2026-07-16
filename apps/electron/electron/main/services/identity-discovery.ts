@@ -33,9 +33,10 @@ import {
   queryOne,
   insertIdentitySuggestion,
   filterEligibleGraphEdgeIds,
-  eligibleMeetingIdsForIdentity
+  filterEligibleMembershipRows
 } from './database'
-import type { Contact, Project, IdentitySuggestion } from './database'
+import type { Contact, Project, IdentitySuggestion, MembershipRow } from './database'
+import { filterEligibleRecordingIds } from './recording-eligibility'
 import { normalizeName, accentFoldedKey, fuzzyNameScore, detectAmbiguousName } from './entity-normalize'
 import { nameRarity, type Rarity } from './name-rarity'
 
@@ -394,35 +395,27 @@ export function discoverContactMerges(): DiscoveryResult {
   const contacts = queryAll<Contact>('SELECT * FROM contacts')
   if (contacts.length < 2) return result
 
-  // Meeting sets (for graph-closeness Jaccard) — one pass.
+  // Meeting sets (for graph-closeness Jaccard) — one pass, PER-ROW provenance.
+  //
+  // ADV26-2/-3 (round-27) — meeting_contacts rows are written by BOTH calendar
+  // sync AND applyTranscriptEntities, for the SAME meeting. Round-26 gated at the
+  // MEETING level, which LAUNDERED transcript-derived rows on a calendar meeting.
+  // Fetch each row WITH its per-row provenance and gate the ROW through the shared
+  // {@link filterEligibleMembershipRows}: a row counts toward mJac only when it is
+  // calendar/user-authored OR backed by an eligible source recording. Legacy
+  // (NULL-provenance) rows and a fail-closed lookup are dropped. Computed ONCE over
+  // the whole corpus so an excluded recording can't inflate the shared-meeting
+  // Jaccard and push a merge suggestion over threshold.
+  const allMcRows = safeQueryAll<MembershipRow & { contact_id: string; meeting_id: string }>(
+    'SELECT contact_id, meeting_id, source, source_recording_id FROM meeting_contacts'
+  )
   const meetingSets = new Map<string, Set<string>>()
-  for (const row of safeQueryAll<{ contact_id: string; meeting_id: string }>(
-    'SELECT contact_id, meeting_id FROM meeting_contacts'
-  )) {
+  for (const row of filterEligibleMembershipRows(allMcRows).eligible) {
     let s = meetingSets.get(row.contact_id)
     if (!s) meetingSets.set(row.contact_id, (s = new Set<string>()))
     s.add(row.meeting_id)
   }
-  // ADV25-2 (round-26) — meeting_contacts membership is TRANSCRIPT-derived
-  // (applyTranscriptEntities) with no per-row provenance, so an excluded /
-  // hard-purged recording's participant links would otherwise keep inflating mJac
-  // (shared-meeting Jaccard) and push a merge suggestion over threshold. Compute
-  // the shared eligible-meeting allowlist ONCE across the whole corpus and count
-  // ONLY meetings that are calendar-authored OR backed by ≥1 eligible recording.
-  const eligibleMeetings = eligibleMeetingIdsForIdentity(
-    (function () {
-      const all = new Set<string>()
-      for (const s of meetingSets.values()) for (const m of s) all.add(m)
-      return all
-    })()
-  ).eligible
-  const meetingSetFor = (id: string): Set<string> => {
-    const all = meetingSets.get(id)
-    if (!all) return new Set<string>()
-    const out = new Set<string>()
-    for (const m of all) if (eligibleMeetings.has(m)) out.add(m)
-    return out
-  }
+  const meetingSetFor = (id: string): Set<string> => meetingSets.get(id) ?? new Set<string>()
 
   const aliasKeys = loadAliasKeys('contact_aliases', 'contact_id')
   const neighborsFor = makeNeighborLoader(PERSON_NEIGHBORS_SQL, 1)
@@ -519,31 +512,20 @@ export function discoverProjectMerges(): DiscoveryResult {
   const projects = queryAll<Project>('SELECT * FROM projects')
   if (projects.length < 2) return result
 
+  // ADV26-2 (round-27) — same PER-ROW provenance gating as contact discovery:
+  // meeting_projects rows are transcript-derived (or manual), so only rows that are
+  // calendar/user-authored OR backed by an eligible source recording may inflate
+  // mJac (see {@link filterEligibleMembershipRows}). Computed once over the corpus.
+  const allMpRows = safeQueryAll<MembershipRow & { project_id: string; meeting_id: string }>(
+    'SELECT project_id, meeting_id, source, source_recording_id FROM meeting_projects'
+  )
   const meetingSets = new Map<string, Set<string>>()
-  for (const row of safeQueryAll<{ project_id: string; meeting_id: string }>(
-    'SELECT project_id, meeting_id FROM meeting_projects'
-  )) {
+  for (const row of filterEligibleMembershipRows(allMpRows).eligible) {
     let s = meetingSets.get(row.project_id)
     if (!s) meetingSets.set(row.project_id, (s = new Set<string>()))
     s.add(row.meeting_id)
   }
-  // ADV25-2 (round-26) — same eligible-meeting gating as contact discovery:
-  // meeting_projects membership is transcript-derived, so only meetings that are
-  // calendar-authored OR backed by ≥1 eligible recording may inflate mJac.
-  const eligibleMeetings = eligibleMeetingIdsForIdentity(
-    (function () {
-      const all = new Set<string>()
-      for (const s of meetingSets.values()) for (const m of s) all.add(m)
-      return all
-    })()
-  ).eligible
-  const meetingSetFor = (id: string): Set<string> => {
-    const all = meetingSets.get(id)
-    if (!all) return new Set<string>()
-    const out = new Set<string>()
-    for (const m of all) if (eligibleMeetings.has(m)) out.add(m)
-    return out
-  }
+  const meetingSetFor = (id: string): Set<string> => meetingSets.get(id) ?? new Set<string>()
 
   const aliasKeys = loadAliasKeys('project_aliases', 'project_id')
   const neighborsFor = makeNeighborLoader(PROJECT_NEIGHBORS_SQL, 2)
@@ -619,29 +601,23 @@ interface SuggestionEvidence {
   [k: string]: unknown
 }
 
-/** Shared-meeting id set for one entity (person → meeting_contacts, project → meeting_projects). */
-function meetingSetForEntity(kind: 'person' | 'project', id: string): Set<string> {
-  const table = kind === 'person' ? 'meeting_contacts' : 'meeting_projects'
-  const idCol = kind === 'person' ? 'contact_id' : 'project_id'
-  return new Set(
-    safeQueryAll<{ meeting_id: string }>(`SELECT meeting_id FROM ${table} WHERE ${idCol} = ?`, [id]).map(
-      (r) => r.meeting_id
-    )
-  )
-}
-
 /**
- * ADV25-2 (round-26) — the ELIGIBLE shared-meeting id set for one entity: the
- * entity's meeting membership restricted to meetings that may contribute to a
- * non-owner identity surface (calendar-authored OR backed by ≥1 eligible
- * recording — see {@link eligibleMeetingIdsForIdentity}). Used at read-time mJac
- * recompute so an excluded / hard-purged recording's transcript-derived
- * membership no longer keeps a merge suggestion above threshold.
+ * ADV26-2 (round-27) — the ELIGIBLE shared-meeting id set for one entity, gated at
+ * the membership ROW: the entity's meeting_contacts / meeting_projects rows,
+ * filtered through {@link filterEligibleMembershipRows} so only calendar/user-
+ * authored rows OR rows backed by an eligible source recording count. Used at
+ * read-time mJac recompute so an excluded / hard-purged recording's
+ * transcript-derived membership no longer keeps a merge suggestion above threshold
+ * — even when the parent meeting carries calendar metadata. Fail-closed.
  */
 function eligibleMeetingSetForEntity(kind: 'person' | 'project', id: string): Set<string> {
-  const all = meetingSetForEntity(kind, id)
-  if (all.size === 0) return all
-  return eligibleMeetingIdsForIdentity(all).eligible
+  const table = kind === 'person' ? 'meeting_contacts' : 'meeting_projects'
+  const idCol = kind === 'person' ? 'contact_id' : 'project_id'
+  const rows = safeQueryAll<MembershipRow & { meeting_id: string }>(
+    `SELECT meeting_id, source, source_recording_id FROM ${table} WHERE ${idCol} = ?`,
+    [id]
+  )
+  return new Set(filterEligibleMembershipRows(rows).eligible.map((r) => r.meeting_id))
 }
 
 /**
@@ -698,9 +674,32 @@ export function revalidateSuggestionsForSurfacing(suggestions: IdentitySuggestio
 
     const oldGraph = Number(ev.signals?.graph ?? 0)
     const hadTopics = Array.isArray(ev.sharedTopics) && ev.sharedTopics.length > 0
-    // No graph/topic component ⇒ nothing recording-attributed to revalidate.
+    // No graph/topic component ⇒ this is NOT a discovery graph suggestion.
     if (oldGraph <= 0 && !hadTopics) {
-      out.push(s)
+      // ADV26-1 (round-27) — a TRANSCRIPT-created suggestion (applyTranscriptEntities)
+      // carries NO graph/topic evidence, so round-26 passed it through UNVALIDATED:
+      // a suggestion whose source recording was later trashed / personal /
+      // value-excluded / hard-purged still surfaced and could be accepted. Revalidate
+      // it through the recording allowlist using the authoritative source recording
+      // id(s) persisted on the row (source_recording_ids). Discovery (graph) rows are
+      // handled by the graph path above/below; they keep NULL provenance.
+      const src = parseSourceRecordingIds(s.source_recording_ids)
+      if (src !== null) {
+        // Post-v44 transcript suggestion — gate by its source recording(s).
+        if (src.length === 0) continue // no eligible source recorded ⇒ suppress
+        const { eligible, failClosed } = filterEligibleRecordingIds(src)
+        if (failClosed) continue // fail-closed
+        if (!src.some((id) => eligible.has(id))) continue // all sources excluded/purged ⇒ suppress
+        out.push(s)
+        continue
+      }
+      // NULL provenance + no graph. A DISCOVERY straggler always carries a `signals`
+      // block (email/name only); a legacy TRANSCRIPT suggestion does not. Suppress
+      // the legacy/missing-provenance transcript suggestions fail-closed (ADV26-1);
+      // let genuine discovery stragglers through (they have no recording attribution).
+      if (ev.signals) {
+        out.push(s)
+      }
       continue
     }
 
@@ -797,4 +796,22 @@ function preferKeeper(
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100
+}
+
+/**
+ * v44/round-27 — parse the identity_suggestions.source_recording_ids column.
+ * Returns `null` when the column is NULL/absent (a DISCOVERY/graph or legacy
+ * suggestion with no per-suggestion recording provenance), or a (possibly empty)
+ * string[] for a TRANSCRIPT-created suggestion whose provenance is KNOWN. A
+ * malformed blob is treated as an EMPTY known-provenance array (fail-closed: a
+ * transcript suggestion we can't attribute has no eligible source ⇒ suppressed).
+ */
+function parseSourceRecordingIds(raw: string | null | undefined): string[] | null {
+  if (raw == null) return null
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string' && !!id) : []
+  } catch {
+    return []
+  }
 }
