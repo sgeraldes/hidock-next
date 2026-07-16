@@ -54,8 +54,8 @@ describe('entity-resolver', () => {
     const SQL = await initSqlJs()
     dbInstance = new SQL.Database()
     dbInstance.run(`
-      CREATE TABLE contacts (id TEXT PRIMARY KEY, name TEXT, email TEXT);
-      CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT);
+      CREATE TABLE contacts (id TEXT PRIMARY KEY, name TEXT, email TEXT, created_at TEXT);
+      CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT, created_at TEXT);
       CREATE TABLE contact_aliases (id TEXT PRIMARY KEY, alias_norm TEXT UNIQUE, contact_id TEXT, source TEXT, confidence REAL);
       CREATE TABLE project_aliases (id TEXT PRIMARY KEY, alias_norm TEXT UNIQUE, project_id TEXT, source TEXT, confidence REAL);
       CREATE TABLE meeting_contacts (meeting_id TEXT, contact_id TEXT, role TEXT, source TEXT, source_recording_id TEXT);

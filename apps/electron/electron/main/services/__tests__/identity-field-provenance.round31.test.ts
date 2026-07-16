@@ -191,9 +191,13 @@ describe('ADV29-1 — resolver bars suppressed entities as link targets', () => 
   })
 
   it('fail-closed: when eligibility cannot be determined, resolver creates new rather than linking', () => {
-    // A visible calendar contact would normally resolve; simulate a lookup failure by
-    // dropping the recordings table so filterVisibleEntityIds fails closed.
-    contact('c-live', 'Dana', 'calendar', null)
+    // The only 'Dana' is the SUPPRESSED transcript contact from beforeEach (c-dana,
+    // sourced by the excluded r-old). Simulate a lookup failure by dropping the
+    // recordings table so the entity-visibility lookup fails closed ⇒ the suppressed
+    // contact is barred as a link target ⇒ resolver returns no id (create-new).
+    // (round-32 note: a genuinely-visible calendar/user contact is NOT recording-gated
+    //  and would still resolve — that is correct, not a leak; the fail-closed invariant
+    //  only bars recording-gated/suppressed candidates. See ADV30-1.)
     run('DROP TABLE recordings')
     expect(resolveContact('Dana').id).toBeNull()
   })

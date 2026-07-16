@@ -56,17 +56,22 @@ export interface ResolveContext {
   meetingId?: string
   projectIds?: string[]
   /**
-   * Resolve for IDENTITY KEYING rather than as a durable LINK target. When true,
-   * the ADV29-1 suppressed-entity bar (see {@link entityVisibilityGate}) is NOT
-   * applied: the resolver may return a currently-suppressed contact/project id.
+   * Resolve for IDENTITY KEYING rather than as a durable LINK target.
    *
-   * Keying ≠ display. The graph-ingest person-node keyer and rekeyExistingPersonNodes
-   * only decide a node's stable `contact:<id>` norm_key — they do NOT write a contact
-   * membership, so they cannot reanimate a suppressed entity the way
-   * applyTranscriptEntities can. Suppression for the graph happens at its own READ
-   * surfaces (graph-provenance / exclusion filters), not by breaking ingest keying.
+   * ADV30-2 (round-32) — forKeying is PREFER-VISIBLE, NEVER-SUPPRESSED. Keying a
+   * graph person node to a contact id makes that contact graph-visible via the
+   * eligible recording's edges, so keying to a SUPPRESSED contact leaks its
+   * identity fields (getNodeDetail reads company/email/aliases). The resolver
+   * therefore applies the same visibility bar for keying as for linking: it may key
+   * a node to a genuinely VISIBLE same-name contact, but if the only match is
+   * SUPPRESSED it returns no id ⇒ the keyer falls back to NAME keying (round-30
+   * superseded the earlier round-31 "keying bypasses the bar" semantics, which let
+   * an unordered exact-name lookup key a node to an older suppressed row).
+   *
+   * The flag is retained for call-site intent (graph-ingest keyer,
+   * rekeyExistingPersonNodes) even though the bar is now identical to the link path.
    * Write/link callers (org-reconciler.applyTranscriptEntities, self-identification)
-   * MUST leave this unset so the reanimation bar still guards those paths.
+   * leave it unset.
    */
   forKeying?: boolean
 }
@@ -226,12 +231,40 @@ function coOccurringProjectIds(ctx?: ResolveContext): Set<string> {
 // FAIL-CLOSED: if the visibility lookup fails, EVERY candidate is treated as barred
 // (create-new rather than risk linking into a possibly-excluded entity).
 //
-/** Build a predicate that reports whether an entity id is BARRED as a link target
- *  (suppressed on non-owner surfaces, or fail-closed). Computed once per resolve
- *  over the full candidate set so the accent/fuzzy loops don't re-query per row. */
+/** Build a predicate that reports whether an entity id is BARRED as a link/keying
+ *  target (suppressed on non-owner surfaces, or fail-closed). Computed once per
+ *  resolve over the full candidate set so the accent/fuzzy loops don't re-query per
+ *  row. ADV30-2 (round-32): applied to KEYING callers too (forKeying) — keying to a
+ *  suppressed contact leaks its fields, so it must prefer-visible-never-suppressed. */
 function entityVisibilityGate(kind: 'contact' | 'project', ids: string[]): (id: string) => boolean {
   const { visible, failClosed } = filterVisibleEntityIds(kind, ids)
   return (id: string) => failClosed || !visible.has(id)
+}
+
+/**
+ * ADV30-1 (round-32) — deterministic VISIBLE-preferring pick for an exact key
+ * (name/email). `ids` is every entity sharing the key, ordered most-recent-first
+ * (created_at DESC, id DESC). Returns the first that is neither `blocked` (a
+ * 'rejected' alias) nor `barred` (suppressed on non-owner surfaces / fail-closed) —
+ * i.e. the newest VISIBLE match. Returns null when EVERY match is blocked/suppressed.
+ *
+ * This replaces the old `WHERE LOWER(name)=? LIMIT 1` that picked ONE unordered row
+ * BEFORE the visibility bar: an older SUPPRESSED row could be picked and rejected
+ * while a newer VISIBLE duplicate was never considered. That made re-analysis of an
+ * eligible recording create a fresh entity every pass (identity duplication) and let
+ * ingest key a node to the suppressed row. Preferring the visible match makes
+ * re-analysis idempotent (links the visible replacement) and keeps keying off the
+ * suppressed id.
+ */
+function pickVisibleExact(
+  ids: string[],
+  blocked: (id: string) => boolean,
+  barred: (id: string) => boolean
+): string | null {
+  for (const id of ids) {
+    if (!blocked(id) && !barred(id)) return id
+  }
+  return null
 }
 
 // ---------------------------------------------------------------------------
@@ -255,19 +288,23 @@ export function resolveContact(name: string, ctx?: ResolveContext): ResolveResul
 
   const candidates = queryAll<{ id: string; name: string }>('SELECT id, name FROM contacts')
 
-  // ADV29-1 (round-31) — bar SUPPRESSED entities from being chosen as a link
-  // target (no reanimation). Computed once over every candidate id; fail-closed.
-  // Skipped for identity-keying callers (ctx.forKeying): keying a graph node by a
-  // contact id neither writes a membership nor reanimates the entity, and the
-  // graph suppresses at its own read surfaces (see ResolveContext.forKeying).
-  const barred = ctx?.forKeying
-    ? () => false
-    : entityVisibilityGate('contact', candidates.map((c) => c.id))
+  // ADV29-1 (round-31) / ADV30-2 (round-32) — bar SUPPRESSED entities from being
+  // chosen as a link OR keying target (no reanimation; no leaking a suppressed
+  // contact's fields via a keyed node). Computed once over every candidate id;
+  // fail-closed. Applied to identity-keying callers (ctx.forKeying) too — keying a
+  // node to a suppressed contact makes it graph-visible via the eligible recording's
+  // edges (see ResolveContext.forKeying).
+  const barred = entityVisibilityGate('contact', candidates.map((c) => c.id))
 
-  // Tier 1 — exact email (only when the name is itself an email).
+  // Tier 1 — exact email (only when the name is itself an email). ADV30-1: fetch ALL
+  // matches and PREFER the newest VISIBLE one (not a LIMIT-1 unordered row).
   if (looksLikeEmail(raw)) {
-    const c = queryOne<{ id: string }>('SELECT id FROM contacts WHERE LOWER(email) = ? LIMIT 1', [raw.toLowerCase()])
-    if (c && !blocked(c.id) && !barred(c.id)) return { id: c.id, confidence: 1.0, method: 'email' }
+    const emailIds = queryAll<{ id: string }>(
+      'SELECT id FROM contacts WHERE LOWER(email) = ? ORDER BY created_at DESC, id DESC',
+      [raw.toLowerCase()]
+    ).map((r) => r.id)
+    const emailId = pickVisibleExact(emailIds, blocked, barred)
+    if (emailId) return { id: emailId, confidence: 1.0, method: 'email' }
   }
 
   // Ambiguous-bucket guard — runs BEFORE the exact-name/alias tiers so a literal
@@ -284,9 +321,13 @@ export function resolveContact(name: string, ctx?: ResolveContext): ResolveResul
       if (present.length === 1) {
         return { id: present[0].id, confidence: ATTENDEE_CONTEXT_CONFIDENCE, method: 'attendee-context' }
       }
-      const bucket = queryOne<{ id: string }>('SELECT id FROM contacts WHERE LOWER(name) = ? LIMIT 1', [norm])
+      // ADV30-1: prefer the newest VISIBLE same-name bucket contact (never a suppressed one).
+      const bucketIds = queryAll<{ id: string }>(
+        'SELECT id FROM contacts WHERE LOWER(name) = ? ORDER BY created_at DESC, id DESC',
+        [norm]
+      ).map((r) => r.id)
       return {
-        id: bucket && !blocked(bucket.id) && !barred(bucket.id) ? bucket.id : null,
+        id: pickVisibleExact(bucketIds, blocked, barred),
         confidence: AMBIGUOUS_BUCKET_CONFIDENCE,
         method: 'ambiguous-bucket',
         ambiguous: true,
@@ -294,9 +335,16 @@ export function resolveContact(name: string, ctx?: ResolveContext): ResolveResul
     }
   }
 
-  // Tier 2 — exact case-insensitive name.
-  const exact = queryOne<{ id: string }>('SELECT id FROM contacts WHERE LOWER(name) = ? LIMIT 1', [norm])
-  if (exact && !blocked(exact.id) && !barred(exact.id)) return { id: exact.id, confidence: 0.95, method: 'exact-name' }
+  // Tier 2 — exact case-insensitive name. ADV30-1: fetch ALL matches and PREFER the
+  // newest VISIBLE one — a LIMIT-1 unordered row could pick an older SUPPRESSED
+  // duplicate (barred) while a newer VISIBLE one is never considered, breaking
+  // re-analysis idempotency and keying a node to the suppressed row.
+  const exactIds = queryAll<{ id: string }>(
+    'SELECT id FROM contacts WHERE LOWER(name) = ? ORDER BY created_at DESC, id DESC',
+    [norm]
+  ).map((r) => r.id)
+  const exactId = pickVisibleExact(exactIds, blocked, barred)
+  if (exactId) return { id: exactId, confidence: 0.95, method: 'exact-name' }
 
   // Tier 3 — positive alias.
   if (hasPositiveAlias) {
@@ -357,16 +405,20 @@ export function resolveProject(name: string, ctx?: ResolveContext): ResolveResul
 
   const candidates = queryAll<{ id: string; name: string }>('SELECT id, name FROM projects')
 
-  // ADV29-1 (round-31) — bar SUPPRESSED projects from being chosen as a link
-  // target (no reanimation). Computed once over every candidate id; fail-closed.
-  // Skipped for identity-keying callers (ctx.forKeying); see ResolveContext.forKeying.
-  const barred = ctx?.forKeying
-    ? () => false
-    : entityVisibilityGate('project', candidates.map((p) => p.id))
+  // ADV29-1 (round-31) / ADV30-2 (round-32) — bar SUPPRESSED projects from being
+  // chosen as a link OR keying target (no reanimation). Computed once over every
+  // candidate id; fail-closed. Applied to identity-keying callers (ctx.forKeying)
+  // too; see ResolveContext.forKeying.
+  const barred = entityVisibilityGate('project', candidates.map((p) => p.id))
 
-  // Tier 1 — exact case-insensitive name.
-  const exact = queryOne<{ id: string }>('SELECT id FROM projects WHERE LOWER(name) = ? LIMIT 1', [norm])
-  if (exact && !blocked(exact.id) && !barred(exact.id)) return { id: exact.id, confidence: 0.95, method: 'exact-name' }
+  // Tier 1 — exact case-insensitive name. ADV30-1: fetch ALL matches and PREFER the
+  // newest VISIBLE one (not a LIMIT-1 unordered row that could pick a suppressed dup).
+  const exactIds = queryAll<{ id: string }>(
+    'SELECT id FROM projects WHERE LOWER(name) = ? ORDER BY created_at DESC, id DESC',
+    [norm]
+  ).map((r) => r.id)
+  const exactId = pickVisibleExact(exactIds, blocked, barred)
+  if (exactId) return { id: exactId, confidence: 0.95, method: 'exact-name' }
 
   // Tier 2 — positive alias.
   if (aliasRow && aliasRow.source !== 'rejected') {
