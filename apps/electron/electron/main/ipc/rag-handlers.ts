@@ -40,8 +40,15 @@ export function registerRAGHandlers(): void {
       // Chat is Gemini-first with Ollama fallback — availability reflects EITHER
       // a configured Gemini key OR a reachable Ollama (see chat-llm.ts).
       const chatStatus = await getChatLLMService().getStatus()
-      const docCount = vectorStore.getDocumentCount()
-      const meetingCount = vectorStore.getMeetingCount()
+      // ADV44-1 (round-46) — status must reflect the ELIGIBLE corpus, not the raw
+      // in-memory one. Soft-delete / value-exclude / personal RETAIN their vector
+      // rows (retrieval filters them dynamically), so the raw counts over-report
+      // excluded chunks and `ready` could be true with ZERO eligible documents —
+      // making the deletion/value controls visibly dishonest. Route the counts
+      // through the SAME fail-closed eligibility boundary search uses; base `ready`
+      // on the ELIGIBLE document count (fail-closed ⇒ 0 ⇒ not ready).
+      const docCount = vectorStore.getEligibleDocumentCount()
+      const meetingCount = vectorStore.getEligibleMeetingCount()
 
       return success({
         backend: chatStatus.backend,

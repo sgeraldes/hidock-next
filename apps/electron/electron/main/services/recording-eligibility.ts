@@ -181,3 +181,55 @@ export function isCaptureEligible(captureId: string): boolean {
   const { eligible, failClosed } = filterEligibleCaptureIds([captureId])
   return !failClosed && eligible.has(captureId)
 }
+
+/**
+ * ADV44 (round-46) — THE stateless positive-provenance filter for vector chunks,
+ * shared by the vector store's read boundary ({@link VectorStore.filterEligibleDocs})
+ * AND the Today briefing's eligible-chunk COUNT, so both derive "which vector
+ * chunks may surface" from ONE implementation (no drift between what search
+ * serves and what the displayed count claims).
+ *
+ * A row is eligible iff:
+ *   • its recordingId resolves to a REAL recording that is ELIGIBLE — the
+ *     allowlist governs (a forged captureId cannot exempt a real excluded
+ *     recording); OR
+ *   • its recordingId does NOT resolve to a real recording (hard-purged orphan
+ *     / artifact / legacy) AND its captureId resolves to an ELIGIBLE capture.
+ * A row with NEITHER resolvable eligible recording NOR eligible capture (incl.
+ * legacy neither-id rows) is DROPPED — positive provenance required.
+ *
+ * FAIL-CLOSED: ANY provenance lookup failure ⇒ return [] (drop everything), so a
+ * transient DB error can never leak an excluded chunk into a read or inflate a
+ * displayed count.
+ */
+export function filterEligibleProvenanceRows<T>(
+  rows: T[],
+  recIdOf: (row: T) => string | null | undefined,
+  capIdOf: (row: T) => string | null | undefined
+): T[] {
+  const recCandidates = rows.map(recIdOf).filter((x): x is string => !!x)
+  const capCandidates = rows.map(capIdOf).filter((x): x is string => !!x)
+
+  const existRec = existingRecordings(recCandidates) // which ids are REAL recordings (any state)
+  const eligibility = filterEligibleRecordingIds(recCandidates) // the allowlist over real recordings
+  const capEligibility = filterEligibleCaptureIds(capCandidates) // eligible (not merely existing) captures
+
+  // ANY provenance lookup failing ⇒ we cannot prove provenance for a recording-
+  // backed row ⇒ fail closed: drop everything.
+  const failClosed = existRec.failClosed || eligibility.failClosed || capEligibility.failClosed
+
+  return rows.filter((row) => {
+    if (failClosed) return false
+    const recId = recIdOf(row)
+    if (recId && existRec.ids.has(recId)) {
+      // Recording-backed ⇒ governed by the allowlist. A forged captureId cannot
+      // make a real excluded recording eligible.
+      return eligibility.eligible.has(recId)
+    }
+    // recordingId absent OR does NOT resolve to a recording ⇒ artifact,
+    // hard-purged orphan, or a legacy neither-id row. Keep IFF a genuine
+    // ELIGIBLE captureId backs it; else DROP.
+    const capId = capIdOf(row)
+    return !!capId && capEligibility.eligible.has(capId)
+  })
+}

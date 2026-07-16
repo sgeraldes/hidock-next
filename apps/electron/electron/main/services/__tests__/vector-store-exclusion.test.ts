@@ -22,7 +22,12 @@ const deps = vi.hoisted(() => ({
   // ADV41-2 (round-43) — side-effect fired DURING the embeddings provider call,
   // used to simulate an owner exclusion committing while an EARLIER row's embed
   // is in flight. Null unless a race test sets it.
-  onEmbeddings: null as null | (() => void)
+  onEmbeddings: null as null | (() => void),
+  // ADV44-1 (round-46) — when non-null, the set of recordingIds that resolve to a
+  // REAL recording (existence probe). Lets a test model a hard-purged orphan
+  // (recordingId present on the chunk but naming no live recording). Null ⇒
+  // default behaviour (every non-empty id is treated as a real recording).
+  existingOverride: null as null | Set<string>
 }))
 
 vi.mock('../database', () => ({
@@ -62,7 +67,12 @@ vi.mock('../database', () => ({
   getExistingRecordingIds: (ids: Iterable<string>) =>
     deps.throwOnExclusion
       ? { ids: new Set<string>(), failClosed: true }
-      : { ids: new Set([...ids].filter((i): i is string => !!i)), failClosed: false },
+      : {
+          ids: new Set(
+            [...ids].filter((i): i is string => !!i && (deps.existingOverride ? deps.existingOverride.has(i) : true))
+          ),
+          failClosed: false
+        },
   getExistingCaptureIds: (_ids: Iterable<string>) =>
     deps.throwOnExclusion
       ? { ids: new Set<string>(), failClosed: true }
@@ -88,6 +98,7 @@ beforeEach(() => {
   deps.backfillRows = []
   deps.indexedRecordingIds = []
   deps.onEmbeddings = null
+  deps.existingOverride = null
   deps.generateEmbedding.mockReset()
   deps.generateEmbedding.mockResolvedValue([1, 0, 0])
 })
@@ -281,5 +292,56 @@ describe('VectorStore read primitives inherit the eligibility boundary', () => {
     deps.excluded = new Set()
     deps.throwOnExclusion = true
     expect(store.getAllDocuments()).toEqual([])
+  })
+})
+
+// ADV44-1 (round-46) — rag:status derived documentCount/meetingCount/ready from
+// the RAW in-memory corpus, so soft-delete/value-exclude/personal docs (whose
+// vector rows are RETAINED for restoration) inflated the counts and could make
+// Chat appear "ready" with zero eligible docs. getEligibleDocumentCount /
+// getEligibleMeetingCount route through the SAME fail-closed eligibility boundary
+// search uses, so the status numbers match what the assistant can actually serve.
+describe('VectorStore eligible counts (rag:status honesty)', () => {
+  it('getEligibleDocumentCount excludes soft-deleted / personal / value-excluded chunks', async () => {
+    const store = new VectorStore()
+    await store.addDocument('ok chunk a', { recordingId: 'r-ok', chunkIndex: 0 })
+    await store.addDocument('ok chunk b', { recordingId: 'r-ok', chunkIndex: 1 })
+    await store.addDocument('excluded chunk', { recordingId: 'r-bad', chunkIndex: 0 })
+
+    // Raw count sees every retained row…
+    expect(store.getDocumentCount()).toBe(3)
+
+    // …the eligible count drops the excluded recording's chunk.
+    deps.excluded = new Set(['r-bad'])
+    expect(store.getEligibleDocumentCount()).toBe(2)
+  })
+
+  it('getEligibleMeetingCount counts distinct meetings among ELIGIBLE docs only', async () => {
+    const store = new VectorStore()
+    await store.addDocument('a', { recordingId: 'r-ok', meetingId: 'm-1', chunkIndex: 0 })
+    await store.addDocument('b', { recordingId: 'r-bad', meetingId: 'm-2', chunkIndex: 0 })
+
+    expect(store.getMeetingCount()).toBe(2)
+
+    deps.excluded = new Set(['r-bad'])
+    expect(store.getEligibleMeetingCount()).toBe(1)
+  })
+
+  it('a hard-purged-orphan chunk (recordingId names no real recording, no capture) is not counted', async () => {
+    const store = new VectorStore()
+    await store.addDocument('orphan', { recordingId: 'r-purged', chunkIndex: 0 })
+    // The existence probe reports r-purged is NOT a real recording (hard-purged);
+    // with no eligible captureId it has no positive provenance ⇒ dropped.
+    deps.existingOverride = new Set<string>() // r-purged resolves to nothing
+    expect(store.getEligibleDocumentCount()).toBe(0)
+    expect(store.getEligibleMeetingCount()).toBe(0)
+  })
+
+  it('fails closed to zero (docs AND meetings) when the eligibility lookup throws', async () => {
+    const store = new VectorStore()
+    await store.addDocument('a', { recordingId: 'r-ok', meetingId: 'm-1', chunkIndex: 0 })
+    deps.throwOnExclusion = true
+    expect(store.getEligibleDocumentCount()).toBe(0)
+    expect(store.getEligibleMeetingCount()).toBe(0)
   })
 })

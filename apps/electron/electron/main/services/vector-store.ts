@@ -6,8 +6,7 @@
 import { getDatabase, isRecordingProcessable } from './database'
 import {
   filterEligibleRecordingIds,
-  existingRecordings,
-  filterEligibleCaptureIds,
+  filterEligibleProvenanceRows,
   isRecordingEligible
 } from './recording-eligibility'
 import { getEmbeddingsService } from './embeddings'
@@ -504,34 +503,16 @@ class VectorStore {
     // this still subsumes the forged-provenance protection (an ineligible/forged
     // captureId is absent from the eligible set ⇒ dropped) while keeping genuine
     // eligible artifacts (round-11 regression).
-    const recCandidates = docs.map((d) => d.metadata.recordingId).filter((x): x is string => !!x)
-    const capCandidates = docs.map((d) => d.metadata.captureId).filter((x): x is string => !!x)
-
-    const existRec = existingRecordings(recCandidates) // which ids are REAL recordings (any state)
-    const eligibility = filterEligibleRecordingIds(recCandidates) // the allowlist over real recordings
-    const capEligibility = filterEligibleCaptureIds(capCandidates) // eligible (not merely existing) captures
-
-    // ANY provenance lookup failing ⇒ we cannot prove provenance for a doc that
-    // has a recordingId ⇒ fail closed: keep only docs with NO recordingId.
-    const failClosed = existRec.failClosed || eligibility.failClosed || capEligibility.failClosed
-
-    return docs.filter((d) => {
-      // ADV23-1 (round-24) — require POSITIVE provenance; no "no recordingId ⇒
-      // keep" fall-through. Any lookup failure ⇒ drop everything (fail closed).
-      if (failClosed) return false
-      const recId = d.metadata.recordingId
-      if (recId && existRec.ids.has(recId)) {
-        // Recording-backed ⇒ governed by the allowlist. A forged captureId cannot
-        // make a real excluded recording eligible.
-        return eligibility.eligible.has(recId)
-      }
-      // recordingId is absent OR does NOT resolve to a recording ⇒ artifact,
-      // hard-purged orphan, or a legacy neither-id row. Keep IFF a genuine
-      // ELIGIBLE captureId backs it; else DROP (no positive provenance:
-      // null-provenance legacy row / forged / soft-deleted / value-excluded).
-      const capId = d.metadata.captureId
-      return !!capId && capEligibility.eligible.has(capId)
-    })
+    //
+    // ADV44 (round-46) — this positive-provenance logic is now the shared
+    // {@link filterEligibleProvenanceRows} so the Today briefing's eligible-chunk
+    // COUNT derives from the SAME implementation this read boundary uses (no
+    // drift between what search serves and what the count claims).
+    return filterEligibleProvenanceRows(
+      docs,
+      (d) => d.metadata.recordingId,
+      (d) => d.metadata.captureId
+    )
   }
 
   async search(query: string, topK = 5): Promise<SearchResult[]> {
@@ -699,6 +680,34 @@ class VectorStore {
   getMeetingCount(): number {
     const meetingIds = new Set<string>()
     for (const doc of this.documents.values()) {
+      if (doc.metadata.meetingId) {
+        meetingIds.add(doc.metadata.meetingId)
+      }
+    }
+    return meetingIds.size
+  }
+
+  /**
+   * ADV44-1 (round-46) — the ELIGIBILITY-FILTERED document count for status
+   * surfaces (rag:status, Today statistics). getDocumentCount above returns the
+   * RAW in-memory corpus size; soft-delete / value-exclude / personal intentionally
+   * RETAIN their vector rows (retrieval filters them dynamically), so the raw size
+   * over-counts excluded chunks and can make Chat look "ready" with ZERO eligible
+   * docs. Route through the SAME fail-closed eligibility boundary search uses
+   * ({@link filterEligibleDocs}); a lookup failure yields 0 (fail-closed).
+   */
+  getEligibleDocumentCount(): number {
+    return this.filterEligibleDocs([...this.documents.values()]).length
+  }
+
+  /**
+   * ADV44-1 (round-46) — distinct meetings among ELIGIBLE documents only (see
+   * {@link getEligibleDocumentCount}). Excluded recordings no longer inflate the
+   * displayed meeting count; fail-closed to 0 on any eligibility lookup failure.
+   */
+  getEligibleMeetingCount(): number {
+    const meetingIds = new Set<string>()
+    for (const doc of this.filterEligibleDocs([...this.documents.values()])) {
       if (doc.metadata.meetingId) {
         meetingIds.add(doc.metadata.meetingId)
       }

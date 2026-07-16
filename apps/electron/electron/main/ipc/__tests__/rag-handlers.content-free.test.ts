@@ -38,6 +38,8 @@ vi.mock('../../services/vector-store', () => ({
   getVectorStore: vi.fn(() => ({
     getDocumentCount: vi.fn(() => 0),
     getMeetingCount: vi.fn(() => 0),
+    getEligibleDocumentCount: vi.fn(() => 0),
+    getEligibleMeetingCount: vi.fn(() => 0),
     search: vi.fn(),
     getAllDocuments: vi.fn(() => [])
   }))
