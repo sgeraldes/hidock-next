@@ -32,7 +32,8 @@
  * NO new tables and NO schema migration: it reads/deletes existing rows only.
  */
 
-import { queryAll, run, addToQueue, updateRecordingTranscriptionStatus } from './database'
+import { queryAll, run, addToQueue, updateRecordingTranscriptionStatus, runInTransaction } from './database'
+import { isRecordingEligible } from './recording-eligibility'
 
 // Config-KV marker prefixes written by the self-identification pass
 // (self-identification.ts SCANNED_KEY_PREFIX / MERGE_KEY_PREFIX). Clearing the
@@ -140,6 +141,25 @@ export interface ReDiarizeResult {
   cleared: ClearedAutoBindings
 }
 
+/** Error code: the recording is excluded from AI re-processing (soft-deleted,
+ *  personal, value-excluded, or hard-purged / unresolvable). */
+export const RE_DIARIZE_INELIGIBLE = 'RECORDING_INELIGIBLE'
+/** Error code: the recording is eligible but the enqueue step failed (empty
+ *  queue id or any enqueue/status error) — the clear is rolled back. */
+export const RE_DIARIZE_ENQUEUE_FAILED = 'RE_DIARIZE_ENQUEUE_FAILED'
+
+/** Carries a stable `code` so the IPC handler can report an honest, specific
+ *  failure instead of a generic error. */
+export class ReDiarizeError extends Error {
+  constructor(
+    public readonly code: string,
+    message: string
+  ) {
+    super(message)
+    this.name = 'ReDiarizeError'
+  }
+}
+
 /**
  * Re-diarize one recording: clear its automatic speaker names, then re-queue the
  * recording for (re)transcription with the given provider so segmentation is
@@ -149,17 +169,61 @@ export interface ReDiarizeResult {
  * `recordingId` MUST already be the canonical recordings.id.
  * `provider` is passed straight through to the queue (undefined → global default).
  *
+ * ADV46-1 (round-48) — ELIGIBILITY + ATOMICITY. Re-diarize feeds the
+ * transcription/analysis AI pipeline, so an EXCLUDED recording (soft-deleted /
+ * personal / value-excluded / hard-purged) must not be re-diarized or re-queued,
+ * exactly like `transcribe`. This is NOT a deletion control — it is AI
+ * re-processing that must respect exclusion. Two invariants, both enforced in ONE
+ * synchronous transaction:
+ *   1. Eligibility is asserted BEFORE any identity state is read or deleted, so a
+ *      refused recording keeps its bindings / mentions / self-id markers intact.
+ *      FAIL-CLOSED: {@link isRecordingEligible} returns false on any
+ *      exclusion-lookup failure, so a transient DB error refuses rather than
+ *      destroys identity data.
+ *   2. clear → enqueue → status are ONE transaction: an EMPTY queue id or ANY
+ *      enqueue/status failure throws, rolling the whole thing back (bindings
+ *      restored, status unchanged) — never a partial identity deletion with
+ *      nothing queued.
+ * On refusal / failure this THROWS (the IPC handler maps it to an honest
+ * `success:false`); it does not report success.
+ *
  * Emits progress through the normal transcription queue events. Idempotent /
  * safe to run repeatedly.
  */
 export async function reDiarizeRecording(recordingId: string, provider?: string): Promise<ReDiarizeResult> {
-  const cleared = clearAutoSpeakerBindingsForReDiarize(recordingId)
+  const { cleared, queueItemId } = runInTransaction((): ReDiarizeResult => {
+    // (1) Assert eligibility BEFORE reading/deleting ANY identity state.
+    if (!isRecordingEligible(recordingId)) {
+      throw new ReDiarizeError(
+        RE_DIARIZE_INELIGIBLE,
+        `Recording ${recordingId} is excluded from AI re-processing (deleted, personal, or low-value) and cannot be re-diarized.`
+      )
+    }
 
-  const queueItemId = addToQueue(recordingId, provider)
-  updateRecordingTranscriptionStatus(recordingId, 'queued')
+    // (2) Clear the automatic identity state (still inside the transaction).
+    const clearedInner = clearAutoSpeakerBindingsForReDiarize(recordingId)
 
-  // Lazy-import the transcription service so this module stays light for unit
-  // tests of the clearing logic (mirrors self-identification's lazy imports).
+    // (3) Enqueue. An empty id means the enqueue chokepoint refused — treat it,
+    // and any enqueue/status error, as a hard failure so the clear rolls back
+    // rather than leaving identity data deleted with nothing queued.
+    const enqueuedId = addToQueue(recordingId, provider)
+    if (!enqueuedId) {
+      throw new ReDiarizeError(
+        RE_DIARIZE_ENQUEUE_FAILED,
+        `Failed to enqueue recording ${recordingId} for re-diarization; identity state left unchanged.`
+      )
+    }
+
+    // (4) Mark queued — the final write of the atomic unit.
+    updateRecordingTranscriptionStatus(recordingId, 'queued')
+
+    return { queueItemId: enqueuedId, cleared: clearedInner }
+  })
+
+  // Post-commit (OUTSIDE the transaction): the clear/enqueue/status are now
+  // durably committed, so kick the queue. Lazy-import the transcription service
+  // so this module stays light for unit tests of the clearing logic (mirrors
+  // self-identification's lazy imports).
   const { markUserPriority, processQueueManually } = await import('./transcription')
   markUserPriority(recordingId) // explicit single-recording request — jump the backlog
   void processQueueManually()
