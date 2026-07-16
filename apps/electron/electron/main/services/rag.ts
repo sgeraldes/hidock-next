@@ -298,8 +298,11 @@ function getEntityDetectionIndex(
 
   const aliasToContacts = new Map<string, EntityIndexEntry[]>()
   try {
+    // The stored column is alias_norm (see v27 schema) — there is NO `alias`
+    // column. Selecting the wrong name threw SQLITE_ERROR on every chat turn
+    // and silently disabled this entire detection tier.
     const aliases = queryAll<{ alias: string; contact_id: string; source: string | null }>(
-      'SELECT alias, contact_id, source FROM contact_aliases'
+      'SELECT alias_norm AS alias, contact_id, source FROM contact_aliases'
     )
     for (const a of aliases) {
       if (a.source === 'rejected') continue

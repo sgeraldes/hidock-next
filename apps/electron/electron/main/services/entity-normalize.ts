@@ -6,9 +6,20 @@
  * scoring rules can be unit-tested in isolation.
  */
 
-/** Lowercase, trim, collapse internal whitespace. Matches the graph store's key. */
+/**
+ * Canonical name key: Unicode-normalize (NFKC), lowercase, trim, collapse
+ * internal whitespace. Matches the graph store's key.
+ *
+ * NFKC matters for identity: composed vs decomposed accents ("café" typed as
+ * NFC vs NFD) are DIFFERENT JS strings but the same name — without folding
+ * them, a discovery-rejection tombstone written under one form fails to match
+ * a re-analysis arriving in the other, and createProject can clear a different
+ * key than the reconciler checks. NFKC also folds compatibility forms
+ * (ligatures like ﬁ → fi, fullwidth chars, NBSP → space) so visually-identical
+ * spellings share one key.
+ */
 export function normalizeName(name: string): string {
-  return (name || '').toLowerCase().trim().replace(/\s+/g, ' ')
+  return (name || '').normalize('NFKC').toLowerCase().trim().replace(/\s+/g, ' ')
 }
 
 /** Combining-marks range U+0300–U+036F, built without literal marks in source. */

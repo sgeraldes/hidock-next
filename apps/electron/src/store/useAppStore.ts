@@ -23,6 +23,64 @@ export function getDownloadQueueKey(recording: UnifiedRecording): string | null 
   return null
 }
 
+/**
+ * Download status mirrored from the main-process DownloadService (Phase-1 contract).
+ * 'cancelling' is transient (in-flight USB transfer being aborted) and settles to
+ * 'cancelled'. See apps/electron/PHASE1-HANDOFF.md.
+ */
+export type DownloadStatus =
+  | 'pending'
+  | 'downloading'
+  | 'cancelling'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+
+/**
+ * A renderer-visible download row. This Map is the SINGLE renderer source of truth
+ * for download UI (bell popover + Operations overlay); it mirrors the authoritative
+ * main-process queue via `syncDownloadQueue` (fed by download-service:state-update).
+ */
+export interface DownloadQueueEntry {
+  filename: string
+  progress: number
+  size: number
+  status: DownloadStatus
+  error?: string
+  cancelReason?: 'user' | 'interrupted'
+}
+
+/** One item from the main-process download-service state stream. */
+interface MainDownloadItem {
+  filename: string
+  fileSize: number
+  progress: number
+  status: DownloadStatus
+  error?: string
+  cancelReason?: 'user' | 'interrupted'
+}
+
+// Cancelled downloads flash briefly in the UI, then their row is dropped. The main
+// process keeps a 'cancelled' terminal-suppression row indefinitely (so a deliberate
+// user cancel never resurrects on reconnect), so we track which cancelled filenames
+// have already been shown + dismissed to avoid re-adding them on every state-update.
+const CANCELLED_VISIBLE_MS = 3500
+const _cancelDismissTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const _dismissedCancelled = new Set<string>()
+
+function clearCancelDismissTracking(filename?: string): void {
+  if (filename) {
+    const t = _cancelDismissTimers.get(filename)
+    if (t) clearTimeout(t)
+    _cancelDismissTimers.delete(filename)
+    _dismissedCancelled.delete(filename)
+    return
+  }
+  for (const t of _cancelDismissTimers.values()) clearTimeout(t)
+  _cancelDismissTimers.clear()
+  _dismissedCancelled.clear()
+}
+
 interface AppState {
   // Calendar
   meetings: Meeting[]
@@ -77,8 +135,9 @@ interface AppState {
   deviceSyncTotalBytes: number
   deviceSyncEta: number | null // seconds remaining
 
-  // Download queue state (persists across page navigation)
-  downloadQueue: Map<string, { filename: string; progress: number; size: number }>
+  // Download queue state (persists across page navigation). Enriched with status/error
+  // so the bell popover + Operations overlay can show and cancel in-flight downloads.
+  downloadQueue: Map<string, DownloadQueueEntry>
 
   // Actions
   setMeetings: (meetings: Meeting[]) => void
@@ -130,6 +189,13 @@ interface AppState {
   updateDownloadProgress: (id: string, progress: number) => void
   removeFromDownloadQueue: (id: string) => void
   clearDownloadQueue: () => void
+  /**
+   * Mirror the authoritative main-process download queue into the renderer store.
+   * This is the primary writer (fed by download-service:state-update); the direct
+   * add/update/remove actions above provide fast local feedback between throttled
+   * main-process emits. Cancelled rows flash briefly, then self-dismiss.
+   */
+  syncDownloadQueue: (items: MainDownloadItem[]) => void
   /**
    * @deprecated Use `useIsDownloading(id)` selector hook instead.
    * This method uses `get()` which causes over-subscription - the caller re-renders
@@ -332,7 +398,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Download queue actions
   addToDownloadQueue: (id, filename, size) => set((state) => {
     const newQueue = new Map(state.downloadQueue)
-    newQueue.set(id, { filename, progress: 0, size })
+    const existing = newQueue.get(id)
+    // Preserve an existing entry's status/progress (e.g. already 'cancelling' from
+    // main state); a fresh entry starts as an active 'downloading' row.
+    newQueue.set(id, existing
+      ? { ...existing, filename, size }
+      : { filename, progress: 0, size, status: 'downloading' })
     return { downloadQueue: newQueue }
   }),
 
@@ -345,12 +416,68 @@ export const useAppStore = create<AppState>((set, get) => ({
   }),
 
   removeFromDownloadQueue: (id) => set((state) => {
+    if (!state.downloadQueue.has(id)) return state
     const newQueue = new Map(state.downloadQueue)
     newQueue.delete(id)
     return { downloadQueue: newQueue }
   }),
 
-  clearDownloadQueue: () => set({ downloadQueue: new Map() }),
+  clearDownloadQueue: () => {
+    clearCancelDismissTracking()
+    set({ downloadQueue: new Map() })
+  },
+
+  syncDownloadQueue: (items) => set((state) => {
+    const next = new Map(state.downloadQueue)
+    const seen = new Set<string>()
+    for (const it of items) {
+      seen.add(it.filename)
+      // Terminal success/failure is not a live download row: 'completed' vanishes and
+      // 'failed' surfaces via the separate retryable badge, not this queue.
+      if (it.status === 'completed' || it.status === 'failed') {
+        clearCancelDismissTracking(it.filename)
+        next.delete(it.filename)
+        continue
+      }
+      // An item that is active again (retry / re-download) is no longer a stale cancel.
+      if (it.status === 'pending' || it.status === 'downloading' || it.status === 'cancelling') {
+        clearCancelDismissTracking(it.filename)
+      }
+      if (it.status === 'cancelled') {
+        if (_dismissedCancelled.has(it.filename)) {
+          next.delete(it.filename)
+          continue
+        }
+        if (!_cancelDismissTimers.has(it.filename)) {
+          const timer = setTimeout(() => {
+            _dismissedCancelled.add(it.filename)
+            _cancelDismissTimers.delete(it.filename)
+            useAppStore.getState().removeFromDownloadQueue(it.filename)
+          }, CANCELLED_VISIBLE_MS)
+          _cancelDismissTimers.set(it.filename, timer)
+        }
+      }
+      const existing = next.get(it.filename)
+      // Keep the smoother renderer-driven progress for the active item (the main
+      // process throttles progress emits ~250ms).
+      const progress = existing && it.status === 'downloading' && existing.progress > it.progress
+        ? existing.progress
+        : it.progress
+      next.set(it.filename, {
+        filename: it.filename,
+        size: it.fileSize,
+        progress,
+        status: it.status,
+        error: it.error,
+        cancelReason: it.cancelReason
+      })
+    }
+    // Drop entries the main process no longer reports, unless a cancel is still flashing.
+    for (const key of next.keys()) {
+      if (!seen.has(key) && !_cancelDismissTimers.has(key)) next.delete(key)
+    }
+    return { downloadQueue: next }
+  }),
 
   // SM-M01: Deprecated methods that use get() causing over-subscription.
   // Components should use useIsDownloading(id) and useDownloadProgress(id) selector hooks instead.

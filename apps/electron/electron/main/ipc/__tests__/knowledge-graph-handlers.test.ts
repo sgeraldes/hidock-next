@@ -43,12 +43,12 @@ import {
 import { registerKnowledgeGraphHandlers } from '../knowledge-graph-handlers'
 
 describe('knowledge-graph IPC handlers', () => {
-  let handlers: Record<string, Function> = {}
+  let handlers: Record<string, (...args: any[]) => any> = {}
 
   beforeEach(() => {
     vi.clearAllMocks()
     handlers = {}
-    ;(ipcMain.handle as any).mockImplementation((channel: string, handler: Function) => {
+    ;(ipcMain.handle as any).mockImplementation((channel: string, handler: (...args: any[]) => any) => {
       handlers[channel] = handler
     })
     registerKnowledgeGraphHandlers()

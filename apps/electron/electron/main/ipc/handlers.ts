@@ -43,13 +43,17 @@ import { ipcMain } from 'electron'
 import { installFeatureGate } from '../services/feature-gate'
 
 export function registerIpcHandlers(): void {
-  // Track I (Gate 2): wrap ipcMain.handle for the duration of registration so
-  // every feature-owned channel is auto-gated fail-closed. Core/shared channels
-  // pass through untouched, and under the default `full` preset nothing is gated
-  // (zero behavior change). Restored in `finally` so later dynamic handlers are
-  // unaffected. See services/feature-gate.ts for the rationale.
-  const restoreGate = installFeatureGate(ipcMain)
-  try {
+  // Track I (Gate 2) + round-4 [HIGH]: wrap ipcMain.handle and keep the gate
+  // installed for the LIFETIME of the process — deliberately NEVER restored.
+  // Restoring after this synchronous bulk registrar left any later, DYNAMIC
+  // ipcMain.handle registration (lazy services, feature code paths) ungated
+  // regardless of the classification lists. With the lifetime install every
+  // registration flows through classification: unlisted channels of a
+  // restart-gated feature default to initiation (fail closed), core channels
+  // pass untouched, and under the default `full` preset nothing changes.
+  // installFeatureGate is idempotent, so repeated registrar calls (tests) do
+  // not double-wrap. See services/feature-gate.ts for the rationale.
+  installFeatureGate(ipcMain)
   // Register all IPC handlers
   registerConfigHandlers()
   registerDatabaseHandlers()
@@ -95,9 +99,6 @@ export function registerIpcHandlers(): void {
   registerBrainsHandlers()
   registerHandoverHandlers()
   registerValueBackfillHandlers()
-  } finally {
-    restoreGate()
-  }
 
   console.log('All IPC handlers registered')
 }

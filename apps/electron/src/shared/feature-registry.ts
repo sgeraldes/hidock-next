@@ -91,9 +91,18 @@ export const FEATURES: Record<FeatureId, FeatureDefinition> = {
       'self-id:',
       'transcript-upgrade:',
       'quality:',
-      // recording-handlers mixes library reads with transcription triggers —
-      // gate the transcription trigger at CHANNEL granularity (spec §A.1).
+      // recording-handlers mixes library reads with transcription TRIGGERS on the
+      // shared `recordings:` namespace. Gate every transcription trigger/control
+      // channel at CHANNEL granularity (spec §A.1) so they fail closed when
+      // transcription is off — Review-2 [HIGH]: these previously slipped through
+      // unclassified and stayed callable with transcription disabled.
       'recordings:reDiarize',
+      'recordings:transcribe',
+      'recordings:addToQueue',
+      'recordings:processQueue',
+      'recordings:reprocessWith',
+      'recordings:startTranscriptionProcessor',
+      'recordings:stopTranscriptionProcessor',
     ],
     dependsOn: [],
     softDependsOn: [],
@@ -469,4 +478,231 @@ export function routeFeature(pathname: string): FeatureId | null {
     }
   }
   return null
+}
+
+// ---------------------------------------------------------------------------
+// Channel classification (Review-2 [HIGH]: no channel may slip through the gate
+// unclassified)
+// ---------------------------------------------------------------------------
+
+/**
+ * Namespaces that are wholly `core` / shared floor and are NEVER gated. Every
+ * channel under one of these prefixes is intentionally open (config, database,
+ * storage, the always-on Library floor, connector management, …). A prefix ends
+ * in `:`.
+ *
+ * NOTE: this is deliberately a prefix allowlist for namespaces that belong
+ * entirely to core. Namespaces that MIX feature-owned and core channels, or
+ * carry feature side effects (today `recordings:` and `storage:`), are NOT
+ * listed here — their core channels are exact-listed in `CORE_CHANNELS` so a
+ * newly-added channel on those namespaces cannot silently default to open; it
+ * stays `unclassified` until a human classifies it.
+ */
+export const CORE_CHANNEL_PREFIXES: string[] = [
+  'app:',
+  'config:',
+  'db:',
+  // `storage:` is deliberately NOT a blanket prefix (adversarial round-2 [HIGH]):
+  // `storage:save-recording` carries a transcription side effect, so storage
+  // channels are exact-listed in CORE_CHANNELS instead.
+  'integrity:',
+  'migration:',
+  'repair:',
+  'brains:',
+  'knowledge:',
+  'artifacts:',
+  'waveform:',
+  'handover:',
+  'outputs:',
+  // Connector management surface (list/configure/connect/disconnect for ALL
+  // connectors). Per-connector IPC gating is a later phase (spec §C.3); the host
+  // enforces per-instance enable today, so these stay open.
+  'connectors:',
+]
+
+/**
+ * Exact `core` channels on namespaces that cannot be blanket-allowlisted:
+ *
+ * - `recordings:` MIXES Library floor channels (reads, deletes, imports, watcher
+ *   control, meeting-linking, status updates) with transcription triggers and
+ *   meeting-intelligence timeline channels. The feature-owned ones live in
+ *   `FEATURES[*].ipcNamespaces`; only the floor is listed here.
+ * - `storage:` channels are core (file storage is the product floor), but
+ *   `storage:save-recording` carries a transcription side effect — saving stays
+ *   core while the side effect itself is gated behind the transcription feature
+ *   inside `queueTranscriptionIfEnabled` (adversarial round-2 [HIGH]).
+ * - `value:` maintains the Library's value index. It is not owned by an optional
+ *   feature, so its current user-triggered backfill controls are exact-listed.
+ *
+ * Anything new on these namespaces is `unclassified` until explicitly added.
+ */
+export const CORE_CHANNELS: string[] = [
+  'storage:assign-tier',
+  'storage:delete-recording',
+  'storage:execute-cleanup',
+  'storage:get-by-tier',
+  'storage:get-cleanup-suggestions',
+  'storage:get-cleanup-suggestions-for-tier',
+  'storage:get-info',
+  'storage:get-stats',
+  'storage:initialize-untiered',
+  'storage:open-file',
+  'storage:open-folder',
+  'storage:read-recording',
+  'storage:reveal-in-folder',
+  'storage:save-recording',
+  'storage:select-folder',
+  'value:cancelBackfill',
+  'value:getBackfillStatus',
+  'value:startBackfill',
+  'recordings:addExternal',
+  'recordings:addExternalByPath',
+  'recordings:backfillDurations',
+  'recordings:clearPreassignment',
+  'recordings:delete',
+  'recordings:deleteBatch',
+  'recordings:deleteCascade',
+  'recordings:deletionImpact',
+  'recordings:getAll',
+  'recordings:getAllWithTranscripts',
+  'recordings:getById',
+  'recordings:getCandidates',
+  'recordings:getForMeeting',
+  'recordings:getMeetingsNearDate',
+  'recordings:getPreassignment',
+  'recordings:getTranscript',
+  'recordings:getTrash',
+  'recordings:getTranscriptionStatus',
+  'recordings:getWatcherStatus',
+  'recordings:linkToMeeting',
+  'recordings:markNotOnDevice',
+  'recordings:markPersonal',
+  'recordings:preassign',
+  'recordings:restore',
+  'recordings:retryPendingCleanups',
+  'recordings:scanFolder',
+  'recordings:selectMeeting',
+  'recordings:setValueRating',
+  'recordings:startWatcher',
+  'recordings:stopWatcher',
+  'recordings:unlinkFromMeeting',
+  'recordings:updateDuration',
+  'recordings:updateStatus',
+  'recordings:updateTranscriptionStatus',
+]
+
+// ---------------------------------------------------------------------------
+// Initiation / teardown partition for restart-gated features (round-3)
+// ---------------------------------------------------------------------------
+
+/**
+ * TEARDOWN / OBSERVATION channels of restart-gated features. The IPC gate rule
+ * for a restart-gated feature (device-sync, assistant) is a partition:
+ *
+ *  - INITIATION (default — any owned channel NOT listed here): requires
+ *    boot-enabled AND desired-enabled. A live disable blocks new device/AI work
+ *    immediately (connects, scans, downloads, pipeline starts, auto-connect).
+ *  - TEARDOWN / OBSERVATION (listed here): requires boot-enabled ONLY. Callable
+ *    regardless of the desired flag, so in-flight or boot-active state can
+ *    always be drained (disconnect, cancel, stop/pause ops, pipeline cleanup) and
+ *    GENUINELY passive reads keep working while the restart is pending.
+ *  - Boot-disabled keeps EVERYTHING closed (both halves) until the next boot.
+ *
+ * Runtime-toggleable features are unaffected (pure live gating; their teardown
+ * is handled by feature-lifecycle stop actions).
+ *
+ * Membership rule (round-5 [HIGH]): a channel may be listed here ONLY if its
+ * handler either (a) STOPS/ABORTS device activity (teardown), or (b) reads purely
+ * cached / in-memory / DB state with ZERO device I/O (observation). Any channel
+ * whose handler can reach jensen.sendCommand — including "getter" reads that
+ * round-trip to the device — is INITIATION and MUST be left off this list (it
+ * then defaults to the boot-AND-desired gate). Verified against the actual
+ * handler → service call chain, never guessed from the channel name. Defaulting
+ * unlisted channels to INITIATION is the fail-safe direction.
+ */
+export const TEARDOWN_CHANNELS: string[] = [
+  // --- device-sync / jensen: teardown (stop/abort ops) ---
+  // NOTE (round-4 [HIGH]): jensen:reset is deliberately NOT listed. Reset sends
+  // a full command sequence to the device — it INITIATES USB traffic (resets
+  // during live calls have cut audio; the drain pattern is a manual recovery,
+  // not a routine channel). It takes the normal initiation gate.
+  //
+  // disconnect/cancelDownload/stop*/pause* stay teardown even though some issue a
+  // device command: they STOP or ABORT activity (the whole point of teardown is
+  // to drain boot-active state), so they must remain reachable while a disable is
+  // pending. cancelDownload only aborts an AbortController — no device I/O at all.
+  'jensen:disconnect',
+  'jensen:cancelDownload',
+  'jensen:stopBluetoothScan',
+  'jensen:stopRealtime',
+  'jensen:pauseRealtime',
+  // --- device-sync / jensen: GENUINELY passive reads (synchronous, in-memory) ---
+  // Round-5 [HIGH]: ONLY these three are safe as boot-only observation — their
+  // handlers return synchronously from in-memory state and NEVER call
+  // jensen.sendCommand (jensen-device.ts: isConnected():boolean L632,
+  // getModel():DeviceModel L1077, isP1Device():boolean L2630). The former
+  // "status getters" getDeviceInfo/getCardInfo/getFileCount/getSettings/
+  // getRealtimeSettings/getRealtimeData/getBatteryStatus/getBluetoothStatus are
+  // NOT passive: each is `async` and issues sendCommand(new JensenMessage(CMD.*))
+  // — fresh USB traffic — so they are INITIATION (removed from this list; they
+  // default to the boot-AND-desired gate). A live-disabled renderer must not be
+  // able to make the device talk through a "getter".
+  'jensen:isConnected',
+  'jensen:isP1Device',
+  'jensen:getModel',
+  // --- device-sync / pipeline teardown + observation ---
+  // get-state returns the projected PipelineState in-memory (pipeline.getState(),
+  // device-pipeline-handlers.ts L80-81) — no device I/O. disconnect/cancel are
+  // stop ops (teardown).
+  'device-pipeline:disconnect',
+  'device-pipeline:cancel',
+  'device-pipeline:get-state',
+  // --- device-sync / local device cache (no USB at all) ---
+  'deviceCache:getAll',
+  'deviceCache:saveAll',
+  'deviceCache:clear',
+  // --- device-sync / download-service teardown + in-flight bookkeeping + reads ---
+  'download-service:cancel',
+  'download-service:cancel-active',
+  'download-service:cancel-all',
+  'download-service:check-stalled',
+  'download-service:clear-completed',
+  'download-service:get-files-to-sync',
+  'download-service:get-state',
+  'download-service:get-stats',
+  'download-service:is-file-synced',
+  'download-service:mark-failed',
+  'download-service:notify-completion',
+  'download-service:update-progress',
+  // --- assistant: cancel/cleanup of in-flight AI work ---
+  'rag:cancel',
+  'rag:clear-session',
+]
+
+/** Is this channel in the teardown/observation half of the partition? */
+export function isTeardownChannel(channel: string): boolean {
+  return TEARDOWN_CHANNELS.includes(channel)
+}
+
+/** Result of classifying an IPC channel for the gate + the completeness test. */
+export type ChannelClass =
+  | { kind: 'feature'; feature: FeatureId }
+  | { kind: 'core' }
+  | { kind: 'unclassified' }
+
+/**
+ * Classify an IPC channel as owned by a feature, intentionally core (never
+ * gated), or `unclassified`. The registrar-inventory completeness test asserts
+ * that NO registered channel is `unclassified`, so any future channel must be
+ * mapped to a feature (in `FEATURES[*].ipcNamespaces`) or explicitly declared
+ * core (a `CORE_CHANNEL_PREFIXES` prefix or a `CORE_CHANNELS` exact entry).
+ */
+export function classifyChannel(channel: string): ChannelClass {
+  const feature = channelFeature(channel)
+  if (feature) return { kind: 'feature', feature }
+  if (CORE_CHANNELS.includes(channel)) return { kind: 'core' }
+  for (const prefix of CORE_CHANNEL_PREFIXES) {
+    if (channel.startsWith(prefix)) return { kind: 'core' }
+  }
+  return { kind: 'unclassified' }
 }

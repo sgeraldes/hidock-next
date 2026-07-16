@@ -29,6 +29,20 @@ describe('normalizeName', () => {
     expect(normalizeName('')).toBe('')
     expect(normalizeName('   ')).toBe('')
   })
+  it('folds Unicode composition + compatibility forms (NFKC) so equivalent spellings share one key', () => {
+    // Composed (NFC) vs decomposed (NFD) accents are DIFFERENT JS strings but the
+    // same name. Without NFKC a discovery tombstone written under one form fails
+    // to match a re-analysis arriving in the other (the dismiss→reappear bug).
+    const composed = 'Café Project' // é = U+00E9
+    const decomposed = 'Café Project' // e + U+0301 combining acute
+    expect(composed).not.toBe(decomposed)
+    expect(normalizeName(composed)).toBe(normalizeName(decomposed))
+    expect(normalizeName(decomposed)).toBe('café project')
+    // NFKC also folds compatibility forms: the ﬁ ligature (U+FB01) → 'fi', and a
+    // non-breaking space (U+00A0) becomes a normal space (then collapses).
+    expect(normalizeName('ﬁle sync')).toBe('file sync')
+    expect(normalizeName('atlas migration')).toBe('atlas migration')
+  })
 })
 
 describe('stripDiacritics / accentFoldedKey', () => {

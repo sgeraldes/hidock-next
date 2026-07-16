@@ -126,8 +126,14 @@ function makeNodeId(type: string, normKey: string): string {
   return `${type}:${slug}`
 }
 
+/**
+ * Deterministic edge id from the (source, target, type) triple. The triple is
+ * folded to lowercase before slugging so the UPPERCASE edge type survives the
+ * a-z character class — the type must stay distinguishable in the id, or every
+ * type between the same pair would collapse to one '_' and collide.
+ */
 function makeEdgeId(sourceId: string, targetId: string, type: string): string {
-  const combined = `${sourceId}|||${targetId}|||${type}`
+  const combined = `${sourceId}|||${targetId}|||${type}`.toLowerCase()
   const slug = combined.replace(/[^a-z0-9_|:]+/g, '_').slice(0, 120)
   return `edge:${slug}`
 }
@@ -236,14 +242,21 @@ export class KnowledgeGraphStore {
     // slugify to the same id (collapsed punctuation, 64-char truncation). That
     // is the root cause of the "UNIQUE constraint failed: graph_nodes.id" ingest
     // error: the (type,norm_key) lookup above misses, then the INSERT collides
-    // on the primary key. Detect a taken id and derive a stable, hashed variant.
+    // on the primary key. Derive stable hashed candidates in a CHECKED loop —
+    // a single unchecked suffix can itself collide (hash collision, or a
+    // natural id equal to the derived one), which would recreate the crash.
     let id = makeNodeId(type, normKey)
-    const clash = this.db.queryOne<{ norm_key: string }>(
-      'SELECT norm_key FROM graph_nodes WHERE id = ?',
-      [id]
-    )
-    if (clash && clash.norm_key !== normKey) {
-      id = `${id}__${shortHash(normKey)}`.slice(0, 96)
+    for (let n = 0; ; n++) {
+      const clash = this.db.queryOne<{ type: string; norm_key: string }>(
+        'SELECT type, norm_key FROM graph_nodes WHERE id = ?',
+        [id]
+      )
+      if (!clash) break
+      // Same identity can't appear here (the (type,norm_key) lookup above
+      // would have matched) — break so the PK violation surfaces loudly
+      // instead of silently minting a duplicate node for the same key.
+      if (clash.type === type && clash.norm_key === normKey) break
+      id = `${makeNodeId(type, normKey)}__${shortHash(n === 0 ? normKey : `${normKey}#${n}`)}`.slice(0, 96)
     }
 
     // ADV35-1 (round-37): stamp NODE-LEVEL provenance on INSERT. A 'derived' node
@@ -263,7 +276,6 @@ export class KnowledgeGraphStore {
    * Returns the edge id.
    */
   upsertEdge({ sourceId, targetId, type, props, now = '' }: UpsertEdgeInput): string {
-    const edgeId = makeEdgeId(sourceId, targetId, type)
     const propsJson = props != null ? JSON.stringify(props) : null
 
     const existing = this.db.queryOne<{ id: string; weight: number }>(
@@ -274,6 +286,30 @@ export class KnowledgeGraphStore {
     if (existing) {
       this.db.run('UPDATE graph_edges SET weight = ? WHERE id = ?', [existing.weight + 1, existing.id])
       return existing.id
+    }
+
+    // New edge. The id slug now preserves the edge type, but it is still lossy:
+    // the 120-char truncation (and case-folding of the node ids) means two
+    // DISTINCT triples can produce the same id. Same failure class as
+    // upsertNode above — the triple lookup misses, then the INSERT collides on
+    // the primary key ("UNIQUE constraint failed: graph_edges.id", which
+    // aborted transcript ingest forever). Derive stable hashed candidates in a
+    // CHECKED loop — a single unchecked suffix can itself collide (hash
+    // collision, or a natural id equal to the derived one), which would
+    // recreate the crash.
+    const combined = `${sourceId}|||${targetId}|||${type}`
+    let edgeId = makeEdgeId(sourceId, targetId, type)
+    for (let n = 0; ; n++) {
+      const clash = this.db.queryOne<{ source_id: string; target_id: string; type: string }>(
+        'SELECT source_id, target_id, type FROM graph_edges WHERE id = ?',
+        [edgeId]
+      )
+      if (!clash) break
+      // Same triple can't appear here (the triple lookup above would have
+      // matched) — break so the PK violation surfaces loudly instead of
+      // silently minting a duplicate edge for the same triple.
+      if (clash.source_id === sourceId && clash.target_id === targetId && clash.type === type) break
+      edgeId = `${makeEdgeId(sourceId, targetId, type)}__${shortHash(n === 0 ? combined : `${combined}#${n}`)}`
     }
 
     this.db.run(

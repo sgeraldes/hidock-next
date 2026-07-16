@@ -33,12 +33,12 @@ vi.mock('../../services/database', () => ({
 }))
 
 describe('Knowledge IPC Handlers', () => {
-  let handlers: Record<string, Function> = {}
+  let handlers: Record<string, (...args: any[]) => any> = {}
 
   beforeEach(() => {
     vi.clearAllMocks()
     handlers = {}
-    // @ts-ignore
+    // @ts-expect-error mock method not present on typed import
     ipcMain.handle.mockImplementation((channel, handler) => {
       handlers[channel] = handler
     })
@@ -62,7 +62,7 @@ describe('Knowledge IPC Handlers', () => {
           source_recording_id: 'rec-1'
         }
       ]
-      // @ts-ignore
+      // @ts-expect-error mock method not present on typed import
       queryAll.mockReturnValue(mockRows)
 
       const result = await handlers['knowledge:getAll']({}, { limit: 10, offset: 0 })
@@ -88,7 +88,7 @@ describe('Knowledge IPC Handlers', () => {
     })
 
     it('should return empty array on database error', async () => {
-      // @ts-ignore
+      // @ts-expect-error mock method not present on typed import
       queryAll.mockImplementation(() => { throw new Error('DB Error') })
       const result = await handlers['knowledge:getAll']({})
       expect(result).toEqual([])
@@ -149,7 +149,7 @@ describe('Knowledge IPC Handlers', () => {
   describe('knowledge:getById', () => {
     it('should return mapped capture if found', async () => {
       const mockRow = { id: '1', title: 'Single' }
-      // @ts-ignore
+      // @ts-expect-error mock method not present on typed import
       queryOne.mockReturnValue(mockRow)
 
       const result = await handlers['knowledge:getById']({}, '1')
@@ -159,7 +159,7 @@ describe('Knowledge IPC Handlers', () => {
     })
 
     it('should return null if not found', async () => {
-      // @ts-ignore
+      // @ts-expect-error mock method not present on typed import
       queryOne.mockReturnValue(null)
       const result = await handlers['knowledge:getById']({}, '99')
       expect(result).toBeNull()

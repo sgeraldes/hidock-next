@@ -78,6 +78,17 @@ describe('navItemVisibility', () => {
       hint: 'Requires Calendar',
     })
   })
+
+  it('round-3 pending-DISABLE: /sync stays VISIBLE (teardown controls must stay reachable)', () => {
+    // device-sync live-disabled while boot-active: desired-off + pendingRestart.
+    const resolved = resolveFeatureState({ preset: 'full', flags: { 'device-sync': false } })
+    expect(navItemVisibility(resolved, '/sync', ['device-sync'])).toEqual({
+      visibility: 'visible',
+      hint: 'Off after restart',
+    })
+    // Without the pending marker (i.e., after the restart) it hides as before.
+    expect(navItemVisibility(resolved, '/sync').visibility).toBe('hidden')
+  })
 })
 
 describe('FeatureRoute + FeatureDisabledPage', () => {
@@ -138,6 +149,27 @@ describe('FeatureRoute + FeatureDisabledPage', () => {
     expect(screen.getByText('Turned off in Settings')).toBeInTheDocument()
   })
 
+  it('round-3 pending-DISABLE keeps the device surface rendered (teardown reachable)', () => {
+    // device-sync desired-off but boot-active (pendingRestart from main).
+    act(() => {
+      setFeatures({ preset: 'full', flags: { 'device-sync': false } })
+      useFeatureStore.getState().setPendingRestart(['device-sync'])
+    })
+    render(
+      <MemoryRouter>
+        <FeatureRoute feature="device-sync">
+          <div data-testid="sync-page" />
+        </FeatureRoute>
+      </MemoryRouter>
+    )
+    // Surface stays up — disconnect/cancel controls must remain reachable.
+    expect(screen.getByTestId('sync-page')).toBeInTheDocument()
+    // After the restart (pending cleared), the honest disabled page shows.
+    act(() => useFeatureStore.getState().setPendingRestart([]))
+    expect(screen.queryByTestId('sync-page')).not.toBeInTheDocument()
+    expect(screen.getByText('Device Sync is turned off')).toBeInTheDocument()
+  })
+
   it('FeatureDisabledPage notes when enabling needs a restart (assistant)', () => {
     setFeatures({ preset: 'library-only', flags: {} })
     render(
@@ -183,7 +215,21 @@ describe('FeaturesSettings (minimal preset dropdown)', () => {
     expect(screen.queryByText(/restart required/i)).not.toBeInTheDocument()
     useFeatureStore.getState().setPendingRestart(['assistant'])
     rerender(<FeaturesSettings />)
-    expect(screen.getByText(/restart required/i)).toBeInTheDocument()
+    // Desired-ON + pending ⇒ enable direction: "Restart required to activate".
+    expect(screen.getByText(/restart required to activate/i)).toBeInTheDocument()
     expect(screen.getByText('Assistant')).toBeInTheDocument()
+  })
+
+  it('round-3 banner distinguishes the DISABLE direction ("disabled for new work")', () => {
+    // device-sync desired-off + pending ⇒ disable direction wording.
+    setFeatures({ preset: 'full', flags: { 'device-sync': false } })
+    useFeatureStore.getState().setPendingRestart(['device-sync'])
+    render(<FeaturesSettings />)
+    const banner = screen.getByText(/disabled for new work — restart to fully unload/i)
+    expect(banner).toBeInTheDocument()
+    // The banner line itself names the feature (it also appears in the
+    // "turned off" summary, so scope the assertion to the banner paragraph).
+    expect(banner.textContent).toContain('Device Sync')
+    expect(screen.queryByText(/restart required to activate/i)).not.toBeInTheDocument()
   })
 })

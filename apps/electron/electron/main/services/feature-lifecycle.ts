@@ -14,7 +14,7 @@
  */
 
 import { getEventBus } from './event-bus'
-import { getResolvedFeatures } from './feature-gate'
+import { getResolvedFeatures, getBootEffectiveFeatures } from './feature-gate'
 import {
   ALL_FEATURE_IDS,
   FEATURES,
@@ -101,6 +101,34 @@ export async function applyFeatureChanges(
 }
 
 /**
+ * Derive the pending-restart set from the boot-effective snapshot (Review-2
+ * [MEDIUM]). There is NO stored flag to clear: pending-restart is always the
+ * honest, recomputed difference between what the user wants and what is actually
+ * in force since boot. Consequently, toggling an UNRELATED runtime feature never
+ * drops a restart-gated feature's pending status, and reverting a feature back to
+ * its boot state removes it from the set automatically.
+ *
+ * A restart is pending for a feature iff it is restart-gated
+ * (`runtimeToggleable: false`) AND its desired state differs from the
+ * boot-effective snapshot in EITHER direction (adversarial round-2): the gate for
+ * restart-gated features is symmetrically pinned to boot (see feature-gate.ts),
+ * so BOTH a live enable (not yet in force) and a live disable (still functional
+ * until restart — never strand active USB work by closing teardown channels)
+ * genuinely require a restart to take effect, and the banner must say so.
+ */
+export function derivePendingRestart(
+  desired: ResolvedFeatures,
+  bootEffective: ResolvedFeatures
+): FeatureId[] {
+  const pending: FeatureId[] = []
+  for (const id of ALL_FEATURE_IDS) {
+    if (FEATURES[id].runtimeToggleable) continue
+    if (desired[id].enabled !== bootEffective[id].enabled) pending.push(id)
+  }
+  return pending
+}
+
+/**
  * Broadcast the current resolved feature state (+ any restart-required features)
  * to the renderer as a domain event. The renderer's feature store listens for
  * `features:changed` and updates nav/routes live (spec Gate 4 / risk #7).
@@ -121,10 +149,16 @@ export function broadcastFeaturesChanged(resolved: ResolvedFeatures, pendingRest
  * Reconcile lifecycle actions for a features-config change and broadcast the new
  * state. Call AFTER config has been persisted. `prev` is the resolved state
  * captured BEFORE the config write.
+ *
+ * `applyFeatureChanges` runs the live start/stop side effects for THIS
+ * transition. The authoritative `pendingRestart` is derived independently from
+ * the boot-effective snapshot (Review-2 [MEDIUM]) — NOT from this transition — so
+ * an unrelated toggle can never clear a restart-gated feature's pending status.
  */
 export async function reconcileFeatures(prev: ResolvedFeatures): Promise<FeatureId[]> {
   const next = getResolvedFeatures()
-  const pendingRestart = await applyFeatureChanges(prev, next)
+  await applyFeatureChanges(prev, next)
+  const pendingRestart = derivePendingRestart(next, getBootEffectiveFeatures())
   broadcastFeaturesChanged(next, pendingRestart)
   return pendingRestart
 }

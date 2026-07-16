@@ -32,13 +32,13 @@ vi.mock('../../services/database', () => ({
 }))
 
 describe('knowledge:getByIds handler (B-CHAT-004)', () => {
-  let handlers: Record<string, Function> = {}
+  let handlers: Record<string, (...args: any[]) => any> = {}
 
   beforeEach(() => {
     vi.clearAllMocks()
     handlers = {}
-    // @ts-ignore
-    ipcMain.handle.mockImplementation((channel: string, handler: Function) => {
+    // @ts-expect-error mock method not present on typed import
+    ipcMain.handle.mockImplementation((channel: string, handler: (...args: any[]) => any) => {
       handlers[channel] = handler
     })
     registerKnowledgeHandlers()
@@ -81,7 +81,7 @@ describe('knowledge:getByIds handler (B-CHAT-004)', () => {
         status: 'enriched'
       }
     ]
-    // @ts-ignore
+    // @ts-expect-error mock method not present on typed import
     queryAll.mockReturnValue(mockRows)
 
     const result = await handlers['knowledge:getByIds']({}, ['kc-1', 'kc-2'])
@@ -106,7 +106,7 @@ describe('knowledge:getByIds handler (B-CHAT-004)', () => {
   })
 
   it('should build correct number of placeholders for IDs', async () => {
-    // @ts-ignore
+    // @ts-expect-error mock method not present on typed import
     queryAll.mockReturnValue([])
 
     await handlers['knowledge:getByIds']({}, ['a', 'b', 'c'])
@@ -118,7 +118,7 @@ describe('knowledge:getByIds handler (B-CHAT-004)', () => {
   })
 
   it('should handle single ID', async () => {
-    // @ts-ignore
+    // @ts-expect-error mock method not present on typed import
     queryAll.mockReturnValue([{
       id: 'single',
       title: 'Single Item',
@@ -136,7 +136,7 @@ describe('knowledge:getByIds handler (B-CHAT-004)', () => {
   })
 
   it('should return empty array on database error', async () => {
-    // @ts-ignore
+    // @ts-expect-error mock method not present on typed import
     queryAll.mockImplementation(() => { throw new Error('DB Error') })
 
     const result = await handlers['knowledge:getByIds']({}, ['kc-1'])
@@ -144,7 +144,7 @@ describe('knowledge:getByIds handler (B-CHAT-004)', () => {
   })
 
   it('should not use SELECT * in the query', async () => {
-    // @ts-ignore
+    // @ts-expect-error mock method not present on typed import
     queryAll.mockReturnValue([])
 
     await handlers['knowledge:getByIds']({}, ['kc-1'])

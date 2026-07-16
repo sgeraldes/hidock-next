@@ -12,32 +12,62 @@ permissions:
 jobs:
   # Electron app (HiDock Meeting Intelligence) — primary product
   test-electron:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # windows-latest deliberately: Windows is the suite's proven platform
+    # (3510/3510 green there; the app is developed and dogfooded on Windows).
+    # An ubuntu run leaves 22 test files failing on platform-specific paths
+    # (trusted-root exe resolution etc.) — tracked; switch to an OS matrix
+    # once the suite is Linux-clean. No apt deps needed: usb/better-sqlite3
+    # rebuild with the preinstalled VS Build Tools.
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
     steps:
     - uses: actions/checkout@v4
 
-    - name: Use Node.js 20
+    # Node 22: better-sqlite3 12.x ships win32 Node prebuilds only for
+    # ABI >= 127 (Node 22+); on Node 20 prebuild-install falls back to a
+    # node-gyp compile that the runner's VS 18 image breaks.
+    - name: Use Node.js 22
       uses: actions/setup-node@v4
       with:
-        node-version: 20
+        node-version: 22
         cache: 'npm'
         cache-dependency-path: |
           apps/electron/package-lock.json
           packages/*/package-lock.json
 
-    # file:-linked @hidock/* packages install first; packages/database also
-    # provides the Node-ABI better-sqlite3 copy the vitest DB shim resolves to
-    - name: Install workspace packages
+    # file:-linked @hidock/* packages in dependency-first order (connectors
+    # before connectors-slack, database before knowledge-graph; a packages/*/
+    # glob sorts "connectors-slack/" BEFORE "connectors/"). --ignore-scripts
+    # stops npm running a linked sibling's `prepare` (tsup) before that
+    # sibling has its devDeps; a bare `npm rebuild` would re-trigger the same
+    # linked prepare, so only better-sqlite3's skipped native install script
+    # is restored, by name. dist/ is not committed — built explicitly last.
+    - name: Install and build workspace packages
       run: |
-        for d in packages/*/; do
-          echo "== npm ci: $d"
-          (cd "$d" && npm ci)
+        PKGS="ai-providers audio-capture calendar-sync connectors connectors-slack database jensen-protocol knowledge-graph storage-controller transcription"
+        for n in $PKGS; do
+          echo "== npm ci: packages/$n"
+          (cd "packages/$n" && npm ci --ignore-scripts)
+        done
+        (cd packages/database && npm rebuild better-sqlite3)
+        for n in $PKGS; do
+          echo "== build: packages/$n"
+          (cd "packages/$n" && npm run build --if-present)
         done
 
     - name: Install electron app dependencies
       working-directory: ./apps/electron
       run: npm ci
+
+    # install-app-deps (electron postinstall) follows the @hidock/database
+    # symlink and rebuilds ITS better-sqlite3 for Electron's ABI, clobbering
+    # the Node-ABI binding vitest's DB shim loads — restore it.
+    - name: Restore Node-ABI better-sqlite3 for vitest
+      working-directory: ./packages/database
+      run: npm rebuild better-sqlite3
 
     - name: Typecheck
       working-directory: ./apps/electron

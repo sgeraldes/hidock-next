@@ -42,7 +42,7 @@ vi.mock('../../services/database', () => {
 })
 
 describe('Actionables IPC Handlers', () => {
-  let handlers: Record<string, Function> = {}
+  let handlers: Record<string, (...args: any[]) => any> = {}
 
   beforeEach(async () => {
     vi.clearAllMocks()
@@ -50,7 +50,7 @@ describe('Actionables IPC Handlers', () => {
     db.__captures.clear()
     db.getExcludedRecordingIds.mockReturnValue({ ids: new Set<string>(), failClosed: false })
     handlers = {}
-    vi.mocked(ipcMain.handle).mockImplementation((channel: string, handler: Function) => {
+    vi.mocked(ipcMain.handle).mockImplementation((channel: string, handler: (...args: any[]) => any) => {
       handlers[channel] = handler
       return undefined as any
     })

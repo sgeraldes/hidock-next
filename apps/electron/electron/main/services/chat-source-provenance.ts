@@ -28,83 +28,34 @@
  * Schema stays v43: the envelope rides INSIDE the existing `chat_messages.sources`
  * TEXT column. The envelope is VERSIONED ({@link SOURCE_PROVENANCE_V}); any
  * unknown/older version is treated conservatively (unverifiable ⇒ fail-closed).
+ *
+ * ADV59-1 (round-61) — the ELIGIBILITY-FREE envelope parser + persist helpers +
+ * the F17 hard-purge at-rest scrub decision now live in
+ * `chat-source-provenance-core.ts` (which imports NOTHING from
+ * recording-eligibility.ts) so database.ts can reuse the SAME parser during a
+ * hard purge without dragging the recording-eligibility ⇄ database cycle into it.
+ * This module re-exports the core so external import paths are unchanged, and
+ * keeps ONLY the two eligibility-dependent read/resend decisions below.
  */
 
 import { filterEligibleRecordingIds, filterEligibleCaptureIds } from './recording-eligibility'
+import { parseEnvelope, type MessageProvenance } from './chat-source-provenance-core'
 
-/**
- * Envelope version marker. BUMPED to 2 for the round-19 message-level provenance
- * union (round-18 used v1 per-source `_prov`). A stored envelope whose `v` does
- * NOT equal this is treated as an unknown/older version → conservative
- * fail-closed on read (see {@link revalidateStoredSources}).
- */
-export const SOURCE_PROVENANCE_V = 2
-
-/** Shown in place of an assistant answer that referenced now-excluded sources. */
-export const REDACTED_ANSWER =
-  '[This response referenced sources that have since been excluded from the knowledge base.]'
-
-/**
- * The authoritative, message-level provenance union for one assistant answer:
- * every recording/capture id that contributed to ANY prompt component (vector
- * snippets, pinned context, graph facts), resolved main-side at generation time.
- * `unverifiable` is set when a component's provenance could not be resolved
- * (e.g. a graph fact-provenance read threw, or a vector chunk had neither a
- * recording nor a capture id) → the whole message fails closed on read.
- */
-export interface MessageProvenance {
-  recordingIds: string[]
-  captureIds: string[]
-  unverifiable: boolean
-}
-
-/**
- * ADV19-1 (round-20) — the MAIN-ISSUED message-kind marker. EVERY persisted
- * role=assistant message carries an explicit envelope stamped MAIN-SIDE:
- *   • `rag`     — a RAG answer grounded on recordings/captures. Its `prov` union
- *                 drives redaction (redact on ANY excluded/unverifiable source).
- *   • `non-rag` — a genuine non-source assistant emit (error text, "no results",
- *                 greeting, status). It grounds on NOTHING, so it is TRUSTED and
- *                 preserved on read. The renderer cannot forge this: main derives
- *                 the kind from RAG pipeline state (see rag.ts consumeAssistantAnswer)
- *                 or issues it from the fixed notice catalog (assistant:addNotice),
- *                 never from renderer input, and always OWNS the content + envelope.
- * An assistant message WITHOUT a valid current-version envelope (null, `[]`,
- * legacy pre-v2, malformed, unknown version) is unverifiable ⇒ fail-closed redact.
- */
-export type MessageKind = 'rag' | 'non-rag'
-
-interface ProvenanceEnvelope {
-  v: number
-  /** Main-issued message kind — 'rag' (redactable via `prov`) or 'non-rag' (trusted). */
-  kind: MessageKind
-  /** The plain renderer source objects shown as citation chips. */
-  sources: Array<Record<string, unknown>>
-  /** Authoritative union; `undefined` when the stored envelope's prov is malformed. */
-  prov?: MessageProvenance
-}
-
-/** Normalize a provenance union for persistence: dedup, string-only ids, boolean flag. */
-function normalizeProv(p: MessageProvenance): MessageProvenance {
-  return {
-    recordingIds: [...new Set((p.recordingIds ?? []).filter((i): i is string => typeof i === 'string' && !!i))],
-    captureIds: [...new Set((p.captureIds ?? []).filter((i): i is string => typeof i === 'string' && !!i))],
-    unverifiable: !!p.unverifiable
-  }
-}
-
-/** Coerce a stored `prov` blob to a valid union, or `undefined` if malformed. */
-function coerceProv(x: unknown): MessageProvenance | undefined {
-  if (!x || typeof x !== 'object') return undefined
-  const r = (x as { recordingIds?: unknown }).recordingIds
-  const c = (x as { captureIds?: unknown }).captureIds
-  if (!Array.isArray(r) || !Array.isArray(c)) return undefined
-  return {
-    recordingIds: r.filter((i): i is string => typeof i === 'string'),
-    captureIds: c.filter((i): i is string => typeof i === 'string'),
-    unverifiable: !!(x as { unverifiable?: unknown }).unverifiable
-  }
-}
+// Re-export the eligibility-free core so `from './chat-source-provenance'`
+// importers (assistant-handlers, database-handlers, rag, tests) are unchanged.
+export {
+  SOURCE_PROVENANCE_V,
+  REDACTED_ANSWER,
+  PURGE_TOMBSTONE,
+  packSources,
+  packNonRagAssistant,
+  parseEnvelope,
+  presentSourcesNoRevalidate,
+  messageReferencesPurgedRecording,
+  type MessageProvenance,
+  type MessageKind,
+  type ProvenanceEnvelope
+} from './chat-source-provenance-core'
 
 /**
  * THE shared fail-closed decision, used by every read/resend path so they cannot
@@ -129,87 +80,6 @@ export function isProvenanceExcluded(prov: MessageProvenance | undefined): boole
     for (const id of prov.captureIds) if (!cap.eligible.has(id)) return true
   }
   return false
-}
-
-/**
- * PERSIST a RAG assistant answer — wrap the renderer-supplied `sources` array
- * together with the authoritative provenance union in a versioned, MAIN-ISSUED
- * `kind:'rag'` envelope. An envelope is ALWAYS written — EVEN IF the sources array
- * is empty — so a pinned/graph-only answer is still verifiable (and redactable) on
- * read. Without `prov` (user messages) the raw sources are stored verbatim, or
- * null. Assistant messages MUST route through this (with a `prov`) or through
- * {@link packNonRagAssistant}; a raw/enveloped-less assistant blob fails closed.
- */
-export function packSources(sourcesJson: string | null | undefined, prov?: MessageProvenance): string | null {
-  if (prov) {
-    let sources: unknown[] = []
-    if (sourcesJson) {
-      try {
-        const parsed = JSON.parse(sourcesJson)
-        if (Array.isArray(parsed)) sources = parsed
-      } catch {
-        /* keep [] — the union, not the chips, drives redaction */
-      }
-    }
-    return JSON.stringify({ v: SOURCE_PROVENANCE_V, kind: 'rag', sources, prov: normalizeProv(prov) })
-  }
-  if (!sourcesJson) return null
-  return sourcesJson
-}
-
-/**
- * PERSIST a genuine NON-RAG assistant emit (error text, "no results", greeting,
- * status) — a MAIN-ISSUED `kind:'non-rag'` envelope. It grounds on NOTHING, so it
- * is trusted and preserved on read. Only main may call this; the content + the
- * decision to stamp non-rag are main-owned — either the RAG service's stored error
- * text (rag.ts consumeAssistantAnswer) or a fixed catalog string (assistant:addNotice),
- * never renderer-supplied prose.
- */
-export function packNonRagAssistant(): string {
-  return JSON.stringify({ v: SOURCE_PROVENANCE_V, kind: 'non-rag', sources: [] })
-}
-
-/**
- * Parse a stored blob to the CURRENT-version, valid-kind envelope, or null if it
- * isn't one. A v2 blob missing/invalid `kind` (e.g. a pre-round-20 envelope) is
- * NOT a valid current envelope ⇒ null ⇒ fail-closed on the assistant read path.
- */
-function parseEnvelope(stored: string): ProvenanceEnvelope | null {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(stored)
-  } catch {
-    return null
-  }
-  const kind = (parsed as { kind?: unknown })?.kind
-  if (
-    parsed &&
-    typeof parsed === 'object' &&
-    !Array.isArray(parsed) &&
-    (parsed as ProvenanceEnvelope).v === SOURCE_PROVENANCE_V &&
-    (kind === 'rag' || kind === 'non-rag') &&
-    Array.isArray((parsed as ProvenanceEnvelope).sources)
-  ) {
-    return {
-      v: SOURCE_PROVENANCE_V,
-      kind,
-      sources: (parsed as ProvenanceEnvelope).sources,
-      prov: kind === 'rag' ? coerceProv((parsed as { prov?: unknown }).prov) : undefined
-    }
-  }
-  return null
-}
-
-/**
- * Unpack the stored blob to the plain sources array the renderer expects, WITHOUT
- * eligibility revalidation. Used for the freshly-added message returned by
- * addMessage (nothing can be excluded yet).
- */
-export function presentSourcesNoRevalidate(stored: string | null | undefined): string | null {
-  if (!stored) return stored ?? null
-  const env = parseEnvelope(stored)
-  if (!env) return stored
-  return JSON.stringify(env.sources)
 }
 
 /**

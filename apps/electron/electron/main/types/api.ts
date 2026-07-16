@@ -107,6 +107,8 @@ export type ErrorCode =
   // or cannot be verified; refused so the excluded derivative's content is not
   // read/updated/returned.
   | 'ACTIONABLE_INELIGIBLE'
+  /** Unmerge rejected: a newer open merge depends on this journal's entities (undo it first). */
+  | 'MERGE_ORDER_CONFLICT'
 
 // =============================================================================
 // RAG Filter Types

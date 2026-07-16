@@ -4,13 +4,34 @@
  *
  * @vitest-environment node
  */
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, afterAll } from 'vitest'
 import { tmpdir } from 'os'
+import { join } from 'path'
+import { mkdirSync, rmSync } from 'fs'
 
-vi.mock('electron', () => ({
-  app: { getPath: () => tmpdir() },
-  safeStorage: { isEncryptionAvailable: () => false },
-}))
+// Isolated per-process userData dir. Pointing userData at the tmpdir ROOT (as
+// before) made every real-fs config suite share one %TEMP%/config.json across
+// files and runs — leaking the file and letting parallel workers see each
+// other's writes. A function declaration so the hoisted mock factory can call it.
+function testUserDataDir(): string {
+  return join(tmpdir(), `hidock-config-features-test-${process.pid}`)
+}
+
+vi.mock('electron', () => {
+  // config.ts resolves its paths as soon as it is imported — the dir must
+  // exist (and be empty) before that happens.
+  const dir = testUserDataDir()
+  rmSync(dir, { recursive: true, force: true })
+  mkdirSync(dir, { recursive: true })
+  return {
+    app: { getPath: () => testUserDataDir() },
+    safeStorage: { isEncryptionAvailable: () => false },
+  }
+})
+
+afterAll(() => {
+  rmSync(testUserDataDir(), { recursive: true, force: true })
+})
 
 vi.mock('../brains/brain-credential-store', () => ({
   getBrainCredentialStore: () => ({

@@ -366,6 +366,8 @@ export interface ElectronAPI {
     delete: (id: string) => Promise<Result<void>>
     merge: (request: { keeperId: string; loserId: string }) => Promise<Result<Person>>
     unmerge: (journalId: string) => Promise<Result<UnmergeResult>>
+    /** Atomic group Undo: unwinds all journals newest-first in ONE transaction — any rejection rolls back the whole group. */
+    unmergeGroup: (journalIds: string[]) => Promise<Result<UnmergeResult[]>>
     /** GATED (assistant/hover/Today): excluded-recording-derived attendees suppressed. */
     getForMeeting: (meetingId: string) => Promise<Result<Contact[]>>
     /** OWNER-MANAGEMENT (existence-scoped): all participants of the owner's own meeting. */
@@ -410,13 +412,6 @@ export interface ElectronAPI {
     updateDuration: (id: string, durationSeconds: number) => Promise<{ success: boolean; error?: string }>
     backfillDurations: () => Promise<{ success: boolean; scanned?: number; updated?: number; markedLowValue?: number; error?: string }>
     linkToMeeting: (recordingId: string, meetingId: string, confidence: number, method: string) => Promise<any>
-    delete: (id: string) => Promise<boolean>
-    deleteBatch: (ids: string[]) => Promise<{
-      success: boolean
-      deleted: number
-      failed: number
-      errors: Array<{ id: string; error: string }>
-    }>
     // Privacy source-deletion (v38)
     markPersonal: (id: string, personal: boolean) => Promise<{ success: boolean; personal?: boolean; error?: string }>
     deletionImpact: (id: string) => Promise<{
@@ -818,7 +813,9 @@ export interface ElectronAPI {
         filename: string
         fileSize: number
         progress: number
-        status: 'pending' | 'downloading' | 'completed' | 'failed' | 'cancelled'
+        // 'cancelling' is a transient state emitted while an in-flight USB transfer is
+        // being aborted; it settles to 'cancelled'. See DownloadService (Phase-1 cancel).
+        status: 'pending' | 'downloading' | 'cancelling' | 'completed' | 'failed' | 'cancelled'
         error?: string
       }>
       session: {
@@ -1335,6 +1332,7 @@ const electronAPI: ElectronAPI = {
     delete: (id) => callIPC('contacts:delete', id),
     merge: (request) => callIPC('contacts:merge', request),
     unmerge: (journalId) => callIPC('contacts:unmerge', journalId),
+    unmergeGroup: (journalIds) => callIPC('contacts:unmergeGroup', journalIds),
     getForMeeting: (meetingId) => callIPC('contacts:getForMeeting', meetingId),
     getForMeetingOwner: (meetingId) => callIPC('contacts:getForMeetingOwner', meetingId)
   },
@@ -1372,8 +1370,6 @@ const electronAPI: ElectronAPI = {
     backfillDurations: () => callIPC('recordings:backfillDurations'),
     linkToMeeting: (recordingId, meetingId, confidence, method) =>
       callIPC('db:link-recording-to-meeting', recordingId, meetingId, confidence, method),
-    delete: (id) => callIPC('recordings:delete', id),
-    deleteBatch: (ids) => callIPC('recordings:deleteBatch', ids),
     markPersonal: (id, personal) => callIPC('recordings:markPersonal', id, personal),
     deletionImpact: (id) => callIPC('recordings:deletionImpact', id),
     deleteCascade: (id, hard, opts) => callIPC('recordings:deleteCascade', id, hard, opts),

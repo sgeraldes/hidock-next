@@ -110,12 +110,34 @@ export function FeaturesSettings(): React.ReactElement {
             role="status"
             className="flex items-center justify-between gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-3"
           >
-            <p className="text-xs">
-              Restart required to enable:{' '}
-              <span className="font-medium">
-                {pendingRestart.map((id) => FEATURES[id].label).join(', ')}
-              </span>
-            </p>
+            <div className="space-y-0.5 text-xs">
+              {/* Round-3: distinguish the two pending directions honestly.
+                  desired-ON + pending  ⇒ enable waits for restart to activate.
+                  desired-OFF + pending ⇒ disabled for NEW work now; restart
+                  fully unloads it (teardown/status stay available meanwhile). */}
+              {pendingRestart.filter((id) => resolved[id]?.enabled).length > 0 && (
+                <p>
+                  Restart required to activate:{' '}
+                  <span className="font-medium">
+                    {pendingRestart
+                      .filter((id) => resolved[id]?.enabled)
+                      .map((id) => FEATURES[id].label)
+                      .join(', ')}
+                  </span>
+                </p>
+              )}
+              {pendingRestart.filter((id) => !resolved[id]?.enabled).length > 0 && (
+                <p>
+                  Disabled for new work — restart to fully unload:{' '}
+                  <span className="font-medium">
+                    {pendingRestart
+                      .filter((id) => !resolved[id]?.enabled)
+                      .map((id) => FEATURES[id].label)
+                      .join(', ')}
+                  </span>
+                </p>
+              )}
+            </div>
             <Button
               size="sm"
               variant="outline"

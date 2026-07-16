@@ -249,7 +249,6 @@ export function useDeviceSubscriptions() {
       // When the component truly unmounts and remounts, React creates a NEW ref(false).
     }
   // SM-M02: Dependencies are stable (deviceService is singleton), refs handle action freshness
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deviceService])
 
   // ---- Live-recording signal (CMD 18 poll → jensen:recording-changed push) ----
@@ -387,6 +386,5 @@ export function useDeviceSubscriptions() {
       unsubDeviceDisconnect()
     }
   // SM-M02: Dependencies are stable (deviceService is singleton), refs handle action freshness
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deviceService])
 }

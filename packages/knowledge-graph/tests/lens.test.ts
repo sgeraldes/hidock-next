@@ -4,7 +4,7 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { existsSync, rmSync } from 'fs'
-import Database from 'better-sqlite3'
+import { createRequire } from 'node:module'
 import { DatabaseEngine } from '@hidock/database'
 import { KnowledgeGraphStore } from '../src/graph-store.js'
 import { ingestExtraction } from '../src/ingest.js'
@@ -22,41 +22,33 @@ import {
 } from '../src/queries.js'
 import type { ExtractionResult, ExtractionMeta } from '../src/extract.js'
 
+// The engine requires the app-owned better-sqlite3 native module. Resolve the
+// database package's OWN copy (the one CI's "npm rebuild better-sqlite3"
+// Node-ABI restore step targets) so resolution never depends on hoisting.
+const requireFromDatabase = createRequire(new URL('../../database/package.json', import.meta.url))
+const BetterSqlite3 = requireFromDatabase('better-sqlite3')
+
+/** Engines opened by makeStore — closed in afterEach so temp DBs can be deleted. */
+const openEngines: DatabaseEngine[] = []
+
 function tempPath(name: string) {
   return join(tmpdir(), `hidock-kg-lens-${name}-${Date.now()}-${Math.random().toString(36).slice(2)}.sqlite`)
 }
 
-// better-sqlite3 (unlike the old sql.js engine) holds a native OS file handle
-// open until closeDatabase() runs — on Windows, rmSync() on a still-open file
-// fails with EPERM. Track every engine created by makeStore() and close them
-// all before removing files.
-const engines: DatabaseEngine[] = []
-
 async function makeStore(name: string) {
   const dbPath = tempPath(name)
   const engine = new DatabaseEngine({
-    betterSqlite3: Database,
+    betterSqlite3: BetterSqlite3,
     dbPathProvider: () => dbPath,
     schemaVersion: 1,
     schema: 'CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)',
     migrations: {},
   })
   await engine.initialize()
-  engines.push(engine)
+  openEngines.push(engine)
   const store = new KnowledgeGraphStore(engine)
   store.initSchema()
   return { store, dbPath }
-}
-
-function closeEngines(): void {
-  for (const e of engines) {
-    try {
-      e.closeDatabase()
-    } catch {
-      /* already closed */
-    }
-  }
-  engines.length = 0
 }
 
 /** A full extraction with a decision, action, risk, next step, topic, project. */
@@ -102,8 +94,17 @@ describe('Lens: strata assignment by type', () => {
 describe('Lens: date derivation', () => {
   const paths: string[] = []
   afterEach(() => {
-    closeEngines()
-    for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
+    // better-sqlite3 holds the DB file open — close engines first, or rmSync
+    // EPERMs on Windows and stale state leaks into the next run.
+    for (const e of openEngines) {
+      try { e.closeDatabase() } catch { /* already closed */ }
+    }
+    openEngines.length = 0
+    for (const p of paths) {
+      for (const f of [p, `${p}-wal`, `${p}-shm`]) {
+        if (existsSync(f)) rmSync(f, { force: true })
+      }
+    }
     paths.length = 0
   })
 
@@ -137,8 +138,17 @@ describe('Lens: date derivation', () => {
 describe('Lens: scoping (centered vs whole-graph)', () => {
   const paths: string[] = []
   afterEach(() => {
-    closeEngines()
-    for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
+    // better-sqlite3 holds the DB file open — close engines first, or rmSync
+    // EPERMs on Windows and stale state leaks into the next run.
+    for (const e of openEngines) {
+      try { e.closeDatabase() } catch { /* already closed */ }
+    }
+    openEngines.length = 0
+    for (const p of paths) {
+      for (const f of [p, `${p}-wal`, `${p}-shm`]) {
+        if (existsSync(f)) rmSync(f, { force: true })
+      }
+    }
     paths.length = 0
   })
 
@@ -180,8 +190,17 @@ describe('Lens: scoping (centered vs whole-graph)', () => {
 describe('Lens: time-window filtering', () => {
   const paths: string[] = []
   afterEach(() => {
-    closeEngines()
-    for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
+    // better-sqlite3 holds the DB file open — close engines first, or rmSync
+    // EPERMs on Windows and stale state leaks into the next run.
+    for (const e of openEngines) {
+      try { e.closeDatabase() } catch { /* already closed */ }
+    }
+    openEngines.length = 0
+    for (const p of paths) {
+      for (const f of [p, `${p}-wal`, `${p}-shm`]) {
+        if (existsSync(f)) rmSync(f, { force: true })
+      }
+    }
     paths.length = 0
   })
 
@@ -233,8 +252,17 @@ describe('Lens: time-window filtering', () => {
 describe('Lens: default center selection', () => {
   const paths: string[] = []
   afterEach(() => {
-    closeEngines()
-    for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
+    // better-sqlite3 holds the DB file open — close engines first, or rmSync
+    // EPERMs on Windows and stale state leaks into the next run.
+    for (const e of openEngines) {
+      try { e.closeDatabase() } catch { /* already closed */ }
+    }
+    openEngines.length = 0
+    for (const p of paths) {
+      for (const f of [p, `${p}-wal`, `${p}-shm`]) {
+        if (existsSync(f)) rmSync(f, { force: true })
+      }
+    }
     paths.length = 0
   })
 
@@ -270,8 +298,17 @@ describe('Lens: default center selection', () => {
 describe('Lens: per-stratum node budget', () => {
   const paths: string[] = []
   afterEach(() => {
-    closeEngines()
-    for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
+    // better-sqlite3 holds the DB file open — close engines first, or rmSync
+    // EPERMs on Windows and stale state leaks into the next run.
+    for (const e of openEngines) {
+      try { e.closeDatabase() } catch { /* already closed */ }
+    }
+    openEngines.length = 0
+    for (const p of paths) {
+      for (const f of [p, `${p}-wal`, `${p}-shm`]) {
+        if (existsSync(f)) rmSync(f, { force: true })
+      }
+    }
     paths.length = 0
   })
 
@@ -363,8 +400,17 @@ describe('Lens: per-stratum node budget', () => {
 describe('Provenance: path derivation', () => {
   const paths: string[] = []
   afterEach(() => {
-    closeEngines()
-    for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
+    // better-sqlite3 holds the DB file open — close engines first, or rmSync
+    // EPERMs on Windows and stale state leaks into the next run.
+    for (const e of openEngines) {
+      try { e.closeDatabase() } catch { /* already closed */ }
+    }
+    openEngines.length = 0
+    for (const p of paths) {
+      for (const f of [p, `${p}-wal`, `${p}-shm`]) {
+        if (existsSync(f)) rmSync(f, { force: true })
+      }
+    }
     paths.length = 0
   })
 

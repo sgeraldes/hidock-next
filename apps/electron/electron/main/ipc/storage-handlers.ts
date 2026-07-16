@@ -24,6 +24,7 @@ import {
   SaveRecordingSchema
 } from './validation'
 import { getConfig } from '../services/config'
+import { isFeatureEnabled } from '../services/feature-gate'
 
 // Month name mapping for HiDock filename parsing
 const MONTH_NAMES: Record<string, number> = {
@@ -272,8 +273,13 @@ export function registerStorageHandlers(): void {
 
       const recordingId = randomUUID()
 
-      // Only auto-queue for transcription when the user has enabled it.
-      const autoTranscribe = getConfig().transcription.autoTranscribe === true
+      // Only auto-queue for transcription when the user has enabled it AND the
+      // transcription feature itself is on (adversarial round-2 [HIGH]: saving is
+      // core behavior, but its transcription side effect must respect the feature
+      // gate). Mirrors the check inside queueTranscriptionIfEnabled so the row's
+      // transcription_status stays honest.
+      const autoTranscribe =
+        getConfig().transcription.autoTranscribe === true && isFeatureEnabled('transcription')
 
       // Insert into database
       const recording: Omit<Recording, 'created_at'> = {

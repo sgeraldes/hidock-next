@@ -361,7 +361,8 @@ export function Projects() {
           knowledgeIds: p.knowledgeIds,
           personIds: p.personIds,
           folderPath: p.folderPath ?? p.folder_path ?? null,
-          url: p.url ?? null
+          url: p.url ?? null,
+          origin: p.origin ?? null
         }
         setActiveProject(detailed)
         setEditFolder(detailed.folderPath || '')
@@ -858,7 +859,11 @@ export function Projects() {
                 {(() => {
                   const knowledgeCount = activeProject.knowledgeIds?.length ?? 0
                   const peopleCount = activeProject.personIds?.length ?? 0
-                  const isDiscovered = sourceMeetings.length > 0
+                  // Provenance is the durable origin column (v42), NOT linked
+                  // meetings — a manual project can have meetings tagged, and a
+                  // legacy (pre-v42, origin unknown) row must not claim discovery.
+                  // The DB layer enforces the same rule on Dismiss (fail-closed).
+                  const isDiscovered = activeProject.origin === 'discovered'
                   const sourceChips = sourceMeetings.map((m) => (
                     <EntityMention key={m.id} type="meeting" id={m.id} name={m.subject} showIcon />
                   ))
@@ -875,7 +880,7 @@ export function Projects() {
                             <div className="min-w-0 space-y-1">
                               <h3 className="text-sm font-bold">No items yet</h3>
                               <p className="text-sm text-muted-foreground">
-                                Add knowledge or link meetings to start building this project's hub.
+                                Add knowledge or link meetings to start building this project&apos;s hub.
                               </p>
                             </div>
                           </div>
@@ -939,7 +944,7 @@ export function Projects() {
                     )
                   }
 
-                  if (sourceMeetings.length > 0) {
+                  if (isDiscovered && sourceMeetings.length > 0) {
                     return (
                       <Card className="animate-rise-in bg-muted/5">
                         <CardContent className="p-4">
@@ -1311,7 +1316,7 @@ export function Projects() {
                       <h3 className="font-bold text-sm uppercase tracking-wider">AI Project Insight</h3>
                     </div>
                     <p className="text-sm leading-relaxed text-muted-foreground italic">
-                      AI-generated insights for "{activeProject.name}" will appear here once knowledge items are linked to this project.
+                      AI-generated insights for &quot;{activeProject.name}&quot; will appear here once knowledge items are linked to this project.
                     </p>
                     <div className="mt-4 flex gap-2">
                       <Button

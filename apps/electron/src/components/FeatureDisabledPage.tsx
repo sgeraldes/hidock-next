@@ -13,7 +13,11 @@ import { useNavigate } from 'react-router-dom'
 import { Lock, Settings as SettingsIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { FEATURES, type FeatureId } from '@/shared/feature-registry'
-import { useFeatureResolved, describeDisableReason } from '@/store/useFeatureStore'
+import {
+  useFeatureResolved,
+  useFeaturePendingDisable,
+  describeDisableReason,
+} from '@/store/useFeatureStore'
 
 export function FeatureDisabledPage({ feature }: { feature: FeatureId }): React.ReactElement {
   const navigate = useNavigate()
@@ -60,9 +64,14 @@ export function FeatureRoute({
   children: ReactNode
 }): React.ReactElement {
   const resolved = useFeatureResolved(feature)
+  // Round-3: a restart-gated feature that is desired-off but was ACTIVE at boot
+  // (pending-disable) keeps its surface — main still serves its teardown and
+  // status IPC until the restart, and the user must be able to reach controls
+  // like disconnect / cancel download. Hiding the page here would orphan them.
+  const pendingDisable = useFeaturePendingDisable(feature)
   // Default to enabled when unknown (config not yet loaded) so we never flash the
   // disabled page during the initial config fetch under the default `full` preset.
   const enabled = resolved?.enabled ?? true
-  if (!enabled) return <FeatureDisabledPage feature={feature} />
+  if (!enabled && !pendingDisable) return <FeatureDisabledPage feature={feature} />
   return <>{children}</>
 }

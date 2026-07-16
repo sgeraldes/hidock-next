@@ -369,6 +369,15 @@ export class JensenDevice {
   // real, so this must never be short enough to trip a healthy-but-slow stream.
   private transferStallTimeoutMs = 120_000
 
+  // POST-DRAIN settlement of the in-flight downloadFile (see getActiveDownloadSettlement).
+  // downloadFile's OWN returned promise resolves false the instant a user-cancel/stall
+  // abort fires — BEFORE its async byte-boundary drain (settleTransfer) completes. This
+  // promise resolves only AFTER that drain has finished (releaseSlotAndAdvance /
+  // quarantine / stand-down), giving a cancel caller a truthful "device has settled"
+  // signal. null when no transfer is in flight or the current transfer completed
+  // normally (its returned promise already WAS the settlement — no drain).
+  private _activeDownloadSettlement: Promise<void> | null = null
+
   // Set when a transfer settlement could not safely release the serialized command
   // slot (a stall, or a cancelled transfer that never reached its protocol byte
   // boundary). A poisoned session is torn down (disconnect) and must NOT advance the
@@ -718,6 +727,19 @@ export class JensenDevice {
   // while transfer packets can still arrive, or it overlaps the device IN FIFO and
   // wedges the firmware (the #1 forbidden failure mode). These helpers give every
   // abnormal exit ONE quiescence discipline instead of per-case shortcuts.
+
+  /**
+   * POST-DRAIN settlement of the in-flight downloadFile, or null when there is nothing
+   * to await (idle, or a transfer that completed normally). downloadFile resolves its
+   * OWN promise false the instant a user-cancel/stall abort fires — before the async
+   * byte-boundary drain finishes — so a cancel coordinator that only awaits downloadFile
+   * returns while the device may still be streaming. Await THIS to block until the drain
+   * (releaseSlotAndAdvance / quarantine / stand-down) has actually completed. Additive:
+   * downloadFile's own resolution value and timing are unchanged.
+   */
+  getActiveDownloadSettlement(): Promise<void> | null {
+    return this._activeDownloadSettlement
+  }
 
   /** Resolve the in-flight download's own promise with `value` (does NOT advance). */
   private resolveActiveDownload(value: boolean): void {
@@ -1236,7 +1258,12 @@ export class JensenDevice {
     this.currentCommandTag = tag
     this.currentOperationName = entry.operationName
 
-    if (shouldLog()) console.log(`[Jensen] sendNext: ${entry.operationName} (${tag})`)
+    // GET_RECORDING_FILE is a 20s background poll (live-recording detection) —
+    // logging every probe drowns the console; state CHANGES are logged by the
+    // poll's owner instead.
+    if (shouldLog() && entry.msg.command !== CMD.GET_RECORDING_FILE) {
+      console.log(`[Jensen] sendNext: ${entry.operationName} (${tag})`)
+    }
 
     // Set parse delay based on command type
     // jensen.js: g.timewait = d.command == 5 || d.command == G ? 1e3 : 10
@@ -1533,7 +1560,7 @@ export class JensenDevice {
         consumed += parsed.length
         const msg = parsed.message
 
-        if (shouldLog() && msg.id !== CMD.TRANSFER_FILE) {
+        if (shouldLog() && msg.id !== CMD.TRANSFER_FILE && msg.id !== CMD.GET_RECORDING_FILE) {
           console.log(`[Jensen] recv: cmd=${msg.id}, seq=${msg.sequence}, bodyLen=${msg.body.length}`)
         }
 
@@ -2352,12 +2379,29 @@ export class JensenDevice {
     onProgress?: (received: number) => void,
     signal?: AbortSignal
   ): Promise<boolean> {
+    // Clear any stale settlement handle up front so the two early returns below (which
+    // never start a transfer, hence never drain) leave nothing for a caller to await.
+    this._activeDownloadSettlement = null
     if (!this.device) return false
     if (signal?.aborted) return false
 
     let received = 0
     let aborted = false
     let settled = false
+
+    // POST-DRAIN settlement (see getActiveDownloadSettlement). Resolved either by the
+    // main try/finally on a NON-draining exit (normal completion, null-msg fail), or by
+    // `finishSettlement` after settleTransfer's async drain on an abort/stall exit. A
+    // draining abort sets `settlementDraining` so the main finally does NOT resolve it
+    // early (that would defeat the whole point). Resolving twice is a harmless no-op.
+    let settlementDraining = false
+    let markSettled!: () => void
+    const settlement = new Promise<void>((resolve) => { markSettled = resolve })
+    this._activeDownloadSettlement = settlement
+    const finishSettlement = (): void => {
+      markSettled()
+      if (this._activeDownloadSettlement === settlement) this._activeDownloadSettlement = null
+    }
 
     // Inactivity watchdog. A transfer holds the single serialized command slot for
     // its ENTIRE duration, so it must NOT use the command-level timeout: expireCommand
@@ -2469,19 +2513,27 @@ export class JensenDevice {
       await this.quarantineConnection(`download stalled (${received}/${fileSize} bytes)`)
     }
 
+    // Owns the POST-DRAIN settlement for every abort/stall exit: settleTransfer runs
+    // its (possibly async) drain, then finishSettlement resolves the settlement promise.
+    // `settlementDraining` tells the main finally to leave settlement resolution to us.
+    const settleAndFinish = (reason: 'disconnect' | 'user-cancel' | 'stall'): void => {
+      settlementDraining = true
+      void settleTransfer(reason).finally(finishSettlement)
+    }
+
     // Abort handling (disconnect / user cancel). The AbortController's reason string
     // distinguishes them: the disconnect IPC aborts with 'disconnect' (see
     // jensen-handlers); anything else is treated as a user cancel.
     const abortHandler = (): void => {
       const reason = signal?.reason === 'disconnect' ? 'disconnect' : 'user-cancel'
-      void settleTransfer(reason)
+      settleAndFinish(reason)
     }
     signal?.addEventListener('abort', abortHandler, { once: true })
 
     const armStall = (): void => {
       if (settled) return
       if (stallTimerId) clearTimeout(stallTimerId)
-      stallTimerId = setTimeout(() => { void settleTransfer('stall') }, TRANSFER_STALL_TIMEOUT_MS)
+      stallTimerId = setTimeout(() => { settleAndFinish('stall') }, TRANSFER_STALL_TIMEOUT_MS)
     }
 
     // Set real-time progress callback (jensen.js: this.onreceive = r). Report the
@@ -2557,6 +2609,12 @@ export class JensenDevice {
       this.onreceive = null
       signal?.removeEventListener('abort', abortHandler)
       return false
+    } finally {
+      // Non-draining exit (normal completion, null-msg fail, or a synchronous return):
+      // this promise resolving IS the settlement, so resolve now. A draining abort/stall
+      // exit set `settlementDraining` and owns settlement via settleAndFinish's drain —
+      // resolving here would defeat the post-drain guarantee, so skip it.
+      if (!settlementDraining) finishSettlement()
     }
   }
 

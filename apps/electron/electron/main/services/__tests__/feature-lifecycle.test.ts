@@ -36,7 +36,7 @@ vi.mock('../clipboard-capture', () => ({
   stopClipboardWatch: (...a: unknown[]) => stopClipboard(...a),
 }))
 
-import { applyFeatureChanges } from '../feature-lifecycle'
+import { applyFeatureChanges, derivePendingRestart } from '../feature-lifecycle'
 
 const resolved = (f: FeaturesConfig) => resolveFeatureState(f)
 const FULL = resolved({ preset: 'full', flags: {} })
@@ -99,5 +99,76 @@ describe('applyFeatureChanges', () => {
     expect(stopGraph).toHaveBeenCalledTimes(1)
     expect(pending).toEqual([])
     errSpy.mockRestore()
+  })
+})
+
+describe('derivePendingRestart (Review-2 [MEDIUM]: derived from desired vs boot-effective)', () => {
+  // Boot with device-sync OFF (assistant stays ON in the full baseline).
+  const BOOT = resolved({ preset: 'full', flags: { 'device-sync': false } })
+
+  it('is empty when the desired state matches boot', () => {
+    expect(derivePendingRestart(BOOT, BOOT)).toEqual([])
+  })
+
+  it('flags a live-ENABLED restart-gated feature (device-sync on after booting off)', () => {
+    const desired = resolved({ preset: 'full', flags: {} }) // device-sync now on
+    expect(derivePendingRestart(desired, BOOT)).toEqual(['device-sync'])
+  })
+
+  it('an UNRELATED runtime toggle never clears an existing pending restart', () => {
+    // device-sync live-enabled AND calendar (runtime) turned off in the same edit.
+    const desired = resolved({ preset: 'full', flags: { calendar: false } })
+    // calendar is runtime-toggleable, so it never accrues; device-sync stays pending.
+    expect(derivePendingRestart(desired, BOOT)).toEqual(['device-sync'])
+  })
+
+  it('reverting a feature back to its boot state removes it from the set (no stored flag)', () => {
+    // Revert: device-sync desired OFF again == boot OFF ⇒ nothing pending.
+    const reverted = resolved({ preset: 'full', flags: { 'device-sync': false } })
+    expect(derivePendingRestart(reverted, BOOT)).toEqual([])
+  })
+
+  it('unions ALL live-enabled restart-gated features (device-sync + assistant), in registry order', () => {
+    // Boot with BOTH restart-gated features off; desire both on ⇒ both pending.
+    const bootOff = resolved({ preset: 'full', flags: { 'device-sync': false, assistant: false } })
+    const desired = resolved({ preset: 'full', flags: {} }) // both on
+    expect(derivePendingRestart(desired, bootOff)).toEqual(['device-sync', 'assistant'])
+  })
+
+  it('a live-DISABLE of a restart-gated feature IS a pending restart (symmetric boot gate)', () => {
+    // The gate is pinned to boot in BOTH directions: a live disable leaves the
+    // feature functional until restart (never strand active USB work), so the
+    // banner must honestly flag it as pending.
+    const bootFull = resolved({ preset: 'full', flags: {} })
+    const desiredDisable = resolved({ preset: 'full', flags: { assistant: false } })
+    expect(derivePendingRestart(desiredDisable, bootFull)).toEqual(['assistant'])
+    // Same via a cascade disable (transcription off ⇒ assistant cascade-off).
+    const cascade = resolved({ preset: 'full', flags: { transcription: false } })
+    expect(derivePendingRestart(cascade, bootFull)).toEqual(['assistant'])
+    // Disabling both restart-gated features unions them, in registry order.
+    const bothOff = resolved({ preset: 'full', flags: { 'device-sync': false, assistant: false } })
+    expect(derivePendingRestart(bothOff, bootFull)).toEqual(['device-sync', 'assistant'])
+  })
+
+  it('is symmetric: lone disable and lone enable both flag pendingRestart relative to boot', () => {
+    const bootOn = resolved({ preset: 'full', flags: {} })
+    const bootOffDevice = resolved({ preset: 'full', flags: { 'device-sync': false } })
+    const desiredOffDevice = resolved({ preset: 'full', flags: { 'device-sync': false } })
+    const desiredOn = resolved({ preset: 'full', flags: {} })
+    // Lone disable relative to boot-on ⇒ pending.
+    expect(derivePendingRestart(desiredOffDevice, bootOn)).toEqual(['device-sync'])
+    // Lone enable relative to boot-off ⇒ pending.
+    expect(derivePendingRestart(desiredOn, bootOffDevice)).toEqual(['device-sync'])
+  })
+
+  it('never flags a runtime-toggleable feature even when it differs from boot', () => {
+    // transcription (runtime) enabled vs boot off ⇒ still not a restart.
+    const bootOff = resolved({ preset: 'library-only', flags: {} }) // transcription off
+    const desired = resolved({ preset: 'library-only', flags: { transcription: true } })
+    expect(derivePendingRestart(desired, bootOff)).toEqual([])
+    // And the disable direction: calendar (runtime) off vs boot on ⇒ not a restart.
+    const bootOn = resolved({ preset: 'full', flags: {} })
+    const desiredOff = resolved({ preset: 'full', flags: { calendar: false } })
+    expect(derivePendingRestart(desiredOff, bootOn)).toEqual([])
   })
 })

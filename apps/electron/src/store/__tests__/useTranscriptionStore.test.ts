@@ -586,14 +586,15 @@ describe('useTranscriptionStore', () => {
         // Simulate q-2 having failed and been retried (retryCount=1)
         store.markFailed('q-2', 'Error')
 
-        // Wait for the retry IPC mock to complete
-        await vi.waitFor(() => {
-          store.retry('q-2')
-        })
+        store.retry('q-2')
 
-        // Allow the async retry promise to resolve
-        await vi.waitFor(() => {
-          const item = store.queue.get('q-2')
+        // retry() only flips the item back to pending after its IPC promise
+        // resolves — wait until that lands. Must re-read getState() each poll:
+        // the store replaces state immutably, so the `store` snapshot above
+        // never sees the update. (waitUntil, not waitFor: waitFor only retries
+        // on throw, so a false return would end the wait immediately.)
+        await vi.waitUntil(() => {
+          const item = useTranscriptionStore.getState().queue.get('q-2')
           return item?.status === 'pending' && item?.retryCount === 1
         })
 

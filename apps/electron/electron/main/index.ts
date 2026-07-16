@@ -42,7 +42,7 @@ import { getIntegrityService } from './services/integrity-service'
 import { acquireSingleInstanceLock } from './single-instance'
 import { startBootScheduler } from './services/boot-scheduler'
 import { registerGatedBootTasks } from './services/boot-tasks'
-import { isFeatureEnabled } from './services/feature-gate'
+import { isFeatureEnabled, captureBootEffectiveFeatures } from './services/feature-gate'
 
 let mainWindow: BrowserWindow | null = null
 let splashWindow: BrowserWindow | null = null
@@ -157,6 +157,13 @@ async function initializeServices(): Promise<void> {
   await initializeConfig()
   console.log('Config initialized')
 
+  // Track I (Review-2 [CRITICAL]): snapshot the effective feature state from the
+  // desired config NOW, before any IPC handlers register or any USB path can run.
+  // Restart-gated features (device-sync, assistant) are pinned to this snapshot
+  // for the IPC gate, so enabling them at runtime cannot open their IPC until the
+  // next boot — the USB safety boundary.
+  captureBootEffectiveFeatures()
+
   updateSplashStatus('Setting up storage...', 20)
   await initializeFileStorage()
   console.log('File storage initialized')
@@ -215,8 +222,12 @@ async function initializeServices(): Promise<void> {
   // Gate USB hot-plug auto-connect on the user's "Auto-connect on startup"
   // preference. Without this the device reconnects on every power-on / plug-in
   // regardless of the toggle. Manual "Connect Device" is unaffected.
-  // Track I: additionally requires the Device Sync feature — with it disabled the
-  // app must not initiate USB connections at all (checked live, no restart).
+  // Track I: additionally requires the Device Sync feature. Auto-connect is an
+  // INITIATION path (round-3 partition): isFeatureEnabled('device-sync') is
+  // boot-enabled AND desired-enabled, so a live disable stops hot-plug
+  // auto-connect immediately, while boot-disabled keeps it off regardless of a
+  // live enable (USB safety — activation only across a reboot). Teardown /
+  // observation IPC stays reachable via the boot-only half of the gate.
   setAutoConnectChecker(
     () => getConfig().device.autoConnect === true && isFeatureEnabled('device-sync')
   )

@@ -9,6 +9,21 @@ export type { MentionResult } from './mentionEvidence'
 export type { PersonContext } from './personContext'
 
 /**
+ * Shared unmerge-result inspection for EVERY Undo flow in this hook (accept,
+ * direct merge, group merge). Returns null when the unmerge succeeded, or the
+ * message to display when it did not. A rejected Result — most importantly
+ * MERGE_ORDER_CONFLICT ("undo the newer merge of X first") — must surface the
+ * backend's actionable message and must NEVER be reported as success.
+ * Exported for tests.
+ */
+export function unmergeFailureMessage(res: unknown): string | null {
+  const r = res as { success?: boolean; error?: { message?: string } } | null | undefined
+  if (r && r.success === true) return null
+  const msg = r?.error?.message
+  return msg && msg.trim() !== '' ? msg : 'The records could not be separated again.'
+}
+
+/**
  * A row from `identity:getSuggestions` — the resolver's 0.5–0.8 confidence band
  * surfaced for human review. Mirrors the main-process `IdentitySuggestion` shape.
  */
@@ -347,11 +362,20 @@ export function useIdentitySuggestions(kind?: 'person' | 'project') {
               label: 'Undo',
               onClick: async () => {
                 try {
-                  const undo = await unmerge(journalId)
-                  if (!undo.success) throw new Error('unmerge failed')
-                  toast.info('Merge undone', 'The separate records were restored.')
-                } catch {
-                  toast.error('Undo failed', 'The records could not be separated again.')
+                  // Centralized result handling: an ordering rejection
+                  // (MERGE_ORDER_CONFLICT) tells the user exactly which newer
+                  // merge to undo first.
+                  const failure = unmergeFailureMessage(await unmerge(journalId))
+                  if (failure) {
+                    toast.error('Undo failed', failure)
+                  } else {
+                    toast.info('Merge undone', 'The separate records were restored.')
+                  }
+                } catch (err) {
+                  toast.error(
+                    'Undo failed',
+                    err instanceof Error && err.message ? err.message : 'The records could not be separated again.'
+                  )
                 } finally {
                   load(true)
                 }
@@ -432,11 +456,21 @@ export function useIdentitySuggestions(kind?: 'person' | 'project') {
                   label: 'Undo',
                   onClick: async () => {
                     try {
-                      const undo = await window.electronAPI.contacts.unmerge(journalId as string)
-                      if (!undo.success) throw new Error('unmerge failed')
-                      toast.info('Merge undone', 'The separate records were restored.')
-                    } catch {
-                      toast.error('Undo failed', 'The records could not be separated again.')
+                      // Centralized result handling — surfaces MERGE_ORDER_CONFLICT's
+                      // "undo the newer merge first" message instead of a fixed string.
+                      const failure = unmergeFailureMessage(
+                        await window.electronAPI.contacts.unmerge(journalId as string)
+                      )
+                      if (failure) {
+                        toast.error('Undo failed', failure)
+                      } else {
+                        toast.info('Merge undone', 'The separate records were restored.')
+                      }
+                    } catch (err) {
+                      toast.error(
+                        'Undo failed',
+                        err instanceof Error && err.message ? err.message : 'The records could not be separated again.'
+                      )
                     } finally {
                       load(true)
                     }
@@ -530,17 +564,66 @@ export function useIdentitySuggestions(kind?: 'person' | 'project') {
                 action: {
                   label: 'Undo',
                   onClick: async () => {
+                    // Tracks whether the atomic backend unmerge has COMMITTED, so
+                    // the catch below can report honestly: once records are
+                    // separated, a later throw (e.g. the name-restore rejecting at
+                    // the IPC transport) must NOT be reported as "nothing undone".
+                    let unmergeCommitted = false
                     try {
-                      // Reverse every merge newest-first, then restore the prior name.
-                      for (const jid of [...journalIds].reverse()) {
-                        await window.electronAPI.contacts.unmerge(jid)
+                      // (1) Only unwind merges if any were actually recorded. A
+                      // rename-only group (every candidate was a bare-mention
+                      // alias → empty journalIds) has nothing to unmerge, and the
+                      // unmergeGroup IPC schema rejects an empty list — so skip
+                      // straight to the name-restore. When journals DO exist, ONE
+                      // atomic backend call unwinds them newest-first in a single
+                      // transaction; any rejection (e.g. MERGE_ORDER_CONFLICT)
+                      // rolls the ENTIRE group back, leaving it fully
+                      // re-attemptable rather than half-unwound.
+                      if (journalIds.length > 0) {
+                        const failure = unmergeFailureMessage(
+                          await window.electronAPI.contacts.unmergeGroup(journalIds)
+                        )
+                        if (failure) {
+                          // Nothing changed on the backend — do NOT restore the
+                          // name and do NOT claim the group was undone.
+                          toast.error('Undo failed', failure)
+                          return
+                        }
+                        unmergeCommitted = true
                       }
+                      // (2) Restore the prior canonical name. The rename was a
+                      // separate contacts.update (never journaled), so it returns
+                      // a Result rather than throwing — a failure here must
+                      // surface, not be masked by a success toast.
                       if (rename) {
-                        await window.electronAPI.contacts.update({ id: keeperId, name: keeperName })
+                        const restore = await window.electronAPI.contacts.update({ id: keeperId, name: keeperName })
+                        if (!restore.success) {
+                          const msg = (restore as { error?: { message?: string } }).error?.message
+                          toast.error(
+                            'Undo incomplete',
+                            msg || 'The merges were reversed but the previous name could not be restored.'
+                          )
+                          return
+                        }
                       }
                       toast.info('Group merge undone', 'The separate records were restored.')
-                    } catch {
-                      toast.error('Undo failed', 'Some records could not be separated again.')
+                    } catch (err) {
+                      const detail = err instanceof Error && err.message ? err.message : undefined
+                      if (unmergeCommitted) {
+                        // The unmerge already committed (records ARE separated);
+                        // only a later step threw. A flat "Undo failed" would be
+                        // dishonest — the merges were reversed.
+                        toast.error(
+                          'Undo incomplete',
+                          detail
+                            ? `The records were separated, but the previous name could not be restored: ${detail}`
+                            : 'The records were separated, but the previous name could not be restored.'
+                        )
+                      } else {
+                        // The unmerge itself failed/threw (or there was nothing to
+                        // unmerge) — nothing was undone.
+                        toast.error('Undo failed', detail || 'Some records could not be separated again.')
+                      }
                     } finally {
                       load(true)
                     }

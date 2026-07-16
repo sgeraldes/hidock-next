@@ -514,6 +514,13 @@ export interface Project {
   folderPath?: string | null
   url?: string | null
 
+  /**
+   * Durable provenance (v42): 'manual' = user-created, 'discovered' =
+   * auto-created by the reconciler from a transcript, null/undefined =
+   * legacy/unknown (not dismissable). Only 'discovered' projects offer Dismiss.
+   */
+  origin?: 'manual' | 'discovered' | null
+
 
 
 

@@ -116,7 +116,7 @@ describe('migration v26 objects', () => {
     // round-31 bumped 45 -> 46 (per-field role provenance); round-37 bumped 46 -> 47
     // (node-level graph provenance, ADV35-1).
     const row = queryOne<{ version: number }>('SELECT version FROM schema_version ORDER BY version DESC LIMIT 1')
-    expect(row?.version).toBe(48)
+    expect(row?.version).toBe(49)
   })
 })
 

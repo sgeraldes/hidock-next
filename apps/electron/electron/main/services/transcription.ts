@@ -87,6 +87,7 @@ function spawnStreaming(
   })
 }
 import { getConfig } from './config'
+import { isFeatureEnabled } from './feature-gate'
 import {
   addToQueue,
   getRecordingById,
@@ -361,6 +362,11 @@ const MAX_RETRY_ATTEMPTS = 3 // spec-014: configurable max retry attempts
 async function processQueue(): Promise<void> {
   if (isProcessing) return
 
+  // Round-3 [HIGH]: with the transcription FEATURE disabled, a queue pass must
+  // not start at all (no retry re-queues, no stuck-item bookkeeping, no drain) —
+  // a residual interval tick or direct call is a no-op.
+  if (!isFeatureEnabled('transcription')) return
+
   // spec-005: Acquire mutex lock to prevent concurrent processing
   const processId = `proc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
   const lockAcquired = acquireTranscriptionLock(processId)
@@ -499,7 +505,12 @@ async function processQueue(): Promise<void> {
     const processedThisRun = new Set<string>()
     // `!queuePaused`: if the user pauses mid-run, the current item (already being
     // awaited below) finishes, then the loop condition stops further dequeues.
-    while (!cancelRequested && !queuePaused) {
+    // `isFeatureEnabled('transcription')` (round-3 [HIGH]): disabling the
+    // transcription FEATURE mid-drain must stop the backlog — the in-flight item
+    // may finish, but the next pending item must not start. Without this check a
+    // running processQueue drained the whole queue after a disable (the interval
+    // stop only prevents FUTURE ticks).
+    while (!cancelRequested && !queuePaused && isFeatureEnabled('transcription')) {
       const item = orderPendingForProcessing(getQueueItems('pending')).find(
         (i) => !processedThisRun.has(i.id)
       )
@@ -628,9 +639,18 @@ export async function processQueueManually(): Promise<void> {
  * auto-transcribe enabled". Consolidates the previously duplicated gate from
  * download-service, recording-watcher, and storage:save-recording (ADR-0005
  * category A). Returns true if the recording was queued, false otherwise.
+ *
+ * Track I (adversarial round-2 [HIGH]): also gated on the transcription FEATURE.
+ * Callers of this funnel are core/device flows (storage:save-recording, the
+ * download service, the recording watcher, the device pipeline) whose own
+ * channels are never transcription-gated — without this check, a core channel
+ * could start transcription background work (queue insert + processor kick)
+ * while the transcription feature is disabled, with only the legacy
+ * autoTranscribe setting standing in the way.
  */
 export function queueTranscriptionIfEnabled(recordingId: string): boolean {
   if (getConfig().transcription.autoTranscribe !== true) return false
+  if (!isFeatureEnabled('transcription')) return false
   addToQueue(recordingId)
   processQueueManually()
   return true

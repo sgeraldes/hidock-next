@@ -105,7 +105,13 @@ vi.mock('../database', () => ({
     return undefined
   }),
   queryAll: vi.fn((sql: string) => {
-    if (/contact_aliases/i.test(sql)) return aliasRows
+    if (/contact_aliases/i.test(sql)) {
+      // The real table stores alias_norm — there is NO `alias` column. Mirror
+      // SQLite and throw for the wrong name (the production regression that
+      // silently disabled Tier-2); only the correct query gets rows.
+      if (!/alias_norm/.test(sql)) throw new Error('no such column: alias')
+      return aliasRows
+    }
     return []
   }),
   escapeLikePattern: (p: string) => p.replace(/[%_\\]/g, '\\$&'),

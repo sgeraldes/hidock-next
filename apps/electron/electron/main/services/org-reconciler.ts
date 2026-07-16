@@ -614,9 +614,15 @@ export function applyTranscriptEntities(opts: {
         // clears the tombstone and resolveProject links to it normally above.
       } else {
         const id = randomUUID()
-        // v45/round-28: transcript-extracted project ENTITY ⇒ source='transcript' +
-        // recording, so it is suppressed on non-owner surfaces once excluded (ADV27-1).
-        run(`INSERT INTO projects (id, name, status, source, source_recording_id) VALUES (?, ?, 'active', 'transcript', ?)`, [
+        // This auto-create path stamps BOTH provenance families, which gate
+        // different guards:
+        //   origin='discovered' (v42) — durable provenance; ONLY rows created
+        //   here are dismissable via projects:dismissDiscovered (fail-closed
+        //   elsewhere).
+        //   source='transcript' + recording (v45/round-28) — the project ENTITY
+        //   is transcript-extracted, so it is suppressed on non-owner surfaces
+        //   once excluded (ADV27-1).
+        run(`INSERT INTO projects (id, name, status, origin, source, source_recording_id) VALUES (?, ?, 'active', 'discovered', 'transcript', ?)`, [
           id,
           projectName,
           opts.recordingId ?? null

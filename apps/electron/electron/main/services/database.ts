@@ -8,7 +8,7 @@ import { normalizeName, isGenericSpeakerLabel, detectAmbiguousName } from './ent
 import { getEventBus } from './event-bus'
 import type { QualityRating } from '@/types/knowledge'
 
-const SCHEMA_VERSION = 48
+const SCHEMA_VERSION = 49
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -453,7 +453,14 @@ CREATE TABLE IF NOT EXISTS projects (
     status TEXT CHECK(status IN ('active', 'archived')) DEFAULT 'active',
     folder_path TEXT,
     url TEXT,
+    -- Durable provenance (v49): 'manual' = explicit user create, 'discovered' =
+    -- reconciler auto-create from a transcript mention. NULL = legacy/unknown.
+    -- dismissDiscoveredProject requires 'discovered' (fail-closed): a project of
+    -- unproven origin can never be tombstone-deleted through the dismiss path.
+    origin TEXT CHECK(origin IN ('manual', 'discovered')),
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    -- Entity-level identity provenance (v45): 'user'/'calendar'/'transcript' +
+    -- the recording that minted a transcript-derived project.
     source TEXT,
     source_recording_id TEXT
 );
@@ -749,6 +756,14 @@ CREATE TABLE IF NOT EXISTS merge_journal (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL CHECK(kind IN ('contact', 'project')),
     keeper_id TEXT NOT NULL,
+    -- loser_id (v42): queryable loser identity for the dependency-aware
+    -- newest-first unmerge guard (also inside loser_snapshot, but the guard
+    -- must not JSON-parse every open journal on every unmerge).
+    loser_id TEXT,
+    -- seq (v42): explicit immutable merge order. rowid is an implementation
+    -- detail (VACUUM and dump/restore may renumber it), so ordering guards key
+    -- on this instead.
+    seq INTEGER,
     loser_snapshot TEXT NOT NULL,
     repointed_manifest TEXT NOT NULL,
     folded_fields TEXT,
@@ -873,7 +888,7 @@ const MIGRATIONS: Record<number, () => void> = {
     for (const sql of columnsToAdd) {
       try {
         database.run(sql)
-      } catch (e) {
+      } catch {
         // Column likely already exists, ignore
         console.log(`Column may already exist: ${sql}`)
       }
@@ -957,7 +972,7 @@ const MIGRATIONS: Record<number, () => void> = {
           }
           console.log('[Migration v7] Updated device_files_cache durations')
         }
-      } catch (e) {
+      } catch {
         // device_files_cache may not exist
         console.log('[Migration v7] device_files_cache not found or empty')
       }
@@ -1035,7 +1050,7 @@ const MIGRATIONS: Record<number, () => void> = {
           }
           console.log('[Migration v8] Fixed device_files_cache durations')
         }
-      } catch (e) {
+      } catch {
         console.log('[Migration v8] device_files_cache not found or empty')
       }
     } catch (e) {
@@ -1114,7 +1129,7 @@ const MIGRATIONS: Record<number, () => void> = {
           }
           console.log('[Migration v9] Fixed device_files_cache durations')
         }
-      } catch (e) {
+      } catch {
         console.log('[Migration v9] device_files_cache not found or empty')
       }
     } catch (e) {
@@ -1136,7 +1151,7 @@ const MIGRATIONS: Record<number, () => void> = {
         CHECK(storage_tier IN (NULL, 'hot', 'warm', 'cold', 'archive'))
       `)
       console.log('[Migration v10] Added storage_tier column to recordings')
-    } catch (e) {
+    } catch {
       // Column likely already exists
       console.log('[Migration v10] storage_tier column may already exist')
     }
@@ -1145,7 +1160,7 @@ const MIGRATIONS: Record<number, () => void> = {
     try {
       database.run('CREATE INDEX IF NOT EXISTS idx_recordings_storage_tier ON recordings(storage_tier)')
       console.log('[Migration v10] Created storage_tier index')
-    } catch (e) {
+    } catch {
       console.log('[Migration v10] storage_tier index may already exist')
     }
 
@@ -1171,7 +1186,7 @@ const MIGRATIONS: Record<number, () => void> = {
           "ALTER TABLE recordings ADD COLUMN migrated_at TEXT"
         ]
         for (const sql of columnsToAdd) {
-          try { database.run(sql) } catch (e) { /* ignore duplicate */ }
+          try { database.run(sql) } catch { /* ignore duplicate */ }
         }
       }
 
@@ -1186,14 +1201,14 @@ const MIGRATIONS: Record<number, () => void> = {
           const schemaSQL = readFileSync(schemaPath, 'utf-8')
           const statements = schemaSQL.split('\n').filter(line => !line.trim().startsWith('--')).join('\n').split(';').map(s => s.trim()).filter(s => s.length > 0)
           for (const sql of statements) {
-            try { database.run(sql) } catch (e) { /* ignore existing */ }
+            try { database.run(sql) } catch { /* ignore existing */ }
           }
         }
       } else {
         // Table exists, check for ALL columns added during redesign
         const captureInfo = database.exec("PRAGMA table_info(knowledge_captures)")
         const existingCols = captureInfo[0].values.map(col => col[1])
-        
+
         const requiredColumns = [
           { name: 'category', def: "category TEXT CHECK(category IN ('meeting', 'interview', '1:1', 'brainstorm', 'note', 'other')) DEFAULT 'meeting'" },
           { name: 'status', def: "status TEXT CHECK(status IN ('processing', 'ready', 'enriched')) DEFAULT 'ready'" },
@@ -1247,7 +1262,7 @@ const MIGRATIONS: Record<number, () => void> = {
     try {
       database.run('ALTER TABLE chat_messages ADD COLUMN conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE')
       console.log('[Migration v12] Added conversation_id column to chat_messages')
-    } catch (e) {
+    } catch {
       console.log('[Migration v12] conversation_id column may already exist')
     }
 
@@ -1269,7 +1284,7 @@ const MIGRATIONS: Record<number, () => void> = {
     for (const sql of columnsToAdd) {
       try {
         database.run(sql)
-      } catch (e) {
+      } catch {
         console.log(`Column may already exist: ${sql}`)
       }
     }
@@ -1283,7 +1298,7 @@ const MIGRATIONS: Record<number, () => void> = {
     try {
       database.run("ALTER TABLE projects ADD COLUMN status TEXT CHECK(status IN ('active', 'archived')) DEFAULT 'active'")
       console.log('[Migration v14] Added status column to projects')
-    } catch (e) {
+    } catch {
       console.log('[Migration v14] status column may already exist')
     }
     console.log('Migration v14 complete: Projects table enhanced')
@@ -1306,7 +1321,7 @@ const MIGRATIONS: Record<number, () => void> = {
     for (const sql of columnsToAdd) {
       try {
         database.run(sql)
-      } catch (e) {
+      } catch {
         // Column likely already exists, ignore
         console.log(`Column may already exist: ${sql}`)
       }
@@ -2473,6 +2488,153 @@ const MIGRATIONS: Record<number, () => void> = {
       console.warn('[Migration v48] role_origin backfill failed (non-fatal):', e)
     }
     console.log('Migration v48 complete')
+  },
+
+  49: () => {
+    // v49: projects.origin — durable provenance for the dismiss-discovered path.
+    // 'manual' = explicit user create, 'discovered' = reconciler auto-create.
+    // Legacy rows stay NULL (unknown) and are fail-closed: dismissDiscovered
+    // refuses them, so a renderer bug or direct IPC call can never tombstone-
+    // delete a manually created project. Idempotent: guarded ALTER.
+    // (Re-keyed from v42 on merge into beta/meeting-intelligence: HEAD's F16/F18
+    // chain already occupies 42-48. This migration was never integrated or
+    // published under 42, so no on-disk DB recorded it there — safe to renumber.)
+    console.log('Running migration to schema v49: projects.origin')
+    const database = getDatabase()
+    const cols = getTableColumns(database, 'projects')
+    if (cols.length > 0 && !cols.includes('origin')) {
+      try {
+        database.run('ALTER TABLE projects ADD COLUMN origin TEXT')
+      } catch (e) {
+        console.warn('[Migration v49] add origin failed:', e)
+      }
+    }
+
+    // merge_journal.loser_id + seq (part of v49 — this version exists only on
+    // this lane and was never integrated or published, so the journal columns
+    // for the dependency-aware newest-first unmerge guard extend the SAME
+    // migration instead of minting v50). loser_id makes the loser queryable
+    // without JSON-parsing every snapshot; seq is the explicit immutable merge
+    // order (rowid can be renumbered by VACUUM/dump-restore). Backfill:
+    // loser_id from the snapshot's $.id, seq from rowid — rowid is monotonic
+    // for rows that have never been renumbered, and any historical renumbering
+    // predates the guard, so it is the best available witness of merge order.
+    const journalCols = getTableColumns(database, 'merge_journal')
+    if (journalCols.length > 0) {
+      if (!journalCols.includes('loser_id')) {
+        try {
+          database.run('ALTER TABLE merge_journal ADD COLUMN loser_id TEXT')
+        } catch (e) {
+          console.warn('[Migration v49] add merge_journal.loser_id failed:', e)
+        }
+      }
+      if (!journalCols.includes('seq')) {
+        try {
+          database.run('ALTER TABLE merge_journal ADD COLUMN seq INTEGER')
+        } catch (e) {
+          console.warn('[Migration v49] add merge_journal.seq failed:', e)
+        }
+      }
+      // Backfills run UNCONDITIONALLY (WHERE ... IS NULL makes them idempotent):
+      // repairPhase may have force-added the columns on this same boot — or an
+      // earlier FAILED v49 attempt may have added both nullable columns and
+      // died before filling them — in which case the includes-guards above
+      // skip the ALTERs but legacy rows still need their values.
+      //
+      // seq is ESSENTIAL (the unmerge ordering guard keys on it) and does not
+      // depend on snapshot validity, so it runs first, alone, and a failure
+      // RETHROWS — v49 must not be recorded over NULL-seq journals (same
+      // policy as the tombstone re-key below), or they would be stranded
+      // forever behind a recorded version with ordering unenforced.
+      try {
+        database.run('UPDATE merge_journal SET seq = rowid WHERE seq IS NULL')
+      } catch (e) {
+        console.warn('[Migration v49] merge_journal seq backfill failed:', e)
+        throw e
+      }
+      // loser_id is backfilled per-row behind json_valid so ONE malformed
+      // loser_snapshot cannot abort the statement and strand every valid row.
+      // Malformed rows are logged and keep loser_id NULL — the unmerge guard
+      // rejects them fail-closed (unreadable snapshot), never silently orders
+      // or undoes them. An unexpected statement failure still rethrows.
+      try {
+        const malformed = queryAll<{ id: string }>(
+          'SELECT id FROM merge_journal WHERE loser_id IS NULL AND NOT json_valid(loser_snapshot)'
+        )
+        if (malformed.length > 0) {
+          console.warn(
+            `[Migration v49] ${malformed.length} merge_journal row(s) have a malformed loser_snapshot and stay ` +
+              `un-unmergeable (fail-closed): ${malformed.map((r) => r.id).join(', ')}`
+          )
+        }
+        database.run(
+          "UPDATE merge_journal SET loser_id = json_extract(loser_snapshot, '$.id') " +
+            'WHERE loser_id IS NULL AND json_valid(loser_snapshot)'
+        )
+      } catch (e) {
+        console.warn('[Migration v49] merge_journal loser_id backfill failed:', e)
+        throw e
+      }
+    }
+
+    // Re-key v41 tombstones under the NFKC name normalization that ships with
+    // v49. v41 wrote name_norm with the pre-NFKC normalizeName, so a tombstone
+    // recorded under a decomposed (NFD) or compatibility form no longer matches
+    // post-v49 lookups: re-analysis would resurrect the dismissed project, and a
+    // manual re-create could never clear the stranded key. Recompute every key
+    // from original_name in one transaction. NFKC collisions (two old keys
+    // folding to one) are resolved deterministically: keep the NEWEST rejection
+    // (latest rejected_at, ties broken by old name_norm), drop the rest — the
+    // newest row is the user's most recent dismissal decision for that name.
+    try {
+      runInTransaction(() => {
+        const rows = queryAll<{
+          name_norm: string
+          original_name: string
+          source_meeting_id: string | null
+          rejected_at: string | null
+        }>(
+          'SELECT name_norm, original_name, source_meeting_id, rejected_at FROM project_discovery_rejections ' +
+            'ORDER BY rejected_at DESC, name_norm DESC'
+        )
+        let rekeyed = 0
+        const winners = new Map<string, (typeof rows)[number] & { oldNorm: string }>()
+        for (const row of rows) {
+          const newNorm = normalizeName(row.original_name)
+          if (!newNorm) continue
+          // Rows are newest-first, so the first row seen per new key wins.
+          if (!winners.has(newNorm)) winners.set(newNorm, { ...row, oldNorm: row.name_norm })
+        }
+        for (const [newNorm, row] of winners) {
+          if (newNorm !== row.oldNorm) rekeyed++
+        }
+        if (rekeyed > 0 || winners.size !== rows.length) {
+          run('DELETE FROM project_discovery_rejections')
+          for (const [newNorm, row] of winners) {
+            run(
+              `INSERT INTO project_discovery_rejections (name_norm, original_name, source_meeting_id, rejected_at)
+               VALUES (?, ?, ?, ?)`,
+              [newNorm, row.original_name, row.source_meeting_id, row.rejected_at]
+            )
+          }
+          console.log(
+            `[Migration v49] re-keyed ${rekeyed} tombstone(s) to NFKC, ` +
+              `dropped ${rows.length - winners.size} collision(s)`
+          )
+        }
+      })
+    } catch (e) {
+      // Rethrow: the transaction has rolled back, and schema_version must NOT
+      // advance to 49 on a failed rewrite — swallowing here would strand the
+      // v41 keys permanently (the migration never retries once 49 is recorded).
+      // The engine records each version only AFTER its migration returns, so
+      // failing loudly leaves the DB at 48 and the next boot retries the
+      // re-key. (The guarded ALTER above may have committed — that's fine:
+      // it is idempotent and repairPhase force-adds the column anyway.)
+      console.warn('[Migration v49] tombstone re-key failed:', e)
+      throw e
+    }
+    console.log('Migration v49 complete')
   }
 
 }
@@ -2497,7 +2659,7 @@ function repairPhase(): void {
     for (const col of meetingRepairs) {
       if (!meetingCols.includes(col.name)) {
         console.log(`[Database] Repairing meetings: adding ${col.name}`)
-        try { database.run(`ALTER TABLE meetings ADD COLUMN ${col.name} ${col.def}`) } catch (e) {}
+        try { database.run(`ALTER TABLE meetings ADD COLUMN ${col.name} ${col.def}`) } catch {}
       }
     }
   }
@@ -2517,7 +2679,7 @@ function repairPhase(): void {
     for (const col of recordingRepairs) {
       if (!recCols.includes(col.name)) {
         console.log(`[Database] Repairing recordings: adding ${col.name}`)
-        try { database.run(`ALTER TABLE recordings ADD COLUMN ${col.name} ${col.def}`) } catch (e) {}
+        try { database.run(`ALTER TABLE recordings ADD COLUMN ${col.name} ${col.def}`) } catch {}
       }
     }
   } else {
@@ -2550,7 +2712,7 @@ function repairPhase(): void {
     for (const col of knowledgeRepairs) {
       if (!capCols.includes(col.name)) {
         console.log(`[Database] Repairing knowledge_captures: adding ${col.name}`)
-        try { database.run(`ALTER TABLE knowledge_captures ADD COLUMN ${col.def}`) } catch (e) {}
+        try { database.run(`ALTER TABLE knowledge_captures ADD COLUMN ${col.def}`) } catch {}
       }
     }
   } else {
@@ -2569,7 +2731,7 @@ function repairPhase(): void {
     for (const col of queueRepairs) {
       if (!queueCols.includes(col.name)) {
         console.log(`[Database] Repairing transcription_queue: adding ${col.name}`)
-        try { database.run(`ALTER TABLE transcription_queue ADD COLUMN ${col.name} ${col.def}`) } catch (e) {}
+        try { database.run(`ALTER TABLE transcription_queue ADD COLUMN ${col.name} ${col.def}`) } catch {}
       }
     }
   }
@@ -2643,7 +2805,7 @@ function repairPhase(): void {
         FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
       )
     `)
-  } catch (e) { /* table already exists */ }
+  } catch { /* table already exists */ }
 
   // Repair transcript_speakers (v25): a new table has no columns to ALTER, but
   // force-create it here so an older on-disk DB that skipped the migration still
@@ -2661,7 +2823,7 @@ function repairPhase(): void {
         FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
       )
     `)
-  } catch (e) { /* table already exists */ }
+  } catch { /* table already exists */ }
 
   // Repair mention_resolutions (v35): force-create so an older on-disk DB that
   // skipped the migration still gets it before any resolveMention write. Idempotent.
@@ -2727,7 +2889,7 @@ function repairPhase(): void {
         FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
       )
     `)
-  } catch (e) { /* table already exists */ }
+  } catch { /* table already exists */ }
 
   // Repair alias memory + suggestion tables (v27): force-create so an older
   // on-disk DB that skipped the migration still gets them. Idempotent.
@@ -2770,7 +2932,7 @@ function repairPhase(): void {
     database.run('CREATE INDEX IF NOT EXISTS idx_contact_aliases_contact ON contact_aliases(contact_id)')
     database.run('CREATE INDEX IF NOT EXISTS idx_project_aliases_project ON project_aliases(project_id)')
     database.run('CREATE INDEX IF NOT EXISTS idx_identity_suggestions_status ON identity_suggestions(status)')
-  } catch (e) { /* tables already exist */ }
+  } catch { /* tables already exist */ }
 
   // Repair artifacts table (v28): force-create so an older on-disk DB that
   // skipped the migration still gets it before any importArtifact write. Idempotent.
@@ -2795,13 +2957,13 @@ function repairPhase(): void {
     database.run('CREATE INDEX IF NOT EXISTS idx_artifacts_capture ON artifacts(knowledge_capture_id)')
     database.run('CREATE INDEX IF NOT EXISTS idx_artifacts_kind ON artifacts(kind)')
     database.run('CREATE INDEX IF NOT EXISTS idx_artifacts_content_hash ON artifacts(content_hash)')
-  } catch (e) { /* table already exists */ }
+  } catch { /* table already exists */ }
 
   // Repair action_items (v26): force-add assignee_contact_id if missing.
   const actionItemCols = getTableColumns(database, 'action_items')
   if (actionItemCols.length > 0 && !actionItemCols.includes('assignee_contact_id')) {
     console.log('[Database] Repairing action_items: adding assignee_contact_id')
-    try { database.run('ALTER TABLE action_items ADD COLUMN assignee_contact_id TEXT') } catch (e) {}
+    try { database.run('ALTER TABLE action_items ADD COLUMN assignee_contact_id TEXT') } catch {}
   }
 
   // Repair transcripts (v39): force-add the meeting-timeline JSON columns so an
@@ -2812,20 +2974,60 @@ function repairPhase(): void {
     for (const col of ['sentiment_segments', 'event_markers']) {
       if (!transcriptCols.includes(col)) {
         console.log(`[Database] Repairing transcripts: adding ${col}`)
-        try { database.run(`ALTER TABLE transcripts ADD COLUMN ${col} TEXT`) } catch (e) {}
+        try { database.run(`ALTER TABLE transcripts ADD COLUMN ${col} TEXT`) } catch {}
       }
     }
   }
 
-  // Repair projects (v29): force-add folder_path/url if missing.
+  // Repair projects (v29 + v42): force-add folder_path/url and the origin
+  // provenance column if missing, so an older on-disk schema that skipped a
+  // migration still gets them before the reconciler or dismissDiscoveredProject
+  // touches the table. Idempotent.
   const projectCols = getTableColumns(database, 'projects')
   if (projectCols.length > 0) {
     for (const col of ['folder_path', 'url']) {
       if (!projectCols.includes(col)) {
         console.log(`[Database] Repairing projects: adding ${col}`)
-        try { database.run(`ALTER TABLE projects ADD COLUMN ${col} TEXT`) } catch (e) {}
+        try { database.run(`ALTER TABLE projects ADD COLUMN ${col} TEXT`) } catch {}
       }
     }
+    if (!projectCols.includes('origin')) {
+      console.log('[Database] Repairing projects: adding origin')
+      try { database.run('ALTER TABLE projects ADD COLUMN origin TEXT') } catch { /* already exists */ }
+    }
+  }
+
+  // Repair merge_journal (v42): loser_id + seq for the dependency-aware
+  // newest-first unmerge guard. Force-add so an older on-disk schema that
+  // skipped the migration still gets the columns before any unmerge runs.
+  const journalCols = getTableColumns(database, 'merge_journal')
+  if (journalCols.length > 0) {
+    if (!journalCols.includes('loser_id')) {
+      console.log('[Database] Repairing merge_journal: adding loser_id')
+      try { database.run('ALTER TABLE merge_journal ADD COLUMN loser_id TEXT') } catch { /* already exists */ }
+    }
+    if (!journalCols.includes('seq')) {
+      console.log('[Database] Repairing merge_journal: adding seq')
+      try { database.run('ALTER TABLE merge_journal ADD COLUMN seq INTEGER') } catch { /* already exists */ }
+    }
+    // Backfills run UNCONDITIONALLY every boot, independently, idempotent via
+    // WHERE ... IS NULL. This is the recovery path for a partially-applied
+    // earlier v42 attempt that added both nullable columns (making the
+    // conditional adds above no-ops) but died before filling them: a NULL seq
+    // makes that journal UNMERGEABLE (the guard rejects it fail-closed rather
+    // than ordering it as zero), so this backfill is what returns those
+    // journals to service. loser_id is guarded per-row by json_valid so one
+    // malformed snapshot never blocks the valid rows (malformed rows stay
+    // NULL and are rejected fail-closed at unmerge time).
+    try {
+      database.run('UPDATE merge_journal SET seq = rowid WHERE seq IS NULL')
+    } catch { /* seq column missing on an ancient schema — the migration adds it */ }
+    try {
+      database.run(
+        "UPDATE merge_journal SET loser_id = json_extract(loser_snapshot, '$.id') " +
+          'WHERE loser_id IS NULL AND json_valid(loser_snapshot)'
+      )
+    } catch { /* loser_id column missing on an ancient schema — the migration adds it */ }
   }
 
   // Repair project_notes (v29): force-create so an older on-disk DB that skipped
@@ -2844,7 +3046,7 @@ function repairPhase(): void {
       )
     `)
     database.run('CREATE INDEX IF NOT EXISTS idx_project_notes_project_kind ON project_notes(project_id, kind)')
-  } catch (e) { /* table already exists */ }
+  } catch { /* table already exists */ }
 
   // Repair chat_messages (AI-15: columns referenced by assistant mapper)
   const chatMsgInfo = database.exec("PRAGMA table_info(chat_messages)")
@@ -2859,7 +3061,7 @@ function repairPhase(): void {
     for (const col of chatRepairs) {
       if (!chatCols.includes(col.name)) {
         console.log(`[Database] Repairing chat_messages: adding ${col.name}`)
-        try { database.run(`ALTER TABLE chat_messages ADD COLUMN ${col.name} ${col.def}`) } catch (e) {}
+        try { database.run(`ALTER TABLE chat_messages ADD COLUMN ${col.name} ${col.def}`) } catch {}
       }
     }
   }
@@ -3294,7 +3496,7 @@ function extractContactsFromMeetingDataInternal(meeting: Omit<Meeting, 'created_
           emailsToLookup.push(attendee.email)
         }
       }
-    } catch (e) {
+    } catch {
       // Invalid JSON, skip attendees
     }
   }
@@ -6957,6 +7159,10 @@ interface MergeJournalRow {
   id: string
   kind: MergeKind
   keeper_id: string
+  /** Queryable loser identity (v42). Null only on pre-backfill legacy rows. */
+  loser_id: string | null
+  /** Explicit immutable merge order (v42). Null only on pre-backfill legacy rows. */
+  seq: number | null
   loser_snapshot: string
   repointed_manifest: string
   folded_fields: string | null
@@ -7111,7 +7317,7 @@ export function mergeContacts(keeperId: string, loserId: string): Contact {
       loserAliases,
       keeperBefore: { meetingIds: keeperMeetingIds, speakerIds: keeperSpeakerIds }
     }
-    writeMergeJournalNoSave('contact', keeperId, loser, manifest, foldedFields)
+    writeMergeJournalNoSave('contact', keeperId, loser.id, loser, manifest, foldedFields)
 
     return queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [keeperId])!
   })
@@ -7154,22 +7360,124 @@ function diffFoldedFields(
 function writeMergeJournalNoSave(
   kind: MergeKind,
   keeperId: string,
+  loserId: string,
   loserRow: unknown,
   manifest: ContactMergeManifest | ProjectMergeManifest,
   foldedFields: Record<string, { from: string | null; to: string | null }>
 ): void {
+  // seq: explicit immutable merge order (v42) — assigned monotonically at write
+  // time so the newest-first unmerge guard never depends on rowid or timestamps.
   runNoSave(
-    `INSERT INTO merge_journal (id, kind, keeper_id, loser_snapshot, repointed_manifest, folded_fields, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO merge_journal (id, kind, keeper_id, loser_id, seq, loser_snapshot, repointed_manifest, folded_fields, created_at)
+     VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM merge_journal), ?, ?, ?, ?)`,
     [
       randomUUID(),
       kind,
       keeperId,
+      loserId,
       JSON.stringify(loserRow),
       JSON.stringify(manifest),
       Object.keys(foldedFields).length ? JSON.stringify(foldedFields) : null,
       new Date().toISOString()
     ]
+  )
+}
+
+/**
+ * Typed ordering failure for unmerge: a newer, still-open merge depends on one
+ * of this journal's entities. Carries the blocking journal's id (and its
+ * loser's display name when parseable) so the IPC layer can surface a precise,
+ * actionable rejection instead of a generic database error.
+ */
+export class MergeOrderConflictError extends Error {
+  constructor(
+    public readonly blockingJournalId: string,
+    public readonly blockingLoserName: string | null,
+    message: string
+  ) {
+    super(message)
+    this.name = 'MergeOrderConflictError'
+  }
+}
+
+/**
+ * Dependency-aware newest-first guard, shared by {@link unmergeContacts} and
+ * {@link unmergeProjects}. Journals are delta-based: folded_fields records the
+ * change from the state the PREVIOUS merge left behind, and a merge's manifest
+ * assumes its keeper/loser rows exist exactly as the merges before it arranged
+ * them. Undoing a journal while a NEWER open journal touches either of its
+ * entities therefore corrupts state two ways:
+ *   - same keeper: an older restore rewinds folded fields (origin, tags) out
+ *     from under the newer merge's still-folded data (provenance laundering);
+ *   - keeper-of-keeper chains: J1 = A->D, then J2 = D->E deletes D. Unmerging
+ *     J1 first "recreates" A against a keeper that no longer exists, skipping
+ *     every link move, while J2's snapshot of D still contains A's folded data
+ *     — duplication and misattribution on the later unwind.
+ * Blocking on ANY newer open journal (same kind) that shares the keeper or the
+ * loser id makes newest-first unwinding always legal and everything else
+ * rejected — correctness by induction, no delta reconstruction. Ordering keys
+ * on the explicit immutable seq column, never rowid.
+ */
+function assertNewestFirstUnmerge(row: MergeJournalRow): void {
+  // Fail-closed on journals the ordering system cannot place: a NULL seq
+  // (partially-applied v42 that the boot-time repair backfill has not healed
+  // yet) must NEVER be silently ordered as zero — that would exempt the row
+  // from the guard entirely and reopen the out-of-order corruption class.
+  if (row.seq === null || row.seq === undefined) {
+    throw new Error(
+      `Merge journal ${row.id} has no merge-order sequence (seq) and cannot be safely undone. ` +
+        'Restart the app so the repair pass can backfill journal ordering, then retry.'
+    )
+  }
+  // ...and symmetrically: while ANY open journal of this kind is unsequenced,
+  // "newer than" is unknowable for the whole kind (a NULL-seq row can never
+  // match `seq > ?`, so it could silently fail to block an older undo). Pause
+  // undo for the kind until the backfill heals it — transient by construction,
+  // since seq backfill is unconditional on every boot and snapshot-independent.
+  const unsequenced = queryOne<{ id: string }>(
+    'SELECT id FROM merge_journal WHERE kind = ? AND undone_at IS NULL AND seq IS NULL LIMIT 1',
+    [row.kind]
+  )
+  if (unsequenced) {
+    throw new Error(
+      `Merge journal ${unsequenced.id} has no merge-order sequence (seq), so ${row.kind} merges cannot be ` +
+        'safely undone right now. Restart the app so the repair pass can backfill journal ordering, then retry.'
+    )
+  }
+  // Fail-closed on journals the undo cannot faithfully replay: if loser_id was
+  // never backfilled AND the snapshot is unparseable, the loser cannot be
+  // recreated from it — reject here with a precise message instead of letting
+  // JSON.parse explode mid-unmerge.
+  let loserId: string | null = row.loser_id
+  if (loserId === null || loserId === undefined) {
+    try {
+      loserId = (JSON.parse(row.loser_snapshot) as { id?: string }).id ?? null
+    } catch {
+      throw new Error(
+        `Merge journal ${row.id} has an unreadable loser snapshot; this merge cannot be undone.`
+      )
+    }
+  }
+  const newer = queryOne<{ id: string; loser_snapshot: string }>(
+    `SELECT id, loser_snapshot FROM merge_journal
+     WHERE kind = ? AND undone_at IS NULL AND seq > ?
+       AND (keeper_id = ? OR keeper_id = ? OR loser_id = ? OR loser_id = ?)
+     ORDER BY seq DESC LIMIT 1`,
+    [row.kind, row.seq, row.keeper_id, loserId, row.keeper_id, loserId]
+  )
+  if (!newer) return
+  let blockingName: string | null = null
+  try {
+    blockingName = (JSON.parse(newer.loser_snapshot) as { name?: string }).name ?? null
+  } catch {
+    /* name stays null */
+  }
+  throw new MergeOrderConflictError(
+    newer.id,
+    blockingName,
+    `Merges must be undone newest-first: undo the newer merge${
+      blockingName ? ` of "${blockingName}"` : ''
+    } (${newer.id}) before this one`
   )
 }
 
@@ -7686,6 +7994,13 @@ export function unmergeContacts(journalId: string): UnmergeResult {
   return runInTransaction(() => {
     const row = loadOpenJournal(journalId, 'contact')
     const keeperId = row.keeper_id
+
+    // Dependency-aware newest-first guard (v42): contacts share the delta-based
+    // merge_journal model, so out-of-order undo corrupts cumulative folded
+    // fields (tags union, widened seen-spans) and hits the same
+    // keeper-of-keeper hole as projects. One shared guard for both kinds.
+    assertNewestFirstUnmerge(row)
+
     const loser = JSON.parse(row.loser_snapshot) as Contact
     const manifest = JSON.parse(row.repointed_manifest) as ContactMergeManifest
 
@@ -7846,6 +8161,39 @@ export function unmergeContacts(journalId: string): UnmergeResult {
       restored: { meetingLinks, speakerLinks, knowledgeLinks: 0, aliases: aliasesRestored, fieldsRestored, skipped },
       orphanedSinceMerge
     }
+  })
+}
+
+/**
+ * ATOMICALLY reverse a GROUP of contact merges (the group-merge Undo). Every
+ * given journal is unwound newest-first (ordered by seq, regardless of caller
+ * order) inside ONE transaction: any rejection — order conflict, missing or
+ * unsequenced journal, unreadable snapshot, already-unmerged — rolls the WHOLE
+ * group back and rethrows that journal's typed error, leaving the group state
+ * exactly as before the call (fully re-attemptable).
+ *
+ * Why atomic: per-journal unmerges each commit independently, so a
+ * mid-sequence failure used to leave the newest journals undone and the older
+ * ones unreachable — a retry started at the already-undone newest journal, was
+ * rejected, and stopped. The engine's re-entrant runInTransaction folds each
+ * inner unmergeContacts transaction into this outer one, making the rollback
+ * total.
+ */
+export function unmergeContactsGroup(journalIds: string[]): UnmergeResult[] {
+  if (journalIds.length === 0) return []
+  return runInTransaction(() => {
+    // Newest-first by seq. Unknown ids sort last and fail inside
+    // unmergeContacts with the precise not-found error; NULL-seq rows are
+    // rejected fail-closed by the ordering guard. Duplicates are collapsed so
+    // one id cannot trip the already-unmerged rejection against itself.
+    const unique = [...new Set(journalIds)]
+    const seqOf = new Map<string, number>()
+    for (const id of unique) {
+      const r = queryOne<{ seq: number | null }>('SELECT seq FROM merge_journal WHERE id = ?', [id])
+      if (r && r.seq !== null) seqOf.set(id, r.seq)
+    }
+    const ordered = unique.sort((a, b) => (seqOf.get(b) ?? -1) - (seqOf.get(a) ?? -1))
+    return ordered.map((id) => unmergeContacts(id))
   })
 }
 
@@ -8324,6 +8672,12 @@ export interface Project {
   status: string
   folder_path: string | null
   url: string | null
+  /**
+   * Durable provenance (v42): 'manual' (explicit user create) or 'discovered'
+   * (reconciler auto-create from a transcript). null = legacy/unknown — treated
+   * as NOT dismissable (fail-closed).
+   */
+  origin: 'manual' | 'discovered' | null
   created_at: string
   /** v45 entity origin: 'user' | 'transcript' | null (legacy). */
   source?: string | null
@@ -8382,18 +8736,20 @@ export function getProjectById(id: string): Project | undefined {
   return queryOne<Project>('SELECT * FROM projects WHERE id = ?', [id])
 }
 
-export function createProject(project: Omit<Project, 'created_at' | 'folder_path' | 'url'>): Project {
-  // v45/round-28: an explicit user create ⇒ entity source 'user' (always visible on
-  // non-owner identity surfaces). Transcript-extracted projects are minted by
-  // applyTranscriptEntities' raw INSERT with source='transcript'.
+export function createProject(project: Omit<Project, 'created_at' | 'folder_path' | 'url' | 'origin'>): Project {
+  // This function IS the manual path — it stamps origin='manual' itself so no
+  // caller can accidentally (or deliberately) mint a dismissable project here.
+  // v45/round-28: an explicit user create also ⇒ entity source 'user' (always
+  // visible on non-owner identity surfaces). Transcript-extracted projects are
+  // minted by applyTranscriptEntities' raw INSERT with source='transcript'.
   run(
-    "INSERT INTO projects (id, name, description, status, source) VALUES (?, ?, ?, ?, 'user')",
+    "INSERT INTO projects (id, name, description, status, source, origin) VALUES (?, ?, ?, ?, 'user', 'manual')",
     [project.id, project.name, project.description, project.status || 'active']
   )
   // Manual beats rejection: an explicit create clears any discovery tombstone for
   // this name, so future transcript mentions resolve and link to it normally.
   clearProjectDiscoveryRejection(project.name)
-  return { ...project, folder_path: null, url: null, created_at: new Date().toISOString() }
+  return { ...project, folder_path: null, url: null, origin: 'manual', created_at: new Date().toISOString() }
 }
 
 // ---------------------------------------------------------------------------
@@ -8435,6 +8791,48 @@ export function clearProjectDiscoveryRejection(name: string): void {
   const norm = normalizeName(name)
   if (!norm) return
   run('DELETE FROM project_discovery_rejections WHERE name_norm = ?', [norm])
+}
+
+/** Typed failure reasons for {@link dismissDiscoveredProject}. */
+export class DismissDiscoveredError extends Error {
+  constructor(public readonly code: 'NOT_FOUND' | 'NOT_DISCOVERED', message: string) {
+    super(message)
+    this.name = 'DismissDiscoveredError'
+  }
+}
+
+/**
+ * Dismiss an auto-discovered project: verify provenance, record the durable
+ * tombstone, and delete the row — all in ONE transaction.
+ *
+ * Provenance is enforced HERE, in the database layer, not in the renderer: the
+ * row's origin (v42) must be exactly 'discovered'. 'manual' and NULL (legacy/
+ * unknown) are rejected fail-closed, so a stale UI, a bug, or a compromised
+ * renderer invoking the IPC channel directly can never cascade-delete a
+ * manually created project through this path. (Plain projects:delete remains
+ * the explicit, tombstone-free removal for any project.)
+ */
+export function dismissDiscoveredProject(id: string): void {
+  runInTransaction(() => {
+    const project = queryOne<Project>('SELECT * FROM projects WHERE id = ?', [id])
+    if (!project) {
+      throw new DismissDiscoveredError('NOT_FOUND', `Project with ID ${id} not found`)
+    }
+    if (project.origin !== 'discovered') {
+      throw new DismissDiscoveredError(
+        'NOT_DISCOVERED',
+        'Only auto-discovered projects can be dismissed. This project was created manually ' +
+          '(or predates provenance tracking) — delete it explicitly instead.'
+      )
+    }
+    const sourceMeeting = queryOne<{ meeting_id: string }>(
+      'SELECT mp.meeting_id FROM meeting_projects mp JOIN meetings m ON m.id = mp.meeting_id ' +
+        'WHERE mp.project_id = ? ORDER BY m.start_time DESC LIMIT 1',
+      [id]
+    )
+    addProjectDiscoveryRejection(project.name, sourceMeeting?.meeting_id ?? null)
+    run('DELETE FROM projects WHERE id = ?', [id])
+  })
 }
 
 export interface ProjectUpdateFields {
@@ -8633,12 +9031,29 @@ export function mergeProjects(keeperId: string, loserId: string): Project {
     const notEmpty = (v: string | null | undefined) => !!(v && v.trim())
     const description = notEmpty(keeper.description) ? keeper.description : loser.description ?? null
     const status = notEmpty(keeper.status) ? keeper.status : loser.status || 'active'
+    // Provenance dominance (v42): the merged row now contains BOTH projects'
+    // data, so it may only stay 'discovered' (dismissable) when both inputs were
+    // 'discovered'. 'manual' dominates ('manual' merged either way is guarded),
+    // and NULL (legacy/unknown) dominates 'discovered' — fail-closed: data of
+    // unproven origin must never become tombstone-deletable through a merge.
+    // Journaled in folded_fields, so unmerge restores the keeper's own origin.
+    const origin: Project['origin'] =
+      keeper.origin === 'manual' || loser.origin === 'manual'
+        ? 'manual'
+        : keeper.origin === 'discovered' && loser.origin === 'discovered'
+          ? 'discovered'
+          : null
     const foldedFields = diffFoldedFields(
-      { description: keeper.description, status: keeper.status },
-      { description, status }
+      { description: keeper.description, status: keeper.status, origin: keeper.origin },
+      { description, status, origin }
     )
 
-    runNoSave('UPDATE projects SET description = ?, status = ? WHERE id = ?', [description, status, keeperId])
+    runNoSave('UPDATE projects SET description = ?, status = ?, origin = ? WHERE id = ?', [
+      description,
+      status,
+      origin,
+      keeperId
+    ])
     runNoSave('DELETE FROM projects WHERE id = ?', [loserId])
 
     const manifest: ProjectMergeManifest = {
@@ -8648,7 +9063,7 @@ export function mergeProjects(keeperId: string, loserId: string): Project {
       loserAliases,
       keeperBefore: { meetingIds: keeperMeetingIds, knowledgeIds: keeperKnowledgeIds }
     }
-    writeMergeJournalNoSave('project', keeperId, loser, manifest, foldedFields)
+    writeMergeJournalNoSave('project', keeperId, loser.id, loser, manifest, foldedFields)
 
     return queryOne<Project>('SELECT * FROM projects WHERE id = ?', [keeperId])!
   })
@@ -8666,6 +9081,14 @@ export function unmergeProjects(journalId: string): UnmergeResult {
   return runInTransaction(() => {
     const row = loadOpenJournal(journalId, 'project')
     const keeperId = row.keeper_id
+
+    // Dependency-aware newest-first guard (v42): rejects this unmerge while any
+    // newer open project journal touches this journal's keeper OR loser — the
+    // same-keeper provenance-laundering case AND keeper-of-keeper chains
+    // (A->D then D->E), where D no longer exists and an early J1 undo would
+    // recreate A linkless while J2's snapshot of D still holds A's folded data.
+    assertNewestFirstUnmerge(row)
+
     const loser = JSON.parse(row.loser_snapshot) as Project
     const manifest = JSON.parse(row.repointed_manifest) as ProjectMergeManifest
 
@@ -8677,10 +9100,12 @@ export function unmergeProjects(journalId: string): UnmergeResult {
     }
 
     // 1. Recreate the loser project from the snapshot. ADV58-1: carry source/
-    //    source_recording_id so the restored project keeps its positive provenance.
+    //    source_recording_id so the restored project keeps its positive provenance;
+    //    origin preserved too — an unmerged discovered project stays dismissable,
+    //    a manual one stays guarded.
     runNoSave(
-      `INSERT INTO projects (id, name, description, status, folder_path, url, created_at, source, source_recording_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO projects (id, name, description, status, folder_path, url, origin, created_at, source, source_recording_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         loser.id,
         loser.name,
@@ -8688,6 +9113,7 @@ export function unmergeProjects(journalId: string): UnmergeResult {
         loser.status ?? 'active',
         loser.folder_path ?? null,
         loser.url ?? null,
+        loser.origin ?? null,
         loser.created_at,
         loser.source ?? null,
         loser.source_recording_id ?? null

@@ -313,7 +313,6 @@ export async function ingestFromDbTranscripts(): Promise<IngestResult> {
       // adversarial review AR-1) — it can take seconds and must not hold a
       // DB transaction open.
       const extraction = await extractGraphFromTranscript(row.full_text, meta, llm)
-
       // F16/spec-002 (AR-1, layer 2 of 2) + F18 (spec-004, Step 6): FINAL
       // eligibility is decided with a FRESH point-read at persistence time,
       // inside the SAME transaction as the graph writes + ingested-marker
@@ -330,13 +329,21 @@ export async function ingestFromDbTranscripts(): Promise<IngestResult> {
       // became eligible mid-run still ingests. Wrapping ingest+marker in one
       // transaction also makes them atomic: a mid-ingest failure rolls back
       // both.
-      runInTransaction(() => {
+      //
+      // The marker is also RE-CHECKED inside the transaction: two ingest entry
+      // points (debounced graph-sync + manual graph:ingestAll) can both pass
+      // the pre-extraction check before either commits, and the loser would
+      // re-upsert every edge (weight inflation). The transaction callback is
+      // synchronous — no await can interleave — so the recheck+writes+marker
+      // are race-free on the single better-sqlite3 connection. The marker
+      // INSERT is deliberately NOT "OR IGNORE": after both rechecks a conflict
+      // is impossible, and if one ever happens it must be loud.
+      const ingestedNow = runInTransaction(() => {
         if (!isRecordingGraphIngestable(row.recording_id)) {
-          result.skipped++
           console.log(
             `[KnowledgeGraph] Skipped non-ingestable recording ${row.recording_id} (transcript ${row.id})`
           )
-          return
+          return false
         }
 
         // F18 (AR2-4): fresh in-txn marker re-check. The outer "already
@@ -346,14 +353,11 @@ export async function ingestFromDbTranscripts(): Promise<IngestResult> {
         // is what actually prevents a double-ingest / double weight-bump: the
         // second pass to reach this line sees the first pass's marker and
         // skips, rather than re-asserting every edge a second time.
-        const alreadyInTxn = queryOne<{ transcript_id: string }>(
+        const claimed = queryOne<{ transcript_id: string }>(
           'SELECT transcript_id FROM graph_ingested_transcripts WHERE transcript_id = ?',
           [row.id]
         )
-        if (alreadyInTxn) {
-          result.skipped++
-          return
-        }
+        if (claimed) return false // lost the race — a concurrent ingest committed first
 
         ingestExtraction(store, extraction, meta, {
           now: new Date().toISOString(),
@@ -364,11 +368,13 @@ export async function ingestFromDbTranscripts(): Promise<IngestResult> {
 
         // Mark as ingested
         run(
-          'INSERT OR IGNORE INTO graph_ingested_transcripts (transcript_id, ingested_at) VALUES (?, ?)',
+          'INSERT INTO graph_ingested_transcripts (transcript_id, ingested_at) VALUES (?, ?)',
           [row.id, new Date().toISOString()]
         )
-        result.ingested++
+        return true
       })
+      if (ingestedNow) result.ingested++
+      else result.skipped++
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       result.errors.push({ transcriptId: row.id, error: msg })
@@ -466,16 +472,31 @@ export async function ingestFromFolder(folderPath: string): Promise<IngestResult
       }
 
       const extraction = await extractGraphFromTranscript(content, meta, llm)
-      ingestExtraction(store, extraction, meta, {
-        now: new Date().toISOString(),
-        resolvePerson: makePersonResolver(),
-      })
+      // Atomic + race-checked for the same reasons as ingestFromDbTranscripts
+      // above: a mid-ingest failure must not half-commit nodes/edges without
+      // the marker, and a concurrent ingest that committed during the await
+      // must be detected inside the synchronous transaction, or the loser
+      // re-upserts every edge (weight inflation).
+      const ingestedNow = runInTransaction(() => {
+        const claimed = queryOne<{ transcript_id: string }>(
+          'SELECT transcript_id FROM graph_ingested_transcripts WHERE transcript_id = ?',
+          [transcriptId]
+        )
+        if (claimed) return false // lost the race — a concurrent ingest committed first
 
-      run(
-        'INSERT OR IGNORE INTO graph_ingested_transcripts (transcript_id, ingested_at) VALUES (?, ?)',
-        [transcriptId, new Date().toISOString()]
-      )
-      result.ingested++
+        ingestExtraction(store, extraction, meta, {
+          now: new Date().toISOString(),
+          resolvePerson: makePersonResolver(),
+        })
+
+        run(
+          'INSERT INTO graph_ingested_transcripts (transcript_id, ingested_at) VALUES (?, ?)',
+          [transcriptId, new Date().toISOString()]
+        )
+        return true
+      })
+      if (ingestedNow) result.ingested++
+      else result.skipped++
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       result.errors.push({ transcriptId: file, error: msg })

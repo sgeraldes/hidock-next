@@ -193,13 +193,15 @@ describe('Database Service', () => {
   // 1. initializeDatabase — real boot + schema
   // =========================================================================
   describe('initializeDatabase()', () => {
-    it('initializes and reports the current schema version (48)', () => {
+    it('initializes and reports the current schema version (49)', () => {
       // round-31 bumped SCHEMA_VERSION 45 -> 46 (per-field role provenance, ADV29-2);
       // round-37 bumped 46 -> 47 (node-level graph provenance, ADV35-1).
+      // The merge of beta/meeting-intelligence into HEAD carried the ladder to 49
+      // (SCHEMA_VERSION = 49 in database.ts); both pre-merge sides (48, 42) are stale.
       const row = queryOne<{ version: number }>(
         'SELECT version FROM schema_version ORDER BY version DESC LIMIT 1'
       )
-      expect(row?.version).toBe(48)
+      expect(row?.version).toBe(49)
     })
 
     it('creates the expected core tables', () => {

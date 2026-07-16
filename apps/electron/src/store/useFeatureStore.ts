@@ -92,6 +92,17 @@ export const useFeatureResolved = (id: FeatureId): ResolvedFeature | undefined =
 
 export const usePendingRestart = (): FeatureId[] => useFeatureStore((s) => s.pendingRestart)
 
+/**
+ * Pending-DISABLE (round-3): the feature is desired-off but was active at boot —
+ * a restart is pending to fully unload it. Main keeps its teardown/observation
+ * IPC open (initiation is blocked), so device/Sync surfaces must stay VISIBLE in
+ * this state — hiding them would make the reachable teardown controls
+ * (disconnect, cancel download, reset) undiscoverable while USB work may still
+ * be in flight.
+ */
+export const useFeaturePendingDisable = (id: FeatureId): boolean =>
+  useFeatureStore((s) => !(s.resolved[id]?.enabled ?? true) && s.pendingRestart.includes(id))
+
 /** Resolve the feature owning a route/nav path (null = floor/unowned → always on). */
 export function featureForPath(pathname: string): FeatureId | null {
   return routeFeature(pathname)

@@ -187,6 +187,40 @@ describe('knowledge-graph-service', () => {
       expect(result.errors).toHaveLength(1)
       expect(result.errors[0].error).toContain('API rate limit')
     })
+
+    it('concurrent ingest runs do not double-ingest or inflate edge weights', async () => {
+      dbRun(`INSERT OR IGNORE INTO recordings (id, filename, date_recorded, meeting_id) VALUES (?, ?, ?, ?)`,
+        ['rec-race', 'race.hda', '2026-06-01', null])
+      dbRun(`INSERT OR IGNORE INTO transcripts (id, recording_id, full_text, language) VALUES (?, ?, ?, ?)`,
+        ['tx-race', 'rec-race', 'Alice discussed TypeScript.', 'en'])
+
+      // Hold BOTH extractions on one gate so both runs pass the
+      // pre-extraction marker check before either can commit — the exact
+      // race between debounced graph-sync and a manual graph:ingestAll.
+      let release!: (v: string) => void
+      const gate = new Promise<string>((r) => { release = r })
+      ;(complete as any).mockImplementation(() => gate)
+
+      const p1 = ingestFromDbTranscripts()
+      const p2 = ingestFromDbTranscripts()
+      // Let both runs reach the awaited extraction before releasing it.
+      await new Promise((r) => setImmediate(r))
+      release(FAKE_JSON)
+      const [r1, r2] = await Promise.all([p1, p2])
+
+      // Exactly one run ingests; the loser detects the committed marker
+      // inside its transaction and skips cleanly — no error, no rollback.
+      expect(r1.ingested + r2.ingested).toBe(1)
+      expect(r1.skipped + r2.skipped).toBe(1)
+      expect([...r1.errors, ...r2.errors]).toHaveLength(0)
+
+      // Single ingest's worth of graph writes: no edge weight was
+      // re-incremented by the losing run.
+      const store = getKnowledgeGraphStore()
+      const weights = store.db.queryAll<{ weight: number }>('SELECT weight FROM graph_edges')
+      expect(weights.length).toBeGreaterThan(0)
+      expect(Math.max(...weights.map((w) => w.weight))).toBe(1)
+    })
   })
 
   // =========================================================================
