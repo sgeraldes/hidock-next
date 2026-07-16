@@ -2177,6 +2177,13 @@ export function renameGraphEntity(entityId: string, newLabel: string): RenameEnt
   const node = store.getNode(nodeId)
   if (!node) return { outcome: 'noop', scope: 'graph', nodeId: null }
 
+  // ADV33-2 (round-35): execution-time NODE-visibility recheck (TOCTOU). Refuse a
+  // rename of a node that became personal / deleted / value-excluded / hard-purged /
+  // zero-provenance AFTER the inspector loaded — a contact-scoped rename would emit
+  // entity:contact-changed and re-expose a now-hidden node's identity everywhere.
+  // Fail-closed no-op.
+  if (!isNodeMutable(store, nodeId, node)) return { outcome: 'noop', scope: 'graph', nodeId }
+
   const contactId = contactIdOfNode(node)
   if (node.type === 'person' && contactId) {
     // ADV30-2 (round-32): refuse a contact-scoped rename when the backing contact is
@@ -2278,8 +2285,17 @@ export interface LinkContactResult {
  * (manual/sovereign tier). Reuses the contacts identity platform — no new store.
  */
 export function linkNodeToContact(entityId: string, contactId: string): LinkContactResult {
+  const store = getKnowledgeGraphStore()
   const nodeId = resolveEntityToNodeId(entityId)
   if (!nodeId) throw new Error('Node not found')
+  const node = store.getNode(nodeId)
+  if (!node) throw new Error('Node not found')
+  // ADV33-2 (round-35): execution-time NODE-visibility recheck (TOCTOU). Refuse
+  // binding a node that became personal / deleted / value-excluded / hard-purged /
+  // zero-provenance AFTER the inspector loaded — the bind writes a manual alias +
+  // re-keys the node onto the contact identity, re-exposing a now-hidden node.
+  // Fail-closed refusal BEFORE the target-contact visibility check.
+  if (!isNodeMutable(store, nodeId, node)) throw new Error('Node not available')
   const contact = getContactById(contactId)
   if (!contact) throw new Error('Contact not found')
   // ADV30-2 (round-32): refuse binding a (visible) graph node to a SUPPRESSED contact.
@@ -2306,6 +2322,15 @@ export function convertNodeToContact(
   const node = store.getNode(nodeId)
   if (!node) throw new Error('Node not found')
   if (node.type !== 'person') throw new Error('Only person nodes can become contacts')
+
+  // ADV33-2 (round-35): execution-time NODE-visibility recheck (TOCTOU). The
+  // inspector may have loaded this node while it was visible, but by the time the
+  // user clicks "convert" the node's source recording could have become
+  // personal / deleted / value-excluded / hard-purged (all its edges now suppressed).
+  // Converting a now-HIDDEN node would mint a source='user' contact that is ALWAYS
+  // visible — permanently laundering excluded-derived identity. Refuse fail-closed
+  // (missing node or fail-closed exclusion lookup ⇒ refuse) BEFORE any create/bind.
+  if (!isNodeMutable(store, nodeId, node)) throw new Error('Node not available')
 
   const existingContactId = contactIdOfNode(node)
   // ADV31-1 (round-33): only REUSE the node's existing backing contact when it is
@@ -2349,6 +2374,11 @@ export function setNodePronouns(entityId: string, pronouns: string): boolean {
   const store = getKnowledgeGraphStore()
   const nodeId = resolveEntityToNodeId(entityId)
   if (!nodeId) return false
+  // ADV33-2 (round-35): execution-time NODE-visibility recheck (TOCTOU). Refuse
+  // mutating props on a node that became personal / deleted / value-excluded /
+  // hard-purged / zero-provenance AFTER the inspector loaded. Fail-closed no-op.
+  const node = store.getNode(nodeId)
+  if (!isNodeMutable(store, nodeId, node)) return false
   const value = (pronouns || '').trim()
   return setNodeProps(store, nodeId, { pronouns: value ? value : null })
 }
@@ -2372,12 +2402,39 @@ export interface MergePreviewDTO {
 }
 
 /**
+ * ADV33-2 (round-35) — the SHARED execution-time NODE-visibility guard for EVERY
+ * point graph mutation (convert / rename / link / pronouns / merge). At EXECUTION
+ * time — NOT inspector-load time — the target node must still be VISIBLE under the
+ * CURRENT exclusion set: a node that became personal / deleted / value-excluded /
+ * hard-purged, or whose incident edges are now ALL provenance-suppressed / legacy
+ * zero-provenance, is NOT mutable. This closes the TOCTOU where a stale mutation
+ * (worst case: convertNodeToContact minting an always-visible source='user' contact)
+ * could promote, rename, re-bind, or fold a now-HIDDEN node and thereby launder
+ * excluded-derived identity. Fail-closed: a missing node OR a fail-closed exclusion
+ * lookup ⇒ NOT mutable (refuse; no state change). Backing-CONTACT visibility is
+ * mutation-specific (convert's fall-through-to-fresh, rename's contact path, link's
+ * target, merge's both nodes) and enforced at each call site / by isNodeMergeEligible.
+ */
+function isNodeMutable(
+  store: KnowledgeGraphStore,
+  nodeId: string,
+  node: GraphNode | undefined,
+  exclusion: GroundingExclusion = getGroundingExclusionSet(true)
+): boolean {
+  if (!node) return false
+  if (exclusion.failClosed) return false
+  return isNodeVisibleUnderExclusion(store, nodeId, exclusion)
+}
+
+/**
  * ADV31-2 / ADV32-2 (round-34) — merge eligibility for a node on a NON-OWNER
  * surface, SHARED by {@link mergeGraphPreview} and {@link mergeGraphNodes} so the
- * preview and the commit AGREE. A node is merge-eligible only when it is VISIBLE
- * under exclusion AND (when contact-backed) its BACKING contact is visible.
- * Fail-closed: a missing node, an excluded-only node, a suppressed backing contact,
- * or a visibility-lookup failure ⇒ NOT eligible.
+ * preview and the commit AGREE. Builds on the shared {@link isNodeMutable}
+ * execution-time NODE-visibility guard and additionally requires that, when the node
+ * is contact-backed, its BACKING contact is visible (merge folds edges into a
+ * contact-keyed keeper / calls mergeContacts, so a suppressed backing contact must
+ * refuse the whole merge). Fail-closed: a missing node, an excluded-only node, a
+ * suppressed backing contact, or a visibility-lookup failure ⇒ NOT eligible.
  */
 function isNodeMergeEligible(
   store: KnowledgeGraphStore,
@@ -2385,9 +2442,8 @@ function isNodeMergeEligible(
   node: GraphNode | undefined,
   exclusion: GroundingExclusion
 ): boolean {
-  if (!node) return false
-  if (exclusion.failClosed) return false
-  if (!isNodeVisibleUnderExclusion(store, nodeId, exclusion)) return false
+  if (!isNodeMutable(store, nodeId, node, exclusion)) return false
+  if (!node) return false // narrowing (isNodeMutable already refused a missing node)
   const contact = contactIdOfNode(node)
   if (contact && !isContactVisible(contact)) return false
   return true
