@@ -31,6 +31,7 @@
 import { GoogleGenerativeAI } from '@google/generative-ai'
 import { getRecordingById, resolveRecordingId, queryOne, queryAll, run } from './database'
 import { isRecordingEligible } from './recording-eligibility'
+import { eligibleToGenerate } from './brains/eligibility'
 
 export interface SentimentSegment {
   startSec: number
@@ -478,13 +479,34 @@ export function buildSentimentWindows(
   return windows
 }
 
-/** Scores keyed by window index, each clamped to [-1, 1]. */
-export type WindowScorer = (windows: SentimentWindow[]) => Promise<Map<number, number>>
+/**
+ * Scores keyed by window index, each clamped to [-1, 1].
+ *
+ * ADV43-3 (round-45) — the scorer receives a fail-closed `shouldGenerate` gate.
+ * The production scorer (geminiWindowScorer) awaits a dynamic config import
+ * BEFORE its `generateContent` call, so an owner exclusion committed during that
+ * setup await would otherwise reach Gemini unobserved. The scorer re-evaluates
+ * the gate SYNCHRONOUSLY after all awaited setup, immediately before the provider
+ * call, and aborts (returns an empty score map — sentiment simply omitted) on a
+ * `false` return or a throw. Absent ⇒ no gate (injected test scorers ignore it).
+ */
+export type WindowScorer = (
+  windows: SentimentWindow[],
+  shouldGenerate?: () => boolean
+) => Promise<Map<number, number>>
 
 export interface SentimentOptions {
   targetWindowSec?: number
   /** Inject a scorer (tests). Defaults to the Gemini scorer. */
   scoreWindows?: WindowScorer
+  /**
+   * ADV43-3 (round-45) — MANDATORY fail-closed eligibility gate for the
+   * PRODUCTION scorer. analyzeTimeline wires its recording-eligibility check
+   * here; deriveSentimentSegments forwards it to the scorer, which re-checks it
+   * after its setup await and immediately before generateContent. Omitted ⇒ no
+   * gate (direct/test callers).
+   */
+  shouldGenerate?: () => boolean
   /**
    * Invoked with the RAW scorer error when sentiment scoring fails (the series
    * is then omitted). Lets analyzeTimeline classify the failure while this
@@ -508,7 +530,9 @@ export async function deriveSentimentSegments(
   const scorer = opts.scoreWindows ?? geminiWindowScorer
   let scores: Map<number, number>
   try {
-    scores = await scorer(windows)
+    // ADV43-3 (round-45) — forward the fail-closed gate so the production scorer
+    // re-checks eligibility after its setup await, immediately before the Gemini call.
+    scores = await scorer(windows, opts.shouldGenerate)
   } catch (e) {
     console.warn('[Timeline] sentiment scoring failed:', e instanceof Error ? e.message : e)
     opts.onError?.(e)
@@ -529,13 +553,20 @@ export async function deriveSentimentSegments(
  * empty map when Gemini is not configured, so sentiment is simply omitted rather
  * than failing the whole analysis.
  */
-export const geminiWindowScorer: WindowScorer = async (windows) => {
+export const geminiWindowScorer: WindowScorer = async (windows, shouldGenerate) => {
   // Lazy import so this leaf module doesn't pull in config.ts (which touches the
   // Electron `app` at load) — keeps the pure pieces testable under plain node.
   const { getConfig } = await import('./config')
   const config = getConfig()
   const apiKey = config.transcription.geminiApiKey
   if (!apiKey) return new Map()
+
+  // ADV43-3 (round-45) — the dynamic import above is an AWAIT between
+  // analyzeTimeline's up-front eligibility check and this provider call. Re-check
+  // the fail-closed gate SYNCHRONOUSLY here — after all awaited setup, immediately
+  // before generateContent — and ABORT (return an empty map ⇒ sentiment omitted,
+  // NO provider call) when the source became ineligible or the check throws.
+  if (!eligibleToGenerate(shouldGenerate)) return new Map()
 
   const genAI = new GoogleGenerativeAI(apiKey)
   const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-3.5-flash' })
@@ -928,6 +959,13 @@ export async function analyzeTimeline(
   const callerOnError = sentimentOpts?.onError
   const sentimentSegments = await deriveSentimentSegments(turns, {
     ...sentimentOpts,
+    // ADV43-3 (round-45) — MANDATORY fail-closed gate for the production scorer.
+    // geminiWindowScorer awaits a dynamic config import before generateContent;
+    // this re-checks recording eligibility after that await and immediately before
+    // the Gemini call, so an exclusion committed during the scorer's setup aborts
+    // the provider call (no transcript windows sent). Set AFTER the spread so it
+    // is not overridden by a caller-supplied value.
+    shouldGenerate: () => isRecordingEligible(id),
     onError: (err) => {
       analysisError = classifyAnalysisError(err)
       callerOnError?.(err)
