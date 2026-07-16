@@ -396,15 +396,33 @@ export function repairEscapedMeetingText(): number {
   return repaired
 }
 
-/** Idempotently link a contact to a meeting and refresh its meeting count/last-seen. */
-function linkContactToMeeting(contactId: string, meetingId: string | undefined, now: string): void {
+/**
+ * Idempotently link a contact to a meeting and refresh its meeting count/last-seen.
+ *
+ * v44/round-27 provenance: this helper only ever links AI-EXTRACTED / auto-resolved
+ * participants (applyTranscriptEntities + autoSplitAmbiguousBuckets), so a NEW row
+ * it writes is TRANSCRIPT-derived — tagged source='transcript' + the source
+ * recording id so the non-owner identity surfaces gate it by that recording's
+ * eligibility. A NULL sourceRecordingId leaves the row transcript-with-no-recording
+ * ⇒ ineligible fail-closed (correct: unprovenanced transcript membership).
+ */
+function linkContactToMeeting(
+  contactId: string,
+  meetingId: string | undefined,
+  now: string,
+  sourceRecordingId?: string | null
+): void {
   if (!contactId || !meetingId) return
   const link = queryOne<{ meeting_id: string }>(
     `SELECT meeting_id FROM meeting_contacts WHERE meeting_id = ? AND contact_id = ?`,
     [meetingId, contactId]
   )
   if (!link) {
-    run(`INSERT INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, 'attendee')`, [meetingId, contactId])
+    run(`INSERT INTO meeting_contacts (meeting_id, contact_id, role, source, source_recording_id) VALUES (?, ?, 'attendee', 'transcript', ?)`, [
+      meetingId,
+      contactId,
+      sourceRecordingId ?? null
+    ])
   }
   run(
     `UPDATE contacts SET
@@ -465,7 +483,7 @@ export function applyTranscriptEntities(opts: {
             // Explicitly marked Unclear — leave it unattributed, do not create.
             continue
           }
-          linkContactToMeeting(contactId, opts.meetingId, now)
+          linkContactToMeeting(contactId, opts.meetingId, now, opts.recordingId)
           continue
         }
       }
@@ -490,7 +508,7 @@ export function applyTranscriptEntities(opts: {
           contactId = id
           contacts++
         }
-        linkContactToMeeting(contactId, opts.meetingId, now)
+        linkContactToMeeting(contactId, opts.meetingId, now, opts.recordingId)
         continue
       }
 
@@ -508,12 +526,15 @@ export function applyTranscriptEntities(opts: {
         }
       } else if (res.id && res.confidence >= SUGGEST_THRESHOLD) {
         // Mid confidence — queue a reviewable suggestion; do NOT create or link.
+        // v44/round-27 (ADV26-1): persist the authoritative source recording id so
+        // this NON-graph transcript suggestion is revalidated through the recording
+        // allowlist at surface + accept (excluded/purged source ⇒ suppressed/refused).
         insertIdentitySuggestion('person', name, res.id, res.confidence, {
           method: res.method,
           meetingId: opts.meetingId,
           coOccurring: meetingAttendeeNames(),
           ...(res.rarity ? { rarity: res.rarity } : {})
-        })
+        }, opts.recordingId ? [opts.recordingId] : [])
         continue
       } else {
         // Low confidence — genuinely new person.
@@ -528,7 +549,7 @@ export function applyTranscriptEntities(opts: {
       }
 
       if (contactId && opts.meetingId) {
-        linkContactToMeeting(contactId, opts.meetingId, now)
+        linkContactToMeeting(contactId, opts.meetingId, now, opts.recordingId)
       }
     }
 
@@ -540,12 +561,13 @@ export function applyTranscriptEntities(opts: {
       if (res.id && res.confidence >= AUTO_LINK_THRESHOLD) {
         projectId = res.id
       } else if (res.id && res.confidence >= SUGGEST_THRESHOLD) {
+        // v44/round-27 (ADV26-1): persist the source recording id (see person path).
         insertIdentitySuggestion('project', projectName, res.id, res.confidence, {
           method: res.method,
           meetingId: opts.meetingId,
           coOccurring: [],
           ...(res.rarity ? { rarity: res.rarity } : {})
-        })
+        }, opts.recordingId ? [opts.recordingId] : [])
       } else if (isProjectDiscoveryRejected(projectName)) {
         // Dismissed discovery — a durable tombstone (v41) blocks silent
         // re-creation on re-analysis. Only the AUTO-create path is blocked:
@@ -563,7 +585,13 @@ export function applyTranscriptEntities(opts: {
           [opts.meetingId, projectId]
         )
         if (!link) {
-          run(`INSERT INTO meeting_projects (meeting_id, project_id) VALUES (?, ?)`, [opts.meetingId, projectId])
+          // v44 provenance: this project link is AI-extracted from the transcript ⇒
+          // 'transcript' + the source recording id (gated by its eligibility).
+          run(`INSERT INTO meeting_projects (meeting_id, project_id, source, source_recording_id) VALUES (?, ?, 'transcript', ?)`, [
+            opts.meetingId,
+            projectId,
+            opts.recordingId ?? null
+          ])
         }
         projectLinked = true
       }
@@ -1175,7 +1203,7 @@ export function autoSplitAmbiguousBuckets(): { buckets: number; resolved: number
     runInTransaction(() => {
       for (const r of toResolve) {
         recordMentionResolutionNoSave(r.recordingId, res.name, r.bestGuessId as string, r.method, methodConfidence(r.method))
-        linkContactToMeeting(r.bestGuessId as string, r.meetingId ?? undefined, now)
+        linkContactToMeeting(r.bestGuessId as string, r.meetingId ?? undefined, now, r.recordingId)
         resolvedTotal++
       }
     })
