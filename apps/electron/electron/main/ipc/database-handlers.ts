@@ -48,7 +48,19 @@ export function registerDatabaseHandlers(): void {
     return getRecordings()
   })
 
+  // ADV25-4 (round-26) — db:get-recording is a NON-OWNER point read. Its sole
+  // preload consumer (`recordings.getById`) is ActionableDetail, which resolves an
+  // actionable's source recording on expand: the actionable list is eligibility-
+  // gated, but eligibility can change between listing and expand (the recording is
+  // trashed / marked personal / value-excluded / hard-purged), so an earlier-gated
+  // id is NOT sufficient for end-to-end fail-closed. Gate the point read through
+  // the shared positive allowlist: null on ineligible OR on any eligibility-lookup
+  // failure. ActionableDetail already handles null (renders a neutral "none"
+  // state). No owner-only variant is needed — no owner-management surface calls
+  // recordings.getById (Library/Trash/SourceReader use their own accessors).
   ipcMain.handle('db:get-recording', async (_, id: string) => {
+    const { eligible, failClosed } = filterEligibleRecordingIds([id])
+    if (failClosed || !eligible.has(id)) return null
     return getRecordingById(id)
   })
 
