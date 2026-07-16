@@ -7269,6 +7269,33 @@ function reverseGraphFold(snapshot: GraphMergeSnapshot | undefined): void {
   const K = snapshot.keeperNode
   if (!L) return
 
+  // ADV57-1 (round-59) Part B — belt-and-suspenders against a manifest that still
+  // references a HARD-PURGED recording (F17 permanent delete). Part A (the
+  // purge-time journal scrub) normally strips those rows AT REST, but a manifest
+  // written before that fix — or by any path that skipped the scrub — could still
+  // carry a snapshot edge_source whose recording no longer exists. Re-inserting it
+  // would resurrect unprovenanced context-graph traces after a purge, which is
+  // exactly what F17 forbids. So: never re-insert a snapshot source whose recording
+  // is gone, and drop any snapshot edge whose sources are ALL gone.
+  //
+  // A source with no recording_id attribution is left untouched (it is not a purge
+  // target). A structurally source-less edge (no snapshot edge_source rows at all)
+  // is likewise never dropped — only an edge that HAD sources and lost every one of
+  // them to a purge is suppressed. In the normal (no-purge) round-trip every source
+  // recording still exists, so this filter is a no-op and byte-identity is preserved.
+  const recExistsCache = new Map<string, boolean>()
+  const sourceStillValid = (s: Record<string, unknown>): boolean => {
+    const rid = s.recording_id
+    if (rid == null) return true // no recording attribution — not a purge target
+    const key = String(rid)
+    let ex = recExistsCache.get(key)
+    if (ex === undefined) {
+      ex = !!queryOne<{ x: number }>('SELECT 1 AS x FROM recordings WHERE id = ?', [key])
+      recExistsCache.set(key, ex)
+    }
+    return ex
+  }
+
   // 1. Recreate the loser node (idempotent — skip if a node with its id already exists).
   if (!queryOne<{ id: string }>('SELECT id FROM graph_nodes WHERE id = ?', [L])) {
     const n = snapshot.loserNode
@@ -7282,7 +7309,11 @@ function reverseGraphFold(snapshot: GraphMergeSnapshot | undefined): void {
   // 2. Reverse each loser edge.
   for (const le of snapshot.edges) {
     const leId = le.id as string
-    const leSources = snapshot.edgeSources.filter((s) => s.edge_id === leId)
+    const rawSources = snapshot.edgeSources.filter((s) => s.edge_id === leId)
+    // Part B: only re-insert sources whose recording still exists; if the edge HAD
+    // sources but every one is now purged, skip the edge entirely (do not resurrect it).
+    const leSources = rawSources.filter(sourceStillValid)
+    if (rawSources.length > 0 && leSources.length === 0) continue
     const exists = queryOne<{ id: string }>('SELECT id FROM graph_edges WHERE id = ?', [leId])
     if (exists) {
       // Non-colliding repoint (or untouched): restore endpoints/weight + sources exactly.
@@ -7332,6 +7363,143 @@ function reverseGraphFold(snapshot: GraphMergeSnapshot | undefined): void {
     reinsertGraphEdge(le)
     for (const s of leSources) reinsertGraphEdgeSource(s)
   }
+}
+
+// -----------------------------------------------------------------------------
+// ADV57-1 (round-59): a HARD-PURGE (F17 permanent delete) of a recording R must
+// also strip R's contribution from every OPEN merge_journal graph snapshot, not
+// just from the live graph. Round-58 journaled a full loser-subgraph snapshot
+// (loser node + incident edges + their graph_edge_sources) so unmerge could
+// reverse the graph fold. But `removeRecordingProvenanceCore` scrubbed only the
+// LIVE graph; the journal snapshot kept recoverable full-row copies referencing
+// R. A later UNMERGE then re-inserted R's edges + edge_sources — resurrecting
+// unprovenanced traces of a permanently-deleted recording, AND meaning the
+// retained manifest itself preserved recoverable node/edge data after a purge.
+//
+// This scrub runs INSIDE the same purge transaction as the live-graph cleanup
+// (invoked from removeRecordingProvenanceCore), so the manifest-at-rest is
+// trimmed atomically with the live graph. It mirrors the live purge's semantics
+// EXACTLY so a later reverseGraphFold stays byte-consistent with the (now purged)
+// live graph:
+//   • drop R's edge_source rows from the snapshot;
+//   • an edge left with ZERO snapshot sources (was sole-sourced by R) is DROPPED —
+//     the live purge would have deleted it, so unmerge must not resurrect it;
+//   • an edge that keeps ≥1 source (genuinely shared with a surviving recording)
+//     is KEPT with its snapshot weight decremented by R's removed assertion sum,
+//     floored at 1 — exactly what removeRecordingProvenance did to the live edge;
+//   • the loser NODE is kept iff it retains ≥1 surviving snapshot edge OR live
+//     orphan-node GC would keep it anyway (persons and protected projects are
+//     never GC'd); otherwise the snapshot node is nulled so unmerge cannot
+//     resurrect a source-less node.
+// -----------------------------------------------------------------------------
+
+/** Node types the live purge GCs when orphaned (mirror of GC_ELIGIBLE_TYPES in
+ *  @hidock/knowledge-graph recording-provenance.ts). Person is never GC'd;
+ *  project is conditionally protected; every other type is left alone. */
+const JOURNAL_GC_ELIGIBLE_TYPES = new Set(['topic', 'decision', 'action_item', 'next_step', 'skill', 'risk'])
+
+/**
+ * Would the live orphan-node GC KEEP this (now edge-less in the snapshot) node?
+ * Mirrors `removeRecordingProvenance`'s node-GC policy: never GC a person; GC a
+ * project only when it is NOT backed by a real `projects` row (isProjectNodeProtected,
+ * name-keyed); GC the derived types; leave any other type alone.
+ */
+function journalSnapshotNodeIndependentlyKept(node: Record<string, unknown>): boolean {
+  const type = String(node.type ?? '')
+  if (type === 'person') return true // live purge never GCs a person node
+  if (type === 'project') {
+    const label = String(node.label ?? '').toLowerCase().trim()
+    const row = queryOne<{ id: string }>('SELECT id FROM projects WHERE LOWER(name) = ?', [label])
+    return !!row // protected iff linked to a real projects row
+  }
+  return !JOURNAL_GC_ELIGIBLE_TYPES.has(type) // GC-eligible → not kept; anything else → kept
+}
+
+/**
+ * Strip a hard-purged recording's contribution from every OPEN (not-yet-undone)
+ * merge_journal graph snapshot. See the section banner for the full contract.
+ * Runs through the module-local runNoSave/queryOne so it JOINS the caller's open
+ * purge transaction (engine.ts inTransaction re-entrancy). Returns the number of
+ * journal rows whose manifest was rewritten (0 when nothing referenced R).
+ *
+ * `purgedTranscriptIds` is the same union removeRecordingProvenanceCore computes
+ * (live ∪ graph-sourced ∪ caller-supplied); a snapshot source is R's contribution
+ * when its recording_id === purgedRecordingId OR its transcript_id is in that set
+ * (the transcript match is defensive — a well-formed row already has recording_id
+ * === R, but this also catches any inconsistent row).
+ */
+export function scrubMergeJournalGraphSnapshots(purgedRecordingId: string, purgedTranscriptIds: string[]): number {
+  const txSet = new Set(purgedTranscriptIds)
+  const rows = queryAll<{ id: string; repointed_manifest: string }>(
+    'SELECT id, repointed_manifest FROM merge_journal WHERE undone_at IS NULL'
+  )
+  const isPurgedSource = (s: Record<string, unknown>): boolean =>
+    s.recording_id === purgedRecordingId || (typeof s.transcript_id === 'string' && txSet.has(s.transcript_id))
+
+  let modified = 0
+  for (const row of rows) {
+    let manifest: Record<string, unknown>
+    try {
+      manifest = JSON.parse(row.repointed_manifest) as Record<string, unknown>
+    } catch {
+      continue
+    }
+    const snap = manifest.graph as GraphMergeSnapshot | undefined
+    if (!snap) continue
+    const edgeSources = Array.isArray(snap.edgeSources) ? snap.edgeSources : []
+    const edges = Array.isArray(snap.edges) ? snap.edges : []
+    if (!edgeSources.some(isPurgedSource)) continue // nothing of R's in this snapshot
+
+    // 1. Remove R's edge_source rows; accumulate the removed assertion weight per edge.
+    const removedWeightByEdge = new Map<string, number>()
+    const keptSources: Array<Record<string, unknown>> = []
+    for (const s of edgeSources) {
+      if (isPurgedSource(s)) {
+        const eid = String(s.edge_id ?? '')
+        const amt = Number(s.assertion_count ?? 1) || 0
+        removedWeightByEdge.set(eid, (removedWeightByEdge.get(eid) ?? 0) + amt)
+      } else {
+        keptSources.push(s)
+      }
+    }
+    const survivingSourceEdgeIds = new Set(keptSources.map((s) => String(s.edge_id ?? '')))
+
+    // 2. Trim edges: drop a now-source-less edge (was sole-sourced by R); decrement a
+    //    surviving edge's weight by R's removed sum (floor 1) — mirror the live purge.
+    const trimmedEdges: Array<Record<string, unknown>> = []
+    for (const e of edges) {
+      const eid = String(e.id ?? '')
+      const removed = removedWeightByEdge.get(eid) ?? 0
+      if (removed > 0 && !survivingSourceEdgeIds.has(eid)) continue // all sources were R's → drop
+      if (removed > 0) {
+        const w = Number(e.weight ?? 1) || 1
+        trimmedEdges.push({ ...e, weight: Math.max(1, w - removed) })
+      } else {
+        trimmedEdges.push(e)
+      }
+    }
+
+    // 3. Loser node: keep iff it still has a surviving edge OR live orphan-GC keeps it.
+    let loserNode = snap.loserNode
+    if (loserNode) {
+      const nodeId = loserNode.id
+      const stillHasEdge = trimmedEdges.some((e) => e.source_id === nodeId || e.target_id === nodeId)
+      if (!stillHasEdge && !journalSnapshotNodeIndependentlyKept(loserNode)) {
+        loserNode = null
+      }
+    }
+
+    const newSnap: GraphMergeSnapshot = {
+      keeperNode: snap.keeperNode,
+      loserNode,
+      edges: trimmedEdges,
+      edgeSources: keptSources,
+    }
+    manifest.graph = newSnap
+    runNoSave('UPDATE merge_journal SET repointed_manifest = ? WHERE id = ?', [JSON.stringify(manifest), row.id])
+    modified++
+  }
+  return modified
 }
 
 /** Fetch and validate an un-undone journal row of the given kind. @throws otherwise. */

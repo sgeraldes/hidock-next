@@ -74,6 +74,7 @@ import {
   finalizeAcceptedMerge,
   captureLoserSubgraph,
   attachGraphSnapshotToJournal,
+  scrubMergeJournalGraphSnapshots,
 } from './database'
 import type { Contact, Project, IdentitySuggestion, AcceptSuggestionResult, MergeKind } from './database'
 import { getEventBus } from './event-bus'
@@ -623,6 +624,17 @@ export function removeRecordingProvenanceCore(
     meetingId,
     isProjectProtected: isProjectNodeProtected,
   })
+
+  // ADV57-1 (round-59): the live-graph scrub above is not enough — a merge_journal
+  // graph snapshot (round-58) still holds full-row copies of this recording's edges
+  // + graph_edge_sources, which a later UNMERGE would re-insert, resurrecting traces
+  // of a permanently-deleted recording. Strip this recording's contribution from
+  // every OPEN journal snapshot in the SAME transaction as the live cleanup, using
+  // the identical transcript-id set. Skipped on dryRun (F17's impact dialog writes
+  // nothing). See scrubMergeJournalGraphSnapshots for the exact trimming contract.
+  if (!dryRun) {
+    scrubMergeJournalGraphSnapshots(recordingId, transcriptIds)
+  }
 
   return {
     ok: true,
