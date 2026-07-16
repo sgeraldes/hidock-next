@@ -167,5 +167,26 @@ describe('OutputGeneratorService', () => {
       const result = await generator.generate({ templateId: 'meeting_minutes', knowledgeCaptureId: 'kc-1' })
       expect(result.content).toBe('Generated Content')
     })
+
+    // ADV41-4 (round-43) — the transcript eligibility check runs BEFORE the
+    // awaited BrainRouter.resolve (provider auth/availability). An owner deletion
+    // / personal / value-exclusion committing during that gap must be caught by a
+    // recheck immediately before brain.generate — the already-built prompt embeds
+    // the transcript, so partial dropping is impossible: refuse instead.
+    it('flips eligibility DURING brain resolution ⇒ brain.generate is NOT called (fail closed)', async () => {
+      stubCapture()
+      excludedRecordingResult = { ids: new Set<string>(), failClosed: false } // eligible at first check
+      // BrainRouter.resolve probes Ollama availability; use that await to commit
+      // the exclusion, exactly modelling a deletion landing during resolution.
+      mockOllamaIsAvailable.mockImplementation(async () => {
+        excludedRecordingResult = { ids: new Set(['rec-1']), failClosed: false }
+        return true
+      })
+      const generator = getOutputGeneratorService()
+      await expect(
+        generator.generate({ templateId: 'meeting_minutes', knowledgeCaptureId: 'kc-1' })
+      ).rejects.toThrow(/eligibility changed during provider resolution/)
+      expect(mockOllamaGenerate).not.toHaveBeenCalled()
+    })
   })
 })

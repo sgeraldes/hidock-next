@@ -177,7 +177,13 @@ class OutputGeneratorService {
     if (failClosed) {
       throw new Error('Cannot verify recording eligibility — output generation refused (fail closed)')
     }
-    const transcripts = entries.filter((e) => eligible.has(e.recordingId)).map((e) => e.text)
+    const eligibleEntries = entries.filter((e) => eligible.has(e.recordingId))
+    const transcripts = eligibleEntries.map((e) => e.text)
+    // ADV41-4 (round-43) — retain the source recording ids so eligibility can be
+    // REVALIDATED after the awaited BrainRouter.resolve below, immediately before
+    // the provider call. The prompt is built from these transcripts now, but an
+    // owner exclusion can commit during resolution.
+    const sourceRecordingIds = eligibleEntries.map((e) => e.recordingId)
 
     if (transcripts.length === 0) {
       throw new Error('No transcripts available for the selected context')
@@ -204,6 +210,21 @@ class OutputGeneratorService {
     if (!brain) {
       throw new Error(
         'No output provider available. Configure a Gemini API key in Settings or start Ollama.'
+      )
+    }
+
+    // ADV41-4 (round-43) — BrainRouter.resolve above is an await (auth /
+    // availability); an owner deletion / mark-personal / value-exclusion can
+    // commit during that gap. The prompt was assembled from eligibility
+    // snapshotted BEFORE the await, so revalidate the source recordings in the
+    // SAME synchronous step immediately before the provider call. If ANY source
+    // is now ineligible — or eligibility can't be established (fail closed) —
+    // refuse rather than send an excluded transcript to the brain (the prompt
+    // already embeds every source's text, so partial dropping is not possible).
+    const recheck = filterEligibleRecordingIds(sourceRecordingIds)
+    if (recheck.failClosed || sourceRecordingIds.some((id) => !recheck.eligible.has(id))) {
+      throw new Error(
+        'Recording eligibility changed during provider resolution — output generation refused (fail closed)'
       )
     }
 
