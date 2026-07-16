@@ -66,9 +66,10 @@ import {
   upsertContactAlias,
   getContactAliases,
   mergeContacts,
+  mergeProjects,
   getMergeImpact,
 } from './database'
-import type { Contact } from './database'
+import type { Contact, Project } from './database'
 import { getEventBus } from './event-bus'
 import { resolveContact } from './entity-resolver'
 
@@ -3057,6 +3058,80 @@ export function mergeContactsWithGraph(keeperContactId: string, loserContactId: 
   const keeperNodeId = resolveContactToNodeId(keeperContactId)
   const loserNodeId = resolveContactToNodeId(loserContactId)
   return mergeContactsFoldingNodes(keeperContactId, loserContactId, keeperNodeId, loserNodeId).contact
+}
+
+/**
+ * Resolve a PROJECT id to its backing graph project NODE id. Project nodes are
+ * NAME-KEYED (unlike person nodes, which carry `contact:<id>`): the graph keys a
+ * project node by its normalized name (`type='project' AND norm_key = normalize(name)`
+ * — see resolveEntityToNodeId step 4 and the graph key rule normalizeGraphLabel).
+ * Returns null when the project has no backing node (a project that never surfaced
+ * in an ingested transcript), so the graph fold is a graceful no-op and the relational
+ * merge still proceeds. Uses the SAME normalizer the project-node keying uses.
+ */
+function resolveProjectToNodeId(projectId: string): string | null {
+  const store = getKnowledgeGraphStore()
+  const project = queryOne<{ name: string }>('SELECT name FROM projects WHERE id = ?', [projectId])
+  if (!project) return null
+  const norm = normalizeGraphLabel(project.name)
+  if (!norm) return null
+  const node = store.db.queryOne<{ id: string }>(
+    "SELECT id FROM graph_nodes WHERE type = 'project' AND norm_key = ?",
+    [norm]
+  )
+  return node?.id ?? null
+}
+
+/**
+ * Cross-layer atomic core for a PROJECT merge: merge the relational PROJECTS
+ * (journaled, undoable) AND fold their backing project NODES in ONE re-entrant
+ * runInTransaction, so a throw in either phase rolls BOTH back (a single rollback
+ * boundary). Mirrors mergeContactsFoldingNodes; mergeProjects's inner runInTransaction
+ * and mergeNodes's runInGraphTransaction are RE-ENTRANT and JOIN the open transaction.
+ *
+ * The node fold runs only when BOTH projects resolve to DISTINCT project nodes; a
+ * project with no backing node folds as a no-op and the project merge still commits.
+ * The project nodes are NAME-KEYED, so BOTH must be resolved to their node ids BEFORE
+ * mergeProjects runs (which deletes the loser project ROW — after that the loser's
+ * name→id lookup would fail, but its GRAPH node persists under the old name and still
+ * folds).
+ */
+function mergeProjectsFoldingNodes(
+  keeperProjectId: string,
+  loserProjectId: string,
+  keeperNodeId: string | null,
+  loserNodeId: string | null
+): { project: Project; movedEdges: number } {
+  const store = getKnowledgeGraphStore()
+  return runInTransaction(() => {
+    const project = mergeProjects(keeperProjectId, loserProjectId)
+    let movedEdges = 0
+    if (keeperNodeId && loserNodeId && keeperNodeId !== loserNodeId) {
+      const r = mergeNodes(store, keeperNodeId, loserNodeId)
+      movedEdges = r.movedEdges
+    }
+    return { project, movedEdges }
+  })
+}
+
+/**
+ * Projects entry point (ADV56-3 / round-58): merge two PROJECTS by id AND fold their
+ * backing graph project nodes ATOMICALLY. mergeProjects (relational-only) deletes the
+ * loser project WITHOUT touching its NAME-KEYED graph node, so the loser's project
+ * node + edges + graph_edge_sources stayed reachable under a project that no longer
+ * existed relationally. Resolving BOTH project nodes by NAME and folding them inside
+ * the same transaction as the relational merge closes that strand — the direct analogue
+ * of the round-57 contact composite.
+ *
+ * Callers must apply their own visibility/eligibility gates on BOTH ids first (the
+ * projects:merge IPC's fail-closed filterVisibleEntityIds boundary; the suggestion-accept
+ * eligibility gate).
+ */
+export function mergeProjectsWithGraph(keeperProjectId: string, loserProjectId: string): Project {
+  // Resolve BOTH nodes by NAME BEFORE the relational merge deletes the loser row.
+  const keeperNodeId = resolveProjectToNodeId(keeperProjectId)
+  const loserNodeId = resolveProjectToNodeId(loserProjectId)
+  return mergeProjectsFoldingNodes(keeperProjectId, loserProjectId, keeperNodeId, loserNodeId).project
 }
 
 /** Remove a junk node from the graph (and its edges). Idempotent. */

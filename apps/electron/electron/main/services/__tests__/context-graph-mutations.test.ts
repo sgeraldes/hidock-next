@@ -57,6 +57,7 @@ import {
   mergeGraphPreview,
   mergeGraphNodes,
   mergeContactsWithGraph,
+  mergeProjectsWithGraph,
   deleteGraphNode,
 } from '../knowledge-graph-service'
 import { mergeDuplicateContacts } from '../org-reconciler'
@@ -697,6 +698,146 @@ describe('Context Graph contact-merge graph fold (ADV55-1 / round-57)', () => {
     // No node keyed to the folded-away contact id survives.
     const goneId = survivorId === 'c-a' ? 'c-b' : 'c-a'
     expect(queryAll(`SELECT id FROM graph_nodes WHERE norm_key = 'contact:${goneId}'`)).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADV56-3 (round-58): the project-merge paths fold the NAME-KEYED project graph
+// node ATOMICALLY. Before, projects:merge (and the suggestion project branch) called
+// relational-only mergeProjects, which deletes the loser project WITHOUT folding its
+// name-keyed graph node — so the loser's project node + edges + graph_edge_sources
+// stayed reachable under a project that no longer existed relationally.
+// mergeProjectsWithGraph resolves BOTH project nodes by NAME and folds them inside the
+// same transaction as the relational merge.
+// ---------------------------------------------------------------------------
+describe('Context Graph project-merge graph fold (ADV56-3 / round-58)', () => {
+  function snapshot() {
+    return {
+      projects: JSON.stringify(queryAll('SELECT * FROM projects ORDER BY id')),
+      projectAliases: JSON.stringify(queryAll('SELECT * FROM project_aliases ORDER BY id')),
+      graphNodes: JSON.stringify(queryAll('SELECT * FROM graph_nodes ORDER BY id')),
+      graphEdges: JSON.stringify(queryAll('SELECT * FROM graph_edges ORDER BY id')),
+      graphEdgeSources: JSON.stringify(
+        queryAll('SELECT * FROM graph_edge_sources ORDER BY edge_id, recording_id, transcript_id')
+      ),
+      meetingProjects: JSON.stringify(queryAll('SELECT * FROM meeting_projects ORDER BY meeting_id, project_id')),
+      journalCount: queryAll<{ c: number }>('SELECT COUNT(*) AS c FROM merge_journal')[0]?.c ?? 0,
+    }
+  }
+
+  function seedProject(id: string, name: string) {
+    dbRun(
+      "INSERT OR IGNORE INTO projects (id, name, status, created_at) VALUES (?, ?, 'active', ?)",
+      [id, name, '2026-01-01']
+    )
+  }
+
+  /**
+   * Seed keeper p-a (name 'Apollo') + loser p-b (name 'Artemis') as projects, each with
+   * a NAME-KEYED project graph node, plus a loser-only graph edge (with provenance) and a
+   * loser-only meeting membership — so a stranded fold is observable as an orphan.
+   */
+  function seedProjectKeyed() {
+    seedProject('p-a', 'Apollo')
+    seedProject('p-b', 'Artemis')
+    dbRun('INSERT OR IGNORE INTO recordings (id, filename, date_recorded) VALUES (?, ?, ?)', [
+      'rec-seed', 'rec-seed.hda', '2026-01-01',
+    ])
+    const store = getKnowledgeGraphStore()
+    const keeper = store.upsertNode({ type: 'project', label: 'Apollo', now: '2026-01-01' })
+    const loser = store.upsertNode({ type: 'project', label: 'Artemis', now: '2026-01-01' })
+    const m = store.upsertNode({ type: 'meeting', label: 'Extra', props: { meetingId: 'mx', date: '2026-01-05' }, now: '2026-01-01' })
+    const eLoser = store.upsertEdge({ sourceId: m, targetId: loser, type: 'ABOUT', now: '2026-01-01' })
+    dbRun(
+      'INSERT OR IGNORE INTO graph_edge_sources (edge_id, recording_id, transcript_id, assertion_count, created_at) VALUES (?, ?, ?, 1, ?)',
+      [eLoser, 'rec-seed', 'tx-seed', '2026-01-01']
+    )
+    dbRun('INSERT OR IGNORE INTO meetings (id, subject, start_time, end_time) VALUES (?, ?, ?, ?)', [
+      'mtg-loser', 'Loser Sync', '2026-01-05T00:00:00.000Z', '2026-01-05T01:00:00.000Z',
+    ])
+    dbRun('INSERT OR IGNORE INTO meeting_projects (meeting_id, project_id) VALUES (?, ?)', ['mtg-loser', 'p-b'])
+    return { keeper, loser, m, eLoser, store }
+  }
+
+  it('name-keyed SUCCESS: the project-merge path folds the loser NODE + provenance onto the keeper (no strand)', async () => {
+    const { keeper, loser, m, eLoser, store } = seedProjectKeyed()
+    const before = snapshot()
+
+    const merged = mergeProjectsWithGraph('p-a', 'p-b')
+    expect(merged.id).toBe('p-a')
+
+    // Relational layer: loser project gone, keeper survives, journal grew by one.
+    expect(queryAll("SELECT id FROM projects WHERE id = 'p-b'")).toHaveLength(0)
+    expect(queryAll("SELECT id FROM projects WHERE id = 'p-a'")).toHaveLength(1)
+    expect(snapshot().journalCount).toBe(before.journalCount + 1)
+    // Loser membership repointed to the keeper (relational fold).
+    expect(queryAll<{ project_id: string }>('SELECT project_id FROM meeting_projects WHERE meeting_id = ?', ['mtg-loser'])).toEqual([
+      { project_id: 'p-a' },
+    ])
+
+    // Graph layer — the fix: the loser NODE is folded into the keeper, NOT stranded.
+    expect(store.getNode(loser)).toBeUndefined()
+    expect(store.getNode(keeper)).toBeTruthy()
+    // The loser's edge was repointed onto the keeper node (id preserved by the UPDATE).
+    const edge = queryAll<{ source_id: string; target_id: string }>('SELECT source_id, target_id FROM graph_edges WHERE id = ?', [eLoser])
+    expect(edge).toEqual([{ source_id: m, target_id: keeper }])
+    // Its per-recording provenance rode along (nothing stranded under the loser).
+    expect(queryAll('SELECT edge_id FROM graph_edge_sources WHERE edge_id = ?', [eLoser])).toHaveLength(1)
+    // Exactly one project node remains — the keeper. No node stranded under the loser name.
+    expect(queryAll("SELECT id FROM graph_nodes WHERE type = 'project'")).toEqual([{ id: keeper }])
+  })
+
+  it('graph-phase FAILURE: a throw in the graph fold rolls BOTH layers back (byte-identical)', async () => {
+    const { keeper, loser, store } = seedProjectKeyed()
+    const before = snapshot()
+
+    // Inject a one-shot fault into the GRAPH phase only: throw on the loser-node delete,
+    // which mergeNodes runs LAST — AFTER mergeProjects already ran in the shared tx.
+    const origRun = store.db.run.bind(store.db)
+    let fired = false
+    const spy = vi.spyOn(store.db, 'run').mockImplementation((sql: string, params?: unknown[]) => {
+      if (!fired && /DELETE\s+FROM\s+graph_nodes/i.test(sql)) {
+        fired = true
+        throw new Error('injected fault: graph_nodes delete')
+      }
+      return origRun(sql, params)
+    })
+
+    try {
+      expect(() => mergeProjectsWithGraph('p-a', 'p-b')).toThrow(/injected fault/)
+    } finally {
+      spy.mockRestore()
+    }
+    expect(fired).toBe(true)
+
+    const after = snapshot()
+    // Whole composite rolled back: loser project + node SURVIVE, journal untouched,
+    // and every touched table is byte-identical to the pre-merge snapshot.
+    expect(queryAll("SELECT id FROM projects WHERE id = 'p-b'")).toHaveLength(1)
+    expect(queryAll("SELECT id FROM projects WHERE id = 'p-a'")).toHaveLength(1)
+    expect(store.getNode(loser)).toBeTruthy()
+    expect(store.getNode(keeper)).toBeTruthy()
+    expect(after.projects).toBe(before.projects)
+    expect(after.projectAliases).toBe(before.projectAliases)
+    expect(after.meetingProjects).toBe(before.meetingProjects)
+    expect(after.journalCount).toBe(before.journalCount)
+    expect(after.graphNodes).toBe(before.graphNodes)
+    expect(after.graphEdges).toBe(before.graphEdges)
+    expect(after.graphEdgeSources).toBe(before.graphEdgeSources)
+  })
+
+  it('no-node graceful case: a loser project with NO graph node still merges (fold is a no-op)', async () => {
+    seedProject('p-a', 'Apollo')
+    seedProject('p-b', 'Artemis')
+    const store = getKnowledgeGraphStore()
+    // Only the keeper has a project node; the loser has NO backing project node at all.
+    const keeper = store.upsertNode({ type: 'project', label: 'Apollo', now: '2026-01-01' })
+
+    expect(() => mergeProjectsWithGraph('p-a', 'p-b')).not.toThrow()
+
+    expect(queryAll("SELECT id FROM projects WHERE id = 'p-b'")).toHaveLength(0)
+    expect(queryAll("SELECT id FROM projects WHERE id = 'p-a'")).toHaveLength(1)
+    expect(store.getNode(keeper)).toBeTruthy()
   })
 })
 

@@ -20,7 +20,6 @@ import {
   getTopicsForProjectMeetings,
   getKnowledgeIdsForProject,
   getPersonIdsForProject,
-  mergeProjects,
   unmergeProjects,
   UnmergeResult,
   getProjectsForKnowledge,
@@ -34,6 +33,7 @@ import {
   Project as DBProject,
   ProjectNote
 } from '../services/database'
+import { mergeProjectsWithGraph } from '../services/knowledge-graph-service'
 import { filterEligibleRecordingIds } from '../services/recording-eligibility'
 import { filterEligibleActionableRows } from '../services/actionable-eligibility'
 import { success, error, Result } from '../types/api'
@@ -402,7 +402,12 @@ export function registerProjectsHandlers(): void {
           return error('MERGE_NOT_ALLOWED', 'These projects cannot be merged.')
         }
 
-        const merged = mergeProjects(keeperId, loserId)
+        // ADV56-3 (round-58): route through the graph-aware composite so the loser's
+        // NAME-KEYED project node + edges + graph_edge_sources provenance fold onto the
+        // keeper in the SAME transaction as the relational merge. mergeProjects
+        // (relational-only) deletes the loser project WITHOUT touching its graph node,
+        // stranding the loser's project node/edges under a project that no longer exists.
+        const merged = mergeProjectsWithGraph(keeperId, loserId)
         return success(mapToProject(merged))
       } catch (err) {
         console.error('projects:merge error:', err)
