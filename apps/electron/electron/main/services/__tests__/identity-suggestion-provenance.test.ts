@@ -284,8 +284,14 @@ function seedMeetingOnlyPair(recProvenance: 'eligible' | 'excluded'): void {
   }
 }
 function insertMeetingOnlySuggestion(): void {
+  // ADV51-1 (round-53) FLIP: role is now recomputed from CURRENT field provenance at
+  // surfacing. These seeded 'PM' roles carry no provenance marker (NULL
+  // role_source_recording_id + NULL role_origin) so the field sanitizer treats them
+  // as untrusted legacy roles and blanks them — a baked-in role:0.2 would therefore be
+  // (correctly) removed and drop this meeting-gating suggestion for the wrong reason.
+  // This test isolates the mJac (meeting) gate, so the role component is 0 here.
   const ev = {
-    signals: { name: 0.6, email: 0, role: 0.2, graph: 0.2 },
+    signals: { name: 0.6, email: 0, role: 0, graph: 0.2 },
     composite: 0.6,
     sharedTopics: [],
     sharedMeetings: 2,
@@ -651,5 +657,175 @@ describe('rarity BEARER corpus — fail-closed (ADV50-2)', () => {
     expect(surfaced()).toHaveLength(0)
     // Accept refuses the merge (not authorized while the corpus can't be verified).
     expect(isSuggestionEligibleForAccept(getIdentitySuggestionById(id)!)).toBe(false)
+  })
+})
+
+// --- ADV51-2 (round-53): mention transcript CORPUS query fails closed -------------
+
+/**
+ * Round 51 propagated only the ELIGIBILITY-lookup failure to failClosed; the
+ * transcript CORPUS SELECT still used safeQueryAll (catch ⇒ empty ⇒ trusted 0). A
+ * transcript-query failure must fail CLOSED too: a false 0 removes the 'common'
+ * penalty and raises confidence while the corpus can't be read. Here bearers + the
+ * eligibility subquery stay healthy and ONLY the transcripts table is broken.
+ */
+describe('rarity mention CORPUS query — fail-closed (ADV51-2)', () => {
+  it('SUPPRESSES at surfacing and REFUSES accept when the transcript SELECT itself throws', () => {
+    const id = insertCommonRaritySuggestion() // short 'ana'/'ane' tokens ⇒ mention count consulted
+    seedMentions('t-live', 'Talk with Ana Lima', 3) // would be counted if the query worked
+    // Break ONLY the transcript corpus query — contacts (bearers) + knowledge_captures
+    // (eligibility subquery) remain intact, isolating the CORPUS-query fail-closed path.
+    run('PRAGMA foreign_keys = OFF')
+    run('DROP TABLE transcripts')
+
+    expect(surfaced()).toHaveLength(0)
+    expect(isSuggestionEligibleForAccept(getIdentitySuggestionById(id)!)).toBe(false)
+  })
+})
+
+// --- ADV51-3 (round-53): bearer corpus is VISIBILITY-filtered ---------------------
+
+function visibleContact(id: string, name: string): void {
+  run(
+    `INSERT INTO contacts (id, name, type, source, first_seen_at, last_seen_at, meeting_count, created_at)
+     VALUES (?, ?, 'team', 'calendar', '2026-01-01', '2026-01-01', 0, '2026-01-01T00:00:00Z')`,
+    [id, name]
+  )
+}
+/** A transcript-origin contact whose ONLY source recording is value-excluded ⇒ suppressed. */
+function excludedOnlyContact(id: string, name: string): void {
+  const rec = `rec-exc-${id}`
+  seedRecording(rec)
+  valueExclude(rec)
+  run(
+    `INSERT INTO contacts (id, name, type, source, source_recording_id, first_seen_at, last_seen_at, meeting_count, created_at)
+     VALUES (?, ?, 'team', 'transcript', ?, '2026-01-01', '2026-01-01', 0, '2026-01-01T00:00:00Z')`,
+    [id, name, rec]
+  )
+}
+
+describe('rarity BEARER corpus — visibility filtering (ADV51-3)', () => {
+  it('does NOT count EXCLUDED-ONLY entities as bearers ⇒ a name common only via them is demoted', () => {
+    insertCommonRaritySuggestion() // tagged 'common' via a persisted −0.15
+    // Three more 'Ana …' bearers, each a suppressed (excluded-only) entity. They must
+    // NOT count toward the 'ana' base rate ⇒ the persisted 'common' is demoted at surface.
+    for (let i = 0; i < 3; i++) excludedOnlyContact(`c-anaX-${i}`, `Ana Ex${i}`)
+    const rows = surfaced()
+    expect(rows).toHaveLength(1)
+    expect(JSON.parse(rows[0].evidence!).rarity).toBeUndefined() // excluded bearers don't skew ⇒ normal
+  })
+
+  it('DOES count VISIBLE entities as bearers ⇒ keeps common (control)', () => {
+    insertCommonRaritySuggestion()
+    for (let i = 0; i < 3; i++) visibleContact(`c-anaV-${i}`, `Ana Vis${i}`)
+    const rows = surfaced()
+    expect(rows).toHaveLength(1)
+    expect(JSON.parse(rows[0].evidence!).rarity).toBe('common') // 3 visible 'ana' bearers ⇒ common
+  })
+})
+
+// --- ADV51-1 (round-53): discovery ROLE evidence is provenance-sanitized ----------
+
+/** Insert a contact with an explicit role provenance (role_source_recording_id/role_origin). */
+function contactWithRole(
+  id: string,
+  name: string,
+  role: string,
+  opts: { roleSourceRecordingId?: string; roleOrigin?: string } = {}
+): void {
+  run(
+    `INSERT INTO contacts (id, name, type, role, role_source_recording_id, role_origin, source, first_seen_at, last_seen_at, meeting_count, created_at)
+     VALUES (?, ?, 'team', ?, ?, ?, 'calendar', '2026-01-01', '2026-01-01', 0, '2026-01-01T00:00:00Z')`,
+    [id, name, role, opts.roleSourceRecordingId ?? null, opts.roleOrigin ?? null]
+  )
+}
+
+/**
+ * A ROLE-load-bearing person suggestion: composite 0.65 with a role boost of 0.20
+ * (PM ≈ Project Manager). Removing the role component drops it to 0.45 < 0.50. The
+ * names bear distinct short first tokens ('edu'/'eduardo' ⇒ token 'edu') so rarity is
+ * a no-op and only the role recompute moves the composite.
+ */
+function insertRoleSuggestion(keeperId: string, loserId: string): string {
+  const id = randomUUID()
+  const ev = {
+    signals: { name: 0.45, email: 0, role: 0.2, graph: 0 },
+    composite: 0.65,
+    sharedTopics: [],
+    roleOverlap: ['project', 'manager'],
+    sharedMeetings: 0,
+    keeperId,
+    keeperName: 'Edu',
+    loserId,
+    loserName: 'Eduardo',
+    emailMatch: 'none',
+  }
+  run(
+    `INSERT INTO identity_suggestions (id, kind, candidate_name, target_id, confidence, evidence, status, created_at)
+     VALUES (?, 'person', 'Eduardo', ?, 0.65, ?, 'pending', '2026-01-01T00:00:00Z')`,
+    [id, keeperId, JSON.stringify(ev)]
+  )
+  return id
+}
+
+describe('discovery role evidence — field-provenance sanitize + recompute (ADV51-1)', () => {
+  it('keeps a suggestion whose role is a trusted (manual) role', () => {
+    contactWithRole('c-edu', 'Edu', 'Project Manager', { roleOrigin: 'manual' })
+    contactWithRole('c-eduardo', 'Eduardo', 'PM', { roleOrigin: 'manual' })
+    const id = insertRoleSuggestion('c-edu', 'c-eduardo')
+    const rows = surfaced()
+    expect(rows).toHaveLength(1)
+    const ev = JSON.parse(rows[0].evidence!)
+    expect(ev.signals.role).toBeGreaterThan(0) // role preserved
+    expect(ev.roleOverlap).toEqual(expect.arrayContaining(['project', 'manager']))
+    expect(isSuggestionEligibleForAccept(getIdentitySuggestionById(id)!)).toBe(true)
+  })
+
+  it('drops the role boost + roleOverlap when the role source recording is EXCLUDED ⇒ suggestion falls below threshold', () => {
+    seedRecording('rec-bad')
+    valueExclude('rec-bad')
+    // Keeper's role was learned from a now value-excluded recording ⇒ blanked ⇒ no boost.
+    contactWithRole('c-edu', 'Edu', 'Project Manager', { roleSourceRecordingId: 'rec-bad' })
+    contactWithRole('c-eduardo', 'Eduardo', 'PM', { roleOrigin: 'manual' })
+    const id = insertRoleSuggestion('c-edu', 'c-eduardo')
+    // 0.65 − 0.20 role = 0.45 < 0.50 ⇒ suppressed at surfacing + refused at accept.
+    expect(surfaced()).toHaveLength(0)
+    expect(isSuggestionEligibleForAccept(getIdentitySuggestionById(id)!)).toBe(false)
+    // Non-destructive — the row remains (un-exclude the recording would re-surface it).
+    expect(getIdentitySuggestions('pending')).toHaveLength(1)
+  })
+
+  it('SUPPRESSES at surfacing and REFUSES accept when the role provenance lookup fails (fail-closed)', () => {
+    seedRecording('rec-x')
+    contactWithRole('c-edu', 'Edu', 'Project Manager', { roleSourceRecordingId: 'rec-x' })
+    contactWithRole('c-eduardo', 'Eduardo', 'PM', { roleOrigin: 'manual' })
+    const id = insertRoleSuggestion('c-edu', 'c-eduardo')
+    // Break the role-eligibility lookup (value-exclusion subquery table gone) — the role
+    // is attributed to a recording whose eligibility can no longer be verified.
+    run('PRAGMA foreign_keys = OFF')
+    run('DROP TABLE knowledge_captures')
+    expect(surfaced()).toHaveLength(0)
+    expect(isSuggestionEligibleForAccept(getIdentitySuggestionById(id)!)).toBe(false)
+  })
+
+  it('does NOT feed an excluded transcript-derived role into a NEW discovery suggestion (write path)', () => {
+    // Both contacts pair on an EXACT email (composite floored 0.96 ⇒ survives) so the
+    // suggestion is created regardless; the ROLE tokens must be absent because the
+    // shared role was learned from an excluded recording and is blanked before scoring.
+    seedRecording('rec-bad')
+    valueExclude('rec-bad')
+    run(
+      `INSERT INTO contacts (id, name, email, type, role, role_source_recording_id, source, first_seen_at, last_seen_at, meeting_count, created_at)
+       VALUES ('c-r1', 'Marco Vela', 'm.vela@dfx5.com', 'team', 'Project Manager', 'rec-bad', 'calendar', '2026-01-01', '2026-01-01', 5, '2026-01-01T00:00:00Z')`
+    )
+    run(
+      `INSERT INTO contacts (id, name, email, type, role, role_source_recording_id, source, first_seen_at, last_seen_at, meeting_count, created_at)
+       VALUES ('c-r2', 'Marc Vela', 'm.vela@dfx5.com', 'team', 'Project Manager', 'rec-bad', 'calendar', '2026-01-01', '2026-01-01', 1, '2026-01-01T00:00:00Z')`
+    )
+    const res = discoverContactMerges()
+    expect(res.suggestionsCreated).toBe(1)
+    const ev = JSON.parse(getIdentitySuggestions('pending')[0].evidence!)
+    expect(ev.signals.role).toBe(0) // excluded role contributes nothing
+    expect(ev.roleOverlap).toEqual([])
   })
 })
