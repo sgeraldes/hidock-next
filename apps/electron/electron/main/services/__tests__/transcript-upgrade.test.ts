@@ -339,3 +339,79 @@ describe('reformatOne — eligibility gate (RE8-1)', () => {
     expect(mockGenerate).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * ADV45-4 (round-47) — discovery (getRecommendedRecordingIds) AND counts
+ * (scanOldTranscripts / getUpgradeStatus) must share the SAME eligible
+ * assessment set the reformat work list uses, so an excluded / unassociable
+ * recording never appears in a recommendation OR inflates a displayed total.
+ * Fail-closed: eligibility unavailable ⇒ zero counts / empty ids.
+ */
+describe('discovery + counts — shared eligible assessment set (ADV45-4)', () => {
+  beforeEach(() => {
+    // A flat, high-importance transcript → recommend-retranscribe band.
+    addTranscript({
+      id: 't-flat-high',
+      fullText:
+        'Al final decidimos avanzar con el proyecto. Acordamos la fecha límite y firmamos el contrato. ' +
+        'El presupuesto fue aprobado y quedamos en los próximos pasos. '.repeat(30),
+      wordCount: 4000,
+      actionItems: JSON.stringify(['a', 'b', 'c', 'd']),
+      topics: JSON.stringify(['x', 'y', 'z', 'w']),
+      recording: { date: new Date().toISOString(), meetingId: 'm1' },
+      meeting: {
+        attendees: JSON.stringify([{ email: 'a@acme.com' }, { email: 'b@client.com' }]),
+        organizerEmail: 'me@acme.com'
+      }
+    })
+    dbInstance.run(`INSERT INTO meeting_projects (meeting_id, project_id) VALUES ('m1','p1')`)
+    // A flat, low-importance transcript → reformat band.
+    addTranscript({
+      id: 't-flat-low',
+      fullText: 'una charla informal sin decisiones ni compromisos, solo hablamos del clima un rato',
+      wordCount: 120
+    })
+  })
+
+  it('baseline: both legacy rows counted; the high-importance one is recommended', () => {
+    expect(getRecommendedRecordingIds()).toEqual(['rec-t-flat-high'])
+    const res = scanOldTranscripts()
+    expect(res.totalTranscripts).toBe(2)
+    expect(res.legacyTotal).toBe(2)
+    expect(res.recommendedRetranscription).toBe(1)
+    expect(res.toReformat).toBe(1)
+  })
+
+  it('excluding the recommended recording drops it from discovery AND every count', () => {
+    excludedResult = { ids: new Set(['rec-t-flat-high']), failClosed: false }
+    expect(getRecommendedRecordingIds()).toEqual([])
+    const res = scanOldTranscripts()
+    expect(res.totalTranscripts).toBe(1)
+    expect(res.legacyTotal).toBe(1)
+    expect(res.recommendedRetranscription).toBe(0)
+    expect(res.toReformat).toBe(1)
+    expect(getUpgradeStatus().legacyTotal).toBe(1)
+  })
+
+  it('excluding the reformat-band recording leaves the recommendation but shrinks counts', () => {
+    excludedResult = { ids: new Set(['rec-t-flat-low']), failClosed: false }
+    expect(getRecommendedRecordingIds()).toEqual(['rec-t-flat-high'])
+    const res = scanOldTranscripts()
+    expect(res.totalTranscripts).toBe(1)
+    expect(res.legacyTotal).toBe(1)
+    expect(res.toReformat).toBe(0)
+    expect(res.recommendedRetranscription).toBe(1)
+  })
+
+  it('fails closed (zero counts / empty ids) when eligibility cannot be established', () => {
+    excludedResult = { ids: new Set<string>(), failClosed: true }
+    expect(getRecommendedRecordingIds()).toEqual([])
+    const res = scanOldTranscripts()
+    expect(res.totalTranscripts).toBe(0)
+    expect(res.legacyTotal).toBe(0)
+    expect(res.recommendedRetranscription).toBe(0)
+    expect(res.toReformat).toBe(0)
+    expect(res.alreadyReformatted).toBe(0)
+    expect(getUpgradeStatus().legacyTotal).toBe(0)
+  })
+})

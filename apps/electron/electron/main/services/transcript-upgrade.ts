@@ -228,6 +228,40 @@ function assessAll(threshold: number): TriageAssessment[] {
   return out
 }
 
+/**
+ * ADV45-4 (round-47) — THE single ELIGIBLE assessment set shared by scan,
+ * status, recommended ids, AND the reformat work list, so discovery and counts
+ * never drift from what is actually eligible to process. Round 8 filtered ONLY
+ * the reformat WORK LIST; getRecommendedRecordingIds + scanOldTranscripts still
+ * assessed/tallied every joined transcript (including excluded / unassociable
+ * rows whose recording is personal / trashed / value-excluded / hard-purged).
+ * Every discovery + count read now derives from this one filtered set.
+ *
+ * FAIL-CLOSED: returns `null` when the recording-eligibility lookup could not
+ * complete, so callers surface zero counts / empty ids rather than leaking.
+ */
+function eligibleAssessments(threshold: number): TriageAssessment[] | null {
+  const all = assessAll(threshold)
+  const { eligible, failClosed } = filterEligibleRecordingIds(all.map((a) => a.recordingId))
+  if (failClosed) {
+    console.error('[TranscriptUpgrade] assessment set suppressed — recording eligibility unavailable (fail closed)')
+    return null
+  }
+  return all.filter((a) => eligible.has(a.recordingId))
+}
+
+/** The zero result used whenever the eligible assessment set can't be built. */
+function emptyScan(threshold: number): ScanResult {
+  return {
+    totalTranscripts: 0,
+    legacyTotal: 0,
+    toReformat: 0,
+    recommendedRetranscription: 0,
+    alreadyReformatted: 0,
+    threshold
+  }
+}
+
 /** Roll a list of assessments up into the scan counts. `total` is the row count. */
 function tally(total: number, assessments: TriageAssessment[], threshold: number): ScanResult {
   let legacyTotal = 0
@@ -260,14 +294,12 @@ function tally(total: number, assessments: TriageAssessment[], threshold: number
  * not write anything, so it is safe to call against the live DB.
  */
 export function scanOldTranscripts(threshold = DEFAULT_TRIAGE_THRESHOLD): ScanResult {
-  const rows = loadTranscriptRows()
-  const projects = loadProjectLinkSets()
-  const assessments: TriageAssessment[] = []
-  for (const row of rows) {
-    if (!row.full_text || !row.full_text.trim()) continue
-    assessments.push(assess(row, projects, threshold))
-  }
-  return tally(rows.length, assessments, threshold)
+  // ADV45-4 (round-47) — tally ONLY the eligible assessment set; excluded /
+  // unassociable transcripts must not inflate any displayed count. Fail-closed:
+  // zero counts when eligibility can't be established.
+  const assessments = eligibleAssessments(threshold)
+  if (assessments === null) return emptyScan(threshold)
+  return tally(assessments.length, assessments, threshold)
 }
 
 /**
@@ -282,26 +314,29 @@ export function runUpgrade(threshold = DEFAULT_TRIAGE_THRESHOLD): ScanResult {
   return result
 }
 
-/** Recording ids of the flat transcripts flagged for audio re-transcription. */
+/** Recording ids of the flat transcripts flagged for audio re-transcription.
+ *  ADV45-4 (round-47) — sourced from the shared ELIGIBLE assessment set so an
+ *  excluded / unassociable recording is never surfaced via
+ *  transcript-upgrade:getRecommended; fail-closed empty. */
 export function getRecommendedRecordingIds(threshold = DEFAULT_TRIAGE_THRESHOLD): string[] {
-  return assessAll(threshold)
+  const assessments = eligibleAssessments(threshold)
+  if (assessments === null) return []
+  return assessments
     .filter((a) => a.formatClass === 'legacy' && a.band === 'recommend-retranscribe')
     .map((a) => a.recordingId)
 }
 
 /** Transcript ids of the flat, below-threshold band — the reformat work list.
- *  RE8-1 (round-8) — the candidate list is filtered through the shared
- *  eligibility boundary FAIL-CLOSED so an excluded (personal / trashed /
- *  value-excluded) recording's transcript is never enqueued for an LLM reformat
- *  in the first place; if eligibility can't be established, the list is empty. */
+ *  RE8-1 (round-8) / ADV45-4 (round-47) — sourced from the SAME shared eligible
+ *  assessment set as scan/status/recommended (no drift) so an excluded (personal
+ *  / trashed / value-excluded / hard-purged) recording's transcript is never
+ *  enqueued for an LLM reformat; if eligibility can't be established, empty. */
 function getReformatTranscriptIds(threshold: number): string[] {
-  const candidates = assessAll(threshold).filter((a) => a.formatClass === 'legacy' && a.band === 'reformat')
-  const { eligible, failClosed } = filterEligibleRecordingIds(candidates.map((a) => a.recordingId))
-  if (failClosed) {
-    console.error('[TranscriptUpgrade] reformat work list suppressed — recording eligibility unavailable (fail closed)')
-    return []
-  }
-  return candidates.filter((a) => eligible.has(a.recordingId)).map((a) => a.transcriptId)
+  const assessments = eligibleAssessments(threshold)
+  if (assessments === null) return []
+  return assessments
+    .filter((a) => a.formatClass === 'legacy' && a.band === 'reformat')
+    .map((a) => a.transcriptId)
 }
 
 /** Current upgrade status: scan counts + whether the worker is draining. */
