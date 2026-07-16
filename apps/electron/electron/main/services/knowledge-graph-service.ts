@@ -41,8 +41,6 @@ import type {
   PersonResolver,
   AttendeeResult,
   SkillDemonstratorResult,
-  PersonProfile,
-  MeetingGraph,
   GraphNode,
   SubGraph,
   LensGraph,
@@ -736,12 +734,41 @@ export function queryTopSkill(skill: string): SkillDemonstratorResult[] {
     .sort((a, b) => b.weight - a.weight)
 }
 
-export function queryPersonProfile(name: string): PersonProfile | undefined {
+/**
+ * ADV34-3 sweep (round-36) — the profile's related entities are returned as
+ * SANITIZED ContextGraphNode DTOs (via the shared {@link nodeToDTO}), NOT raw
+ * GraphNode objects: personProfile previously leaked raw norm_key + props + row
+ * timestamps on the graph:personProfile IPC surface. (The related nodes are
+ * meetings/skills/actions — never person — so they carry no contactId; the DTO
+ * strips norm_key/props regardless.)
+ */
+export interface PersonProfileDTO {
+  personId: string
+  personLabel: string
+  meetings: ContextGraphNode[]
+  skills: ContextGraphNode[]
+  actionItems: ContextGraphNode[]
+}
+
+export function queryPersonProfile(name: string): PersonProfileDTO | undefined {
   const store = getKnowledgeGraphStore()
   const profile = personProfile(store, name)
   if (!profile) return undefined
+  const projects = projectNameIndex()
+  const sanitize = (nodes: GraphNode[]): ContextGraphNode[] => {
+    const vis = visibleContactIdSet(nodes)
+    return nodes.map((n) => nodeToDTO({ ...n, degree: 0 }, projects, vis))
+  }
   const exclusion = getGroundingExclusionSet(true) // ADV23-2: non-owner surface — suppress legacy zero-provenance edges
-  if (exclusionIsNoop(exclusion)) return profile
+  if (exclusionIsNoop(exclusion)) {
+    return {
+      personId: profile.personId,
+      personLabel: profile.personLabel,
+      meetings: sanitize(profile.meetings),
+      skills: sanitize(profile.skills),
+      actionItems: sanitize(profile.actionItems),
+    }
+  }
   // An excluded-only person is not retrievable at all.
   if (!isNodeVisibleUnderExclusion(store, profile.personId, exclusion)) return undefined
   // INC2 — each relationship is filtered by ITS CONNECTING edge's provenance,
@@ -761,30 +788,71 @@ export function queryPersonProfile(name: string): PersonProfile | undefined {
       .map(({ __edge_id, ...node }) => node as GraphNode)
   }
   return {
-    ...profile,
-    meetings: related('ATTENDED'),
-    skills: related('DEMONSTRATED'),
-    actionItems: related('OWNS'),
+    personId: profile.personId,
+    personLabel: profile.personLabel,
+    meetings: sanitize(related('ATTENDED')),
+    skills: sanitize(related('DEMONSTRATED')),
+    actionItems: sanitize(related('OWNS')),
   }
 }
 
-export function queryMeetingGraph(meetingId: string): MeetingGraph {
+/**
+ * Sanitized meeting-graph DTO returned on the graph:meetingGraph IPC surface.
+ * ADV34-1 (round-36) — nodes (and the meeting node) are ContextGraphNode DTOs
+ * mapped through the shared contact-visibility-aware {@link nodeToDTO}, NOT raw
+ * GraphNode objects: a node visible via an eligible meeting edge but keyed to a
+ * SUPPRESSED contact must never leak its `norm_key` (`contact:<id>`) or
+ * `props.contactId` on this non-owner surface. Edges keep the package's
+ * source_id/target_id shape (they carry no contact-identity leak).
+ */
+export interface MeetingGraphDTO {
+  meeting: ContextGraphNode | null
+  nodes: ContextGraphNode[]
+  edges: Array<{ id: string; source_id: string; target_id: string; type: string; weight: number }>
+}
+
+export function queryMeetingGraph(meetingId: string): MeetingGraphDTO {
   const store = getKnowledgeGraphStore()
   const graph = meetingSummaryGraph(store, meetingId)
+  const empty: MeetingGraphDTO = { meeting: null, nodes: [], edges: [] }
+  if (!graph.meeting) return empty
   const exclusion = getGroundingExclusionSet(true) // ADV23-2: non-owner surface — suppress legacy zero-provenance edges
-  if (exclusionIsNoop(exclusion) || !graph.meeting) return graph
-  // Centered on a meeting: fail closed + never expose an excluded-only meeting.
-  if (exclusion.failClosed || !isNodeVisibleUnderExclusion(store, graph.meeting.id, exclusion)) {
-    return { meeting: undefined, nodes: [], edges: [] }
+
+  let keptNodes = graph.nodes
+  let keptEdges = graph.edges
+  if (!exclusionIsNoop(exclusion)) {
+    // Centered on a meeting: fail closed + never expose an excluded-only meeting.
+    if (exclusion.failClosed || !isNodeVisibleUnderExclusion(store, graph.meeting.id, exclusion)) {
+      return empty
+    }
+    const suppressed = provenanceSuppressedEdgeIds(store, graph.edges.map((e) => e.id), exclusion)
+    keptEdges = graph.edges.filter((e) => !suppressed.has(e.id))
+    const incident = new Set<string>([graph.meeting.id])
+    for (const e of keptEdges) {
+      incident.add(e.source_id)
+      incident.add(e.target_id)
+    }
+    keptNodes = graph.nodes.filter((n) => incident.has(n.id))
   }
-  const suppressed = provenanceSuppressedEdgeIds(store, graph.edges.map((e) => e.id), exclusion)
-  const keptEdges = graph.edges.filter((e) => !suppressed.has(e.id))
-  const incident = new Set<string>([graph.meeting.id])
-  for (const e of keptEdges) {
-    incident.add(e.source_id)
-    incident.add(e.target_id)
+
+  // ADV34-1 (round-36) — route the meeting node AND every surviving node through
+  // the shared nodeToDTO (with a batched fail-closed visibleContactIdSet), so a
+  // person node keyed to a suppressed contact never returns its contactId, and no
+  // raw norm_key/props leaves this surface — on the healthy path too (raw nodes
+  // were previously returned wholesale).
+  const projects = projectNameIndex()
+  const visibleContacts = visibleContactIdSet([graph.meeting, ...keptNodes])
+  return {
+    meeting: nodeToDTO({ ...graph.meeting, degree: 0 }, projects, visibleContacts),
+    nodes: keptNodes.map((n) => nodeToDTO({ ...n, degree: 0 }, projects, visibleContacts)),
+    edges: keptEdges.map((e) => ({
+      id: e.id,
+      source_id: e.source_id,
+      target_id: e.target_id,
+      type: e.type,
+      weight: e.weight,
+    })),
   }
-  return { meeting: graph.meeting, nodes: graph.nodes.filter((n) => incident.has(n.id)), edges: keptEdges }
 }
 
 export function queryStats(): { nodes: number; edges: number; nodesByType: Record<string, number> } {
@@ -2181,8 +2249,10 @@ export function renameGraphEntity(entityId: string, newLabel: string): RenameEnt
   // rename of a node that became personal / deleted / value-excluded / hard-purged /
   // zero-provenance AFTER the inspector loaded — a contact-scoped rename would emit
   // entity:contact-changed and re-expose a now-hidden node's identity everywhere.
-  // Fail-closed no-op.
-  if (!isNodeMutable(store, nodeId, node)) return { outcome: 'noop', scope: 'graph', nodeId }
+  // Fail-closed no-op. ONE exclusion snapshot drives this guard AND the implicit
+  // collision-keeper guard below so they are consistent (ADV34-3).
+  const exclusion = getGroundingExclusionSet(true)
+  if (!isNodeMutable(store, nodeId, node, exclusion)) return { outcome: 'noop', scope: 'graph', nodeId }
 
   const contactId = contactIdOfNode(node)
   if (node.type === 'person' && contactId) {
@@ -2220,6 +2290,25 @@ export function renameGraphEntity(entityId: string, newLabel: string): RenameEnt
     }
   }
 
+  // ADV34-3 (round-36): a graph-only rename runs through the package's renameNode,
+  // which SILENTLY MERGES this node into an existing same-(type, norm_key) node when
+  // the new label collides — folding the VISIBLE source's edges into that keeper and
+  // DELETING the source. Round-35 validated only the requested node. Resolve the
+  // implicit collision keeper and require it to pass merge-eligibility under the SAME
+  // exclusion snapshot; if the keeper is excluded-only / hidden (or the lookup fails),
+  // REFUSE before any graph change so a stale rename cannot fold a visible source into
+  // a suppressed keeper.
+  const newKey = normalizeGraphLabel(label)
+  if (newKey !== node.norm_key) {
+    const keeper = store.db.queryOne<{ id: string }>(
+      'SELECT id FROM graph_nodes WHERE type = ? AND norm_key = ? AND id != ?',
+      [node.type, newKey, nodeId]
+    )
+    if (keeper && !isNodeMergeEligible(store, keeper.id, store.getNode(keeper.id), exclusion)) {
+      return { outcome: 'noop', scope: 'graph', nodeId }
+    }
+  }
+
   const res = renameNode(store, nodeId, label)
   return { outcome: res.outcome, scope: 'graph', nodeId: res.nodeId }
 }
@@ -2241,6 +2330,30 @@ function bindNodeToContact(nodeId: string, contactId: string): { outcome: 'linke
   if (!node) return { outcome: 'linked', nodeId }
   const canonicalName = getContactById(contactId)?.name ?? node.label
 
+  const contactKey = `contact:${contactId}`
+  const keeper = queryOne<{ id: string }>(
+    "SELECT id FROM graph_nodes WHERE type = 'person' AND norm_key = ?",
+    [contactKey]
+  )
+
+  // ADV34-3 (round-36): when a contact-keyed node ALREADY carries this identity,
+  // the bind SILENTLY MERGES the source into that keeper (repoints its edges,
+  // deletes the visible source). Round-35's execution-time guard covered only the
+  // explicit source. Resolve the IMPLICIT keeper and require BOTH the source and
+  // the keeper to pass the SAME merge-eligibility check under ONE current exclusion
+  // snapshot BEFORE any alias write or graph change: if the keeper is excluded-only /
+  // hidden (or the visibility lookup fails), REFUSE with NO state mutation — a stale
+  // bind must never fold a visible source into a suppressed keeper.
+  const exclusion = getGroundingExclusionSet(true)
+  if (!isNodeMutable(store, nodeId, node, exclusion)) {
+    throw new Error('Node not available')
+  }
+  if (keeper && keeper.id !== nodeId) {
+    if (!isNodeMergeEligible(store, keeper.id, store.getNode(keeper.id), exclusion)) {
+      throw new Error('Node not available')
+    }
+  }
+
   // Sovereign manual bind so the resolver links this spelling from now on.
   try {
     upsertContactAlias(contactId, node.label, 'manual', 1.0)
@@ -2248,11 +2361,6 @@ function bindNodeToContact(nodeId: string, contactId: string): { outcome: 'linke
     console.warn('[knowledge-graph] manual alias write failed:', e)
   }
 
-  const contactKey = `contact:${contactId}`
-  const keeper = queryOne<{ id: string }>(
-    "SELECT id FROM graph_nodes WHERE type = 'person' AND norm_key = ?",
-    [contactKey]
-  )
   const now = new Date().toISOString()
 
   if (keeper && keeper.id !== nodeId) {

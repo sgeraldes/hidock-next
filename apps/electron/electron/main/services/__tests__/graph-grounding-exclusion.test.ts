@@ -828,7 +828,8 @@ describe('RE4-3 — ranking / profile / meeting / list / stats hide excluded-onl
     expect(queryTopAttendees('Planning').map((a) => a.person)).not.toContain('Zoe')
     expect(queryTopSkill('Kubernetes').map((s) => s.person)).not.toContain('Zoe')
     expect(queryPersonProfile('Zoe')).toBeUndefined()
-    expect(queryMeetingGraph('nStandup')).toEqual({ meeting: undefined, nodes: [], edges: [] })
+    // ADV34-1 (round-36): meetingGraph now returns a sanitized DTO (meeting: null when empty).
+    expect(queryMeetingGraph('nStandup')).toEqual({ meeting: null, nodes: [], edges: [] })
     const labels = queryListNodes().map((n) => n.label)
     expect(labels).not.toContain('Zoe')
     expect(labels).not.toContain('Standup')
@@ -1102,7 +1103,8 @@ describe('ADV23-2 — zero-provenance legacy edges suppressed from non-owner sur
     expect(searchGraphNodes('Zed').map((n) => n.label)).not.toContain('Zed')
     expect(searchGraphNodes('LegacyMtg').map((n) => n.label)).not.toContain('LegacyMtg')
     expect(getNodeDetail('Zed').node).toBeNull()
-    expect(queryMeetingGraph('nLegacyMtg')).toEqual({ meeting: undefined, nodes: [], edges: [] })
+    // ADV34-1 (round-36): meetingGraph now returns a sanitized DTO (meeting: null when empty).
+    expect(queryMeetingGraph('nLegacyMtg')).toEqual({ meeting: null, nodes: [], edges: [] })
     const listed = queryListNodes().map((n) => n.label)
     expect(listed).not.toContain('Zed')
     expect(listed).not.toContain('LegacyMtg')
