@@ -8,7 +8,7 @@ import { normalizeName, isGenericSpeakerLabel, detectAmbiguousName } from './ent
 import { getEventBus } from './event-bus'
 import type { QualityRating } from '@/types/knowledge'
 
-const SCHEMA_VERSION = 46
+const SCHEMA_VERSION = 47
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -2363,6 +2363,44 @@ const MIGRATIONS: Record<number, () => void> = {
       }
     }
     console.log('Migration v46 complete')
+  },
+
+  47: () => {
+    // v47 (F18/round-37, ADV35-1): NODE-LEVEL provenance on graph_nodes. Edge-level
+    // provenance (graph_edge_sources) can only suppress a node that HAS edges; an
+    // ISOLATED node (e.g. a risk extracted with no raiser, or a topic that never
+    // linked) has none, so the old "zero incident edges ⇒ visible" branch kept
+    // exposing an edgeless derived orphan after its recording was excluded/purged.
+    // Add graph_nodes.origin ('derived' | 'manual') + source_recording_id so an
+    // isolated node's visibility can be decided by NODE provenance:
+    //   manual/structural ⇒ visible; derived ⇒ visible only if its source recording
+    //   is eligible; legacy-null ⇒ structural KIND visible / derived KIND suppressed.
+    // Populated at ingest going forward (packages/knowledge-graph ingestExtraction:
+    // recording-backed ⇒ 'derived'+source; folder ⇒ 'manual').
+    // NO DATA BACKFILL: an isolated legacy node has NO edges and therefore NO
+    // graph_edge_sources rows to associate it to a recording, so its recording is
+    // not derivable — it stays origin=NULL and is resolved at READ time by the
+    // node-KIND heuristic (structural kinds visible, derived kinds suppressed
+    // fail-closed). A CONNECTED legacy node is left NULL too (edge-provenance
+    // governs it, unchanged). Documented in ARF-HIGHS-CHANGES.
+    // Idempotent: guarded ALTERs; the graph_nodes table may not exist yet on a
+    // brand-new DB (it is created lazily by the KnowledgeGraphStore with these
+    // columns already present in GRAPH_SCHEMA), so the length guard skips it.
+    console.log('Running migration to schema v47: node-level graph provenance')
+    const database = getDatabase()
+    const addCol = (col: string): void => {
+      const cols = getTableColumns(database, 'graph_nodes')
+      if (cols.length > 0 && !cols.includes(col)) {
+        try {
+          database.run(`ALTER TABLE graph_nodes ADD COLUMN ${col} TEXT`)
+        } catch (e) {
+          console.warn(`[Migration v47] add graph_nodes.${col} failed:`, e)
+        }
+      }
+    }
+    addCol('origin')
+    addCol('source_recording_id')
+    console.log('Migration v47 complete')
   }
 
 }
@@ -2500,6 +2538,20 @@ function repairPhase(): void {
     if (cols.length > 0 && !cols.includes(col)) {
       console.log(`[Database] Repairing ${table}: adding ${col}`)
       try { database.run(`ALTER TABLE ${table} ADD COLUMN ${col} TEXT`) } catch { /* column exists */ }
+    }
+  }
+
+  // v47/round-37 (ADV35-1) — NODE-LEVEL graph provenance columns. graph_nodes is
+  // created lazily by the KnowledgeGraphStore (GRAPH_SCHEMA, with these columns), so
+  // it may not exist during this early boot repair — the length guard skips it then,
+  // and a graph that DOES already exist from an older build gets the columns
+  // force-added before any node-visibility read. The one-time v47 migration also
+  // adds them; this is the belt-and-suspenders (matching v44/v45). Idempotent.
+  for (const col of ['origin', 'source_recording_id'] as const) {
+    const cols = getTableColumns(database, 'graph_nodes')
+    if (cols.length > 0 && !cols.includes(col)) {
+      console.log(`[Database] Repairing graph_nodes: adding ${col}`)
+      try { database.run(`ALTER TABLE graph_nodes ADD COLUMN ${col} TEXT`) } catch { /* column exists */ }
     }
   }
 

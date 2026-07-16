@@ -340,3 +340,82 @@ describe('ingestExtraction: per-edge provenance writes (F18)', () => {
     expect(allSourceRows).toHaveLength(1) // one row, not two
   })
 })
+
+// =============================================================================
+// ADV35-1 (round-37): NODE-LEVEL provenance writes (isolated-node visibility)
+// =============================================================================
+
+describe('ingestExtraction: node-level provenance (ADV35-1)', () => {
+  const paths: string[] = []
+  afterEach(() => {
+    closeEngines()
+    for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
+    paths.length = 0
+  })
+
+  it('a recording-backed ingest stamps every node origin=derived + source_recording_id', async () => {
+    const { store, dbPath } = await makeStore('node-prov-derived')
+    paths.push(dbPath)
+    ingestExtraction(store, meeting1, meta1, { recordingId: 'rec-1', transcriptId: 'tx-1' })
+
+    const nodes = store.db.queryAll<{ origin: string | null; source_recording_id: string | null }>(
+      'SELECT origin, source_recording_id FROM graph_nodes'
+    )
+    expect(nodes.length).toBeGreaterThan(0)
+    expect(nodes.every((n) => n.origin === 'derived' && n.source_recording_id === 'rec-1')).toBe(true)
+  })
+
+  it('an ISOLATED risk (no raiser) carries derived provenance so it can later be suppressed', async () => {
+    const { store, dbPath } = await makeStore('node-prov-isolated-risk')
+    paths.push(dbPath)
+    const withOrphanRisk: ExtractionResult = {
+      people: [],
+      topics: [],
+      projects: [],
+      decisions: [],
+      action_items: [],
+      risks: [{ text: 'Unowned risk', raised_by: '' }], // no raiser ⇒ edgeless node
+      next_steps: [],
+    }
+    ingestExtraction(store, withOrphanRisk, meta1, { recordingId: 'rec-iso', transcriptId: 'tx-iso' })
+
+    const risk = store.db.queryOne<{ id: string; origin: string | null; source_recording_id: string | null }>(
+      "SELECT id, origin, source_recording_id FROM graph_nodes WHERE type = 'risk'"
+    )
+    expect(risk).toBeDefined()
+    expect(risk!.origin).toBe('derived')
+    expect(risk!.source_recording_id).toBe('rec-iso')
+    // Confirm it truly has NO incident edge (the case the round-35 finding is about).
+    const edges = store.db.queryAll('SELECT id FROM graph_edges WHERE source_id = ? OR target_id = ?', [risk!.id, risk!.id])
+    expect(edges).toHaveLength(0)
+  })
+
+  it('a folder-style ingest (no recordingId) stamps nodes origin=manual + NULL source', async () => {
+    const { store, dbPath } = await makeStore('node-prov-manual')
+    paths.push(dbPath)
+    ingestExtraction(store, meeting1, meta1) // no options → folder-ingest shape
+
+    const nodes = store.db.queryAll<{ origin: string | null; source_recording_id: string | null }>(
+      'SELECT origin, source_recording_id FROM graph_nodes'
+    )
+    expect(nodes.length).toBeGreaterThan(0)
+    expect(nodes.every((n) => n.origin === 'manual' && n.source_recording_id === null)).toBe(true)
+  })
+
+  it('an existing node keeps its FIRST origin when a later ingest re-touches it', async () => {
+    const { store, dbPath } = await makeStore('node-prov-first-wins')
+    paths.push(dbPath)
+    // First: derived from rec-A.
+    ingestExtraction(store, meeting1, meta1, { recordingId: 'rec-A', transcriptId: 'tx-A' })
+    // Second: the SAME meeting/people re-ingested from rec-B — nodes already exist.
+    ingestExtraction(store, meeting1, meta1, { recordingId: 'rec-B', transcriptId: 'tx-B' })
+
+    const nodes = store.db.queryAll<{ source_recording_id: string | null }>(
+      'SELECT source_recording_id FROM graph_nodes'
+    )
+    // Best-effort provenance for the isolated case: the FIRST source is retained
+    // (edge-provenance governs when a node is connected, so this only matters for
+    // an isolated node).
+    expect(nodes.every((n) => n.source_recording_id === 'rec-A')).toBe(true)
+  })
+})

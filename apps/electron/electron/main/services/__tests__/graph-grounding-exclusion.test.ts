@@ -83,6 +83,23 @@ function seedNode(id: string, type: string, label: string): void {
   )
 }
 
+/**
+ * ADV35-1 (round-37) — seed an ISOLATED (edgeless) node WITH node-level provenance
+ * so its visibility is governed by origin/source_recording_id, not edge-provenance.
+ */
+function seedNodeWithOrigin(
+  id: string,
+  type: string,
+  label: string,
+  origin: 'derived' | 'manual' | null,
+  sourceRecordingId: string | null
+): void {
+  dbRun(
+    'INSERT OR IGNORE INTO graph_nodes (id, type, label, norm_key, props, origin, source_recording_id, created_at, updated_at) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)',
+    [id, type, label, `${type}:${label.toLowerCase()}`, origin, sourceRecordingId, '2026-06-01', '2026-06-01']
+  )
+}
+
 function seedEdge(id: string, sourceId: string, targetId: string, type: string): void {
   dbRun(
     'INSERT OR IGNORE INTO graph_edges (id, source_id, target_id, type, props, weight, created_at) VALUES (?, ?, ?, ?, NULL, 1, ?)',
@@ -457,10 +474,70 @@ describe('P3 — search / provenance / inspector hide excluded-only nodes', () =
     expect(searchGraphNodes('Backlog').map((n) => n.label)).toContain('Backlog')
   })
 
-  it('an isolated node (no edges) stays findable even under exclusion', () => {
-    seedNode('nSolo', 'topic', 'Solo')
+  // ADV35-1 (round-37) — an isolated (edgeless) node is no longer blanket-visible.
+  // Its NODE-LEVEL provenance decides: manual/structural stay visible; a derived
+  // orphan whose source recording is excluded/purged is suppressed; a legacy
+  // (origin-NULL) isolated node is visible for structural kinds, suppressed for
+  // derived kinds. (Replaces the round-24 test that codified the fail-OPEN branch.)
+  it('an isolated MANUAL node (folder/user origin) stays findable under exclusion', () => {
+    seedNodeWithOrigin('nManual', 'topic', 'ManualTopic', 'manual', null)
     deleteRecordingCascade('recA', { hard: false })
-    expect(searchGraphNodes('Solo').map((n) => n.label)).toContain('Solo')
+    expect(searchGraphNodes('ManualTopic').map((n) => n.label)).toContain('ManualTopic')
+  })
+
+  it('an isolated DERIVED node is suppressed once its source recording is soft-deleted', () => {
+    seedNodeWithOrigin('nRiskA', 'risk', 'RiskFromA', 'derived', 'recA')
+    // Visible while recA is eligible.
+    expect(searchGraphNodes('RiskFromA').map((n) => n.label)).toContain('RiskFromA')
+    deleteRecordingCascade('recA', { hard: false })
+    expect(searchGraphNodes('RiskFromA').map((n) => n.label)).not.toContain('RiskFromA')
+  })
+
+  it('an isolated DERIVED node is suppressed after its source recording is hard-purged', () => {
+    seedNodeWithOrigin('nRiskHP', 'risk', 'RiskHardPurge', 'derived', 'recB')
+    expect(searchGraphNodes('RiskHardPurge').map((n) => n.label)).toContain('RiskHardPurge')
+    // Hard purge removes the recordings row entirely → source no longer resolves
+    // via the positive allowlist → node suppressed. Wire the real graph cleanup.
+    setGraphProvenanceCleanup((id, opts) => removeRecordingProvenanceCore(id, opts))
+    try {
+      deleteRecordingCascade('recB', { hard: true })
+    } finally {
+      setGraphProvenanceCleanup(null)
+    }
+    expect(searchGraphNodes('RiskHardPurge').map((n) => n.label)).not.toContain('RiskHardPurge')
+  })
+
+  it('an isolated DERIVED node with an unassociable (null) source is suppressed fail-closed', () => {
+    seedNodeWithOrigin('nRiskOrphan', 'risk', 'RiskOrphan', 'derived', null)
+    deleteRecordingCascade('recA', { hard: false })
+    expect(searchGraphNodes('RiskOrphan').map((n) => n.label)).not.toContain('RiskOrphan')
+  })
+
+  it('a legacy (origin-null) isolated DERIVED-kind node is suppressed on the non-owner surface', () => {
+    seedNodeWithOrigin('nLegacyRisk', 'risk', 'LegacyRisk', null, null)
+    // Even with NO recording excluded, the non-owner surface suppresses legacy
+    // zero-provenance derived-kind content (round-24 policy, node tier).
+    expect(searchGraphNodes('LegacyRisk').map((n) => n.label)).not.toContain('LegacyRisk')
+  })
+
+  it('a legacy (origin-null) isolated STRUCTURAL-kind node stays visible', () => {
+    seedNodeWithOrigin('nLegacyProj', 'project', 'LegacyProject', null, null)
+    expect(searchGraphNodes('LegacyProject').map((n) => n.label)).toContain('LegacyProject')
+  })
+
+  it('an isolated DERIVED node returns to search when its source recording is restored', () => {
+    seedNodeWithOrigin('nRiskRestore', 'risk', 'RiskRestore', 'derived', 'recA')
+    deleteRecordingCascade('recA', { hard: false })
+    expect(searchGraphNodes('RiskRestore').map((n) => n.label)).not.toContain('RiskRestore')
+    restoreRecording('recA')
+    expect(searchGraphNodes('RiskRestore').map((n) => n.label)).toContain('RiskRestore')
+  })
+
+  it('the mutation guard refuses an isolated excluded-derived node (isNodeMutable)', () => {
+    seedNodeWithOrigin('nRiskMut', 'risk', 'RiskMutable', 'derived', 'recA')
+    deleteRecordingCascade('recA', { hard: false })
+    // getNodeDetail routes through isNodeVisibleUnderExclusion → null for a hidden node.
+    expect(getNodeDetail('RiskMutable').node).toBeNull()
   })
 
   it('queryProvenance of a shared-source center omits the excluded edge contribution', () => {

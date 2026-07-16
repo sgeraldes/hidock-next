@@ -1,4 +1,5 @@
 import type { KnowledgeGraphStore, UpsertEdgeInput } from './graph-store.js'
+import type { NodeType } from './schema.js'
 import type { ExtractionResult, ExtractionMeta } from './extract.js'
 import { isGenericEntityLabel } from './stop-list.js'
 
@@ -53,6 +54,19 @@ export function ingestExtraction(
       ? { recordingId: options.recordingId, transcriptId: options.transcriptId }
       : null
 
+  // ADV35-1 (round-37) — NODE-LEVEL provenance for the ISOLATED-node case (a risk
+  // extracted without a raiser has NO edge, hence no edge-provenance to suppress by
+  // after its recording is excluded). A recording-backed ingest stamps every node
+  // 'derived' + source_recording_id so an edgeless one can still be suppressed;
+  // folder ingest (no recordingId) has no recording to exclude, so its nodes are
+  // 'manual' (always visible on non-owner surfaces). Stamped on INSERT only —
+  // upsertNode keeps the first origin for a node that later accretes from another
+  // recording (edge-provenance then governs the connected case).
+  const nodeProvenance: { origin: 'derived' | 'manual'; sourceRecordingId: string | null } =
+    options.recordingId
+      ? { origin: 'derived', sourceRecordingId: options.recordingId }
+      : { origin: 'manual', sourceRecordingId: null }
+
   /** Upsert an edge and, when provenance ids are present, record the source. */
   const linkEdge = (input: UpsertEdgeInput): string => {
     const edgeId = store.upsertEdge(input)
@@ -60,31 +74,43 @@ export function ingestExtraction(
     return edgeId
   }
 
+  /** Upsert any extraction node with the shared node-level provenance stamp. */
+  const upsertDerivedNode = (input: {
+    type: NodeType
+    label: string
+    key?: string
+    props?: Record<string, unknown>
+  }): string =>
+    store.upsertNode({
+      ...input,
+      now,
+      origin: nodeProvenance.origin,
+      sourceRecordingId: nodeProvenance.sourceRecordingId,
+    })
+
   /** Upsert a person node, keyed by contact id when the resolver matches. */
   const upsertPerson = (name: string): string => {
     const resolved = resolvePerson?.(name) ?? null
     if (resolved) {
-      return store.upsertNode({
+      return upsertDerivedNode({
         type: 'person',
         label: resolved.label ?? name,
         key: `contact:${resolved.id}`,
         props: { contactId: resolved.id },
-        now,
       })
     }
-    return store.upsertNode({ type: 'person', label: name, now })
+    return upsertDerivedNode({ type: 'person', label: name })
   }
 
   // Meeting node — F18: keyed by `meeting:<meta.meetingId>` (mirrors the
   // `contact:<id>` identity pattern) so recurring occurrences with the same
   // display title no longer fold into one node. Label stays the display
   // title; props.meetingId is unchanged (meetingSummaryGraph resolves by it).
-  const meetingId = store.upsertNode({
+  const meetingId = upsertDerivedNode({
     type: 'meeting',
     label: meta.title ?? meta.meetingId,
     key: `meeting:${meta.meetingId}`,
     props: { meetingId: meta.meetingId, date: meta.date ?? '' },
-    now,
   })
 
   // People: ATTENDED meeting, DEMONSTRATED skills
@@ -98,7 +124,7 @@ export function ingestExtraction(
 
     for (const skill of person.skills ?? []) {
       if (!skill.trim()) continue
-      const skillId = store.upsertNode({ type: 'skill', label: skill, now })
+      const skillId = upsertDerivedNode({ type: 'skill', label: skill })
       linkEdge({ sourceId: personId, targetId: skillId, type: 'DEMONSTRATED', now })
     }
   }
@@ -106,28 +132,28 @@ export function ingestExtraction(
   // Topics: meeting ABOUT topic
   for (const topicLabel of extraction.topics) {
     if (!topicLabel.trim()) continue
-    const topicId = store.upsertNode({ type: 'topic', label: topicLabel, now })
+    const topicId = upsertDerivedNode({ type: 'topic', label: topicLabel })
     linkEdge({ sourceId: meetingId, targetId: topicId, type: 'ABOUT', now })
   }
 
   // Projects: meeting ABOUT project
   for (const projectLabel of extraction.projects) {
     if (!projectLabel.trim()) continue
-    const projectId = store.upsertNode({ type: 'project', label: projectLabel, now })
+    const projectId = upsertDerivedNode({ type: 'project', label: projectLabel })
     linkEdge({ sourceId: meetingId, targetId: projectId, type: 'ABOUT', now })
   }
 
   // Decisions: MADE_IN meeting
   for (const decisionText of extraction.decisions) {
     if (!decisionText.trim()) continue
-    const decisionId = store.upsertNode({ type: 'decision', label: decisionText, now })
+    const decisionId = upsertDerivedNode({ type: 'decision', label: decisionText })
     linkEdge({ sourceId: decisionId, targetId: meetingId, type: 'MADE_IN', now })
   }
 
   // Action items: person OWNS action_item
   for (const ai of extraction.action_items) {
     if (!ai.text.trim()) continue
-    const aiId = store.upsertNode({ type: 'action_item', label: ai.text, now })
+    const aiId = upsertDerivedNode({ type: 'action_item', label: ai.text })
     if (ai.owner?.trim() && !isGenericEntityLabel(ai.owner)) {
       const ownerId = upsertPerson(ai.owner)
       linkEdge({ sourceId: ownerId, targetId: aiId, type: 'OWNS', now })
@@ -138,7 +164,7 @@ export function ingestExtraction(
   // Risks: person RAISED risk
   for (const risk of extraction.risks) {
     if (!risk.text.trim()) continue
-    const riskId = store.upsertNode({ type: 'risk', label: risk.text, now })
+    const riskId = upsertDerivedNode({ type: 'risk', label: risk.text })
     if (risk.raised_by?.trim() && !isGenericEntityLabel(risk.raised_by)) {
       const raiserId = upsertPerson(risk.raised_by)
       linkEdge({ sourceId: raiserId, targetId: riskId, type: 'RAISED', now })
@@ -148,7 +174,7 @@ export function ingestExtraction(
   // Next steps: meeting HAS_NEXT_STEP
   for (const ns of extraction.next_steps) {
     if (!ns.trim()) continue
-    const nsId = store.upsertNode({ type: 'next_step', label: ns, now })
+    const nsId = upsertDerivedNode({ type: 'next_step', label: ns })
     linkEdge({ sourceId: meetingId, targetId: nsId, type: 'HAS_NEXT_STEP', now })
   }
 }

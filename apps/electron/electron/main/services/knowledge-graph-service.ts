@@ -1267,8 +1267,12 @@ export function searchGraphNodes(query: string, limit = 12): ContextGraphNode[] 
  * nodes match a search. This replaces the per-node isNodeVisibleUnderExclusion
  * N+1 so a caller can push the exclusion into SQL (`id NOT IN(...)`) and keep the
  * DB's LIMIT meaningful. The visibility decision is byte-for-byte the same as
- * isNodeVisibleUnderExclusion: a node with no incident edges, or with ≥1
- * surviving (non-suppressed / legacy zero-provenance) edge, is NOT hidden.
+ * isNodeVisibleUnderExclusion: a node with ≥1 surviving (non-suppressed / legacy
+ * zero-provenance) edge is NOT hidden; a node with all-suppressed incident edges IS
+ * hidden; and (ADV35-1, round-37) an ISOLATED node is decided by NODE-LEVEL
+ * provenance ({@link classifyIsolatedNodeVisible}) — a derived orphan of an
+ * excluded/purged recording (or a legacy derived-kind orphan) is hidden, while a
+ * manual/structural (or legacy structural-kind) orphan stays visible.
  */
 function computeExcludedOnlyNodeIds(
   store: KnowledgeGraphStore,
@@ -1321,6 +1325,32 @@ function computeExcludedOnlyNodeIds(
   }
   for (const [nodeId, count] of incident) {
     if (count > 0 && suppressedIncident.get(nodeId) === count) hidden.add(nodeId)
+  }
+
+  // 3. ADV35-1 (round-37) — ISOLATED nodes (no incident edge, hence absent from
+  //    `incident`) are not decided by edge-provenance. Scan all nodes, and for each
+  //    isolated one apply the NODE-LEVEL provenance rule. Batch the derived-source
+  //    eligibility lookup ONCE (not per node) to preserve this function's bounded,
+  //    non-N+1 contract.
+  const allNodes = store.db.queryAll<NodeProvenanceRow & { id: string }>(
+    'SELECT id, type, origin, source_recording_id FROM graph_nodes'
+  )
+  const isolatedDerivedSourceIds = new Set<string>()
+  for (const n of allNodes) {
+    if (incident.has(n.id)) continue // has edges — decided above
+    if (n.origin === 'derived' && n.source_recording_id && !exclusion.failClosed) {
+      isolatedDerivedSourceIds.add(n.source_recording_id)
+    }
+  }
+  const { eligible: eligibleIsolatedSources, failClosed: isolatedFailClosed } =
+    isolatedDerivedSourceIds.size > 0
+      ? getEligibleRecordingIds(isolatedDerivedSourceIds)
+      : { eligible: new Set<string>(), failClosed: false }
+  const sourceEligible = (recId: string): boolean =>
+    !isolatedFailClosed && eligibleIsolatedSources.has(recId)
+  for (const n of allNodes) {
+    if (incident.has(n.id)) continue
+    if (!classifyIsolatedNodeVisible(n, exclusion, sourceEligible)) hidden.add(n.id)
   }
   return hidden
 }
@@ -1495,12 +1525,83 @@ function provenanceSuppressedEdgeIds(
 }
 
 /**
- * P3 (round-3) — is a graph node visible under the current exclusion? A node is
- * HIDDEN only when it has ≥1 incident edge AND every incident edge is
- * provenance-suppressed (an "excluded-only" node). A node with no incident
- * edges (isolated / not recording-tied) or with ≥1 eligible edge is visible.
+ * ADV35-1 (round-37) — node TYPES that carry an independently-gated STRUCTURAL
+ * identity (person → contact, meeting → meetings row, project → projects row).
+ * A LEGACY (pre-v47, origin-NULL) ISOLATED node of one of these kinds is treated
+ * as manual/structural and stays visible; every other kind (risk/topic/decision/
+ * action_item/next_step/skill) is a purely DERIVED extraction artifact, so a
+ * legacy isolated one is suppressed fail-closed (it can't be proven manual and
+ * has no edge/node provenance to associate to an eligible recording).
+ */
+const LEGACY_STRUCTURAL_NODE_KINDS = new Set<string>(['person', 'meeting', 'project'])
+
+interface NodeProvenanceRow {
+  type: string
+  origin: string | null
+  source_recording_id: string | null
+}
+
+/**
+ * ADV35-1 (round-37) — PURE isolated-node visibility rule, shared by the per-node
+ * {@link isIsolatedNodeVisible} (point reads / views / mutation guard) and the
+ * batched {@link computeExcludedOnlyNodeIds} (search) so they never drift. Given a
+ * node's provenance row + a predicate for whether a derived source recording is
+ * currently eligible:
+ *   • origin 'manual'/'structural' ⇒ VISIBLE (user/folder/calendar — not tied to a
+ *     recording, nothing to exclude);
+ *   • origin 'derived' ⇒ visible ONLY if its source_recording_id resolves ELIGIBLE
+ *     (no source id, an ineligible/hard-purged source, or a fail-closed context ⇒
+ *     SUPPRESSED);
+ *   • origin NULL (legacy) ⇒ structural KIND visible, derived KIND suppressed.
+ */
+function classifyIsolatedNodeVisible(
+  row: NodeProvenanceRow,
+  exclusion: GroundingExclusion,
+  sourceEligible: (recId: string) => boolean
+): boolean {
+  if (row.origin === 'manual' || row.origin === 'structural') return true
+  if (row.origin === 'derived') {
+    if (!row.source_recording_id) return false // derived but unassociable ⇒ suppress
+    if (exclusion.failClosed) return false // fail-closed context suppresses attributed content
+    return sourceEligible(row.source_recording_id)
+  }
+  // origin NULL = LEGACY pre-v47. Structural kind ⇒ visible; derived kind ⇒ suppress.
+  return LEGACY_STRUCTURAL_NODE_KINDS.has(row.type)
+}
+
+/**
+ * ADV35-1 (round-37) — visibility for a single ISOLATED (zero-incident-edge) node.
+ * An isolated node has NO graph_edge_sources rows, so edge-provenance can't suppress
+ * it; the NODE-LEVEL provenance rule ({@link classifyIsolatedNodeVisible}) decides.
+ * A missing node row ⇒ not visible (fail-closed).
+ */
+function isIsolatedNodeVisible(
+  store: KnowledgeGraphStore,
+  nodeId: string,
+  exclusion: GroundingExclusion
+): boolean {
+  const row = store.db.queryOne<NodeProvenanceRow>(
+    'SELECT type, origin, source_recording_id FROM graph_nodes WHERE id = ?',
+    [nodeId]
+  )
+  if (!row) return false // gone ⇒ not visible (fail-closed)
+  return classifyIsolatedNodeVisible(row, exclusion, (recId) => {
+    const { eligible, failClosed } = getEligibleRecordingIds([recId])
+    return !failClosed && eligible.has(recId)
+  })
+}
+
+/**
+ * P3 (round-3) — is a graph node visible under the current exclusion? A node with
+ * ≥1 incident edge is HIDDEN only when EVERY incident edge is provenance-suppressed
+ * (an "excluded-only" node). ADV35-1 (round-37): a node with ZERO incident edges is
+ * no longer blanket-visible — an ISOLATED DERIVED node (e.g. an edgeless risk) has
+ * no edge-provenance to suppress by, so its NODE-LEVEL provenance decides (see
+ * {@link isIsolatedNodeVisible}); manual/structural isolated nodes stay visible.
  * Used by the inspector/search read paths (searchGraphNodes, queryProvenance,
- * getNodeDetail, default-center) so they never expose an excluded-only node.
+ * getNodeDetail, default-center, queryListNodes) AND the mutation guard
+ * (isNodeMutable) so they never expose / mutate an excluded-only or
+ * excluded-derived-orphan node.
  */
 function isNodeVisibleUnderExclusion(
   store: KnowledgeGraphStore,
@@ -1512,7 +1613,7 @@ function isNodeVisibleUnderExclusion(
     'SELECT id FROM graph_edges WHERE source_id = ? OR target_id = ?',
     [nodeId, nodeId]
   )
-  if (incident.length === 0) return true // isolated — not recording-attributed
+  if (incident.length === 0) return isIsolatedNodeVisible(store, nodeId, exclusion) // node-level provenance
   const suppressed = provenanceSuppressedEdgeIds(store, incident.map((e) => e.id), exclusion)
   return suppressed.size < incident.length // ≥1 edge survived ⇒ visible
 }
@@ -1597,6 +1698,7 @@ function suppressExcludedFromView<
       incidentToSuppressed.add(e.target)
     }
   }
+  const store = getKnowledgeGraphStore()
   const keptNodes = data.nodes.filter((n) => {
     // RE4-2 (round-4) — the center is NOT exempt from pruning. Centered callers
     // (queryNeighborhood/queryLens) pre-check center visibility and bail EMPTY
@@ -1607,7 +1709,12 @@ function suppressExcludedFromView<
     if (incidentToKept.has(n.id)) return true // still connected
     // Orphaned strictly BY the removal (was only on suppressed edges) → prune.
     if (incidentToSuppressed.has(n.id)) return false
-    return true // isolated node untouched by the removal → keep
+    // ADV35-1 (round-37) — isolated within this view (touched by NO edge here, e.g.
+    // an edgeless risk in the overview, or a fullGraph-limit-truncated node). No
+    // longer blanket-kept: re-verify through the shared boundary, which decides an
+    // isolated node by NODE-LEVEL provenance (derived-orphan of an excluded/purged
+    // recording ⇒ suppressed; manual/structural ⇒ kept).
+    return isNodeVisibleUnderExclusion(store, n.id, exclusion)
   })
   return { ...data, nodes: keptNodes, edges: keptEdges }
 }

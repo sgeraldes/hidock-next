@@ -109,10 +109,11 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('v46 migration — contacts.role_source_recording_id', () => {
-  it('column exists after init and schema version is 46', () => {
+  it('column exists after init and schema version is 47', () => {
     expect(getTableColumns(getDatabase(), 'contacts')).toContain('role_source_recording_id')
+    // round-37 bumped 46 -> 47 (node-level graph provenance, ADV35-1).
     const v = queryOne<{ v: number }>('SELECT MAX(version) AS v FROM schema_version')
-    expect(v?.v).toBe(46)
+    expect(v?.v).toBe(47)
   })
 
   it('backfill/legacy: a role with NULL provenance is always shown', () => {

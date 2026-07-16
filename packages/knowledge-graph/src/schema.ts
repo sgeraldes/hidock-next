@@ -35,13 +35,22 @@ export type EdgeType = (typeof EDGE_TYPES)[number]
 /** DDL for the knowledge graph. Run via initSchema() — idempotent. */
 export const GRAPH_SCHEMA = `
 CREATE TABLE IF NOT EXISTS graph_nodes (
-  id         TEXT PRIMARY KEY,
-  type       TEXT NOT NULL,
-  label      TEXT NOT NULL,
-  norm_key   TEXT NOT NULL,
-  props      TEXT,
-  created_at TEXT,
-  updated_at TEXT
+  id                  TEXT PRIMARY KEY,
+  type                TEXT NOT NULL,
+  label               TEXT NOT NULL,
+  norm_key            TEXT NOT NULL,
+  props               TEXT,
+  created_at          TEXT,
+  updated_at          TEXT,
+  -- ADV35-1 (F18/round-37): NODE-LEVEL provenance. An ISOLATED (edgeless) node —
+  -- e.g. a risk extracted without a raiser, or a topic that never linked — has NO
+  -- graph_edge_sources rows, so edge-provenance cannot suppress it after its
+  -- source recording is excluded/purged. origin distinguishes a recording-DERIVED
+  -- node ('derived', carrying source_recording_id) from a MANUAL/structural one
+  -- ('manual' — folder import / user path, no recording, always visible).
+  -- NULL = legacy pre-v47 (visibility falls back to a node-type heuristic).
+  origin              TEXT,
+  source_recording_id TEXT
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_graph_nodes_type_norm ON graph_nodes(type, norm_key);

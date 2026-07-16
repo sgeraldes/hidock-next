@@ -18,6 +18,10 @@ export interface GraphNode {
   props?: string | null
   created_at?: string | null
   updated_at?: string | null
+  /** ADV35-1 (round-37) — NODE-LEVEL provenance: 'derived' | 'manual' | null (legacy). */
+  origin?: 'derived' | 'manual' | string | null
+  /** ADV35-1 (round-37) — the recording a 'derived' node was extracted from (NULL for manual/legacy). */
+  source_recording_id?: string | null
 }
 
 export interface GraphEdge {
@@ -42,6 +46,16 @@ export interface UpsertNodeInput {
   key?: string
   props?: Record<string, unknown>
   now?: string
+  /**
+   * ADV35-1 (F18/round-37) — NODE-LEVEL provenance, written on INSERT only (an
+   * existing node keeps its FIRST recorded origin/source — best-effort for the
+   * isolated case; when a node accretes edges, edge-provenance governs). 'derived'
+   * = extracted from a recording's transcript (supply `sourceRecordingId`);
+   * 'manual' = a source with no recording identity (folder import / user path) —
+   * always visible on non-owner surfaces. Omit for legacy/untracked call sites.
+   */
+  origin?: 'derived' | 'manual'
+  sourceRecordingId?: string | null
 }
 
 export interface UpsertEdgeInput {
@@ -148,7 +162,7 @@ export class KnowledgeGraphStore {
    * If not: insert with deterministic id derived from type+norm_key.
    * Returns the node id.
    */
-  upsertNode({ type, label, key, props, now = '' }: UpsertNodeInput): string {
+  upsertNode({ type, label, key, props, now = '', origin, sourceRecordingId }: UpsertNodeInput): string {
     // Identity key drives dedup; the label is display-only. Defaults to label.
     const normKey = normalizeLabel(key ?? label)
     const propsJson = props != null ? JSON.stringify(props) : null
@@ -187,9 +201,13 @@ export class KnowledgeGraphStore {
       id = `${id}__${shortHash(normKey)}`.slice(0, 96)
     }
 
+    // ADV35-1 (round-37): stamp NODE-LEVEL provenance on INSERT. A 'derived' node
+    // carries its source recording; a 'manual' node (no recording identity) carries
+    // NULL. Omitted (legacy call sites) ⇒ both NULL. The UPDATE branch above never
+    // rewrites these, so an existing node keeps its FIRST recorded provenance.
     this.db.run(
-      'INSERT INTO graph_nodes (id, type, label, norm_key, props, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [id, type, label, normKey, propsJson, now, now]
+      'INSERT INTO graph_nodes (id, type, label, norm_key, props, origin, source_recording_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, type, label, normKey, propsJson, origin ?? null, sourceRecordingId ?? null, now, now]
     )
     return id
   }
