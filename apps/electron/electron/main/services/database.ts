@@ -6352,14 +6352,36 @@ export function filterVisibleEntityIds(kind: 'contact' | 'project', ids: Iterabl
 export function blankIneligibleContactFields<
   T extends { role?: string | null; role_source_recording_id?: string | null; role_origin?: string | null; source?: string | null }
 >(contacts: T[]): T[] {
-  if (contacts.length === 0) return contacts
+  return blankIneligibleContactFieldsWithStatus(contacts).contacts
+}
+
+/**
+ * ADV51-1 (round-53) — the SAME field-provenance sanitizer as
+ * {@link blankIneligibleContactFields}, but returning the `failClosed` signal from
+ * the underlying eligibility lookup so a scoring caller (identity-discovery role
+ * recompute) can distinguish two outcomes it must treat differently:
+ *   • an ATTRIBUTABLE transcript role whose source recording is verified INELIGIBLE
+ *     ⇒ role blanked, `failClosed = false` (the role contributes NOTHING, and the
+ *     caller lowers the composite — a determinate exclusion, not an error), vs.
+ *   • the eligibility lookup could NOT complete ⇒ every attributable role blanked
+ *     AND `failClosed = true`, so the caller SUPPRESSES the suggestion (surfacing)
+ *     and REJECTS acceptance rather than trusting a blanked-to-nothing role that
+ *     might actually be eligible.
+ * A NULL-provenance untrusted/legacy role is blanked deterministically (fail-closed
+ * within this fn) but does NOT set `failClosed` — it is a known-untrusted role, not
+ * an unverifiable one.
+ */
+export function blankIneligibleContactFieldsWithStatus<
+  T extends { role?: string | null; role_source_recording_id?: string | null; role_origin?: string | null; source?: string | null }
+>(contacts: T[]): { contacts: T[]; failClosed: boolean } {
+  if (contacts.length === 0) return { contacts, failClosed: false }
   const srcIds = new Set<string>()
   for (const c of contacts) {
     if (c.role && c.role_source_recording_id) srcIds.add(c.role_source_recording_id)
   }
   // getEligibleRecordingIds handles an empty set (returns {eligible:∅, failClosed:false}).
   const { eligible, failClosed } = getEligibleRecordingIds(srcIds)
-  return contacts.map((c) => {
+  const out = contacts.map((c) => {
     if (!c.role) return c // no role ⇒ nothing to blank
     // (1) Attributable transcript role ⇒ gate by its source recording's eligibility
     //     (fail-closed: a lookup failure blanks it).
@@ -6370,6 +6392,7 @@ export function blankIneligibleContactFields<
     // (2) NULL provenance ⇒ show ONLY an explicitly-structural/manual role.
     return roleIsTrustedStructural(c) ? c : { ...c, role: null }
   })
+  return { contacts: out, failClosed }
 }
 
 /**

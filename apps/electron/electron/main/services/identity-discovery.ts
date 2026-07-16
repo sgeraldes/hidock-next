@@ -34,7 +34,9 @@ import {
   insertIdentitySuggestion,
   filterEligibleGraphEdgeIds,
   filterEligibleMembershipRows,
-  filterVisibleEntityIds
+  filterVisibleEntityIds,
+  blankIneligibleContactFields,
+  blankIneligibleContactFieldsWithStatus
 } from './database'
 import type { Contact, Project, IdentitySuggestion, MembershipRow } from './database'
 import { filterEligibleRecordingIds } from './recording-eligibility'
@@ -181,6 +183,33 @@ function buildTokenBearers(entities: Array<{ name: string }>): Map<string, numbe
   return counts
 }
 
+/**
+ * ADV51-3 (round-53) — VISIBILITY-filtered bearer counts. The bearer corpus (the
+ * base-rate denominator that classifies a token common/rare) must count ONLY
+ * entities that are visible on non-owner identity surfaces: an entity whose every
+ * provenance is excluded / suppressed / legacy (already hidden from the
+ * People/Projects LIST by {@link filterVisibleEntityIds}) must NOT change a token's
+ * rarity — otherwise an excluded-only bearer both skews a discovery suggestion's
+ * confidence AND leaks a coarse count-based inference about excluded content.
+ *
+ * Routes the candidate ids through the shared positive visibility boundary and
+ * builds counts from the positively-VISIBLE rows only, propagating that boundary's
+ * `failClosed` so a lookup failure (which yields an EMPTY visible set) fails
+ * CLOSED at the rarity recompute (suppress at surfacing, reject at accept) rather
+ * than trusting a zero bearerCount that could raise confidence.
+ */
+function buildVisibleTokenBearers(
+  kind: 'contact' | 'project',
+  entities: Array<{ id: string; name: string }>
+): { bearers: Map<string, number>; failClosed: boolean } {
+  const { visible, failClosed } = filterVisibleEntityIds(
+    kind,
+    entities.map((e) => e.id)
+  )
+  const visibleEntities = entities.filter((e) => visible.has(e.id))
+  return { bearers: buildTokenBearers(visibleEntities), failClosed }
+}
+
 /** Escape LIKE wildcards so a name is matched literally. */
 function likeEscape(s: string): string {
   return s.replace(/[\\%_]/g, (m) => '\\' + m)
@@ -220,10 +249,27 @@ function makeMentionCounter(): (name: string) => MentionCount {
     if (!key) return { count: 0, failClosed: false }
     const hit = cache.get(key)
     if (hit !== undefined) return hit
-    const rows = safeQueryAll<{ recording_id: string | null }>(
-      `SELECT recording_id FROM transcripts WHERE full_text LIKE ? ESCAPE '\\'`,
-      [`%${likeEscape(name.trim())}%`]
-    )
+    // ADV51-2 (round-53) — the transcript CORPUS query must fail CLOSED too. A prior
+    // `safeQueryAll` swallowed a transcript SELECT exception into an EMPTY result,
+    // which then returned { count: 0, failClosed: FALSE } — a trusted zero that
+    // REMOVES the 'common' penalty and RAISES confidence while the mention corpus is
+    // unverifiable (round 51 only propagated the ELIGIBILITY-lookup failure, not the
+    // corpus-query failure). `transcripts` is a core table that always exists, so a
+    // throw here is a genuine fault: STRICT queryAll inside an explicit try/catch ⇒
+    // any exception yields { count: 0, failClosed: TRUE } so the caller suppresses at
+    // surfacing + rejects at accept rather than trusting the zero.
+    let rows: Array<{ recording_id: string | null }>
+    try {
+      rows = queryAll<{ recording_id: string | null }>(
+        `SELECT recording_id FROM transcripts WHERE full_text LIKE ? ESCAPE '\\'`,
+        [`%${likeEscape(name.trim())}%`]
+      )
+    } catch (e) {
+      console.error('[identity-discovery] mention-count transcript query failed — failing closed:', e)
+      const failed: MentionCount = { count: 0, failClosed: true }
+      cache.set(key, failed)
+      return failed
+    }
     let result: MentionCount = { count: 0, failClosed: false }
     if (rows.length > 0) {
       const recIds = rows.map((r) => r.recording_id).filter((id): id is string => !!id)
@@ -475,8 +521,25 @@ export function discoverContactMerges(): DiscoveryResult {
 
   const aliasKeys = loadAliasKeys('contact_aliases', 'contact_id')
   const neighborsFor = makeNeighborLoader(PERSON_NEIGHBORS_SQL, 1)
-  const tokenBearers = buildTokenBearers(contacts)
+  // ADV51-3 (round-53) — count bearers only over VISIBLE contacts (excluded-only /
+  // suppressed / legacy entities must not skew a token's base rate). failClosed is
+  // carried into pairRarity; at SCAN it is not itself blocking (the authoritative
+  // fail-closed gate is the surface/accept recompute), but propagating it keeps a
+  // fault from being treated as a confident zero downstream.
+  const { bearers: tokenBearers, failClosed: bearersFailClosed } = buildVisibleTokenBearers(
+    'contact',
+    contacts.map((c) => ({ id: c.id, name: c.name }))
+  )
   const mentionsOf = makeMentionCounter()
+
+  // ADV51-1 (round-53) — sanitize each contact's `role` through the shared field-
+  // provenance boundary BEFORE it feeds roleSignal/roleOverlap: a transcript-derived
+  // role whose source recording is now excluded (or a legacy/untrusted NULL-provenance
+  // role) contributes NOTHING to the role signal. At SCAN a blanked role simply lowers
+  // the role boost (conservative); the authoritative role recompute runs at surface +
+  // accept (revalidateSuggestionsForSurfacing / isSuggestionEligibleForAccept).
+  const sanitizedRoleById = new Map<string, string | null>()
+  for (const c of blankIneligibleContactFields(contacts)) sanitizedRoleById.set(c.id, c.role ?? null)
 
   // Ambiguous mention buckets ("Sergio" = several real people): never propose merging
   // a distinct surname-bearer INTO the bucket (or the bucket into one of them). Those
@@ -502,7 +565,8 @@ export function discoverContactMerges(): DiscoveryResult {
     // --- signals ---
     const name = pairNameScore(a.name, b.name)
     const rel = emailRelation(a.email, b.email)
-    const role = roleSignal(a.role, b.role)
+    // ADV51-1 (round-53) — sanitized roles (excluded/legacy role ⇒ blanked ⇒ no boost).
+    const role = roleSignal(sanitizedRoleById.get(a.id) ?? null, sanitizedRoleById.get(b.id) ?? null)
 
     const mJac = jaccard(meetingSetFor(a.id), meetingSetFor(b.id))
     const aNeighbors = neighborsFor(normalizeName(a.name))
@@ -520,7 +584,8 @@ export function discoverContactMerges(): DiscoveryResult {
     // suggestion created here is revalidated at surface/accept, where a failClosed
     // rarity recompute SUPPRESSES/REJECTS it. So scan keeps creating on the other
     // signals (email/name/graph) rather than dropping a valid email-matched pair.
-    const rar = pairRarity(a.name, b.name, tokenBearers, mentionsOf)
+    // ADV51-3 (round-53) — carry the bearer-corpus failClosed for consistency.
+    const rar = pairRarity(a.name, b.name, tokenBearers, mentionsOf, bearersFailClosed)
 
     let composite = NAME_WEIGHT * name + role.boost + graph + emailBoost + rar.delta
     if (rel === 'conflict') composite -= EMAIL_CONFLICT_PENALTY
@@ -591,7 +656,11 @@ export function discoverProjectMerges(): DiscoveryResult {
 
   const aliasKeys = loadAliasKeys('project_aliases', 'project_id')
   const neighborsFor = makeNeighborLoader(PROJECT_NEIGHBORS_SQL, 2)
-  const tokenBearers = buildTokenBearers(projects)
+  // ADV51-3 (round-53) — visibility-filtered bearer counts (see contact discovery).
+  const { bearers: tokenBearers, failClosed: bearersFailClosed } = buildVisibleTokenBearers(
+    'project',
+    projects.map((p) => ({ id: p.id, name: p.name }))
+  )
   const mentionsOf = makeMentionCounter()
 
   const pairs = candidatePairsFrom(projects.map((p) => ({ id: p.id, name: p.name, email: null })))
@@ -612,7 +681,8 @@ export function discoverProjectMerges(): DiscoveryResult {
     // ADV49-3 (round-51) — scan keeps its conservative bearer-based rarity on a
     // failClosed mention lookup (see the contact-discovery site above); the
     // surface/accept recompute is the authoritative fail-closed gate.
-    const rar = pairRarity(a.name, b.name, tokenBearers, mentionsOf)
+    // ADV51-3 (round-53) — carry the bearer-corpus failClosed for consistency.
+    const rar = pairRarity(a.name, b.name, tokenBearers, mentionsOf, bearersFailClosed)
 
     // Projects have no email/role → never auto-mergeable (that gate needs email corroboration).
     const composite = clamp01(NAME_WEIGHT * name + graph + rar.delta)
@@ -657,6 +727,7 @@ interface SuggestionEvidence {
   signals?: { name?: number; email?: number; role?: number; graph?: number }
   composite?: number
   sharedTopics?: string[]
+  roleOverlap?: string[]
   sharedMeetings?: number
   keeperId?: string
   keeperName?: string
@@ -718,8 +789,18 @@ function makeRarityRecomputer(): (s: IdentitySuggestion, ev: SuggestionEvidence)
     const table = kind === 'person' ? 'contacts' : 'projects'
     let result: { bearers: Map<string, number>; failClosed: boolean }
     try {
-      const rows = queryAll<{ name: string }>(`SELECT name FROM ${table}`)
-      result = { bearers: buildTokenBearers(rows), failClosed: false }
+      // ADV51-3 (round-53) — select id+name and count ONLY positively-VISIBLE rows
+      // (an excluded-only / suppressed / legacy entity must not skew the base rate).
+      // Propagate the visibility boundary's failClosed so an unverifiable corpus
+      // suppresses the recompute (a bare-0 bearerCount would classify a long token
+      // RARE (+0.05) and raise confidence during a DB fault — the ADV50-2 hole, now
+      // also closed against the entity-visibility lookup).
+      const rows = queryAll<{ id: string; name: string }>(`SELECT id, name FROM ${table}`)
+      const { visible, failClosed } = filterVisibleEntityIds(
+        kind === 'person' ? 'contact' : 'project',
+        rows.map((r) => r.id)
+      )
+      result = { bearers: buildTokenBearers(rows.filter((r) => visible.has(r.id))), failClosed }
     } catch (e) {
       console.error(`[identity-discovery] bearer corpus lookup (${table}) failed — failing closed:`, e)
       result = { bearers: new Map<string, number>(), failClosed: true }
@@ -761,6 +842,78 @@ function makeRarityRecomputer(): (s: IdentitySuggestion, ev: SuggestionEvidence)
       console.error('[identity-discovery] rarity recompute failed — leaving suggestion untouched:', e)
       return s
     }
+  }
+}
+
+/**
+ * ADV51-1 (round-53) — recompute a persisted suggestion's ROLE component from the
+ * CURRENT field-level provenance of the keeper + loser contacts. A role boost /
+ * roleOverlap baked in at creation whose source recording is now excluded (or which
+ * is a legacy/untrusted NULL-provenance role) must contribute NOTHING at surface +
+ * accept. Each contact's role provenance is fetched once and routed through the
+ * shared field sanitizer ({@link blankIneligibleContactFieldsWithStatus}):
+ *   • role blanked (excluded source OR legacy/untrusted) ⇒ boost 0 / no overlap;
+ *   • role still eligible ⇒ the recomputed roleSignal (unchanged if roles unchanged);
+ *   • field eligibility UNVERIFIABLE (lookup failClosed) ⇒ { failClosed: true } so the
+ *     caller SUPPRESSES the suggestion at surfacing and REJECTS it at accept.
+ * Role is a PERSON-only signal (projects carry role 0 / no overlap) and only a
+ * suggestion that actually BAKED a role component is recomputed — a suggestion with
+ * no role boost/overlap is a no-op (never fabricates a boost that could raise
+ * confidence).
+ */
+interface ContactRoleRow {
+  id: string
+  role: string | null
+  role_source_recording_id: string | null
+  role_origin: string | null
+  source: string | null
+}
+function makeRoleRecomputer(): (
+  s: IdentitySuggestion,
+  ev: SuggestionEvidence
+) => { boost: number; shared: string[]; failClosed: boolean } {
+  const cache = new Map<string, ContactRoleRow | null>()
+  const fetchContact = (id: string): ContactRoleRow | null => {
+    if (cache.has(id)) return cache.get(id) ?? null
+    let row: ContactRoleRow | null = null
+    try {
+      row =
+        queryOne<ContactRoleRow>(
+          'SELECT id, role, role_source_recording_id, role_origin, source FROM contacts WHERE id = ?',
+          [id]
+        ) ?? null
+    } catch (e) {
+      console.error('[identity-discovery] role-recompute contact lookup failed:', e)
+      row = null
+    }
+    cache.set(id, row)
+    return row
+  }
+  return (s, ev) => {
+    const oldBoost = Number(ev.signals?.role ?? 0)
+    const oldShared = Array.isArray(ev.roleOverlap)
+      ? (ev.roleOverlap as unknown[]).filter((x): x is string => typeof x === 'string')
+      : []
+    // Role is PERSON-only; a project suggestion carries no role component.
+    if (s.kind !== 'person') return { boost: oldBoost, shared: oldShared, failClosed: false }
+    // No role component was baked into this suggestion ⇒ nothing to recompute (must
+    // not fabricate a boost that would RAISE confidence).
+    if (!(oldBoost > 0) && oldShared.length === 0) return { boost: 0, shared: [], failClosed: false }
+    const keeperId = ev.keeperId ?? s.target_id
+    const loserId = ev.loserId ?? null
+    // A discovery role suggestion always carries BOTH entity ids; without them the
+    // role provenance can't be re-verified ⇒ conservatively drop the boost (never
+    // raises confidence — the composite recompute lowers it toward the other signals).
+    if (!keeperId || !loserId) return { boost: 0, shared: [], failClosed: false }
+    const keeper = fetchContact(keeperId)
+    const loser = fetchContact(loserId)
+    // Either entity gone (hard-purged) ⇒ its role evidence is gone ⇒ no boost.
+    if (!keeper || !loser) return { boost: 0, shared: [], failClosed: false }
+    const { contacts: sanitized, failClosed } = blankIneligibleContactFieldsWithStatus([keeper, loser])
+    // Field eligibility could not be verified ⇒ suppress (surface) + reject (accept).
+    if (failClosed) return { boost: oldBoost, shared: oldShared, failClosed: true }
+    const rec = roleSignal(sanitized[0]?.role ?? null, sanitized[1]?.role ?? null)
+    return { boost: rec.boost, shared: rec.shared, failClosed: false }
   }
 }
 
@@ -815,6 +968,9 @@ export function revalidateSuggestionsForSurfacing(suggestions: IdentitySuggestio
   // ADV48-1 (round-50) — corrects a persisted `rarity`/confidence that was derived
   // (partly) from now-excluded transcript mentions, before the survivor is displayed.
   const recomputeRarity = makeRarityRecomputer()
+  // ADV51-1 (round-53) — corrects/suppresses a persisted `role` boost + roleOverlap
+  // whose source recording became excluded (or that is a legacy/untrusted role).
+  const recomputeRole = makeRoleRecomputer()
 
   for (const s of suggestions) {
     if (s.status !== 'pending') {
@@ -867,7 +1023,19 @@ export function revalidateSuggestionsForSurfacing(suggestions: IdentitySuggestio
       // the legacy/missing-provenance transcript suggestions fail-closed (ADV26-1);
       // let genuine discovery stragglers through (they have no recording attribution).
       if (ev.signals) {
-        const recomputed = recomputeRarity(s, ev)
+        // ADV51-1 (round-53) — recompute the ROLE component from current field
+        // provenance (excluded/legacy role ⇒ no boost; unverifiable ⇒ suppress).
+        const roleRec = recomputeRole(s, ev)
+        if (roleRec.failClosed) continue
+        const oldRole = Number(ev.signals.role ?? 0)
+        let comp = clamp01(Number(ev.composite ?? s.confidence ?? 0) - oldRole + roleRec.boost)
+        if (ev.emailMatch === 'exact') comp = Math.max(comp, EMAIL_EXACT_FLOOR)
+        ev.signals = { ...ev.signals, role: round2(roleRec.boost) }
+        ev.roleOverlap = roleRec.shared
+        ev.composite = round2(comp)
+        // Role evidence was load-bearing and is now gone ⇒ drop below the bar.
+        if (comp < SUGGEST_THRESHOLD) continue
+        const recomputed = recomputeRarity({ ...s, confidence: round2(comp), evidence: JSON.stringify(ev) }, ev)
         if (recomputed) out.push(recomputed) // ADV49-3 — null ⇒ suppress (unverifiable rarity)
       }
       continue
@@ -903,10 +1071,19 @@ export function revalidateSuggestionsForSurfacing(suggestions: IdentitySuggestio
 
       const oldComposite = Number(ev.composite ?? s.confidence ?? 0)
       let newComposite = clamp01(oldComposite - oldGraph + newGraph)
+
+      // ADV51-1 (round-53) — recompute the ROLE component from current field
+      // provenance too (a transcript-derived role whose source recording is now
+      // excluded contributes nothing; an unverifiable role provenance suppresses).
+      const roleRec = recomputeRole(s, ev)
+      if (roleRec.failClosed) continue
+      const oldRole = Number(ev.signals?.role ?? 0)
+      newComposite = clamp01(newComposite - oldRole + roleRec.boost)
       if (ev.emailMatch === 'exact') newComposite = Math.max(newComposite, EMAIL_EXACT_FLOOR)
 
       ev.sharedTopics = eligibleSharedTopics
-      ev.signals = { ...(ev.signals ?? {}), graph: round2(newGraph) }
+      ev.roleOverlap = roleRec.shared
+      ev.signals = { ...(ev.signals ?? {}), graph: round2(newGraph), role: round2(roleRec.boost) }
       ev.composite = round2(newComposite)
       if (canRecompute) ev.sharedMeetings = mJac.shared.length
       // Ensure the rarity recompute below can resolve both names (may have been
