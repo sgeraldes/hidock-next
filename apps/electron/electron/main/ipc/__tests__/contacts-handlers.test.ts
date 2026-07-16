@@ -30,6 +30,10 @@ vi.mock('../../services/database', () => ({
   // boundary. Default to all-visible so these shape assertions are unaffected;
   // behavioral suppression is covered by the real-temp-DB suite.
   filterVisibleEntityIds: vi.fn((_kind: string, ids: Iterable<string>) => ({ visible: new Set([...ids]), failClosed: false })),
+  // ADV29-2 (round-31) — getAll/getById/getForMeeting blank a transcript-enriched
+  // role whose source recording is ineligible. Default to pass-through; behavioral
+  // blanking is covered by the real-temp-DB round-31 suite.
+  blankIneligibleContactFields: vi.fn(<T,>(contacts: T[]) => contacts),
   getDatabase: vi.fn(() => ({
     prepare: vi.fn(() => ({
       bind: vi.fn(),

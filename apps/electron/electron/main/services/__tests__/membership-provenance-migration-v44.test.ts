@@ -83,10 +83,11 @@ afterEach(() => {
 })
 
 describe('v44 schema', () => {
-  it('boot schema version is 45', () => {
-    // F18/round-28 bumped SCHEMA_VERSION 44 -> 45 (entity-level identity provenance).
+  it('boot schema version is 46', () => {
+    // F18/round-28 bumped 44 -> 45 (entity provenance); round-31 bumped 45 -> 46
+    // (per-field role provenance, ADV29-2).
     const row = queryOne<{ v: number }>('SELECT MAX(version) AS v FROM schema_version')!
-    expect(row.v).toBe(45)
+    expect(row.v).toBe(46)
   })
 
   it('adds the per-row provenance columns (idempotent — table already has them)', () => {

@@ -80,10 +80,10 @@ describe('migration v37 objects', () => {
     expect(info).toHaveLength(1)
   })
 
-  it('is at schema version 45', () => {
-    // F18/round-28 bumped SCHEMA_VERSION 44 -> 45 (entity-level identity provenance).
+  it('is at schema version 46', () => {
+    // round-31 bumped SCHEMA_VERSION 45 -> 46 (per-field role provenance, ADV29-2).
     const row = queryOne<{ version: number }>('SELECT version FROM schema_version ORDER BY version DESC LIMIT 1')
-    expect(row?.version).toBe(45)
+    expect(row?.version).toBe(46)
   })
 })
 

@@ -512,10 +512,14 @@ export function applyTranscriptEntities(opts: {
           // v45/round-28: a transcript-extracted ENTITY ⇒ source='transcript' +
           // the source recording, so the visible-identity boundary suppresses it
           // on non-owner surfaces once that recording is excluded (ADV27-1).
+          // v46/round-31 (ADV29-2): stamp role_source_recording_id = the recording
+          // when we set a transcript-derived role, so a non-owner read can blank the
+          // role if this recording is later excluded even while the entity stays
+          // visible via another eligible recording.
           run(
-            `INSERT INTO contacts (id, name, type, role, first_seen_at, last_seen_at, meeting_count, source, source_recording_id)
-             VALUES (?, ?, 'unknown', ?, ?, ?, 0, 'transcript', ?)`,
-            [id, name, person.role ?? null, now, now, opts.recordingId ?? null]
+            `INSERT INTO contacts (id, name, type, role, first_seen_at, last_seen_at, meeting_count, source, source_recording_id, role_source_recording_id)
+             VALUES (?, ?, 'unknown', ?, ?, ?, 0, 'transcript', ?, ?)`,
+            [id, name, person.role ?? null, now, now, opts.recordingId ?? null, person.role ? (opts.recordingId ?? null) : null]
           )
           contactId = id
           contacts++
@@ -542,7 +546,14 @@ export function applyTranscriptEntities(opts: {
             [contactId]
           )
           if (existing && !existing.role && existing.source === 'transcript') {
-            run(`UPDATE contacts SET role = ? WHERE id = ?`, [person.role, contactId])
+            // v46/round-31 (ADV29-2): record the recording that supplied this role so
+            // a non-owner read blanks it if the recording is later excluded, even
+            // though the entity stays visible via another eligible recording.
+            run(`UPDATE contacts SET role = ?, role_source_recording_id = ? WHERE id = ?`, [
+              person.role,
+              opts.recordingId ?? null,
+              contactId
+            ])
           }
         }
         // Remember an attendee-context split so re-analysis attributes it the same way
@@ -566,10 +577,11 @@ export function applyTranscriptEntities(opts: {
         // Low confidence — genuinely new person.
         const id = randomUUID()
         // v45/round-28: transcript-extracted ENTITY ⇒ source='transcript' + recording (ADV27-1).
+        // v46/round-31 (ADV29-2): stamp role_source_recording_id when a transcript role is set.
         run(
-          `INSERT INTO contacts (id, name, type, role, first_seen_at, last_seen_at, meeting_count, source, source_recording_id)
-           VALUES (?, ?, 'unknown', ?, ?, ?, 0, 'transcript', ?)`,
-          [id, name, person.role ?? null, now, now, opts.recordingId ?? null]
+          `INSERT INTO contacts (id, name, type, role, first_seen_at, last_seen_at, meeting_count, source, source_recording_id, role_source_recording_id)
+           VALUES (?, ?, 'unknown', ?, ?, ?, 0, 'transcript', ?, ?)`,
+          [id, name, person.role ?? null, now, now, opts.recordingId ?? null, person.role ? (opts.recordingId ?? null) : null]
         )
         contactId = id
         contacts++

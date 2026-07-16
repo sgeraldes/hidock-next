@@ -158,6 +158,14 @@ export interface Contact {
   last_seen_at: string
   meeting_count: number
   created_at: string
+  /** v45 entity origin: 'user' | 'calendar' | 'transcript' | null (legacy). */
+  source?: string | null
+  /** v45 — recording whose transcript minted a transcript-origin entity. */
+  source_recording_id?: string | null
+  /** v46 (ADV29-2) — recording that supplied the current `role`. NULL = calendar/
+   *  manual/legacy-authored (always shown); a transcript-enriched role is BLANKED
+   *  on non-owner reads when this recording is ineligible. */
+  role_source_recording_id?: string | null
 }
 
 /**

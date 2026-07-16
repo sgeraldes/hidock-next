@@ -19,6 +19,7 @@ import {
   mergeContacts,
   unmergeContacts,
   filterVisibleEntityIds,
+  blankIneligibleContactFields,
   UnmergeResult,
   Contact
 } from '../services/database'
@@ -61,8 +62,10 @@ export function registerContactsHandlers(): void {
         const { visible } = filterVisibleEntityIds('contact', result.contacts.map((c) => c.id))
         const contacts = result.contacts.filter((c) => visible.has(c.id))
 
+        // ADV29-2 (round-31) — a contact kept visible by an eligible recording can
+        // still carry a `role` enriched from an excluded one; blank it fail-closed.
         return success({
-          contacts: contacts.map(mapToPerson),
+          contacts: blankIneligibleContactFields(contacts).map(mapToPerson),
           total: result.total
         })
       } catch (err) {
@@ -108,8 +111,11 @@ export function registerContactsHandlers(): void {
           totalMeetingTimeMinutes += Math.round((end - start) / 60000)
         }
 
+        // ADV29-2 (round-31) — blank a transcript-enriched role whose source
+        // recording is ineligible even though the entity itself stays visible.
+        const [safeContact] = blankIneligibleContactFields([contact])
         return success({
-          contact: mapToPerson(contact),
+          contact: mapToPerson(safeContact),
           meetings,
           totalMeetingTimeMinutes
         })
@@ -312,7 +318,10 @@ export function registerContactsHandlers(): void {
           return error('VALIDATION_ERROR', 'Meeting ID must be a string')
         }
 
-        const contacts = getContactsForMeeting(meetingId)
+        // ADV29-2 (round-31) — assistant/hover tier: blank a transcript-enriched
+        // role whose source recording is ineligible (the participant may stay via a
+        // structural/eligible membership while its role came from an excluded one).
+        const contacts = blankIneligibleContactFields(getContactsForMeeting(meetingId))
         return success(contacts.map(mapToPerson))
       } catch (err) {
         console.error('contacts:getForMeeting error:', err)

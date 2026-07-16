@@ -58,6 +58,7 @@ import {
   getEligibleRecordingIds,
   isRecordingGraphIngestable,
   getContactById,
+  blankIneligibleContactFields,
   getContactByName,
   createContact,
   updateContact,
@@ -1913,9 +1914,13 @@ export function getNodeDetail(entityId: string): NodeDetailDTO {
   if (contactId) {
     const contact = getContactById(contactId)
     if (contact) {
-      role = contact.role
-      company = contact.company
-      email = contact.email
+      // ADV29-2 (round-31) — graph inspector is a NON-OWNER surface: blank a
+      // transcript-enriched role whose source recording is ineligible (fail-closed),
+      // even though the node/contact stays visible via an eligible recording.
+      const [safe] = blankIneligibleContactFields([contact])
+      role = safe.role
+      company = safe.company
+      email = safe.email
       dto.contactId = contactId
     }
     try {

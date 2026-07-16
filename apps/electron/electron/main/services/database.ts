@@ -8,7 +8,7 @@ import { normalizeName, isGenericSpeakerLabel, detectAmbiguousName } from './ent
 import { getEventBus } from './event-bus'
 import type { QualityRating } from '@/types/knowledge'
 
-const SCHEMA_VERSION = 45
+const SCHEMA_VERSION = 46
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -400,6 +400,13 @@ CREATE TABLE IF NOT EXISTS synced_files (
 --                           an unassociable legacy entity is fail-closed suppressed
 -- source_recording_id is the recording whose transcript minted a transcript entity
 -- (used to gate a transcript entity that has NO membership rows yet).
+-- v46 (F18/round-31, ADV29-2) PER-FIELD provenance. role is the only contact
+-- scalar an AI transcript ENRICHES (org-reconciler.applyTranscriptEntities fills an
+-- empty role from a recording). Entity-level visibility cannot retract ONE field:
+-- a contact visible via an eligible recording B keeps a role enriched from an
+-- excluded recording A. role_source_recording_id records the recording that
+-- supplied the current role, and a NON-OWNER read BLANKS role when that recording
+-- is ineligible. NULL = calendar/manual/legacy-authored role, always shown.
 CREATE TABLE IF NOT EXISTS contacts (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -414,7 +421,8 @@ CREATE TABLE IF NOT EXISTS contacts (
     meeting_count INTEGER DEFAULT 0,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     source TEXT,
-    source_recording_id TEXT
+    source_recording_id TEXT,
+    role_source_recording_id TEXT
 );
 
 -- User-created projects for organizing meetings. Projects are full hubs (v29):
@@ -2326,6 +2334,35 @@ const MIGRATIONS: Record<number, () => void> = {
       console.warn('[Migration v45] entity provenance backfill failed (non-fatal):', e)
     }
     console.log('Migration v45 complete')
+  },
+
+  46: () => {
+    // v46 (F18/round-31, ADV29-2): PER-FIELD provenance for the one contact scalar
+    // an AI transcript enriches — `role`. Entity-level visibility (v45) suppresses a
+    // whole transcript entity when its source recording is excluded, but a contact
+    // kept visible by an ELIGIBLE recording B can still display a role that was
+    // enriched from an EXCLUDED recording A (org-reconciler.applyTranscriptEntities
+    // fills an empty role from a specific recording). Add
+    // contacts.role_source_recording_id so a non-owner read can BLANK a role whose
+    // source recording is ineligible.
+    // NO backfill: existing role values are treated as calendar/manual/legacy
+    // (role_source_recording_id NULL ⇒ always shown). Only NEW transcript enrichment
+    // going forward stamps provenance — we do not retroactively blank a legacy role
+    // we cannot attribute to a recording (conservative; documented in ARF-HIGHS-CHANGES).
+    // Projects have NO transcript-enriched scalar (description is user-authored only),
+    // so no per-field column is needed there.
+    // Idempotent: single guarded ALTER (matching v44/v45).
+    console.log('Running migration to schema v46: per-field role provenance')
+    const database = getDatabase()
+    const cols = getTableColumns(database, 'contacts')
+    if (cols.length > 0 && !cols.includes('role_source_recording_id')) {
+      try {
+        database.run('ALTER TABLE contacts ADD COLUMN role_source_recording_id TEXT')
+      } catch (e) {
+        console.warn('[Migration v46] add contacts.role_source_recording_id failed:', e)
+      }
+    }
+    console.log('Migration v46 complete')
   }
 
 }
@@ -2453,6 +2490,9 @@ function repairPhase(): void {
     ['identity_suggestions', 'source_recording_ids'],
     ['contacts', 'source'],
     ['contacts', 'source_recording_id'],
+    // v46/round-31 (ADV29-2) — per-field role provenance; force-add so an older
+    // on-disk schema has it before any role read blanks on ineligible provenance.
+    ['contacts', 'role_source_recording_id'],
     ['projects', 'source'],
     ['projects', 'source_recording_id']
   ] as const) {
@@ -5579,6 +5619,14 @@ export interface Contact {
   last_seen_at: string
   meeting_count: number
   created_at: string
+  /** v45 entity origin: 'user' | 'calendar' | 'transcript' | null (legacy). */
+  source?: string | null
+  /** v45 — recording whose transcript minted a transcript-origin entity. */
+  source_recording_id?: string | null
+  /** v46 (ADV29-2) — recording that supplied the current `role`; NULL = calendar/
+   *  manual/legacy (always shown). Transcript-enriched role is blanked on non-owner
+   *  reads when this recording is ineligible. */
+  role_source_recording_id?: string | null
 }
 
 export type ContactRole = 'organizer' | 'attendee'
@@ -6064,6 +6112,42 @@ export function filterVisibleEntityIds(kind: 'contact' | 'project', ids: Iterabl
 }
 
 /**
+ * ADV29-2 (round-31) — FIELD-LEVEL provenance blanking for the transcript-enriched
+ * contact scalar `role`. {@link filterVisibleEntityIds} gates the WHOLE entity, but
+ * a contact kept visible by an ELIGIBLE recording B can still carry a `role` that
+ * was enriched from a now-EXCLUDED recording A (org-reconciler.applyTranscriptEntities
+ * fills an empty role from one specific recording, stamping role_source_recording_id).
+ * Entity-level visibility cannot retract that one field, so this blanks it on
+ * NON-OWNER display surfaces (People list/detail, assistant participant/hover, graph
+ * inspector). Rules per contact:
+ *   • role_source_recording_id NULL  ⇒ calendar/manual/legacy-authored ⇒ role SHOWN.
+ *   • resolves to an ELIGIBLE recording ⇒ role SHOWN.
+ *   • resolves to an INELIGIBLE / missing (hard-purged) recording ⇒ role BLANKED.
+ *   • FAIL-CLOSED: the eligibility lookup failing ⇒ every transcript-sourced role
+ *     BLANKED (a transient DB error must not leak an excluded-recording role).
+ * Non-mutating: returns shallow copies for contacts that need blanking; passes the
+ * original row through untouched otherwise, so internal (non-display) callers that
+ * do NOT route through this keep the raw role. Only owner-management surfaces
+ * (Library/Trash, MeetingDetail owner participant view) skip this helper.
+ */
+export function blankIneligibleContactFields<T extends { role?: string | null; role_source_recording_id?: string | null }>(
+  contacts: T[]
+): T[] {
+  if (contacts.length === 0) return contacts
+  const srcIds = new Set<string>()
+  for (const c of contacts) {
+    if (c.role && c.role_source_recording_id) srcIds.add(c.role_source_recording_id)
+  }
+  if (srcIds.size === 0) return contacts // nothing is transcript-provenanced ⇒ all shown
+  const { eligible, failClosed } = getEligibleRecordingIds(srcIds)
+  return contacts.map((c) => {
+    if (!c.role || !c.role_source_recording_id) return c // no provenance ⇒ shown
+    const ok = !failClosed && eligible.has(c.role_source_recording_id)
+    return ok ? c : { ...c, role: null }
+  })
+}
+
+/**
  * Compact graph-neighborhood context for the identity merge card (B7 symmetric
  * context): the people this person most co-attends meetings with, and the
  * topics/projects closest to them. Accepts a contact id OR a raw name (resolver-band
@@ -6326,7 +6410,9 @@ export function updateContact(id: string, updates: Partial<Contact>): void {
   if (updates.name !== undefined) { fields.push('name = ?'); params.push(updates.name); }
   if (updates.email !== undefined) { fields.push('email = ?'); params.push(updates.email); }
   if (updates.type !== undefined) { fields.push('type = ?'); params.push(updates.type); }
-  if (updates.role !== undefined) { fields.push('role = ?'); params.push(updates.role); }
+  // v46/round-31 (ADV29-2): a user-authored role is always shown — clear any
+  // transcript field-provenance so read-blanking never hides an owner-set role.
+  if (updates.role !== undefined) { fields.push('role = ?'); params.push(updates.role); fields.push('role_source_recording_id = NULL'); }
   if (updates.company !== undefined) { fields.push('company = ?'); params.push(updates.company); }
   if (updates.notes !== undefined) { fields.push('notes = ?'); params.push(updates.notes); }
   if (updates.tags !== undefined) { fields.push('tags = ?'); params.push(updates.tags); }
@@ -6612,6 +6698,10 @@ export function mergeContacts(keeperId: string, loserId: string): Contact {
     const notEmpty = (v: string | null | undefined) => !!(v && v.trim())
     const email = notEmpty(keeper.email) ? keeper.email : loser.email ?? null
     const role = notEmpty(keeper.role) ? keeper.role : loser.role ?? null
+    // v46/round-31 (ADV29-2): fold the role's FIELD-provenance alongside the role
+    // value it came from, so a folded transcript role keeps being blanked on
+    // non-owner reads when its source recording is excluded (no laundering via merge).
+    const roleSrc = notEmpty(keeper.role) ? keeper.role_source_recording_id ?? null : loser.role_source_recording_id ?? null
     const company = notEmpty(keeper.company) ? keeper.company : loser.company ?? null
     const notes = notEmpty(keeper.notes) ? keeper.notes : loser.notes ?? null
     const type = keeper.type && keeper.type !== 'unknown' ? keeper.type : loser.type || 'unknown'
@@ -6626,6 +6716,7 @@ export function mergeContacts(keeperId: string, loserId: string): Contact {
       {
         email: keeper.email,
         role: keeper.role,
+        role_source_recording_id: keeper.role_source_recording_id ?? null,
         company: keeper.company,
         notes: keeper.notes,
         type: keeper.type,
@@ -6633,13 +6724,13 @@ export function mergeContacts(keeperId: string, loserId: string): Contact {
         first_seen_at: keeper.first_seen_at,
         last_seen_at: keeper.last_seen_at
       },
-      { email, role, company, notes, type, tags: tagsJson, first_seen_at: firstSeen, last_seen_at: lastSeen }
+      { email, role, role_source_recording_id: roleSrc, company, notes, type, tags: tagsJson, first_seen_at: firstSeen, last_seen_at: lastSeen }
     )
 
     runNoSave(
-      `UPDATE contacts SET email = ?, role = ?, company = ?, notes = ?, type = ?, tags = ?,
+      `UPDATE contacts SET email = ?, role = ?, role_source_recording_id = ?, company = ?, notes = ?, type = ?, tags = ?,
          first_seen_at = ?, last_seen_at = ? WHERE id = ?`,
-      [email, role, company, notes, type, tagsJson, firstSeen, lastSeen, keeperId]
+      [email, role, roleSrc, company, notes, type, tagsJson, firstSeen, lastSeen, keeperId]
     )
 
     runNoSave('DELETE FROM contacts WHERE id = ?', [loserId])
