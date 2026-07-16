@@ -33,7 +33,8 @@ import {
   queryOne,
   insertIdentitySuggestion,
   filterEligibleGraphEdgeIds,
-  filterEligibleMembershipRows
+  filterEligibleMembershipRows,
+  filterVisibleEntityIds
 } from './database'
 import type { Contact, Project, IdentitySuggestion, MembershipRow } from './database'
 import { filterEligibleRecordingIds } from './recording-eligibility'
@@ -777,6 +778,63 @@ export function isSuggestionEligibleForAccept(s: IdentitySuggestion): boolean {
   const survivor = survivors.find((x) => x.id === s.id)
   if (!survivor) return false
   return Number(survivor.confidence ?? 0) >= SUGGEST_THRESHOLD
+}
+
+/**
+ * R28-RES-2 (round-29) — NON-OWNER DISPLAY gate for the surfaced merge queue.
+ *
+ * {@link revalidateSuggestionsForSurfacing} gates a suggestion's graph/topic/
+ * recording EVIDENCE, but a name/email-only DISCOVERY straggler (graph=0, no
+ * source_recording_ids) can pair two ENTITIES that are BOTH suppressed on non-owner
+ * surfaces — transcript-created contacts/projects whose every source recording is
+ * excluded (an "excluded-only entity", already hidden from the People/Projects LIST
+ * by {@link filterVisibleEntityIds} at contacts:getAll/projects:getAll). Such a
+ * suggestion would still surface both entity NAMES on a NON-OWNER surface: the Today
+ * identity-suggestion teaser (a DISPLAY-tier surface) and the People/Projects merge
+ * queue. Drop any suggestion whose keeper OR loser entity is not visible so an
+ * excluded-only entity/pair never surfaces its name there.
+ *
+ * A suggestion with no resolvable loser ENTITY (a transcript-created suggestion
+ * proposing a candidate NAME into an existing keeper) is gated only on the keeper —
+ * its candidate name's recording eligibility is already enforced by
+ * {@link revalidateSuggestionsForSurfacing} via source_recording_ids (ADV26-1).
+ *
+ * FAIL-CLOSED: a visibility-lookup exception yields an empty visible set → the
+ * affected suggestions are suppressed.
+ *
+ * DISPLAY tier ONLY. The ACCEPT action ({@link isSuggestionEligibleForAccept} →
+ * identity:acceptSuggestion) is OWNER-management and stays gated on EVIDENCE
+ * eligibility (recording provenance), NOT entity visibility — the owner may merge
+ * their own entities. It is intentionally NOT routed through this gate.
+ */
+export function filterSuggestionsForNonOwnerDisplay(suggestions: IdentitySuggestion[]): IdentitySuggestion[] {
+  if (suggestions.length === 0) return suggestions
+  const contactIds = new Set<string>()
+  const projectIds = new Set<string>()
+  const resolved = suggestions.map((s) => {
+    let ev: SuggestionEvidence = {}
+    try {
+      ev = s.evidence ? (JSON.parse(s.evidence) as SuggestionEvidence) : {}
+    } catch {
+      ev = {}
+    }
+    const keeperId = ev.keeperId ?? s.target_id
+    const loserId = ev.loserId ?? null
+    const set = s.kind === 'person' ? contactIds : projectIds
+    if (keeperId) set.add(keeperId)
+    if (loserId) set.add(loserId)
+    return { s, kind: s.kind, keeperId, loserId }
+  })
+  const visibleContacts = filterVisibleEntityIds('contact', contactIds).visible
+  const visibleProjects = filterVisibleEntityIds('project', projectIds).visible
+  const out: IdentitySuggestion[] = []
+  for (const { s, kind, keeperId, loserId } of resolved) {
+    const visible = kind === 'person' ? visibleContacts : visibleProjects
+    if (keeperId && !visible.has(keeperId)) continue
+    if (loserId && !visible.has(loserId)) continue
+    out.push(s)
+  }
+  return out
 }
 
 // ---------------------------------------------------------------------------

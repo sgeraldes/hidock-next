@@ -37,6 +37,7 @@ import {
   discoverContactMerges,
   discoverProjectMerges,
   revalidateSuggestionsForSurfacing,
+  filterSuggestionsForNonOwnerDisplay,
   isSuggestionEligibleForAccept,
   DiscoveryResult
 } from '../services/identity-discovery'
@@ -80,7 +81,12 @@ export function registerIdentityHandlers(): void {
       // redact now-excluded/zero-provenance graph topics and supersede (drop)
       // any pending suggestion whose graph/topic evidence no longer clears the
       // surfacing threshold. Non-destructive (no status write); fail-closed.
-      return success(revalidateSuggestionsForSurfacing(getIdentitySuggestions(status)))
+      // R28-RES-2 (round-29): additionally apply the non-owner DISPLAY gate so a
+      // discovery straggler pairing an excluded-only ENTITY never surfaces its name
+      // on Today / the People-Projects merge queue (whose entity LISTS already
+      // suppress it). The accept path is gated separately on evidence, not here.
+      const surfaced = revalidateSuggestionsForSurfacing(getIdentitySuggestions(status))
+      return success(filterSuggestionsForNonOwnerDisplay(surfaced))
     } catch (err) {
       console.error('identity:getSuggestions error:', err)
       return error('DATABASE_ERROR', 'Failed to fetch identity suggestions', err)
