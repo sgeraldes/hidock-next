@@ -23,7 +23,7 @@
  * @vitest-environment node
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 const mockUpdateRecordingStatus = vi.fn()
 const mockGetRecordingById = vi.fn()
@@ -42,6 +42,10 @@ const mockIsValueExcludedRecording = vi.fn((..._args: any[]) => false)
 // ARF-3 — the post-analysis processability gate. Default true (live); the
 // ARF-3 describe below drives it false to simulate a mid-analysis trash.
 const mockIsRecordingProcessable = vi.fn((..._args: any[]) => true)
+// ADV40-1 (round-42) — the UP-FRONT eligibility gate (before any provider call).
+// Default true (eligible); the ADV40-1 describe drives it false to prove the
+// transcription + Gemini providers are NEVER reached for an excluded recording.
+const mockIsRecordingEligible = vi.fn((..._args: any[]) => true)
 // RE-2 — reanalyzeFailedTranscripts exclusion gates: value pre-filter Set +
 // the post-await point-read. Defaults let existing reanalyze tests heal.
 const mockGetValueExcludedRecordingIds = vi.fn((..._args: any[]) => new Set<string>())
@@ -144,6 +148,13 @@ vi.mock('../database', () => ({
     (mockQueryAll('SELECT ... FROM transcripts backfill', [limit]) as any) ?? []
 }))
 
+// ADV40-1 (round-42) — transcription.ts routes the up-front provider gate
+// through the shared recording-eligibility boundary. Mock it here (default
+// eligible) so the existing happy paths persist; the ADV40-1 describe flips it.
+vi.mock('../recording-eligibility', () => ({
+  isRecordingEligible: (...args: any[]) => mockIsRecordingEligible(...args)
+}))
+
 vi.mock('electron', () => ({
   BrowserWindow: { getAllWindows: vi.fn(() => []) },
   ipcMain: { handle: vi.fn() }
@@ -184,12 +195,16 @@ vi.mock('fs', async (importOriginal) => {
 
 vi.mock('../vector-store', () => ({ getVectorStore: vi.fn(() => null) }))
 
+// ADV40-1 (round-42) — a NAMED spy so a test can assert the transcription
+// provider (local-asr via spawn) is NEVER invoked for an ineligible recording.
+const mockSpawn = vi.fn((..._args: any[]) =>
+  makeFakeChildProcess(
+    JSON.stringify({ text: mockAsrText, language: 'es', duration_seconds: 5, processing_time_seconds: 1 })
+  )
+)
 vi.mock('child_process', () => ({
   execFile: vi.fn(),
-  spawn: (_cmd: string, _args: string[]) =>
-    makeFakeChildProcess(
-      JSON.stringify({ text: mockAsrText, language: 'es', duration_seconds: 5, processing_time_seconds: 1 })
-    )
+  spawn: (...args: any[]) => mockSpawn(...args)
 }))
 
 // detectActionables goes through the brains registry (getBrainRegistry ->
@@ -721,5 +736,70 @@ describe('transcribeRecording — ARF-3 in-flight trash stops post-analysis deri
     expect(mockEmitDomainEvent).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: 'entity:transcript-ready' })
     )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADV40-1 (round-42) — recordings:transcribe / the queue MUST check eligibility
+// BEFORE any provider call. A soft-deleted / personal / value-excluded /
+// hard-purged recording (or an eligibility lookup that fails closed) must reach
+// NEITHER the transcription provider (local-asr spawn) NOR Gemini analysis — the
+// later post-analysis gate only blocks PERSISTENCE, it cannot un-send excluded
+// audio/transcript to an external LLM.
+// ---------------------------------------------------------------------------
+
+describe('transcribeRecording — ADV40-1 eligibility BEFORE the provider', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    resetConfig() // provider: 'local-asr'
+    mockIsRecordingEligible.mockReset() // restore the () => true default
+    mockIsValueExcludedRecording.mockReturnValue(false)
+    mockIsRecordingProcessable.mockReturnValue(true)
+    mockGetRecordingById.mockReturnValue({
+      id: 'rec-elig',
+      filename: 'elig.wav',
+      file_path: 'G:\\Recordings\\elig.wav',
+      status: 'complete'
+    })
+    mockQueryAll.mockImplementation(() => [])
+    mockQueryOne.mockReturnValue({ id: 'cap-elig' })
+    mockEnsureCapture.mockReturnValue('cap-elig')
+    mockApplyCaptureValueClassification.mockReturnValue({ applied: true, rating: 'unrated' })
+    mockGenerateContent.mockResolvedValue(geminiJsonResponse(BASE_ANALYSIS))
+  })
+
+  // Prevent a mockReturnValue(false) override from leaking into later describes
+  // (vi.clearAllMocks only clears history, not a set return value).
+  afterEach(() => {
+    mockIsRecordingEligible.mockReset()
+  })
+
+  it('control (eligible): the transcription provider AND Gemini analysis ARE called', async () => {
+    const { transcribeManually } = await import('../transcription')
+    await transcribeManually('rec-elig')
+
+    expect(mockSpawn).toHaveBeenCalled() // local-asr transcription provider
+    expect(mockGenerateContent).toHaveBeenCalled() // Gemini analysis
+    expect(mockInsertTranscript).toHaveBeenCalled() // and it persisted normally
+  })
+
+  it.each([
+    ['soft-deleted / personal / value-excluded / hard-purged (boundary returns ineligible)'],
+    ['eligibility lookup fails closed (boundary returns ineligible)']
+  ])('ineligible up front (%s): ZERO provider calls, nothing persisted', async () => {
+    // isRecordingEligible is the shared FAIL-CLOSED boundary — both an excluded
+    // recording and a lookup error resolve to `false`, so one flip covers both.
+    mockIsRecordingEligible.mockReturnValue(false)
+
+    const { transcribeManually } = await import('../transcription')
+    await transcribeManually('rec-elig')
+
+    // Neither provider was invoked — no excluded audio/transcript left the app.
+    expect(mockSpawn).not.toHaveBeenCalled()
+    expect(mockGenerateContent).not.toHaveBeenCalled()
+    // Nothing was persisted and the row was never even flipped to 'processing'.
+    expect(mockInsertTranscript).not.toHaveBeenCalled()
+    expect(mockEnsureCapture).not.toHaveBeenCalled()
+    expect(mockUpdateRecordingStatus).not.toHaveBeenCalledWith('rec-elig', 'processing')
   })
 })

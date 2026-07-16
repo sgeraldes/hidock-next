@@ -120,6 +120,7 @@ import {
   type Transcript
 } from './database'
 import { BrowserWindow } from 'electron'
+import { isRecordingEligible } from './recording-eligibility'
 import { getVectorStore } from './vector-store'
 import { ensureKnowledgeCaptureForRecording } from './knowledge-capture-backfill'
 import { applyCaptureValueClassification, parseValueClassification, neutralizeDelimiters } from './value-classification'
@@ -1626,6 +1627,29 @@ async function transcribeRecording(
   }
   // Continue with the canonical id so status updates hit the real row.
   recordingId = recording.id
+
+  // ADV40-1 (round-42, HIGH) — FAIL-CLOSED eligibility gate BEFORE any provider
+  // call. transcribeRecording is reachable directly via recordings:transcribe
+  // (transcribeManually) AND via the queue processor; the raw lookups above
+  // resolve a soft-deleted / personal / value-excluded recording perfectly well,
+  // so WITHOUT this gate the AUDIO would be sent to the transcription provider and
+  // the transcript to Gemini analysis before the post-analysis stillProcessable()
+  // check — DISCLOSING excluded content to an EXTERNAL LLM. The later gate only
+  // blocks PERSISTENCE; it cannot un-send the audio/transcript. Route the
+  // canonical id through THE shared fail-closed boundary (isRecordingEligible:
+  // exists AND non-deleted AND non-personal AND not value-excluded; false on ANY
+  // lookup error) and return the existing 'cancelled' outcome WITHOUT touching a
+  // provider when ineligible. The post-await stillProcessable() re-checks below
+  // stay as defense-in-depth for a delete/personal transition that lands mid-run.
+  // This is the core F17 "excluded from all AI processing" promise.
+  if (!isRecordingEligible(recordingId)) {
+    console.log(
+      `[Transcription] Recording ${recordingId} is ineligible (soft-deleted / personal / ` +
+        'value-excluded / hard-purged, or the eligibility lookup failed) — skipping the ' +
+        'transcription provider and Gemini entirely; no audio or transcript sent to any external LLM'
+    )
+    return { status: 'cancelled' }
+  }
 
   if (!existsSync(recording.file_path)) {
     throw new Error(`Recording file not found: ${recording.file_path}`)

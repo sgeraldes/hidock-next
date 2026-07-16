@@ -23,6 +23,10 @@ const mockExecFile = vi.fn()
 const mockAddToQueue = vi.fn()
 // INC-2 — controllable so a test can make transcribeRecording bail 'cancelled'.
 const mockIsRecordingProcessable = vi.fn((..._args: any[]) => true)
+// ADV40-1 (round-42) — the UP-FRONT eligibility gate (before any provider call).
+// Default true so the happy paths reach the provider as before; flipped false to
+// prove the queue path never invokes the provider for an excluded recording.
+const mockIsRecordingEligible = vi.fn((..._args: any[]) => true)
 // INC3/INC4 (round-5) — controllable vector store + queue-progress spy.
 const mockGetVectorStore = vi.fn((..._args: any[]) => null as any)
 const mockUpdateQueueProgress = vi.fn()
@@ -114,6 +118,12 @@ vi.mock('../database', () => ({
   isRecordingProcessable: (...args: any[]) => mockIsRecordingProcessable(...args)
 }))
 
+// ADV40-1 (round-42) — transcription.ts gates the provider through the shared
+// recording-eligibility boundary. Default eligible; flipped in the ADV40-1 test.
+vi.mock('../recording-eligibility', () => ({
+  isRecordingEligible: (...args: any[]) => mockIsRecordingEligible(...args)
+}))
+
 // Mock electron
 vi.mock('electron', () => ({
   BrowserWindow: {
@@ -186,6 +196,7 @@ describe('Transcription Service', () => {
     // clearAllMocks keeps mockReturnValue impls, so re-assert the defaults so an
     // INC-2/INC3 test that flips them cannot leak into others.
     mockIsRecordingProcessable.mockReturnValue(true)
+    mockIsRecordingEligible.mockReturnValue(true)
     mockGetVectorStore.mockReturnValue(null as any)
     mockConfig = {
       transcription: {
@@ -367,6 +378,47 @@ describe('Transcription Service', () => {
       expect(queueCalls.some((c: any[]) => c[0] === 'queue-cancel' && c[1] === 'completed')).toBe(false)
       // Nothing was persisted (the early gate bailed before insertTranscript).
       expect(mockInsertTranscript).not.toHaveBeenCalled()
+    })
+
+    it('ADV40-1 (round-42) — the QUEUE path never invokes the provider for an ineligible recording', async () => {
+      mockConfig.transcription.provider = 'local-asr'
+      mockConfig.transcription.geminiApiKey = ''
+      // Eligible for the post-analysis gate, but INELIGIBLE at the up-front
+      // provider gate (soft-deleted/personal/value-excluded/hard-purged or a
+      // fail-closed lookup) — so the provider must never be reached at all.
+      mockIsRecordingProcessable.mockReturnValue(true)
+      mockIsRecordingEligible.mockReturnValue(false)
+      mockGetQueueItems.mockImplementation((status?: string) =>
+        status === 'pending'
+          ? [{ id: 'queue-adv40', recording_id: 'rec-adv40', filename: 'a.wav', status: 'pending', attempts: 0 }]
+          : []
+      )
+      mockGetRecordingById.mockReturnValue({
+        id: 'rec-adv40',
+        filename: 'a.wav',
+        file_path: 'G:\\Recordings\\a.wav',
+        status: 'complete'
+      })
+      mockExecFile.mockImplementation(() =>
+        makeFakeChildProcess(
+          JSON.stringify({ text: 'Speaker 1: hola.', language: 'es', duration_seconds: 5, processing_time_seconds: 1 })
+        )
+      )
+
+      const { startTranscriptionProcessor, stopTranscriptionProcessor } = await import('../transcription')
+      startTranscriptionProcessor()
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      stopTranscriptionProcessor()
+
+      // The transcription provider (local-asr spawn → mockExecFile) was NEVER
+      // invoked — no excluded audio left the app.
+      expect(mockExecFile).not.toHaveBeenCalled()
+      // Nothing persisted, the row never flipped to 'processing', queue cancelled.
+      expect(mockInsertTranscript).not.toHaveBeenCalled()
+      expect(mockUpdateRecordingStatus).not.toHaveBeenCalledWith('rec-adv40', 'processing')
+      const queueCalls = mockUpdateQueueItem.mock.calls
+      expect(queueCalls.some((c: any[]) => c[0] === 'queue-adv40' && c[1] === 'cancelled')).toBe(true)
+      expect(queueCalls.some((c: any[]) => c[0] === 'queue-adv40' && c[1] === 'completed')).toBe(false)
     })
 
     it('C (round-4) — a recording ineligible AFTER the transcript persists is still marked cancelled, not completed', async () => {
