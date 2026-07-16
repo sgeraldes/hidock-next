@@ -157,7 +157,11 @@ const REKEY_CONFIDENCE = 0.8
 function makePersonResolver(meetingId?: string): PersonResolver {
   return (name: string) => {
     try {
-      const r = resolveContact(name, meetingId ? { meetingId } : undefined)
+      // forKeying: this resolves a person node's stable contact-id norm_key, not a
+      // durable membership link — so it must key by contact id even when the contact
+      // is currently suppressed on non-owner surfaces (keying ≠ display; ADV29-1 bar
+      // guards the write/link paths, not graph ingest keying).
+      const r = resolveContact(name, { forKeying: true, ...(meetingId ? { meetingId } : {}) })
       if (r.id && r.confidence >= REKEY_CONFIDENCE) {
         const contact = getContactById(r.id)
         return { id: r.id, label: contact?.name ?? name }
@@ -846,7 +850,7 @@ export function rekeyExistingPersonNodes(): { rekeyed: number; merged: number; s
   for (const node of nameKeyed) {
     let contactId: string | null = null
     try {
-      const r = resolveContact(node.label)
+      const r = resolveContact(node.label, { forKeying: true })
       if (r.id && r.confidence >= REKEY_CONFIDENCE) contactId = r.id
     } catch {
       contactId = null

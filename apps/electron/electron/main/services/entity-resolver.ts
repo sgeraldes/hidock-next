@@ -55,6 +55,20 @@ export { nameRarity } from './name-rarity'
 export interface ResolveContext {
   meetingId?: string
   projectIds?: string[]
+  /**
+   * Resolve for IDENTITY KEYING rather than as a durable LINK target. When true,
+   * the ADV29-1 suppressed-entity bar (see {@link entityVisibilityGate}) is NOT
+   * applied: the resolver may return a currently-suppressed contact/project id.
+   *
+   * Keying ≠ display. The graph-ingest person-node keyer and rekeyExistingPersonNodes
+   * only decide a node's stable `contact:<id>` norm_key — they do NOT write a contact
+   * membership, so they cannot reanimate a suppressed entity the way
+   * applyTranscriptEntities can. Suppression for the graph happens at its own READ
+   * surfaces (graph-provenance / exclusion filters), not by breaking ingest keying.
+   * Write/link callers (org-reconciler.applyTranscriptEntities, self-identification)
+   * MUST leave this unset so the reanimation bar still guards those paths.
+   */
+  forKeying?: boolean
 }
 
 export interface ResolveResult {
@@ -243,7 +257,12 @@ export function resolveContact(name: string, ctx?: ResolveContext): ResolveResul
 
   // ADV29-1 (round-31) — bar SUPPRESSED entities from being chosen as a link
   // target (no reanimation). Computed once over every candidate id; fail-closed.
-  const barred = entityVisibilityGate('contact', candidates.map((c) => c.id))
+  // Skipped for identity-keying callers (ctx.forKeying): keying a graph node by a
+  // contact id neither writes a membership nor reanimates the entity, and the
+  // graph suppresses at its own read surfaces (see ResolveContext.forKeying).
+  const barred = ctx?.forKeying
+    ? () => false
+    : entityVisibilityGate('contact', candidates.map((c) => c.id))
 
   // Tier 1 — exact email (only when the name is itself an email).
   if (looksLikeEmail(raw)) {
@@ -340,7 +359,10 @@ export function resolveProject(name: string, ctx?: ResolveContext): ResolveResul
 
   // ADV29-1 (round-31) — bar SUPPRESSED projects from being chosen as a link
   // target (no reanimation). Computed once over every candidate id; fail-closed.
-  const barred = entityVisibilityGate('project', candidates.map((p) => p.id))
+  // Skipped for identity-keying callers (ctx.forKeying); see ResolveContext.forKeying.
+  const barred = ctx?.forKeying
+    ? () => false
+    : entityVisibilityGate('project', candidates.map((p) => p.id))
 
   // Tier 1 — exact case-insensitive name.
   const exact = queryOne<{ id: string }>('SELECT id FROM projects WHERE LOWER(name) = ? LIMIT 1', [norm])
