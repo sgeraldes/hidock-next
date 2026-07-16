@@ -62,6 +62,11 @@ function edgeSource(edgeId: string, recordingId: string): void {
 function seedRecording(id: string): void {
   run('INSERT INTO recordings (id, filename, date_recorded) VALUES (?, ?, ?)', [id, `${id}.hda`, new Date().toISOString()])
 }
+function seedRecordingForMeeting(id: string, meetingId: string): void {
+  run('INSERT INTO recordings (id, filename, date_recorded, meeting_id) VALUES (?, ?, ?, ?)', [
+    id, `${id}.hda`, new Date().toISOString(), meetingId
+  ])
+}
 function valueExclude(recordingId: string): void {
   run('INSERT INTO knowledge_captures (id, title, captured_at, source_recording_id, quality_rating) VALUES (?, ?, ?, ?, ?)', [
     `cap-${recordingId}`, 'Cap', '2026-06-01', recordingId, 'garbage'
@@ -81,7 +86,14 @@ function seedPair(aboutProvenance: 'eligible' | 'excluded' | 'zero', opts: { mee
   // revalidation tests omit them (opts.meetings === false) so the ONLY graph
   // evidence between keeper and loser is the controlled "Falcon" topic edge.
   if (opts.meetings !== false) {
-    for (const m of ['m1', 'm2']) { meeting(m); attend(m, 'c-edu'); attend(m, 'c-eduardo') }
+    for (const m of ['m1', 'm2']) {
+      meeting(m); attend(m, 'c-edu'); attend(m, 'c-eduardo')
+      // ADV25-2 (round-26): mJac now counts only ELIGIBLE meetings. Back these
+      // shared meetings with a live (eligible) recording so the shared-meeting
+      // signal survives — these topic-provenance tests are about topic edges, not
+      // meeting-eligibility (that gate is exercised in its own describe below).
+      seedRecordingForMeeting(`rec-${m}`, m)
+    }
   }
 
   node('n-edu', 'person', 'Edu', normalizeName('Edu'))
@@ -239,5 +251,87 @@ describe('revalidateSuggestionsForSurfacing — persisted evidence (ADV24-2 read
     const rows = surfaced()
     expect(rows).toHaveLength(1)
     expect(Number(rows[0].confidence)).toBeGreaterThanOrEqual(0.95)
+  })
+})
+
+// --- ADV25-2: mJac eligible-meeting gating -----------------------------------
+
+/**
+ * Two contacts linked ONLY via shared meetings (no graph topic edges). The
+ * meetings are backed by recordings whose provenance the caller controls, so the
+ * shared-meeting mJac is the ONLY graph evidence. Composite 0.60 with graph 0.20 —
+ * removing the mJac contribution drops it below the 0.50 surfacing bar.
+ */
+function seedMeetingOnlyPair(recProvenance: 'eligible' | 'excluded'): void {
+  createGraphTables()
+  contact('c-edu', 'Edu', { role: 'PM' })
+  contact('c-eduardo', 'Eduardo', { role: 'PM' })
+  for (const m of ['m1', 'm2']) {
+    meeting(m); attend(m, 'c-edu'); attend(m, 'c-eduardo')
+    seedRecordingForMeeting(`rec-${m}`, m)
+    if (recProvenance === 'excluded') valueExclude(`rec-${m}`)
+  }
+}
+function insertMeetingOnlySuggestion(): void {
+  const ev = {
+    signals: { name: 0.6, email: 0, role: 0.2, graph: 0.2 },
+    composite: 0.6,
+    sharedTopics: [],
+    sharedMeetings: 2,
+    keeperId: 'c-eduardo', keeperName: 'Eduardo', loserId: 'c-edu', loserName: 'Edu', emailMatch: 'none'
+  }
+  run(
+    `INSERT INTO identity_suggestions (id, kind, candidate_name, target_id, confidence, evidence, status, created_at)
+     VALUES (?, 'person', 'Edu', 'c-eduardo', 0.6, ?, 'pending', '2026-01-01T00:00:00Z')`,
+    [randomUUID(), JSON.stringify(ev)]
+  )
+}
+
+describe('revalidateSuggestionsForSurfacing — mJac eligible-meeting gating (ADV25-2)', () => {
+  it('counts ELIGIBLE-meeting-backed links ⇒ keeps the suggestion', () => {
+    seedMeetingOnlyPair('eligible')
+    insertMeetingOnlySuggestion()
+    expect(surfaced()).toHaveLength(1)
+  })
+
+  it('drops the mJac contribution of EXCLUDED-recording-backed meetings ⇒ below threshold ⇒ dropped', () => {
+    seedMeetingOnlyPair('excluded')
+    insertMeetingOnlySuggestion()
+    expect(surfaced()).toHaveLength(0)
+    // Non-destructive — the DB row remains (un-exclude would re-surface it).
+    expect(getIdentitySuggestions('pending')).toHaveLength(1)
+  })
+})
+
+// --- ADV25-5: below-threshold drop regardless of loserId + malformed evidence -
+
+describe('revalidateSuggestionsForSurfacing — below-threshold + malformed (ADV25-5)', () => {
+  it('drops a graph-bearing suggestion WITHOUT a loserId whose recomputed composite is below threshold', () => {
+    seedPair('excluded', { meetings: false }) // Falcon topic edge suppressed
+    // No loserId → pre-round-26 this row was returned even below threshold.
+    const ev = {
+      signals: { name: 0.65, email: 0, role: 0, graph: 0.15 },
+      composite: 0.55,
+      sharedTopics: ['Falcon'],
+      sharedMeetings: 0,
+      keeperId: 'c-eduardo', keeperName: 'Eduardo', loserName: 'Edu', emailMatch: 'none'
+    }
+    run(
+      `INSERT INTO identity_suggestions (id, kind, candidate_name, target_id, confidence, evidence, status, created_at)
+       VALUES (?, 'person', 'Edu', 'c-eduardo', 0.55, ?, 'pending', '2026-01-01T00:00:00Z')`,
+      [randomUUID(), JSON.stringify(ev)]
+    )
+    expect(surfaced()).toHaveLength(0)
+  })
+
+  it('suppresses a pending suggestion whose evidence blob is malformed (fail-closed)', () => {
+    run(
+      `INSERT INTO identity_suggestions (id, kind, candidate_name, target_id, confidence, evidence, status, created_at)
+       VALUES (?, 'person', 'Edu', 'c-eduardo', 0.7, ?, 'pending', '2026-01-01T00:00:00Z')`,
+      [randomUUID(), '{ this is not valid json']
+    )
+    expect(surfaced()).toHaveLength(0)
+    // Non-destructive — the row remains.
+    expect(getIdentitySuggestions('pending')).toHaveLength(1)
   })
 })

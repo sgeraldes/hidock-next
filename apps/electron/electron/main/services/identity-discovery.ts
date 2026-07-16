@@ -28,7 +28,13 @@
  * shape carries a `signals` map so a connector-derived signal slots in later.
  */
 
-import { queryAll, queryOne, insertIdentitySuggestion, filterEligibleGraphEdgeIds } from './database'
+import {
+  queryAll,
+  queryOne,
+  insertIdentitySuggestion,
+  filterEligibleGraphEdgeIds,
+  eligibleMeetingIdsForIdentity
+} from './database'
 import type { Contact, Project, IdentitySuggestion } from './database'
 import { normalizeName, accentFoldedKey, fuzzyNameScore, detectAmbiguousName } from './entity-normalize'
 import { nameRarity, type Rarity } from './name-rarity'
@@ -397,7 +403,26 @@ export function discoverContactMerges(): DiscoveryResult {
     if (!s) meetingSets.set(row.contact_id, (s = new Set<string>()))
     s.add(row.meeting_id)
   }
-  const meetingSetFor = (id: string): Set<string> => meetingSets.get(id) ?? new Set<string>()
+  // ADV25-2 (round-26) — meeting_contacts membership is TRANSCRIPT-derived
+  // (applyTranscriptEntities) with no per-row provenance, so an excluded /
+  // hard-purged recording's participant links would otherwise keep inflating mJac
+  // (shared-meeting Jaccard) and push a merge suggestion over threshold. Compute
+  // the shared eligible-meeting allowlist ONCE across the whole corpus and count
+  // ONLY meetings that are calendar-authored OR backed by ≥1 eligible recording.
+  const eligibleMeetings = eligibleMeetingIdsForIdentity(
+    (function () {
+      const all = new Set<string>()
+      for (const s of meetingSets.values()) for (const m of s) all.add(m)
+      return all
+    })()
+  ).eligible
+  const meetingSetFor = (id: string): Set<string> => {
+    const all = meetingSets.get(id)
+    if (!all) return new Set<string>()
+    const out = new Set<string>()
+    for (const m of all) if (eligibleMeetings.has(m)) out.add(m)
+    return out
+  }
 
   const aliasKeys = loadAliasKeys('contact_aliases', 'contact_id')
   const neighborsFor = makeNeighborLoader(PERSON_NEIGHBORS_SQL, 1)
@@ -502,7 +527,23 @@ export function discoverProjectMerges(): DiscoveryResult {
     if (!s) meetingSets.set(row.project_id, (s = new Set<string>()))
     s.add(row.meeting_id)
   }
-  const meetingSetFor = (id: string): Set<string> => meetingSets.get(id) ?? new Set<string>()
+  // ADV25-2 (round-26) — same eligible-meeting gating as contact discovery:
+  // meeting_projects membership is transcript-derived, so only meetings that are
+  // calendar-authored OR backed by ≥1 eligible recording may inflate mJac.
+  const eligibleMeetings = eligibleMeetingIdsForIdentity(
+    (function () {
+      const all = new Set<string>()
+      for (const s of meetingSets.values()) for (const m of s) all.add(m)
+      return all
+    })()
+  ).eligible
+  const meetingSetFor = (id: string): Set<string> => {
+    const all = meetingSets.get(id)
+    if (!all) return new Set<string>()
+    const out = new Set<string>()
+    for (const m of all) if (eligibleMeetings.has(m)) out.add(m)
+    return out
+  }
 
   const aliasKeys = loadAliasKeys('project_aliases', 'project_id')
   const neighborsFor = makeNeighborLoader(PROJECT_NEIGHBORS_SQL, 2)
@@ -590,6 +631,20 @@ function meetingSetForEntity(kind: 'person' | 'project', id: string): Set<string
 }
 
 /**
+ * ADV25-2 (round-26) — the ELIGIBLE shared-meeting id set for one entity: the
+ * entity's meeting membership restricted to meetings that may contribute to a
+ * non-owner identity surface (calendar-authored OR backed by ≥1 eligible
+ * recording — see {@link eligibleMeetingIdsForIdentity}). Used at read-time mJac
+ * recompute so an excluded / hard-purged recording's transcript-derived
+ * membership no longer keeps a merge suggestion above threshold.
+ */
+function eligibleMeetingSetForEntity(kind: 'person' | 'project', id: string): Set<string> {
+  const all = meetingSetForEntity(kind, id)
+  if (all.size === 0) return all
+  return eligibleMeetingIdsForIdentity(all).eligible
+}
+
+/**
  * ADV24-2 (round-25) — revalidate PENDING identity suggestions at SURFACING time
  * (identity:getSuggestions → the People/Projects merge queue). A suggestion's
  * graph-derived evidence (sharedTopics + the `graph` confidence signal) was
@@ -626,11 +681,20 @@ export function revalidateSuggestionsForSurfacing(suggestions: IdentitySuggestio
     }
 
     let ev: SuggestionEvidence
+    let evMalformed = false
     try {
       ev = s.evidence ? (JSON.parse(s.evidence) as SuggestionEvidence) : {}
     } catch {
       ev = {}
+      evMalformed = true
     }
+    // ADV25-5 (round-26) — a suggestion whose evidence blob is PRESENT but
+    // unparseable cannot be revalidated (we can't even tell whether it carries a
+    // graph/topic component). Fail-closed: suppress it from surfacing rather than
+    // returning it unvalidated. Non-destructive — the DB row remains, so a fixed /
+    // re-derived evidence blob re-surfaces it. (A null evidence is legitimately "no
+    // evidence" and passes through below as a non-graph suggestion.)
+    if (evMalformed) continue
 
     const oldGraph = Number(ev.signals?.graph ?? 0)
     const hadTopics = Array.isArray(ev.sharedTopics) && ev.sharedTopics.length > 0
@@ -664,7 +728,7 @@ export function revalidateSuggestionsForSurfacing(suggestions: IdentitySuggestio
       // conservatively lowers confidence (never raises it).
       const canRecompute = !!loserId
       const mJac = canRecompute
-        ? jaccard(meetingSetForEntity(kind, keeperId), meetingSetForEntity(kind, loserId!))
+        ? jaccard(eligibleMeetingSetForEntity(kind, keeperId), eligibleMeetingSetForEntity(kind, loserId!))
         : { score: 0, shared: [] as string[] }
       const newGraph = GRAPH_MAX_BOOST * clamp01(mJac.score + tJac.score)
 
@@ -677,11 +741,15 @@ export function revalidateSuggestionsForSurfacing(suggestions: IdentitySuggestio
       ev.composite = round2(newComposite)
       if (canRecompute) ev.sharedMeetings = mJac.shared.length
 
-      // Drop only when we could fully recompute AND the graph/topic evidence was
-      // load-bearing (composite now below the surfacing bar). Without a resolvable
-      // loserId we can't separate meeting from topic contribution, so we keep the
-      // row but with topics already redacted (no leak).
-      if (canRecompute && newComposite < SUGGEST_THRESHOLD) continue
+      // ADV25-5 (round-26) — drop EVERY graph-bearing suggestion whose CONSERVATIVE
+      // recomputed composite falls below the surfacing bar, regardless of whether a
+      // resolvable loserId let us recompute meeting overlap. Without a loserId,
+      // newGraph already treats meeting overlap as 0 (a conservative LOWER bound
+      // that never raises confidence), and eligible topics are already suppressed —
+      // so a below-threshold composite here means the load-bearing graph/topic
+      // evidence is gone and the row must not surface. The email-exact floor above
+      // still protects a legitimate email straggler.
+      if (newComposite < SUGGEST_THRESHOLD) continue
 
       out.push({ ...s, confidence: round2(newComposite), evidence: JSON.stringify(ev) })
     } catch (e) {
@@ -691,6 +759,25 @@ export function revalidateSuggestionsForSurfacing(suggestions: IdentitySuggestio
     }
   }
   return out
+}
+
+/**
+ * ADV25-3 (round-26) — accept-time TOCTOU guard. identity:getSuggestions
+ * revalidates on READ, but a card can be accepted (clicked) after its supporting
+ * recording was excluded / hard-purged between load and click. Re-run the EXACT
+ * same revalidation ({@link revalidateSuggestionsForSurfacing}) against current
+ * provenance + eligibility and report whether the suggestion STILL clears
+ * SUGGEST_THRESHOLD. The caller (identity:acceptSuggestion) MUST refuse the merge
+ * when this returns false, with NO await between this check and the merge so the
+ * eligibility check and the merge are atomic on the single-threaded main process.
+ * Fail-closed: a suppressed/dropped, malformed, or below-threshold suggestion
+ * returns false.
+ */
+export function isSuggestionEligibleForAccept(s: IdentitySuggestion): boolean {
+  const survivors = revalidateSuggestionsForSurfacing([s])
+  const survivor = survivors.find((x) => x.id === s.id)
+  if (!survivor) return false
+  return Number(survivor.confidence ?? 0) >= SUGGEST_THRESHOLD
 }
 
 // ---------------------------------------------------------------------------

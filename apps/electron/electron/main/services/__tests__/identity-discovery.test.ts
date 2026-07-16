@@ -52,6 +52,16 @@ vi.mock('../database', () => ({
     eligibleEdgeIds: new Set([...edgeIds]),
     failClosed: false,
   }),
+  // ADV25-2 (round-26): discovery now gates shared-meeting mJac through the
+  // eligible-meeting boundary. These unit tests seed no recordings/calendar
+  // provenance (graph closeness here comes from shared meeting_contacts /
+  // meeting_projects rows), so a pass-through (every meeting eligible) preserves
+  // their behavior. The real eligible-meeting suppression is exercised against a
+  // real DB in identity-suggestion-provenance.test.ts + person-context-eligibility.test.ts.
+  eligibleMeetingIdsForIdentity: (meetingIds: Iterable<string>) => ({
+    eligible: new Set([...meetingIds]),
+    failClosed: false,
+  }),
 }))
 
 import { discoverContactMerges, discoverProjectMerges } from '../identity-discovery'
