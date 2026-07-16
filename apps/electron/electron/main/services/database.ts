@@ -8220,11 +8220,28 @@ export interface ActionItem {
 }
 
 /**
+ * ADV38-1 (round-40) — read a single action item row (incl. its
+ * knowledge_capture_id) so a caller can gate the item through
+ * {@link filterEligibleCaptureIds} BEFORE reading/updating/returning its content.
+ * Returns undefined when the row does not exist (or its capture cascade-deleted it).
+ */
+export function getActionItemById(actionItemId: string): ActionItem | undefined {
+  return queryOne<ActionItem>('SELECT * FROM action_items WHERE id = ?', [actionItemId])
+}
+
+/**
  * Bind (or clear) the canonical contact for an action item's assignee (v26).
  * The raw `assignee` name string is left untouched — this only sets the id link.
  * Pass null to clear the binding. Returns the updated row.
  *
  * @throws if the action item does not exist.
+ *
+ * SECURITY (ADV38-1, round-40): this function performs NO eligibility gating — the
+ * caller (actionItems:setAssignee) MUST resolve the item's source-capture
+ * eligibility ({@link filterEligibleCaptureIds}) and any contact's visibility
+ * ({@link filterVisibleEntityIds}) BEFORE calling this, in the SAME synchronous
+ * transaction, so a suppressed derivative's content is never read/updated/returned
+ * and a suppressed contact is never persisted as an assignee.
  */
 export function setActionItemAssignee(actionItemId: string, contactId: string | null): ActionItem {
   const item = queryOne<ActionItem>('SELECT * FROM action_items WHERE id = ?', [actionItemId])

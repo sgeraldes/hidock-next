@@ -102,6 +102,11 @@ export type ErrorCode =
   // ADV37 (round-39) — a bucket-mention resolve targeting a contact that is SUPPRESSED
   // on the non-owner identity boundary (linking it would reanimate the hidden entity).
   | 'CONTACT_INELIGIBLE'
+  // ADV38-1 (round-40) — a mutation (actionItems:setAssignee) on an action item whose
+  // SOURCE capture/recording is excluded (personal/deleted/value-excluded/hard-purged)
+  // or cannot be verified; refused so the excluded derivative's content is not
+  // read/updated/returned.
+  | 'ACTIONABLE_INELIGIBLE'
 
 // =============================================================================
 // RAG Filter Types
