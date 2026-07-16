@@ -4,7 +4,12 @@
  */
 
 import { getDatabase, isRecordingProcessable } from './database'
-import { filterEligibleRecordingIds, existingRecordings, filterEligibleCaptureIds } from './recording-eligibility'
+import {
+  filterEligibleRecordingIds,
+  existingRecordings,
+  filterEligibleCaptureIds,
+  isRecordingEligible
+} from './recording-eligibility'
 import { getEmbeddingsService } from './embeddings'
 
 interface VectorDocument {
@@ -354,10 +359,21 @@ class VectorStore {
        * any chunk's metadata.
        */
       shouldPersist?: () => boolean
+      /**
+       * ADV41-2 (round-43) — PRE-PROVIDER eligibility gate. `shouldPersist`
+       * above runs only AFTER the embeddings await (post-provider), so it can
+       * block the WRITE but cannot un-send content to the external embeddings
+       * provider. This callback is invoked in the SAME synchronous step
+       * IMMEDIATELY BEFORE the embeddings provider call; returning false ⇒
+       * indexTranscript returns 0 WITHOUT calling the provider. Every caller
+       * whose recording can become excluded mid-run should pass it (the boot
+       * backfill does). Not stored on any chunk's metadata.
+       */
+      shouldGenerate?: () => boolean
     }
   ): Promise<number> {
-    // Destructure the gate out so it never lands on a stored chunk's metadata.
-    const { shouldPersist, ...chunkMeta } = metadata
+    // Destructure the gates out so they never land on a stored chunk's metadata.
+    const { shouldPersist, shouldGenerate, ...chunkMeta } = metadata
     // Check if already indexed
     if (chunkMeta.recordingId) {
       const existing = Array.from(this.documents.values()).filter(
@@ -371,6 +387,20 @@ class VectorStore {
 
     // Chunk the transcript and embed all chunks in one batched call
     const chunks = chunkText(transcript)
+
+    // ADV41-2 (round-43) — PRE-PROVIDER gate, adjacent to the provider call with
+    // NO await between here and generateEmbeddings. A top-of-function or batch
+    // snapshot is defeated when an owner exclusion commits while an EARLIER
+    // caller/row was awaiting; re-validate immediately before sending this
+    // content to the external embeddings provider. Fail-closed callers return
+    // false ⇒ nothing is sent, nothing is persisted (returns 0).
+    if (shouldGenerate && !shouldGenerate()) {
+      console.log(
+        `[VectorStore] ${chunkMeta.recordingId ?? 'doc'} not eligible — skipping index (pre-provider)`
+      )
+      return 0
+    }
+
     const embeddings = await getEmbeddingsService().generateEmbeddings(chunks)
 
     // RE-1 — re-check eligibility ADJACENT to the write, with no await between
@@ -558,15 +588,30 @@ class VectorStore {
     let skipped = rows.length - eligibleRows.length
     for (const row of eligibleRows) {
       try {
+        // ADV41-2 (round-43) — `eligibleRows` snapshotted eligibility ONCE
+        // before the loop. While an EARLIER row's indexTranscript awaited its
+        // embeddings, the owner can exclude a LATER row (delete / personal /
+        // value-exclude); that row is still in `eligibleRows`. Re-check per row
+        // in the SAME synchronous step immediately before the call so an
+        // excluded recording is never sent to the embeddings provider.
+        if (!isRecordingEligible(row.recording_id)) {
+          skipped++
+          continue
+        }
         const count = await this.indexTranscript(row.full_text, {
           recordingId: row.recording_id,
           timestamp: row.date_recorded,
           subject: row.filename,
-          // P2 (round-3) — the SELECT above snapshotted eligibility, but a hard
-          // purge / trash / mark-personal can land DURING indexTranscript's
-          // embeddings await. Re-check adjacent to the write (inside
-          // indexTranscript, after embeddings, before the INSERT loop) so this
-          // boot backfill never re-indexes a recording made ineligible mid-run.
+          // ADV41-2 (round-43) — PRE-PROVIDER gate: re-validated by
+          // indexTranscript IMMEDIATELY before the embeddings provider call, so
+          // an exclusion committing during THIS row's own chunking window also
+          // blocks the send (the per-row check above closes the window opened by
+          // PRIOR rows' awaits; this closes the window inside indexTranscript).
+          shouldGenerate: () => isRecordingEligible(row.recording_id),
+          // P2 (round-3) — post-await defense: a hard purge / trash /
+          // mark-personal landing DURING the embeddings await is re-checked
+          // adjacent to the write (inside indexTranscript, after embeddings,
+          // before the INSERT loop) so nothing orphaned is persisted.
           shouldPersist: () => isRecordingProcessable(row.recording_id)
         })
         if (count > 0) indexed++

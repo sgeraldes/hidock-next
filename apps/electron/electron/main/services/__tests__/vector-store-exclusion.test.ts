@@ -18,7 +18,11 @@ const deps = vi.hoisted(() => ({
   // (captured from the vector_embeddings INSERT) so a test can assert the shared
   // eligibility boundary ran BEFORE the embed loop.
   backfillRows: [] as Array<{ recording_id: string; full_text: string }>,
-  indexedRecordingIds: [] as string[]
+  indexedRecordingIds: [] as string[],
+  // ADV41-2 (round-43) — side-effect fired DURING the embeddings provider call,
+  // used to simulate an owner exclusion committing while an EARLIER row's embed
+  // is in flight. Null unless a race test sets it.
+  onEmbeddings: null as null | (() => void)
 }))
 
 vi.mock('../database', () => ({
@@ -69,7 +73,10 @@ vi.mock('../database', () => ({
 vi.mock('../embeddings', () => ({
   getEmbeddingsService: () => ({
     generateEmbedding: (text: string) => deps.generateEmbedding(text),
-    generateEmbeddings: async (texts: string[]) => texts.map(() => [1, 0, 0])
+    generateEmbeddings: async (texts: string[]) => {
+      if (deps.onEmbeddings) deps.onEmbeddings()
+      return texts.map(() => [1, 0, 0])
+    }
   })
 }))
 
@@ -80,6 +87,7 @@ beforeEach(() => {
   deps.throwOnExclusion = false
   deps.backfillRows = []
   deps.indexedRecordingIds = []
+  deps.onEmbeddings = null
   deps.generateEmbedding.mockReset()
   deps.generateEmbedding.mockResolvedValue([1, 0, 0])
 })
@@ -211,6 +219,30 @@ describe('VectorStore.backfillMissingTranscripts — eligibility BEFORE the embe
 
     expect(deps.indexedRecordingIds).toEqual([])
     expect(res.indexed).toBe(0)
+  })
+
+  it('ADV41-2 (round-43) — a LATER row excluded WHILE an earlier row embeds is never sent to the provider', async () => {
+    // Two eligible rows at batch-filter time. While the FIRST row's embeddings
+    // are in flight, the owner excludes the SECOND row. The per-row recheck
+    // immediately before each indexTranscript call (plus indexTranscript's
+    // pre-provider shouldGenerate) must drop it so it is never embedded.
+    deps.backfillRows = [
+      { recording_id: 'r-first', full_text: 'first transcript, embeds fine' },
+      { recording_id: 'r-later', full_text: 'excluded DURING r-first embed' }
+    ]
+    // Fire during the FIRST embed call: commit the exclusion of the later row.
+    deps.onEmbeddings = () => {
+      deps.excluded.add('r-later')
+    }
+
+    const store = new VectorStore()
+    const res = await store.backfillMissingTranscripts()
+
+    // Only r-first ever reached the embed/INSERT; r-later was dropped by the
+    // per-row recheck before its indexTranscript call.
+    expect(deps.indexedRecordingIds).toEqual(['r-first'])
+    expect(res.indexed).toBe(1)
+    expect(res.skipped).toBe(1)
   })
 })
 
