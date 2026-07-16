@@ -36,6 +36,7 @@ import {
   initializeDatabase,
   run as dbRun,
   queryAll,
+  queryOne,
   getContactById,
   getContactByName,
   getContactAliases,
@@ -60,6 +61,7 @@ import {
   mergeProjectsWithGraph,
   acceptIdentitySuggestionWithGraph,
   deleteGraphNode,
+  removeRecordingProvenanceCore,
 } from '../knowledge-graph-service'
 import { mergeDuplicateContacts } from '../org-reconciler'
 
@@ -1017,6 +1019,12 @@ describe('Context Graph merge→unmerge graph round-trip (ADV56-2 / round-58)', 
     seedContact('c-a', 'Bob')
     seedContact('c-b', 'Robert')
     dbRun('INSERT OR IGNORE INTO recordings (id, filename, date_recorded) VALUES (?, ?, ?)', ['rec-seed', 'rec-seed.hda', '2026-01-01'])
+    // ADV57-1 (round-59): reverseGraphFold now refuses snapshot sources whose recording
+    // no longer exists (belt-and-suspenders against post-purge resurrection). Every
+    // sourcing recording this fixture references must therefore be a real recordings row
+    // (they always are in reality) — otherwise the harden path would treat 'rec-loser'
+    // like a purged recording and skip it. Byte-identity is unaffected (graphSnap ignores recordings).
+    dbRun('INSERT OR IGNORE INTO recordings (id, filename, date_recorded) VALUES (?, ?, ?)', ['rec-loser', 'rec-loser.hda', '2026-01-01'])
     const store = getKnowledgeGraphStore()
     const K = store.upsertNode({ type: 'person', label: 'Bob', key: 'contact:c-a', props: { contactId: 'c-a' }, now: '2026-01-01' })
     const L = store.upsertNode({ type: 'person', label: 'Robert', key: 'contact:c-b', props: { contactId: 'c-b' }, now: '2026-01-01' })
@@ -1068,6 +1076,9 @@ describe('Context Graph merge→unmerge graph round-trip (ADV56-2 / round-58)', 
     dbRun("INSERT OR IGNORE INTO projects (id, name, status, created_at) VALUES ('p-a', 'Apollo', 'active', '2026-01-01')", [])
     dbRun("INSERT OR IGNORE INTO projects (id, name, status, created_at) VALUES ('p-b', 'Artemis', 'active', '2026-01-01')", [])
     dbRun('INSERT OR IGNORE INTO recordings (id, filename, date_recorded) VALUES (?, ?, ?)', ['rec-seed', 'rec-seed.hda', '2026-01-01'])
+    // ADV57-1 (round-59): reverseGraphFold refuses snapshot sources whose recording no
+    // longer exists — 'rec-loser' must be a real recordings row (see the contacts test).
+    dbRun('INSERT OR IGNORE INTO recordings (id, filename, date_recorded) VALUES (?, ?, ?)', ['rec-loser', 'rec-loser.hda', '2026-01-01'])
     const store = getKnowledgeGraphStore()
     const K = store.upsertNode({ type: 'project', label: 'Apollo', now: '2026-01-01' })
     const L = store.upsertNode({ type: 'project', label: 'Artemis', now: '2026-01-01' })
@@ -1098,6 +1109,199 @@ describe('Context Graph merge→unmerge graph round-trip (ADV56-2 / round-58)', 
     expect(after.graphEdgeSources).toBe(before.graphEdgeSources)
     expect(after.projects).toBe(before.projects)
     expect(after.meetingProjects).toBe(before.meetingProjects)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADV57-1 (round-59): round-58 journaled a full loser-subgraph snapshot so unmerge
+// could reverse the graph fold. But a HARD PURGE (F17 permanent delete) of a
+// recording R that occurs BETWEEN merge and unmerge scrubbed only the LIVE graph —
+// the journal snapshot kept recoverable full-row copies of R's edges + edge_sources,
+// so a later unmerge RE-INSERTED them, resurrecting traces of a permanently-deleted
+// recording (and the retained manifest itself preserved recoverable data after a
+// purge). The fix: the purge now scrubs R's contribution from every open journal
+// snapshot IN THE SAME TRANSACTION (Part A), mirroring the live purge exactly, and
+// reverseGraphFold refuses any snapshot source whose recording is gone (Part B).
+// ---------------------------------------------------------------------------
+describe('Context Graph merge → hard-purge → unmerge (ADV57-1 / round-59)', () => {
+  function addEdgeSource(edgeId: string, rec: string, tx: string, count: number) {
+    dbRun(
+      'INSERT OR IGNORE INTO graph_edge_sources (edge_id, recording_id, transcript_id, assertion_count, created_at) VALUES (?, ?, ?, ?, ?)',
+      [edgeId, rec, tx, count, '2026-01-01']
+    )
+  }
+  function setWeight(edgeId: string, weight: number) {
+    dbRun('UPDATE graph_edges SET weight = ? WHERE id = ?', [weight, edgeId])
+  }
+  function edgeSourcesFor(edgeId: string) {
+    return queryAll<{ recording_id: string; transcript_id: string; assertion_count: number }>(
+      'SELECT recording_id, transcript_id, assertion_count FROM graph_edge_sources WHERE edge_id = ? ORDER BY recording_id, transcript_id',
+      [edgeId]
+    )
+  }
+  function edgeRow(edgeId: string) {
+    return queryOne<{ id: string; source_id: string; target_id: string; weight: number }>(
+      'SELECT id, source_id, target_id, weight FROM graph_edges WHERE id = ?',
+      [edgeId]
+    )
+  }
+  // Purge a recording through the REAL deletion path: wire the same seam
+  // registerRecordingDeletionHandlers wires at startup, then run the hard cascade
+  // (which deletes the recordings row AND runs the graph + journal scrub in ONE tx).
+  function hardPurge(recordingId: string) {
+    database.setGraphProvenanceCleanup((rid, opts) => removeRecordingProvenanceCore(rid, opts))
+    return database.deleteRecordingCascade(recordingId, { hard: true })
+  }
+
+  it('contacts: scrubs the purged recording from the journal snapshot; unmerge never resurrects it (selective, byte-consistent)', async () => {
+    seedContact('c-a', 'Bob')
+    seedContact('c-b', 'Robert')
+    // rec-S survives; rec-R is hard-purged between merge and unmerge.
+    dbRun('INSERT OR IGNORE INTO recordings (id, filename, date_recorded) VALUES (?, ?, ?)', ['rec-S', 'rec-S.hda', '2026-01-01'])
+    dbRun('INSERT OR IGNORE INTO recordings (id, filename, date_recorded) VALUES (?, ?, ?)', ['rec-R', 'rec-R.hda', '2026-01-01'])
+    const store = getKnowledgeGraphStore()
+    const K = store.upsertNode({ type: 'person', label: 'Bob', key: 'contact:c-a', props: { contactId: 'c-a' }, now: '2026-01-01' })
+    const L = store.upsertNode({ type: 'person', label: 'Robert', key: 'contact:c-b', props: { contactId: 'c-b' }, now: '2026-01-01' })
+    const M1 = store.upsertNode({ type: 'meeting', label: 'Shared', props: { meetingId: 'm1', date: '2026-01-05' }, now: '2026-01-01' })
+    const M2 = store.upsertNode({ type: 'meeting', label: 'LoserOnly', props: { meetingId: 'm2', date: '2026-01-06' }, now: '2026-01-01' })
+    const Mc = store.upsertNode({ type: 'meeting', label: 'Collide', props: { meetingId: 'mc', date: '2026-01-07' }, now: '2026-01-01' })
+
+    // el1: SHARED (S+R), non-colliding (no keeper edge to M1) → repoints on fold, keeps id.
+    const el1 = store.upsertEdge({ sourceId: L, targetId: M1, type: 'ATTENDED', now: '2026-01-01' })
+    addEdgeSource(el1, 'rec-S', 'tx-s', 1)
+    addEdgeSource(el1, 'rec-R', 'tx-r', 1)
+    setWeight(el1, 2)
+    // el2: SOLE-SOURCE R → deleted by the purge; must NOT be resurrected by unmerge.
+    const el2 = store.upsertEdge({ sourceId: L, targetId: M2, type: 'ATTENDED', now: '2026-01-01' })
+    addEdgeSource(el2, 'rec-R', 'tx-r', 1)
+    setWeight(el2, 1)
+    // Collision pair: keeper ekc (S) + loser elc (S+R) both ATTEND Mc → elc folds into ekc.
+    const ekc = store.upsertEdge({ sourceId: K, targetId: Mc, type: 'ATTENDED', now: '2026-01-01' })
+    addEdgeSource(ekc, 'rec-S', 'tx-s', 1)
+    setWeight(ekc, 1)
+    const elc = store.upsertEdge({ sourceId: L, targetId: Mc, type: 'ATTENDED', now: '2026-01-01' })
+    addEdgeSource(elc, 'rec-S', 'tx-s', 1)
+    addEdgeSource(elc, 'rec-R', 'tx-r', 1)
+    setWeight(elc, 2)
+
+    mergeContactsWithGraph('c-a', 'c-b')
+    expect(store.getNode(L)).toBeUndefined() // fold happened
+    const journal = database.getMergeJournal('contact', 'c-a')
+    expect(journal).toHaveLength(1)
+    const journalId = journal[0].id
+
+    // Hard-purge rec-R (scrubs live graph + journal snapshot in one transaction).
+    const purge = hardPurge('rec-R')
+    expect(purge?.mode).toBe('hard')
+
+    // --- MANIFEST-AT-REST proof: the retained snapshot itself no longer contains any
+    // edge_source referencing rec-R, and the sole-R edge is gone from it (not merely
+    // filtered at unmerge time). This is Part A doing its job. ---
+    const manifestRow = queryOne<{ repointed_manifest: string }>(
+      'SELECT repointed_manifest FROM merge_journal WHERE id = ?',
+      [journalId]
+    )!
+    const snap = JSON.parse(manifestRow.repointed_manifest).graph as {
+      loserNode: { id: string } | null
+      edges: Array<{ id: string; weight: number }>
+      edgeSources: Array<{ edge_id: string; recording_id: string }>
+    }
+    expect(snap.edgeSources.some((s) => s.recording_id === 'rec-R')).toBe(false)
+    expect(snap.edges.some((e) => e.id === el2)).toBe(false) // sole-R edge dropped from snapshot
+    expect(snap.edgeSources.every((s) => s.recording_id === 'rec-S')).toBe(true)
+    // Surviving shared edges kept with weight decremented by R's assertion sum (2-1=1).
+    expect(snap.edges.find((e) => e.id === el1)?.weight).toBe(1)
+    expect(snap.edges.find((e) => e.id === elc)?.weight).toBe(1)
+    expect(snap.loserNode?.id).toBe(L) // loser node kept (retains surviving edges)
+
+    // --- Unmerge and prove NO rec-R trace is resurrected anywhere. ---
+    const undo = database.unmergeContacts(journalId)
+    expect(undo.loserId).toBe('c-b')
+
+    // (1) No graph_edge_sources referencing the purged recording exist anywhere.
+    const rRows = queryAll('SELECT * FROM graph_edge_sources WHERE recording_id = ?', ['rec-R'])
+    expect(rRows).toHaveLength(0)
+    // (2) The sole-R edge stays deleted.
+    expect(edgeRow(el2)).toBeUndefined()
+    // (3) Loser node + backing contact restored (it retained surviving S provenance).
+    expect(store.getNode(L)).toBeTruthy()
+    expect(getContactById('c-b')).toBeTruthy()
+    // (4) el1 split back to the loser with ONLY the surviving S source, weight 1.
+    expect(edgeRow(el1)).toMatchObject({ source_id: L, target_id: M1, weight: 1 })
+    expect(edgeSourcesFor(el1)).toEqual([{ recording_id: 'rec-S', transcript_id: 'tx-s', assertion_count: 1 }])
+    // (5) The collided loser edge is reconstructed on the loser with only S, weight 1…
+    expect(edgeRow(elc)).toMatchObject({ source_id: L, target_id: Mc, weight: 1 })
+    expect(edgeSourcesFor(elc)).toEqual([{ recording_id: 'rec-S', transcript_id: 'tx-s', assertion_count: 1 }])
+    // …and the keeper edge ekc is restored to its exact pre-merge state (S only, weight 1) —
+    // the fold's transferred R contribution is gone, matching purge-then-split.
+    expect(edgeRow(ekc)).toMatchObject({ source_id: K, target_id: Mc, weight: 1 })
+    expect(edgeSourcesFor(ekc)).toEqual([{ recording_id: 'rec-S', transcript_id: 'tx-s', assertion_count: 1 }])
+  })
+
+  it('projects: scrubs the purged recording from the name-keyed project snapshot; unmerge never resurrects it', async () => {
+    dbRun("INSERT OR IGNORE INTO projects (id, name, status, created_at) VALUES ('p-a', 'Apollo', 'active', '2026-01-01')", [])
+    dbRun("INSERT OR IGNORE INTO projects (id, name, status, created_at) VALUES ('p-b', 'Artemis', 'active', '2026-01-01')", [])
+    dbRun('INSERT OR IGNORE INTO recordings (id, filename, date_recorded) VALUES (?, ?, ?)', ['rec-S', 'rec-S.hda', '2026-01-01'])
+    dbRun('INSERT OR IGNORE INTO recordings (id, filename, date_recorded) VALUES (?, ?, ?)', ['rec-R', 'rec-R.hda', '2026-01-01'])
+    const store = getKnowledgeGraphStore()
+    const K = store.upsertNode({ type: 'project', label: 'Apollo', now: '2026-01-01' })
+    const L = store.upsertNode({ type: 'project', label: 'Artemis', now: '2026-01-01' })
+    const M1 = store.upsertNode({ type: 'meeting', label: 'Shared', props: { meetingId: 'm1', date: '2026-01-05' }, now: '2026-01-01' })
+    const M2 = store.upsertNode({ type: 'meeting', label: 'LoserOnly', props: { meetingId: 'm2', date: '2026-01-06' }, now: '2026-01-01' })
+    const Mc = store.upsertNode({ type: 'meeting', label: 'Collide', props: { meetingId: 'mc', date: '2026-01-07' }, now: '2026-01-01' })
+
+    // el1: SHARED (S+R), non-colliding. el2: SOLE-R (dropped). collision ekc(S)+elc(S+R).
+    const el1 = store.upsertEdge({ sourceId: M1, targetId: L, type: 'ABOUT', now: '2026-01-01' })
+    addEdgeSource(el1, 'rec-S', 'tx-s', 1)
+    addEdgeSource(el1, 'rec-R', 'tx-r', 1)
+    setWeight(el1, 2)
+    const el2 = store.upsertEdge({ sourceId: M2, targetId: L, type: 'ABOUT', now: '2026-01-01' })
+    addEdgeSource(el2, 'rec-R', 'tx-r', 1)
+    setWeight(el2, 1)
+    const ekc = store.upsertEdge({ sourceId: Mc, targetId: K, type: 'ABOUT', now: '2026-01-01' })
+    addEdgeSource(ekc, 'rec-S', 'tx-s', 1)
+    setWeight(ekc, 1)
+    const elc = store.upsertEdge({ sourceId: Mc, targetId: L, type: 'ABOUT', now: '2026-01-01' })
+    addEdgeSource(elc, 'rec-S', 'tx-s', 1)
+    addEdgeSource(elc, 'rec-R', 'tx-r', 1)
+    setWeight(elc, 2)
+
+    mergeProjectsWithGraph('p-a', 'p-b')
+    expect(store.getNode(L)).toBeUndefined()
+    const journal = database.getMergeJournal('project', 'p-a')
+    expect(journal).toHaveLength(1)
+    const journalId = journal[0].id
+
+    const purge = hardPurge('rec-R')
+    expect(purge?.mode).toBe('hard')
+
+    const manifestRow = queryOne<{ repointed_manifest: string }>(
+      'SELECT repointed_manifest FROM merge_journal WHERE id = ?',
+      [journalId]
+    )!
+    const snap = JSON.parse(manifestRow.repointed_manifest).graph as {
+      loserNode: { id: string } | null
+      edges: Array<{ id: string; weight: number }>
+      edgeSources: Array<{ edge_id: string; recording_id: string }>
+    }
+    expect(snap.edgeSources.some((s) => s.recording_id === 'rec-R')).toBe(false)
+    expect(snap.edges.some((e) => e.id === el2)).toBe(false)
+    expect(snap.edges.find((e) => e.id === el1)?.weight).toBe(1)
+    expect(snap.edges.find((e) => e.id === elc)?.weight).toBe(1)
+    expect(snap.loserNode?.id).toBe(L)
+
+    const undo = database.unmergeProjects(journalId)
+    expect(undo.loserId).toBe('p-b')
+
+    expect(queryAll('SELECT * FROM graph_edge_sources WHERE recording_id = ?', ['rec-R'])).toHaveLength(0)
+    expect(edgeRow(el2)).toBeUndefined()
+    expect(store.getNode(L)).toBeTruthy()
+    expect(edgeRow(el1)).toMatchObject({ source_id: M1, target_id: L, weight: 1 })
+    expect(edgeSourcesFor(el1)).toEqual([{ recording_id: 'rec-S', transcript_id: 'tx-s', assertion_count: 1 }])
+    expect(edgeRow(elc)).toMatchObject({ source_id: Mc, target_id: L, weight: 1 })
+    expect(edgeSourcesFor(elc)).toEqual([{ recording_id: 'rec-S', transcript_id: 'tx-s', assertion_count: 1 }])
+    expect(edgeRow(ekc)).toMatchObject({ source_id: Mc, target_id: K, weight: 1 })
+    expect(edgeSourcesFor(ekc)).toEqual([{ recording_id: 'rec-S', transcript_id: 'tx-s', assertion_count: 1 }])
   })
 })
 
