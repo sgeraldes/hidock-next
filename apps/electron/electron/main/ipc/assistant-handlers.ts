@@ -314,7 +314,19 @@ export function registerAssistantHandlers(): void {
         'SELECT knowledge_capture_id FROM conversation_context WHERE conversation_id = ?',
         [conversationId]
       )
-      return rows.map(r => r.knowledge_capture_id)
+      const ids = rows.map(r => r.knowledge_capture_id)
+      if (ids.length === 0) return ids
+
+      // ADV39 readback fail-closed — a capture pinned earlier may since have become
+      // personal / soft-deleted / value-excluded / hard-purged. Filter the returned
+      // ids through the shared fail-closed eligibility source so an excluded pin no
+      // longer appears in the displayed context list OR inflates the context count,
+      // matching the round-40 write gate on assistant:addContext. Filter-on-read
+      // (non-destructive): the conversation_context row is preserved, so restoring
+      // the recording brings the pin back. On any lookup error the eligible set is
+      // empty ⇒ every recording-backed pin drops (fail-closed).
+      const { eligible } = filterEligibleCaptureIds(ids)
+      return ids.filter(id => eligible.has(id))
     } catch (error) {
       console.error('Failed to get context:', error)
       return []
