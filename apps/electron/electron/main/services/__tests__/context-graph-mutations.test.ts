@@ -56,8 +56,10 @@ import {
   setNodePronouns,
   mergeGraphPreview,
   mergeGraphNodes,
+  mergeContactsWithGraph,
   deleteGraphNode,
 } from '../knowledge-graph-service'
+import { mergeDuplicateContacts } from '../org-reconciler'
 
 function seedContact(id: string, name: string, extra: { role?: string; company?: string; email?: string } = {}) {
   // ADV30-2 (round-32) — getNodeDetail + the graph contact mutations now gate the
@@ -516,6 +518,185 @@ describe('Context Graph contact/graph composite atomicity (ADV54-1 / round-56)',
     expect(getKnowledgeGraphStore().getNode(res.nodeId)!.norm_key).toBe(`contact:${contact!.id}`)
     // The commit actually changed state (guards against a no-op false positive).
     expect(snap().contacts).not.toBe(before.contacts)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADV55-1 (round-57): the People-UI + org-reconciler contact-merge paths fold the
+// graph identity ATOMICALLY. Before, they called bare mergeContacts and depended on
+// the post-commit `entity:contact-changed` name event to fold the graph — but F18
+// person nodes are keyed `contact:<id>`, so graph-sync's NAME resolver no-oped and
+// the loser's node/edges/graph_edge_sources stayed stranded under the DELETED loser
+// contact id. mergeContactsWithGraph resolves both nodes by CONTACT ID and folds them
+// inside the same transaction as the relational merge (shared core with the inspector
+// path). The org-reconciler dedup path is routed through the SAME composite.
+// ---------------------------------------------------------------------------
+describe('Context Graph contact-merge graph fold (ADV55-1 / round-57)', () => {
+  /** Snapshot every table the composite touches, ordered for byte-identity. */
+  function snapshot() {
+    return {
+      contacts: JSON.stringify(queryAll('SELECT * FROM contacts ORDER BY id')),
+      contactAliases: JSON.stringify(queryAll('SELECT * FROM contact_aliases ORDER BY id')),
+      graphNodes: JSON.stringify(queryAll('SELECT * FROM graph_nodes ORDER BY id')),
+      graphEdges: JSON.stringify(queryAll('SELECT * FROM graph_edges ORDER BY id')),
+      graphEdgeSources: JSON.stringify(
+        queryAll('SELECT * FROM graph_edge_sources ORDER BY edge_id, recording_id, transcript_id')
+      ),
+      meetingContacts: JSON.stringify(queryAll('SELECT * FROM meeting_contacts ORDER BY meeting_id, contact_id')),
+      journalCount: queryAll<{ c: number }>('SELECT COUNT(*) AS c FROM merge_journal')[0]?.c ?? 0,
+    }
+  }
+
+  /**
+   * Seed keeper c-a + loser c-b as VISIBLE linked contacts, each with a `contact:<id>`
+   * person node, plus a loser-only graph edge (with provenance) and a loser-only
+   * meeting membership — so a stranded fold is observable as an orphan node/edge/row.
+   */
+  function seedContactKeyed() {
+    seedContact('c-a', 'Bob')
+    seedContact('c-b', 'Robert')
+    const { person: keeper } = seedGraph({ personLabel: 'Bob', contactId: 'c-a' })
+    const store = getKnowledgeGraphStore()
+    const loser = store.upsertNode({
+      type: 'person',
+      label: 'Robert',
+      key: 'contact:c-b',
+      props: { contactId: 'c-b' },
+      now: '2026-01-01',
+    })
+    const m = store.upsertNode({ type: 'meeting', label: 'Extra', props: { meetingId: 'mx', date: '2026-01-05' }, now: '2026-01-01' })
+    const eLoser = store.upsertEdge({ sourceId: loser, targetId: m, type: 'ATTENDED', now: '2026-01-01' })
+    dbRun(
+      'INSERT OR IGNORE INTO graph_edge_sources (edge_id, recording_id, transcript_id, assertion_count, created_at) VALUES (?, ?, ?, 1, ?)',
+      [eLoser, 'rec-seed', 'tx-seed', '2026-01-01']
+    )
+    dbRun('INSERT OR IGNORE INTO meetings (id, subject, start_time, end_time) VALUES (?, ?, ?, ?)', [
+      'mtg-loser',
+      'Loser Sync',
+      '2026-01-05T00:00:00.000Z',
+      '2026-01-05T01:00:00.000Z',
+    ])
+    dbRun('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)', [
+      'mtg-loser',
+      'c-b',
+      'attendee',
+    ])
+    return { keeper, loser, m, eLoser, store }
+  }
+
+  it('contact-keyed SUCCESS: the People-merge path folds the loser NODE + provenance onto the keeper (no strand)', async () => {
+    const { keeper, loser, m, eLoser, store } = seedContactKeyed()
+    const before = snapshot()
+
+    // The People-UI entry point (what contacts:merge now calls).
+    const merged = mergeContactsWithGraph('c-a', 'c-b')
+    expect(merged.id).toBe('c-a')
+
+    // Relational layer: loser contact gone, keeper survives, journal grew by one.
+    expect(getContactById('c-b')).toBeUndefined()
+    expect(getContactById('c-a')).toBeTruthy()
+    expect(snapshot().journalCount).toBe(before.journalCount + 1)
+    // Loser membership repointed to the keeper (relational fold).
+    expect(queryAll<{ contact_id: string }>('SELECT contact_id FROM meeting_contacts WHERE meeting_id = ?', ['mtg-loser'])).toEqual([
+      { contact_id: 'c-a' },
+    ])
+
+    // Graph layer — the fix: the loser NODE is folded into the keeper, NOT stranded.
+    expect(store.getNode(loser)).toBeUndefined()
+    expect(store.getNode(keeper)).toBeTruthy()
+    // The loser's edge was repointed onto the keeper node (id preserved by the UPDATE).
+    const edge = queryAll<{ source_id: string; target_id: string }>('SELECT source_id, target_id FROM graph_edges WHERE id = ?', [eLoser])
+    expect(edge).toEqual([{ source_id: keeper, target_id: m }])
+    // Its per-recording provenance rode along (nothing stranded under the loser).
+    expect(queryAll('SELECT edge_id FROM graph_edge_sources WHERE edge_id = ?', [eLoser])).toHaveLength(1)
+    // No graph node still keyed to the deleted loser contact id.
+    expect(queryAll("SELECT id FROM graph_nodes WHERE norm_key = 'contact:c-b'")).toHaveLength(0)
+  })
+
+  it('graph-phase FAILURE: a throw in the graph fold rolls BOTH layers back (byte-identical)', async () => {
+    const { keeper, loser, store } = seedContactKeyed()
+    const before = snapshot()
+
+    // Inject a one-shot fault into the GRAPH phase only: throw on the loser-node
+    // delete, which mergeNodes runs LAST — AFTER mergeContacts already ran within the
+    // shared transaction. mergeContacts uses the app-level run() (not store.db.run),
+    // so this spy lands strictly in the graph surgery.
+    const origRun = store.db.run.bind(store.db)
+    let fired = false
+    const spy = vi.spyOn(store.db, 'run').mockImplementation((sql: string, params?: unknown[]) => {
+      if (!fired && /DELETE\s+FROM\s+graph_nodes/i.test(sql)) {
+        fired = true
+        throw new Error('injected fault: graph_nodes delete')
+      }
+      return origRun(sql, params)
+    })
+
+    try {
+      expect(() => mergeContactsWithGraph('c-a', 'c-b')).toThrow(/injected fault/)
+    } finally {
+      spy.mockRestore()
+    }
+    expect(fired).toBe(true)
+
+    const after = snapshot()
+    // Whole composite rolled back: loser contact + node SURVIVE, journal untouched,
+    // and every touched table is byte-identical to the pre-merge snapshot.
+    expect(getContactById('c-b')).toBeTruthy()
+    expect(getContactById('c-a')).toBeTruthy()
+    expect(store.getNode(loser)).toBeTruthy()
+    expect(store.getNode(keeper)).toBeTruthy()
+    expect(after.contacts).toBe(before.contacts)
+    expect(after.contactAliases).toBe(before.contactAliases)
+    expect(after.meetingContacts).toBe(before.meetingContacts)
+    expect(after.journalCount).toBe(before.journalCount)
+    expect(after.graphNodes).toBe(before.graphNodes)
+    expect(after.graphEdges).toBe(before.graphEdges)
+    expect(after.graphEdgeSources).toBe(before.graphEdgeSources)
+  })
+
+  it('no-node graceful case: a loser with NO person node still merges (fold is a no-op)', async () => {
+    seedContact('c-a', 'Bob')
+    seedContact('c-b', 'Robert')
+    // Keeper has a contact-keyed node; the loser has NO backing person node at all.
+    const { person: keeper } = seedGraph({ personLabel: 'Bob', contactId: 'c-a' })
+    const store = getKnowledgeGraphStore()
+
+    expect(() => mergeContactsWithGraph('c-a', 'c-b')).not.toThrow()
+
+    // Contact merge still happened; the keeper node is untouched (nothing to fold).
+    expect(getContactById('c-b')).toBeUndefined()
+    expect(getContactById('c-a')).toBeTruthy()
+    expect(store.getNode(keeper)).toBeTruthy()
+  })
+
+  it('org-reconciler dedup path folds the graph node through the SAME composite', async () => {
+    // Two same-name, structurally-visible contacts (source='user') → the name-group
+    // collapse in mergeDuplicateContacts folds them via mergeContactsWithGraph.
+    seedContact('c-a', 'Sam')
+    seedContact('c-b', 'Sam')
+    const store = getKnowledgeGraphStore()
+    const nodeA = store.upsertNode({ type: 'person', label: 'Sam', key: 'contact:c-a', props: { contactId: 'c-a' }, now: '2026-01-01' })
+    const nodeB = store.upsertNode({ type: 'person', label: 'Sam', key: 'contact:c-b', props: { contactId: 'c-b' }, now: '2026-01-01' })
+    const m = store.upsertNode({ type: 'meeting', label: 'Sync', props: { meetingId: 'ms', date: '2026-01-05' }, now: '2026-01-01' })
+    const eA = store.upsertEdge({ sourceId: nodeA, targetId: m, type: 'ATTENDED', now: '2026-01-01' })
+    const eB = store.upsertEdge({ sourceId: nodeB, targetId: m, type: 'ATTENDED', now: '2026-01-01' })
+    for (const e of [eA, eB]) {
+      dbRun('INSERT OR IGNORE INTO graph_edge_sources (edge_id, recording_id, transcript_id, assertion_count, created_at) VALUES (?, ?, ?, 1, ?)', [e, 'rec-seed', 'tx-seed', '2026-01-01'])
+    }
+
+    const removed = mergeDuplicateContacts()
+    expect(removed).toBe(1)
+
+    // Exactly one 'Sam' contact remains, and exactly one contact-keyed person node —
+    // the loser node was folded (not left stranded under a deleted contact).
+    const survivors = queryAll<{ id: string }>("SELECT id FROM contacts WHERE name = 'Sam'")
+    expect(survivors).toHaveLength(1)
+    const survivorId = survivors[0].id
+    const personNodes = queryAll<{ norm_key: string }>("SELECT norm_key FROM graph_nodes WHERE type = 'person'")
+    expect(personNodes).toEqual([{ norm_key: `contact:${survivorId}` }])
+    // No node keyed to the folded-away contact id survives.
+    const goneId = survivorId === 'c-a' ? 'c-b' : 'c-a'
+    expect(queryAll(`SELECT id FROM graph_nodes WHERE norm_key = 'contact:${goneId}'`)).toHaveLength(0)
   })
 })
 

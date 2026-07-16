@@ -17,7 +17,6 @@ import {
   queryOne,
   run,
   runInTransaction,
-  mergeContacts,
   meetingBaseUid,
   insertIdentitySuggestion,
   getAllRecordingPreassignments,
@@ -31,6 +30,7 @@ import {
   type RecordingPreassignment
 } from './database'
 import { filterEligibleRecordingIds } from './recording-eligibility'
+import { mergeContactsWithGraph } from './knowledge-graph-service'
 import { resolveContact, resolveProject } from './entity-resolver'
 import { isGenericSpeakerLabel, cleanRole } from './entity-normalize'
 import { canUpgrade, methodConfidence } from './signal-tiers'
@@ -911,7 +911,11 @@ export function mergeDuplicateContacts(): number {
       for (const loser of group) {
         if (loser.id === keeper.id) continue
         if (visible.has(loser.id) !== keeperVisible) continue // cross visibility boundary — never launder
-        mergeContacts(keeper.id, loser.id)
+        // ADV55-1 (round-57): fold the backing graph person nodes atomically with the
+        // relational merge (was bare mergeContacts, which left the loser's graph node +
+        // provenance stranded under the deleted loser contact id whenever the
+        // post-commit name event no-opped for contact-keyed nodes or graph sync was off).
+        mergeContactsWithGraph(keeper.id, loser.id)
         removed++
       }
     }

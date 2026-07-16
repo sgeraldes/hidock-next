@@ -16,13 +16,13 @@ import {
   getMeetingsForContact,
   getContactsForMeeting,
   getContactsForMeetingOwner,
-  mergeContacts,
   unmergeContacts,
   filterVisibleEntityIds,
   blankIneligibleContactFields,
   UnmergeResult,
   Contact
 } from '../services/database'
+import { mergeContactsWithGraph } from '../services/knowledge-graph-service'
 import { getEventBus } from '../services/event-bus'
 import { success, error, Result } from '../types/api'
 import {
@@ -324,7 +324,12 @@ export function registerContactsHandlers(): void {
           return error('MERGE_NOT_ALLOWED', 'These contacts cannot be merged.')
         }
 
-        const merged = mergeContacts(keeperId, loserId)
+        // ADV55-1 (round-57): route through the graph-aware composite so the loser's
+        // person node + edges + graph_edge_sources provenance fold onto the keeper
+        // in the SAME transaction as the relational merge, instead of relying on the
+        // post-commit name event (which NO-OPS for contact-keyed F18 nodes, leaving
+        // the loser's graph facts stranded under the deleted loser contact id).
+        const merged = mergeContactsWithGraph(keeperId, loserId)
         return success(mapToPerson(merged))
       } catch (err) {
         console.error('contacts:merge error:', err)

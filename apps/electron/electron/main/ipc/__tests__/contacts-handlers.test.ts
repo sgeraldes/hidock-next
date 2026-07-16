@@ -25,7 +25,6 @@ vi.mock('../../services/database', () => ({
   getMeetingsForContact: vi.fn(),
   getContactsForMeeting: vi.fn(),
   getContactsForMeetingOwner: vi.fn(),
-  mergeContacts: vi.fn(),
   // ADV27-1 (round-28) — contacts:getAll/getById route through the visible-identity
   // boundary. Default to all-visible so these shape assertions are unaffected;
   // behavioral suppression is covered by the real-temp-DB suite.
@@ -42,6 +41,14 @@ vi.mock('../../services/database', () => ({
       free: vi.fn()
     }))
   }))
+}))
+
+// ADV55-1 (round-57) — contacts:merge now routes through the graph-aware composite
+// (mergeContactsWithGraph) so the loser's graph node/edges/provenance fold atomically
+// with the relational merge. Mock it here (the real one pulls in @hidock/knowledge-graph);
+// behavioral coverage lives in context-graph-mutations.test.ts against a real temp DB.
+vi.mock('../../services/knowledge-graph-service', () => ({
+  mergeContactsWithGraph: vi.fn()
 }))
 
 describe('Contacts IPC Handlers', () => {
@@ -227,9 +234,10 @@ describe('Contacts IPC Handlers', () => {
   const LOSER = '660e8400-e29b-41d4-a716-446655440001'
 
   it('should merge two contacts (contacts:merge)', async () => {
-    const { getContactById, mergeContacts } = await import('../../services/database')
+    const { getContactById } = await import('../../services/database')
+    const { mergeContactsWithGraph } = await import('../../services/knowledge-graph-service')
     vi.mocked(getContactById).mockReturnValue({ id: KEEPER, name: 'K', tags: null } as any)
-    vi.mocked(mergeContacts).mockReturnValue({ id: KEEPER, name: 'K', tags: null } as any)
+    vi.mocked(mergeContactsWithGraph).mockReturnValue({ id: KEEPER, name: 'K', tags: null } as any)
 
     registerContactsHandlers()
     expect(ipcMain.handle).toHaveBeenCalledWith('contacts:merge', expect.any(Function))
@@ -239,7 +247,8 @@ describe('Contacts IPC Handlers', () => {
 
     expect(result.success).toBe(true)
     expect(result.data.id).toBe(KEEPER)
-    expect(mergeContacts).toHaveBeenCalledWith(KEEPER, LOSER)
+    // Routed through the graph-aware composite (ADV55-1) rather than bare mergeContacts.
+    expect(mergeContactsWithGraph).toHaveBeenCalledWith(KEEPER, LOSER)
   })
 
   it('should reject merging a contact into itself', async () => {

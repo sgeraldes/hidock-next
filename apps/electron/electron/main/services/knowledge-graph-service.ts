@@ -48,7 +48,6 @@ import type {
   NodeGraphStats,
 } from '@hidock/knowledge-graph'
 import { complete } from '@hidock/ai-providers'
-import { getProviderConfigFromSettings } from './ai-provider-config'
 import {
   run,
   runInTransaction,
@@ -69,6 +68,7 @@ import {
   mergeContacts,
   getMergeImpact,
 } from './database'
+import type { Contact } from './database'
 import { getEventBus } from './event-bus'
 import { resolveContact } from './entity-resolver'
 
@@ -205,6 +205,12 @@ export interface IngestResult {
 }
 
 export async function ingestFromDbTranscripts(): Promise<IngestResult> {
+  // ADV55-1 (round-57): lazy-load provider config so importing this service (now done
+  // by org-reconciler for the contact-merge composite) does NOT eagerly pull config.ts,
+  // which reads app.getPath('home') at MODULE LOAD. Keeping it lazy lets the graph
+  // service be imported in a plain Node context without an Electron `app` mock, while
+  // ingestion (which needs the provider) still resolves it here.
+  const { getProviderConfigFromSettings } = await import('./ai-provider-config')
   const providerConfig = getProviderConfigFromSettings()
   if (!providerConfig) {
     throw new Error('No AI provider configured. Please set a provider API key in Settings.')
@@ -410,6 +416,8 @@ export async function ingestFromFolder(folderPath: string): Promise<IngestResult
     throw new Error(`Path is not a directory: ${resolved}`)
   }
 
+  // Lazy-load — see ingestFromDbTranscripts (ADV55-1): avoids an eager config.ts load.
+  const { getProviderConfigFromSettings } = await import('./ai-provider-config')
   const providerConfig = getProviderConfigFromSettings()
   if (!providerConfig) {
     throw new Error('No AI provider configured. Please set a provider API key in Settings.')
@@ -2945,30 +2953,110 @@ export function mergeGraphNodes(keeperEntityId: string, loserEntityId: string): 
 
   if (keeperContact && loserContact && keeperContact !== loserContact) {
     // Both backing contacts are VISIBLE (checked above) — real, journaled contacts
-    // merge (undoable), then fold the graph nodes.
+    // merge (undoable), then fold the graph nodes. Both graph nodes are known
+    // present + eligible here (keeperId/loserId came FROM the store and passed the
+    // guards above), so the shared cross-layer core ALWAYS folds them.
     //
-    // ADV53-1 (round-55): the composite must be CROSS-LAYER failure-atomic. Round-54
-    // made mergeContacts and mergeNodes each atomic on their OWN transaction, but
-    // running them back-to-back committed the contact merge (relational rows +
-    // undo-journal) BEFORE mergeNodes ran. If mergeNodes then threw (DB I/O, schema,
-    // statement failure), the operation reported failure while the loser contact was
-    // already deleted/repointed and its graph node + edges survived — relational and
-    // graph identity go inconsistent, and provenance is stranded under a graph node
-    // backed by a now-deleted contact. Wrapping BOTH in ONE outer runInTransaction
-    // gives them a single rollback boundary: mergeContacts's inner runInTransaction
-    // and mergeNodes's runInGraphTransaction (→ graphDbAdapter.runInTransaction →
-    // engine.runInTransaction) are RE-ENTRANT — with a transaction already open they
-    // JOIN it (no illegal nested BEGIN) and defer to the outer COMMIT/ROLLBACK, so a
-    // throw anywhere in the graph phase rolls the contact merge + journal back too.
-    return runInTransaction(() => {
-      mergeContacts(keeperContact, loserContact)
-      const r = mergeNodes(store, keeperId, loserId)
-      return { keeperId: r.keeperId, movedEdges: r.movedEdges, path: 'contact' as const }
-    })
+    // ADV53-1 (round-55): the composite must be CROSS-LAYER failure-atomic. The
+    // relational merge (rows + undo-journal) and the graph fold share ONE rollback
+    // boundary via mergeContactsFoldingNodes's runInTransaction (see there for the
+    // re-entrancy contract). ADV55-1 (round-57): factored into that shared core so the
+    // People-UI / reconciler contact-id entry point (mergeContactsWithGraph) gets the
+    // SAME atomic fold instead of depending on the post-commit name event.
+    const { movedEdges } = mergeContactsFoldingNodes(keeperContact, loserContact, keeperId, loserId)
+    return { keeperId, movedEdges, path: 'contact' as const }
   }
 
   const r = mergeNodes(store, keeperId, loserId)
   return { keeperId: r.keeperId, movedEdges: r.movedEdges, path: 'graph' }
+}
+
+/**
+ * Resolve a CONTACT id to its backing person NODE id, the way the merge/rekey code
+ * keys contact nodes: the canonical `contact:<id>` norm_key first (what
+ * rekeyExistingPersonNodes + bindNodeToContact look up), then a legacy person node
+ * still carrying the id only in props.contactId. Returns null when the contact has
+ * no backing person node yet — the graph fold is then a no-op (the contact merge
+ * still proceeds atomically). Name-only legacy nodes (norm_key = a name, no
+ * contactId prop) intentionally do NOT resolve here; those are folded by graph-sync's
+ * post-commit name-event fallback, which resolves by normalized name.
+ */
+function resolveContactToNodeId(contactId: string): string | null {
+  const store = getKnowledgeGraphStore()
+  const db = store.db
+  const byKey = db.queryOne<{ id: string }>(
+    "SELECT id FROM graph_nodes WHERE type = 'person' AND norm_key = ?",
+    [`contact:${contactId}`]
+  )
+  if (byKey) return byKey.id
+  const byProp = db.queryOne<{ id: string }>(
+    "SELECT id FROM graph_nodes WHERE type = 'person' AND JSON_EXTRACT(props, '$.contactId') = ?",
+    [contactId]
+  )
+  return byProp?.id ?? null
+}
+
+/**
+ * Cross-layer atomic core: merge the relational CONTACTS (journaled, undoable) AND
+ * fold their backing person NODES in ONE re-entrant runInTransaction, so a throw in
+ * either phase rolls BOTH back (a single rollback boundary). mergeContacts's inner
+ * runInTransaction and mergeNodes's runInGraphTransaction (→ graphDbAdapter
+ * .runInTransaction → engine.runInTransaction) are RE-ENTRANT: with a transaction
+ * already open they JOIN it (no illegal nested BEGIN) and defer to the outer
+ * COMMIT/ROLLBACK.
+ *
+ * The node fold runs only when BOTH contacts resolve to DISTINCT person nodes; a
+ * contact with no backing node (or a still-name-keyed legacy node) folds as a no-op
+ * and the contact merge still commits — unlike the inspector path, which starts FROM
+ * nodes and refuses a missing one.
+ *
+ * Event timing (ADV55-1 / round-57): mergeContacts emits `entity:contact-changed`
+ * AFTER its inner (joined) transaction returns but BEFORE this outer COMMIT, and the
+ * EventEmitter dispatch is synchronous — so graph-sync's `merged` handler runs
+ * mid-transaction. That handler resolves nodes by NORMALIZED NAME, so for
+ * contact-keyed nodes (norm_key `contact:<id>`) it finds nothing and no-ops; the
+ * authoritative fold is THIS in-transaction mergeNodes. For legacy name-keyed nodes
+ * the handler performs the (now same-transaction) fold and resolveContactToNodeId
+ * returns null here, so there is no double-fold. The event is still emitted for its
+ * other subscribers (rag reindex, UI refresh).
+ */
+function mergeContactsFoldingNodes(
+  keeperContactId: string,
+  loserContactId: string,
+  keeperNodeId: string | null,
+  loserNodeId: string | null
+): { contact: Contact; movedEdges: number } {
+  const store = getKnowledgeGraphStore()
+  return runInTransaction(() => {
+    const contact = mergeContacts(keeperContactId, loserContactId)
+    let movedEdges = 0
+    if (keeperNodeId && loserNodeId && keeperNodeId !== loserNodeId) {
+      // Resolve AFTER the contact merge is harmless: the loser's GRAPH node persists
+      // (only its contact ROW was deleted), so its `contact:<id>` key still folds.
+      const r = mergeNodes(store, keeperNodeId, loserNodeId)
+      movedEdges = r.movedEdges
+    }
+    return { contact, movedEdges }
+  })
+}
+
+/**
+ * People-UI + reconciler entry point (ADV55-1 / round-57): merge two CONTACTS by id
+ * AND fold their backing graph person nodes ATOMICALLY. Resolves each contact to its
+ * `contact:<id>` node (see resolveContactToNodeId) and shares mergeContactsFoldingNodes
+ * with mergeGraphNodes' contact branch, so the loser's graph node, edges, and
+ * graph_edge_sources provenance are repointed onto the keeper inside the same
+ * transaction as the relational merge — no longer stranded under the deleted loser
+ * contact id and no longer dependent on the best-effort post-commit name event
+ * (which no-ops for contact-keyed nodes and is skipped when graph sync is disabled).
+ *
+ * Callers must apply their own visibility/eligibility gates on BOTH ids first (the
+ * contacts:merge IPC's fail-closed boundary; the org-reconciler dedup partition).
+ */
+export function mergeContactsWithGraph(keeperContactId: string, loserContactId: string): Contact {
+  const keeperNodeId = resolveContactToNodeId(keeperContactId)
+  const loserNodeId = resolveContactToNodeId(loserContactId)
+  return mergeContactsFoldingNodes(keeperContactId, loserContactId, keeperNodeId, loserNodeId).contact
 }
 
 /** Remove a junk node from the graph (and its edges). Idempotent. */
