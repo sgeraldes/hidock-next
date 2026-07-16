@@ -1,5 +1,6 @@
 // Engine interface
 export type { TranscriptSegment, TranscribeOptions, TranscriptionEngine } from './engines/engine-interface.js'
+export { TranscriptionCancelledError } from './engines/engine-interface.js'
 
 // Engines
 export { CohereEngine } from './engines/cohere-engine.js'

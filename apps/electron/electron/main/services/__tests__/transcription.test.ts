@@ -34,7 +34,7 @@ const mockUpdateQueueProgress = vi.fn()
 // test can assert analyzeTranscriptWithGemini's provider was NEVER reached when
 // the recording became ineligible during audio transcription. Default rejects
 // (analysis "fails") — the historical behaviour this suite relied on.
-const mockGenerateContent = vi.fn(async () => {
+const mockGenerateContent = vi.fn(async (..._args: unknown[]) => {
   throw new Error('API rate limit exceeded')
 })
 
@@ -171,7 +171,16 @@ vi.mock('@hidock/transcription', () => {
       transcribe: mockGeminiTranscribe
     }
   }
-  return { GeminiEngine }
+  // transcription.ts imports TranscriptionCancelledError (round-45 ADV43-1) to map
+  // an in-engine eligibility abort to a cancelled outcome; the mock must export it
+  // as a real class so `e instanceof TranscriptionCancelledError` is callable.
+  class TranscriptionCancelledError extends Error {
+    constructor(message = 'Transcription cancelled: source is no longer eligible for AI processing') {
+      super(message)
+      this.name = 'TranscriptionCancelledError'
+    }
+  }
+  return { GeminiEngine, TranscriptionCancelledError }
 })
 
 // Mock fs - simple approach that works in jsdom environment

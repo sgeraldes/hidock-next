@@ -1,4 +1,4 @@
-import { GeminiEngine } from '@hidock/transcription'
+import { GeminiEngine, TranscriptionCancelledError } from '@hidock/transcription'
 import { GoogleGenerativeAI } from '@google/generative-ai'
 import { getBrainRegistry, resolveGeminiApiKey } from './brains'
 import { readFile, existsSync } from 'fs'
@@ -782,7 +782,17 @@ interface TranscriptAnalysis {
 async function transcribeWithGemini(
   filePath: string,
   meetingContext: string,
-  progressCallback?: (stage: string, progress: number) => void
+  progressCallback?: (stage: string, progress: number) => void,
+  // ADV43-1 (round-45) — FAIL-CLOSED eligibility gate threaded INTO GeminiEngine's
+  // internal multi-call pipeline (Files API upload/poll, per-chunk generation,
+  // retries). transcribeRecording passes its isRecordingEligible check here so an
+  // owner exclusion committed WHILE the file is being read/uploaded or a chunk /
+  // retry is in flight aborts the pipeline before the next provider call —
+  // GeminiEngine throws TranscriptionCancelledError, which transcribeRecording maps
+  // to a cancelled outcome. The engine-level gate complements the up-front and
+  // second-stage checks in transcribeRecording (which cannot see an exclusion that
+  // lands between the engine's own chunk/upload/retry calls).
+  shouldGenerate?: () => boolean
 ): Promise<RawTranscriptionResult> {
   const config = getConfig()
   if (!resolveGeminiApiKey()) {
@@ -816,6 +826,8 @@ async function transcribeWithGemini(
     context: meetingContext || undefined,
     // GeminiEngine reads filePath from options for MIME type detection
     filePath,
+    // ADV43-1 (round-45) — re-checked inside the engine before each provider call.
+    shouldGenerate,
     // Real per-chunk progress (long recordings are transcribed in ~10-minute
     // segments) — replaces the fake ticker that sat at 90% for minutes.
     onProgress: (done: number, total: number) => {
@@ -1703,11 +1715,31 @@ Meeting ${i + 1}: "${m.subject}"
 
   const config = getConfig()
   const transcriptionProvider = providerOverride || config.transcription.provider || 'gemini'
-  const rawTranscript = transcriptionProvider === 'vibevoice'
-    ? await transcribeWithVibeVoice(recording.file_path, progressCallback)
-    : transcriptionProvider === 'local-asr'
-      ? await transcribeWithLocalAsr(recording.file_path, progressCallback)
-      : await transcribeWithGemini(recording.file_path, meetingContext, progressCallback)
+  let rawTranscript: RawTranscriptionResult
+  try {
+    rawTranscript = transcriptionProvider === 'vibevoice'
+      ? await transcribeWithVibeVoice(recording.file_path, progressCallback)
+      : transcriptionProvider === 'local-asr'
+        ? await transcribeWithLocalAsr(recording.file_path, progressCallback)
+        // ADV43-1 (round-45) — thread the SAME fail-closed eligibility check into
+        // GeminiEngine's internal chunk/upload/retry loop. If the owner excludes
+        // the recording WHILE the engine is mid-pipeline, the engine throws
+        // TranscriptionCancelledError (caught below) so we stop sending audio to
+        // Gemini and persist nothing — the up-front + second-stage checks cannot
+        // observe an exclusion that lands between the engine's own provider calls.
+        : await transcribeWithGemini(recording.file_path, meetingContext, progressCallback, () =>
+            isRecordingEligible(recordingId)
+          )
+  } catch (e) {
+    if (e instanceof TranscriptionCancelledError) {
+      console.log(
+        `[Transcription] Recording ${recordingId} became ineligible during the transcription ` +
+          'provider pipeline (chunk/upload/retry) — aborted before further audio was sent; nothing persisted'
+      )
+      return { status: 'cancelled' }
+    }
+    throw e
+  }
   const fullText = rawTranscript.fullText
 
   // ADV42-1 (round-44, HIGH) — SECOND-STAGE eligibility recheck. The up-front
