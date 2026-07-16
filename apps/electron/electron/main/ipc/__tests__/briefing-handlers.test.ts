@@ -32,6 +32,14 @@ vi.mock('../../services/database', () => {
       ids: new Set([...ids].filter((i) => i && captures.has(i))),
       failClosed: false
     }),
+    // ADV44-2 (round-46) — the stats.indexedChunks count routes vector_embeddings
+    // provenance rows through filterEligibleProvenanceRows, which needs the
+    // recording existence probe. Every recording id used in these tests names a
+    // REAL recording (existence = identity); excluded ones still exist.
+    getExistingRecordingIds: (ids: Iterable<string>) => ({
+      ids: new Set([...ids].filter((i): i is string => !!i)),
+      failClosed: false
+    }),
     getCaptureEligibilityRows: (ids: Iterable<string>) => ({
       rows: [...ids].filter((i) => i && captures.has(i)).map((id) => ({ id, ...captures.get(id)! })),
       failClosed: false
@@ -357,6 +365,81 @@ describe('Briefing IPC Handlers', () => {
     const ids = res.data.pendingActionables.map((a: any) => a.id)
     expect(ids).toHaveLength(8)
     expect(ids.every((id: string) => id.startsWith('a-ok-'))).toBe(true)
+  })
+
+  // ADV44-2 (round-46) — the displayed statistics (transcribedCount / indexedChunks
+  // / pendingActionables) must count only ELIGIBLE derivatives. A raw COUNT(*)
+  // over the derivative tables over-reports soft-deleted / personal / value-
+  // excluded / hard-purged sources, contradicting the deletion + value controls.
+  it('ADV44-2 — statistics count only eligible transcripts, vector chunks and actionables', async () => {
+    const db: any = await import('../../services/database')
+    const { queryAll, getMeetings } = db
+    vi.mocked(getMeetings).mockReturnValue([])
+    // rec-drop is value-excluded / soft-deleted; rec-keep is eligible.
+    db.getExcludedRecordingIds.mockReturnValue({ ids: new Set(['rec-drop']), failClosed: false })
+    db.__captures.set('kc-keep', { source_recording_id: 'rec-keep', quality_rating: null, deleted_at: null })
+    db.__captures.set('kc-drop', { source_recording_id: 'rec-drop', quality_rating: null, deleted_at: null })
+
+    vi.mocked(queryAll).mockImplementation(
+      routeQueryAll([
+        // --- stats queries (specific fragments FIRST so they win over display routes) ---
+        { match: /SELECT id, source_knowledge_id FROM actionables/, rows: [
+          { id: 'a-keep', source_knowledge_id: 'kc-keep' },
+          { id: 'a-drop', source_knowledge_id: 'kc-drop' }
+        ] },
+        { match: /SELECT recording_id, capture_id FROM vector_embeddings/, rows: [
+          { recording_id: 'rec-keep', capture_id: null },
+          { recording_id: 'rec-keep', capture_id: null },
+          { recording_id: 'rec-drop', capture_id: null }
+        ] },
+        { match: /SELECT recording_id FROM transcripts WHERE/, rows: [
+          { recording_id: 'rec-keep' },
+          { recording_id: 'rec-drop' }
+        ] },
+        // --- display queries (empty so the test focuses on stats) ---
+        { match: /LEFT JOIN recordings r ON r\.id = t\.recording_id/, rows: [] },
+        { match: /JOIN recordings r ON r\.id = t\.recording_id\s+LEFT JOIN meetings m/, rows: [] },
+        { match: /SELECT COUNT\(1\) AS n FROM recordings r/, rows: [{ n: 0 }] },
+        { match: /FROM actionables\s+WHERE status/, rows: [] }
+      ])
+    )
+
+    const res = await handlers['briefing:get']()
+    expect(res.success).toBe(true)
+    // rec-drop dropped from all three totals; rec-keep (2 chunks) counted.
+    expect(res.data.stats.transcribedCount).toBe(1)
+    expect(res.data.stats.indexedChunks).toBe(2)
+    expect(res.data.stats.pendingActionables).toBe(1)
+  })
+
+  it('ADV44-2 — statistics fail closed to zero for recording-backed derivatives when eligibility is unverifiable', async () => {
+    const db: any = await import('../../services/database')
+    const { queryAll, getMeetings } = db
+    vi.mocked(getMeetings).mockReturnValue([])
+    db.getExcludedRecordingIds.mockReturnValue({ ids: new Set<string>(), failClosed: true })
+    // kc-1 is a legacy recording-backed actionable source (not a registered
+    // capture) → recording-backed → dropped on fail-closed.
+    vi.mocked(queryAll).mockImplementation(
+      routeQueryAll([
+        { match: /SELECT id, source_knowledge_id FROM actionables/, rows: [
+          { id: 'a-1', source_knowledge_id: 'rec-1' }
+        ] },
+        { match: /SELECT recording_id, capture_id FROM vector_embeddings/, rows: [
+          { recording_id: 'rec-1', capture_id: null }
+        ] },
+        { match: /SELECT recording_id FROM transcripts WHERE/, rows: [{ recording_id: 'rec-1' }] },
+        { match: /LEFT JOIN recordings r ON r\.id = t\.recording_id/, rows: [] },
+        { match: /JOIN recordings r ON r\.id = t\.recording_id\s+LEFT JOIN meetings m/, rows: [] },
+        { match: /SELECT COUNT\(1\) AS n FROM recordings r/, rows: [{ n: 0 }] },
+        { match: /FROM actionables\s+WHERE status/, rows: [] }
+      ])
+    )
+
+    const res = await handlers['briefing:get']()
+    expect(res.success).toBe(true)
+    expect(res.data.stats.transcribedCount).toBe(0)
+    expect(res.data.stats.indexedChunks).toBe(0)
+    expect(res.data.stats.pendingActionables).toBe(0)
   })
 
   // RE8-P2a (round-9) — NO fixed page ceiling: 900 excluded rows precede the

@@ -7,7 +7,7 @@
 
 import { ipcMain } from 'electron'
 import { getMeetings, queryAll } from '../services/database'
-import { filterEligibleRecordingIds } from '../services/recording-eligibility'
+import { filterEligibleRecordingIds, filterEligibleProvenanceRows } from '../services/recording-eligibility'
 import { filterEligibleActionableRows } from '../services/actionable-eligibility'
 import { getConfig } from '../services/config'
 
@@ -230,14 +230,47 @@ export function registerBriefingHandlers(): void {
       const todayFollowUps = filterEligibleByRecording(todayFollowUpsRaw, (r) => r.recordingId)
 
       const config = getConfig()
+
+      // ADV44-2 (round-46) — the displayed statistics count DERIVATIVE tables
+      // (transcripts / vector chunks / pending actionables). A COUNT(*) over the
+      // raw tables over-reports soft-deleted / personal / value-excluded /
+      // hard-purged sources, contradicting the deletion + value controls. Produce
+      // each total through the SAME shared positive-eligibility boundaries the
+      // display lists use, FAIL-CLOSED to zero (never inflate). Follows the
+      // round-9 fetch-then-filter pattern (no truncation-before-filter): fetch the
+      // provenance ids, filter, count.
+
+      // transcribedCount — only transcripts whose recording is eligible.
+      const transcribedCount = filterEligibleByRecording(
+        queryAll<{ recording_id: string }>(
+          `SELECT recording_id FROM transcripts WHERE TRIM(COALESCE(full_text, '')) != ''`
+        ),
+        (r) => r.recording_id
+      ).length
+
+      // indexedChunks — only vector chunks with eligible positive provenance
+      // (same boundary as vector-store search / rag:status FIX 1).
+      const indexedChunks = filterEligibleProvenanceRows(
+        queryAll<{ recording_id: string | null; capture_id: string | null }>(
+          `SELECT recording_id, capture_id FROM vector_embeddings`
+        ),
+        (r) => r.recording_id,
+        (r) => r.capture_id
+      ).length
+
+      // pendingActionables — only pending actionables whose source capture/recording
+      // is eligible (standalone null-source rows kept), via the shared boundary.
+      const pendingActionablesCount = filterEligibleActionableRows(
+        queryAll<{ id: string; source_knowledge_id: string | null }>(
+          `SELECT id, source_knowledge_id FROM actionables WHERE status = 'pending'`
+        ),
+        (a) => a.source_knowledge_id
+      ).length
+
       const stats = {
-        transcribedCount: queryAll<{ n: number }>(
-          `SELECT COUNT(1) AS n FROM transcripts WHERE TRIM(COALESCE(full_text, '')) != ''`
-        )[0]?.n ?? 0,
-        indexedChunks: queryAll<{ n: number }>(`SELECT COUNT(1) AS n FROM vector_embeddings`)[0]?.n ?? 0,
-        pendingActionables: queryAll<{ n: number }>(
-          `SELECT COUNT(1) AS n FROM actionables WHERE status = 'pending'`
-        )[0]?.n ?? 0
+        transcribedCount,
+        indexedChunks,
+        pendingActionables: pendingActionablesCount
       }
 
       return {
