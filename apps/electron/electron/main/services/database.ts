@@ -7382,11 +7382,18 @@ function reverseGraphFold(snapshot: GraphMergeSnapshot | undefined): void {
 // EXACTLY so a later reverseGraphFold stays byte-consistent with the (now purged)
 // live graph:
 //   • drop R's edge_source rows from the snapshot;
-//   • an edge left with ZERO snapshot sources (was sole-sourced by R) is DROPPED —
-//     the live purge would have deleted it, so unmerge must not resurrect it;
-//   • an edge that keeps ≥1 source (genuinely shared with a surviving recording)
-//     is KEPT with its snapshot weight decremented by R's removed assertion sum,
-//     floored at 1 — exactly what removeRecordingProvenance did to the live edge;
+//   • an edge left with ZERO surviving snapshot sources is DROPPED ONLY when R's
+//     removed assertion sum fully accounts for the edge weight (removed ≥ weight)
+//     — i.e. it was genuinely sole-sourced by R, which the live purge deleted.
+//     When weight EXCEEDS R's removed sum, the excess is UNATTRIBUTED RESIDUE (a
+//     legacy/co-asserted edge R later re-asserted); the live purge KEEPS such an
+//     edge at max(1, weight − removed), so the snapshot must keep it too — dropping
+//     it would let a later unmerge launder the residue onto the keeper under the
+//     WRONG entity. This mirrors removeRecordingProvenance's residue rule
+//     (recording-provenance.ts:166-180) EXACTLY;
+//   • an edge that keeps ≥1 surviving source (genuinely shared with a surviving
+//     recording) is KEPT with its snapshot weight decremented by R's removed
+//     assertion sum, floored at 1 — exactly what removeRecordingProvenance did;
 //   • the loser NODE is kept iff it retains ≥1 surviving snapshot edge OR live
 //     orphan-node GC would keep it anyway (persons and protected projects are
 //     never GC'd); otherwise the snapshot node is nulled so unmerge cannot
@@ -7464,19 +7471,28 @@ export function scrubMergeJournalGraphSnapshots(purgedRecordingId: string, purge
     }
     const survivingSourceEdgeIds = new Set(keptSources.map((s) => String(s.edge_id ?? '')))
 
-    // 2. Trim edges: drop a now-source-less edge (was sole-sourced by R); decrement a
-    //    surviving edge's weight by R's removed sum (floor 1) — mirror the live purge.
+    // 2. Trim edges — mirror the LIVE removal engine (recording-provenance.ts:166-180)
+    //    EXACTLY. For an edge R sourced (removed > 0):
+    //      • no surviving source rows: DELETE only when removed ≥ weight (fully
+    //        attributed sole-source, as the live purge deleted it); otherwise the
+    //        excess weight is UNATTRIBUTED RESIDUE — KEEP the edge at
+    //        max(1, weight − removed) (never drop), exactly as the live purge kept
+    //        the live edge. Dropping it here would let a later unmerge launder that
+    //        residue onto the keeper under the wrong entity (AR2-3, weight dimension).
+    //      • ≥1 surviving source row (genuinely shared): KEEP, decrement by R's sum,
+    //        floor 1.
+    //    An edge R never sourced (removed === 0) is untouched.
     const trimmedEdges: Array<Record<string, unknown>> = []
     for (const e of edges) {
       const eid = String(e.id ?? '')
       const removed = removedWeightByEdge.get(eid) ?? 0
-      if (removed > 0 && !survivingSourceEdgeIds.has(eid)) continue // all sources were R's → drop
-      if (removed > 0) {
-        const w = Number(e.weight ?? 1) || 1
-        trimmedEdges.push({ ...e, weight: Math.max(1, w - removed) })
-      } else {
+      if (removed === 0) {
         trimmedEdges.push(e)
+        continue
       }
+      const w = Number(e.weight ?? 1) || 1
+      if (!survivingSourceEdgeIds.has(eid) && removed >= w) continue // sole-source → drop
+      trimmedEdges.push({ ...e, weight: Math.max(1, w - removed) }) // shared OR residue → keep, decrement
     }
 
     // 3. Loser node: keep iff it still has a surviving edge OR live orphan-GC keeps it.

@@ -1303,6 +1303,72 @@ describe('Context Graph merge → hard-purge → unmerge (ADV57-1 / round-59)', 
     expect(edgeRow(ekc)).toMatchObject({ source_id: Mc, target_id: K, weight: 1 })
     expect(edgeSourcesFor(ekc)).toEqual([{ recording_id: 'rec-S', transcript_id: 'tx-s', assertion_count: 1 }])
   })
+
+  // ADV58-2 (round-60): a loser edge whose WEIGHT EXCEEDS R's attributed assertion_count
+  // carries UNATTRIBUTED RESIDUE (a legacy/co-asserted edge R later re-asserted). The
+  // live purge KEEPS such an edge at max(1, weight − removed) (it is not sole-sourced by
+  // R). Round-59's snapshot scrub wrongly DROPPED it whenever R's sources were removed —
+  // so unmerge could not split the residue back, leaving it laundered on the keeper under
+  // the WRONG entity. The fix mirrors removeRecordingProvenance's residue predicate: drop
+  // the snapshot edge only when removed ≥ weight; otherwise keep it at the residual weight.
+  it('contacts: retains unattributed-residue edges (weight > R assertion) in the snapshot; unmerge splits residue back, never launders it onto the keeper', async () => {
+    seedContact('c-a', 'Bob')
+    seedContact('c-b', 'Robert')
+    dbRun('INSERT OR IGNORE INTO recordings (id, filename, date_recorded) VALUES (?, ?, ?)', ['rec-S', 'rec-S.hda', '2026-01-01'])
+    dbRun('INSERT OR IGNORE INTO recordings (id, filename, date_recorded) VALUES (?, ?, ?)', ['rec-R', 'rec-R.hda', '2026-01-01'])
+    const store = getKnowledgeGraphStore()
+    const K = store.upsertNode({ type: 'person', label: 'Bob', key: 'contact:c-a', props: { contactId: 'c-a' }, now: '2026-01-01' })
+    const L = store.upsertNode({ type: 'person', label: 'Robert', key: 'contact:c-b', props: { contactId: 'c-b' }, now: '2026-01-01' })
+    const Mr = store.upsertNode({ type: 'meeting', label: 'ResidueNC', props: { meetingId: 'mr', date: '2026-01-05' }, now: '2026-01-01' })
+    const Mc = store.upsertNode({ type: 'meeting', label: 'ResidueCollide', props: { meetingId: 'mc', date: '2026-01-07' }, now: '2026-01-01' })
+
+    // elr: NON-COLLIDING residue — L→Mr, weight 2 but only ONE R assertion (1 unit is
+    // unattributed residue, no other recording). Live purge keeps it at weight 1.
+    const elr = store.upsertEdge({ sourceId: L, targetId: Mr, type: 'ATTENDED', now: '2026-01-01' })
+    addEdgeSource(elr, 'rec-R', 'tx-r', 1)
+    setWeight(elr, 2)
+    // Collision pair with a RESIDUE loser edge: keeper ekc (S, weight 1) + loser elc-r
+    // (R only, weight 2 → 1 unit residue). elc-r folds into ekc (ekc → weight 3, {S,R}).
+    const ekc = store.upsertEdge({ sourceId: K, targetId: Mc, type: 'ATTENDED', now: '2026-01-01' })
+    addEdgeSource(ekc, 'rec-S', 'tx-s', 1)
+    setWeight(ekc, 1)
+    const elcr = store.upsertEdge({ sourceId: L, targetId: Mc, type: 'ATTENDED', now: '2026-01-01' })
+    addEdgeSource(elcr, 'rec-R', 'tx-r', 1)
+    setWeight(elcr, 2)
+
+    mergeContactsWithGraph('c-a', 'c-b')
+    expect(store.getNode(L)).toBeUndefined()
+    const journalId = database.getMergeJournal('contact', 'c-a')[0].id
+
+    const purge = hardPurge('rec-R')
+    expect(purge?.mode).toBe('hard')
+
+    // --- MANIFEST-AT-REST: both residue edges are RETAINED at the residual weight (1),
+    // NOT dropped. Revert-proof: the old drop-on-no-source rule removes them here. ---
+    const snap = JSON.parse(
+      queryOne<{ repointed_manifest: string }>('SELECT repointed_manifest FROM merge_journal WHERE id = ?', [journalId])!
+        .repointed_manifest
+    ).graph as { edges: Array<{ id: string; weight: number }>; edgeSources: Array<{ recording_id: string }> }
+    expect(snap.edgeSources.some((s) => s.recording_id === 'rec-R')).toBe(false)
+    expect(snap.edges.find((e) => e.id === elr)?.weight).toBe(1) // residue kept, not dropped
+    expect(snap.edges.find((e) => e.id === elcr)?.weight).toBe(1) // residue kept, not dropped
+
+    // --- Unmerge: residue is split back onto the LOSER, keeper returns to its true
+    // pre-merge state (weight 1, S only) — the residue is NOT laundered onto the keeper. ---
+    database.unmergeContacts(journalId)
+    expect(queryAll('SELECT * FROM graph_edge_sources WHERE recording_id = ?', ['rec-R'])).toHaveLength(0)
+    // Non-colliding residue edge is back on the loser at weight 1 with NO sources.
+    expect(edgeRow(elr)).toMatchObject({ source_id: L, target_id: Mr, weight: 1 })
+    expect(edgeSourcesFor(elr)).toEqual([])
+    // Colliding residue edge reconstructed on the loser at weight 1 with NO sources.
+    expect(edgeRow(elcr)).toMatchObject({ source_id: L, target_id: Mc, weight: 1 })
+    expect(edgeSourcesFor(elcr)).toEqual([])
+    // Keeper edge restored to weight 1 {S:1} — residue NOT laundered (old rule left it at 2).
+    expect(edgeRow(ekc)).toMatchObject({ source_id: K, target_id: Mc, weight: 1 })
+    expect(edgeSourcesFor(ekc)).toEqual([{ recording_id: 'rec-S', transcript_id: 'tx-s', assertion_count: 1 }])
+    expect(store.getNode(L)).toBeTruthy()
+    expect(getContactById('c-b')).toBeTruthy()
+  })
 })
 
 describe('Context Graph remove + pronouns', () => {
