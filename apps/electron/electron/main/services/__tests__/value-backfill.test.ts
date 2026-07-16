@@ -767,6 +767,73 @@ describe('value-backfill', () => {
   })
 
   // ---------------------------------------------------------------------
+  // ADV42-3 (round-44) — the per-item privacy check ran ONCE before the retry
+  // loop; a soft-delete / mark-personal landing during a FAILED request or its
+  // backoff must abort the retry so the excluded transcript is never re-sent to
+  // the provider. Recheck immediately before EVERY retry attempt.
+  // ---------------------------------------------------------------------
+
+  describe('per-retry privacy recheck (ADV42-3)', () => {
+    it('a mark-personal during a failed request aborts the retry: EXACTLY one provider call, no failure parked', async () => {
+      seedEligible('cap-retry') // rec-cap-retry
+      classifyCaptureValueRawMock.mockImplementation(async () => {
+        // The first (and only) attempt fails; during the failed request the owner
+        // marks the source recording personal (recordings:markPersonal landing).
+        run('UPDATE recordings SET personal = 1 WHERE id = ?', ['rec-cap-retry'])
+        throw new Error('429 rate limit exceeded')
+      })
+
+      const result = await startValueBackfill()
+
+      expect(result.total).toBe(1)
+      // The retry loop rechecked eligibility before re-sending and aborted — the
+      // transcript was sent to the provider exactly ONCE.
+      expect(classifyCaptureValueRawMock).toHaveBeenCalledTimes(1)
+      // Abort-as-skipped: no failure parked. The reserve's 'in_progress' row is
+      // left for a future run to recover once the flag is reverted (attempts
+      // consumed exactly once at reserve).
+      const row = getBackfillStateRow('cap-retry')
+      expect(row?.status).toBe('in_progress')
+      expect(row?.attempts).toBe(1)
+      // Nothing classified.
+      expect(getCaptureRow('cap-retry')?.quality_rating).toBe('unrated')
+    })
+
+    it('a soft-delete during the backoff aborts the retry the same way (exactly one provider call)', async () => {
+      seedEligible('cap-retry2') // rec-cap-retry2
+      classifyCaptureValueRawMock.mockImplementation(async () => {
+        run('UPDATE recordings SET deleted_at = ? WHERE id = ?', [new Date().toISOString(), 'rec-cap-retry2'])
+        throw new Error('transient network error')
+      })
+
+      const result = await startValueBackfill()
+
+      expect(result.total).toBe(1)
+      expect(classifyCaptureValueRawMock).toHaveBeenCalledTimes(1)
+      const row = getBackfillStateRow('cap-retry2')
+      expect(row?.status).toBe('in_progress')
+      expect(row?.attempts).toBe(1)
+    })
+
+    it('control: a transient failure with NO exclusion still retries normally to success', async () => {
+      seedEligible('cap-ok')
+      let calls = 0
+      classifyCaptureValueRawMock.mockImplementation(async () => {
+        calls++
+        if (calls === 1) throw new Error('429 rate limit exceeded')
+        return successReply('none', 0.9)
+      })
+
+      const result = await startValueBackfill()
+
+      expect(result.total).toBe(1)
+      // No exclusion ⇒ the in-run retry proceeds and the second attempt succeeds.
+      expect(classifyCaptureValueRawMock).toHaveBeenCalledTimes(2)
+      expect(getBackfillStateRow('cap-ok')?.status).toBe('classified')
+    })
+  })
+
+  // ---------------------------------------------------------------------
   // Resumability + cancel
   // ---------------------------------------------------------------------
 

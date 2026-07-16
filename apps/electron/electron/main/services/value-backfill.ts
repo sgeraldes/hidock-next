@@ -340,6 +340,21 @@ function isRateLimitError(e: unknown): boolean {
   return /429|rate.?limit|too many requests|quota/i.test(message)
 }
 
+/**
+ * ADV42-3 (round-44) — thrown by callWithInRunRetries when the fresh per-attempt
+ * privacy recheck fails (personal / soft-delete / capture-purge committed during
+ * a failed request or its backoff). Distinct from a provider failure so the
+ * caller aborts-as-SKIPPED (no failure park, reserve's 'in_progress' recovered
+ * on a future run once the flag is reverted) rather than burning a durable
+ * failure. Carries no transcript content.
+ */
+class CapturePrivacyBlockedError extends Error {
+  constructor(public readonly captureId: string) {
+    super(`capture ${captureId} became privacy-blocked mid-retry`)
+    this.name = 'CapturePrivacyBlockedError'
+  }
+}
+
 /** "Longer on 429/rate errors" (spec Part G) — a rate-limit-shaped error backs
  *  off further than a generic transient failure. */
 const RATE_LIMIT_BACKOFF_MULTIPLIER = 3
@@ -347,6 +362,18 @@ const RATE_LIMIT_BACKOFF_MULTIPLIER = 3
 async function callWithInRunRetries(captureId: string): Promise<RawClassificationResult> {
   let lastError: unknown
   for (let attempt = 0; attempt <= IN_RUN_RETRY_DELAYS_MS.length; attempt++) {
+    // ADV42-3 (round-44) — FAIL-CLOSED privacy recheck immediately before EVERY
+    // provider attempt (the first send AND every retry). processOneCapture ran
+    // isCapturePrivacyBlocked ONCE before this loop, with only the synchronous
+    // reserve between it and the first send; but on a FAILED attempt the loop
+    // awaits the backoff delay, during which the owner can soft-delete / mark the
+    // recording personal (or hard-purge the capture). Rechecking here — with no
+    // await between the check and classifyCaptureValueRaw — ensures the excluded
+    // transcript is NEVER re-sent to the external provider on a retry. Abort as
+    // SKIPPED (throw the sentinel) rather than re-invoke the provider.
+    if (isCapturePrivacyBlocked(captureId)) {
+      throw new CapturePrivacyBlockedError(captureId)
+    }
     try {
       const result = await classifyCaptureValueRaw(captureId)
       // CX-T3-9/CX-T3-11: the rate-limit TIMESTAMP is stamped only when the
@@ -444,6 +471,18 @@ async function processOneCapture(captureId: string, runId: string): Promise<Proc
   try {
     raw = await callWithInRunRetries(captureId)
   } catch (e) {
+    // ADV42-3 (round-44) — a personal / soft-delete / capture-purge landed during
+    // a failed request or its backoff and the per-retry recheck aborted BEFORE
+    // any further provider call. Abort-as-SKIPPED: park NO failure so the item
+    // stays retryable, leaving reserve's 'in_progress' row for a future run to
+    // recover once the flag is reverted (exactly like the pre-reserve privacy
+    // skip). No transcript was re-sent.
+    if (e instanceof CapturePrivacyBlockedError) {
+      console.log(
+        `[ValueBackfill] capture=${captureId} privacy-blocked mid-retry (personal/deleted/purged) — skipped, no failure parked`
+      )
+      return 'skipped'
+    }
     // CX-T3-10: if a concurrent purge removed the capture while the failing
     // call was in flight, finalizeFailure writes nothing — report the item
     // as skipped (consistent with the successful-call purge path), not as a
