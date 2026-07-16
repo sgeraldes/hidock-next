@@ -60,6 +60,16 @@ export interface DeleteRecordingOutcome extends RecordingDeletionResult {
   allFilesRemoved: boolean
   /** Kinds still pending after the retry sweep (empty when allFilesRemoved). */
   pendingFileKinds: string[]
+  /**
+   * ADV49-1 (round 51, DELETION HONESTY) — true when a hard purge removed the
+   * authoritative rows but could NOT durably journal a failed file-cleanup
+   * target (the `recordPendingFileCleanups` write itself threw). The failed
+   * paths are therefore unrecoverable by the retry sweep, so the caller must
+   * NOT claim an automatic retry — it must report an honest unrecoverable
+   * cleanup failure. Always false/absent when journaling succeeded (the normal
+   * partial-failure case, which IS auto-retried). Never set for a soft delete.
+   */
+  cleanupUnrecoverable?: boolean
 }
 
 export interface DeletionServiceError {
@@ -143,6 +153,9 @@ export async function deleteRecording(
 
   const filesRemoved = { audio: false, wikiPages: 0, artifactBlobs: 0 }
   const pendingTargets: PendingCleanupTarget[] = []
+  // ADV49-1 (round 51) — set when the durable journaling of failed cleanup
+  // targets itself fails, meaning those targets can never be auto-retried.
+  let cleanupUnrecoverable = false
 
   if (cascade.mode === 'hard') {
     // Sync the in-memory vector store (its DB rows are already gone).
@@ -199,12 +212,27 @@ export async function deleteRecording(
 
     // AR3-2 — durably record any first-attempt failures against this purge's
     // own journal row (deleteRecordingCascade always sets journalId for a
-    // hard purge).
+    // hard purge) so the retry sweep can rediscover and re-clean them.
+    //
+    // ADV49-1 (round 51, DELETION HONESTY): the authoritative recording/capture
+    // rows are already committed and gone; this journal write is the ONLY
+    // durable record of a cleanup target that could not be removed. If it FAILS
+    // we must NOT swallow it and return a plain success that promises an
+    // automatic retry which can never happen — the failed paths live only in
+    // the in-memory `pendingTargets` and would be lost the moment this call
+    // returns, leaving sensitive audio/artifacts on disk forever after a
+    // "permanent deletion". Instead flag an explicit UNRECOVERABLE-cleanup
+    // outcome so the caller reports an honest failure (the rows WERE purged, but
+    // file cleanup could not be guaranteed and will NOT be auto-retried).
     if (pendingTargets.length > 0 && cascade.journalId) {
       try {
         recordPendingFileCleanups(cascade.journalId, pendingTargets)
       } catch (e) {
-        console.warn('[RecordingDeletion] failed to record pending cleanups:', e)
+        console.error(
+          '[RecordingDeletion] UNRECOVERABLE: failed to journal pending file cleanups — these targets cannot be auto-retried:',
+          e
+        )
+        cleanupUnrecoverable = true
       }
     }
   }
@@ -250,6 +278,16 @@ export async function deleteRecording(
     } catch (e) {
       console.warn('[RecordingDeletion] pending-cleanup retry sweep failed (non-fatal):', e)
     }
+  }
+
+  // ADV49-1 (round 51) — a journaling failure means the failed targets were
+  // never persisted, so the sweep above could not (and did not) recover them.
+  // Report an HONEST unrecoverable outcome: cleanup is not complete and will
+  // NOT be auto-retried. (allFilesRemoved is already false here since
+  // pendingTargets was non-empty, but force it for clarity.)
+  if (cleanupUnrecoverable) {
+    allFilesRemoved = false
+    return { success: true, ...cascade, filesRemoved, allFilesRemoved, pendingFileKinds, cleanupUnrecoverable: true }
   }
 
   return { success: true, ...cascade, filesRemoved, allFilesRemoved, pendingFileKinds }

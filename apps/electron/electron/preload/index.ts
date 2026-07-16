@@ -467,6 +467,10 @@ export interface ElectronAPI {
       // spec-006/F17 T6 AR3-2 — post-commit file-cleanup partial-result contract.
       allFilesRemoved?: boolean
       pendingFileKinds?: string[]
+      // ADV49-1 (round 51) — the failed file-cleanup targets could not be durably
+      // journaled, so they will NOT be auto-retried; the toast reports an honest
+      // unrecoverable failure instead of promising a retry.
+      cleanupUnrecoverable?: boolean
       // spec-006/F17 T6 AR3-3(c)
       graphCleanupSkipped?: boolean
       journalId?: string

@@ -1168,6 +1168,9 @@ export function Library() {
           // ARF-4 — the escape hatch deferred graph cleanup; force the honest
           // warning toast (never plain "Deleted permanently").
           graphCleanupDeferred: res.graphCleanupSkipped === true,
+          // ADV49-1 (round 51) — failed file cleanup couldn't be journaled, so
+          // it will NOT be auto-retried; forces the honest "remove manually" copy.
+          cleanupUnrecoverable: res.cleanupUnrecoverable === true,
           removed: res.removed
         })
         toast[variant](title, body)

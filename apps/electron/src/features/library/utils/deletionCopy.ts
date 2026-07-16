@@ -147,6 +147,22 @@ export function filesPendingBody(filename: string, kinds: string[]): string {
   return `Removed "${filename}"'s data, but ${list} couldn't be deleted yet. It will retry automatically.`
 }
 
+/** ADV49-1 (round 51, DELETION HONESTY) — the hard purge removed the
+ *  authoritative rows but could NOT durably journal the failed file-cleanup
+ *  targets (the ledger write itself failed), so they will NOT be auto-retried.
+ *  This body deliberately does NOT promise an automatic retry — it tells the
+ *  owner the file must be removed manually. */
+export const FILES_UNRECOVERABLE_TITLE = 'Removed data — cleanup could not be guaranteed'
+
+export function filesUnrecoverableBody(filename: string, kinds: string[]): string {
+  const unique = Array.from(new Set(kinds)).map((k) => CLEANUP_KIND_LABELS[k] ?? `a ${k} file`)
+  const list = joinParts(unique) || 'a file'
+  return (
+    `Removed "${filename}"'s data, but ${list} couldn't be deleted and this could not be recorded for ` +
+    'an automatic retry. Please remove it manually.'
+  )
+}
+
 /** CX-T6-5 (fix round 2) — the device copy WAS removed and the local purge
  *  succeeded, but the view-bookkeeping reconciliation (markNotOnDevice: row
  *  flip + device-cache entry removal) failed — so the list may keep showing
@@ -224,6 +240,10 @@ export interface CompletionToastInputs {
   /** AR3-2 — true when the local purge's own post-commit file cleanup left something pending. */
   filesPending: boolean
   pendingKinds: string[]
+  /** ADV49-1 (round 51) — true when the failed cleanup targets could NOT be
+   *  durably journaled, so they will NOT be auto-retried; forces the honest
+   *  "remove it manually" copy instead of the "will retry automatically" copy. */
+  cleanupUnrecoverable?: boolean
   /** CX-T6-5/CX-T6-6 — true when the device copy WAS removed but the
    *  view-bookkeeping reconciliation or the local rebuild failed, so the
    *  list may still show it until the next authoritative device scan. */
@@ -252,11 +272,26 @@ export interface CompletionToast {
  * dispatches whatever this returns; it owns no copy decisions of its own.
  */
 export function selectCompletionToast(inputs: CompletionToastInputs): CompletionToast {
-  const { filename, deviceOutcome, filesPending, pendingKinds, viewMayBeStale, graphCleanupDeferred, removed } = inputs
+  const { filename, deviceOutcome, filesPending, pendingKinds, viewMayBeStale, graphCleanupDeferred, cleanupUnrecoverable, removed } = inputs
   const staleNote = viewMayBeStale ? ` ${VIEW_MAY_BE_STALE_NOTE}` : ''
   // ARF-4 — appended to EVERY partial branch so none overclaims the graph was
   // cleaned; when it is the SOLE caveat, its own dedicated branch below fires.
   const graphNote = graphCleanupDeferred ? GRAPH_CLEANUP_DEFERRED_NOTE : ''
+
+  // ADV49-1 (round 51) — an UNRECOVERABLE file-cleanup failure (the failed
+  // targets could not be durably journaled) must NEVER claim an automatic
+  // retry. It takes priority over the normal files-pending branch and, when
+  // combined with a device-copy-remains outcome, over the combined-partial
+  // branch too, so no body promises a retry that can't happen.
+  if (filesPending && cleanupUnrecoverable) {
+    const deviceNote =
+      deviceOutcome === 'partial' ? ' The device copy is still there and will reconcile on the next device scan.' : ''
+    return {
+      variant: 'warning',
+      title: FILES_UNRECOVERABLE_TITLE,
+      body: filesUnrecoverableBody(filename, pendingKinds) + deviceNote + staleNote + graphNote
+    }
+  }
 
   if (deviceOutcome === 'partial' && filesPending) {
     // CX-T6-3 — both partial outcomes must surface together; the

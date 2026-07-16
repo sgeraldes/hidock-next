@@ -336,6 +336,42 @@ describe('AR3-2 — partial file-cleanup + retry ledger round-trip', () => {
     expect(res.pendingFileKinds).toEqual([])
   })
 
+  // ADV49-1 (round 51, DELETION HONESTY) — the journal write is the ONLY
+  // durable record of a failed cleanup target (the authoritative rows are
+  // already committed and gone). If that write THROWS, the failed paths live
+  // only in memory and are lost the moment this call returns. The method must
+  // report an HONEST unrecoverable outcome — NOT a plain success promising an
+  // auto-retry that can never happen.
+  it('reports cleanupUnrecoverable (honest failure) when journaling the failed targets throws', async () => {
+    db.deleteRecordingCascade.mockReturnValue({
+      mode: 'hard',
+      recordingId: 'r1',
+      filename: 'r1.wav',
+      filePath: '/data/r1.wav',
+      artifactPaths: [],
+      removed: {},
+      journalId: 'journal-unrec'
+    })
+    files.deleteRecording.mockReturnValue(false) // unlink failed
+    files.existsSync.mockReturnValue(true) // ...but the file DID exist ⇒ a real pending target
+    files.removeMeetingWiki.mockReturnValue({ removed: 0, failed: 0, ok: true })
+    // The durable journal write itself fails (e.g. DB I/O / serialization).
+    db.recordPendingFileCleanups.mockImplementationOnce(() => {
+      throw new Error('journal write failed')
+    })
+
+    const res = await deleteRecording('r1', { hard: true })
+    expect(res.success).toBe(true)
+    if (!res.success) return
+
+    // The purge DID remove the rows, but file cleanup could not be guaranteed
+    // AND could not be journaled ⇒ honest unrecoverable outcome, no false
+    // "will retry automatically" promise, and the target is not silently lost.
+    expect(res.cleanupUnrecoverable).toBe(true)
+    expect(res.allFilesRemoved).toBe(false)
+    expect(res.pendingFileKinds).toContain('audio')
+  })
+
   describe('retryPendingFileCleanups', () => {
     it('clears a pending target once the retry succeeds', async () => {
       db.getPendingFileCleanups.mockReturnValueOnce([
