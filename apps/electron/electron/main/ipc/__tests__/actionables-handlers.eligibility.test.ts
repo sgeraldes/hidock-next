@@ -106,6 +106,54 @@ describe('ADV15-3 — actionables:getAll capture-aware gating', () => {
   })
 })
 
+describe('ADV38 sweep (round-40) — actionables mutation gating', () => {
+  it('updateStatus REFUSES a stale actionable whose source recording is excluded (no write)', async () => {
+    seedRecording('rec-del', null, { deleted: true })
+    seedActionable('a-del', seedCapture({ source: 'rec-del' }))
+    const res = await invoke('actionables:updateStatus', 'a-del', 'in_progress')
+    expect(res.success).toBe(false)
+    // Generic not-found — does not disclose the excluded actionable's existence.
+    expect(res.error).toContain('not found')
+    // Status unchanged (still pending).
+    const { queryOne } = await import('../../services/database')
+    const row = queryOne<{ status: string }>('SELECT status FROM actionables WHERE id = ?', ['a-del'])
+    expect(row?.status).toBe('pending')
+  })
+
+  it('updateStatus WORKS for an eligible actionable', async () => {
+    seedRecording('rec-ok', null)
+    seedActionable('a-ok', seedCapture({ source: 'rec-ok' }))
+    const res = await invoke('actionables:updateStatus', 'a-ok', 'in_progress')
+    expect(res.success).toBe(true)
+    const { queryOne } = await import('../../services/database')
+    const row = queryOne<{ status: string }>('SELECT status FROM actionables WHERE id = ?', ['a-ok'])
+    expect(row?.status).toBe('in_progress')
+  })
+
+  it('generateOutput REFUSES a stale actionable whose STANDALONE capture is value-excluded (no derived metadata returned, no write)', async () => {
+    seedActionable('a-bad', seedCapture({ source: null, quality: 'low-value' }))
+    const res = await invoke('actionables:generateOutput', 'a-bad')
+    expect(res.success).toBe(false)
+    expect(res.error).toContain('not found')
+    expect(res.data).toBeUndefined()
+    const { queryOne } = await import('../../services/database')
+    const row = queryOne<{ status: string }>('SELECT status FROM actionables WHERE id = ?', ['a-bad'])
+    expect(row?.status).toBe('pending') // NOT flipped to in_progress
+  })
+
+  it('generateOutput WORKS for an eligible actionable (returns sourceKnowledgeId, flips status)', async () => {
+    seedRecording('rec-ok', null)
+    const cap = seedCapture({ source: 'rec-ok' })
+    seedActionable('a-ok', cap)
+    const res = await invoke('actionables:generateOutput', 'a-ok')
+    expect(res.success).toBe(true)
+    expect(res.data.sourceKnowledgeId).toBe(cap)
+    const { queryOne } = await import('../../services/database')
+    const row = queryOne<{ status: string }>('SELECT status FROM actionables WHERE id = ?', ['a-ok'])
+    expect(row?.status).toBe('in_progress')
+  })
+})
+
 describe('ADV15-3 — actionables:getByMeeting capture-aware gating', () => {
   it('drops excluded/soft-deleted/garbage actionables for the meeting', async () => {
     seedMeeting('m-1')

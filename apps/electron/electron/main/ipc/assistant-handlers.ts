@@ -1,6 +1,7 @@
 
 import { ipcMain } from 'electron'
 import { queryAll, queryOne, run, runInTransaction } from '../services/database'
+import { filterEligibleCaptureIds } from '../services/recording-eligibility'
 import { getRAGService } from '../services/rag'
 import {
   packSources,
@@ -244,6 +245,18 @@ export function registerAssistantHandlers(): void {
       const kc = queryOne<any>('SELECT id FROM knowledge_captures WHERE id = ?', [knowledgeCaptureId])
       if (!kc) {
         console.error(`addContext: Knowledge capture ${knowledgeCaptureId} not found`)
+        return { success: false, error: 'Knowledge capture not found' }
+      }
+
+      // ADV38 sweep (round-40) — defense-in-depth: never PIN an already-excluded
+      // capture as chat context. The RAG consumer re-checks pinned-context recording
+      // eligibility fail-closed at prompt assembly (round-20), so an excluded pin is
+      // already dropped before it reaches the LLM; but refusing the write closes the
+      // stale-id path that would let a hidden capture be attached at all. Generic
+      // not-found so an excluded capture's existence is not disclosed; fail-closed.
+      const capElig = filterEligibleCaptureIds([knowledgeCaptureId])
+      if (capElig.failClosed || !capElig.eligible.has(knowledgeCaptureId)) {
+        console.error(`addContext: Knowledge capture ${knowledgeCaptureId} not eligible`)
         return { success: false, error: 'Knowledge capture not found' }
       }
 
