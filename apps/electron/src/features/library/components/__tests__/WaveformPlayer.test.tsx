@@ -300,4 +300,18 @@ describe('WaveformPlayer', () => {
     rerender(<WaveformPlayer mode="full" recordingId="rec-1" filePath="/a.wav" />)
     expect(screen.queryByTestId('sentiment-curve')).not.toBeInTheDocument()
   })
+
+  it('renders a single sentiment interval across its full time span', () => {
+    useUIStore.setState({ currentlyPlayingId: 'rec-1', playbackDuration: 100 })
+    render(
+      <WaveformPlayer
+        mode="full"
+        recordingId="rec-1"
+        filePath="/a.wav"
+        sentiment={[{ startSec: 20, endSec: 80, score: 0.5 }]}
+      />
+    )
+
+    expect(screen.getByTestId('sentiment-curve')).toHaveAttribute('points', '20,25 80,25')
+  })
 })
