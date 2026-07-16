@@ -90,7 +90,9 @@ function defaultApplyContact(p: ExternalPerson): 'created' | 'updated' {
     })
     return 'updated'
   }
-  createContact({ name: p.name, email: p.email ?? null, role: p.title ?? null, company: p.company ?? null })
+  // v45/round-28: connector-imported people are structural (calendar/directory),
+  // NOT transcript-extracted ⇒ entity source 'calendar' (always visible).
+  createContact({ name: p.name, email: p.email ?? null, role: p.title ?? null, company: p.company ?? null, source: 'calendar' })
   return 'created'
 }
 

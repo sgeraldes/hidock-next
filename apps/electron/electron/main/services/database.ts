@@ -8,7 +8,7 @@ import { normalizeName, isGenericSpeakerLabel, detectAmbiguousName } from './ent
 import { getEventBus } from './event-bus'
 import type { QualityRating } from '@/types/knowledge'
 
-const SCHEMA_VERSION = 44
+const SCHEMA_VERSION = 45
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -388,6 +388,18 @@ CREATE TABLE IF NOT EXISTS synced_files (
 
 -- Contacts extracted from meeting attendees (renamed to People in UI)
 -- Note: email is NOT UNIQUE - multiple contacts can share an email (spec-013)
+-- v45 (F18/round-28) ENTITY-level provenance. A contact ENTITY is created by TWO
+-- independent origins and the NON-OWNER identity surfaces must gate the entity by
+-- its origin (ADV27-1), not just its membership rows.
+--   source = user        -- manual "Add Person" / graph promotion, always visible
+--   source = calendar    -- calendar sync / connector import, always visible
+--   source = transcript  -- AI-extracted by applyTranscriptEntities, visible only
+--                           while a backing membership OR its source_recording_id
+--                           resolves to an eligible recording
+--   source IS NULL       -- legacy (pre-v45), derived from membership provenance,
+--                           an unassociable legacy entity is fail-closed suppressed
+-- source_recording_id is the recording whose transcript minted a transcript entity
+-- (used to gate a transcript entity that has NO membership rows yet).
 CREATE TABLE IF NOT EXISTS contacts (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -400,12 +412,18 @@ CREATE TABLE IF NOT EXISTS contacts (
     first_seen_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
     meeting_count INTEGER DEFAULT 0,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    source TEXT,
+    source_recording_id TEXT
 );
 
 -- User-created projects for organizing meetings. Projects are full hubs (v29):
 -- folder_path binds a project to a location on disk (repo, docs folder), url binds
 -- it to a webpage. project_notes below holds its issues/risks/notes.
+-- v45 (F18/round-28) ENTITY-level provenance -- see contacts above. A project is
+-- 'user' (manual create), 'transcript' (AI-extracted by applyTranscriptEntities),
+-- or NULL legacy. Projects are never in calendar data, so there is no 'calendar'
+-- origin. A manual project tag is 'user'.
 CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -413,7 +431,9 @@ CREATE TABLE IF NOT EXISTS projects (
     status TEXT CHECK(status IN ('active', 'archived')) DEFAULT 'active',
     folder_path TEXT,
     url TEXT,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    source TEXT,
+    source_recording_id TEXT
 );
 
 -- Project issues / risks / free-form notes (v29). Each row is one item tracked
@@ -2273,6 +2293,39 @@ const MIGRATIONS: Record<number, () => void> = {
       console.warn('[Migration v44] provenance backfill failed (non-fatal):', e)
     }
     console.log('Migration v44 complete')
+  },
+
+  45: () => {
+    // v45 (F18/round-28): ENTITY-level provenance (ADV27-1). applyTranscriptEntities
+    // mints contact/project ENTITY rows from transcript participants; v44 tracked
+    // provenance only on the MEMBERSHIP rows, so excluding the sole source recording
+    // hid the membership but left the extracted entity searchable/openable on the
+    // People/Projects non-owner surfaces. Add contacts/projects.source +
+    // source_recording_id and a one-time BEST-EFFORT origin backfill derived from
+    // each entity's membership provenance.
+    // Idempotent: guarded ALTERs, then a backfill that only touches source-NULL rows.
+    console.log('Running migration to schema v45: entity-level identity provenance')
+    const database = getDatabase()
+    const addCol = (table: string, col: string, def: string): void => {
+      const cols = getTableColumns(database, table)
+      if (cols.length > 0 && !cols.includes(col)) {
+        try {
+          database.run(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`)
+        } catch (e) {
+          console.warn(`[Migration v45] add ${table}.${col} failed:`, e)
+        }
+      }
+    }
+    addCol('contacts', 'source', 'TEXT')
+    addCol('contacts', 'source_recording_id', 'TEXT')
+    addCol('projects', 'source', 'TEXT')
+    addCol('projects', 'source_recording_id', 'TEXT')
+    try {
+      backfillEntityProvenanceV45()
+    } catch (e) {
+      console.warn('[Migration v45] entity provenance backfill failed (non-fatal):', e)
+    }
+    console.log('Migration v45 complete')
   }
 
 }
@@ -2389,12 +2442,19 @@ function repairPhase(): void {
   // NOTE: the repair only adds COLUMNS; the one-time provenance BACKFILL lives in
   // the v44 migration (runs once per DB), so older rows stay NULL (fail-closed
   // ineligible on non-owner surfaces) until the migration classifies them.
+  // v45/round-28 (ADV27-1) — entity-level provenance columns on contacts/projects
+  // added to the same force-add list so an older on-disk schema has them before any
+  // visible-identity read. The one-time origin BACKFILL lives in the v45 migration.
   for (const [table, col] of [
     ['meeting_contacts', 'source'],
     ['meeting_contacts', 'source_recording_id'],
     ['meeting_projects', 'source'],
     ['meeting_projects', 'source_recording_id'],
-    ['identity_suggestions', 'source_recording_ids']
+    ['identity_suggestions', 'source_recording_ids'],
+    ['contacts', 'source'],
+    ['contacts', 'source_recording_id'],
+    ['projects', 'source'],
+    ['projects', 'source_recording_id']
   ] as const) {
     const cols = getTableColumns(database, table)
     if (cols.length > 0 && !cols.includes(col)) {
@@ -5761,12 +5821,18 @@ export function filterEligibleMembershipRows<T extends MembershipRow>(rows: T[])
  *   • meeting_contacts:
  *       - role='organizer' OR the contact's email appears in the meeting's calendar
  *         data (organizer_email / attendees JSON) ⇒ 'calendar' (structural).
- *       - else if the meeting has ≥1 recording ⇒ 'transcript' + that recording id
- *         (ambiguous rows are ASSOCIATED WITH THE RECORDING so they are gated by
- *         recording eligibility rather than laundered as calendar).
+ *       - else if the meeting has EXACTLY ONE recording ⇒ 'transcript' + that
+ *         recording id (the recording is the UNAMBIGUOUS transcript source, so the
+ *         row is correctly gated by that recording's eligibility).
  *       - else ⇒ leave NULL (legacy / unassociable ⇒ ineligible on non-owner surfaces).
  *   • meeting_projects: projects are never in calendar attendee data, so a row is
- *       'transcript' + the meeting's recording when one exists, else NULL.
+ *       'transcript' + the meeting's SOLE recording when exactly one exists, else NULL.
+ *
+ * ADV27-2 (round-28) — a meeting with MULTIPLE recordings has NO uniquely
+ * attributable transcript source, so attributing an ambiguous membership to the
+ * FIRST recording LAUNDERS a row that may derive from an EXCLUDED sibling recording
+ * into an eligible one. Such rows are left NULL (fail-closed ineligible on non-owner
+ * surfaces) rather than positively (mis)attributed.
  * Idempotent: only touches rows still NULL. Wrapped in one transaction.
  */
 export function backfillMembershipProvenanceV44(): void {
@@ -5787,12 +5853,21 @@ export function backfillMembershipProvenanceV44(): void {
       if (set.size > 0) calEmails.set(m.id, set)
     }
 
-    // Per-meeting first recording id (the 'transcript' association target).
-    const firstRec = new Map<string, string>()
+    // ADV27-2 (round-28) — per-meeting recording ids. A membership is only
+    // positively attributable to a transcript source when the meeting has EXACTLY
+    // ONE recording; a multi-recording meeting is ambiguous ⇒ leave NULL.
+    const recsByMeeting = new Map<string, string[]>()
     for (const r of queryAll<{ meeting_id: string; id: string }>(
       'SELECT meeting_id, id FROM recordings WHERE meeting_id IS NOT NULL ORDER BY date_recorded ASC'
     )) {
-      if (!firstRec.has(r.meeting_id)) firstRec.set(r.meeting_id, r.id)
+      const arr = recsByMeeting.get(r.meeting_id)
+      if (arr) arr.push(r.id)
+      else recsByMeeting.set(r.meeting_id, [r.id])
+    }
+    /** The SOLE recording id of a meeting, or null when zero/ambiguous (>1). */
+    const soleRec = (meetingId: string): string | null => {
+      const arr = recsByMeeting.get(meetingId)
+      return arr && arr.length === 1 ? arr[0] : null
     }
 
     // meeting_contacts.
@@ -5810,14 +5885,14 @@ export function backfillMembershipProvenanceV44(): void {
           row.contact_id
         ])
       } else {
-        const rec = firstRec.get(row.meeting_id)
+        const rec = soleRec(row.meeting_id)
         if (rec) {
           run(
             `UPDATE meeting_contacts SET source = 'transcript', source_recording_id = ? WHERE meeting_id = ? AND contact_id = ?`,
             [rec, row.meeting_id, row.contact_id]
           )
         }
-        // else: leave NULL (legacy / unassociable).
+        // else: leave NULL (legacy / unassociable / multi-recording ambiguous).
       }
     }
 
@@ -5826,15 +5901,166 @@ export function backfillMembershipProvenanceV44(): void {
       `SELECT meeting_id, project_id FROM meeting_projects WHERE source IS NULL`
     )
     for (const row of mpRows) {
-      const rec = firstRec.get(row.meeting_id)
+      const rec = soleRec(row.meeting_id)
       if (rec) {
         run(
           `UPDATE meeting_projects SET source = 'transcript', source_recording_id = ? WHERE meeting_id = ? AND project_id = ?`,
           [rec, row.meeting_id, row.project_id]
         )
       }
+      // else: leave NULL (legacy / unassociable / multi-recording ambiguous).
     }
   })
+}
+
+/**
+ * v45/round-28 (ADV27-1) — one-time BEST-EFFORT ENTITY-origin backfill for pre-v45
+ * contacts / projects (entity `source` IS NULL). Runs AFTER
+ * {@link backfillMembershipProvenanceV44} so membership provenance is populated
+ * first. Classifies each entity from its membership rows:
+ *   • ≥1 'calendar' (structural) membership  ⇒ entity 'calendar' (always visible)
+ *   • else ≥1 'transcript' membership        ⇒ entity 'transcript' (visible only
+ *       while a backing membership / its source recording is eligible; the
+ *       membership rows already carry the recording, so entity.source_recording_id
+ *       stays NULL here — the visibility boundary falls back to the memberships)
+ *   • else (no classified membership)        ⇒ leave NULL (legacy / unassociable ⇒
+ *       fail-closed suppressed on non-owner surfaces per the round-28 fail-safe)
+ * Idempotent: only touches entities whose `source` is still NULL.
+ */
+export function backfillEntityProvenanceV45(): void {
+  runInTransaction(() => {
+    const classify = (table: 'contacts' | 'projects', junction: 'meeting_contacts' | 'meeting_projects', idCol: 'contact_id' | 'project_id'): void => {
+      // Entity ids still lacking an origin.
+      const ents = queryAll<{ id: string }>(`SELECT id FROM ${table} WHERE source IS NULL`)
+      for (const e of ents) {
+        const rows = queryAll<{ source: string | null }>(
+          `SELECT DISTINCT source FROM ${junction} WHERE ${idCol} = ?`,
+          [e.id]
+        )
+        const sources = new Set(rows.map((r) => r.source))
+        // meeting_contacts uses 'calendar' for structural rows; meeting_projects uses
+        // 'calendar' for a manual project tag — treat any non-transcript non-null
+        // membership source as structural for the entity.
+        let origin: string | null = null
+        if ([...sources].some((s) => s != null && s !== 'transcript')) origin = 'calendar'
+        else if (sources.has('transcript')) origin = 'transcript'
+        if (origin) run(`UPDATE ${table} SET source = ? WHERE id = ?`, [origin, e.id])
+      }
+    }
+    classify('contacts', 'meeting_contacts', 'contact_id')
+    classify('projects', 'meeting_projects', 'project_id')
+  })
+}
+
+/** v45/round-28 — a contact/project ENTITY row with its origin provenance. */
+export interface EntityProvenanceRow {
+  id: string
+  /** 'user' | 'calendar' (structural, always visible) | 'transcript' | null (legacy). */
+  source?: string | null
+  /** The recording whose transcript minted a 'transcript' entity (for the zero-membership case). */
+  source_recording_id?: string | null
+}
+
+/** Result of {@link filterVisibleEntityIds}. */
+export interface EntityVisibility {
+  /** The subset of input entity ids that are visible on a NON-OWNER identity surface. */
+  visible: Set<string>
+  /** True only on a HARD lookup exception → callers suppress everything. */
+  failClosed: boolean
+}
+
+/**
+ * ADV27-1 (round-28) — THE central visible-identity boundary for NON-OWNER
+ * contact/project LIST + POINT reads (contacts:getAll/getById, projects:getAll/
+ * getById). applyTranscriptEntities mints ENTITY rows (name/role/company) from
+ * transcript participants; v44 gated only the MEMBERSHIP rows, so excluding the
+ * sole source recording hid the membership but left the extracted entity
+ * searchable/openable. This boundary suppresses a transcript-created entity whose
+ * provenance is fully excluded, while ALWAYS keeping the owner's OWN data
+ * (manual/calendar/user entities) — so no per-surface owner exemption is needed:
+ * the rule itself never hides manual/calendar entities.
+ *
+ * An entity is VISIBLE iff ANY of:
+ *   • its `source` is STRUCTURAL — any non-null value other than 'transcript'
+ *     ('user' manual/graph-promotion, 'calendar' sync/connector) ⇒ always visible;
+ *   • it has ≥1 membership row eligible via {@link filterEligibleMembershipRows}
+ *     (a calendar membership, or a transcript membership whose recording is still
+ *     eligible) — this also covers legacy NULL-source entities that still have a
+ *     live structural/eligible membership;
+ *   • it is 'transcript'-origin with NO eligible membership but its own
+ *     `source_recording_id` resolves to an eligible recording (the entity minted
+ *     from a transcript that is not yet linked to a meeting).
+ * Otherwise SUPPRESSED (fail-closed): a transcript entity whose every membership +
+ * source recording is excluded, and a legacy NULL-source entity with no eligible
+ * membership (ambiguous ⇒ suppress per the round-28 fail-safe).
+ *
+ * FAIL-CLOSED: a hard exception (entity-row lookup) yields an empty visible set
+ * with failClosed=true so callers drop everything.
+ */
+export function filterVisibleEntityIds(kind: 'contact' | 'project', ids: Iterable<string>): EntityVisibility {
+  const unique = [...new Set([...ids].filter((id): id is string => !!id))]
+  if (unique.length === 0) return { visible: new Set<string>(), failClosed: false }
+  const table = kind === 'contact' ? 'contacts' : 'projects'
+  const junction = kind === 'contact' ? 'meeting_contacts' : 'meeting_projects'
+  const idCol = kind === 'contact' ? 'contact_id' : 'project_id'
+  try {
+    const entities = new Map<string, EntityProvenanceRow>()
+    const membershipsByEntity = new Map<string, Array<MembershipRow & { entity_id: string }>>()
+    const transcriptEntityRecIds = new Set<string>()
+    const CHUNK = 400
+    for (let i = 0; i < unique.length; i += CHUNK) {
+      const chunk = unique.slice(i, i + CHUNK)
+      const ph = chunk.map(() => '?').join(',')
+      for (const row of queryAll<EntityProvenanceRow>(
+        `SELECT id, source, source_recording_id FROM ${table} WHERE id IN (${ph})`,
+        chunk
+      )) {
+        entities.set(row.id, row)
+        if (row.source === 'transcript' && row.source_recording_id) transcriptEntityRecIds.add(row.source_recording_id)
+      }
+      for (const row of queryAll<MembershipRow & { entity_id: string }>(
+        `SELECT ${idCol} AS entity_id, source, source_recording_id FROM ${junction} WHERE ${idCol} IN (${ph})`,
+        chunk
+      )) {
+        const arr = membershipsByEntity.get(row.entity_id)
+        if (arr) arr.push(row)
+        else membershipsByEntity.set(row.entity_id, [row])
+      }
+    }
+
+    // Resolve the zero-membership transcript-entity source recordings once.
+    const { eligible: eligibleEntityRecs, failClosed: entityRecFailClosed } =
+      transcriptEntityRecIds.size > 0
+        ? getEligibleRecordingIds(transcriptEntityRecIds)
+        : { eligible: new Set<string>(), failClosed: false }
+
+    const visible = new Set<string>()
+    for (const id of unique) {
+      const ent = entities.get(id)
+      if (!ent) continue // does not resolve to a live entity row ⇒ not visible (positive allowlist)
+      // Structural origin ('user'/'calendar' — anything non-null except 'transcript') ⇒ always visible.
+      if (ent.source != null && ent.source !== 'transcript') {
+        visible.add(id)
+        continue
+      }
+      // ≥1 eligible membership (structural or eligible-transcript) ⇒ visible.
+      const rows = membershipsByEntity.get(id) ?? []
+      if (rows.length > 0 && filterEligibleMembershipRows(rows).eligible.length > 0) {
+        visible.add(id)
+        continue
+      }
+      // Transcript entity with no eligible membership: fall back to its own source recording.
+      if (ent.source === 'transcript' && ent.source_recording_id && !entityRecFailClosed && eligibleEntityRecs.has(ent.source_recording_id)) {
+        visible.add(id)
+        continue
+      }
+      // Otherwise suppressed (transcript fully excluded, or legacy NULL with no eligible membership).
+    }
+    return { visible, failClosed: false }
+  } catch (e) {
+    console.error('[Database] filterVisibleEntityIds FAILED — failing closed:', e)
+    return { visible: new Set<string>(), failClosed: true }
+  }
 }
 
 /**
@@ -6013,10 +6239,12 @@ export function upsertContact(contact: Omit<Contact, 'created_at'>): Contact {
     )
     return { ...existing, name: contact.name, last_seen_at: contact.last_seen_at, meeting_count: existing.meeting_count + 1 }
   } else {
-    // Insert new contact
+    // Insert new contact. v45/round-28: upsertContact folds calendar/meeting
+    // attendee sightings, so a NEW row here is calendar/structural-authored ⇒
+    // entity source 'calendar' (always visible on non-owner identity surfaces).
     run(
-      `INSERT INTO contacts (id, name, email, type, role, company, notes, tags, first_seen_at, last_seen_at, meeting_count)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO contacts (id, name, email, type, role, company, notes, tags, first_seen_at, last_seen_at, meeting_count, source)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'calendar')`,
       [
         contact.id,
         contact.name,
@@ -6048,9 +6276,14 @@ export function createContact(input: {
   role?: string | null
   company?: string | null
   notes?: string | null
+  /** v45/round-28 ENTITY origin. Defaults to 'user' (manual "Add Person" / graph
+   *  promotion). Connector/calendar imports pass 'calendar'. Transcript-extracted
+   *  contacts are minted by applyTranscriptEntities' raw INSERT, NOT this helper. */
+  source?: string
 }): Contact {
   const id = randomUUID()
   const now = new Date().toISOString()
+  const source = input.source ?? 'user'
   const contact: Contact = {
     id,
     name: input.name,
@@ -6066,8 +6299,8 @@ export function createContact(input: {
     created_at: now
   }
   run(
-    `INSERT INTO contacts (id, name, email, type, role, company, notes, tags, first_seen_at, last_seen_at, meeting_count)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO contacts (id, name, email, type, role, company, notes, tags, first_seen_at, last_seen_at, meeting_count, source)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       contact.id,
       contact.name,
@@ -6079,7 +6312,8 @@ export function createContact(input: {
       contact.tags,
       contact.first_seen_at,
       contact.last_seen_at,
-      contact.meeting_count
+      contact.meeting_count,
+      source
     ]
   )
   return contact
@@ -7081,8 +7315,11 @@ export function getProjectById(id: string): Project | undefined {
 }
 
 export function createProject(project: Omit<Project, 'created_at' | 'folder_path' | 'url'>): Project {
+  // v45/round-28: an explicit user create ⇒ entity source 'user' (always visible on
+  // non-owner identity surfaces). Transcript-extracted projects are minted by
+  // applyTranscriptEntities' raw INSERT with source='transcript'.
   run(
-    'INSERT INTO projects (id, name, description, status) VALUES (?, ?, ?, ?)',
+    "INSERT INTO projects (id, name, description, status, source) VALUES (?, ?, ?, ?, 'user')",
     [project.id, project.name, project.description, project.status || 'active']
   )
   // Manual beats rejection: an explicit create clears any discovery tombstone for
@@ -8138,7 +8375,7 @@ function buildBucketResolution(
   const candIds = candidates.map((c) => c.id)
   const nameKey = normalizeName(contact.name)
 
-  const recRows =
+  const rawRecRows =
     candIds.length === 0
       ? []
       : queryAll<{ recordingId: string; filename: string | null; date: string | null; meetingId: string | null; subject: string | null }>(
@@ -8152,6 +8389,18 @@ function buildBucketResolution(
             ORDER BY r.date_recorded DESC`,
           [contact.id]
         )
+
+  // ADV27-4 (round-28) — the bucket-resolution recordings feed identity display
+  // (getAmbiguousBuckets / getBucketResolution) AND the startup autoSplit WRITER
+  // (creates mention resolutions + membership links). The SQL above filters only
+  // personal + deleted_at, NOT the F16 value / capture-exclusion / hard-purge
+  // allowlist. Route every candidate recording id through the positive
+  // {@link getEligibleRecordingIds} allowlist and DROP ineligible ones so a
+  // value-excluded / capture-excluded / hard-purged recording never appears in a
+  // bucket or gets auto-split into durable identity state. Fail-closed: an
+  // eligibility lookup failure drops ALL bucket recordings.
+  const { eligible: eligibleRecs } = getEligibleRecordingIds(rawRecRows.map((r) => r.recordingId))
+  const recRows = rawRecRows.filter((r) => eligibleRecs.has(r.recordingId))
 
   const recIds = recRows.map((r) => r.recordingId)
   const meetingIds = [...new Set(recRows.map((r) => r.meetingId).filter((x): x is string => !!x))]

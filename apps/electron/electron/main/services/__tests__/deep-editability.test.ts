@@ -112,10 +112,10 @@ describe('migration v26 objects', () => {
     expect(cols).toContain('assignee_contact_id')
   })
 
-  it('is at schema version 44', () => {
-    // F18/round-27 bumped SCHEMA_VERSION 43 -> 44 (per-row membership provenance).
+  it('is at schema version 45', () => {
+    // F18/round-28 bumped SCHEMA_VERSION 44 -> 45 (entity-level identity provenance).
     const row = queryOne<{ version: number }>('SELECT version FROM schema_version ORDER BY version DESC LIMIT 1')
-    expect(row?.version).toBe(44)
+    expect(row?.version).toBe(45)
   })
 })
 

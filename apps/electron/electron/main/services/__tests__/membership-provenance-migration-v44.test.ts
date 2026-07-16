@@ -83,9 +83,10 @@ afterEach(() => {
 })
 
 describe('v44 schema', () => {
-  it('boot schema version is 44', () => {
+  it('boot schema version is 45', () => {
+    // F18/round-28 bumped SCHEMA_VERSION 44 -> 45 (entity-level identity provenance).
     const row = queryOne<{ v: number }>('SELECT MAX(version) AS v FROM schema_version')!
-    expect(row.v).toBe(44)
+    expect(row.v).toBe(45)
   })
 
   it('adds the per-row provenance columns (idempotent — table already has them)', () => {
@@ -145,6 +146,25 @@ describe('backfillMembershipProvenanceV44', () => {
 
     expect(mc('m-orphan', 'c-o')).toEqual({ source: null, source_recording_id: null })
     expect(mp('m-orphan', 'p-o')).toEqual({ source: null, source_recording_id: null })
+  })
+
+  it('ADV27-2: leaves a MULTI-recording meeting membership NULL (no arbitrary-recording laundering)', () => {
+    // A non-calendar meeting with TWO recordings has no uniquely attributable
+    // transcript source; attributing the membership to the FIRST recording would
+    // launder a row that may derive from the OTHER (excluded) recording.
+    meeting('m-multi', false)
+    contact('c-multi', 'Multi Person', null)
+    recording('rec-a', 'm-multi')
+    recording('rec-b', 'm-multi')
+    legacyContact('m-multi', 'c-multi')
+    project('p-multi', 'MultiProject')
+    legacyProject('m-multi', 'p-multi')
+
+    backfillMembershipProvenanceV44()
+
+    // Ambiguous ⇒ NULL (fail-closed ineligible on non-owner surfaces), NOT rec-a.
+    expect(mc('m-multi', 'c-multi')).toEqual({ source: null, source_recording_id: null })
+    expect(mp('m-multi', 'p-multi')).toEqual({ source: null, source_recording_id: null })
   })
 
   it('is idempotent — a second run does not reclassify already-provenanced rows', () => {

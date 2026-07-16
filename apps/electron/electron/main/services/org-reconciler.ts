@@ -500,10 +500,13 @@ export function applyTranscriptEntities(opts: {
           contactId = res.id
         } else {
           const id = randomUUID()
+          // v45/round-28: a transcript-extracted ENTITY ⇒ source='transcript' +
+          // the source recording, so the visible-identity boundary suppresses it
+          // on non-owner surfaces once that recording is excluded (ADV27-1).
           run(
-            `INSERT INTO contacts (id, name, type, role, first_seen_at, last_seen_at, meeting_count)
-             VALUES (?, ?, 'unknown', ?, ?, ?, 0)`,
-            [id, name, person.role ?? null, now, now]
+            `INSERT INTO contacts (id, name, type, role, first_seen_at, last_seen_at, meeting_count, source, source_recording_id)
+             VALUES (?, ?, 'unknown', ?, ?, ?, 0, 'transcript', ?)`,
+            [id, name, person.role ?? null, now, now, opts.recordingId ?? null]
           )
           contactId = id
           contacts++
@@ -539,10 +542,11 @@ export function applyTranscriptEntities(opts: {
       } else {
         // Low confidence — genuinely new person.
         const id = randomUUID()
+        // v45/round-28: transcript-extracted ENTITY ⇒ source='transcript' + recording (ADV27-1).
         run(
-          `INSERT INTO contacts (id, name, type, role, first_seen_at, last_seen_at, meeting_count)
-           VALUES (?, ?, 'unknown', ?, ?, ?, 0)`,
-          [id, name, person.role ?? null, now, now]
+          `INSERT INTO contacts (id, name, type, role, first_seen_at, last_seen_at, meeting_count, source, source_recording_id)
+           VALUES (?, ?, 'unknown', ?, ?, ?, 0, 'transcript', ?)`,
+          [id, name, person.role ?? null, now, now, opts.recordingId ?? null]
         )
         contactId = id
         contacts++
@@ -575,7 +579,13 @@ export function applyTranscriptEntities(opts: {
         // clears the tombstone and resolveProject links to it normally above.
       } else {
         const id = randomUUID()
-        run(`INSERT INTO projects (id, name, status) VALUES (?, ?, 'active')`, [id, projectName])
+        // v45/round-28: transcript-extracted project ENTITY ⇒ source='transcript' +
+        // recording, so it is suppressed on non-owner surfaces once excluded (ADV27-1).
+        run(`INSERT INTO projects (id, name, status, source, source_recording_id) VALUES (?, ?, 'active', 'transcript', ?)`, [
+          id,
+          projectName,
+          opts.recordingId ?? null
+        ])
         projectId = id
       }
 
