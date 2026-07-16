@@ -93,6 +93,12 @@ export type ErrorCode =
   // ADV27-4 (round-28) — a bucket-mention resolve targeting a recording that became
   // ineligible (excluded/deleted/hard-purged) between load and click (accept-time recheck).
   | 'RECORDING_INELIGIBLE'
+  // ADV36-2 (round-38) — an entity merge refused because one/both sides are not
+  // visible on the non-owner identity boundary (would launder a suppressed entity).
+  | 'MERGE_NOT_ALLOWED'
+  // ADV36-3 (round-38) — a duplicate-name visibility check could not be evaluated
+  // (transient failure); the create is refused RETRYABLY rather than minting a twin.
+  | 'RETRYABLE_ERROR'
 
 // =============================================================================
 // RAG Filter Types

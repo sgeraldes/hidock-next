@@ -137,19 +137,23 @@ describe('contacts:create — SUPPRESSED duplicate is not disclosed; fresh creat
 })
 
 // ---------------------------------------------------------------------------
-// Visibility lookup FAILURE — fail closed WITHOUT identity details.
+// Visibility lookup FAILURE — RETRYABLE, do NOT create (ADV36-3, round-38).
+// A same-name candidate EXISTS but its visibility can't be evaluated; creating a
+// fresh row would persist a duplicate from a transient failure. Refuse retryably
+// WITHOUT leaking identity details.
 // ---------------------------------------------------------------------------
 
-describe('contacts:create — visibility lookup failure fails closed', () => {
-  it('does not leak the candidate id/name when filterVisibleEntityIds throws', async () => {
+describe('contacts:create — visibility lookup failure is RETRYABLE (no create)', () => {
+  it('returns RETRYABLE_ERROR and creates nothing when filterVisibleEntityIds throws', async () => {
     seedContact('c-ghost', 'Ghost', 'transcript', 'r-any')
     // Break the visibility query's junction read so filterVisibleEntityIds throws
-    // (fail-closed) while getContactByName (contacts only) still resolves the dup.
+    // (fail-closed) while getContactsByName (contacts only) still resolves the dup.
     run('DROP TABLE meeting_contacts')
     const res = await invoke('contacts:create', { name: 'ghost' })
-    // Fail closed WITHOUT identity details: allow the fresh create, never reveal the id/name.
-    expect(res.success).toBe(true)
-    expect(res.data.id).not.toBe('c-ghost')
-    expect(res.data.name).toBe('ghost')
+    // RETRYABLE (not success): no fresh row is minted (create returns success),
+    // and no identity details are leaked.
+    expect(res.success).toBe(false)
+    expect(res.error.code).toBe('RETRYABLE_ERROR')
+    expect(res.error.details?.existingId).toBeUndefined()
   })
 })

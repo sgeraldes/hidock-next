@@ -8154,6 +8154,20 @@ export function getContactByName(name: string): Contact | undefined {
   return queryOne<Contact>('SELECT * FROM contacts WHERE LOWER(name) = LOWER(?) LIMIT 1', [name])
 }
 
+/**
+ * ADV36-3 (round-38) — ALL exact-name (case-insensitive) contact candidates, not
+ * just the first. contacts:create must inspect EVERY same-name row (both a
+ * suppressed transcript-derived twin AND a visible one can coexist) so it can pick
+ * the VISIBLE duplicate rather than a suppressed row that would hide a genuine
+ * duplicate and mint another. Ordered by created_at for deterministic selection.
+ */
+export function getContactsByName(name: string): Contact[] {
+  return queryAll<Contact>(
+    'SELECT * FROM contacts WHERE LOWER(name) = LOWER(?) ORDER BY created_at ASC, id ASC',
+    [name]
+  )
+}
+
 // =============================================================================
 // Alias memory + identity suggestions (v27, Round 4a)
 // =============================================================================

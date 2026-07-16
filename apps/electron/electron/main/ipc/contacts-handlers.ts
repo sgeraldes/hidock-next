@@ -9,7 +9,7 @@ import { z } from 'zod'
 import {
   getContacts,
   getContactById,
-  getContactByName,
+  getContactsByName,
   createContact,
   updateContact,
   deleteContact,
@@ -141,23 +141,34 @@ export function registerContactsHandlers(): void {
         }
 
         const name = parsed.data.name.trim()
-        const existing = getContactByName(name)
-        if (existing) {
-          // ADV35-2 (round-37) — the raw duplicate candidate must NOT be disclosed
-          // if it is a transcript-origin contact suppressed on non-owner surfaces
-          // (its sole source recording is personal/soft-deleted/value-excluded/
-          // hard-purged, or a legacy NULL-provenance row with no eligible
-          // membership). Route it through the central visible-identity boundary:
-          //   • VISIBLE  ⇒ genuine duplicate — surface its id/name (existing UX).
-          //   • SUPPRESSED ⇒ treat as unavailable — do NOT reveal the hidden id/name;
-          //     fall through and mint a fresh manual contact instead.
-          //   • lookup FAILED (failClosed) ⇒ fail closed WITHOUT identity details —
-          //     allow the fresh create rather than leaking the candidate.
-          const { visible, failClosed } = filterVisibleEntityIds('contact', [existing.id])
-          if (!failClosed && visible.has(existing.id)) {
-            return error('DUPLICATE_ENTRY', `A contact named ${existing.name} already exists`, {
-              existingId: existing.id,
-              existingName: existing.name
+        // ADV36-3 (round-38) — inspect EVERY exact-name candidate, not just the
+        // first (getContactByName LIMIT 1 was unordered). With BOTH a suppressed
+        // transcript-derived twin AND a visible same-name contact, an unordered
+        // LIMIT-1 could pick the suppressed row, ignore the visible duplicate, and
+        // mint another (duplicate identity). Route ALL candidates through the central
+        // visible-identity boundary in ONE call:
+        //   • ANY VISIBLE match ⇒ genuine duplicate — surface the VISIBLE one's id/name.
+        //   • only SUPPRESSED matches ⇒ treat as unavailable — do NOT reveal a hidden
+        //     id/name; fall through and mint a fresh manual contact.
+        //   • visibility EVALUATION FAILS (failClosed) ⇒ RETRYABLE error, do NOT create
+        //     (a transient DB error must not persist a duplicate).
+        const candidates = getContactsByName(name)
+        if (candidates.length > 0) {
+          const { visible, failClosed } = filterVisibleEntityIds(
+            'contact',
+            candidates.map((c) => c.id)
+          )
+          if (failClosed) {
+            return error(
+              'RETRYABLE_ERROR',
+              'Could not verify whether this contact already exists. Please try again.'
+            )
+          }
+          const visibleDup = candidates.find((c) => visible.has(c.id))
+          if (visibleDup) {
+            return error('DUPLICATE_ENTRY', `A contact named ${visibleDup.name} already exists`, {
+              existingId: visibleDup.id,
+              existingName: visibleDup.name
             })
           }
         }
@@ -193,6 +204,17 @@ export function registerContactsHandlers(): void {
         const { id, tags, name, email, ...otherUpdates } = parsed.data
         const contact = getContactById(id)
         if (!contact) {
+          return error('NOT_FOUND', `Contact with ID ${id} not found`)
+        }
+
+        // ADV36-2 sweep (round-38) — gate the update TARGET through the central
+        // visible-identity boundary. A SUPPRESSED contact (transcript-derived, sole
+        // source recording excluded) is already hidden from contacts:getById /
+        // getAll, so a stale UI reference must not be able to mutate (and thereby
+        // re-surface / re-key) it. Treat a suppressed/failClosed target as absent,
+        // consistent with getById's NOT_FOUND suppression.
+        const { visible, failClosed } = filterVisibleEntityIds('contact', [id])
+        if (failClosed || !visible.has(id)) {
           return error('NOT_FOUND', `Contact with ID ${id} not found`)
         }
 
@@ -286,6 +308,20 @@ export function registerContactsHandlers(): void {
         }
         if (!getContactById(loserId)) {
           return error('NOT_FOUND', `Loser contact ${loserId} not found`)
+        }
+
+        // ADV36-2 (round-38) — mergeContacts folds the loser's fields/aliases/
+        // memberships onto the keeper with NO visibility check, so a stale or
+        // SUPPRESSED loser (its sole source recording personal/soft-deleted/
+        // value-excluded/hard-purged) would launder excluded-derived identity+fields
+        // into a VISIBLE keeper. Round 30 gated the org-reconciler AUTO merge; this
+        // MANUAL IPC was missed. Gate BOTH ids through the central visible-identity
+        // boundary immediately before the merge (no await in between — atomic on the
+        // single-threaded main process). Refuse GENERICALLY (no identity details)
+        // unless BOTH are visible AND the lookup succeeds; fail-closed on lookup error.
+        const { visible, failClosed } = filterVisibleEntityIds('contact', [keeperId, loserId])
+        if (failClosed || !visible.has(keeperId) || !visible.has(loserId)) {
+          return error('MERGE_NOT_ALLOWED', 'These contacts cannot be merged.')
         }
 
         const merged = mergeContacts(keeperId, loserId)

@@ -207,6 +207,15 @@ export function registerProjectsHandlers(): void {
           return error('NOT_FOUND', `Project with ID ${id} not found`)
         }
 
+        // ADV36-2 sweep (round-38) — gate the update TARGET through the central
+        // visible-identity boundary (mirrors contacts:update). A SUPPRESSED project
+        // is already hidden from projects:getById / getAll, so a stale UI reference
+        // must not mutate (and thereby re-surface) it. Suppressed/failClosed ⇒ absent.
+        const { visible, failClosed } = filterVisibleEntityIds('project', [id])
+        if (failClosed || !visible.has(id)) {
+          return error('NOT_FOUND', `Project with ID ${id} not found`)
+        }
+
         updateProject(id, {
           name,
           description: description ?? undefined,
@@ -365,6 +374,18 @@ export function registerProjectsHandlers(): void {
         }
         if (!getProjectById(loserId)) {
           return error('NOT_FOUND', `Loser project ${loserId} not found`)
+        }
+
+        // ADV36-2 sweep (round-38) — the MANUAL project-merge analogue of
+        // contacts:merge. mergeProjects folds the loser's fields/memberships onto the
+        // keeper with NO visibility check, so a stale/SUPPRESSED loser project (sole
+        // source recording excluded) would launder excluded-derived identity into a
+        // VISIBLE keeper. Gate BOTH ids through the central visible-identity boundary
+        // immediately before the merge (atomic — no await between). Refuse
+        // generically unless BOTH visible AND the lookup succeeds; fail-closed.
+        const { visible, failClosed } = filterVisibleEntityIds('project', [keeperId, loserId])
+        if (failClosed || !visible.has(keeperId) || !visible.has(loserId)) {
+          return error('MERGE_NOT_ALLOWED', 'These projects cannot be merged.')
         }
 
         const merged = mergeProjects(keeperId, loserId)
