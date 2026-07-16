@@ -281,7 +281,6 @@ export function Chat() {
         setContextError('Recording not found')
         return
       }
-      setContextRecording(capture)
 
       // Auto-create or select conversation for this context
       if (!activeConversation) {
@@ -291,17 +290,35 @@ export function Chat() {
         setConversations(prev => [newConv, ...prev])
         setActiveConversation(newConv)
 
-        // Attach context to the new conversation
-        await window.electronAPI.assistant.addContext(newConv.id, contextId)
-        setContextIds([contextId])
-        setContextItems([capture])
-      } else {
-        // Attach to existing conversation
-        if (!contextIds.includes(contextId)) {
-          await window.electronAPI.assistant.addContext(activeConversation.id, contextId)
-          setContextIds(prev => [...prev, contextId])
-          setContextItems(prev => [...prev, capture])
+        // ADV39: respect the addContext write result. The main-process gate refuses
+        // to pin a capture that became personal/deleted/value-excluded between fetch
+        // and write; only install/display the capture when the write SUCCEEDED, and
+        // re-fetch its metadata only AFTER a successful write.
+        const result = await window.electronAPI.assistant.addContext(newConv.id, contextId)
+        if (!result?.success) {
+          setContextError('That item is no longer available')
+          return
         }
+        const fresh = await window.electronAPI.knowledge.getById(contextId)
+        const installed = fresh ?? capture
+        setContextRecording(installed)
+        setContextIds([contextId])
+        setContextItems([installed])
+      } else if (!contextIds.includes(contextId)) {
+        // Attach to existing conversation — only install/display on a successful write.
+        const result = await window.electronAPI.assistant.addContext(activeConversation.id, contextId)
+        if (!result?.success) {
+          setContextError('That item is no longer available')
+          return
+        }
+        const fresh = await window.electronAPI.knowledge.getById(contextId)
+        const installed = fresh ?? capture
+        setContextRecording(installed)
+        setContextIds(prev => [...prev, contextId])
+        setContextItems(prev => [...prev, installed])
+      } else {
+        // Already attached — surface it in the banner without re-writing.
+        setContextRecording(capture)
       }
     } catch (error) {
       setContextError('Failed to load recording context')
@@ -509,9 +526,17 @@ export function Chat() {
         setContextItems(prev => prev.filter(item => item.id !== id))
       } else {
         // Step 1: Add context on server FIRST
-        await window.electronAPI.assistant.addContext(activeConversation.id, id)
+        const result = await window.electronAPI.assistant.addContext(activeConversation.id, id)
 
-        // Step 2: Fetch metadata BEFORE updating store
+        // ADV39: respect the write result. The main-process gate refuses to pin a
+        // capture that became excluded between fetch and write; do not install or
+        // display a capture the write refused.
+        if (!result?.success) {
+          toast.error('Unable to add context', 'That item is no longer available.')
+          return
+        }
+
+        // Step 2: Fetch metadata only AFTER a successful write
         const item = await window.electronAPI.knowledge.getById(id)
 
         // Step 3: Update store ONLY after both operations succeed
