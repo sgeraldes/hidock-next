@@ -5702,7 +5702,7 @@ export interface MembershipRowEligibility<T> {
  * ADV26 (round-27) — THE shared per-ROW membership-eligibility boundary for
  * NON-OWNER identity surfaces (person-context people + project-label fallback,
  * suggestion mJac in discovery + revalidation). Supersedes the round-26
- * meeting-level {@link eligibleMeetingIdsForIdentity}, which laundered
+ * meeting-level `eligibleMeetingIdsForIdentity` (removed), which laundered
  * transcript-derived rows on a calendar meeting.
  *
  * A membership row is ELIGIBLE iff:

@@ -27,14 +27,19 @@ function contact(id: string, name: string): void {
 function meeting(id: string): void {
   run(`INSERT INTO meetings (id, subject, start_time, end_time) VALUES (?, ?, '2026-01-02T10:00:00Z', '2026-01-02T11:00:00Z')`, [id, id])
 }
+// v44/round-27: co-attendance rows carry per-row provenance. These ranking tests
+// use structural (calendar) attendance so every row is eligible and the ranking
+// mechanics are what's under test (per-row suppression is covered in
+// person-context-eligibility.test.ts).
 function attend(meetingId: string, contactId: string): void {
-  run(`INSERT INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, 'attendee')`, [meetingId, contactId])
+  run(`INSERT INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES (?, ?, 'attendee', 'calendar')`, [meetingId, contactId])
 }
 function project(id: string, name: string): void {
   run(`INSERT INTO projects (id, name, status) VALUES (?, ?, 'active')`, [id, name])
 }
-function tagProject(meetingId: string, projectId: string): void {
-  run(`INSERT INTO meeting_projects (meeting_id, project_id) VALUES (?, ?)`, [meetingId, projectId])
+/** Transcript-derived project tag backed by a source recording (see r-m1 below). */
+function tagProject(meetingId: string, projectId: string, recId: string): void {
+  run(`INSERT INTO meeting_projects (meeting_id, project_id, source, source_recording_id) VALUES (?, ?, 'transcript', ?)`, [meetingId, projectId, recId])
 }
 function node(id: string, type: string, label: string, normKey: string): void {
   run(
@@ -74,15 +79,15 @@ describe('getPersonContext', () => {
     attend('m3', 'c-dave')
 
     // meeting_projects fallback for topics.
-    project('p-atlas', 'Atlas')
-    tagProject('m1', 'p-atlas')
-    // ADV25-1 (round-26): the meeting_projects fallback now only surfaces a label
-    // backed by an ELIGIBLE meeting. m1 gets a live (eligible) recording so its
-    // transcript-derived 'Atlas' label legitimately surfaces. (Suppression of an
-    // unbacked / excluded-recording label is covered in person-context-eligibility.test.ts.)
+    // ADV26-2 (round-27): the fallback now gates the meeting_projects ROW. m1's
+    // 'Atlas' tag is transcript-derived from a live (eligible) recording r-m1, so it
+    // legitimately surfaces. (Suppression of an excluded/legacy row is covered in
+    // person-context-eligibility.test.ts.)
     run(
       `INSERT INTO recordings (id, filename, date_recorded, meeting_id) VALUES ('r-m1', 'r-m1.hda', '2026-01-02T10:00:00Z', 'm1')`
     )
+    project('p-atlas', 'Atlas')
+    tagProject('m1', 'p-atlas', 'r-m1')
 
     // Graph path for a person WITH a node (Bob → ATTENDED → meeting → ABOUT → topic).
     node('n-bob', 'person', 'Bob', 'bob')

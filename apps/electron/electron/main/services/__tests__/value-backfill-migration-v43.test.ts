@@ -22,12 +22,15 @@ import { join } from 'path'
 const source = readFileSync(join(__dirname, '..', 'database.ts'), 'utf-8')
 
 describe('schema v43: value_backfill_state (resumable value-classification backfill cursor)', () => {
-  it('bumps SCHEMA_VERSION to exactly 43 (current)', () => {
-    // This IS the newest migration in the worktree at time of writing — pin the
-    // exact value (same convention as value-classification-migration-v42.test.ts
-    // did before this migration existed). A future migration bump must update
-    // this test, not silently pass it.
-    expect(source).toMatch(/const SCHEMA_VERSION = 43\b/)
+  it('SCHEMA_VERSION is at least 43 and the v43 migration is registered', () => {
+    // v43 shipped value_backfill_state. The GLOBAL "current version" pin now lives
+    // in membership-provenance-migration-v44.test.ts (F18/round-27 bumped 43 -> 44);
+    // here we only assert v43's migration still exists and the version never
+    // regressed below it. A future bump updates the v44 test, not this one.
+    const m = source.match(/const SCHEMA_VERSION = (\d+)\b/)
+    expect(m).not.toBeNull()
+    expect(Number(m![1])).toBeGreaterThanOrEqual(43)
+    expect(source).toMatch(/^\s*43:\s*\(\)\s*=>/m) // MIGRATIONS[43] still registered
   })
 
   it('fresh schema creates the value_backfill_state table with the resumability columns', () => {

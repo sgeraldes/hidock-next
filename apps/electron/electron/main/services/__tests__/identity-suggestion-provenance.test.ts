@@ -23,8 +23,12 @@ import { randomUUID } from 'crypto'
 const dbPath = join(tmpdir(), `hidock-adv24-suggestion-prov-${process.pid}.sqlite`)
 vi.mock('../file-storage', () => ({ getDatabasePath: () => dbPath }))
 
-import { initializeDatabase, closeDatabase, run, getIdentitySuggestions, type IdentitySuggestion } from '../database'
-import { discoverContactMerges, revalidateSuggestionsForSurfacing } from '../identity-discovery'
+import { initializeDatabase, closeDatabase, run, getIdentitySuggestions, getIdentitySuggestionById, type IdentitySuggestion } from '../database'
+import {
+  discoverContactMerges,
+  revalidateSuggestionsForSurfacing,
+  isSuggestionEligibleForAccept
+} from '../identity-discovery'
 import { normalizeName } from '../entity-normalize'
 
 // --- seed helpers -----------------------------------------------------------
@@ -46,8 +50,15 @@ function contact(id: string, name: string, opts: { role?: string; meetings?: num
 function meeting(id: string): void {
   run(`INSERT INTO meetings (id, subject, start_time, end_time) VALUES (?, ?, '2026-01-02T10:00:00Z', '2026-01-02T11:00:00Z')`, [id, id])
 }
+// v44/round-27: each attended meeting `m` is backed by a source recording `rec-${m}`
+// (seedRecordingForMeeting), so the transcript-derived membership row is gated by
+// that recording's eligibility — the ADV26-2 per-row mJac gate.
 function attend(meetingId: string, contactId: string): void {
-  run(`INSERT INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, 'attendee')`, [meetingId, contactId])
+  run(`INSERT INTO meeting_contacts (meeting_id, contact_id, role, source, source_recording_id) VALUES (?, ?, 'attendee', 'transcript', ?)`, [
+    meetingId,
+    contactId,
+    `rec-${meetingId}`
+  ])
 }
 function node(id: string, type: string, label: string, normKey: string): void {
   run(`INSERT INTO graph_nodes (id, type, label, norm_key, created_at, updated_at)
@@ -333,5 +344,92 @@ describe('revalidateSuggestionsForSurfacing — below-threshold + malformed (ADV
     expect(surfaced()).toHaveLength(0)
     // Non-destructive — the row remains.
     expect(getIdentitySuggestions('pending')).toHaveLength(1)
+  })
+})
+
+// --- ADV26-1 (round-27): transcript-created suggestions (no graph evidence) ---
+
+/**
+ * applyTranscriptEntities creates suggestions with NO graph/topic evidence, so the
+ * round-26 revalidator passed them through unvalidated. Round-27 persists the
+ * authoritative source recording id(s) on the row and gates the suggestion through
+ * the recording allowlist at SURFACE and ACCEPT: an excluded/purged source ⇒
+ * suppressed + refused; a legacy (NULL-provenance, no-signals) transcript
+ * suggestion ⇒ suppressed fail-closed.
+ */
+function insertTranscriptSuggestion(opts: { sourceIds: string[] | null; candidate?: string }): string {
+  const id = randomUUID()
+  const ev = { method: 'fuzzy', meetingId: 'm-t', coOccurring: [] } // NO signals / sharedTopics
+  const src = opts.sourceIds === null ? null : JSON.stringify(opts.sourceIds)
+  run(
+    `INSERT INTO identity_suggestions (id, kind, candidate_name, target_id, confidence, evidence, status, created_at, source_recording_ids)
+     VALUES (?, 'person', ?, 'c-eduardo', 0.65, ?, 'pending', '2026-01-01T00:00:00Z', ?)`,
+    [id, opts.candidate ?? 'Edu', JSON.stringify(ev), src]
+  )
+  return id
+}
+
+describe('transcript-created suggestions — recording-allowlist revalidation (ADV26-1)', () => {
+  it('surfaces AND accepts a transcript suggestion whose source recording is ELIGIBLE', () => {
+    contact('c-eduardo', 'Eduardo')
+    contact('c-edu', 'Edu')
+    seedRecording('rec-live')
+    const id = insertTranscriptSuggestion({ sourceIds: ['rec-live'] })
+
+    expect(surfaced()).toHaveLength(1)
+    expect(isSuggestionEligibleForAccept(getIdentitySuggestionById(id)!)).toBe(true)
+  })
+
+  it('does NOT surface and REFUSES accept when the source recording is value-excluded', () => {
+    contact('c-eduardo', 'Eduardo')
+    contact('c-edu', 'Edu')
+    seedRecording('rec-bad')
+    valueExclude('rec-bad')
+    const id = insertTranscriptSuggestion({ sourceIds: ['rec-bad'] })
+
+    expect(surfaced()).toHaveLength(0)
+    expect(isSuggestionEligibleForAccept(getIdentitySuggestionById(id)!)).toBe(false)
+    // Non-destructive — the row remains.
+    expect(getIdentitySuggestions('pending')).toHaveLength(1)
+  })
+
+  it('does NOT surface a transcript suggestion whose source recording was hard-purged (absent)', () => {
+    contact('c-eduardo', 'Eduardo')
+    contact('c-edu', 'Edu')
+    // No recording row for 'rec-gone' — the positive allowlist rejects a missing id.
+    const id = insertTranscriptSuggestion({ sourceIds: ['rec-gone'] })
+
+    expect(surfaced()).toHaveLength(0)
+    expect(isSuggestionEligibleForAccept(getIdentitySuggestionById(id)!)).toBe(false)
+  })
+
+  it('does NOT surface a transcript suggestion with EMPTY known provenance', () => {
+    contact('c-eduardo', 'Eduardo')
+    contact('c-edu', 'Edu')
+    const id = insertTranscriptSuggestion({ sourceIds: [] })
+
+    expect(surfaced()).toHaveLength(0)
+    expect(isSuggestionEligibleForAccept(getIdentitySuggestionById(id)!)).toBe(false)
+  })
+
+  it('suppresses a LEGACY (NULL provenance, no signals) transcript suggestion fail-closed', () => {
+    contact('c-eduardo', 'Eduardo')
+    contact('c-edu', 'Edu')
+    const id = insertTranscriptSuggestion({ sourceIds: null }) // NULL column = legacy
+
+    expect(surfaced()).toHaveLength(0)
+    expect(isSuggestionEligibleForAccept(getIdentitySuggestionById(id)!)).toBe(false)
+  })
+
+  it('fails closed: suppresses a transcript suggestion when the eligibility lookup throws', () => {
+    contact('c-eduardo', 'Eduardo')
+    contact('c-edu', 'Edu')
+    seedRecording('rec-live')
+    const id = insertTranscriptSuggestion({ sourceIds: ['rec-live'] })
+    run('PRAGMA foreign_keys = OFF')
+    run('DROP TABLE knowledge_captures') // breaks the positive allowlist subquery
+
+    expect(surfaced()).toHaveLength(0)
+    expect(isSuggestionEligibleForAccept(getIdentitySuggestionById(id)!)).toBe(false)
   })
 })

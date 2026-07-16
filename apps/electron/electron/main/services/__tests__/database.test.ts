@@ -193,12 +193,12 @@ describe('Database Service', () => {
   // 1. initializeDatabase — real boot + schema
   // =========================================================================
   describe('initializeDatabase()', () => {
-    it('initializes and reports the current schema version (43)', () => {
-      // F16/spec-003 bumped SCHEMA_VERSION 42 -> 43 (value_backfill_state).
+    it('initializes and reports the current schema version (44)', () => {
+      // F18/round-27 bumped SCHEMA_VERSION 43 -> 44 (per-row membership provenance).
       const row = queryOne<{ version: number }>(
         'SELECT version FROM schema_version ORDER BY version DESC LIMIT 1'
       )
-      expect(row?.version).toBe(43)
+      expect(row?.version).toBe(44)
     })
 
     it('creates the expected core tables', () => {

@@ -52,16 +52,14 @@ vi.mock('../database', () => ({
     eligibleEdgeIds: new Set([...edgeIds]),
     failClosed: false,
   }),
-  // ADV25-2 (round-26): discovery now gates shared-meeting mJac through the
-  // eligible-meeting boundary. These unit tests seed no recordings/calendar
-  // provenance (graph closeness here comes from shared meeting_contacts /
-  // meeting_projects rows), so a pass-through (every meeting eligible) preserves
-  // their behavior. The real eligible-meeting suppression is exercised against a
-  // real DB in identity-suggestion-provenance.test.ts + person-context-eligibility.test.ts.
-  eligibleMeetingIdsForIdentity: (meetingIds: Iterable<string>) => ({
-    eligible: new Set([...meetingIds]),
-    failClosed: false,
-  }),
+  // ADV26-2 (round-27): discovery now gates shared-meeting mJac at the membership
+  // ROW through filterEligibleMembershipRows. These unit tests seed no
+  // recordings/calendar provenance (graph closeness here comes from shared
+  // meeting_contacts / meeting_projects rows), so a pass-through (every row
+  // eligible) preserves their behavior. The real per-row suppression is exercised
+  // against a real DB in identity-suggestion-provenance.test.ts +
+  // person-context-eligibility.test.ts.
+  filterEligibleMembershipRows: <T,>(rows: T[]) => ({ eligible: rows, failClosed: false }),
 }))
 
 import { discoverContactMerges, discoverProjectMerges } from '../identity-discovery'
@@ -76,8 +74,8 @@ function seedSchema(): void {
     CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT, description TEXT, status TEXT, created_at TEXT);
     CREATE TABLE contact_aliases (id TEXT PRIMARY KEY, alias_norm TEXT UNIQUE, contact_id TEXT, source TEXT, confidence REAL);
     CREATE TABLE project_aliases (id TEXT PRIMARY KEY, alias_norm TEXT UNIQUE, project_id TEXT, source TEXT, confidence REAL);
-    CREATE TABLE meeting_contacts (meeting_id TEXT, contact_id TEXT, role TEXT);
-    CREATE TABLE meeting_projects (meeting_id TEXT, project_id TEXT);
+    CREATE TABLE meeting_contacts (meeting_id TEXT, contact_id TEXT, role TEXT, source TEXT, source_recording_id TEXT);
+    CREATE TABLE meeting_projects (meeting_id TEXT, project_id TEXT, source TEXT, source_recording_id TEXT);
     CREATE TABLE identity_suggestions (
       id TEXT PRIMARY KEY, kind TEXT, candidate_name TEXT, target_id TEXT, confidence REAL,
       evidence TEXT, status TEXT DEFAULT 'pending', created_at TEXT,

@@ -80,10 +80,10 @@ describe('migration v37 objects', () => {
     expect(info).toHaveLength(1)
   })
 
-  it('is at schema version 43', () => {
-    // F16/spec-003 bumped SCHEMA_VERSION 42 -> 43 (value_backfill_state).
+  it('is at schema version 44', () => {
+    // F18/round-27 bumped SCHEMA_VERSION 43 -> 44 (per-row membership provenance).
     const row = queryOne<{ version: number }>('SELECT version FROM schema_version ORDER BY version DESC LIMIT 1')
-    expect(row?.version).toBe(43)
+    expect(row?.version).toBe(44)
   })
 })
 

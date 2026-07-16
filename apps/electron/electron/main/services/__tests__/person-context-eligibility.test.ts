@@ -1,16 +1,18 @@
 // @vitest-environment node
 
 /**
- * ADV25-1 (round-26) — the getPersonContext meeting_projects FALLBACK (the
- * Identity merge card's topic list, a NON-OWNER discovery surface) must only
- * surface a project label backed by an ELIGIBLE meeting. meeting_contacts /
- * meeting_projects rows are TRANSCRIPT-derived (applyTranscriptEntities) with no
- * per-row provenance, so a label whose only meeting is backed solely by an
- * excluded recording (personal / soft-deleted / value-excluded / hard-purged)
- * must be suppressed; a label backed by an eligible recording OR by independent
- * calendar provenance must survive; a hard eligibility failure fails closed.
+ * ADV26-2/-3 (round-27) — getPersonContext must gate the NON-OWNER identity merge
+ * card at the membership ROW, not the parent meeting. meeting_contacts /
+ * meeting_projects rows are written by BOTH calendar sync AND applyTranscriptEntities
+ * for the SAME meeting, so a coarse meeting-level check LAUNDERS a transcript-derived
+ * row onto a calendar meeting. Per-row provenance (source + source_recording_id):
+ *   • 'transcript' row  ⇒ surfaces only while its source recording is eligible.
+ *   • 'calendar' row     ⇒ structural (calendar/user) ⇒ always allowed.
+ *   • NULL-provenance row ⇒ legacy ⇒ fail-closed ineligible — EVEN when the meeting
+ *                            carries calendar metadata.
  *
- * REAL temp DB, real database.ts (sql.js) end to end.
+ * Covers BOTH the project-label fallback (topics, ADV26-2) and the co-attendee
+ * people list (ADV26-3). REAL temp DB, real database.ts end to end.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
@@ -43,13 +45,31 @@ function calendarMeeting(id: string): void {
     [id, id]
   )
 }
-function attend(meetingId: string, contactId: string): void {
+/** A transcript-derived attendance row backed by a specific source recording. */
+function attendTranscript(meetingId: string, contactId: string, recId: string): void {
+  run(
+    `INSERT INTO meeting_contacts (meeting_id, contact_id, role, source, source_recording_id) VALUES (?, ?, 'attendee', 'transcript', ?)`,
+    [meetingId, contactId, recId]
+  )
+}
+/** A structural (calendar/user-authored) attendance row. */
+function attendCalendar(meetingId: string, contactId: string): void {
+  run(`INSERT INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES (?, ?, 'attendee', 'calendar')`, [meetingId, contactId])
+}
+/** A legacy NULL-provenance attendance row (pre-v44, un-backfilled). */
+function attendLegacy(meetingId: string, contactId: string): void {
   run(`INSERT INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, 'attendee')`, [meetingId, contactId])
 }
 function project(id: string, name: string): void {
   run(`INSERT INTO projects (id, name, status) VALUES (?, ?, 'active')`, [id, name])
 }
-function tagProject(meetingId: string, projectId: string): void {
+function tagProjectTranscript(meetingId: string, projectId: string, recId: string): void {
+  run(`INSERT INTO meeting_projects (meeting_id, project_id, source, source_recording_id) VALUES (?, ?, 'transcript', ?)`, [meetingId, projectId, recId])
+}
+function tagProjectCalendar(meetingId: string, projectId: string): void {
+  run(`INSERT INTO meeting_projects (meeting_id, project_id, source) VALUES (?, ?, 'calendar')`, [meetingId, projectId])
+}
+function tagProjectLegacy(meetingId: string, projectId: string): void {
   run(`INSERT INTO meeting_projects (meeting_id, project_id) VALUES (?, ?)`, [meetingId, projectId])
 }
 function recording(id: string, meetingId: string): void {
@@ -75,52 +95,127 @@ afterEach(() => {
   if (existsSync(dbPath)) rmSync(dbPath, { force: true })
 })
 
-describe('getPersonContext — meeting_projects fallback eligibility (ADV25-1)', () => {
-  it('suppresses a label whose only meeting is backed solely by an EXCLUDED recording', () => {
+describe('getPersonContext — meeting_projects fallback per-row eligibility (ADV26-2)', () => {
+  it('suppresses a transcript-derived label whose source recording is EXCLUDED', () => {
     contact('c-x', 'Xavier')
-    bareMeeting('m-ex') // no calendar provenance
-    attend('m-ex', 'c-x')
-    project('p-ex', 'SecretProject')
-    tagProject('m-ex', 'p-ex')
+    bareMeeting('m-ex')
     recording('rec-ex', 'm-ex')
-    valueExclude('rec-ex') // recording value-excluded ⇒ meeting ineligible
+    valueExclude('rec-ex') // recording value-excluded ⇒ transcript row ineligible
+    attendTranscript('m-ex', 'c-x', 'rec-ex')
+    project('p-ex', 'SecretProject')
+    tagProjectTranscript('m-ex', 'p-ex', 'rec-ex')
 
     expect(getPersonContext('c-x').topics).not.toContain('SecretProject')
   })
 
-  it('keeps a label backed by an ELIGIBLE recording', () => {
+  it('keeps a transcript-derived label whose source recording is ELIGIBLE', () => {
     contact('c-y', 'Yolanda')
     bareMeeting('m-ok')
-    attend('m-ok', 'c-y')
+    recording('rec-ok', 'm-ok') // live, non-excluded ⇒ transcript row eligible
+    attendTranscript('m-ok', 'c-y', 'rec-ok')
     project('p-ok', 'OpenProject')
-    tagProject('m-ok', 'p-ok')
-    recording('rec-ok', 'm-ok') // live, non-excluded recording ⇒ meeting eligible
+    tagProjectTranscript('m-ok', 'p-ok', 'rec-ok')
 
     expect(getPersonContext('c-y').topics).toContain('OpenProject')
   })
 
-  it('keeps a label backed by INDEPENDENT calendar provenance (no recording)', () => {
+  it('keeps a CALENDAR (structural/manual) project label with no recording', () => {
     contact('c-z', 'Zoe')
-    calendarMeeting('m-cal') // organizer_email set ⇒ structural, always allowed
-    attend('m-cal', 'c-z')
+    calendarMeeting('m-cal')
+    attendCalendar('m-cal', 'c-z')
     project('p-cal', 'CalendarProject')
-    tagProject('m-cal', 'p-cal')
+    tagProjectCalendar('m-cal', 'p-cal') // structural project tag ⇒ always allowed
 
     expect(getPersonContext('c-z').topics).toContain('CalendarProject')
   })
 
-  it('fails closed: a recording-backed label is suppressed when the eligibility lookup throws', () => {
+  it('suppresses a LEGACY NULL-provenance project label (fail-closed)', () => {
+    contact('c-l', 'Leo')
+    bareMeeting('m-legacy')
+    attendLegacy('m-legacy', 'c-l')
+    project('p-legacy', 'LegacyProject')
+    tagProjectLegacy('m-legacy', 'p-legacy') // NULL provenance ⇒ ineligible
+
+    expect(getPersonContext('c-l').topics).not.toContain('LegacyProject')
+  })
+
+  it('CALENDAR metadata does NOT launder a transcript-derived project row from an excluded recording', () => {
+    // The meeting has calendar provenance AND carries a transcript-derived project
+    // row from an excluded recording plus a genuine calendar (manual) project row.
+    // Only the calendar row must show; the transcript row stays suppressed.
+    contact('c-m', 'Mara')
+    calendarMeeting('m-mix')
+    recording('rec-bad', 'm-mix')
+    valueExclude('rec-bad')
+    attendCalendar('m-mix', 'c-m')
+    project('p-trans', 'TranscriptOnlyProject')
+    project('p-cal2', 'ManualProject')
+    tagProjectTranscript('m-mix', 'p-trans', 'rec-bad') // laundering attempt
+    tagProjectCalendar('m-mix', 'p-cal2')
+
+    const topics = getPersonContext('c-m').topics
+    expect(topics).not.toContain('TranscriptOnlyProject')
+    expect(topics).toContain('ManualProject')
+  })
+
+  it('fails closed: a transcript-derived label is suppressed when the eligibility lookup throws', () => {
     contact('c-y', 'Yolanda')
     bareMeeting('m-ok')
-    attend('m-ok', 'c-y')
-    project('p-ok', 'OpenProject')
-    tagProject('m-ok', 'p-ok')
     recording('rec-ok', 'm-ok')
-    // Break the positive allowlist (knowledge_captures NOT-EXISTS subquery) so the
-    // recording sub-lookup fails ⇒ the recording-backed meeting is dropped.
+    attendTranscript('m-ok', 'c-y', 'rec-ok')
+    project('p-ok', 'OpenProject')
+    tagProjectTranscript('m-ok', 'p-ok', 'rec-ok')
+    // Break the positive allowlist (knowledge_captures NOT-EXISTS subquery).
     run('PRAGMA foreign_keys = OFF')
     run('DROP TABLE knowledge_captures')
 
     expect(getPersonContext('c-y').topics).not.toContain('OpenProject')
+  })
+})
+
+describe('getPersonContext — co-attendee people list per-row eligibility (ADV26-3)', () => {
+  it('suppresses two participants learned SOLELY from an excluded recording', () => {
+    contact('c-a', 'Ana')
+    contact('c-b', 'Beto')
+    bareMeeting('m-ex')
+    recording('rec-ex', 'm-ex')
+    valueExclude('rec-ex')
+    attendTranscript('m-ex', 'c-a', 'rec-ex')
+    attendTranscript('m-ex', 'c-b', 'rec-ex')
+
+    expect(getPersonContext('c-a').people).not.toContain('Beto')
+  })
+
+  it('keeps a co-attendee learned from an ELIGIBLE recording', () => {
+    contact('c-a', 'Ana')
+    contact('c-b', 'Beto')
+    bareMeeting('m-ok')
+    recording('rec-ok', 'm-ok')
+    attendTranscript('m-ok', 'c-a', 'rec-ok')
+    attendTranscript('m-ok', 'c-b', 'rec-ok')
+
+    expect(getPersonContext('c-a').people).toContain('Beto')
+  })
+
+  it('keeps a CALENDAR co-attendee even when the meeting recording is excluded', () => {
+    contact('c-a', 'Ana')
+    contact('c-b', 'Beto')
+    calendarMeeting('m-cal')
+    recording('rec-bad', 'm-cal')
+    valueExclude('rec-bad')
+    attendCalendar('m-cal', 'c-a')
+    attendCalendar('m-cal', 'c-b')
+
+    expect(getPersonContext('c-a').people).toContain('Beto')
+  })
+
+  it('suppresses a LEGACY NULL-provenance co-attendee (fail-closed)', () => {
+    contact('c-a', 'Ana')
+    contact('c-b', 'Beto')
+    bareMeeting('m-legacy')
+    attendLegacy('m-legacy', 'c-a')
+    attendLegacy('m-legacy', 'c-b')
+
+    expect(getPersonContext('c-a').people).not.toContain('Beto')
   })
 })
