@@ -256,22 +256,29 @@ function pairRarity(
   aName: string,
   bName: string,
   bearers: Map<string, number>,
-  mentionsOf: (name: string) => MentionCount
+  mentionsOf: (name: string) => MentionCount,
+  // ADV50-2 (round-52) — true when the bearer corpus could not be verified. An
+  // unverifiable corpus makes bearerCount an untrustworthy 0, so EVERY branch below
+  // must carry failClosed (the rare early-return especially, where a long token would
+  // otherwise raise confidence without ever consulting the mention counter).
+  bearersFailClosed = false
 ): { rarity: Rarity; delta: number; failClosed: boolean } {
   const at = foldedFirstToken(aName)
   const bt = foldedFirstToken(bName)
   const token = at === bt ? at : at.length <= bt.length ? at : bt
   const bearerCount = Math.max(bearers.get(at) ?? 0, bearers.get(bt) ?? 0)
   const byBearers = nameRarity({ bearers: bearerCount, tokenLength: token.length })
-  // Bearer count already decided rare/common ⇒ the mention count is not consulted,
-  // so there is no eligibility lookup that could fail here.
-  if (byBearers.rarity !== 'normal') return { ...byBearers, failClosed: false }
+  // Bearer count already decided rare/common ⇒ the mention count is not consulted.
+  // Still propagate a BEARER failClosed: a bearerCount of 0 from a FAILED corpus query
+  // must not be trusted to classify the pair rare/common (ADV50-2).
+  if (byBearers.rarity !== 'normal') return { ...byBearers, failClosed: bearersFailClosed }
   // ADV49-3 (round-51) — the mention count IS consulted; propagate its failClosed
-  // so the caller refuses to recompute confidence from an unverifiable count.
+  // (and the bearer failClosed) so the caller refuses to recompute confidence when
+  // EITHER corpus is unverifiable.
   const mA = mentionsOf(aName)
   const mB = mentionsOf(bName)
   const mentions = Math.max(mA.count, mB.count)
-  const failClosed = mA.failClosed || mB.failClosed
+  const failClosed = bearersFailClosed || mA.failClosed || mB.failClosed
   return { ...nameRarity({ bearers: bearerCount, tokenLength: token.length, mentions }), failClosed }
 }
 
@@ -696,15 +703,29 @@ function rarityDelta(r: Rarity | undefined | null): number {
  */
 function makeRarityRecomputer(): (s: IdentitySuggestion, ev: SuggestionEvidence) => IdentitySuggestion | null {
   const mentionsOf = makeMentionCounter() // ELIGIBLE mentions (ADV48-1)
-  const bearersCache = new Map<'person' | 'project', Map<string, number>>()
-  const bearersFor = (kind: 'person' | 'project'): Map<string, number> => {
-    let hit = bearersCache.get(kind)
+  const bearersCache = new Map<'person' | 'project', { bearers: Map<string, number>; failClosed: boolean }>()
+  // ADV50-2 (round-52) — the bearer corpus lookup must NOT swallow a query failure
+  // into an EMPTY map. An empty map yields bearerCount 0, which for a long token makes
+  // pairRarity classify the pair RARE (+0.05) WITHOUT consulting the mention counter,
+  // RAISING persisted confidence + authorizing display/accept precisely during a DB
+  // fault (the ADV49-3 hole, on the BEARER input). contacts/projects are core tables
+  // that ALWAYS exist (unlike the graph tables that safeQueryAll deliberately treats
+  // as empty pre-ingest), so a throw here is a genuine fault: catch-and-FLAG it so the
+  // recompute fails closed (suppress at surfacing, reject at accept), never silently 0.
+  const bearersFor = (kind: 'person' | 'project'): { bearers: Map<string, number>; failClosed: boolean } => {
+    const hit = bearersCache.get(kind)
     if (hit) return hit
     const table = kind === 'person' ? 'contacts' : 'projects'
-    const rows = safeQueryAll<{ name: string }>(`SELECT name FROM ${table}`)
-    hit = buildTokenBearers(rows)
-    bearersCache.set(kind, hit)
-    return hit
+    let result: { bearers: Map<string, number>; failClosed: boolean }
+    try {
+      const rows = queryAll<{ name: string }>(`SELECT name FROM ${table}`)
+      result = { bearers: buildTokenBearers(rows), failClosed: false }
+    } catch (e) {
+      console.error(`[identity-discovery] bearer corpus lookup (${table}) failed — failing closed:`, e)
+      result = { bearers: new Map<string, number>(), failClosed: true }
+    }
+    bearersCache.set(kind, result)
+    return result
   }
 
   return (s: IdentitySuggestion, ev: SuggestionEvidence): IdentitySuggestion | null => {
@@ -713,10 +734,12 @@ function makeRarityRecomputer(): (s: IdentitySuggestion, ev: SuggestionEvidence)
       const loserName = ev.loserName ?? s.candidate_name ?? ''
       if (!keeperName || !loserName) return s // can't recompute ⇒ leave as-is
 
-      const newRar = pairRarity(keeperName, loserName, bearersFor(s.kind), mentionsOf)
-      // ADV49-3 (round-51) — the rarity mention count could not be verified. Do NOT
-      // recompute confidence upward from a bare 0; SUPPRESS the suggestion (dropped
-      // at surfacing, and rejected at accept via isSuggestionEligibleForAccept).
+      const bf = bearersFor(s.kind)
+      const newRar = pairRarity(keeperName, loserName, bf.bearers, mentionsOf, bf.failClosed)
+      // ADV49-3 (round-51) / ADV50-2 (round-52) — the rarity could not be verified
+      // because the mention count OR the bearer corpus lookup failed. Do NOT recompute
+      // confidence upward from an untrustworthy 0; SUPPRESS the suggestion (dropped at
+      // surfacing, and rejected at accept via isSuggestionEligibleForAccept).
       if (newRar.failClosed) return null
       const oldRar = (ev.rarity as Rarity | undefined) ?? undefined
       const oldDelta = rarityDelta(oldRar)

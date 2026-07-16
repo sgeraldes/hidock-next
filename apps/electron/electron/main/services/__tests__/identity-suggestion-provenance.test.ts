@@ -591,3 +591,65 @@ describe('revalidateSuggestionsForSurfacing — rarity recompute (ADV48-1 read p
     expect(isSuggestionEligibleForAccept(getIdentitySuggestionById(id)!)).toBe(false)
   })
 })
+
+// --- ADV50-2 (round-52): rarity BEARER-corpus lookup fails closed ----------------
+
+/**
+ * The rarity recompute consults TWO corpora: the transcript-mention count (ADV49-3,
+ * already fail-closed) AND the BEARER corpus (SELECT name FROM contacts/projects).
+ * The bearer lookup used to swallow a query failure into an EMPTY map ⇒ bearerCount 0
+ * ⇒ for a LONG token pairRarity classifies the pair RARE (+0.05) WITHOUT consulting
+ * the mention counter, RAISING confidence during a DB fault. The bearer lookup must
+ * fail CLOSED like the mention lookup: EITHER corpus unverifiable ⇒ suppress at
+ * surfacing + refuse at accept, confidence NOT raised.
+ *
+ * Distinct LONG first tokens ('yaravid'/'yaravon', >4 chars, 1 bearer each) drive the
+ * RARE early-return branch that never consults the mention counter — exactly where the
+ * bug lived. An exact-email match would otherwise floor the composite so the pair
+ * survives, isolating the fail-closed SUPPRESSION under test.
+ */
+function insertLongTokenRareSuggestion(): string {
+  contact('c-yv', 'Yaravid Ortega', {})
+  contact('c-yv2', 'Yaravon Ortega', {})
+  const id = randomUUID()
+  const ev = {
+    signals: { name: 0.7, email: 1, role: 0, graph: 0 },
+    composite: 0.96, // email-exact floored — survives absent the fail-closed drop
+    sharedTopics: [],
+    sharedMeetings: 0,
+    keeperId: 'c-yv',
+    keeperName: 'Yaravid Ortega',
+    loserId: 'c-yv2',
+    loserName: 'Yaravon Ortega',
+    emailMatch: 'exact',
+  }
+  run(
+    `INSERT INTO identity_suggestions (id, kind, candidate_name, target_id, confidence, evidence, status, created_at)
+     VALUES (?, 'person', 'Yaravon Ortega', 'c-yv', 0.96, ?, 'pending', '2026-01-01T00:00:00Z')`,
+    [id, JSON.stringify(ev)]
+  )
+  return id
+}
+
+describe('rarity BEARER corpus — fail-closed (ADV50-2)', () => {
+  it('both corpora healthy ⇒ the suggestion surfaces and is acceptable', () => {
+    const id = insertLongTokenRareSuggestion()
+    const rows = surfaced()
+    expect(rows).toHaveLength(1)
+    expect(isSuggestionEligibleForAccept(getIdentitySuggestionById(id)!)).toBe(true)
+  })
+
+  it('SUPPRESSES at surfacing and REFUSES accept when the bearer corpus lookup fails', () => {
+    const id = insertLongTokenRareSuggestion()
+    // Break ONLY the bearer corpus query (contacts) — the mention lookup stays healthy,
+    // isolating the BEARER fail-closed path (a bare-0 bearerCount must NOT classify the
+    // long-token pair rare + raise confidence during a DB fault).
+    run('PRAGMA foreign_keys = OFF')
+    run('DROP TABLE contacts')
+
+    // Surfacing suppresses (confidence not raised from an unverifiable corpus).
+    expect(surfaced()).toHaveLength(0)
+    // Accept refuses the merge (not authorized while the corpus can't be verified).
+    expect(isSuggestionEligibleForAccept(getIdentitySuggestionById(id)!)).toBe(false)
+  })
+})
