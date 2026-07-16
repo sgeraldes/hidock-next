@@ -41,9 +41,12 @@ interface AliasRow {
 }
 
 function contact(id: string, name: string): void {
+  // round-39: source='user' ⇒ VISIBLE structural contact (a real owner contact). The
+  // entity-reference-WRITE gates (assignSpeaker etc.) bind only visible contacts; a
+  // bare NULL-source/no-membership contact is suppressed and unreachable via any picker.
   run(
-    `INSERT INTO contacts (id, name, type, first_seen_at, last_seen_at, meeting_count)
-     VALUES (?, ?, 'unknown', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 0)`,
+    `INSERT INTO contacts (id, name, type, first_seen_at, last_seen_at, meeting_count, source)
+     VALUES (?, ?, 'unknown', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 0, 'user')`,
     [id, name]
   )
 }
