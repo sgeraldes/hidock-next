@@ -221,7 +221,15 @@ describe('Context Graph merge', () => {
     const store = getKnowledgeGraphStore()
     const loser = store.upsertNode({ type: 'person', label: 'Robert', key: 'contact:c-b', props: { contactId: 'c-b' }, now: '2026-01-01' })
     const m = store.upsertNode({ type: 'meeting', label: 'Extra', props: { meetingId: 'mx', date: '2026-01-05' }, now: '2026-01-01' })
-    store.upsertEdge({ sourceId: loser, targetId: m, type: 'ATTENDED', now: '2026-01-01' })
+    const eLoser = store.upsertEdge({ sourceId: loser, targetId: m, type: 'ATTENDED', now: '2026-01-01' })
+    // ADV32-2 (round-34): mergeGraphPreview + mergeGraphNodes now share a fail-closed
+    // eligibility gate that also requires the node be VISIBLE under exclusion (not just
+    // its contact). Real graph edges always carry provenance — attribute the loser's
+    // edge to the eligible seed recording so it stays node-visible on this non-owner path.
+    dbRun(
+      'INSERT OR IGNORE INTO graph_edge_sources (edge_id, recording_id, transcript_id, assertion_count, created_at) VALUES (?, ?, ?, 1, ?)',
+      [eLoser, 'rec-seed', 'tx-seed', '2026-01-01']
+    )
 
     const preview = mergeGraphPreview(keeper, loser)
     expect(preview.contactMerge).toBe(true)

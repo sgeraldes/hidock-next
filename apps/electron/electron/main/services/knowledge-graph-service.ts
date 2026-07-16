@@ -944,8 +944,43 @@ function projectNameIndex(): Map<string, string> {
   return m
 }
 
-/** Enrich a raw graph node into a context DTO node with click-through ids. */
-function nodeToDTO(n: GraphNode & { degree?: number }, projects: Map<string, string>): ContextGraphNode {
+/**
+ * ADV32-1 (round-34) — batch-resolve which person-node backing contactIds are
+ * VISIBLE on non-owner surfaces, so the SHARED {@link nodeToDTO} mapper can
+ * sanitize contactId for EVERY DTO reader (overview / neighborhood / lens /
+ * provenance / default-center / search / list) at a single choke-point, WITHOUT a
+ * per-node DB round-trip. A node can be graph-visible via an ELIGIBLE recording's
+ * edge while its BACKING contact is SUPPRESSED (its own source recording excluded /
+ * hard-purged, or a keying collision to an older suppressed same-name row) — edge
+ * suppression only proves the node has surviving EVIDENCE, not that its contact
+ * IDENTITY may be exposed. Routed through the shared FAIL-CLOSED entity-visibility
+ * boundary; a lookup failure ⇒ empty set ⇒ every contactId omitted.
+ */
+function visibleContactIdSet(nodes: Array<Pick<GraphNode, 'type' | 'props'>>): Set<string> {
+  const ids: string[] = []
+  for (const n of nodes) {
+    if (n.type !== 'person') continue
+    const props = parseProps(n.props)
+    if (typeof props.contactId === 'string' && props.contactId) ids.push(props.contactId)
+  }
+  if (ids.length === 0) return new Set<string>()
+  const { visible, failClosed } = filterVisibleEntityIds('contact', ids)
+  return failClosed ? new Set<string>() : visible
+}
+
+/**
+ * Enrich a raw graph node into a context DTO node with click-through ids.
+ * `visibleContactIds` is the batch-resolved allowlist of backing contactIds that
+ * may be exposed on this non-owner surface (see {@link visibleContactIdSet}): a
+ * person node whose contactId is NOT in the set has its contactId OMITTED
+ * (ADV32-1, fail-closed) so a suppressed legacy contact never leaks through ANY of
+ * the DTO readers that funnel through this shared mapper.
+ */
+function nodeToDTO(
+  n: GraphNode & { degree?: number },
+  projects: Map<string, string>,
+  visibleContactIds: Set<string>
+): ContextGraphNode {
   const props = parseProps(n.props)
   const dto: ContextGraphNode = {
     id: n.id,
@@ -953,7 +988,9 @@ function nodeToDTO(n: GraphNode & { degree?: number }, projects: Map<string, str
     label: n.label,
     degree: n.degree ?? 0,
   }
-  if (n.type === 'person' && typeof props.contactId === 'string') dto.contactId = props.contactId
+  if (n.type === 'person' && typeof props.contactId === 'string' && visibleContactIds.has(props.contactId)) {
+    dto.contactId = props.contactId
+  }
   if (n.type === 'meeting' && typeof props.meetingId === 'string') dto.meetingId = props.meetingId
   if (n.type === 'project') {
     const pid = projects.get((n.label || '').toLowerCase().trim())
@@ -964,7 +1001,8 @@ function nodeToDTO(n: GraphNode & { degree?: number }, projects: Map<string, str
 
 function toDTO(sub: SubGraph): ContextGraphData {
   const projects = projectNameIndex()
-  const nodes: ContextGraphNode[] = sub.nodes.map((n) => nodeToDTO(n, projects))
+  const visibleContactIds = visibleContactIdSet(sub.nodes)
+  const nodes: ContextGraphNode[] = sub.nodes.map((n) => nodeToDTO(n, projects, visibleContactIds))
   const edges = sub.edges.map((e) => ({
     id: e.id,
     source: e.source_id,
@@ -1667,8 +1705,9 @@ export interface ProvenanceDTO {
 
 function toLensDTO(lens: LensGraph): ContextLensData {
   const projects = projectNameIndex()
+  const visibleContactIds = visibleContactIdSet(lens.nodes)
   const nodes: ContextLensNode[] = lens.nodes.map((n) => ({
-    ...nodeToDTO(n, projects),
+    ...nodeToDTO(n, projects, visibleContactIds),
     stratum: n.stratum,
     dateMs: n.dateMs,
   }))
@@ -1738,7 +1777,9 @@ export function pickLensCenter(ownerContactId?: string | null): LensCenter | nul
   // ADV23-2 — non-owner surface: legacy zero-provenance nodes are excluded-only.
   if (!isNodeVisibleUnderExclusion(store, node.id, getGroundingExclusionSet(true))) return null
   const projects = projectNameIndex()
-  const dto = nodeToDTO({ ...node, degree: 0 }, projects)
+  // ADV32-1 (round-34) — sanitize contactId through the shared fail-closed set so a
+  // default-centered node keyed to a suppressed contact never exposes its id.
+  const dto = nodeToDTO({ ...node, degree: 0 }, projects, visibleContactIdSet([node]))
   return { id: dto.id, type: dto.type, label: dto.label, contactId: dto.contactId }
 }
 
@@ -1767,6 +1808,15 @@ export function queryProvenance(entityId: string): ProvenanceDTO {
 
   const prov: Provenance = provenance(store, nodeId)
   const projects = projectNameIndex()
+  // ADV32-1 (round-34) — batch-resolve the visible backing contactIds ONCE for
+  // every entity this provenance may map, so mapEntity's shared nodeToDTO sanitizes
+  // contactId fail-closed (a person keyed to a suppressed contact never leaks its
+  // id here) without a per-entity visibility lookup.
+  const provFullNodes = [prov.node, ...prov.meetings, ...prov.people, ...prov.projects, ...prov.actions]
+    .filter((e): e is NonNullable<typeof e> => !!e)
+    .map((e) => store.getNode(e.id))
+    .filter((n): n is NonNullable<typeof n> => !!n)
+  const visibleContacts = visibleContactIdSet(provFullNodes)
   const mapEntity = (e: {
     id: string
     type: string
@@ -1775,7 +1825,7 @@ export function queryProvenance(entityId: string): ProvenanceDTO {
   }): LensCenter & { dateMs: number | null } => {
     // Reuse click-through enrichment by looking up the full node for ids.
     const full = store.getNode(e.id)
-    const base = full ? nodeToDTO({ ...full, degree: 0 }, projects) : { id: e.id, type: e.type, label: e.label, degree: 0 }
+    const base = full ? nodeToDTO({ ...full, degree: 0 }, projects, visibleContacts) : { id: e.id, type: e.type, label: e.label, degree: 0 }
     return {
       id: base.id,
       type: base.type,
@@ -2025,10 +2075,13 @@ export function getNodeDetail(entityId: string): NodeDetailDTO {
   if (!isNodeVisibleUnderExclusion(store, nodeId, exclusion)) return empty
 
   const projects = projectNameIndex()
-  const dto = nodeToDTO({ ...node, degree: 0 }, projects)
-  // ADV30-2 (round-32): nodeToDTO copies contactId straight off the node props. The
-  // inspector is a NON-OWNER surface — re-derive it below under the visibility gate
-  // and clear the raw prop-derived value so a suppressed contact never leaks here.
+  // ADV32-1 (round-34): the shared nodeToDTO now sanitizes contactId through the
+  // fail-closed visibleContactIdSet, so the DTO no longer carries a suppressed id.
+  const dto = nodeToDTO({ ...node, degree: 0 }, projects, visibleContactIdSet([node]))
+  // ADV30-2 (round-32): defence-in-depth — the inspector re-derives contactId below
+  // under isContactVisible (which also covers the `contact:<id>` node key, not just
+  // props.contactId), so clear any prop-derived value first. Harmless when the
+  // shared mapper already omitted it.
   if (dto.contactId) dto.contactId = undefined
   const props = parseProps(node.props)
   const pronouns = typeof props.pronouns === 'string' && props.pronouns ? props.pronouns : null
@@ -2309,6 +2362,83 @@ export interface MergePreviewDTO {
   contactMerge: boolean
   /** Contact link counts for a contact-merge, so the UI can gate a heavy merge. */
   contactImpact?: { keeper: number; loser: number }
+  /**
+   * ADV32-2 (round-34) — true when the preview is REFUSED because a node is not
+   * visible under exclusion or its backing contact is suppressed on this non-owner
+   * surface (mirrors {@link mergeGraphNodes}' refusal). No labels/counts are
+   * exposed when blocked, and the commit will refuse too.
+   */
+  blocked?: boolean
+}
+
+/**
+ * ADV31-2 / ADV32-2 (round-34) — merge eligibility for a node on a NON-OWNER
+ * surface, SHARED by {@link mergeGraphPreview} and {@link mergeGraphNodes} so the
+ * preview and the commit AGREE. A node is merge-eligible only when it is VISIBLE
+ * under exclusion AND (when contact-backed) its BACKING contact is visible.
+ * Fail-closed: a missing node, an excluded-only node, a suppressed backing contact,
+ * or a visibility-lookup failure ⇒ NOT eligible.
+ */
+function isNodeMergeEligible(
+  store: KnowledgeGraphStore,
+  nodeId: string,
+  node: GraphNode | undefined,
+  exclusion: GroundingExclusion
+): boolean {
+  if (!node) return false
+  if (exclusion.failClosed) return false
+  if (!isNodeVisibleUnderExclusion(store, nodeId, exclusion)) return false
+  const contact = contactIdOfNode(node)
+  if (contact && !isContactVisible(contact)) return false
+  return true
+}
+
+/**
+ * ADV32-2 (round-34) — the merge blast radius computed over ONLY the edges that
+ * SURVIVE provenance suppression, so a non-owner preview's per-node edge counts,
+ * shared count and resulting count never include personal / deleted / value-excluded
+ * or legacy zero-provenance edges. Mirrors the package's mergeBlastRadius counting
+ * (neighbor-relative keys; a↔b relations collapse to self-loops and are dropped) but
+ * filters suppressed edges FIRST. Used only when exclusions are active; the healthy
+ * fast path keeps calling the package primitive.
+ */
+function exclusionFilteredBlastRadius(
+  store: KnowledgeGraphStore,
+  keeperId: string,
+  loserId: string,
+  exclusion: GroundingExclusion
+): Pick<MergePreviewDTO, 'a' | 'b' | 'shared' | 'resulting'> {
+  const keeper = store.getNode(keeperId)
+  const loser = store.getNode(loserId)
+  const survivingKeys = (nodeId: string): Set<string> => {
+    const rows = store.db.queryAll<{ id: string; source_id: string; target_id: string; type: string }>(
+      'SELECT id, source_id, target_id, type FROM graph_edges WHERE source_id = ? OR target_id = ?',
+      [nodeId, nodeId]
+    )
+    const suppressed =
+      rows.length === 0 ? new Set<string>() : provenanceSuppressedEdgeIds(store, rows.map((r) => r.id), exclusion)
+    const keys = new Set<string>()
+    for (const r of rows) {
+      if (suppressed.has(r.id)) continue
+      if (r.source_id === nodeId) keys.add(`out:${r.type}:${r.target_id}`)
+      if (r.target_id === nodeId) keys.add(`in:${r.type}:${r.source_id}`)
+    }
+    return keys
+  }
+  const aKeys = keeper ? survivingKeys(keeperId) : new Set<string>()
+  const bKeys = loser ? survivingKeys(loserId) : new Set<string>()
+  let shared = 0
+  const union = new Set<string>(aKeys)
+  for (const k of bKeys) {
+    if (aKeys.has(k)) shared++
+    union.add(k)
+  }
+  let selfLoops = 0
+  for (const k of union) if (k.endsWith(`:${keeperId}`) || k.endsWith(`:${loserId}`)) selfLoops++
+  const resulting = Math.max(0, union.size - selfLoops)
+  const toBlast = (n: GraphNode | undefined, keys: Set<string>) =>
+    n ? { id: n.id, label: n.label, type: n.type, edges: keys.size } : null
+  return { a: toBlast(keeper, aKeys), b: toBlast(loser, bKeys), shared, resulting }
 }
 
 /** Preview merging two nodes: the blast radius (what collapses) BEFORE committing. */
@@ -2319,22 +2449,34 @@ export function mergeGraphPreview(keeperEntityId: string, loserEntityId: string)
   if (!keeperId || !loserId) {
     return { a: null, b: null, shared: 0, resulting: 0, contactMerge: false }
   }
-  const blast = mergeBlastRadius(store, keeperId, loserId)
   const keeperNode = store.getNode(keeperId)
   const loserNode = store.getNode(loserId)
+  // ADV32-2 (round-34): the preview is a NON-OWNER surface and must MATCH the
+  // commit. mergeBlastRadius runs over the RAW graph, so previously the labels +
+  // per-node edge counts + shared/resulting counts included EXCLUDED and legacy
+  // zero-provenance edges, and an excluded-only / suppressed-contact node was still
+  // previewable even though mergeGraphNodes REFUSES it. Refuse fail-closed here
+  // under the SAME shared eligibility check the commit uses (node visible under
+  // exclusion AND backing contact visible) so no raw label/count for a blocked
+  // merge reaches the display.
+  const exclusion = getGroundingExclusionSet(true)
+  if (
+    !isNodeMergeEligible(store, keeperId, keeperNode, exclusion) ||
+    !isNodeMergeEligible(store, loserId, loserNode, exclusion)
+  ) {
+    return { a: null, b: null, shared: 0, resulting: 0, contactMerge: false, blocked: true }
+  }
+  // Both nodes + backing contacts are visible — compute the blast radius from
+  // SURVIVING edges only so excluded relations don't inflate the counts (the
+  // package primitive is safe on the healthy fast path with no active exclusions).
+  const blast = exclusionIsNoop(exclusion)
+    ? mergeBlastRadius(store, keeperId, loserId)
+    : exclusionFilteredBlastRadius(store, keeperId, loserId, exclusion)
   const keeperContact = keeperNode ? contactIdOfNode(keeperNode) : null
   const loserContact = loserNode ? contactIdOfNode(loserNode) : null
-  // ADV31-2 (round-33): the preview must MATCH the commit. mergeGraphNodes now
-  // REFUSES a merge when either backing contact is suppressed, so only present this
-  // as an (undoable) contact merge when BOTH backing contacts are VISIBLE. Otherwise
-  // do NOT surface contactMerge / contactImpact, which would expose a suppressed
-  // contact's link counts on a non-owner surface. Fail-closed (isContactVisible).
-  const contactMerge =
-    !!keeperContact &&
-    !!loserContact &&
-    keeperContact !== loserContact &&
-    isContactVisible(keeperContact) &&
-    isContactVisible(loserContact)
+  // Both backing contacts are already proven VISIBLE by isNodeMergeEligible above,
+  // so a distinct pair is a genuine (undoable) contact merge.
+  const contactMerge = !!keeperContact && !!loserContact && keeperContact !== loserContact
   let contactImpact: { keeper: number; loser: number } | undefined
   if (contactMerge && keeperContact && loserContact) {
     try {
@@ -2368,25 +2510,28 @@ export function mergeGraphNodes(keeperEntityId: string, loserEntityId: string): 
 
   const keeperNode = store.getNode(keeperId)
   const loserNode = store.getNode(loserId)
+
+  // ADV31-2 (round-33) + ADV32-2 (round-34): REFUSE the ENTIRE merge fail-closed
+  // whenever EITHER node is not visible under exclusion OR its backing contact is
+  // SUPPRESSED — the SAME shared eligibility check mergeGraphPreview enforces, so
+  // preview and commit AGREE. The round-32 code merely skipped the journaled
+  // mergeContacts but still FELL THROUGH to an unconditional graph-only mergeNodes —
+  // which deletes the loser node and folds ALL its edges (incl. EXCLUDED provenance)
+  // into the keeper. From a non-owner surface that destructively mutates
+  // suppressed-contact-backed / excluded-only graph state, and if the excluded
+  // recording is later restored its facts reappear under the WRONG identity.
+  // Fail-closed: a missing/excluded-only node or a visibility-lookup failure ⇒ no
+  // node or edge changes.
+  const exclusion = getGroundingExclusionSet(true)
+  if (!isNodeMergeEligible(store, keeperId, keeperNode, exclusion)) {
+    throw new Error('Node not available')
+  }
+  if (!isNodeMergeEligible(store, loserId, loserNode, exclusion)) {
+    throw new Error('Node not available')
+  }
+
   const keeperContact = keeperNode ? contactIdOfNode(keeperNode) : null
   const loserContact = loserNode ? contactIdOfNode(loserNode) : null
-
-  // ADV31-2 (round-33): REFUSE the ENTIRE merge fail-closed whenever EITHER
-  // contact-backed node has a SUPPRESSED backing contact. The round-32 code merely
-  // skipped the journaled mergeContacts but still FELL THROUGH to an unconditional
-  // graph-only mergeNodes — which deletes the loser node and folds ALL its edges
-  // (incl. EXCLUDED provenance) into the keeper. From a non-owner surface that
-  // destructively mutates suppressed-contact-backed graph state, and if the excluded
-  // recording is later restored its facts reappear under the WRONG identity. Only a
-  // node that is NOT contact-backed (keeper/loserContact null) imposes no such
-  // constraint. Fail-closed: isContactVisible treats a lookup error as not-visible,
-  // so no node or edge changes on a visibility-lookup failure either.
-  if (keeperContact && !isContactVisible(keeperContact)) {
-    throw new Error('Contact not available')
-  }
-  if (loserContact && !isContactVisible(loserContact)) {
-    throw new Error('Contact not available')
-  }
 
   if (keeperContact && loserContact && keeperContact !== loserContact) {
     // Both backing contacts are VISIBLE (checked above) — real, journaled contacts

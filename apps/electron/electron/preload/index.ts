@@ -241,6 +241,8 @@ interface MergePreviewDTO {
   resulting: number
   contactMerge: boolean
   contactImpact?: { keeper: number; loser: number }
+  /** ADV32-2 (round-34) — the preview was refused (node/contact not visible). */
+  blocked?: boolean
 }
 
 /** Project issue / risk / note (v29). */
