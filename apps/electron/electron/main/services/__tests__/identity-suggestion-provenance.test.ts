@@ -433,3 +433,142 @@ describe('transcript-created suggestions — recording-allowlist revalidation (A
     expect(isSuggestionEligibleForAccept(getIdentitySuggestionById(id)!)).toBe(false)
   })
 })
+
+// --- ADV48-1 (round-50): rarity mention COUNT eligibility + recompute -----------
+
+/**
+ * The rarity scorer's transcript-mention COUNT (the `normal → common` promotion
+ * that docks −0.15) must route recording provenance through the shared allowlist.
+ * A name common ONLY via personal/soft-deleted/value-excluded/orphan(legacy)
+ * transcripts must NOT be tagged 'common'; a lookup failure fails closed to 0
+ * mentions. Persisted suggestions whose 'common' rarity derived from now-excluded
+ * transcripts are recomputed at surfacing + accept.
+ */
+
+// A transcript FK-references its recording, so a hard-purge cascades the
+// transcript too — an orphan (recording-gone) transcript can't exist. The retained
+// states that DO keep the transcript around are personal / soft-deleted /
+// value-excluded; those are what the mention count must exclude.
+function mention(
+  recId: string,
+  text: string,
+  opts: { personal?: boolean; deleted?: boolean; valueExcluded?: boolean } = {}
+): void {
+  seedRecording(recId)
+  run(`INSERT INTO transcripts (id, recording_id, full_text) VALUES (?, ?, ?)`, [randomUUID(), recId, text])
+  if (opts.personal) run('UPDATE recordings SET personal = 1 WHERE id = ?', [recId])
+  if (opts.deleted) run('UPDATE recordings SET deleted_at = ? WHERE id = ?', ['2026-06-01T00:00:00Z', recId])
+  if (opts.valueExcluded) valueExclude(recId)
+}
+
+/** Seed `n` transcripts mentioning `text`, all with the same exclusion opts. */
+function seedMentions(prefix: string, text: string, n: number, opts: Parameters<typeof mention>[2] = {}): void {
+  for (let i = 0; i < n; i++) mention(`${prefix}-${i}`, text, opts)
+}
+
+// Two contacts discovery pairs via a SHARED EXACT EMAIL (composite floored to 0.96,
+// so the pair survives regardless of the rarity delta — isolating the rarity LABEL
+// under test). Distinct SHORT first tokens ('ana'/'ane') with 1 bearer each keep
+// bearers classified 'normal' so the transcript-mention COUNT drives rarity.
+function seedEmailPair(): void {
+  contact('c-al', 'Ana Lima', {})
+  run(`UPDATE contacts SET email = 'a.lima@dfx5.com', meeting_count = 5 WHERE id = 'c-al'`)
+  contact('c-al2', 'Ane Lima', {})
+  run(`UPDATE contacts SET email = 'a.lima@dfx5.com', meeting_count = 1 WHERE id = 'c-al2'`)
+}
+function paired(): any {
+  const rows = getIdentitySuggestions('pending')
+  return rows.length ? JSON.parse(rows[0].evidence!) : null
+}
+
+describe('identity-discovery rarity mention COUNT — recording eligibility (ADV48-1 write path)', () => {
+  it('tags rarity:common when the name is common across ELIGIBLE transcripts', () => {
+    seedEmailPair()
+    seedMentions('t-ok', 'Recap with Ana Lima today', 42) // 42 eligible ≥ COMMON_MENTIONS(40)
+    const res = discoverContactMerges()
+    expect(res.suggestionsCreated).toBe(1)
+    expect(paired().rarity).toBe('common')
+  })
+
+  it('does NOT tag common when the name is common ONLY via EXCLUDED transcripts', () => {
+    seedEmailPair()
+    // 45 excluded mentions (mixed states) + 3 eligible ⇒ eligible count 3 < 40.
+    seedMentions('t-personal', 'Sync with Ana Lima', 15, { personal: true })
+    seedMentions('t-deleted', 'Sync with Ana Lima', 15, { deleted: true })
+    seedMentions('t-value', 'Sync with Ana Lima', 15, { valueExcluded: true })
+    seedMentions('t-live', 'Sync with Ana Lima', 3)
+    const res = discoverContactMerges()
+    expect(res.suggestionsCreated).toBe(1)
+    expect(paired().rarity).not.toBe('common') // only 3 eligible ⇒ normal
+  })
+
+  it('fails closed (0 mentions ⇒ not common) when the eligibility lookup throws', () => {
+    seedEmailPair()
+    seedMentions('t-ok', 'Recap with Ana Lima today', 42) // would be common if counted raw
+    run('PRAGMA foreign_keys = OFF')
+    run('DROP TABLE knowledge_captures') // breaks the positive allowlist subquery
+    const res = discoverContactMerges()
+    expect(res.suggestionsCreated).toBe(1)
+    expect(paired().rarity).not.toBe('common') // fail-closed ⇒ 0 eligible mentions
+  })
+})
+
+/**
+ * Persisted suggestion tagged 'common' with the −0.15 baked into its composite
+ * (i.e. a name-only 0.70 stored as 0.55). Keeper/loser bear SHORT distinct tokens
+ * with 1 bearer each so bearers classify 'normal' — only the mention count can make
+ * it 'common'.
+ */
+function insertCommonRaritySuggestion(): string {
+  contact('c-al', 'Ana Lima', {})
+  contact('c-al2', 'Ane Lima', {})
+  const id = randomUUID()
+  const ev = {
+    signals: { name: 0.7, email: 0, role: 0, graph: 0 },
+    composite: 0.55, // 0.70 name − 0.15 common delta
+    sharedTopics: [],
+    sharedMeetings: 0,
+    keeperId: 'c-al',
+    keeperName: 'Ana Lima',
+    loserId: 'c-al2',
+    loserName: 'Ane Lima',
+    emailMatch: 'none',
+    rarity: 'common',
+  }
+  run(
+    `INSERT INTO identity_suggestions (id, kind, candidate_name, target_id, confidence, evidence, status, created_at)
+     VALUES (?, 'person', 'Ane Lima', 'c-al', 0.55, ?, 'pending', '2026-01-01T00:00:00Z')`,
+    [id, JSON.stringify(ev)]
+  )
+  return id
+}
+
+describe('revalidateSuggestionsForSurfacing — rarity recompute (ADV48-1 read path)', () => {
+  it('corrects a persisted common rarity to normal when its mentions are now all EXCLUDED', () => {
+    const id = insertCommonRaritySuggestion()
+    // 42 EXCLUDED mentions — an unfiltered count would keep it 'common'.
+    seedMentions('t-personal', 'Talk with Ana Lima', 21, { personal: true })
+    seedMentions('t-deleted', 'Talk with Ana Lima', 21, { deleted: true })
+
+    const rows = surfaced()
+    expect(rows).toHaveLength(1)
+    const ev = JSON.parse(rows[0].evidence!)
+    expect(ev.rarity).toBeUndefined() // demoted from 'common'
+    // −0.15 penalty removed ⇒ composite raised 0.55 → 0.70.
+    expect(Number(rows[0].confidence)).toBeCloseTo(0.7, 2)
+
+    // Accept revalidates through the same path ⇒ eligible (clears the bar).
+    expect(isSuggestionEligibleForAccept(getIdentitySuggestionById(id)!)).toBe(true)
+  })
+
+  it('keeps common when the name is genuinely common across ELIGIBLE transcripts', () => {
+    insertCommonRaritySuggestion()
+    seedMentions('t-live', 'Talk with Ana Lima', 42) // eligible ≥ 40
+
+    const rows = surfaced()
+    expect(rows).toHaveLength(1)
+    const ev = JSON.parse(rows[0].evidence!)
+    expect(ev.rarity).toBe('common') // still common ⇒ penalty preserved
+    expect(Number(rows[0].confidence)).toBeCloseTo(0.55, 2)
+  })
+})

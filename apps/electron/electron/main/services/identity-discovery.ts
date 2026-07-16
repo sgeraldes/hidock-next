@@ -39,7 +39,7 @@ import {
 import type { Contact, Project, IdentitySuggestion, MembershipRow } from './database'
 import { filterEligibleRecordingIds } from './recording-eligibility'
 import { normalizeName, accentFoldedKey, fuzzyNameScore, detectAmbiguousName } from './entity-normalize'
-import { nameRarity, type Rarity } from './name-rarity'
+import { nameRarity, COMMON_DELTA, RARE_DELTA, type Rarity } from './name-rarity'
 
 // ---------------------------------------------------------------------------
 // Weights & thresholds (documented — the single source of truth for tuning)
@@ -186,7 +186,22 @@ function likeEscape(s: string): string {
   return s.replace(/[\\%_]/g, (m) => '\\' + m)
 }
 
-/** Memoized transcript mention count for a name (0 when transcripts are absent). */
+/**
+ * Memoized ELIGIBLE transcript mention count for a name (0 when transcripts are
+ * absent).
+ *
+ * ADV48-1 (round-50) — the rarity scorer must count a name's transcript mentions
+ * ONLY over transcripts whose source recording is eligible to surface. A raw
+ * COUNT(*) over `transcripts` used to fold personal / soft-deleted / value-
+ * excluded / hard-purge-orphan / legacy transcripts into a discovery suggestion's
+ * confidence (via the `common` mention promotion, which docks −0.15) AND leaked a
+ * coarse count-based inference about excluded content ("Common name"). Instead we
+ * fetch the matching transcripts' RECORDING IDs and route them through the shared
+ * fail-closed recording allowlist ({@link filterEligibleRecordingIds}), counting
+ * only positively-eligible rows. A hard-purge orphan (recording row gone) or an
+ * excluded recording is dropped by the positive allowlist; a lookup failure fails
+ * CLOSED to 0 (the conservative rarity — never let an unfiltered count through).
+ */
 function makeMentionCounter(): (name: string) => number {
   const cache = new Map<string, number>()
   return (name: string): number => {
@@ -194,11 +209,21 @@ function makeMentionCounter(): (name: string) => number {
     if (!key) return 0
     const hit = cache.get(key)
     if (hit !== undefined) return hit
-    const rows = safeQueryAll<{ n: number }>(
-      `SELECT COUNT(*) AS n FROM transcripts WHERE full_text LIKE ? ESCAPE '\\'`,
+    const rows = safeQueryAll<{ recording_id: string | null }>(
+      `SELECT recording_id FROM transcripts WHERE full_text LIKE ? ESCAPE '\\'`,
       [`%${likeEscape(name.trim())}%`]
     )
-    const n = rows[0]?.n ?? 0
+    let n = 0
+    if (rows.length > 0) {
+      const recIds = rows.map((r) => r.recording_id).filter((id): id is string => !!id)
+      const { eligible, failClosed } = filterEligibleRecordingIds(recIds)
+      // failClosed ⇒ leave n = 0 (fail-closed conservative count).
+      if (!failClosed) {
+        for (const r of rows) {
+          if (r.recording_id && eligible.has(r.recording_id)) n++
+        }
+      }
+    }
     cache.set(key, n)
     return n
   }
@@ -599,7 +624,79 @@ interface SuggestionEvidence {
   loserId?: string
   loserName?: string
   emailMatch?: EmailRelation
+  rarity?: Rarity
   [k: string]: unknown
+}
+
+/** The composite delta a persisted rarity label contributed at creation time. */
+function rarityDelta(r: Rarity | undefined | null): number {
+  if (r === 'common') return COMMON_DELTA
+  if (r === 'rare') return RARE_DELTA
+  return 0
+}
+
+/**
+ * ADV48-1 (round-50) — recompute a surfaced suggestion's rarity + confidence from
+ * the ELIGIBLE mention count, correcting a persisted `rarity` that was derived
+ * (partly) from now-excluded transcripts BEFORE it is displayed or accepted.
+ *
+ * The write path bakes the rarity delta (common −0.15 / rare +0.05) into the
+ * persisted composite and stores the `rarity` LABEL. That label + its delta may
+ * have come from a transcript-mention COUNT that included personal / soft-deleted
+ * / value-excluded / hard-purge-orphan / legacy transcripts (the pre-fix
+ * makeMentionCounter). Now that the counter is eligibility-filtered, re-derive
+ * rarity over the SAME corpus bearers + the ELIGIBLE mention count and re-key the
+ * composite: newComposite = oldComposite − oldRarityDelta + newRarityDelta. Because
+ * eligibility-filtering can only REMOVE mentions, rarity can only move toward
+ * rare/normal (delta upward) — so a survivor never drops below the bar here; the
+ * fix corrects an inflated "Common name" label + its confidence penalty.
+ *
+ * bearers (contacts/projects) are exclusion-independent, so a genuinely common
+ * name (≥3 bearers) stays 'common'. The email-exact floor is preserved.
+ * Fail-closed: any recompute error leaves the suggestion untouched (never raises
+ * confidence on an error, and the label stays as persisted).
+ */
+function makeRarityRecomputer(): (s: IdentitySuggestion, ev: SuggestionEvidence) => IdentitySuggestion {
+  const mentionsOf = makeMentionCounter() // ELIGIBLE mentions (ADV48-1)
+  const bearersCache = new Map<'person' | 'project', Map<string, number>>()
+  const bearersFor = (kind: 'person' | 'project'): Map<string, number> => {
+    let hit = bearersCache.get(kind)
+    if (hit) return hit
+    const table = kind === 'person' ? 'contacts' : 'projects'
+    const rows = safeQueryAll<{ name: string }>(`SELECT name FROM ${table}`)
+    hit = buildTokenBearers(rows)
+    bearersCache.set(kind, hit)
+    return hit
+  }
+
+  return (s: IdentitySuggestion, ev: SuggestionEvidence): IdentitySuggestion => {
+    try {
+      const keeperName = ev.keeperName ?? ''
+      const loserName = ev.loserName ?? s.candidate_name ?? ''
+      if (!keeperName || !loserName) return s // can't recompute ⇒ leave as-is
+
+      const newRar = pairRarity(keeperName, loserName, bearersFor(s.kind), mentionsOf)
+      const oldRar = (ev.rarity as Rarity | undefined) ?? undefined
+      const oldDelta = rarityDelta(oldRar)
+      const newDelta = newRar.delta
+
+      // No change to the rarity label AND no delta shift ⇒ nothing to correct.
+      if (newDelta === oldDelta && (oldRar ?? 'normal') === newRar.rarity) return s
+
+      const oldComposite = Number(ev.composite ?? s.confidence ?? 0)
+      let newComposite = clamp01(oldComposite - oldDelta + newDelta)
+      if (ev.emailMatch === 'exact') newComposite = Math.max(newComposite, EMAIL_EXACT_FLOOR)
+
+      const nextEv: SuggestionEvidence = { ...ev, composite: round2(newComposite) }
+      if (newRar.rarity !== 'normal') nextEv.rarity = newRar.rarity
+      else delete nextEv.rarity
+
+      return { ...s, confidence: round2(newComposite), evidence: JSON.stringify(nextEv) }
+    } catch (e) {
+      console.error('[identity-discovery] rarity recompute failed — leaving suggestion untouched:', e)
+      return s
+    }
+  }
 }
 
 /**
@@ -650,6 +747,9 @@ export function revalidateSuggestionsForSurfacing(suggestions: IdentitySuggestio
   // Fresh (uncached) suppressed neighbor loaders for this surfacing pass.
   const personNeighbors = makeNeighborLoader(PERSON_NEIGHBORS_SQL, 1)
   const projectNeighbors = makeNeighborLoader(PROJECT_NEIGHBORS_SQL, 2)
+  // ADV48-1 (round-50) — corrects a persisted `rarity`/confidence that was derived
+  // (partly) from now-excluded transcript mentions, before the survivor is displayed.
+  const recomputeRarity = makeRarityRecomputer()
 
   for (const s of suggestions) {
     if (s.status !== 'pending') {
@@ -691,7 +791,7 @@ export function revalidateSuggestionsForSurfacing(suggestions: IdentitySuggestio
         const { eligible, failClosed } = filterEligibleRecordingIds(src)
         if (failClosed) continue // fail-closed
         if (!src.some((id) => eligible.has(id))) continue // all sources excluded/purged ⇒ suppress
-        out.push(s)
+        out.push(recomputeRarity(s, ev))
         continue
       }
       // NULL provenance + no graph. A DISCOVERY straggler always carries a `signals`
@@ -699,7 +799,7 @@ export function revalidateSuggestionsForSurfacing(suggestions: IdentitySuggestio
       // the legacy/missing-provenance transcript suggestions fail-closed (ADV26-1);
       // let genuine discovery stragglers through (they have no recording attribution).
       if (ev.signals) {
-        out.push(s)
+        out.push(recomputeRarity(s, ev))
       }
       continue
     }
@@ -740,6 +840,10 @@ export function revalidateSuggestionsForSurfacing(suggestions: IdentitySuggestio
       ev.signals = { ...(ev.signals ?? {}), graph: round2(newGraph) }
       ev.composite = round2(newComposite)
       if (canRecompute) ev.sharedMeetings = mJac.shared.length
+      // Ensure the rarity recompute below can resolve both names (may have been
+      // filled from a DB lookup / candidate_name when absent from the blob).
+      if (!ev.keeperName && keeperName) ev.keeperName = keeperName
+      if (!ev.loserName && loserName) ev.loserName = loserName
 
       // ADV25-5 (round-26) — drop EVERY graph-bearing suggestion whose CONSERVATIVE
       // recomputed composite falls below the surfacing bar, regardless of whether a
@@ -751,7 +855,9 @@ export function revalidateSuggestionsForSurfacing(suggestions: IdentitySuggestio
       // still protects a legitimate email straggler.
       if (newComposite < SUGGEST_THRESHOLD) continue
 
-      out.push({ ...s, confidence: round2(newComposite), evidence: JSON.stringify(ev) })
+      // Pass the graph-updated evidence on the base row so a rarity no-op still
+      // preserves the sharedTopics redaction + graph-signal rewrite.
+      out.push(recomputeRarity({ ...s, confidence: round2(newComposite), evidence: JSON.stringify(ev) }, ev))
     } catch (e) {
       // Fail-closed: a recompute error suppresses this pending suggestion.
       console.error('[identity-discovery] suggestion revalidation failed — suppressing (fail-closed):', e)
