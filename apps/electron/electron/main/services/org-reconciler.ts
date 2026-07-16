@@ -27,8 +27,10 @@ import {
   getBucketResolution,
   healRecordingStatusFromTranscripts,
   isProjectDiscoveryRejected,
+  filterVisibleEntityIds,
   type RecordingPreassignment
 } from './database'
+import { filterEligibleRecordingIds } from './recording-eligibility'
 import { resolveContact, resolveProject } from './entity-resolver'
 import { isGenericSpeakerLabel, cleanRole } from './entity-normalize'
 import { canUpgrade, methodConfidence } from './signal-tiers'
@@ -339,8 +341,15 @@ export function upsertContactsFromMeetings(): { contacts: number; links: number 
           [meeting.id, contact.id]
         )
         if (!existingLink) {
+          // These people come straight from the meeting's calendar organizer/
+          // attendee data, so the membership is CALENDAR-authored (structural) —
+          // tag it 'calendar' so the non-owner identity boundary treats it as
+          // always-eligible, matching the sibling calendar path in database.ts
+          // (syncMeetingContacts). Omitting the source left it NULL = legacy =
+          // fail-closed suppressed, which would wrongly hide a real calendar
+          // contact and (round-30) mis-partition it in mergeDuplicateContacts.
           run(
-            `INSERT INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)`,
+            `INSERT INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES (?, ?, ?, 'calendar')`,
             [meeting.id, contact.id, person.role]
           )
           newLinks++
@@ -519,8 +528,22 @@ export function applyTranscriptEntities(opts: {
         // High confidence — link the existing contact, never create.
         contactId = res.id
         if (person.role) {
-          const existing = queryOne<{ role?: string }>(`SELECT role FROM contacts WHERE id = ?`, [contactId])
-          if (existing && !existing.role) run(`UPDATE contacts SET role = ? WHERE id = ?`, [person.role, contactId])
+          // ADV28-1 (round-30): transcript enrichment must NOT mutate a STRUCTURAL
+          // (calendar/user) or legacy contact's DISPLAYED fields. A transcript-derived
+          // role written onto a structural entity would show on People + graph detail
+          // and could never be revoked when the source recording is later excluded
+          // (personal/soft-deleted/value/purged) — the structural entity has no field
+          // provenance to reverse. So only fill an EMPTY role on a TRANSCRIPT-
+          // provenanced contact, whose whole visibility is already gated by the
+          // source recording via filterVisibleEntityIds. Structural/legacy contacts
+          // keep only calendar/manual data (fail-closed: no laundering).
+          const existing = queryOne<{ role?: string; source?: string | null }>(
+            `SELECT role, source FROM contacts WHERE id = ?`,
+            [contactId]
+          )
+          if (existing && !existing.role && existing.source === 'transcript') {
+            run(`UPDATE contacts SET role = ? WHERE id = ?`, [person.role, contactId])
+          }
         }
         // Remember an attendee-context split so re-analysis attributes it the same way
         // instead of re-running the bucket guess (only meaningful with a recording).
@@ -689,6 +712,23 @@ export function mergeDuplicateRecordings(): number {
   const dupGroups = [...groups.values()].filter((g) => g.length > 1)
   if (dupGroups.length === 0) return 0
 
+  // ADV28-3 (round-30) — NEVER merge recordings across an eligibility boundary.
+  // This reconcile REPARENTS a loser's knowledge_captures (and transcript / vector
+  // rows) onto the keeper. If an ELIGIBLE keeper absorbed a personal / soft-deleted /
+  // value-excluded sibling, that sibling's captures would be reparented onto the
+  // eligible keeper and pass filterEligibleCaptureIds again ⇒ formerly-excluded
+  // content reaches RAG / LLM / display / search (REOPENS the core F16/F17 promise).
+  // Fix: partition each duplicate group by the positive recording allowlist and
+  // collapse ONLY the ELIGIBLE members among themselves. Excluded recordings are
+  // left as separate rows, each still gated by its own recording's exclusion (their
+  // captures keep pointing at the excluded recording). This also side-steps a
+  // value-flip: reparenting a valuable capture from an excluded sibling could
+  // otherwise clear the keeper's value-exclusion. Fail-closed: an eligibility lookup
+  // failure ⇒ merge nothing this pass.
+  const { eligible: eligibleRecIds, failClosed: eligFailClosed } = filterEligibleRecordingIds(
+    dupGroups.flat().map((r) => r.id)
+  )
+
   // vector_embeddings is created lazily by the vector store and may not exist
   // yet; skip it rather than blowing up the whole transaction on a fresh DB.
   const existingTables = new Set(
@@ -699,8 +739,12 @@ export function mergeDuplicateRecordings(): number {
   let removedRows = 0
 
   runInTransaction(() => {
+    if (eligFailClosed) return
     for (const group of dupGroups) {
-      const rows = group.map((r) => ({ ...r, hasTranscript: withTranscript.has(r.id) }))
+      // Only the eligible members of the group may be collapsed together.
+      const eligibleGroup = group.filter((r) => eligibleRecIds.has(r.id))
+      if (eligibleGroup.length < 2) continue
+      const rows = eligibleGroup.map((r) => ({ ...r, hasTranscript: withTranscript.has(r.id) }))
       const keeper = pickKeeperRecording(rows)
       const losers = rows.filter((r) => r.id !== keeper.id)
       if (losers.length === 0) continue
@@ -840,8 +884,21 @@ export function mergeDuplicateContacts(): number {
     for (const group of groups.values()) {
       if (group.length < 2) continue
       const keeper = pickKeeperContact(group)
+      // ADV28-2 (round-30): partition the group by the visible-identity boundary so
+      // an AUTOMATIC startup dedup NEVER folds an excluded/suppressed transcript-only
+      // contact's role/company/notes/tags/memberships into a structurally-visible
+      // (calendar/manual/eligible-transcript) survivor — that would launder
+      // excluded-derived fields onto a visible entity. Merge only pairs on the SAME
+      // side of the visibility boundary: two visible contacts dedup as before; two
+      // suppressed contacts collapse (the survivor stays suppressed, no leak); a
+      // visible↔suppressed pair is left separate. Fail-closed: if visibility can't be
+      // determined, fold nothing this pass.
+      const { visible, failClosed } = filterVisibleEntityIds('contact', group.map((c) => c.id))
+      if (failClosed) continue
+      const keeperVisible = visible.has(keeper.id)
       for (const loser of group) {
         if (loser.id === keeper.id) continue
+        if (visible.has(loser.id) !== keeperVisible) continue // cross visibility boundary — never launder
         mergeContacts(keeper.id, loser.id)
         removed++
       }
