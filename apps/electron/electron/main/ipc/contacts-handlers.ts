@@ -143,10 +143,23 @@ export function registerContactsHandlers(): void {
         const name = parsed.data.name.trim()
         const existing = getContactByName(name)
         if (existing) {
-          return error('DUPLICATE_ENTRY', `A contact named ${existing.name} already exists`, {
-            existingId: existing.id,
-            existingName: existing.name
-          })
+          // ADV35-2 (round-37) — the raw duplicate candidate must NOT be disclosed
+          // if it is a transcript-origin contact suppressed on non-owner surfaces
+          // (its sole source recording is personal/soft-deleted/value-excluded/
+          // hard-purged, or a legacy NULL-provenance row with no eligible
+          // membership). Route it through the central visible-identity boundary:
+          //   • VISIBLE  ⇒ genuine duplicate — surface its id/name (existing UX).
+          //   • SUPPRESSED ⇒ treat as unavailable — do NOT reveal the hidden id/name;
+          //     fall through and mint a fresh manual contact instead.
+          //   • lookup FAILED (failClosed) ⇒ fail closed WITHOUT identity details —
+          //     allow the fresh create rather than leaking the candidate.
+          const { visible, failClosed } = filterVisibleEntityIds('contact', [existing.id])
+          if (!failClosed && visible.has(existing.id)) {
+            return error('DUPLICATE_ENTRY', `A contact named ${existing.name} already exists`, {
+              existingId: existing.id,
+              existingName: existing.name
+            })
+          }
         }
 
         const created = createContact({
