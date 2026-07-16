@@ -1371,6 +1371,166 @@ describe('Context Graph merge → hard-purge → unmerge (ADV57-1 / round-59)', 
   })
 })
 
+// ADV58-1 (round-60): the graph scrub trims only manifest.graph. The RELATIONAL scrub
+// strips a hard-purged recording from every open journal's loser_snapshot: when the loser
+// entity's IDENTITY provenance IS the purged recording it redacts the PII + invalidates the
+// undo (unmerge refuses, surface hides it); otherwise it redacts only R-sourced FIELD
+// values (contacts' role) and unmerge still restores the entity WITH its positive provenance.
+describe('merge_journal relational scrub on hard purge (ADV58-1 / round-60)', () => {
+  function hardPurge(recordingId: string) {
+    database.setGraphProvenanceCleanup((rid, opts) => removeRecordingProvenanceCore(rid, opts))
+    return database.deleteRecordingCascade(recordingId, { hard: true })
+  }
+  function rawJournal(journalId: string) {
+    return queryOne<{ loser_snapshot: string; repointed_manifest: string; undone_at: string | null }>(
+      'SELECT loser_snapshot, repointed_manifest, undone_at FROM merge_journal WHERE id = ?',
+      [journalId]
+    )!
+  }
+  function insertRecording(id: string) {
+    dbRun('INSERT OR IGNORE INTO recordings (id, filename, date_recorded) VALUES (?, ?, ?)', [id, `${id}.hda`, '2026-01-01'])
+  }
+
+  it('contacts: loser whose IDENTITY provenance is the purged recording → PII redacted, journal invalidated, unmerge refuses', () => {
+    dbRun(
+      `INSERT INTO contacts (id, name, email, type, role, company, notes, tags, first_seen_at, last_seen_at, meeting_count, created_at, source, source_recording_id)
+       VALUES ('c-keep','Alice Keeper',NULL,'unknown',NULL,NULL,NULL,NULL,'2026-01-01','2026-01-01',0,'2026-01-01','user',NULL)`,
+      []
+    )
+    dbRun(
+      `INSERT INTO contacts (id, name, email, type, role, company, notes, tags, first_seen_at, last_seen_at, meeting_count, created_at, source, source_recording_id)
+       VALUES ('c-lose','Bob Secret','bob@secret.example','external','CFO','SecretCorp','private notes',NULL,'2026-01-01','2026-01-01',0,'2026-01-01','transcript','rec-R')`,
+      []
+    )
+    insertRecording('rec-R')
+
+    database.mergeContacts('c-keep', 'c-lose')
+    const journalId = database.getMergeJournal('contact', 'c-keep')[0].id
+
+    expect(hardPurge('rec-R')?.mode).toBe('hard')
+
+    // (a) manifest-at-rest: the loser's PII is gone from the stored snapshot.
+    const raw = rawJournal(journalId)
+    for (const pii of ['Bob Secret', 'bob@secret.example', 'SecretCorp', 'private notes', 'CFO']) {
+      expect(raw.loser_snapshot).not.toContain(pii)
+    }
+    const snap = JSON.parse(raw.loser_snapshot)
+    expect(snap.name).toBeNull()
+    expect(snap.email).toBeNull()
+    expect(snap.company).toBeNull()
+    // (b) journal invalidated by the purge.
+    expect(JSON.parse(raw.repointed_manifest).invalidatedByPurge?.recordingId).toBe('rec-R')
+    expect(raw.undone_at).toBeNull()
+    // (c) unmerge refuses; no entity row is recreated.
+    expect(() => database.unmergeContacts(journalId)).toThrow(/permanently deleted|no longer/i)
+    expect(queryOne('SELECT 1 FROM contacts WHERE id = ?', ['c-lose'])).toBeFalsy()
+    // Surface hides the invalidated merge from the undoable list.
+    expect(database.getMergeJournal('contact', 'c-keep')).toHaveLength(0)
+  })
+
+  it('contacts: independently-sourced loser with an R-sourced role → role field redacted only; unmerge restores WITH provenance and WITHOUT the purged role', () => {
+    dbRun(
+      `INSERT INTO contacts (id, name, email, type, role, company, notes, tags, first_seen_at, last_seen_at, meeting_count, created_at, source, source_recording_id)
+       VALUES ('c-keep','Alice Keeper',NULL,'unknown','Owner',NULL,NULL,NULL,'2026-01-01','2026-01-01',0,'2026-01-01','user',NULL)`,
+      []
+    )
+    dbRun(
+      `INSERT INTO contacts (id, name, email, type, role, company, notes, tags, first_seen_at, last_seen_at, meeting_count, created_at, source, source_recording_id, role_source_recording_id, role_origin)
+       VALUES ('c-lose','Carol Public','carol@x.example','external','Director',NULL,NULL,NULL,'2026-01-01','2026-01-01',0,'2026-01-01','transcript','rec-S','rec-R','transcript')`,
+      []
+    )
+    insertRecording('rec-S')
+    insertRecording('rec-R')
+
+    database.mergeContacts('c-keep', 'c-lose')
+    const journalId = database.getMergeJournal('contact', 'c-keep')[0].id
+
+    expect(hardPurge('rec-R')?.mode).toBe('hard')
+
+    const raw = rawJournal(journalId)
+    const snap = JSON.parse(raw.loser_snapshot)
+    expect(snap.role).toBeNull() // R-sourced field value redacted
+    expect(snap.role_source_recording_id).toBeNull()
+    expect(snap.name).toBe('Carol Public') // identity PII NOT redacted (independently sourced)
+    expect(JSON.parse(raw.repointed_manifest).invalidatedByPurge).toBeUndefined() // NOT invalidated
+
+    // Unmerge still restores the entity, WITH its positive provenance and WITHOUT the purged role.
+    const undo = database.unmergeContacts(journalId)
+    expect(undo.loserId).toBe('c-lose')
+    const restored = queryOne<{ source: string | null; source_recording_id: string | null; role: string | null; role_source_recording_id: string | null }>(
+      'SELECT source, source_recording_id, role, role_source_recording_id FROM contacts WHERE id = ?',
+      ['c-lose']
+    )!
+    expect(restored.source).toBe('transcript')
+    expect(restored.source_recording_id).toBe('rec-S') // surviving positive provenance preserved
+    expect(restored.role).toBeNull() // purged role value not restored
+    expect(restored.role_source_recording_id).toBeNull()
+  })
+
+  it('projects: loser whose IDENTITY provenance is the purged recording → PII redacted, journal invalidated, unmerge refuses', () => {
+    dbRun(
+      `INSERT INTO projects (id, name, description, status, created_at, source, source_recording_id)
+       VALUES ('p-keep','Apollo',NULL,'active','2026-01-01','user',NULL)`,
+      []
+    )
+    dbRun(
+      `INSERT INTO projects (id, name, description, status, folder_path, url, created_at, source, source_recording_id)
+       VALUES ('p-lose','Secret Project','confidential brief','active','C:/secret','https://secret.example','2026-01-01','transcript','rec-R')`,
+      []
+    )
+    insertRecording('rec-R')
+
+    database.mergeProjects('p-keep', 'p-lose')
+    const journalId = database.getMergeJournal('project', 'p-keep')[0].id
+
+    expect(hardPurge('rec-R')?.mode).toBe('hard')
+
+    const raw = rawJournal(journalId)
+    for (const pii of ['Secret Project', 'confidential brief', 'C:/secret', 'secret.example']) {
+      expect(raw.loser_snapshot).not.toContain(pii)
+    }
+    const snap = JSON.parse(raw.loser_snapshot)
+    expect(snap.name).toBeNull()
+    expect(snap.description).toBeNull()
+    expect(snap.folder_path).toBeNull()
+    expect(snap.url).toBeNull()
+    expect(JSON.parse(raw.repointed_manifest).invalidatedByPurge?.recordingId).toBe('rec-R')
+    expect(() => database.unmergeProjects(journalId)).toThrow(/permanently deleted|no longer/i)
+    expect(queryOne('SELECT 1 FROM projects WHERE id = ?', ['p-lose'])).toBeFalsy()
+    expect(database.getMergeJournal('project', 'p-keep')).toHaveLength(0)
+  })
+
+  it('non-purge round-trip: unmerge restores the loser WITH its source/source_recording_id (provenance preserved, snapshot untouched)', () => {
+    dbRun(
+      `INSERT INTO contacts (id, name, email, type, role, company, notes, tags, first_seen_at, last_seen_at, meeting_count, created_at, source, source_recording_id)
+       VALUES ('c-keep','Alice Keeper',NULL,'unknown',NULL,NULL,NULL,NULL,'2026-01-01','2026-01-01',0,'2026-01-01','user',NULL)`,
+      []
+    )
+    dbRun(
+      `INSERT INTO contacts (id, name, email, type, role, company, notes, tags, first_seen_at, last_seen_at, meeting_count, created_at, source, source_recording_id)
+       VALUES ('c-lose','Dave Live','dave@x.example','external',NULL,NULL,NULL,NULL,'2026-01-01','2026-01-01',0,'2026-01-01','transcript','rec-S')`,
+      []
+    )
+    insertRecording('rec-S')
+
+    database.mergeContacts('c-keep', 'c-lose')
+    const journalId = database.getMergeJournal('contact', 'c-keep')[0].id
+    // No purge — the snapshot is untouched and the merge stays undoable.
+    const before = rawJournal(journalId)
+    expect(JSON.parse(before.repointed_manifest).invalidatedByPurge).toBeUndefined()
+
+    const undo = database.unmergeContacts(journalId)
+    expect(undo.loserId).toBe('c-lose')
+    const restored = queryOne<{ name: string; source: string | null; source_recording_id: string | null }>(
+      'SELECT name, source, source_recording_id FROM contacts WHERE id = ?',
+      ['c-lose']
+    )!
+    expect(restored.name).toBe('Dave Live')
+    expect(restored.source).toBe('transcript')
+    expect(restored.source_recording_id).toBe('rec-S')
+  })
+})
+
 describe('Context Graph remove + pronouns', () => {
   it('removes a node and its edges', async () => {
     const { person } = seedGraph({ personLabel: 'Junk' })

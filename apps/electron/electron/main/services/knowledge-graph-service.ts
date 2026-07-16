@@ -75,6 +75,7 @@ import {
   captureLoserSubgraph,
   attachGraphSnapshotToJournal,
   scrubMergeJournalGraphSnapshots,
+  scrubMergeJournalRelationalSnapshots,
 } from './database'
 import type { Contact, Project, IdentitySuggestion, AcceptSuggestionResult, MergeKind } from './database'
 import { getEventBus } from './event-bus'
@@ -634,6 +635,13 @@ export function removeRecordingProvenanceCore(
   // nothing). See scrubMergeJournalGraphSnapshots for the exact trimming contract.
   if (!dryRun) {
     scrubMergeJournalGraphSnapshots(recordingId, transcriptIds)
+    // ADV58-1 (round-60): the graph scrub only trims manifest.graph. The RELATIONAL
+    // scrub strips the purged recording from every open journal's loser_snapshot —
+    // redacting PII (+ invalidating the undo) when the loser entity's identity
+    // provenance IS this recording, and redacting R-sourced field values otherwise —
+    // so a hard purge does not retain the entity's PII at rest or let a later unmerge
+    // resurrect a permanently-deleted (or unprovenanced) entity. Same transaction.
+    scrubMergeJournalRelationalSnapshots(recordingId)
   }
 
   return {

@@ -6883,6 +6883,19 @@ export interface GraphMergeSnapshot {
   edgeSources: Array<Record<string, unknown>> // full graph_edge_sources rows for those edges
 }
 
+/**
+ * ADV58-1 (round-60): stamped onto a manifest by the hard-purge relational scrub
+ * ({@link scrubMergeJournalRelationalSnapshots}) when the LOSER entity's identity
+ * provenance was the purged recording. The merge can no longer be honestly undone
+ * (undo would resurrect a permanently-deleted entity), so the loser_snapshot PII is
+ * redacted and this flag makes unmerge refuse and hides the row from the undo surface.
+ * Schema-migration-free (a manifest field, not a merge_journal column).
+ */
+interface MergeInvalidatedByPurge {
+  recordingId: string // the hard-purged recording whose deletion invalidated this undo
+  at: string // ISO timestamp of the purge
+}
+
 /** Contact-merge manifest: everything the fold touched, enough to reverse it. */
 interface ContactMergeManifest {
   meetingContacts: { repointed: RepointedLink[]; collided: RepointedLink[] }
@@ -6891,6 +6904,7 @@ interface ContactMergeManifest {
   loserAliases: Array<{ alias_norm: string; source: string | null; confidence: number | null }>
   keeperBefore: { meetingIds: string[]; speakerIds: string[] }
   graph?: GraphMergeSnapshot // ADV56-2: loser subgraph, present when the graph node was folded
+  invalidatedByPurge?: MergeInvalidatedByPurge // ADV58-1: set when the loser's source recording was hard-purged
 }
 
 /** Project-merge manifest. */
@@ -6901,6 +6915,7 @@ interface ProjectMergeManifest {
   loserAliases: Array<{ alias_norm: string; source: string | null; confidence: number | null }>
   keeperBefore: { meetingIds: string[]; knowledgeIds: string[] }
   graph?: GraphMergeSnapshot // ADV56-2: loser subgraph, present when the graph node was folded
+  invalidatedByPurge?: MergeInvalidatedByPurge // ADV58-1: set when the loser's source recording was hard-purged
 }
 
 /** A keeper link that appeared after the merge — the user must review it by hand. */
@@ -7518,6 +7533,131 @@ export function scrubMergeJournalGraphSnapshots(purgedRecordingId: string, purge
   return modified
 }
 
+// -----------------------------------------------------------------------------
+// ADV58-1 (round-60): the graph scrub above trims only `manifest.graph`. It never
+// inspects `loser_snapshot` — the full loser Contact/Project row (name, email,
+// company, notes, role, tags, description…) — nor field-level provenance. So a
+// hard-purge of a recording R that MINTED a merged-away transcript entity left the
+// entity's identifying PII sitting in the retained journal AT REST (F17 data-retention
+// violation), and a later UNMERGE resurrected the row from that snapshot — under the
+// round-58 INSERT that also omitted source/source_recording_id, i.e. UNPROVENANCED.
+//
+// This sibling scrub runs in the SAME purge transaction (invoked from
+// removeRecordingProvenanceCore, guarded !dryRun). For every OPEN (undone_at IS NULL)
+// journal row:
+//   • ENTITY solely purged-sourced — loser_snapshot.source_recording_id === R (the
+//     loser entity's IDENTITY provenance IS the purged recording). The merge can no
+//     longer be honestly undone (undo would resurrect a permanently-deleted entity),
+//     so REDACT the loser_snapshot's identifying PII (name/email/company/notes/role/
+//     tags/description/folder_path/url + role field-provenance) AND stamp the manifest
+//     `invalidatedByPurge` flag — unmerge then REFUSES and the undo surface hides it.
+//   • ENTITY independently sourced (source_recording_id is a different, surviving
+//     recording, or null) — KEEP the snapshot, but REDACT any FIELD whose field-level
+//     provenance is R (contacts: `role` via role_source_recording_id === R) so unmerge
+//     cannot restore purged-sourced field data. The journal is NOT invalidated.
+//
+// PII fields not present on a given entity kind are simply skipped, so one field list
+// serves contacts and projects.
+// -----------------------------------------------------------------------------
+
+/** Loser-snapshot fields carrying retained personal/user data — nulled when the entity's
+ *  identity provenance is the purged recording. Non-present keys are skipped per row. */
+const JOURNAL_SNAPSHOT_PII_FIELDS = [
+  'name',
+  'email',
+  'company',
+  'notes',
+  'role',
+  'tags',
+  'description',
+  'folder_path',
+  'url',
+  'role_source_recording_id',
+  'role_origin',
+] as const
+
+/**
+ * Strip a hard-purged recording's RELATIONAL contribution from every OPEN merge_journal
+ * loser_snapshot / manifest (sibling of {@link scrubMergeJournalGraphSnapshots}). See the
+ * section banner for the exact entity-vs-field contract. Runs through the module-local
+ * runNoSave/queryAll so it JOINS the caller's open purge transaction. Returns the number of
+ * journal rows rewritten (0 when nothing referenced R).
+ */
+export function scrubMergeJournalRelationalSnapshots(purgedRecordingId: string): number {
+  const rows = queryAll<{ id: string; loser_snapshot: string; repointed_manifest: string }>(
+    'SELECT id, loser_snapshot, repointed_manifest FROM merge_journal WHERE undone_at IS NULL'
+  )
+  let modified = 0
+  for (const row of rows) {
+    let loser: Record<string, unknown>
+    let manifest: Record<string, unknown>
+    try {
+      loser = JSON.parse(row.loser_snapshot) as Record<string, unknown>
+      manifest = JSON.parse(row.repointed_manifest) as Record<string, unknown>
+    } catch {
+      continue
+    }
+    let changed = false
+
+    if (loser.source_recording_id === purgedRecordingId) {
+      // Case A — the loser entity's IDENTITY provenance is the purged recording.
+      // Redact all retained PII and invalidate the merge (cannot honestly undo).
+      for (const f of JOURNAL_SNAPSHOT_PII_FIELDS) {
+        if (f in loser && loser[f] !== null) {
+          loser[f] = null
+          changed = true
+        }
+      }
+      if (!manifest.invalidatedByPurge) {
+        manifest.invalidatedByPurge = { recordingId: purgedRecordingId, at: new Date().toISOString() }
+        changed = true
+      }
+    } else if (loser.role_source_recording_id === purgedRecordingId) {
+      // Case B — independently-sourced entity, but the `role` FIELD was minted by the
+      // purged recording (contacts only). Redact just that field's value + provenance;
+      // do NOT invalidate the journal (the entity itself remains honestly restorable).
+      loser.role = null
+      loser.role_source_recording_id = null
+      loser.role_origin = null
+      changed = true
+    }
+
+    if (changed) {
+      runNoSave('UPDATE merge_journal SET loser_snapshot = ?, repointed_manifest = ? WHERE id = ?', [
+        JSON.stringify(loser),
+        JSON.stringify(manifest),
+        row.id,
+      ])
+      modified++
+    }
+  }
+  return modified
+}
+
+/**
+ * ADV58-1 (round-60): refuse to undo a merge whose loser entity can no longer be honestly
+ * resurrected. Two guards: (1) the manifest carries the `invalidatedByPurge` flag stamped
+ * by the relational scrub; (2) defense-in-depth — the loser's identity-provenance recording
+ * no longer exists in `recordings` (catches manifests written before this fix). @throws when
+ * either holds.
+ */
+function assertJournalNotPurgeInvalidated(
+  manifest: { invalidatedByPurge?: MergeInvalidatedByPurge },
+  loser: { source_recording_id?: string | null }
+): void {
+  if (manifest.invalidatedByPurge) {
+    throw new Error(
+      `Cannot unmerge: the merged entity's source recording (${manifest.invalidatedByPurge.recordingId}) was permanently deleted; this merge can no longer be undone.`
+    )
+  }
+  const rid = loser.source_recording_id
+  if (rid && !queryOne('SELECT 1 FROM recordings WHERE id = ?', [rid])) {
+    throw new Error(
+      `Cannot unmerge: the merged entity's source recording (${rid}) no longer exists; this merge can no longer be undone.`
+    )
+  }
+}
+
 /** Fetch and validate an un-undone journal row of the given kind. @throws otherwise. */
 function loadOpenJournal(journalId: string, kind: MergeKind): MergeJournalRow {
   const row = queryOne<MergeJournalRow>('SELECT * FROM merge_journal WHERE id = ?', [journalId])
@@ -7549,14 +7689,21 @@ export function unmergeContacts(journalId: string): UnmergeResult {
     const loser = JSON.parse(row.loser_snapshot) as Contact
     const manifest = JSON.parse(row.repointed_manifest) as ContactMergeManifest
 
+    // ADV58-1: refuse when the loser's source recording was hard-purged (the entity can
+    // no longer be honestly resurrected). Checked before any write.
+    assertJournalNotPurgeInvalidated(manifest, loser)
+
     if (queryOne('SELECT 1 FROM contacts WHERE id = ?', [loser.id])) {
       throw new Error(`Cannot unmerge: a contact with id ${loser.id} already exists`)
     }
 
-    // 1. Recreate the loser row from the snapshot.
+    // 1. Recreate the loser row from the snapshot. ADV58-1: carry the entity + role
+    //    field provenance (source/source_recording_id/role_source_recording_id/role_origin)
+    //    so the restored loser keeps its validated positive provenance (the round-58 INSERT
+    //    omitted these, leaving the resurrected entity unprovenanced).
     runNoSave(
-      `INSERT INTO contacts (id, name, email, type, role, company, notes, tags, first_seen_at, last_seen_at, meeting_count, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO contacts (id, name, email, type, role, company, notes, tags, first_seen_at, last_seen_at, meeting_count, created_at, source, source_recording_id, role_source_recording_id, role_origin)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         loser.id,
         loser.name,
@@ -7569,7 +7716,11 @@ export function unmergeContacts(journalId: string): UnmergeResult {
         loser.first_seen_at,
         loser.last_seen_at,
         0,
-        loser.created_at
+        loser.created_at,
+        loser.source ?? null,
+        loser.source_recording_id ?? null,
+        loser.role_source_recording_id ?? null,
+        loser.role_origin ?? null
       ]
     )
 
@@ -8174,6 +8325,10 @@ export interface Project {
   folder_path: string | null
   url: string | null
   created_at: string
+  /** v45 entity origin: 'user' | 'transcript' | null (legacy). */
+  source?: string | null
+  /** v45 — recording whose transcript minted a transcript-origin project. */
+  source_recording_id?: string | null
 }
 
 /** One issue / risk / note tracked against a project (v29). */
@@ -8514,14 +8669,18 @@ export function unmergeProjects(journalId: string): UnmergeResult {
     const loser = JSON.parse(row.loser_snapshot) as Project
     const manifest = JSON.parse(row.repointed_manifest) as ProjectMergeManifest
 
+    // ADV58-1: refuse when the loser's source recording was hard-purged.
+    assertJournalNotPurgeInvalidated(manifest, loser)
+
     if (queryOne('SELECT 1 FROM projects WHERE id = ?', [loser.id])) {
       throw new Error(`Cannot unmerge: a project with id ${loser.id} already exists`)
     }
 
-    // 1. Recreate the loser project from the snapshot.
+    // 1. Recreate the loser project from the snapshot. ADV58-1: carry source/
+    //    source_recording_id so the restored project keeps its positive provenance.
     runNoSave(
-      `INSERT INTO projects (id, name, description, status, folder_path, url, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO projects (id, name, description, status, folder_path, url, created_at, source, source_recording_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         loser.id,
         loser.name,
@@ -8529,7 +8688,9 @@ export function unmergeProjects(journalId: string): UnmergeResult {
         loser.status ?? 'active',
         loser.folder_path ?? null,
         loser.url ?? null,
-        loser.created_at
+        loser.created_at,
+        loser.source ?? null,
+        loser.source_recording_id ?? null
       ]
     )
 
@@ -8674,7 +8835,18 @@ export function getMergeJournal(kind: MergeKind, keeperId: string, includeUndone
      ORDER BY created_at DESC`,
     [kind, keeperId]
   )
-  return rows.map((r) => {
+  return rows
+    // ADV58-1: never surface a purge-invalidated merge as undoable — its loser entity's
+    // source recording was permanently deleted, so unmerge would refuse anyway. Hide it
+    // from the undo list (defense in depth alongside the unmerge refusal).
+    .filter((r) => {
+      try {
+        return !(JSON.parse(r.repointed_manifest) as { invalidatedByPurge?: unknown }).invalidatedByPurge
+      } catch {
+        return true
+      }
+    })
+    .map((r) => {
     let loserName = 'Unknown'
     let loserId = ''
     let linkCount = 0
