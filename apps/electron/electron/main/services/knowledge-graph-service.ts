@@ -30,6 +30,7 @@ import {
   deleteNode,
   setNodeProps,
   nodeGraphStats,
+  ownDateMs,
   removeRecordingProvenance,
   pruneOrphanEdgeSources,
   DEFAULT_OVERVIEW_NODE_LIMIT,
@@ -46,6 +47,7 @@ import type {
   SubGraph,
   LensGraph,
   Provenance,
+  NodeGraphStats,
 } from '@hidock/knowledge-graph'
 import { complete } from '@hidock/ai-providers'
 import { getProviderConfigFromSettings } from './ai-provider-config'
@@ -1887,6 +1889,106 @@ export interface NodeDetailDTO {
 }
 
 /**
+ * ADV31-3 (round-33) — the inspector's node STATISTICS derived from an
+ * EXCLUSION-FILTERED one-hop subgraph. Package {@link nodeGraphStats} traverses
+ * the RAW store, so its meeting/person/project counts, degree and first/last-seen
+ * dates include personal/deleted/value-excluded (and legacy zero-provenance)
+ * edges. getNodeDetail is a NON-OWNER surface: every statistic must derive from
+ * ONLY the edges that survive the SAME provenance suppression the other Context
+ * Graph reads use ({@link provenanceSuppressedEdgeIds}) and the neighbors still
+ * reachable from the center via a surviving edge. Fail-closed: on a suppression
+ * lookup failure the exclusion is failClosed ⇒ every attributed edge is
+ * suppressed ⇒ minimal stats (never the raw store's numbers). Mirrors the
+ * package's counting rules (degree = surviving incident edges; meeting dates from
+ * surviving meeting neighbors) over the filtered survivor set.
+ */
+function exclusionFilteredNodeStats(
+  store: KnowledgeGraphStore,
+  nodeId: string,
+  exclusion: GroundingExclusion
+): NodeGraphStats {
+  const empty: NodeGraphStats = {
+    meetingCount: 0,
+    firstSeenMs: null,
+    lastSeenMs: null,
+    peopleCount: 0,
+    projectCount: 0,
+    degree: 0,
+  }
+  const sub = neighborhood(store, nodeId, 1)
+  if (!sub.center) return empty
+  // No filtering to do (healthy + empty exclusion, or no edges) → mirror raw.
+  const suppressed =
+    sub.edges.length === 0
+      ? new Set<string>()
+      : provenanceSuppressedEdgeIds(store, sub.edges.map((e) => e.id), exclusion)
+
+  // Neighbors still connected to the CENTER via a surviving (non-suppressed) edge,
+  // and the center's surviving-incident degree.
+  const survivingNeighbors = new Set<string>()
+  let degree = 0
+  for (const e of sub.edges) {
+    if (suppressed.has(e.id)) continue
+    if (e.source_id === nodeId || e.target_id === nodeId) {
+      degree++
+      const other = e.source_id === nodeId ? e.target_id : e.source_id
+      if (other !== nodeId) survivingNeighbors.add(other)
+    }
+  }
+
+  const byId = new Map(sub.nodes.map((n) => [n.id, n]))
+  let meetingCount = 0
+  let peopleCount = 0
+  let projectCount = 0
+  let firstSeenMs: number | null = null
+  let lastSeenMs: number | null = null
+  for (const id of survivingNeighbors) {
+    const n = byId.get(id)
+    if (!n) continue
+    if (n.type === 'meeting') {
+      meetingCount++
+      const d = ownDateMs(n)
+      if (d != null) {
+        if (firstSeenMs == null || d < firstSeenMs) firstSeenMs = d
+        if (lastSeenMs == null || d > lastSeenMs) lastSeenMs = d
+      }
+    } else if (n.type === 'person') {
+      peopleCount++
+    } else if (n.type === 'project') {
+      projectCount++
+    }
+  }
+  return { meetingCount, firstSeenMs, lastSeenMs, peopleCount, projectCount, degree }
+}
+
+/**
+ * ADV31-3 / RE4-1 (round-33) — the inspector's one-line provenance narrative with
+ * excluded-neighbor LABELS removed. Package {@link provenance} builds the narrative
+ * from a RAW 2-hop neighborhood and embeds neighbor meeting/person labels; on this
+ * NON-OWNER surface an excluded neighbor's name must not appear. Reuses the exact
+ * queryProvenance (RE4-1) rule: derive the survivor set via
+ * {@link centerReachableSurvivorIds} and DROP the narrative entirely when ANY
+ * neighbor was suppressed (a partial narrative could still leak an excluded name).
+ * Fail-closed: a failClosed exclusion suppresses every attributed neighbor.
+ */
+function provenanceSuppressedNarrative(
+  store: KnowledgeGraphStore,
+  nodeId: string,
+  exclusion: GroundingExclusion
+): string {
+  const prov = provenance(store, nodeId)
+  if (exclusionIsNoop(exclusion)) return prov.narrative
+  const survivors = centerReachableSurvivorIds(store, nodeId, 2, exclusion)
+  const keep = (e: { id: string }): boolean => survivors.has(e.id)
+  const suppressedAny =
+    prov.meetings.some((m) => !keep(m)) ||
+    prov.people.some((p) => !keep(p)) ||
+    prov.projects.some((p) => !keep(p)) ||
+    prov.actions.some((a) => !keep(a))
+  return suppressedAny ? '' : prov.narrative
+}
+
+/**
  * Everything the inspector needs to answer "what IS this node?": identity
  * (linked contact vs. raw extracted name), the contact's role/org/email + known
  * aliases when linked, pronouns, graph-derived stats (meetings, first/last seen,
@@ -1917,7 +2019,10 @@ export function getNodeDetail(entityId: string): NodeDetailDTO {
   if (!node) return empty
   // P3 (round-3) — the inspector must not expose an excluded-only node.
   // ADV23-2 — non-owner surface: legacy zero-provenance nodes are excluded-only.
-  if (!isNodeVisibleUnderExclusion(store, nodeId, getGroundingExclusionSet(true))) return empty
+  // ADV31-3 (round-33) — compute the exclusion ONCE and reuse it for the node
+  // visibility gate AND the exclusion-filtered statistics below.
+  const exclusion = getGroundingExclusionSet(true)
+  if (!isNodeVisibleUnderExclusion(store, nodeId, exclusion)) return empty
 
   const projects = projectNameIndex()
   const dto = nodeToDTO({ ...node, degree: 0 }, projects)
@@ -1962,10 +2067,17 @@ export function getNodeDetail(entityId: string): NodeDetailDTO {
     }
   }
 
-  const stats = nodeGraphStats(store, nodeId)
+  // ADV31-3 (round-33): inspector statistics from an EXCLUSION-FILTERED one-hop
+  // subgraph — NOT the raw store (nodeGraphStats), which would count excluded
+  // (personal/deleted/value-excluded/legacy-zero-provenance) neighbors and edges.
+  const stats = exclusionFilteredNodeStats(store, nodeId, exclusion)
   let narrative = ''
   try {
-    narrative = provenance(store, nodeId).narrative
+    // RE4-1 / ADV31-3 (round-33): the narrative embeds neighbor meeting/person
+    // LABELS. Derive it from the SAME exclusion-suppressed subgraph the stats use,
+    // so an excluded neighbor's name never reaches this non-owner surface. When the
+    // node has no surviving neighbor evidence, emit no narrative.
+    narrative = provenanceSuppressedNarrative(store, nodeId, exclusion)
   } catch {
     narrative = ''
   }
@@ -2143,8 +2255,17 @@ export function convertNodeToContact(
   if (node.type !== 'person') throw new Error('Only person nodes can become contacts')
 
   const existingContactId = contactIdOfNode(node)
-  if (existingContactId && getContactById(existingContactId)) {
-    // Already a contact — nothing to create; treat as a no-op link.
+  // ADV31-1 (round-33): only REUSE the node's existing backing contact when it is
+  // VISIBLE. A node can be graph-visible via an eligible recording's edges while its
+  // backing contact is SUPPRESSED (own source excluded / hard-purged, or a keying
+  // collision to an older suppressed same-name row). Returning it here would expose
+  // the suppressed id AND skip creating the promised fresh visible contact. When the
+  // binding is suppressed, IGNORE it and fall through to the visible-only exact-name
+  // logic below, which creates/binds a FRESH VISIBLE contact (bindNodeToContact
+  // re-keys the node off the suppressed identity). Fail-closed: isContactVisible
+  // treats a lookup error as not-visible.
+  if (existingContactId && getContactById(existingContactId) && isContactVisible(existingContactId)) {
+    // Already a VISIBLE contact — nothing to create; treat as a no-op link.
     return { contactId: existingContactId, outcome: 'linked', nodeId, reusedExisting: true }
   }
 
@@ -2203,7 +2324,17 @@ export function mergeGraphPreview(keeperEntityId: string, loserEntityId: string)
   const loserNode = store.getNode(loserId)
   const keeperContact = keeperNode ? contactIdOfNode(keeperNode) : null
   const loserContact = loserNode ? contactIdOfNode(loserNode) : null
-  const contactMerge = !!keeperContact && !!loserContact && keeperContact !== loserContact
+  // ADV31-2 (round-33): the preview must MATCH the commit. mergeGraphNodes now
+  // REFUSES a merge when either backing contact is suppressed, so only present this
+  // as an (undoable) contact merge when BOTH backing contacts are VISIBLE. Otherwise
+  // do NOT surface contactMerge / contactImpact, which would expose a suppressed
+  // contact's link counts on a non-owner surface. Fail-closed (isContactVisible).
+  const contactMerge =
+    !!keeperContact &&
+    !!loserContact &&
+    keeperContact !== loserContact &&
+    isContactVisible(keeperContact) &&
+    isContactVisible(loserContact)
   let contactImpact: { keeper: number; loser: number } | undefined
   if (contactMerge && keeperContact && loserContact) {
     try {
@@ -2240,17 +2371,29 @@ export function mergeGraphNodes(keeperEntityId: string, loserEntityId: string): 
   const keeperContact = keeperNode ? contactIdOfNode(keeperNode) : null
   const loserContact = loserNode ? contactIdOfNode(loserNode) : null
 
+  // ADV31-2 (round-33): REFUSE the ENTIRE merge fail-closed whenever EITHER
+  // contact-backed node has a SUPPRESSED backing contact. The round-32 code merely
+  // skipped the journaled mergeContacts but still FELL THROUGH to an unconditional
+  // graph-only mergeNodes — which deletes the loser node and folds ALL its edges
+  // (incl. EXCLUDED provenance) into the keeper. From a non-owner surface that
+  // destructively mutates suppressed-contact-backed graph state, and if the excluded
+  // recording is later restored its facts reappear under the WRONG identity. Only a
+  // node that is NOT contact-backed (keeper/loserContact null) imposes no such
+  // constraint. Fail-closed: isContactVisible treats a lookup error as not-visible,
+  // so no node or edge changes on a visibility-lookup failure either.
+  if (keeperContact && !isContactVisible(keeperContact)) {
+    throw new Error('Contact not available')
+  }
+  if (loserContact && !isContactVisible(loserContact)) {
+    throw new Error('Contact not available')
+  }
+
   if (keeperContact && loserContact && keeperContact !== loserContact) {
-    // ADV30-2 (round-32): a contacts merge (mergeContacts) folds the loser into the
-    // keeper and can revive/expose a SUPPRESSED contact from a non-owner graph action.
-    // If either backing contact is suppressed, do NOT run the journaled contact merge —
-    // fall through to a graph-only fold (no contact-record mutation). Fail-closed.
-    if (isContactVisible(keeperContact) && isContactVisible(loserContact)) {
-      // Real, journaled contacts merge (undoable) — then fold the graph nodes.
-      mergeContacts(keeperContact, loserContact)
-      const r = mergeNodes(store, keeperId, loserId)
-      return { keeperId: r.keeperId, movedEdges: r.movedEdges, path: 'contact' }
-    }
+    // Both backing contacts are VISIBLE (checked above) — real, journaled contacts
+    // merge (undoable), then fold the graph nodes.
+    mergeContacts(keeperContact, loserContact)
+    const r = mergeNodes(store, keeperId, loserId)
+    return { keeperId: r.keeperId, movedEdges: r.movedEdges, path: 'contact' }
   }
 
   const r = mergeNodes(store, keeperId, loserId)
