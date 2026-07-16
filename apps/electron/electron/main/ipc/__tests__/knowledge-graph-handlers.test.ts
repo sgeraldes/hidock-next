@@ -2,10 +2,11 @@
  * Tests for knowledge-graph-handlers.ts
  *
  * Mocks the service layer and verifies:
- * - All 8 channels are registered
+ * - All 7 channels are registered
  * - Handlers return { success, data } on success
  * - Handlers return { success: false, error } on failure
  * - graph:ingestFolder rejects path traversal
+ * - the removed graph:listNodes / graph:resolvePerson channels are NOT registered
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -29,12 +30,6 @@ vi.mock('../../services/knowledge-graph-service', () => ({
   queryMeetingGraph: vi.fn(),
 }))
 
-// Mock the database (graph:resolvePerson uses getContactByName); avoids pulling
-// the real sql.js/file-storage/config chain into this service-mock test.
-vi.mock('../../services/database', () => ({
-  getContactByName: vi.fn(),
-}))
-
 import {
   queryStats,
   ingestFromDbTranscripts,
@@ -44,7 +39,6 @@ import {
   queryPersonProfile,
   queryMeetingGraph,
 } from '../../services/knowledge-graph-service'
-import { getContactByName } from '../../services/database'
 
 import { registerKnowledgeGraphHandlers } from '../knowledge-graph-handlers'
 
@@ -63,7 +57,7 @@ describe('knowledge-graph IPC handlers', () => {
   // -------------------------------------------------------------------------
   // Registration
   // -------------------------------------------------------------------------
-  it('registers all 8 channels', () => {
+  it('registers all 7 channels', () => {
     const expectedChannels = [
       'graph:stats',
       'graph:ingestAll',
@@ -72,7 +66,6 @@ describe('knowledge-graph IPC handlers', () => {
       'graph:topSkill',
       'graph:personProfile',
       'graph:meetingGraph',
-      'graph:resolvePerson',
     ]
     for (const channel of expectedChannels) {
       expect(ipcMain.handle).toHaveBeenCalledWith(channel, expect.any(Function))
@@ -88,30 +81,14 @@ describe('knowledge-graph IPC handlers', () => {
     expect(handlers['graph:listNodes']).toBeUndefined()
   })
 
-  // -------------------------------------------------------------------------
-  // graph:resolvePerson
-  // -------------------------------------------------------------------------
-  describe('graph:resolvePerson', () => {
-    it('returns the resolved contact', async () => {
-      const contact = { id: 'c1', name: 'Alice', email: null }
-      ;(getContactByName as any).mockReturnValue(contact)
-
-      const result = await handlers['graph:resolvePerson']({}, 'Alice')
-      expect(result).toEqual({ success: true, data: contact })
-      expect(getContactByName).toHaveBeenCalledWith('Alice')
-    })
-
-    it('returns null data when no contact matches', async () => {
-      ;(getContactByName as any).mockReturnValue(undefined)
-      const result = await handlers['graph:resolvePerson']({}, 'Nobody')
-      expect(result).toEqual({ success: true, data: null })
-    })
-
-    it('rejects a non-string name', async () => {
-      const result = await handlers['graph:resolvePerson']({}, 123)
-      expect(result.success).toBe(false)
-      expect(result.error).toContain('name must be a non-empty string')
-    })
+  // ADV34-2 (round 36): graph:resolvePerson was a DEAD IPC (no renderer consumer)
+  // that returned a raw, unfiltered Contact (id/email/role/company/notes/tags/
+  // provenance) — leaking the identity of a contact backed only by an excluded /
+  // hard-purged recording. It was removed entirely; assert it is NOT registered.
+  it('does NOT register the removed graph:resolvePerson channel', () => {
+    const registered = (ipcMain.handle as any).mock.calls.map((c: any[]) => c[0])
+    expect(registered).not.toContain('graph:resolvePerson')
+    expect(handlers['graph:resolvePerson']).toBeUndefined()
   })
 
   // -------------------------------------------------------------------------

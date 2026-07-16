@@ -1079,7 +1079,7 @@ export interface ElectronAPI {
     personProfile: (name: string) => Promise<{ success: boolean; data?: { personId: string; personLabel: string; meetings: any[]; skills: any[]; actionItems: any[] } | undefined; error?: string }>
     meetingGraph: (meetingId: string) => Promise<{ success: boolean; data?: { meeting: any; nodes: any[]; edges: any[] }; error?: string }>
     // listNodes REMOVED (ADV33-1, round 35) — dead IPC that returned raw GraphNodes leaking suppressed contactId.
-    resolvePerson: (name: string) => Promise<{ success: boolean; data?: Contact | null; error?: string }>
+    // resolvePerson REMOVED (ADV34-2, round 36) — dead IPC that returned a raw unfiltered Contact leaking excluded-recording-backed identity.
   }
 
   // Context Graph — interactive visualization + neighborhood retrieval
@@ -1833,7 +1833,7 @@ const electronAPI: ElectronAPI = {
     personProfile: (name: string) => callIPC('graph:personProfile', name),
     meetingGraph: (meetingId: string) => callIPC('graph:meetingGraph', meetingId),
     // listNodes REMOVED (ADV33-1, round 35) — dead IPC that leaked suppressed contactId.
-    resolvePerson: (name: string) => callIPC('graph:resolvePerson', name),
+    // resolvePerson REMOVED (ADV34-2, round 36) — dead IPC that leaked a raw unfiltered Contact.
   },
 
   // Context Graph — interactive visualization + neighborhood retrieval

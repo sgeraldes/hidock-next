@@ -9,7 +9,6 @@
  *   graph:topSkill       — top skill demonstrators
  *   graph:personProfile  — person profile (meetings, skills, action items)
  *   graph:meetingGraph   — all nodes/edges for a meeting
- *   graph:resolvePerson  — resolve a graph person name to a canonical contact
  */
 
 import { ipcMain } from 'electron'
@@ -38,7 +37,6 @@ import {
   mergeGraphNodes,
   deleteGraphNode,
 } from '../services/knowledge-graph-service'
-import { getContactByName } from '../services/database'
 
 export function registerKnowledgeGraphHandlers(): void {
   ipcMain.handle('graph:stats', async () => {
@@ -141,21 +139,12 @@ export function registerKnowledgeGraphHandlers(): void {
   // queryListNodes() export stays — it is still used internally by rag.ts grounding,
   // which never returns raw nodes to a non-owner surface.
 
-  // Resolve a graph person node's name to a canonical contact (v26). Gives the
-  // renderer a direct, indexed lookup instead of scanning contacts.getAll.
-  ipcMain.handle('graph:resolvePerson', async (_event, name: unknown) => {
-    try {
-      if (!name || typeof name !== 'string') {
-        return { success: false, error: 'name must be a non-empty string' }
-      }
-      const contact = getContactByName(name)
-      return { success: true, data: contact ?? null }
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e)
-      console.error('[graph:resolvePerson] Error:', e)
-      return { success: false, error: msg }
-    }
-  })
+  // graph:resolvePerson IPC REMOVED (ADV34-2, round 36): the handler called raw
+  // getContactByName and returned the COMPLETE Contact (id/email/role/company/
+  // notes/tags/provenance) with NO visibility filter, so an exact name for a
+  // transcript-origin contact backed only by an excluded/hard-purged recording
+  // leaked everything. It had no renderer consumer (dead surface), so it is
+  // removed entirely rather than re-DTO'd (round-13 dead-surface-removal lesson).
 
   // -------------------------------------------------------------------------
   // Context Graph — interactive visualization + neighborhood retrieval
