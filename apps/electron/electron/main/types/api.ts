@@ -87,6 +87,9 @@ export type ErrorCode =
   | 'INTERNAL_ERROR'
   | 'UNAUTHORIZED'
   | 'RATE_LIMITED'
+  // ADV25-3 (round-26) — an identity merge suggestion whose supporting evidence
+  // became excluded/deleted between surfacing and accept (accept-time TOCTOU guard).
+  | 'SUGGESTION_STALE'
 
 // =============================================================================
 // RAG Filter Types

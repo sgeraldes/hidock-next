@@ -12,6 +12,7 @@ import { ipcMain } from 'electron'
 import { z } from 'zod'
 import {
   getIdentitySuggestions,
+  getIdentitySuggestionById,
   acceptIdentitySuggestion,
   rejectIdentitySuggestion,
   supersedeOrphanedSuggestions,
@@ -36,6 +37,7 @@ import {
   discoverContactMerges,
   discoverProjectMerges,
   revalidateSuggestionsForSurfacing,
+  isSuggestionEligibleForAccept,
   DiscoveryResult
 } from '../services/identity-discovery'
 import { autoSplitAmbiguousBuckets } from '../services/org-reconciler'
@@ -92,6 +94,24 @@ export function registerIdentityHandlers(): void {
       const parsed = IdSchema.safeParse(id)
       if (!parsed.success) {
         return error('VALIDATION_ERROR', 'Invalid suggestion id', parsed.error.format())
+      }
+      // ADV25-3 (round-26) — close the accept-time TOCTOU. getSuggestions
+      // revalidates on READ, but the source recording backing this card may have
+      // been trashed / marked personal / value-excluded / hard-purged between load
+      // and click. Fetch the persisted row and re-run the SAME revalidation as the
+      // surfacing path; REFUSE the merge (no-op) unless it still clears the
+      // surfacing threshold. There is NO await between this check and the merge, so
+      // the eligibility check + merge are atomic on the single-threaded main
+      // process (better-sqlite3 is synchronous) — nothing can interleave.
+      const row = getIdentitySuggestionById(parsed.data)
+      if (!row) {
+        return error('NOT_FOUND', 'Identity suggestion not found')
+      }
+      if (!isSuggestionEligibleForAccept(row)) {
+        return error(
+          'SUGGESTION_STALE',
+          'This suggestion can no longer be accepted because its supporting evidence was excluded or deleted.'
+        )
       }
       return success(acceptIdentitySuggestion(parsed.data))
     } catch (err) {
