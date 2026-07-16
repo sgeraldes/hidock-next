@@ -1525,6 +1525,17 @@ export async function reanalyzeFailedTranscripts(limit = 3): Promise<number> {
   let healed = 0
   for (const row of rows) {
     try {
+      // ADV41 sweep (round-43) — PER-ROW pre-provider re-check. `rows` was
+      // selected ONCE before the loop; while an EARLIER row's Gemini call was in
+      // flight, the owner can trash / mark-personal / value-exclude a LATER row,
+      // yet it is still in `rows` and would be sent to the provider. Revalidate
+      // in the SAME synchronous step immediately before the provider call (the
+      // post-await check at line ~1536 gates only the PERSIST, which cannot
+      // un-send). Fail-closed isRecordingEligible ⇒ skip the provider call.
+      if (!isRecordingEligible(row.recording_id)) {
+        console.log(`[Reanalyze] Recording ${row.recording_id} excluded before provider call — skipped`)
+        continue
+      }
       // Re-run with no candidate meetings — backfill only heals the analysis
       // fields; meeting matching already ran (or will re-run) elsewhere.
       const analysis = await analyzeTranscriptWithGemini(row.full_text, [])

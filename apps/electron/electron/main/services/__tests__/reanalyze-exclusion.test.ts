@@ -188,6 +188,34 @@ describe('RE-2 — reanalyzeFailedTranscripts excludes trashed/personal/value-ex
     expect(summaryOf('race')).toBeNull()
   })
 
+  it('ADV41 sweep (round-43) — a LATER row excluded WHILE an earlier row is in flight is never sent to the provider', async () => {
+    // Two eligible rows at select time; 'first' is NEWER so (created_at DESC) it
+    // is processed first. While its provider call is in flight, the owner trashes
+    // 'later'. The PER-ROW re-check immediately before the provider call (added in
+    // round-43) must drop 'later' so its full_text never reaches the provider —
+    // the post-await gate alone would have already sent it.
+    seedRecording('first')
+    seedFailedTranscript('t-first', 'first')
+    dbRun("UPDATE transcripts SET created_at = '2026-06-10T00:00:00Z' WHERE recording_id = ?", ['first'])
+    seedRecording('later')
+    seedFailedTranscript('t-later', 'later')
+    dbRun("UPDATE transcripts SET created_at = '2026-06-01T00:00:00Z' WHERE recording_id = ?", ['later'])
+
+    mockGenerateContent.mockImplementationOnce(async () => {
+      deleteRecordingCascade('later', { hard: false }) // exclude the LATER row mid-run
+      return geminiJsonResponse(HEALED)
+    })
+
+    const healed = await reanalyzeFailedTranscripts(10)
+
+    // Provider called EXACTLY once (for 'first'); 'later' was skipped before its
+    // provider call, so nothing was uploaded and nothing was persisted for it.
+    expect(mockGenerateContent).toHaveBeenCalledTimes(1)
+    expect(healed).toBe(1)
+    expect(summaryOf('first')).toBe('Healed summary.')
+    expect(summaryOf('later')).toBeNull()
+  })
+
   it('heals only the eligible one when eligible + excluded rows are mixed', async () => {
     seedRecording('keep')
     seedFailedTranscript('t-keep', 'keep')
