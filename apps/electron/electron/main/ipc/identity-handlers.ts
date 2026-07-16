@@ -13,7 +13,6 @@ import { z } from 'zod'
 import {
   getIdentitySuggestions,
   getIdentitySuggestionById,
-  acceptIdentitySuggestion,
   rejectIdentitySuggestion,
   supersedeOrphanedSuggestions,
   getMergeJournal,
@@ -42,6 +41,7 @@ import {
   isSuggestionEligibleForAccept,
   DiscoveryResult
 } from '../services/identity-discovery'
+import { acceptIdentitySuggestionWithGraph } from '../services/knowledge-graph-service'
 import { autoSplitAmbiguousBuckets } from '../services/org-reconciler'
 import { isRecordingEligible } from '../services/recording-eligibility'
 import { success, error, Result } from '../types/api'
@@ -121,7 +121,12 @@ export function registerIdentityHandlers(): void {
           'This suggestion can no longer be accepted because its supporting evidence was excluded or deleted.'
         )
       }
-      return success(acceptIdentitySuggestion(parsed.data))
+      // ADV56-1 (round-58): route through the graph-aware, atomic accept so a
+      // resolvable-loser accept folds the loser's graph node in the SAME transaction
+      // as the relational merge, and the merge + supersede + status='accepted' write
+      // are all-or-nothing (bare acceptIdentitySuggestion merged in one tx and wrote
+      // the status in a separate tx — a failure stranded the accept half-done).
+      return success(acceptIdentitySuggestionWithGraph(parsed.data))
     } catch (err) {
       console.error('identity:acceptSuggestion error:', err)
       return error('DATABASE_ERROR', 'Failed to accept identity suggestion', err)

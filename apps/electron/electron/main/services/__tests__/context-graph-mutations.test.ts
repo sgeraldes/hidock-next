@@ -58,6 +58,7 @@ import {
   mergeGraphNodes,
   mergeContactsWithGraph,
   mergeProjectsWithGraph,
+  acceptIdentitySuggestionWithGraph,
   deleteGraphNode,
 } from '../knowledge-graph-service'
 import { mergeDuplicateContacts } from '../org-reconciler'
@@ -838,6 +839,143 @@ describe('Context Graph project-merge graph fold (ADV56-3 / round-58)', () => {
     expect(queryAll("SELECT id FROM projects WHERE id = 'p-b'")).toHaveLength(0)
     expect(queryAll("SELECT id FROM projects WHERE id = 'p-a'")).toHaveLength(1)
     expect(store.getNode(keeper)).toBeTruthy()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADV56-1 (round-58): identity:acceptSuggestion, for a RESOLVABLE loser, now routes
+// through the graph-aware, atomic composite (acceptIdentitySuggestionWithGraph). Before,
+// it called bare mergeContacts/mergeProjects (stranding the graph) AND committed the
+// merge in one transaction with the supersede + status='accepted' in a SEPARATE one —
+// a failure in the second left the identity merged but the suggestion pending. Now the
+// merge (graph-aware) + journal capture + supersede + status write are ONE transaction.
+// ---------------------------------------------------------------------------
+describe('Context Graph accept-suggestion graph fold + atomicity (ADV56-1 / round-58)', () => {
+  function seedSuggestion(
+    id: string,
+    kind: 'person' | 'project',
+    candidateName: string,
+    targetId: string,
+    evidence: Record<string, unknown>
+  ) {
+    dbRun(
+      `INSERT INTO identity_suggestions (id, kind, candidate_name, target_id, confidence, evidence, status, created_at)
+       VALUES (?, ?, ?, ?, 0.82, ?, 'pending', '2026-01-01T00:00:00Z')`,
+      [id, kind, candidateName, targetId, JSON.stringify(evidence)]
+    )
+  }
+
+  function seedContactPair() {
+    seedContact('c-a', 'Bob')
+    seedContact('c-b', 'Robert')
+    const { person: keeper } = seedGraph({ personLabel: 'Bob', contactId: 'c-a' })
+    const store = getKnowledgeGraphStore()
+    const loser = store.upsertNode({ type: 'person', label: 'Robert', key: 'contact:c-b', props: { contactId: 'c-b' }, now: '2026-01-01' })
+    const m = store.upsertNode({ type: 'meeting', label: 'Extra', props: { meetingId: 'mx', date: '2026-01-05' }, now: '2026-01-01' })
+    const eLoser = store.upsertEdge({ sourceId: loser, targetId: m, type: 'ATTENDED', now: '2026-01-01' })
+    dbRun('INSERT OR IGNORE INTO graph_edge_sources (edge_id, recording_id, transcript_id, assertion_count, created_at) VALUES (?, ?, ?, 1, ?)', [eLoser, 'rec-seed', 'tx-seed', '2026-01-01'])
+    return { keeper, loser, eLoser, store }
+  }
+
+  function seedProjectPair() {
+    dbRun("INSERT OR IGNORE INTO projects (id, name, status, created_at) VALUES ('p-a', 'Apollo', 'active', '2026-01-01')", [])
+    dbRun("INSERT OR IGNORE INTO projects (id, name, status, created_at) VALUES ('p-b', 'Artemis', 'active', '2026-01-01')", [])
+    dbRun('INSERT OR IGNORE INTO recordings (id, filename, date_recorded) VALUES (?, ?, ?)', ['rec-seed', 'rec-seed.hda', '2026-01-01'])
+    const store = getKnowledgeGraphStore()
+    const keeper = store.upsertNode({ type: 'project', label: 'Apollo', now: '2026-01-01' })
+    const loser = store.upsertNode({ type: 'project', label: 'Artemis', now: '2026-01-01' })
+    const m = store.upsertNode({ type: 'meeting', label: 'Extra', props: { meetingId: 'mx', date: '2026-01-05' }, now: '2026-01-01' })
+    const eLoser = store.upsertEdge({ sourceId: m, targetId: loser, type: 'ABOUT', now: '2026-01-01' })
+    dbRun('INSERT OR IGNORE INTO graph_edge_sources (edge_id, recording_id, transcript_id, assertion_count, created_at) VALUES (?, ?, ?, 1, ?)', [eLoser, 'rec-seed', 'tx-seed', '2026-01-01'])
+    return { keeper, loser, eLoser, store }
+  }
+
+  it('person SUCCESS: folds the loser NODE, marks accepted, supersedes the sibling', async () => {
+    const { keeper, loser, eLoser, store } = seedContactPair()
+    // Accepted pairing: fold c-b into c-a.
+    seedSuggestion('sug-1', 'person', 'Robert', 'c-a', { loserId: 'c-b' })
+    // Sibling: another pending suggestion targeting the soon-deleted loser c-b.
+    seedSuggestion('sug-2', 'person', 'Rob', 'c-b', {})
+
+    const res = acceptIdentitySuggestionWithGraph('sug-1')
+    expect(res.status).toBe('accepted')
+    expect(res.mergeJournalId).toBeTruthy()
+    expect(res.supersededCount).toBe(1)
+
+    // Relational: loser gone, suggestion accepted, sibling superseded (rejected).
+    expect(getContactById('c-b')).toBeUndefined()
+    expect(queryAll<{ status: string }>("SELECT status FROM identity_suggestions WHERE id = 'sug-1'")).toEqual([{ status: 'accepted' }])
+    expect(queryAll<{ status: string }>("SELECT status FROM identity_suggestions WHERE id = 'sug-2'")).toEqual([{ status: 'rejected' }])
+
+    // Graph: loser node folded (not stranded), its edge repointed onto the keeper.
+    expect(store.getNode(loser)).toBeUndefined()
+    expect(store.getNode(keeper)).toBeTruthy()
+    expect(queryAll<{ source_id: string }>('SELECT source_id FROM graph_edges WHERE id = ?', [eLoser])).toEqual([{ source_id: keeper }])
+    expect(queryAll("SELECT id FROM graph_nodes WHERE norm_key = 'contact:c-b'")).toHaveLength(0)
+  })
+
+  it('person ATOMICITY: a fault in the status/supersede phase rolls the WHOLE accept back', async () => {
+    const { keeper, loser } = seedContactPair()
+    seedSuggestion('sug-1', 'person', 'Robert', 'c-a', { loserId: 'c-b' })
+    seedSuggestion('sug-2', 'person', 'Rob', 'c-b', {})
+    const store = getKnowledgeGraphStore()
+
+    // Inject a fault into the finalize (status/supersede) phase, which runs AFTER the
+    // graph-aware merge inside the wrapper's single transaction.
+    const spy = vi.spyOn(database, 'finalizeAcceptedMerge').mockImplementation(() => {
+      throw new Error('injected fault: finalize phase')
+    })
+    try {
+      expect(() => acceptIdentitySuggestionWithGraph('sug-1')).toThrow(/injected fault/)
+    } finally {
+      spy.mockRestore()
+    }
+
+    // Whole accept rolled back: contact NOT merged, loser node intact, suggestion pending,
+    // no journal row written.
+    expect(getContactById('c-b')).toBeTruthy()
+    expect(getContactById('c-a')).toBeTruthy()
+    expect(store.getNode(loser)).toBeTruthy()
+    expect(store.getNode(keeper)).toBeTruthy()
+    expect(queryAll<{ status: string }>("SELECT status FROM identity_suggestions WHERE id = 'sug-1'")).toEqual([{ status: 'pending' }])
+    expect(queryAll<{ status: string }>("SELECT status FROM identity_suggestions WHERE id = 'sug-2'")).toEqual([{ status: 'pending' }])
+    expect(queryAll<{ c: number }>('SELECT COUNT(*) AS c FROM merge_journal')[0]?.c ?? 0).toBe(0)
+  })
+
+  it('project SUCCESS: folds the loser project NODE, marks accepted', async () => {
+    const { keeper, loser, eLoser, store } = seedProjectPair()
+    seedSuggestion('sug-p', 'project', 'Artemis', 'p-a', { loserId: 'p-b' })
+
+    const res = acceptIdentitySuggestionWithGraph('sug-p')
+    expect(res.status).toBe('accepted')
+    expect(res.mergeJournalId).toBeTruthy()
+
+    expect(queryAll("SELECT id FROM projects WHERE id = 'p-b'")).toHaveLength(0)
+    expect(store.getNode(loser)).toBeUndefined()
+    expect(store.getNode(keeper)).toBeTruthy()
+    expect(queryAll<{ target_id: string }>('SELECT target_id FROM graph_edges WHERE id = ?', [eLoser])).toEqual([{ target_id: keeper }])
+    expect(queryAll("SELECT id FROM graph_nodes WHERE type = 'project'")).toEqual([{ id: keeper }])
+  })
+
+  it('project ATOMICITY: a fault in the status/supersede phase rolls the WHOLE accept back', async () => {
+    const { keeper, loser } = seedProjectPair()
+    seedSuggestion('sug-p', 'project', 'Artemis', 'p-a', { loserId: 'p-b' })
+    const store = getKnowledgeGraphStore()
+
+    const spy = vi.spyOn(database, 'finalizeAcceptedMerge').mockImplementation(() => {
+      throw new Error('injected fault: finalize phase')
+    })
+    try {
+      expect(() => acceptIdentitySuggestionWithGraph('sug-p')).toThrow(/injected fault/)
+    } finally {
+      spy.mockRestore()
+    }
+
+    expect(queryAll("SELECT id FROM projects WHERE id = 'p-b'")).toHaveLength(1)
+    expect(store.getNode(loser)).toBeTruthy()
+    expect(store.getNode(keeper)).toBeTruthy()
+    expect(queryAll<{ status: string }>("SELECT status FROM identity_suggestions WHERE id = 'sug-p'")).toEqual([{ status: 'pending' }])
+    expect(queryAll<{ c: number }>('SELECT COUNT(*) AS c FROM merge_journal')[0]?.c ?? 0).toBe(0)
   })
 })
 

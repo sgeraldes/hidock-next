@@ -68,8 +68,12 @@ import {
   mergeContacts,
   mergeProjects,
   getMergeImpact,
+  getIdentitySuggestionById,
+  acceptIdentitySuggestion,
+  mergeJournalIdsFor,
+  finalizeAcceptedMerge,
 } from './database'
-import type { Contact, Project } from './database'
+import type { Contact, Project, IdentitySuggestion, AcceptSuggestionResult, MergeKind } from './database'
 import { getEventBus } from './event-bus'
 import { resolveContact } from './entity-resolver'
 
@@ -3132,6 +3136,63 @@ export function mergeProjectsWithGraph(keeperProjectId: string, loserProjectId: 
   const keeperNodeId = resolveProjectToNodeId(keeperProjectId)
   const loserNodeId = resolveProjectToNodeId(loserProjectId)
   return mergeProjectsFoldingNodes(keeperProjectId, loserProjectId, keeperNodeId, loserNodeId).project
+}
+
+/**
+ * Accept an identity suggestion — graph-aware, atomic entry point (ADV56-1 / round-58).
+ *
+ * This is the sole PRODUCTION entry for identity:acceptSuggestion. Two failures the
+ * bare database.ts acceptIdentitySuggestion had on a RESOLVABLE-LOSER accept:
+ *   1. It called bare mergeContacts/mergeProjects, so the loser's graph node/edges/
+ *      graph_edge_sources were STRANDED (same bug as ADV55-1 / ADV56-3).
+ *   2. It merged in one transaction and wrote the supersede + status='accepted' in a
+ *      SEPARATE transaction — a failure in the second left the identity merged but the
+ *      suggestion pending (a retry then took a different path).
+ *
+ * The resolvable-loser branch here routes the merge through the graph-aware composite
+ * (mergeContactsWithGraph / mergeProjectsWithGraph — which fold the graph node in the
+ * SAME transaction as the relational merge) AND wraps {merge + journal-id capture +
+ * supersede + status write} in ONE re-entrant runInTransaction, so the whole accept is
+ * all-or-nothing across BOTH layers. The bare-ALIAS branch (no resolvable loser) is
+ * single-transaction and graph-neutral already, so it delegates to database.ts's
+ * acceptIdentitySuggestion unchanged.
+ *
+ * Callers apply the accept-time eligibility gate (isSuggestionEligibleForAccept) BEFORE
+ * this, exactly as the IPC does.
+ */
+export function acceptIdentitySuggestionWithGraph(id: string): AcceptSuggestionResult {
+  const s = getIdentitySuggestionById(id)
+  if (!s) throw new Error(`Identity suggestion ${id} not found`)
+
+  let evidence: { loserId?: string } = {}
+  try {
+    evidence = s.evidence ? (JSON.parse(s.evidence) as { loserId?: string }) : {}
+  } catch {
+    evidence = {}
+  }
+
+  const jkind: MergeKind = s.kind === 'person' ? 'contact' : 'project'
+  const loserId = evidence.loserId
+  const table = s.kind === 'person' ? 'contacts' : 'projects'
+  const loserExists =
+    !!loserId &&
+    loserId !== s.target_id &&
+    !!queryOne<{ id: string }>(`SELECT id FROM ${table} WHERE id = ?`, [loserId])
+
+  if (!loserExists) {
+    // Alias accept — graph-neutral, already single-transaction in database.ts.
+    return acceptIdentitySuggestion(id)
+  }
+
+  // Resolvable-loser accept: atomic merge (graph-aware) + supersede + status write.
+  return runInTransaction(() => {
+    const before = mergeJournalIdsFor(jkind, s.target_id)
+    if (s.kind === 'person') mergeContactsWithGraph(s.target_id, loserId!)
+    else mergeProjectsWithGraph(s.target_id, loserId!)
+    const { mergeJournalId, supersededCount } = finalizeAcceptedMerge(s as IdentitySuggestion, loserId!, jkind, before)
+    const row = getIdentitySuggestionById(id)!
+    return { ...row, mergeJournalId, supersededCount }
+  })
 }
 
 /** Remove a junk node from the graph (and its edges). Idempotent. */

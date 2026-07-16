@@ -8719,7 +8719,7 @@ export interface AcceptSuggestionResult extends IdentitySuggestion {
 }
 
 /** Every merge_journal id for a keeper — snapshot before a merge to spot the row it writes. */
-function mergeJournalIdsFor(kind: MergeKind, keeperId: string): Set<string> {
+export function mergeJournalIdsFor(kind: MergeKind, keeperId: string): Set<string> {
   return new Set(
     queryAll<{ id: string }>('SELECT id FROM merge_journal WHERE kind = ? AND keeper_id = ?', [kind, keeperId]).map(
       (r) => r.id
@@ -8803,6 +8803,31 @@ export function supersedeOrphanedSuggestions(kind?: 'person' | 'project'): numbe
 }
 
 /**
+ * Shared tail of an accepted resolvable-loser merge (ADV56-1 / round-58): after the
+ * relational (or graph-aware) merge has run inside the caller's OPEN transaction, this
+ * computes the merge_journal id the merge just wrote (the one not in `journalIdsBefore`),
+ * supersedes the sibling suggestions the merge invalidated, and flips this suggestion to
+ * 'accepted'. Runs entirely through no-save writes so it JOINS the caller's transaction —
+ * both database.ts's acceptIdentitySuggestion and the graph-aware wrapper call it, so the
+ * accept is atomic in either path. Caller must capture `journalIdsBefore` BEFORE the merge.
+ */
+export function finalizeAcceptedMerge(
+  s: IdentitySuggestion,
+  loserId: string,
+  jkind: MergeKind,
+  journalIdsBefore: Set<string>
+): { mergeJournalId: string | null; supersededCount: number } {
+  const after = queryAll<{ id: string }>(
+    'SELECT id FROM merge_journal WHERE kind = ? AND keeper_id = ? ORDER BY created_at DESC',
+    [jkind, s.target_id]
+  )
+  const mergeJournalId = after.find((r) => !journalIdsBefore.has(r.id))?.id ?? null
+  const supersededCount = supersedeSuggestionsForMergedLoser(s.kind, loserId, s.id)
+  runNoSave("UPDATE identity_suggestions SET status = 'accepted' WHERE id = ?", [s.id])
+  return { mergeJournalId, supersededCount }
+}
+
+/**
  * Accept an identity suggestion. Two shapes:
  *
  *  - **Discovery** (evidence carries a `loserId` for a real, still-present entity):
@@ -8840,21 +8865,22 @@ export function acceptIdentitySuggestion(id: string): AcceptSuggestionResult {
     !!queryOne<{ id: string }>(`SELECT id FROM ${table} WHERE id = ?`, [loserId])
 
   if (loserExists) {
-    const before = mergeJournalIdsFor(jkind, s.target_id)
-    if (s.kind === 'person') mergeContacts(s.target_id, loserId!)
-    else mergeProjects(s.target_id, loserId!)
-    const after = queryAll<{ id: string }>(
-      'SELECT id FROM merge_journal WHERE kind = ? AND keeper_id = ? ORDER BY created_at DESC',
-      [jkind, s.target_id]
-    )
-    const mergeJournalId = after.find((r) => !before.has(r.id))?.id ?? null
-
-    const { row, supersededCount } = runInTransaction(() => {
-      const count = supersedeSuggestionsForMergedLoser(s.kind, loserId!, id)
-      runNoSave("UPDATE identity_suggestions SET status = 'accepted' WHERE id = ?", [id])
-      return { row: queryOne<IdentitySuggestion>('SELECT * FROM identity_suggestions WHERE id = ?', [id])!, supersededCount: count }
+    // ADV56-1 (round-58): ATOMIC. Previously the merge COMMITTED in its own
+    // transaction and the supersede + status='accepted' write ran in a SEPARATE
+    // transaction afterward — if that second tx failed, the identity was merged but
+    // the suggestion stayed pending, so a retry took a DIFFERENT path. Wrap the merge,
+    // the journal-id capture, the sibling-supersede, and the status write in ONE
+    // re-entrant runInTransaction so the whole accept is all-or-nothing. (This is the
+    // relational primitive — graph-neutral; the graph fold is added by the graph-aware
+    // wrapper acceptIdentitySuggestionWithGraph, the sole production entry point.)
+    return runInTransaction(() => {
+      const before = mergeJournalIdsFor(jkind, s.target_id)
+      if (s.kind === 'person') mergeContacts(s.target_id, loserId!)
+      else mergeProjects(s.target_id, loserId!)
+      const { mergeJournalId, supersededCount } = finalizeAcceptedMerge(s, loserId!, jkind, before)
+      const row = queryOne<IdentitySuggestion>('SELECT * FROM identity_suggestions WHERE id = ?', [id])!
+      return { ...row, mergeJournalId, supersededCount }
     })
-    return { ...row, mergeJournalId, supersededCount }
   }
 
   const row = runInTransaction(() => {
