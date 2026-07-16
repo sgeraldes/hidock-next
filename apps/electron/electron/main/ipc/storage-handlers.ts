@@ -14,6 +14,7 @@ import {
   getMeetings,
   linkRecordingToMeeting,
   addSyncedFile,
+  getRecordingIdByFilePath,
   type Recording
 } from '../services/database'
 import {
@@ -155,6 +156,13 @@ export function registerStorageHandlers(): void {
       if (typeof filePath !== 'string' || !filePath) {
         return { success: false, error: 'Invalid file path' }
       }
+      // ADV45-2 (round-47) — EXISTENCE-SCOPED owner gate: the path must resolve to
+      // a REAL recording row. Owner may open their own trashed/personal/low-value
+      // recording, but a hard-purged / orphan / arbitrary path is refused (also
+      // blocks arbitrary-path traversal to files no recording owns).
+      if (!getRecordingIdByFilePath(filePath)) {
+        return { success: false, error: 'File not found' }
+      }
       if (!existsSync(filePath)) {
         return { success: false, error: 'File not found' }
       }
@@ -174,6 +182,10 @@ export function registerStorageHandlers(): void {
       if (typeof filePath !== 'string' || !filePath) {
         return { success: false, error: 'Invalid file path' }
       }
+      // ADV45-2 (round-47) — EXISTENCE-SCOPED owner gate (see storage:open-file).
+      if (!getRecordingIdByFilePath(filePath)) {
+        return { success: false, error: 'File not found' }
+      }
       if (!existsSync(filePath)) {
         return { success: false, error: 'File not found' }
       }
@@ -190,6 +202,15 @@ export function registerStorageHandlers(): void {
       const result = ReadRecordingFileSchema.safeParse({ filePath })
       if (!result.success) {
         return { success: false, error: result.error.issues[0]?.message || 'Invalid file path' }
+      }
+
+      // ADV45-2 (round-47) — resolve the path to a canonical recording row and
+      // gate BEFORE serving any bytes. EXISTENCE-SCOPED owner action: the owner
+      // may play their own trashed/personal/low-value recording, but a
+      // hard-purged / orphan / arbitrary path yields no recording ⇒ refuse (no
+      // audio bytes). Fail-closed: a lookup failure resolves to null ⇒ refuse.
+      if (!getRecordingIdByFilePath(result.data.filePath)) {
+        return { success: false, error: 'File not found' }
       }
 
       const buffer = readRecordingFile(result.data.filePath)
