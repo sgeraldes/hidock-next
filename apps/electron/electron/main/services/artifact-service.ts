@@ -19,7 +19,7 @@ import { queryOne, queryAll, run, runInTransaction } from './database'
 import { resolveType, getArtifactType, ArtifactExtractionError } from './artifact-types'
 import { resolveGeminiApiKey } from './brains'
 import { getVectorStore } from './vector-store'
-import { filterEligibleCaptureIds } from './recording-eligibility'
+import { filterEligibleCaptureIds, isCaptureEligible } from './recording-eligibility'
 import { getEventBus } from './event-bus'
 
 export interface ArtifactRow {
@@ -420,12 +420,18 @@ export async function backfillImageCaptureIndex(limit = 10): Promise<ImageCaptur
   // soft-deleted or value-excluded image CAPTURE would otherwise be re-sent to
   // the vision + embeddings providers on boot. Route every capture id through
   // THE shared fail-closed capture boundary; drop a capture-backed row whose
-  // capture is ineligible or unverifiable (fail-closed). A bare artifact with NO
-  // owning capture has no exclusion to honor, so it stays eligible as before.
+  // capture is ineligible or unverifiable (fail-closed).
+  //
+  // ADV41-1 (round-43, HIGH) — a row with NO knowledge_capture_id (schema
+  // permits NULL + the LEFT JOIN) is an UNASSOCIABLE orphan: it has no positive
+  // provenance/eligibility, so it must NOT be sent to Gemini vision or the
+  // embeddings provider. The earlier `: true` branch retained such orphans and
+  // was the hole this finding closes — an artifact WITHOUT a resolvable eligible
+  // capture is now SKIPPED fail-closed (was `: true`, now `: false`).
   const captureIds = backfillRows.map((r) => r.knowledge_capture_id).filter((id): id is string => !!id)
   const { eligible: eligibleCaptures, failClosed: captureFailClosed } = filterEligibleCaptureIds(captureIds)
   const rows = backfillRows.filter((r) =>
-    r.knowledge_capture_id ? !captureFailClosed && eligibleCaptures.has(r.knowledge_capture_id) : true
+    r.knowledge_capture_id ? !captureFailClosed && eligibleCaptures.has(r.knowledge_capture_id) : false
   )
   result.skipped += backfillRows.length - rows.length
   const imageType = getArtifactType('image')
@@ -440,6 +446,15 @@ export async function backfillImageCaptureIndex(limit = 10): Promise<ImageCaptur
   for (const row of rows) {
     result.scanned++
     const baseMetadata = parseMetadata(row.metadata)
+    // ADV41-1/ADV41-3 (round-43) — every surviving row has a non-null capture id
+    // (orphans were skipped fail-closed above). Bind it once; this is the id
+    // re-validated before EACH provider call in this iteration.
+    const captureId = row.knowledge_capture_id
+    if (!captureId) {
+      // Defensive: the filter above already dropped NULL-capture orphans.
+      result.skipped++
+      continue
+    }
     try {
       let text = row.extracted_text && row.extracted_text.trim() ? row.extracted_text : ''
       let caption: string | null = null
@@ -461,6 +476,15 @@ export async function backfillImageCaptureIndex(limit = 10): Promise<ImageCaptur
           continue
         }
 
+        // ADV41-3 (round-43) — capture eligibility was snapshotted ONCE before
+        // the loop; an owner exclusion committing during a PRIOR row's vision /
+        // embed await must not let THIS row's image reach the vision provider.
+        // Re-validate in the SAME synchronous step immediately before the call.
+        if (!isCaptureEligible(captureId)) {
+          result.skipped++
+          continue
+        }
+
         const extraction = await imageType.extractText(row.storage_path)
         text = extraction.text ?? ''
         caption = imageCaption('image', extraction.metadata ?? {})
@@ -476,6 +500,17 @@ export async function backfillImageCaptureIndex(limit = 10): Promise<ImageCaptur
           } else {
             recordBackfillAttempt(row.artifact_id, baseMetadata, 'EMPTY_EXTRACTION', { terminal: true })
           }
+          result.skipped++
+          continue
+        }
+
+        // ADV41-3 (round-43) — re-validate AFTER the vision await, BEFORE
+        // persisting any vision-derived text/summary. An exclusion committing
+        // during the vision call must not leave the excluded image's extracted
+        // text/caption written back. No await between here and the writes below
+        // (the artifact UPDATE and, after this block, the capture-summary
+        // UPDATE), so this check is adjacent to both.
+        if (!isCaptureEligible(captureId)) {
           result.skipped++
           continue
         }
@@ -511,12 +546,25 @@ export async function backfillImageCaptureIndex(limit = 10): Promise<ImageCaptur
 
       const subject =
         caption || (row.summary && row.summary.trim() ? row.summary : row.title) || 'Screenshot'
+
+      // ADV41-3 (round-43) — re-validate IMMEDIATELY before the embeddings
+      // provider call. Exclusion during the vision call or the write window must
+      // not let the excluded image's text be embedded.
+      if (!isCaptureEligible(captureId)) {
+        result.skipped++
+        continue
+      }
       const count = await store.indexTranscript(text, {
         recordingId: row.artifact_id,
         timestamp: row.captured_at ?? now,
         subject,
         sourceType: 'image',
-        captureId: row.knowledge_capture_id ?? undefined
+        captureId,
+        // Pre-provider + post-await guards INSIDE indexTranscript so an exclusion
+        // committing during the embeddings await also blocks the send (round-43
+        // shouldGenerate) and the persist (shouldPersist).
+        shouldGenerate: () => isCaptureEligible(captureId),
+        shouldPersist: () => isCaptureEligible(captureId)
       })
       if (count > 0) result.indexed++
       else result.skipped++ // no embedding backend — text is persisted; retried vision-free later

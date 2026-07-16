@@ -31,7 +31,13 @@ const h = vi.hoisted(() => ({
   /** When true, the fake vision call throws (simulates quota/network failure). */
   visionFails: false,
   /** Billable vision invocations — asserts the backfill's re-billing bound. */
-  visionCalls: 0
+  visionCalls: 0,
+  /**
+   * ADV41-3 (round-43) — side-effect fired DURING the vision provider call, used
+   * to simulate an owner exclusion committing between the vision await and the
+   * subsequent write/embed. Null unless a race test sets it.
+   */
+  onVision: null as null | (() => void)
 }))
 
 // database.ts reads getDatabasePath from file-storage.
@@ -54,6 +60,7 @@ vi.mock('@google/generative-ai', () => ({
       return {
         generateContent: async () => {
           h.visionCalls++
+          if (h.onVision) h.onVision()
           if (h.visionFails) throw new Error('quota exceeded (simulated)')
           return { response: { text: () => h.visionResponse } }
         }
@@ -107,6 +114,7 @@ describe('F5 PixelRAG — image captures as RAG sources', () => {
     })
     h.visionFails = false
     h.visionCalls = 0
+    h.onVision = null
   })
 
   it('vision-extracts on capture, stores the description on the capture row, and indexes tagged chunks', async () => {
@@ -388,10 +396,19 @@ describe('F5 PixelRAG — image captures as RAG sources', () => {
 
     // One OLDER eligible capture behind the wall. It already has extracted text,
     // so indexing it requires zero vision calls — billing must stay at 0.
+    // ADV41-1 (round-43) — a backfill row MUST have a NON-NULL, eligible capture
+    // to reach the providers (NULL-capture orphans are now skipped fail-closed),
+    // so this row is linked to a real standalone (unrated ⇒ eligible) capture.
+    run(
+      `INSERT INTO knowledge_captures (id, title, category, status, quality_rating, captured_at, created_at, updated_at)
+       VALUES ('cap-eligible-behind-wall', 'Dashboard screenshot', 'note', 'ready', 'unrated',
+               '2026-01-02T00:00:00.000Z', '2026-01-02T00:00:00.000Z', '2026-01-02T00:00:00.000Z')`,
+      []
+    )
     run(
       `INSERT INTO artifacts (id, knowledge_capture_id, kind, mime, storage_path, size,
                               content_hash, extracted_text, metadata, created_at)
-       VALUES ('eligible-behind-wall', NULL, 'image', 'image/png', NULL, 0,
+       VALUES ('eligible-behind-wall', 'cap-eligible-behind-wall', 'image', 'image/png', NULL, 0,
                'hash-eligible-behind-wall', 'Dashboard screenshot showing Q3 revenue by region', '{}',
                '2026-01-02T00:00:00.000Z')`,
       []
@@ -440,6 +457,71 @@ describe('F5 PixelRAG — image captures as RAG sources', () => {
     // Vision never populated this artifact's text, and it was never embedded —
     // proving the gate ran BEFORE both provider calls (scoped to this artifact
     // so unrelated eligible candidates in the shared DB don't affect the check).
+    const art = queryOne<{ extracted_text: string | null }>(
+      'SELECT extracted_text FROM artifacts WHERE id = ?',
+      [imported.artifact.id]
+    )
+    expect(art!.extracted_text).toBeNull()
+    const chunks = queryAll<{ id: string }>(
+      'SELECT id FROM vector_embeddings WHERE recording_id = ?',
+      [imported.artifact.id]
+    )
+    expect(chunks.length).toBe(0)
+  })
+
+  it('ADV41-1 (round-43, HIGH) — a NULL-capture ORPHAN image is NEVER sent to vision/embeddings', async () => {
+    // An unassociable legacy/orphan image: a genuine backfill candidate by
+    // attempt-state (no text, has a real file, key present) but with NO owning
+    // knowledge_capture_id. Before the fix the `: true` branch retained it and it
+    // reached Gemini vision + embeddings with no positive provenance. It must now
+    // be skipped fail-closed BEFORE any provider call.
+    const orphanFile = writePng('orphan.png', 'orphan')
+    run(
+      `INSERT INTO artifacts (id, knowledge_capture_id, kind, mime, storage_path, size,
+                              content_hash, extracted_text, metadata, created_at)
+       VALUES ('orphan-artifact', NULL, 'image', 'image/png', ?, 0,
+               'hash-orphan-artifact', NULL, '{}', '2026-01-03T00:00:00.000Z')`,
+      [orphanFile]
+    )
+
+    h.visionCalls = 0
+    await backfillImageCaptureIndex(50)
+
+    // ZERO vision calls attributable to the orphan, and no embeddings for it.
+    const art = queryOne<{ extracted_text: string | null }>(
+      'SELECT extracted_text FROM artifacts WHERE id = ?',
+      ['orphan-artifact']
+    )
+    expect(art!.extracted_text).toBeNull()
+    const chunks = queryAll<{ id: string }>(
+      'SELECT id FROM vector_embeddings WHERE recording_id = ?',
+      ['orphan-artifact']
+    )
+    expect(chunks.length).toBe(0)
+  })
+
+  it('ADV41-3 (round-43) — capture excluded BETWEEN vision and embed ⇒ no text persisted, no embedding', async () => {
+    // Import with no key so the capture is a genuine backfill candidate (no text).
+    h.geminiKey = ''
+    const imported = await importArtifact(writePng('shot-race.png', 'race'), { title: 'Race.png' })
+    expect(imported.artifact.extracted_text).toBeNull()
+
+    // Simulate the owner marking the capture value-excluded DURING the vision
+    // call: the fake vision provider fires this side-effect mid-flight, so by the
+    // time the post-vision recheck runs the capture is no longer eligible.
+    h.geminiKey = 'test-key'
+    h.visionCalls = 0
+    h.onVision = () => {
+      run(`UPDATE knowledge_captures SET quality_rating = 'garbage' WHERE id = ?`, [
+        imported.knowledgeCaptureId
+      ])
+    }
+
+    await backfillImageCaptureIndex(50)
+
+    // Vision ran once (the race happens DURING it), but the post-vision recheck
+    // blocked the write and the embed: no extracted text persisted, no chunks.
+    expect(h.visionCalls).toBeGreaterThanOrEqual(1)
     const art = queryOne<{ extracted_text: string | null }>(
       'SELECT extracted_text FROM artifacts WHERE id = ?',
       [imported.artifact.id]
