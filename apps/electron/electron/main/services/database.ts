@@ -5595,6 +5595,111 @@ function suppressExcludedTopicLabels(rows: Array<{ label: string; edge_id: strin
   return out
 }
 
+/** Result of {@link eligibleMeetingIdsForIdentity}: the subset of candidate meeting
+ *  ids allowed to contribute transcript-derived membership to a NON-OWNER identity
+ *  surface, plus a fail-closed flag on a hard lookup error. */
+export interface MeetingIdentityEligibility {
+  /** Meetings allowed to contribute (calendar-authored OR backed by ≥1 eligible recording). */
+  eligible: Set<string>
+  /** True when the lookup could not complete at all → treat every candidate as ineligible. */
+  failClosed: boolean
+}
+
+/**
+ * ADV25 (round-26) — THE shared eligible-MEETING boundary for NON-OWNER identity
+ * surfaces (person-context project-label fallback + suggestion mJac).
+ *
+ * DATA-MODEL FINDING: `meeting_contacts` / `meeting_projects` have NO per-row
+ * provenance column. Their rows are written by TWO independent sources:
+ *   (a) CALENDAR/USER-authored — reconcileMeetingContacts + saveMeetings project a
+ *       meeting's `organizer_email` / `attendees` JSON (ICS/M365 sync) into
+ *       meeting_contacts, and the accept-alias path writes user-confirmed links.
+ *       These are STRUCTURAL and independent of any recording.
+ *   (b) TRANSCRIPT-derived — applyTranscriptEntities (org-reconciler.ts) inserts
+ *       contacts/projects extracted by AI from a recording's transcript. Excluding
+ *       (personal / soft-delete / value-exclude) or hard-purging that recording
+ *       does NOT remove these rows, so they would otherwise keep inflating identity
+ *       surfaces with content the user asked to exclude.
+ *
+ * Because there is no reliable per-row discriminator, this applies the conservative
+ * fail-closed rule from the ADV25 triage: a meeting MAY contribute transcript-derived
+ * membership to a non-owner identity surface ONLY when it either
+ *   • has INDEPENDENT CALENDAR PROVENANCE (organizer_email / non-empty attendees /
+ *     meeting_url / recurrence — fields only ever set by calendar sync, never by a
+ *     transcript), in which case its membership is structural and always allowed; OR
+ *   • is backed by ≥1 ELIGIBLE recording (via {@link getEligibleRecordingIds} over the
+ *     meeting's recordings) — the transcript-derived membership still has a live,
+ *     non-excluded source.
+ * A meeting with NO calendar provenance whose only recordings are all excluded (or
+ * which has no recordings at all) contributes NOTHING.
+ *
+ * FAIL-CLOSED, mirroring filterEligibleCaptureIds: a RECORDING sub-lookup failure
+ * drops only the recording-backed branch (calendar-authored meetings, resolved from
+ * a successful meetings query, still survive and never over-include, so `failClosed`
+ * stays false); a hard error on the meetings query itself yields an empty set with
+ * `failClosed = true` so callers suppress everything.
+ */
+export function eligibleMeetingIdsForIdentity(meetingIds: Iterable<string>): MeetingIdentityEligibility {
+  const unique = [...new Set([...meetingIds].filter((id): id is string => !!id))]
+  if (unique.length === 0) return { eligible: new Set<string>(), failClosed: false }
+  try {
+    const eligible = new Set<string>()
+    const CHUNK = 400
+
+    // 1. Meetings with INDEPENDENT CALENDAR PROVENANCE (structural, always allowed).
+    //    These fields are only ever populated by the calendar-sync writer
+    //    (saveMeetings), never by transcript analysis.
+    for (let i = 0; i < unique.length; i += CHUNK) {
+      const chunk = unique.slice(i, i + CHUNK)
+      const placeholders = chunk.map(() => '?').join(',')
+      const rows = queryAll<{ id: string }>(
+        `SELECT id FROM meetings
+          WHERE id IN (${placeholders})
+            AND (organizer_email IS NOT NULL
+                 OR (attendees IS NOT NULL AND TRIM(attendees) NOT IN ('', '[]'))
+                 OR meeting_url IS NOT NULL
+                 OR recurrence_rule IS NOT NULL
+                 OR is_recurring = 1)`,
+        chunk
+      )
+      for (const r of rows) eligible.add(r.id)
+    }
+
+    // 2. Remaining meetings: eligible ONLY when backed by ≥1 eligible recording.
+    const remaining = unique.filter((id) => !eligible.has(id))
+    if (remaining.length > 0) {
+      const recToMeeting = new Map<string, string>()
+      const allRecIds: string[] = []
+      for (let i = 0; i < remaining.length; i += CHUNK) {
+        const chunk = remaining.slice(i, i + CHUNK)
+        const placeholders = chunk.map(() => '?').join(',')
+        const recs = queryAll<{ id: string; meeting_id: string }>(
+          `SELECT id, meeting_id FROM recordings WHERE meeting_id IN (${placeholders})`,
+          chunk
+        )
+        for (const rec of recs) {
+          recToMeeting.set(rec.id, rec.meeting_id)
+          allRecIds.push(rec.id)
+        }
+      }
+      const { eligible: eligibleRecs, failClosed: recFailClosed } = getEligibleRecordingIds(allRecIds)
+      // recFailClosed drops ONLY the recording-backed branch; calendar meetings (step 1)
+      // stay eligible and the result never over-includes, so failClosed stays false.
+      if (!recFailClosed) {
+        for (const recId of eligibleRecs) {
+          const meetingId = recToMeeting.get(recId)
+          if (meetingId) eligible.add(meetingId)
+        }
+      }
+    }
+
+    return { eligible, failClosed: false }
+  } catch (e) {
+    console.error('[Database] eligibleMeetingIdsForIdentity FAILED — failing closed:', e)
+    return { eligible: new Set<string>(), failClosed: true }
+  }
+}
+
 /**
  * Compact graph-neighborhood context for the identity merge card (B7 symmetric
  * context): the people this person most co-attends meetings with, and the
@@ -5660,17 +5765,38 @@ export function getPersonContext(idOrName: string, limit = 4): PersonContext {
   let topics = suppressExcludedTopicLabels(topicRows, cap)
 
   if (topics.length === 0 && contactId) {
-    topics = safeGraphQuery<{ label: string }>(
-      `SELECT DISTINCT pr.name AS label
+    // ADV25-1 (round-26) — this relational fallback returns project labels from
+    // meeting_contacts⋈meeting_projects, which are TRANSCRIPT-derived
+    // (applyTranscriptEntities) with no per-row provenance. A personal /
+    // value-excluded / soft-deleted (or hard-purged) recording would otherwise keep
+    // exposing its project label on this NON-OWNER identity card. Gate each
+    // contributing meeting through the shared eligible-meeting boundary
+    // ({@link eligibleMeetingIdsForIdentity}): keep a label only when it is backed
+    // by ≥1 meeting that is calendar-authored OR has an eligible recording. The
+    // `cap` is applied AFTER filtering (labels carry their meeting id, no SQL LIMIT)
+    // so a run of ineligible meetings can't truncate eligible labels out.
+    // Fail-closed: on a hard eligibility failure no fallback labels are surfaced.
+    const rows = safeGraphQuery<{ label: string; meeting_id: string }>(
+      `SELECT DISTINCT pr.name AS label, mc.meeting_id AS meeting_id
          FROM meeting_contacts mc
          JOIN meeting_projects mp ON mp.meeting_id = mc.meeting_id
          JOIN projects pr ON pr.id = mp.project_id
-        WHERE mc.contact_id = ?
-        LIMIT ?`,
-      [contactId, cap]
+        WHERE mc.contact_id = ?`,
+      [contactId]
     )
-      .map((r) => r.label)
-      .filter(Boolean)
+    const { eligible: eligibleMeetings, failClosed } = eligibleMeetingIdsForIdentity(
+      rows.map((r) => r.meeting_id)
+    )
+    if (!failClosed) {
+      const seen = new Set<string>()
+      for (const row of rows) {
+        if (!row.label || seen.has(row.label)) continue
+        if (!row.meeting_id || !eligibleMeetings.has(row.meeting_id)) continue
+        seen.add(row.label)
+        topics.push(row.label)
+        if (topics.length >= cap) break
+      }
+    }
   }
 
   return { people, topics }
@@ -7531,6 +7657,11 @@ export function getIdentitySuggestions(status?: 'pending' | 'accepted' | 'reject
     )
   }
   return queryAll<IdentitySuggestion>('SELECT * FROM identity_suggestions ORDER BY confidence DESC, created_at DESC')
+}
+
+/** Fetch a single identity suggestion by id (used by the accept-time TOCTOU guard). */
+export function getIdentitySuggestionById(id: string): IdentitySuggestion | undefined {
+  return queryOne<IdentitySuggestion>('SELECT * FROM identity_suggestions WHERE id = ?', [id])
 }
 
 /** Outcome of accepting a suggestion — the row plus undo/cascade metadata. */

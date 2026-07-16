@@ -76,6 +76,13 @@ describe('getPersonContext', () => {
     // meeting_projects fallback for topics.
     project('p-atlas', 'Atlas')
     tagProject('m1', 'p-atlas')
+    // ADV25-1 (round-26): the meeting_projects fallback now only surfaces a label
+    // backed by an ELIGIBLE meeting. m1 gets a live (eligible) recording so its
+    // transcript-derived 'Atlas' label legitimately surfaces. (Suppression of an
+    // unbacked / excluded-recording label is covered in person-context-eligibility.test.ts.)
+    run(
+      `INSERT INTO recordings (id, filename, date_recorded, meeting_id) VALUES ('r-m1', 'r-m1.hda', '2026-01-02T10:00:00Z', 'm1')`
+    )
 
     // Graph path for a person WITH a node (Bob → ATTENDED → meeting → ABOUT → topic).
     node('n-bob', 'person', 'Bob', 'bob')
