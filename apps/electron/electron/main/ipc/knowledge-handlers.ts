@@ -1,6 +1,6 @@
 
 import { ipcMain } from 'electron'
-import { queryAll, queryOne, run, setKnowledgeProjects } from '../services/database'
+import { queryAll, queryOne, run, setKnowledgeProjects, filterVisibleEntityIds } from '../services/database'
 import {
   filterEligibleCaptureIds,
   existingRecordings,
@@ -266,6 +266,22 @@ export function registerKnowledgeHandlers(): void {
         ])
         if (!capture) {
           return error('NOT_FOUND', `Knowledge capture ${parsed.data.knowledgeCaptureId} not found`)
+        }
+
+        // ADV37 sweep (round-39) — this WRITE references EXISTING projects by id. Even
+        // though knowledge_projects is not consulted by the visible-identity boundary
+        // (so it cannot reanimate a project on its own), fail-safe: never let a stale UI
+        // attach a SUPPRESSED project (sole provenance excluded/personal/value-excluded/
+        // hard-purged) to a capture. Require EVERY id be currently VISIBLE; refuse
+        // generically on any suppressed id, and RETRYABLE on a fail-closed lookup.
+        if (parsed.data.projectIds.length > 0) {
+          const { visible, failClosed } = filterVisibleEntityIds('project', parsed.data.projectIds)
+          if (failClosed) {
+            return error('RETRYABLE_ERROR', 'Could not verify the selected projects. Please try again.')
+          }
+          if (parsed.data.projectIds.some((id) => !visible.has(id))) {
+            return error('NOT_FOUND', 'One or more selected projects could not be found')
+          }
         }
 
         setKnowledgeProjects(parsed.data.knowledgeCaptureId, parsed.data.projectIds)

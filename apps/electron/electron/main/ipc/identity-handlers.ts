@@ -24,6 +24,7 @@ import {
   getAmbiguousBuckets,
   getBucketResolution,
   resolveMention,
+  filterVisibleEntityIds,
   IdentitySuggestion,
   AcceptSuggestionResult,
   MergeJournalEntry,
@@ -339,6 +340,22 @@ export function registerIdentityHandlers(): void {
           'RECORDING_INELIGIBLE',
           'This recording can no longer be edited because it was excluded or deleted.'
         )
+      }
+      // ADV37 (round-39) — when a contact is chosen (contactId non-null), resolveMention
+      // links it via an always-eligible source='calendar' meeting_contacts membership.
+      // A stale/SUPPRESSED contactId (its provenance excluded/deleted/personal/purged)
+      // would be REANIMATED by that link, so gate the chosen contact through the central
+      // visible-identity boundary right before the write (atomic on the single-threaded
+      // main process). contactId=null (clear) needs no gate. Refuse on suppressed OR
+      // fail-closed lookup.
+      if (contactId) {
+        const { visible, failClosed } = filterVisibleEntityIds('contact', [contactId])
+        if (failClosed || !visible.has(contactId)) {
+          return error(
+            'CONTACT_INELIGIBLE',
+            'This person can no longer be linked because they were excluded or deleted.'
+          )
+        }
       }
       resolveMention(recordingId, sourceName, contactId, method ?? 'manual', 1.0)
       return success({ ok: true })

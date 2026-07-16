@@ -319,6 +319,20 @@ export function registerProjectsHandlers(): void {
           return error('NOT_FOUND', `Project with ID ${projectId} not found`)
         }
 
+        // ADV37-2 (round-39) — tagMeetingToProject writes an always-eligible
+        // source='calendar' meeting_projects membership. A stale/SUPPRESSED project
+        // (its sole provenance an excluded/personal/value-excluded/hard-purged
+        // recording) is already hidden from projects:getAll/getById, so tagging it
+        // here would REANIMATE it (reappearing in project lists/discovery/merge/
+        // legacy-node-backing). Gate the id through the central visible-identity
+        // boundary immediately before the write — no await in between, so on the
+        // single-threaded main process the check and the tag are atomic. Refuse
+        // generically (as not-found) on suppressed OR fail-closed lookup.
+        const { visible, failClosed } = filterVisibleEntityIds('project', [projectId])
+        if (failClosed || !visible.has(projectId)) {
+          return error('NOT_FOUND', `Project with ID ${projectId} not found`)
+        }
+
         tagMeetingToProject(meetingId, projectId)
 
         return success(undefined)
