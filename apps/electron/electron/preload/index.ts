@@ -1078,7 +1078,7 @@ export interface ElectronAPI {
     topSkill: (skill: string) => Promise<{ success: boolean; data?: Array<{ person: string; personId: string; weight: number }>; error?: string }>
     personProfile: (name: string) => Promise<{ success: boolean; data?: { personId: string; personLabel: string; meetings: any[]; skills: any[]; actionItems: any[] } | undefined; error?: string }>
     meetingGraph: (meetingId: string) => Promise<{ success: boolean; data?: { meeting: any; nodes: any[]; edges: any[] }; error?: string }>
-    listNodes: (type?: string) => Promise<{ success: boolean; data?: any[]; error?: string }>
+    // listNodes REMOVED (ADV33-1, round 35) — dead IPC that returned raw GraphNodes leaking suppressed contactId.
     resolvePerson: (name: string) => Promise<{ success: boolean; data?: Contact | null; error?: string }>
   }
 
@@ -1832,7 +1832,7 @@ const electronAPI: ElectronAPI = {
     topSkill: (skill: string) => callIPC('graph:topSkill', skill),
     personProfile: (name: string) => callIPC('graph:personProfile', name),
     meetingGraph: (meetingId: string) => callIPC('graph:meetingGraph', meetingId),
-    listNodes: (type?: string) => callIPC('graph:listNodes', type),
+    // listNodes REMOVED (ADV33-1, round 35) — dead IPC that leaked suppressed contactId.
     resolvePerson: (name: string) => callIPC('graph:resolvePerson', name),
   },
 

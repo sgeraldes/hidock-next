@@ -27,7 +27,6 @@ vi.mock('../../services/knowledge-graph-service', () => ({
   queryTopSkill: vi.fn(),
   queryPersonProfile: vi.fn(),
   queryMeetingGraph: vi.fn(),
-  queryListNodes: vi.fn(),
 }))
 
 // Mock the database (graph:resolvePerson uses getContactByName); avoids pulling
@@ -44,7 +43,6 @@ import {
   queryTopSkill,
   queryPersonProfile,
   queryMeetingGraph,
-  queryListNodes,
 } from '../../services/knowledge-graph-service'
 import { getContactByName } from '../../services/database'
 
@@ -65,7 +63,7 @@ describe('knowledge-graph IPC handlers', () => {
   // -------------------------------------------------------------------------
   // Registration
   // -------------------------------------------------------------------------
-  it('registers all 9 channels', () => {
+  it('registers all 8 channels', () => {
     const expectedChannels = [
       'graph:stats',
       'graph:ingestAll',
@@ -74,12 +72,20 @@ describe('knowledge-graph IPC handlers', () => {
       'graph:topSkill',
       'graph:personProfile',
       'graph:meetingGraph',
-      'graph:listNodes',
       'graph:resolvePerson',
     ]
     for (const channel of expectedChannels) {
       expect(ipcMain.handle).toHaveBeenCalledWith(channel, expect.any(Function))
     }
+  })
+
+  // ADV33-1 (round 35): graph:listNodes was a DEAD IPC (no renderer consumer) that
+  // returned raw GraphNode objects leaking a suppressed backing contact's id. It was
+  // removed entirely; assert it is NOT registered and that no handler exists for it.
+  it('does NOT register the removed graph:listNodes channel', () => {
+    const registered = (ipcMain.handle as any).mock.calls.map((c: any[]) => c[0])
+    expect(registered).not.toContain('graph:listNodes')
+    expect(handlers['graph:listNodes']).toBeUndefined()
   })
 
   // -------------------------------------------------------------------------
@@ -264,23 +270,4 @@ describe('knowledge-graph IPC handlers', () => {
     })
   })
 
-  // -------------------------------------------------------------------------
-  // graph:listNodes
-  // -------------------------------------------------------------------------
-  describe('graph:listNodes', () => {
-    it('returns all nodes when no type given', async () => {
-      const mockNodes = [{ id: 'person:alice', type: 'person', label: 'Alice', norm_key: 'alice', weight: 1 }]
-      ;(queryListNodes as any).mockReturnValue(mockNodes)
-
-      const result = await handlers['graph:listNodes']({})
-      expect(result).toEqual({ success: true, data: mockNodes })
-      expect(queryListNodes).toHaveBeenCalledWith(undefined)
-    })
-
-    it('passes type filter when provided', async () => {
-      ;(queryListNodes as any).mockReturnValue([])
-      await handlers['graph:listNodes']({}, 'person')
-      expect(queryListNodes).toHaveBeenCalledWith('person')
-    })
-  })
 })
