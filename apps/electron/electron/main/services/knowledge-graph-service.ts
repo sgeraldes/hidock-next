@@ -72,6 +72,8 @@ import {
   acceptIdentitySuggestion,
   mergeJournalIdsFor,
   finalizeAcceptedMerge,
+  captureLoserSubgraph,
+  attachGraphSnapshotToJournal,
 } from './database'
 import type { Contact, Project, IdentitySuggestion, AcceptSuggestionResult, MergeKind } from './database'
 import { getEventBus } from './event-bus'
@@ -3032,14 +3034,23 @@ function mergeContactsFoldingNodes(
   loserNodeId: string | null
 ): { contact: Contact; movedEdges: number } {
   const store = getKnowledgeGraphStore()
+  const doFold = !!(keeperNodeId && loserNodeId && keeperNodeId !== loserNodeId)
   return runInTransaction(() => {
+    // Capture the journal ids BEFORE the merge so we can find the row it writes.
+    const journalsBefore = doFold ? mergeJournalIdsFor('contact', keeperContactId) : null
     const contact = mergeContacts(keeperContactId, loserContactId)
     let movedEdges = 0
-    if (keeperNodeId && loserNodeId && keeperNodeId !== loserNodeId) {
+    if (doFold) {
+      // ADV56-2 (round-58): snapshot the loser's pre-fold subgraph so unmerge can reverse
+      // the fold EXACTLY, then patch it into the journal row mergeContacts just wrote.
+      const snapshot = captureLoserSubgraph(loserNodeId!, keeperNodeId!)
       // Resolve AFTER the contact merge is harmless: the loser's GRAPH node persists
       // (only its contact ROW was deleted), so its `contact:<id>` key still folds.
-      const r = mergeNodes(store, keeperNodeId, loserNodeId)
+      const r = mergeNodes(store, keeperNodeId!, loserNodeId!)
       movedEdges = r.movedEdges
+      const journalsAfter = mergeJournalIdsFor('contact', keeperContactId)
+      const newId = [...journalsAfter].find((jid) => !journalsBefore!.has(jid))
+      if (newId) attachGraphSnapshotToJournal(newId, snapshot)
     }
     return { contact, movedEdges }
   })
@@ -3107,12 +3118,20 @@ function mergeProjectsFoldingNodes(
   loserNodeId: string | null
 ): { project: Project; movedEdges: number } {
   const store = getKnowledgeGraphStore()
+  const doFold = !!(keeperNodeId && loserNodeId && keeperNodeId !== loserNodeId)
   return runInTransaction(() => {
+    const journalsBefore = doFold ? mergeJournalIdsFor('project', keeperProjectId) : null
     const project = mergeProjects(keeperProjectId, loserProjectId)
     let movedEdges = 0
-    if (keeperNodeId && loserNodeId && keeperNodeId !== loserNodeId) {
-      const r = mergeNodes(store, keeperNodeId, loserNodeId)
+    if (doFold) {
+      // ADV56-2 (round-58): snapshot the loser's pre-fold subgraph so unmerge can reverse
+      // the fold EXACTLY, then patch it into the journal row mergeProjects just wrote.
+      const snapshot = captureLoserSubgraph(loserNodeId!, keeperNodeId!)
+      const r = mergeNodes(store, keeperNodeId!, loserNodeId!)
       movedEdges = r.movedEdges
+      const journalsAfter = mergeJournalIdsFor('project', keeperProjectId)
+      const newId = [...journalsAfter].find((jid) => !journalsBefore!.has(jid))
+      if (newId) attachGraphSnapshotToJournal(newId, snapshot)
     }
     return { project, movedEdges }
   })

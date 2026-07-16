@@ -6870,6 +6870,19 @@ interface RepointedLink {
   role?: string
 }
 
+/**
+ * ADV56-2 (round-58): snapshot of the LOSER node's pre-fold subgraph, journaled into
+ * the merge manifest so unmerge can reverse the graph mergeNodes fold EXACTLY. Captured
+ * inside the graph-aware composite immediately BEFORE the fold; consumed by
+ * reverseGraphFold on unmerge. Full-row copies so the reconstruction is byte-identical.
+ */
+export interface GraphMergeSnapshot {
+  keeperNode: string | null // keeper graph node id (to compute the fold's repointed endpoints)
+  loserNode: Record<string, unknown> | null // full graph_nodes row for the loser
+  edges: Array<Record<string, unknown>> // full graph_edges rows incident to the loser (pre-fold)
+  edgeSources: Array<Record<string, unknown>> // full graph_edge_sources rows for those edges
+}
+
 /** Contact-merge manifest: everything the fold touched, enough to reverse it. */
 interface ContactMergeManifest {
   meetingContacts: { repointed: RepointedLink[]; collided: RepointedLink[] }
@@ -6877,6 +6890,7 @@ interface ContactMergeManifest {
   createdAliasNorms: string[] // aliases the merge created (loser-name → keeper)
   loserAliases: Array<{ alias_norm: string; source: string | null; confidence: number | null }>
   keeperBefore: { meetingIds: string[]; speakerIds: string[] }
+  graph?: GraphMergeSnapshot // ADV56-2: loser subgraph, present when the graph node was folded
 }
 
 /** Project-merge manifest. */
@@ -6886,6 +6900,7 @@ interface ProjectMergeManifest {
   createdAliasNorms: string[]
   loserAliases: Array<{ alias_norm: string; source: string | null; confidence: number | null }>
   keeperBefore: { meetingIds: string[]; knowledgeIds: string[] }
+  graph?: GraphMergeSnapshot // ADV56-2: loser subgraph, present when the graph node was folded
 }
 
 /** A keeper link that appeared after the merge — the user must review it by hand. */
@@ -7166,6 +7181,159 @@ function restoreFoldedFields(table: 'contacts' | 'projects', keeperId: string, f
   return restored
 }
 
+// -----------------------------------------------------------------------------
+// ADV56-2 (round-58): graph-fold reversal — snapshot the loser's pre-fold subgraph
+// at merge time; reconstruct it exactly on unmerge.
+// -----------------------------------------------------------------------------
+
+/**
+ * Snapshot the LOSER graph node's full pre-fold subgraph: its graph_nodes row, every
+ * graph_edges row incident to it, and every graph_edge_sources row for those edges.
+ * Called inside the graph-aware merge composite immediately BEFORE mergeNodes folds
+ * (and deletes) the loser node, so unmerge can reverse the fold exactly. `keeperNodeId`
+ * is recorded so the reversal can recompute the fold's repointed endpoints (L→K).
+ */
+export function captureLoserSubgraph(loserNodeId: string, keeperNodeId: string): GraphMergeSnapshot {
+  const loserNode = queryOne<Record<string, unknown>>('SELECT * FROM graph_nodes WHERE id = ?', [loserNodeId]) ?? null
+  const edges = queryAll<Record<string, unknown>>(
+    'SELECT * FROM graph_edges WHERE source_id = ? OR target_id = ?',
+    [loserNodeId, loserNodeId]
+  )
+  let edgeSources: Array<Record<string, unknown>> = []
+  const edgeIds = edges.map((e) => e.id as string)
+  if (edgeIds.length) {
+    const placeholders = edgeIds.map(() => '?').join(',')
+    edgeSources = queryAll<Record<string, unknown>>(
+      `SELECT * FROM graph_edge_sources WHERE edge_id IN (${placeholders})`,
+      edgeIds
+    )
+  }
+  return { keeperNode: keeperNodeId, loserNode, edges, edgeSources }
+}
+
+/**
+ * Attach a captured {@link GraphMergeSnapshot} to an already-written merge_journal row's
+ * manifest (the composite writes the relational manifest via mergeContacts/mergeProjects
+ * FIRST, then folds the graph and patches the same row). No-op if the row is gone. Runs
+ * through runNoSave so it joins the composite's open transaction.
+ */
+export function attachGraphSnapshotToJournal(journalId: string, snapshot: GraphMergeSnapshot): void {
+  const row = queryOne<{ repointed_manifest: string }>('SELECT repointed_manifest FROM merge_journal WHERE id = ?', [
+    journalId
+  ])
+  if (!row) return
+  let manifest: Record<string, unknown>
+  try {
+    manifest = JSON.parse(row.repointed_manifest) as Record<string, unknown>
+  } catch {
+    return
+  }
+  manifest.graph = snapshot
+  runNoSave('UPDATE merge_journal SET repointed_manifest = ? WHERE id = ?', [JSON.stringify(manifest), journalId])
+}
+
+/** Re-insert a full graph_edges row from a snapshot (all columns). */
+function reinsertGraphEdge(e: Record<string, unknown>): void {
+  runNoSave(
+    'INSERT OR IGNORE INTO graph_edges (id, source_id, target_id, type, props, weight, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [e.id, e.source_id, e.target_id, e.type, e.props ?? null, e.weight ?? 1, e.created_at ?? null]
+  )
+}
+
+/** Re-insert a full graph_edge_sources row from a snapshot (all columns). */
+function reinsertGraphEdgeSource(s: Record<string, unknown>): void {
+  runNoSave(
+    'INSERT OR IGNORE INTO graph_edge_sources (edge_id, recording_id, transcript_id, assertion_count, created_at) VALUES (?, ?, ?, ?, ?)',
+    [s.edge_id, s.recording_id, s.transcript_id, s.assertion_count ?? 1, s.created_at ?? null]
+  )
+}
+
+/**
+ * Reverse the graph mergeNodes fold recorded in {@link GraphMergeSnapshot}, restoring
+ * the pre-merge graph EXACTLY. Runs inside the unmerge transaction. For each loser edge
+ * in the snapshot:
+ *   - if the edge id still exists (a non-colliding repoint kept its id) → restore its
+ *     original endpoints/weight and re-insert its original sources;
+ *   - else it was deleted at the fold (a collision drop or a loser↔keeper self-loop):
+ *     re-insert it; and for a COLLISION (a keeper edge at the repointed endpoints
+ *     absorbed it) subtract the loser edge's weight and per-source assertion_count from
+ *     that keeper edge — deleting a keeper source row only when it drops to ≤0 (i.e. the
+ *     row existed solely because of the transfer). This exactly inverts mergeNodes'
+ *     transferEdgeSources upsert (which never alters the keeper's created_at and only
+ *     sums counts) so the round-trip is byte-identical.
+ * The loser node row is recreated first (idempotently).
+ */
+function reverseGraphFold(snapshot: GraphMergeSnapshot | undefined): void {
+  if (!snapshot || !snapshot.loserNode) return
+  const L = snapshot.loserNode.id as string
+  const K = snapshot.keeperNode
+  if (!L) return
+
+  // 1. Recreate the loser node (idempotent — skip if a node with its id already exists).
+  if (!queryOne<{ id: string }>('SELECT id FROM graph_nodes WHERE id = ?', [L])) {
+    const n = snapshot.loserNode
+    runNoSave(
+      `INSERT OR IGNORE INTO graph_nodes (id, type, label, norm_key, props, created_at, updated_at, origin, source_recording_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [n.id, n.type, n.label, n.norm_key, n.props ?? null, n.created_at ?? null, n.updated_at ?? null, n.origin ?? null, n.source_recording_id ?? null]
+    )
+  }
+
+  // 2. Reverse each loser edge.
+  for (const le of snapshot.edges) {
+    const leId = le.id as string
+    const leSources = snapshot.edgeSources.filter((s) => s.edge_id === leId)
+    const exists = queryOne<{ id: string }>('SELECT id FROM graph_edges WHERE id = ?', [leId])
+    if (exists) {
+      // Non-colliding repoint (or untouched): restore endpoints/weight + sources exactly.
+      runNoSave(
+        'UPDATE graph_edges SET source_id = ?, target_id = ?, type = ?, props = ?, weight = ?, created_at = ? WHERE id = ?',
+        [le.source_id, le.target_id, le.type, le.props ?? null, le.weight ?? 1, le.created_at ?? null, leId]
+      )
+      runNoSave('DELETE FROM graph_edge_sources WHERE edge_id = ?', [leId])
+      for (const s of leSources) reinsertGraphEdgeSource(s)
+      continue
+    }
+
+    // Edge was deleted at the fold. Compute the endpoints it repointed to (L→K).
+    const s2 = le.source_id === L ? K : le.source_id
+    const t2 = le.target_id === L ? K : le.target_id
+    if (K && s2 !== t2) {
+      // Collision: a keeper edge at (s2,t2,type) absorbed this loser edge's weight+sources.
+      const ke = queryOne<{ id: string }>(
+        'SELECT id FROM graph_edges WHERE source_id = ? AND target_id = ? AND type = ?',
+        [s2, t2, le.type]
+      )
+      if (ke) {
+        runNoSave('UPDATE graph_edges SET weight = weight - ? WHERE id = ?', [le.weight ?? 1, ke.id])
+        for (const s of leSources) {
+          const cur = queryOne<{ assertion_count: number }>(
+            'SELECT assertion_count FROM graph_edge_sources WHERE edge_id = ? AND recording_id = ? AND transcript_id = ?',
+            [ke.id, s.recording_id, s.transcript_id]
+          )
+          if (cur) {
+            const next = (cur.assertion_count ?? 0) - ((s.assertion_count as number) ?? 0)
+            if (next <= 0) {
+              runNoSave(
+                'DELETE FROM graph_edge_sources WHERE edge_id = ? AND recording_id = ? AND transcript_id = ?',
+                [ke.id, s.recording_id, s.transcript_id]
+              )
+            } else {
+              runNoSave(
+                'UPDATE graph_edge_sources SET assertion_count = ? WHERE edge_id = ? AND recording_id = ? AND transcript_id = ?',
+                [next, ke.id, s.recording_id, s.transcript_id]
+              )
+            }
+          }
+        }
+      }
+    }
+    // Re-insert the deleted loser edge (collision drop or self-loop) + its sources.
+    reinsertGraphEdge(le)
+    for (const s of leSources) reinsertGraphEdgeSource(s)
+  }
+}
+
 /** Fetch and validate an un-undone journal row of the given kind. @throws otherwise. */
 function loadOpenJournal(journalId: string, kind: MergeKind): MergeJournalRow {
   const row = queryOne<MergeJournalRow>('SELECT * FROM merge_journal WHERE id = ?', [journalId])
@@ -7289,6 +7457,12 @@ export function unmergeContacts(journalId: string): UnmergeResult {
       ])
     }
     const fieldsRestored = restoreFoldedFields('contacts', keeperId, row.folded_fields)
+
+    // ADV56-2 (round-58): reverse the graph mergeNodes fold EXACTLY (recreate the loser
+    // node, restore its edges + provenance, and remove from the keeper exactly what the
+    // fold transferred in) so the graph is not left attributing the loser's context to
+    // the keeper while unmerge reports success. No-op when the merge folded no graph node.
+    reverseGraphFold(manifest.graph)
 
     recomputeContactMeetingCount(keeperId)
     recomputeContactMeetingCount(loser.id)
@@ -8253,6 +8427,10 @@ export function unmergeProjects(journalId: string): UnmergeResult {
       ])
     }
     const fieldsRestored = restoreFoldedFields('projects', keeperId, row.folded_fields)
+
+    // ADV56-2 (round-58): reverse the graph mergeNodes fold EXACTLY (see unmergeContacts).
+    // No-op when the merge folded no project graph node.
+    reverseGraphFold(manifest.graph)
 
     // 5. Orphan report: keeper links not present before the merge (added since).
     const beforeMeetings = new Set(manifest.keeperBefore.meetingIds)

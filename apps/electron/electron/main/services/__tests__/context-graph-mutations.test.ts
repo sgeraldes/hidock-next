@@ -979,6 +979,128 @@ describe('Context Graph accept-suggestion graph fold + atomicity (ADV56-1 / roun
   })
 })
 
+// ---------------------------------------------------------------------------
+// ADV56-2 (round-58): a merge folds the loser's graph node into the keeper (mergeNodes
+// deletes the loser node and transfers its edges/provenance). unmerge restored ONLY the
+// relational state, so the recreated loser had NO graph node and its history stayed
+// attributed to the keeper — while undo reported SUCCESS. The merge now SNAPSHOTS the
+// loser's pre-fold subgraph into the journal manifest, and unmerge reconstructs it
+// EXACTLY (recreate loser node, restore its edges + provenance, and subtract from the
+// keeper exactly what the fold transferred in). Proven with merge→unmerge byte-identity.
+// ---------------------------------------------------------------------------
+describe('Context Graph merge→unmerge graph round-trip (ADV56-2 / round-58)', () => {
+  /** Full snapshot of the graph + entity tables (merge_journal excluded — it legitimately
+   *  keeps an undone bookkeeping row after unmerge). Ordered for byte-identity. */
+  function graphSnap() {
+    return {
+      graphNodes: JSON.stringify(queryAll('SELECT * FROM graph_nodes ORDER BY id')),
+      graphEdges: JSON.stringify(queryAll('SELECT * FROM graph_edges ORDER BY id')),
+      graphEdgeSources: JSON.stringify(
+        queryAll('SELECT * FROM graph_edge_sources ORDER BY edge_id, recording_id, transcript_id')
+      ),
+      contacts: JSON.stringify(queryAll('SELECT * FROM contacts ORDER BY id')),
+      contactAliases: JSON.stringify(queryAll('SELECT * FROM contact_aliases ORDER BY id')),
+      meetingContacts: JSON.stringify(queryAll('SELECT * FROM meeting_contacts ORDER BY meeting_id, contact_id')),
+      projects: JSON.stringify(queryAll('SELECT * FROM projects ORDER BY id')),
+      meetingProjects: JSON.stringify(queryAll('SELECT * FROM meeting_projects ORDER BY meeting_id, project_id')),
+    }
+  }
+
+  function addEdgeSource(edgeId: string, rec: string, tx: string, count: number) {
+    dbRun(
+      'INSERT OR IGNORE INTO graph_edge_sources (edge_id, recording_id, transcript_id, assertion_count, created_at) VALUES (?, ?, ?, ?, ?)',
+      [edgeId, rec, tx, count, '2026-01-01']
+    )
+  }
+
+  it('contacts: merge→unmerge restores the graph BYTE-IDENTICALLY (collision + non-colliding + loser-only source)', async () => {
+    seedContact('c-a', 'Bob')
+    seedContact('c-b', 'Robert')
+    dbRun('INSERT OR IGNORE INTO recordings (id, filename, date_recorded) VALUES (?, ?, ?)', ['rec-seed', 'rec-seed.hda', '2026-01-01'])
+    const store = getKnowledgeGraphStore()
+    const K = store.upsertNode({ type: 'person', label: 'Bob', key: 'contact:c-a', props: { contactId: 'c-a' }, now: '2026-01-01' })
+    const L = store.upsertNode({ type: 'person', label: 'Robert', key: 'contact:c-b', props: { contactId: 'c-b' }, now: '2026-01-01' })
+    const M = store.upsertNode({ type: 'meeting', label: 'Shared', props: { meetingId: 'ms', date: '2026-01-05' }, now: '2026-01-01' })
+    const M2 = store.upsertNode({ type: 'meeting', label: 'LoserOnly', props: { meetingId: 'ml', date: '2026-01-06' }, now: '2026-01-01' })
+    // Colliding pair: both K and L attend M. Keeper edge ek, loser edge el.
+    const ek = store.upsertEdge({ sourceId: K, targetId: M, type: 'ATTENDED', now: '2026-01-01' })
+    const el = store.upsertEdge({ sourceId: L, targetId: M, type: 'ATTENDED', now: '2026-01-01' })
+    // Non-colliding loser edge (repointed on fold, id preserved): L attends M2.
+    const el2 = store.upsertEdge({ sourceId: L, targetId: M2, type: 'ATTENDED', now: '2026-01-01' })
+    // ek: one shared source. el: same shared source (sums on transfer) + a loser-only source
+    // (a brand-new keeper row that must be DELETED on unmerge). el2: its own source.
+    addEdgeSource(ek, 'rec-seed', 'tx-shared', 1)
+    addEdgeSource(el, 'rec-seed', 'tx-shared', 1)
+    addEdgeSource(el, 'rec-loser', 'tx-loser', 2)
+    addEdgeSource(el2, 'rec-seed', 'tx-m2', 1)
+    // A loser-only relational membership (repoints on merge, comes back on unmerge).
+    dbRun('INSERT OR IGNORE INTO meetings (id, subject, start_time, end_time) VALUES (?, ?, ?, ?)', ['mtg-loser', 'LoserSync', '2026-01-05', '2026-01-05'])
+    dbRun('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)', ['mtg-loser', 'c-b', 'attendee'])
+
+    const before = graphSnap()
+
+    mergeContactsWithGraph('c-a', 'c-b')
+    // Sanity: the fold really happened (loser node gone, journal has a graph snapshot).
+    expect(store.getNode(L)).toBeUndefined()
+    const journal = database.getMergeJournal('contact', 'c-a')
+    expect(journal).toHaveLength(1)
+
+    const undo = database.unmergeContacts(journal[0].id)
+    expect(undo.loserId).toBe('c-b')
+
+    const after = graphSnap()
+    // The ADV56-2 deliverable: the GRAPH is restored byte-identically — loser node back,
+    // its colliding edge's shared source restored to count 1, the loser-only transferred
+    // source deleted off the keeper, the non-colliding edge repointed back, weights exact.
+    expect(after.graphNodes).toBe(before.graphNodes)
+    expect(after.graphEdges).toBe(before.graphEdges)
+    expect(after.graphEdgeSources).toBe(before.graphEdgeSources)
+    // Loser node + its backing contact are back; the fold left nothing under the keeper.
+    expect(store.getNode(L)).toBeTruthy()
+    expect(getContactById('c-b')).toBeTruthy()
+    // Relational aliases + memberships round-trip (contacts.source/meeting_count are a
+    // separate pre-existing relational-unmerge gap, out of scope for the graph fix).
+    expect(after.contactAliases).toBe(before.contactAliases)
+    expect(after.meetingContacts).toBe(before.meetingContacts)
+  })
+
+  it('projects: merge→unmerge restores the graph BYTE-IDENTICALLY (collision + non-colliding)', async () => {
+    dbRun("INSERT OR IGNORE INTO projects (id, name, status, created_at) VALUES ('p-a', 'Apollo', 'active', '2026-01-01')", [])
+    dbRun("INSERT OR IGNORE INTO projects (id, name, status, created_at) VALUES ('p-b', 'Artemis', 'active', '2026-01-01')", [])
+    dbRun('INSERT OR IGNORE INTO recordings (id, filename, date_recorded) VALUES (?, ?, ?)', ['rec-seed', 'rec-seed.hda', '2026-01-01'])
+    const store = getKnowledgeGraphStore()
+    const K = store.upsertNode({ type: 'project', label: 'Apollo', now: '2026-01-01' })
+    const L = store.upsertNode({ type: 'project', label: 'Artemis', now: '2026-01-01' })
+    const M = store.upsertNode({ type: 'meeting', label: 'Shared', props: { meetingId: 'ms', date: '2026-01-05' }, now: '2026-01-01' })
+    const M2 = store.upsertNode({ type: 'meeting', label: 'LoserOnly', props: { meetingId: 'ml', date: '2026-01-06' }, now: '2026-01-01' })
+    // Colliding: M ABOUT K and M ABOUT L. Non-colliding: M2 ABOUT L.
+    const ek = store.upsertEdge({ sourceId: M, targetId: K, type: 'ABOUT', now: '2026-01-01' })
+    const el = store.upsertEdge({ sourceId: M, targetId: L, type: 'ABOUT', now: '2026-01-01' })
+    const el2 = store.upsertEdge({ sourceId: M2, targetId: L, type: 'ABOUT', now: '2026-01-01' })
+    addEdgeSource(ek, 'rec-seed', 'tx-shared', 1)
+    addEdgeSource(el, 'rec-seed', 'tx-shared', 1)
+    addEdgeSource(el, 'rec-loser', 'tx-loser', 2)
+    addEdgeSource(el2, 'rec-seed', 'tx-m2', 1)
+
+    const before = graphSnap()
+
+    mergeProjectsWithGraph('p-a', 'p-b')
+    expect(store.getNode(L)).toBeUndefined()
+    const journal = database.getMergeJournal('project', 'p-a')
+    expect(journal).toHaveLength(1)
+
+    const undo = database.unmergeProjects(journal[0].id)
+    expect(undo.loserId).toBe('p-b')
+
+    const after = graphSnap()
+    expect(after.graphNodes).toBe(before.graphNodes)
+    expect(after.graphEdges).toBe(before.graphEdges)
+    expect(after.graphEdgeSources).toBe(before.graphEdgeSources)
+    expect(after.projects).toBe(before.projects)
+    expect(after.meetingProjects).toBe(before.meetingProjects)
+  })
+})
+
 describe('Context Graph remove + pronouns', () => {
   it('removes a node and its edges', async () => {
     const { person } = seedGraph({ personLabel: 'Junk' })
