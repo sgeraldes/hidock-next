@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3'
 import { existsSync, readFileSync } from 'fs'
-import { join } from 'path'
+import { join, normalize, resolve as resolvePath } from 'path'
 import { randomUUID } from 'crypto'
 import { getDatabasePath } from './file-storage'
 import { DatabaseEngine, getTableColumns, type SqlJsDatabase } from '@hidock/database'
@@ -3588,6 +3588,44 @@ export function getExistingRecordingIds(candidateIds: Iterable<string>): IdExist
   return idsPresentIn('recordings', candidateIds)
 }
 
+/** Normalize a filesystem path for equality comparison: absolute + normalized,
+ *  case-folded on win32 (paths are case-insensitive there). Mirrors
+ *  file-storage.readRecordingFile's own comparison so a resolved path and a
+ *  stored file_path compare identically. */
+function normalizePathForCompare(p: string): string {
+  const n = normalize(resolvePath(p))
+  return process.platform === 'win32' ? n.toLowerCase() : n
+}
+
+/**
+ * ADV45-2 (round-47) — resolve a filesystem path back to the recording row that
+ * OWNS it, so the raw-file IPCs (audio read / open-in-app / reveal-in-folder)
+ * can enforce an EXISTENCE-SCOPED owner gate instead of trusting a
+ * renderer-supplied path. Those are OWNER actions, so the recording may be in
+ * ANY state (trashed / personal / low-value) — this is deliberately
+ * EXISTENCE-scoped, NOT the full eligibility allowlist — but a HARD-PURGED /
+ * orphan / arbitrary path (no `recordings` row claims it) resolves to `null`
+ * and the caller REFUSES (no file bytes / no open / no reveal), which also
+ * blocks arbitrary-path traversal to files no recording owns. Case-insensitive
+ * on win32. Fail-closed: any DB error → `null`.
+ */
+export function getRecordingIdByFilePath(filePath: string): string | null {
+  if (!filePath || typeof filePath !== 'string') return null
+  try {
+    const target = normalizePathForCompare(filePath)
+    const rows = queryAll<{ id: string; file_path: string | null }>(
+      "SELECT id, file_path FROM recordings WHERE file_path IS NOT NULL AND file_path != ''"
+    )
+    for (const r of rows) {
+      if (r.file_path && normalizePathForCompare(r.file_path) === target) return r.id
+    }
+    return null
+  } catch (e) {
+    console.error('[Database] getRecordingIdByFilePath FAILED — failing closed:', e)
+    return null
+  }
+}
+
 /**
  * ADV11 (round-12) — the subset of candidate ids present in `knowledge_captures`
  * (a GENUINE artifact/capture id). Used to positively confirm that a vector doc
@@ -7128,6 +7166,28 @@ export function getSpeakerMap(recordingId: string): SpeakerMapEntry[] {
 }
 
 /**
+ * ADV45-1 (round-47) — gate the RECORDING axis on every speaker-identity
+ * mutation. A speaker mutation resolves/creates a contact, writes a
+ * transcript_speakers binding, and (when the recording is meeting-linked) an
+ * always-eligible source='calendar' meeting_contacts membership — i.e. it can
+ * LAUNDER an excluded recording's interaction into visible identity. Round 39
+ * gated the CONTACT axis (never reanimate a suppressed contact); this gates the
+ * RECORDING axis: the recording itself must be ELIGIBLE (an EXISTING,
+ * non-personal, non-deleted, non-value-excluded row). Called INSIDE each
+ * mutation's transaction BEFORE any contact resolution/creation and BEFORE any
+ * write, so an ineligible / hard-purged recording — OR a fail-closed eligibility
+ * lookup — throws and the whole mutation rolls back with zero state change.
+ * getEligibleRecordingIds lives in THIS module (no import cycle with
+ * recording-eligibility.ts, which imports database.ts).
+ */
+function assertRecordingEligibleForSpeakerMutation(recordingId: string): void {
+  const { eligible, failClosed } = getEligibleRecordingIds([recordingId])
+  if (failClosed || !eligible.has(recordingId)) {
+    throw new Error(`Recording ${recordingId} is not eligible for speaker identity mutation`)
+  }
+}
+
+/**
  * Bind a transcript speaker label to a contact. Provide either an existing
  * contactId or a newName (upserted by case-insensitive name). Writes the map
  * row (replacing any prior binding for the label) and, when the recording is
@@ -7141,6 +7201,8 @@ export function assignSpeaker(
   opts: { contactId?: string; newName?: string }
 ): Contact {
   return runInTransaction(() => {
+    // ADV45-1 (round-47) — RECORDING-axis gate, in-transaction, before any write.
+    assertRecordingEligibleForSpeakerMutation(recordingId)
     let contact: Contact | undefined
 
     // ADV37 (round-39) — this WRITE links the resolved contact via an always-eligible
@@ -7201,7 +7263,11 @@ export function assignSpeaker(
 
 /** Remove a speaker-label → contact binding for a recording. */
 export function unassignSpeaker(recordingId: string, speakerLabel: string): void {
-  run('DELETE FROM transcript_speakers WHERE recording_id = ? AND speaker_label = ?', [recordingId, speakerLabel])
+  runInTransaction(() => {
+    // ADV45-1 (round-47) — RECORDING-axis gate before any mutation.
+    assertRecordingEligibleForSpeakerMutation(recordingId)
+    runNoSave('DELETE FROM transcript_speakers WHERE recording_id = ? AND speaker_label = ?', [recordingId, speakerLabel])
+  })
 }
 
 // =============================================================================
@@ -7279,6 +7345,8 @@ export function setTurnOverride(
   opts: { contactId?: string; newName?: string }
 ): Contact {
   return runInTransaction(() => {
+    // ADV45-1 (round-47) — RECORDING-axis gate, in-transaction, before any write.
+    assertRecordingEligibleForSpeakerMutation(recordingId)
     const contact = resolveContactForBinding(opts)
     runNoSave(
       'INSERT OR REPLACE INTO turn_speaker_overrides (id, recording_id, turn_index, contact_id) VALUES (?, ?, ?, ?)',
@@ -7300,7 +7368,11 @@ export function setTurnOverride(
 
 /** Remove a per-turn override, reverting the turn to its label/split default. */
 export function clearTurnOverride(recordingId: string, turnIndex: number): void {
-  run('DELETE FROM turn_speaker_overrides WHERE recording_id = ? AND turn_index = ?', [recordingId, turnIndex])
+  runInTransaction(() => {
+    // ADV45-1 (round-47) — RECORDING-axis gate before any mutation.
+    assertRecordingEligibleForSpeakerMutation(recordingId)
+    runNoSave('DELETE FROM turn_speaker_overrides WHERE recording_id = ? AND turn_index = ?', [recordingId, turnIndex])
+  })
 }
 
 /** All speaker splits for a recording, ordered so the render can pick the last
@@ -7336,6 +7408,8 @@ function nextSplitLetter(usedDerived: string[], baseLabel: string): string {
  */
 export function splitSpeakerFrom(recordingId: string, baseLabel: string, fromTurnIndex: number): string {
   return runInTransaction(() => {
+    // ADV45-1 (round-47) — RECORDING-axis gate, in-transaction, before any write.
+    assertRecordingEligibleForSpeakerMutation(recordingId)
     const existing = queryOne<{ derived_label: string }>(
       'SELECT derived_label FROM speaker_splits WHERE recording_id = ? AND base_label = ? AND from_turn_index = ?',
       [recordingId, baseLabel, fromTurnIndex]
@@ -7363,6 +7437,8 @@ export function splitSpeakerFrom(recordingId: string, baseLabel: string, fromTur
  */
 export function mergeSpeakerSplit(recordingId: string, baseLabel: string, fromTurnIndex: number): void {
   runInTransaction(() => {
+    // ADV45-1 (round-47) — RECORDING-axis gate, in-transaction, before any write.
+    assertRecordingEligibleForSpeakerMutation(recordingId)
     const row = queryOne<{ derived_label: string }>(
       'SELECT derived_label FROM speaker_splits WHERE recording_id = ? AND base_label = ? AND from_turn_index = ?',
       [recordingId, baseLabel, fromTurnIndex]
@@ -7393,6 +7469,9 @@ export function assignSpeakerFromHere(
   opts: { contactId?: string; newName?: string }
 ): { derivedLabel: string; contact: Contact } {
   return runInTransaction(() => {
+    // ADV45-1 (round-47) — RECORDING-axis gate up front (splitSpeakerFrom +
+    // assignSpeaker each re-assert inside their own nested transactions).
+    assertRecordingEligibleForSpeakerMutation(recordingId)
     const derivedLabel = splitSpeakerFrom(recordingId, baseLabel, fromTurnIndex)
     const contact = assignSpeaker(recordingId, derivedLabel, opts)
     return { derivedLabel, contact }
