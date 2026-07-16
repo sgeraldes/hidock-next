@@ -28,6 +28,14 @@ function graphNodeColumns(): string[] {
 }
 
 beforeEach(async () => {
+  // Defensive: a sibling |main-db| suite in the same worker may have left the
+  // module-singleton connection open on ITS path; close it first so our rm +
+  // init truly re-point at a fresh v47 db (fixes full-run isolation flake).
+  try {
+    closeDatabase()
+  } catch {
+    /* not open — fine */
+  }
   if (existsSync(dbPath)) rmSync(dbPath, { force: true })
   await initializeDatabase()
 })
