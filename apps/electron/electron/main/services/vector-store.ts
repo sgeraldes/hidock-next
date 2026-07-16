@@ -542,9 +542,21 @@ class VectorStore {
     }
     stmt.free()
 
+    // ADV40 sweep (round-42) — route the candidate ids through THE shared
+    // fail-closed boundary BEFORE the embeddings provider call. The SELECT above
+    // only filters personal/deleted at the recording level, and its LEFT JOIN
+    // treats a HARD-PURGED recording's orphaned transcript (r.* all NULL) as
+    // eligible — so that content would be sent to the external embeddings
+    // provider on boot. filterEligibleRecordingIds additionally excludes
+    // value-excluded recordings and, being a positive allowlist, drops
+    // hard-purged orphans. Fail-closed: on any lookup error index NOTHING this
+    // pass (the RE-1 shouldPersist gate below remains for mid-run transitions).
+    const { eligible, failClosed } = filterEligibleRecordingIds(rows.map((r) => r.recording_id))
+    const eligibleRows = failClosed ? [] : rows.filter((r) => eligible.has(r.recording_id))
+
     let indexed = 0
-    let skipped = 0
-    for (const row of rows) {
+    let skipped = rows.length - eligibleRows.length
+    for (const row of eligibleRows) {
       try {
         const count = await this.indexTranscript(row.full_text, {
           recordingId: row.recording_id,

@@ -12,11 +12,35 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 const deps = vi.hoisted(() => ({
   excluded: new Set<string>(),
   throwOnExclusion: false,
-  generateEmbedding: vi.fn()
+  generateEmbedding: vi.fn(),
+  // ADV40 sweep (round-42) — rows the boot backfill's SELECT "returns" (already
+  // personal/deleted-filtered at SQL) + which recording ids actually got indexed
+  // (captured from the vector_embeddings INSERT) so a test can assert the shared
+  // eligibility boundary ran BEFORE the embed loop.
+  backfillRows: [] as Array<{ recording_id: string; full_text: string }>,
+  indexedRecordingIds: [] as string[]
 }))
 
 vi.mock('../database', () => ({
-  getDatabase: () => ({ run: vi.fn(), exec: () => [], prepare: () => ({ step: () => false, free: () => {} }) }),
+  getDatabase: () => ({
+    run: (sql: string, params?: any[]) => {
+      if (typeof sql === 'string' && sql.includes('vector_embeddings') && sql.includes('INSERT') && params) {
+        deps.indexedRecordingIds.push(params[4]) // recording_id column
+      }
+    },
+    exec: () => [],
+    prepare: (_sql: string) => {
+      let i = -1
+      return {
+        step: () => {
+          i++
+          return i < deps.backfillRows.length
+        },
+        getAsObject: () => deps.backfillRows[i],
+        free: () => {}
+      }
+    }
+  }),
   // Round-6 — { ids, failClosed }. The real getExcludedRecordingIds catches
   // internally and surfaces failClosed rather than throwing, so the mock mimics
   // that: throwOnExclusion ⇒ failClosed (the shared boundary drops all
@@ -54,6 +78,8 @@ import { VectorStore } from '../vector-store'
 beforeEach(() => {
   deps.excluded = new Set<string>()
   deps.throwOnExclusion = false
+  deps.backfillRows = []
+  deps.indexedRecordingIds = []
   deps.generateEmbedding.mockReset()
   deps.generateEmbedding.mockResolvedValue([1, 0, 0])
 })
@@ -150,6 +176,41 @@ describe('VectorStore.search exclusion', () => {
     deps.excluded = new Set()
     results = await store.search('anything', 10)
     expect(results.map((r) => r.document.metadata.recordingId).sort()).toEqual(['r-ok', 'r-value-excluded'])
+  })
+})
+
+// ADV40 sweep (round-42) — the boot backfill (backfillMissingTranscripts) embeds
+// each un-indexed transcript. Its SELECT only filters personal/deleted at the
+// recording level (and its LEFT JOIN treats a hard-purged orphan as eligible), so
+// it must ALSO route the candidate ids through the shared fail-closed boundary
+// BEFORE the embeddings provider call.
+describe('VectorStore.backfillMissingTranscripts — eligibility BEFORE the embed', () => {
+  it('embeds only eligible recordings; value-excluded / hard-purged are dropped before embedding', async () => {
+    deps.backfillRows = [
+      { recording_id: 'r-ok', full_text: 'keep this eligible transcript' },
+      { recording_id: 'r-excluded', full_text: 'value-excluded or hard-purged transcript' }
+    ]
+    // The shared boundary (getEligibleRecordingIds) marks r-excluded ineligible.
+    deps.excluded = new Set(['r-excluded'])
+
+    const store = new VectorStore()
+    const res = await store.backfillMissingTranscripts()
+
+    // Only the eligible transcript reached the embed loop / INSERT.
+    expect(deps.indexedRecordingIds).toEqual(['r-ok'])
+    expect(res.indexed).toBe(1)
+    expect(res.skipped).toBe(1)
+  })
+
+  it('FAILS CLOSED — indexes NOTHING when the eligibility lookup fails', async () => {
+    deps.backfillRows = [{ recording_id: 'r-ok', full_text: 'a transcript' }]
+    deps.throwOnExclusion = true // getEligibleRecordingIds → failClosed
+
+    const store = new VectorStore()
+    const res = await store.backfillMissingTranscripts()
+
+    expect(deps.indexedRecordingIds).toEqual([])
+    expect(res.indexed).toBe(0)
   })
 })
 

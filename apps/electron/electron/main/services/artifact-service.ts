@@ -19,6 +19,7 @@ import { queryOne, queryAll, run, runInTransaction } from './database'
 import { resolveType, getArtifactType, ArtifactExtractionError } from './artifact-types'
 import { resolveGeminiApiKey } from './brains'
 import { getVectorStore } from './vector-store'
+import { filterEligibleCaptureIds } from './recording-eligibility'
 import { getEventBus } from './event-bus'
 
 export interface ArtifactRow {
@@ -411,7 +412,22 @@ export async function backfillImageCaptureIndex(limit = 10): Promise<ImageCaptur
   const store = getVectorStore()
   await store.initialize() // ensures vector_embeddings exists for the NOT EXISTS check
 
-  const rows = selectEligibleBackfillRows(limit, Date.now())
+  const backfillRows = selectEligibleBackfillRows(limit, Date.now())
+  // ADV40 sweep (round-42) — the backfill re-runs Gemini VISION on the image AND
+  // embeds the extracted text, so it must gate on the owning capture's
+  // eligibility BEFORE those provider calls. selectEligibleBackfillRows only
+  // scopes by backfill-attempt state, not by deletion/value exclusion, so a
+  // soft-deleted or value-excluded image CAPTURE would otherwise be re-sent to
+  // the vision + embeddings providers on boot. Route every capture id through
+  // THE shared fail-closed capture boundary; drop a capture-backed row whose
+  // capture is ineligible or unverifiable (fail-closed). A bare artifact with NO
+  // owning capture has no exclusion to honor, so it stays eligible as before.
+  const captureIds = backfillRows.map((r) => r.knowledge_capture_id).filter((id): id is string => !!id)
+  const { eligible: eligibleCaptures, failClosed: captureFailClosed } = filterEligibleCaptureIds(captureIds)
+  const rows = backfillRows.filter((r) =>
+    r.knowledge_capture_id ? !captureFailClosed && eligibleCaptures.has(r.knowledge_capture_id) : true
+  )
+  result.skipped += backfillRows.length - rows.length
   const imageType = getArtifactType('image')
 
   let visionKeyAvailable: boolean

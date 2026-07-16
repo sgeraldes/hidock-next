@@ -419,4 +419,36 @@ describe('F5 PixelRAG — image captures as RAG sources', () => {
     expect(again.scanned).toBe(0)
     expect(h.visionCalls).toBe(0)
   })
+
+  it('ADV40 sweep (round-42) — a value-excluded image capture is NEVER re-sent to vision/embeddings', async () => {
+    // Import with NO key so the capture has no extraction/embeddings — i.e. it is
+    // a genuine backfill candidate by attempt-state.
+    h.geminiKey = ''
+    const imported = await importArtifact(writePng('shot-excluded.png', 'excluded'), { title: 'Excluded.png' })
+    expect(imported.indexedChunks).toBe(0)
+    expect(imported.artifact.extracted_text).toBeNull()
+
+    // The user marks the capture value-excluded (garbage). "Excluded from all AI
+    // processing" must hold: the boot backfill must not re-run vision on the
+    // image nor embed its text.
+    run(`UPDATE knowledge_captures SET quality_rating = 'garbage' WHERE id = ?`, [imported.knowledgeCaptureId])
+
+    h.geminiKey = 'test-key'
+    h.visionCalls = 0
+    await backfillImageCaptureIndex(50)
+
+    // Vision never populated this artifact's text, and it was never embedded —
+    // proving the gate ran BEFORE both provider calls (scoped to this artifact
+    // so unrelated eligible candidates in the shared DB don't affect the check).
+    const art = queryOne<{ extracted_text: string | null }>(
+      'SELECT extracted_text FROM artifacts WHERE id = ?',
+      [imported.artifact.id]
+    )
+    expect(art!.extracted_text).toBeNull()
+    const chunks = queryAll<{ id: string }>(
+      'SELECT id FROM vector_embeddings WHERE recording_id = ?',
+      [imported.artifact.id]
+    )
+    expect(chunks.length).toBe(0)
+  })
 })
