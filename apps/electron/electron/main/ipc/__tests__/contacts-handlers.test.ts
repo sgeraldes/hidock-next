@@ -24,6 +24,7 @@ vi.mock('../../services/database', () => ({
   deleteContact: vi.fn(),
   getMeetingsForContact: vi.fn(),
   getContactsForMeeting: vi.fn(),
+  getContactsForMeetingOwner: vi.fn(),
   mergeContacts: vi.fn(),
   // ADV27-1 (round-28) — contacts:getAll/getById route through the visible-identity
   // boundary. Default to all-visible so these shape assertions are unaffected;
@@ -52,6 +53,7 @@ describe('Contacts IPC Handlers', () => {
     expect(ipcMain.handle).toHaveBeenCalledWith('contacts:update', expect.any(Function))
     expect(ipcMain.handle).toHaveBeenCalledWith('contacts:delete', expect.any(Function))
     expect(ipcMain.handle).toHaveBeenCalledWith('contacts:getForMeeting', expect.any(Function))
+    expect(ipcMain.handle).toHaveBeenCalledWith('contacts:getForMeetingOwner', expect.any(Function))
   })
 
   it('should create a new contact (contacts:create)', async () => {

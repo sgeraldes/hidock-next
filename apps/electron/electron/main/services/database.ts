@@ -6351,7 +6351,51 @@ export function getMeetingsForContact(contactId: string): Meeting[] {
   )
 }
 
+/**
+ * R28-RES-1 (round-29) — GATED default meeting-scoped participant read (the
+ * ASSISTANT / hover / Today tier). A meeting's participants are stored in
+ * `meeting_contacts`, written by BOTH calendar sync AND applyTranscriptEntities
+ * (transcript-derived). A transcript-extracted attendee whose source recording is
+ * personal / soft-deleted / value-excluded / hard-purged must NOT surface as a
+ * participant on a non-owner surface (EntityHoverCards, CalendarTooltips, Today).
+ *
+ * Fetch each linked contact WITH its per-row membership provenance and gate the
+ * ROW through the shared {@link filterEligibleMembershipRows}: calendar/user-authored
+ * rows are kept structurally; transcript rows are kept only when their source
+ * recording is still eligible; legacy NULL-provenance rows are dropped (fail-closed).
+ * A hard lookup failure returns [] (fail-closed).
+ *
+ * The OWNER meeting-management surfaces (MeetingDetail, SourceReader/useReaderPeople)
+ * use {@link getContactsForMeetingOwner} instead (existence-scoped: the owner sees
+ * their own meeting's participants, including excluded-recording-derived ones).
+ */
 export function getContactsForMeeting(meetingId: string): Contact[] {
+  const rows = queryAll<Contact & { mc_source: string | null; mc_src_rec: string | null }>(
+    `SELECT c.*, mc.source AS mc_source, mc.source_recording_id AS mc_src_rec
+     FROM contacts c
+     JOIN meeting_contacts mc ON c.id = mc.contact_id
+     WHERE mc.meeting_id = ?`,
+    [meetingId]
+  )
+  const membership = rows.map((r) => ({ id: r.id, source: r.mc_source, source_recording_id: r.mc_src_rec }))
+  const { eligible, failClosed } = filterEligibleMembershipRows(membership)
+  if (failClosed) return []
+  const eligibleIds = new Set(eligible.map((m) => m.id))
+  return rows
+    .filter((r) => eligibleIds.has(r.id))
+    .map(({ mc_source: _s, mc_src_rec: _r, ...c }) => c as Contact)
+}
+
+/**
+ * R28-RES-1 (round-29) — OWNER-MANAGEMENT meeting-scoped participant accessor.
+ * Existence-scoped: returns every contact linked to the meeting regardless of the
+ * membership row's source-recording eligibility, so the owner can view/manage their
+ * OWN meeting's participants (including ones derived from an excluded recording)
+ * before purge. NOT exposed to assistant/Today surfaces — only MeetingDetail and
+ * SourceReader/useReaderPeople repoint here. (F17's promise is about AI processing +
+ * honest-deletion semantics, NOT preventing the owner from viewing their own data.)
+ */
+export function getContactsForMeetingOwner(meetingId: string): Contact[] {
   return queryAll<Contact>(
     `SELECT c.* FROM contacts c
      JOIN meeting_contacts mc ON c.id = mc.contact_id
@@ -7423,13 +7467,33 @@ export function getMeetingsForProject(projectId: string): Meeting[] {
   )
 }
 
+/**
+ * R28-RES-1 sub-sweep (round-29) — GATED default meeting-scoped PROJECT membership
+ * read (the projects twin of {@link getContactsForMeeting}). meeting_projects rows
+ * are written by BOTH manual tagging (calendar/user-authored) AND
+ * applyTranscriptEntities (transcript-derived). A transcript-derived project tag from
+ * an excluded recording must NOT surface as a meeting's project on a non-owner
+ * surface. Gate each membership ROW through {@link filterEligibleMembershipRows};
+ * fail-closed. (No owner caller currently repoints away from this — the
+ * projects:getForMeeting IPC has no renderer consumers; gated as the fail-safe
+ * default per the round-29 sweep mandate. Add an owner accessor mirroring
+ * getContactsForMeetingOwner if an owner surface ever needs the unfiltered list.)
+ */
 export function getProjectsForMeeting(meetingId: string): Project[] {
-  return queryAll<Project>(
-    `SELECT p.* FROM projects p
+  const rows = queryAll<Project & { mp_source: string | null; mp_src_rec: string | null }>(
+    `SELECT p.*, mp.source AS mp_source, mp.source_recording_id AS mp_src_rec
+     FROM projects p
      JOIN meeting_projects mp ON p.id = mp.project_id
      WHERE mp.meeting_id = ?`,
     [meetingId]
   )
+  const membership = rows.map((r) => ({ id: r.id, source: r.mp_source, source_recording_id: r.mp_src_rec }))
+  const { eligible, failClosed } = filterEligibleMembershipRows(membership)
+  if (failClosed) return []
+  const eligibleIds = new Set(eligible.map((m) => m.id))
+  return rows
+    .filter((r) => eligibleIds.has(r.id))
+    .map(({ mp_source: _s, mp_src_rec: _r, ...p }) => p as Project)
 }
 
 export function tagMeetingToProject(meetingId: string, projectId: string): void {

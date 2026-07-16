@@ -364,7 +364,10 @@ export interface ElectronAPI {
     delete: (id: string) => Promise<Result<void>>
     merge: (request: { keeperId: string; loserId: string }) => Promise<Result<Person>>
     unmerge: (journalId: string) => Promise<Result<UnmergeResult>>
+    /** GATED (assistant/hover/Today): excluded-recording-derived attendees suppressed. */
     getForMeeting: (meetingId: string) => Promise<Result<Contact[]>>
+    /** OWNER-MANAGEMENT (existence-scoped): all participants of the owner's own meeting. */
+    getForMeetingOwner: (meetingId: string) => Promise<Result<Contact[]>>
   }
 
   // Projects
@@ -1326,7 +1329,8 @@ const electronAPI: ElectronAPI = {
     delete: (id) => callIPC('contacts:delete', id),
     merge: (request) => callIPC('contacts:merge', request),
     unmerge: (journalId) => callIPC('contacts:unmerge', journalId),
-    getForMeeting: (meetingId) => callIPC('contacts:getForMeeting', meetingId)
+    getForMeeting: (meetingId) => callIPC('contacts:getForMeeting', meetingId),
+    getForMeetingOwner: (meetingId) => callIPC('contacts:getForMeetingOwner', meetingId)
   },
 
   projects: {

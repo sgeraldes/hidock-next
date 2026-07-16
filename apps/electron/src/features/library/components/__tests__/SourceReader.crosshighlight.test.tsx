@@ -102,7 +102,7 @@ beforeEach(() => {
         getSplits: vi.fn().mockResolvedValue({ success: true, data: [] }),
         getMergeHints: vi.fn().mockResolvedValue({ success: true, data: [] }),
       },
-      contacts: { getForMeeting: vi.fn().mockResolvedValue({ success: true, data: [] }), getAll: vi.fn().mockResolvedValue({ success: true, data: { contacts: [] } }) },
+      contacts: { getForMeeting: vi.fn().mockResolvedValue({ success: true, data: [] }), getForMeetingOwner: vi.fn().mockResolvedValue({ success: true, data: [] }), getAll: vi.fn().mockResolvedValue({ success: true, data: { contacts: [] } }) },
       projects: {
         getForKnowledge: vi.fn().mockResolvedValue({ success: true, data: [] }),
         getAll: vi.fn().mockResolvedValue({ success: true, data: { projects: [], total: 0 } }),

@@ -15,6 +15,7 @@ import {
   deleteContact,
   getMeetingsForContact,
   getContactsForMeeting,
+  getContactsForMeetingOwner,
   mergeContacts,
   unmergeContacts,
   filterVisibleEntityIds,
@@ -296,7 +297,12 @@ export function registerContactsHandlers(): void {
   })
 
   /**
-   * Get contacts for a specific meeting
+   * Get contacts for a specific meeting — GATED default (ASSISTANT / hover / Today
+   * tier). R28-RES-1 (round-29): the membership rows are filtered fail-closed
+   * through filterEligibleMembershipRows inside getContactsForMeeting, so a
+   * transcript-extracted attendee from an excluded recording never surfaces here.
+   * EntityHoverCards / CalendarTooltips / Today consume this via
+   * meeting-participants.ts.
    */
   ipcMain.handle(
     'contacts:getForMeeting',
@@ -310,6 +316,30 @@ export function registerContactsHandlers(): void {
         return success(contacts.map(mapToPerson))
       } catch (err) {
         console.error('contacts:getForMeeting error:', err)
+        return error('DATABASE_ERROR', 'Failed to fetch contacts for meeting', err)
+      }
+    }
+  )
+
+  /**
+   * R28-RES-1 (round-29) — OWNER-MANAGEMENT meeting participants (existence-scoped).
+   * Repointed ONLY by MeetingDetail + SourceReader/useReaderPeople so the owner sees
+   * every participant of their OWN meeting, including ones derived from an excluded
+   * recording. NOT used by any assistant/Today surface (those stay on the gated
+   * default above).
+   */
+  ipcMain.handle(
+    'contacts:getForMeetingOwner',
+    async (_, meetingId: unknown): Promise<Result<Person[]>> => {
+      try {
+        if (typeof meetingId !== 'string') {
+          return error('VALIDATION_ERROR', 'Meeting ID must be a string')
+        }
+
+        const contacts = getContactsForMeetingOwner(meetingId)
+        return success(contacts.map(mapToPerson))
+      } catch (err) {
+        console.error('contacts:getForMeetingOwner error:', err)
         return error('DATABASE_ERROR', 'Failed to fetch contacts for meeting', err)
       }
     }
