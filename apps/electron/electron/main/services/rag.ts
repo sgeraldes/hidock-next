@@ -540,6 +540,36 @@ export type AssistantAnswerToPersist =
 
 const UNVERIFIABLE_PROV: MessageProvenance = { recordingIds: [], captureIds: [], unverifiable: true }
 
+/**
+ * ADV42-2 (round-44) — build a FAIL-CLOSED `shouldGenerate` gate over an
+ * answer's provenance union (its surviving recording + capture ids). Re-runs the
+ * shared eligibility boundary on EVERY invocation (never a cached boolean) so
+ * the BrainRouter can re-verify, immediately before each provider attempt
+ * (primary AND fallback), that NONE of the grounding sources became
+ * trashed / personal / value-excluded while a prior attempt was pending. Returns
+ * `false` if ANY id is now ineligible OR the lookup fails closed. An empty union
+ * (an ungrounded general-chat turn) is always eligible — there is no
+ * recording-backed content to protect.
+ */
+function makeProvenanceGate(
+  recordingIds: Iterable<string>,
+  captureIds: Iterable<string>
+): () => boolean {
+  const recIds = [...new Set([...recordingIds].filter((id): id is string => !!id))]
+  const capIds = [...new Set([...captureIds].filter((id): id is string => !!id))]
+  return () => {
+    if (recIds.length > 0) {
+      const rc = filterEligibleRecordingIds(recIds)
+      if (rc.failClosed || recIds.some((id) => !rc.eligible.has(id))) return false
+    }
+    if (capIds.length > 0) {
+      const cc = filterEligibleCaptureIds(capIds)
+      if (cc.failClosed || capIds.some((id) => !cc.eligible.has(id))) return false
+    }
+    return true
+  }
+}
+
 class RAGService {
   private contexts: LRUSessionCache = new LRUSessionCache()
   // B-CHAT-005: Active AbortControllers for cancellable requests
@@ -1036,11 +1066,19 @@ class RAGService {
 
     // B-CHAT-005: Generate response with abort signal support.
     // Gemini-first (config.chat.geminiModel) with Ollama fallback — see chat-llm.ts.
+    // ADV42-2 (round-44) — gate the provider call (and every BrainRouter
+    // fallback attempt) on THIS answer's surviving provenance union. The union
+    // above was revalidated synchronously (no await between it and here), but the
+    // provider call and its fallback loop are awaits: a source trashed / marked
+    // personal / value-excluded while the primary attempt is pending or failing
+    // must not be re-sent to a fallback brain. Re-runs the shared fail-closed
+    // boundary on each attempt.
     const answer = await getChatLLMService().generate(messages, {
       systemPrompt: SYSTEM_PROMPT,
       temperature: 0.7,
       maxTokens: 1024,
-      signal: controller.signal
+      signal: controller.signal,
+      shouldGenerate: makeProvenanceGate(provRecordingIds, provCaptureIds)
     })
 
     if (!answer) {
@@ -1135,7 +1173,15 @@ class RAGService {
 Meeting transcript:
 ${transcript.substring(0, 8000)}` // Limit context size
 
-    return getChatLLMService().generateText(prompt)
+    // ADV42-2 (round-44) — the docs come from searchByMeeting (already fail-closed
+    // filtered), but the summarize provider call + its BrainRouter fallback are
+    // awaits: gate them on the source recordings/captures still being eligible, so
+    // a mid-call exclusion never re-sends this meeting's transcript to a fallback.
+    const shouldGenerate = makeProvenanceGate(
+      docs.map((d) => d.metadata.recordingId).filter((id): id is string => !!id),
+      docs.map((d) => d.metadata.captureId).filter((id): id is string => !!id)
+    )
+    return getChatLLMService().generateText(prompt, undefined, { shouldGenerate })
   }
 
   async findActionItems(meetingId?: string): Promise<string | null> {
@@ -1169,7 +1215,15 @@ Format as a numbered list.
 Meeting transcripts:
 ${transcript.substring(0, 8000)}`
 
-    return getChatLLMService().generateText(prompt)
+    // ADV42-2 (round-44) — same fail-closed provider gate as summarizeMeeting: the
+    // vector docs are already eligibility-filtered, but the provider call + its
+    // fallback loop are awaits, so re-verify the source recordings/captures on
+    // each attempt.
+    const shouldGenerate = makeProvenanceGate(
+      docs.map((d) => d.metadata.recordingId).filter((id): id is string => !!id),
+      docs.map((d) => d.metadata.captureId).filter((id): id is string => !!id)
+    )
+    return getChatLLMService().generateText(prompt, undefined, { shouldGenerate })
   }
 
   /**

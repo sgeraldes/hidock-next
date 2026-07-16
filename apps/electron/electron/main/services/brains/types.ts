@@ -66,6 +66,19 @@ export interface GenerateOptions {
    */
   cwd?: string
   signal?: AbortSignal
+  /**
+   * ADV42-2 (round-44) — FAIL-CLOSED eligibility gate the router re-checks
+   * SYNCHRONOUSLY immediately before EVERY provider attempt (the primary AND
+   * each fallback attempt, after every intervening await). Returns `true` ⇒ the
+   * source recording/capture is still eligible; a `false` return OR a thrown
+   * error ⇒ treat the source as INELIGIBLE and ABORT the whole call without
+   * attempting any (further) provider. Callers pass the SAME recording/capture
+   * eligibility check they run up front so a source excluded while a primary
+   * attempt is pending or failing is never re-sent to a fallback provider. A
+   * missing callback means "no gate configured" (behaves exactly as before).
+   * Router-only — the brain adapters ignore it.
+   */
+  shouldGenerate?: () => boolean
 }
 
 export interface AudioAnalyzeInput {

@@ -401,7 +401,13 @@ class VectorStore {
       return 0
     }
 
-    const embeddings = await getEmbeddingsService().generateEmbeddings(chunks)
+    // ADV42-2 (round-44) — also forward shouldGenerate INTO the embeddings call so
+    // the BrainRouter re-checks eligibility before the Gemini PRIMARY and the
+    // Ollama FALLBACK embed attempts. The pre-provider guard above only covers
+    // the moment before entering the router; if Gemini then fails and the router
+    // falls back to Ollama, an exclusion committed during that window must not
+    // reach the fallback provider either.
+    const embeddings = await getEmbeddingsService().generateEmbeddings(chunks, { shouldGenerate })
 
     // RE-1 — re-check eligibility ADJACENT to the write, with no await between
     // here and the synchronous INSERT loop below. A hard purge that committed

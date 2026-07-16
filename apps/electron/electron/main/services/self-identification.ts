@@ -464,12 +464,21 @@ export function corroborateSelfIds(
 // Pure: end-to-end extractor (LLM injectable)
 // ---------------------------------------------------------------------------
 
-/** Default LLM: the cheap Gemini-flash text model via chat-llm (no new key). */
-async function defaultLLM(prompt: string, systemPrompt: string): Promise<string | null> {
+/** Default LLM: the cheap Gemini-flash text model via chat-llm (no new key).
+ *  ADV42-2 (round-44) — forwards an optional fail-closed `shouldGenerate` gate so
+ *  the BrainRouter re-checks recording eligibility before the PRIMARY and Ollama
+ *  FALLBACK attempts (the diarized turns must not reach a fallback after the
+ *  recording became trashed/personal/value-excluded mid-call). */
+async function defaultLLM(
+  prompt: string,
+  systemPrompt: string,
+  shouldGenerate?: () => boolean
+): Promise<string | null> {
   return getChatLLMService().generate([{ role: 'user', content: prompt }], {
     systemPrompt,
     temperature: 0,
-    maxTokens: 1024
+    maxTokens: 1024,
+    shouldGenerate
   })
 }
 
@@ -485,13 +494,17 @@ async function defaultLLM(prompt: string, systemPrompt: string): Promise<string 
  */
 export async function extractSelfIdentifications(
   turns: SpeakerTurn[],
-  deps: { llm?: SelfIdLLM } = {}
+  deps: { llm?: SelfIdLLM; shouldGenerate?: () => boolean } = {}
 ): Promise<SelfIdResult> {
   const cues = findSelfIdCues(turns)
   if (cues.length === 0) {
     return { identifications: [], mergeSuspected: [], usedLLM: false }
   }
-  const llm = deps.llm ?? defaultLLM
+  // ADV42-2 (round-44) — when no explicit test llm is injected, use the default
+  // chat-llm path with the caller's fail-closed eligibility gate wired into the
+  // BrainRouter (primary + fallback rechecks). An injected mock is used as-is.
+  const llm =
+    deps.llm ?? ((prompt: string, systemPrompt: string) => defaultLLM(prompt, systemPrompt, deps.shouldGenerate))
   let raw: string | null = null
   try {
     raw = await llm(buildSelfIdPrompt(cues), SELF_ID_SYSTEM_PROMPT)
@@ -628,7 +641,13 @@ export async function runSelfIdentificationForRecording(
     return { bound: 0, mergeSuspected: 0, skipped: true }
   }
 
-  const result = await extractSelfIdentifications(turns, { llm: opts.llm })
+  const result = await extractSelfIdentifications(turns, {
+    llm: opts.llm,
+    // ADV42-2 (round-44) — re-verify eligibility before the PRIMARY and FALLBACK
+    // provider attempts inside BrainRouter (the isRecordingEligible gate above is
+    // pre-await only). Fail-closed via isRecordingEligible.
+    shouldGenerate: () => isRecordingEligible(recordingId)
+  })
 
   // RE8-3 (round-8) / P2 — post-await gate ADJACENT to the writes (assignSpeaker
   // creates contacts + speaker bindings, resolveMention writes mention-resolutions,

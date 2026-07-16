@@ -51,6 +51,26 @@ const DEFAULT_BRAIN: BrainId = 'gemini-api'
 const NO_EXCLUDES: ReadonlySet<BrainId> = new Set()
 
 /**
+ * ADV42-2 (round-44) — FAIL-CLOSED evaluation of a `shouldGenerate` eligibility
+ * gate. The source is treated as eligible ONLY when the callback returns
+ * EXACTLY `true`. A `false` return OR any thrown error ⇒ ineligible (do NOT
+ * send content to a provider). A missing callback ⇒ eligible (no gate
+ * configured — legacy behaviour). This is the single choke-point re-run
+ * immediately before EVERY primary AND fallback provider attempt in chat/embed,
+ * so an exclusion committed while a primary attempt is pending/failing never
+ * reaches a fallback provider.
+ */
+function eligibleToGenerate(shouldGenerate?: () => boolean): boolean {
+  if (!shouldGenerate) return true
+  try {
+    return shouldGenerate() === true
+  } catch (e) {
+    console.warn('[BrainRouter] shouldGenerate threw — treating source as ineligible (fail closed):', e)
+    return false
+  }
+}
+
+/**
  * The terminal failed attempt of a chat() call that returned null.
  * `kind: 'threw'` — the brain's chat() rejected (non-abort);
  * `kind: 'null'`  — the brain answered but returned null (e.g. unreachable Ollama).
@@ -267,6 +287,19 @@ export class BrainRouter {
       if (!brain) break
       tried.add(brain.id)
 
+      // ADV42-2 (round-44) — FAIL-CLOSED eligibility recheck immediately before
+      // THIS provider attempt (the primary AND every fallback). selectChatBrain
+      // above awaited authStatus, so the source could have been trashed / marked
+      // personal / value-excluded during that await; re-check synchronously,
+      // adjacent to the call, and ABORT the whole chat (attempt no further
+      // candidate) rather than send the now-excluded content to this brain.
+      // Returns null — the same signal the AbortError path uses — so no fallback
+      // provider ever receives content after the source became ineligible.
+      if (!eligibleToGenerate(opts.shouldGenerate)) {
+        console.warn(`[BrainRouter] chat aborted before ${brain.id}: source no longer eligible (fail closed)`)
+        return null
+      }
+
       try {
         const answer = await brain.chat(messages, opts)
         if (answer != null) return answer
@@ -292,11 +325,25 @@ export class BrainRouter {
    * single availability probe lives inside its adapter's embed() — this wrapper
    * adds none, so a transient probe never yields spurious null vectors (FIX 4).
    */
-  async embed(texts: string[]): Promise<(number[] | null)[]> {
+  async embed(
+    texts: string[],
+    opts: { shouldGenerate?: () => boolean } = {}
+  ): Promise<(number[] | null)[]> {
     if (texts.length === 0) return []
+
+    // ADV42-2 (round-44) — INELIGIBLE result: the null-vector shape callers
+    // already treat as "no embedding available" (same as no provider), so an
+    // aborted embed is indistinguishable from an unconfigured one and persists
+    // nothing.
+    const ineligible = (): (number[] | null)[] => texts.map(() => null)
+
+    // Recheck before the PRIMARY provider attempt.
+    if (!eligibleToGenerate(opts.shouldGenerate)) return ineligible()
 
     const primary = await this.geminiPrimary('embed', 'embed')
     if (primary?.embed) {
+      // Recheck AGAIN after the geminiPrimary await, immediately before the call.
+      if (!eligibleToGenerate(opts.shouldGenerate)) return ineligible()
       try {
         return await primary.embed(texts)
       } catch (e) {
@@ -304,8 +351,13 @@ export class BrainRouter {
       }
     }
 
+    // ADV42-2 (round-44) — recheck before the FALLBACK provider attempt: an
+    // exclusion committed while the primary embed was pending or failing must
+    // NOT reach the Ollama fallback.
+    if (!eligibleToGenerate(opts.shouldGenerate)) return ineligible()
+
     const fallback = this.capabilityFallback('embed', 'gemini-api')
-    return fallback?.embed ? fallback.embed(texts) : texts.map(() => null)
+    return fallback?.embed ? fallback.embed(texts) : ineligible()
   }
 
   /**

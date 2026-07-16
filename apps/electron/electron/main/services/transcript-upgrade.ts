@@ -374,7 +374,12 @@ export async function reformatOne(transcriptId: string): Promise<'done' | 'faile
       response = await svc.generate([{ role: 'user', content: buildReformatPrompt(block) }], {
         systemPrompt: REFORMAT_SYSTEM_PROMPT,
         temperature: 0.2,
-        maxTokens: 8192
+        maxTokens: 8192,
+        // ADV42-2 (round-44) — the pre-loop check above guards entry into the
+        // router; also gate the router's PRIMARY and FALLBACK attempts so a
+        // trash/personal/value-exclusion committed while the Gemini attempt is
+        // pending/failing never reaches the Ollama fallback for this block.
+        shouldGenerate: () => isRecordingEligible(recordingId)
       })
     } catch (e) {
       console.warn(
