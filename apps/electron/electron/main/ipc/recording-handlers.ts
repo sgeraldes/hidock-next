@@ -23,6 +23,7 @@ import {
   type RecordingPreassignment
 } from '../services/database'
 import { getRecordingFiles, deleteRecording as deleteRecordingFile, getRecordingsPath } from '../services/file-storage'
+import { filterEligibleRecordingIds } from '../services/recording-eligibility'
 import {
   scoreMeetingCandidates,
   deriveTranscriptTitle,
@@ -394,6 +395,18 @@ export function registerRecordingHandlers(): void {
       // link dialog can still offer meetings near the recording's date.
       const recording = resolveRecordingId(recordingId)
       if (!recording) {
+        return { success: true, data: [], recordingContext: null }
+      }
+
+      // ADV40-2 (round-42, MED) — gate the canonical recording id through THE
+      // shared fail-closed eligibility boundary BEFORE reading its transcript or
+      // deriving any candidate metadata. Without this, a stale selection of a
+      // now soft-deleted / personal / value-excluded / hard-purged recording
+      // returns its transcript-derived title / summary / speaker-count / scoring
+      // to the renderer. Fail-closed: on exclusion OR any lookup failure return
+      // the same empty/null shape as an unresolved (device-only) id.
+      const { eligible, failClosed } = filterEligibleRecordingIds([recording.id])
+      if (failClosed || !eligible.has(recording.id)) {
         return { success: true, data: [], recordingContext: null }
       }
 
