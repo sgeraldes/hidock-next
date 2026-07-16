@@ -920,7 +920,31 @@ export function rekeyExistingPersonNodes(): { rekeyed: number; merged: number; s
     "SELECT id, label, norm_key, props FROM graph_nodes WHERE type = 'person' AND norm_key NOT LIKE 'contact:%'"
   )
 
+  // ADV47-1 (round-49): this AUTOMATIC maintenance rekey/merge (runs after every
+  // transcript ingestion) is a MUTATION — it repoints edges / deletes / rewrites
+  // node identity — so it must pass the SAME execution-time node-visibility /
+  // mutability boundary the interactive mutations (bindNodeToContact,
+  // mergeGraphNodes) use. Round-35 mis-classified it owner-cleanup-safe; "owner
+  // cleanup" only exempts pure REMOVAL, never a rewrite/merge that changes
+  // identity or topology. Compute the fail-closed exclusion snapshot ONCE for the
+  // whole scan (same source the read/mutation guards use).
+  const exclusion = getGroundingExclusionSet(true)
+
   for (const node of nameKeyed) {
+    // BEFORE resolving/merging/rewriting: a name-keyed node whose only provenance
+    // is now personal / deleted / value-excluded / hard-purged (or a legacy
+    // zero-provenance node on this non-owner boundary) is NOT visible. Merging it
+    // into a contact-keyed node or rewriting its identity would repoint its HIDDEN
+    // edges or delete the hidden node, so restoring the recording later would
+    // resurface its facts under a CHANGED / accent-mismatched identity. Fail
+    // closed: an excluded-only source OR a visibility-lookup failure ⇒ SKIP the
+    // node entirely (no resolve, no merge, no rewrite).
+    const sourceNode = store.getNode(node.id)
+    if (!isNodeMutable(store, node.id, sourceNode, exclusion)) {
+      result.skipped++
+      continue
+    }
+
     let contactId: string | null = null
     try {
       const r = resolveContact(node.label, { forKeying: true })
@@ -941,6 +965,14 @@ export function rekeyExistingPersonNodes(): { rekeyed: number; merged: number; s
     )
 
     if (keeper && keeper.id !== node.id) {
+      // ADV47-1: don't fold a node into a keeper that is itself suppressed — the
+      // merge TARGET must be visible/eligible under the same snapshot (mirrors the
+      // round-33/34 merge guards + bindNodeToContact's implicit-keeper check).
+      // Fail closed: a hidden / excluded-only / lookup-failing keeper ⇒ SKIP.
+      if (!isNodeMergeEligible(store, keeper.id, store.getNode(keeper.id), exclusion)) {
+        result.skipped++
+        continue
+      }
       // Fold this node into the existing contact-keyed node via the package's
       // mergeNodes (repoints edges, drops a colliding one after transferring
       // its graph_edge_sources rows + weight onto the survivor — AR2-1 — and

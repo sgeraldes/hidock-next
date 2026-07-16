@@ -146,6 +146,13 @@ describe('Context Graph service', () => {
     store.db.run(
       "INSERT INTO graph_edges (id, source_id, target_id, type, weight, created_at) VALUES ('edge:legacy', 'person:legacy_mario', 'meeting:rec-ctx', 'ATTENDED', 1, '')"
     )
+    // ADV47-1 (round-49): rekey now passes each node through the execution-time
+    // node-visibility boundary, so the legacy node must be VISIBLE (backed by an
+    // eligible recording) to still rekey. Attribute its edge to the live, eligible
+    // rec-ctx so the happy path is preserved.
+    store.db.run(
+      "INSERT INTO graph_edge_sources (edge_id, recording_id, transcript_id, assertion_count, created_at) VALUES ('edge:legacy', 'rec-ctx', 'tx-ctx', 1, '')"
+    )
 
     const before = store.findNodes({ type: 'person' }).length
     const r = rekeyExistingPersonNodes()
