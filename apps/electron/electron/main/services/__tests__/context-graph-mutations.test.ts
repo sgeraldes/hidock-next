@@ -57,9 +57,13 @@ function seedContact(id: string, name: string, extra: { role?: string; company?:
   // so these functional-test contacts are genuinely VISIBLE (a NULL-source contact with
   // no membership is legitimately suppressed on non-owner surfaces). The suppressed-
   // contact behavior is covered in context-graph-suppressed-contact.round32.test.ts.
+  // ADV50-1 (round-52) — a NULL role_origin is now blanked on non-owner surfaces
+  // (calendar/user CLASSIFICATION ≠ authorship). A structural 'user' create WITH a role
+  // is genuinely owner-authored, so stamp role_origin='user' (mirrors createContact) so
+  // the manually-set role stays visible.
   dbRun(
-    "INSERT OR IGNORE INTO contacts (id, name, role, company, email, first_seen_at, last_seen_at, source) VALUES (?, ?, ?, ?, ?, ?, ?, 'user')",
-    [id, name, extra.role ?? null, extra.company ?? null, extra.email ?? null, '2026-01-01', '2026-01-01']
+    "INSERT OR IGNORE INTO contacts (id, name, role, company, email, first_seen_at, last_seen_at, source, role_origin) VALUES (?, ?, ?, ?, ?, ?, ?, 'user', ?)",
+    [id, name, extra.role ?? null, extra.company ?? null, extra.email ?? null, '2026-01-01', '2026-01-01', extra.role != null ? 'user' : null]
   )
 }
 

@@ -41,7 +41,8 @@ import {
   filterVisibleEntityIds,
   blankIneligibleContactFields,
   updateContact,
-  mergeContacts
+  mergeContacts,
+  backfillRoleOriginV48
 } from '../database'
 import { resolveContact, resolveProject } from '../entity-resolver'
 import { applyTranscriptEntities } from '../org-reconciler'
@@ -129,13 +130,32 @@ describe('v46/v48 migration — contacts.role_source_recording_id + role_origin'
     expect(safe.role).toBeNull()
   })
 
-  // The trusted-structural side of the flip: a NULL-provenance role on a
-  // calendar/user entity is genuinely structural ⇒ still SHOWN.
-  it('legacy NULL-provenance role on a calendar/user entity is still shown', () => {
+  // ADV50-1 (round-52) TIGHTEN of the round-51 flip: a NULL role_origin on a
+  // calendar/user-CLASSIFIED entity is NO LONGER shown. calendar/user CLASSIFICATION
+  // is not proof of calendar/manual AUTHORSHIP — the base applyTranscriptEntities
+  // filled empty roles on calendar/user contacts from transcript output too. With no
+  // positive field-level authorship marker (role_origin unset), the role is AMBIGUOUS
+  // ⇒ BLANKED, fail-closed (no entity-source fallback).
+  it('NULL role_origin on a calendar/user entity is BLANKED absent positive evidence (ADV50-1)', () => {
     contact('c-cal-legacy', 'Cal Legacy', 'calendar', null, 'Director', null)
     contact('c-user-legacy', 'User Legacy', 'user', null, 'Founder', null)
-    expect(blankIneligibleContactFields([getContactById('c-cal-legacy')!])[0].role).toBe('Director')
-    expect(blankIneligibleContactFields([getContactById('c-user-legacy')!])[0].role).toBe('Founder')
+    expect(blankIneligibleContactFields([getContactById('c-cal-legacy')!])[0].role).toBeNull()
+    expect(blankIneligibleContactFields([getContactById('c-user-legacy')!])[0].role).toBeNull()
+  })
+
+  // Positive authorship evidence IS trusted: an explicit role_origin marker
+  // ('manual' owner edit, 'calendar' calendar/connector create, 'user' manual create)
+  // shows the role even on a calendar/user entity.
+  it('an explicit role_origin manual/calendar/user marker is shown (positive evidence)', () => {
+    contact('c-manual', 'Manual Role', 'calendar', null, 'CEO', null)
+    run(`UPDATE contacts SET role_origin = 'manual' WHERE id = 'c-manual'`)
+    contact('c-cal-auth', 'Cal Authored', 'calendar', null, 'Director', null)
+    run(`UPDATE contacts SET role_origin = 'calendar' WHERE id = 'c-cal-auth'`)
+    contact('c-user-auth', 'User Authored', 'user', null, 'Founder', null)
+    run(`UPDATE contacts SET role_origin = 'user' WHERE id = 'c-user-auth'`)
+    expect(blankIneligibleContactFields([getContactById('c-manual')!])[0].role).toBe('CEO')
+    expect(blankIneligibleContactFields([getContactById('c-cal-auth')!])[0].role).toBe('Director')
+    expect(blankIneligibleContactFields([getContactById('c-user-auth')!])[0].role).toBe('Founder')
   })
 
   // An explicit role_origin='legacy' marker (what the v48 backfill stamps on
@@ -144,6 +164,37 @@ describe('v46/v48 migration — contacts.role_source_recording_id + role_origin'
     contact('c-marked', 'Marked Legacy', 'calendar', null, 'VP', null)
     run(`UPDATE contacts SET role_origin = 'legacy' WHERE id = 'c-marked'`)
     expect(blankIneligibleContactFields([getContactById('c-marked')!])[0].role).toBeNull()
+  })
+
+  // ADV50-1 (round-52) migration UPGRADE: a structural (calendar) contact whose EMPTY
+  // role was filled by the BASE-style transcript path — role set, role provenance NULL,
+  // no role_origin marker — is classified 'legacy' by the v48 backfill and BLANKED on
+  // non-owner reads even though the contact is calendar-classified. (Its recording being
+  // excluded is now irrelevant: a legacy role is always untrusted.)
+  it('v48 backfill classifies a base-filled calendar-contact role as legacy ⇒ BLANKED (ADV50-1)', () => {
+    // Pre-v48 shape: calendar entity, role present, NULL role provenance, no marker.
+    contact('c-base-filled', 'Base Filled', 'calendar', 'rec-src', 'Head of Eng', null)
+    // Sanity: no marker yet.
+    expect(queryOne<{ o: string | null }>(`SELECT role_origin AS o FROM contacts WHERE id = 'c-base-filled'`)?.o).toBeNull()
+
+    backfillRoleOriginV48()
+
+    // Classified 'legacy' (calendar classification is NOT authorship evidence).
+    expect(queryOne<{ o: string | null }>(`SELECT role_origin AS o FROM contacts WHERE id = 'c-base-filled'`)?.o).toBe('legacy')
+    // …and therefore BLANKED on non-owner reads.
+    expect(blankIneligibleContactFields([getContactById('c-base-filled')!])[0].role).toBeNull()
+  })
+
+  // The migration still attributes a TRANSCRIPT entity's NULL-provenance role to its
+  // minting recording (option-A) so it is gated by that recording (not blanket-legacy).
+  it('v48 backfill attributes a transcript-entity NULL role to its source recording', () => {
+    contact('c-tx', 'Tx Person', 'transcript', 'rec-mint', 'Analyst', null)
+    backfillRoleOriginV48()
+    const row = queryOne<{ o: string | null; rr: string | null }>(
+      `SELECT role_origin AS o, role_source_recording_id AS rr FROM contacts WHERE id = 'c-tx'`
+    )
+    expect(row?.rr).toBe('rec-mint') // attributed to the minting recording
+    expect(row?.o).toBe('transcript')
   })
 })
 
@@ -281,8 +332,12 @@ describe('ADV29-2 — role blanked when its source recording is ineligible', () 
     expect(res.error.code).toBe('NOT_FOUND')
   })
 
-  it('a calendar-set role is always shown regardless of recording exclusion', () => {
+  // ADV50-1 (round-52): a calendar-AUTHORED role must carry the positive marker
+  // (role_origin='calendar', stamped by the calendar/connector write paths) to be
+  // shown — a bare calendar CLASSIFICATION with a NULL marker is now blanked.
+  it('a calendar-AUTHORED role (role_origin=calendar) is always shown regardless of recording exclusion', () => {
     contact('c-cal', 'Cal Person', 'calendar', null, 'Manager', null)
+    run(`UPDATE contacts SET role_origin = 'calendar' WHERE id = 'c-cal'`)
     excludeRecording('r-a')
     excludeRecording('r-b')
     expect(blankIneligibleContactFields([getContactById('c-cal')!])[0].role).toBe('Manager')

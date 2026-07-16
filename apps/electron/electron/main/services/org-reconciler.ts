@@ -517,9 +517,9 @@ export function applyTranscriptEntities(opts: {
           // role if this recording is later excluded even while the entity stays
           // visible via another eligible recording.
           run(
-            `INSERT INTO contacts (id, name, type, role, first_seen_at, last_seen_at, meeting_count, source, source_recording_id, role_source_recording_id)
-             VALUES (?, ?, 'unknown', ?, ?, ?, 0, 'transcript', ?, ?)`,
-            [id, name, person.role ?? null, now, now, opts.recordingId ?? null, person.role ? (opts.recordingId ?? null) : null]
+            `INSERT INTO contacts (id, name, type, role, first_seen_at, last_seen_at, meeting_count, source, source_recording_id, role_source_recording_id, role_origin)
+             VALUES (?, ?, 'unknown', ?, ?, ?, 0, 'transcript', ?, ?, ?)`,
+            [id, name, person.role ?? null, now, now, opts.recordingId ?? null, person.role ? (opts.recordingId ?? null) : null, person.role ? 'transcript' : null]
           )
           contactId = id
           contacts++
@@ -549,7 +549,7 @@ export function applyTranscriptEntities(opts: {
             // v46/round-31 (ADV29-2): record the recording that supplied this role so
             // a non-owner read blanks it if the recording is later excluded, even
             // though the entity stays visible via another eligible recording.
-            run(`UPDATE contacts SET role = ?, role_source_recording_id = ? WHERE id = ?`, [
+            run(`UPDATE contacts SET role = ?, role_source_recording_id = ?, role_origin = 'transcript' WHERE id = ?`, [
               person.role,
               opts.recordingId ?? null,
               contactId
@@ -579,9 +579,9 @@ export function applyTranscriptEntities(opts: {
         // v45/round-28: transcript-extracted ENTITY ⇒ source='transcript' + recording (ADV27-1).
         // v46/round-31 (ADV29-2): stamp role_source_recording_id when a transcript role is set.
         run(
-          `INSERT INTO contacts (id, name, type, role, first_seen_at, last_seen_at, meeting_count, source, source_recording_id, role_source_recording_id)
-           VALUES (?, ?, 'unknown', ?, ?, ?, 0, 'transcript', ?, ?)`,
-          [id, name, person.role ?? null, now, now, opts.recordingId ?? null, person.role ? (opts.recordingId ?? null) : null]
+          `INSERT INTO contacts (id, name, type, role, first_seen_at, last_seen_at, meeting_count, source, source_recording_id, role_source_recording_id, role_origin)
+           VALUES (?, ?, 'unknown', ?, ?, ?, 0, 'transcript', ?, ?, ?)`,
+          [id, name, person.role ?? null, now, now, opts.recordingId ?? null, person.role ? (opts.recordingId ?? null) : null, person.role ? 'transcript' : null]
         )
         contactId = id
         contacts++
