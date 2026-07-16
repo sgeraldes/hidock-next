@@ -59,6 +59,7 @@ import {
   isRecordingGraphIngestable,
   getContactById,
   blankIneligibleContactFields,
+  filterVisibleEntityIds,
   getContactByName,
   createContact,
   updateContact,
@@ -157,10 +158,11 @@ const REKEY_CONFIDENCE = 0.8
 function makePersonResolver(meetingId?: string): PersonResolver {
   return (name: string) => {
     try {
-      // forKeying: this resolves a person node's stable contact-id norm_key, not a
-      // durable membership link — so it must key by contact id even when the contact
-      // is currently suppressed on non-owner surfaces (keying ≠ display; ADV29-1 bar
-      // guards the write/link paths, not graph ingest keying).
+      // forKeying (ADV30-2): resolve a person node's stable contact-id norm_key,
+      // PREFERRING a VISIBLE same-name contact and NEVER keying to a suppressed one
+      // (a keyed node becomes graph-visible via the eligible recording's edges, which
+      // would leak the suppressed contact's fields). Only-suppressed ⇒ null ⇒ the
+      // node stays name-keyed.
       const r = resolveContact(name, { forKeying: true, ...(meetingId ? { meetingId } : {}) })
       if (r.id && r.confidence >= REKEY_CONFIDENCE) {
         const contact = getContactById(r.id)
@@ -1838,6 +1840,19 @@ export function queryProvenance(entityId: string): ProvenanceDTO {
 // duplicating it.
 // ===========================================================================
 
+/**
+ * ADV30-2 (round-32) — is this contact currently VISIBLE on non-owner surfaces?
+ * A person node can be visible via an eligible recording's edges while its BACKING
+ * contact is SUPPRESSED (its own source recording excluded / hard-purged, or a keying
+ * collision to an older suppressed same-name row). Non-owner graph surfaces must not
+ * expose or mutate such a contact. Routed through the shared entity-visibility
+ * boundary; FAIL-CLOSED (a lookup error ⇒ not visible).
+ */
+function isContactVisible(contactId: string): boolean {
+  const { visible, failClosed } = filterVisibleEntityIds('contact', [contactId])
+  return !failClosed && visible.has(contactId)
+}
+
 /** The contact id a person node is bound to: explicit prop, or its `contact:<id>` key. */
 function contactIdOfNode(node: GraphNode): string | null {
   const props = parseProps(node.props)
@@ -1906,10 +1921,21 @@ export function getNodeDetail(entityId: string): NodeDetailDTO {
 
   const projects = projectNameIndex()
   const dto = nodeToDTO({ ...node, degree: 0 }, projects)
+  // ADV30-2 (round-32): nodeToDTO copies contactId straight off the node props. The
+  // inspector is a NON-OWNER surface — re-derive it below under the visibility gate
+  // and clear the raw prop-derived value so a suppressed contact never leaks here.
+  if (dto.contactId) dto.contactId = undefined
   const props = parseProps(node.props)
   const pronouns = typeof props.pronouns === 'string' && props.pronouns ? props.pronouns : null
 
-  const contactId = contactIdOfNode(node)
+  // ADV30-2 (round-32): the node can be visible via an eligible recording's edges
+  // (passed isNodeVisibleUnderExclusion above) while its BACKING contact is SUPPRESSED
+  // on non-owner surfaces (own source recording excluded / hard-purged, or a keying
+  // collision to an older suppressed same-name row). Gate the contact id through the
+  // shared entity-visibility boundary (fail-closed): when suppressed, expose NEITHER
+  // contactId NOR any contact-derived field (company/email/role/aliases).
+  const rawContactId = contactIdOfNode(node)
+  const contactId = rawContactId && isContactVisible(rawContactId) ? rawContactId : null
   let role: string | null = null
   let company: string | null = null
   let email: string | null = null
@@ -1988,6 +2014,13 @@ export function renameGraphEntity(entityId: string, newLabel: string): RenameEnt
 
   const contactId = contactIdOfNode(node)
   if (node.type === 'person' && contactId) {
+    // ADV30-2 (round-32): refuse a contact-scoped rename when the backing contact is
+    // SUPPRESSED on non-owner surfaces — renaming through updateContact + the
+    // contact-changed event would mutate/re-expose a hidden excluded contact from a
+    // non-owner graph action. Fail-closed no-op.
+    if (!isContactVisible(contactId)) {
+      return { outcome: 'noop', scope: 'contact', nodeId }
+    }
     const contact = getContactById(contactId)
     if (contact) {
       const oldName = contact.name
@@ -2084,6 +2117,11 @@ export function linkNodeToContact(entityId: string, contactId: string): LinkCont
   if (!nodeId) throw new Error('Node not found')
   const contact = getContactById(contactId)
   if (!contact) throw new Error('Contact not found')
+  // ADV30-2 (round-32): refuse binding a (visible) graph node to a SUPPRESSED contact.
+  // The bind writes a manual alias + re-keys the node onto the contact identity,
+  // which makes the hidden excluded contact graph-visible and exposes its fields.
+  // Fail-closed refusal.
+  if (!isContactVisible(contactId)) throw new Error('Contact not available')
   const r = bindNodeToContact(nodeId, contactId)
   return { contactId, outcome: r.outcome, nodeId: r.nodeId }
 }
@@ -2110,9 +2148,11 @@ export function convertNodeToContact(
     return { contactId: existingContactId, outcome: 'linked', nodeId, reusedExisting: true }
   }
 
-  // Reuse an exact-name contact rather than minting a twin.
+  // Reuse an exact-name contact rather than minting a twin — but only a VISIBLE one.
+  // ADV30-2 (round-32): a SUPPRESSED same-name contact must not be reused/re-exposed
+  // by binding a visible node to it; fall through to create a fresh (visible) contact.
   const existing = getContactByName(node.label)
-  if (existing) {
+  if (existing && isContactVisible(existing.id)) {
     const r = bindNodeToContact(nodeId, existing.id)
     return { contactId: existing.id, outcome: r.outcome, nodeId: r.nodeId, reusedExisting: true }
   }
@@ -2201,10 +2241,16 @@ export function mergeGraphNodes(keeperEntityId: string, loserEntityId: string): 
   const loserContact = loserNode ? contactIdOfNode(loserNode) : null
 
   if (keeperContact && loserContact && keeperContact !== loserContact) {
-    // Real, journaled contacts merge (undoable) — then fold the graph nodes.
-    mergeContacts(keeperContact, loserContact)
-    const r = mergeNodes(store, keeperId, loserId)
-    return { keeperId: r.keeperId, movedEdges: r.movedEdges, path: 'contact' }
+    // ADV30-2 (round-32): a contacts merge (mergeContacts) folds the loser into the
+    // keeper and can revive/expose a SUPPRESSED contact from a non-owner graph action.
+    // If either backing contact is suppressed, do NOT run the journaled contact merge —
+    // fall through to a graph-only fold (no contact-record mutation). Fail-closed.
+    if (isContactVisible(keeperContact) && isContactVisible(loserContact)) {
+      // Real, journaled contacts merge (undoable) — then fold the graph nodes.
+      mergeContacts(keeperContact, loserContact)
+      const r = mergeNodes(store, keeperId, loserId)
+      return { keeperId: r.keeperId, movedEdges: r.movedEdges, path: 'contact' }
+    }
   }
 
   const r = mergeNodes(store, keeperId, loserId)

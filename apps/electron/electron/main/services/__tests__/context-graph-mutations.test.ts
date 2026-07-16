@@ -52,8 +52,13 @@ import {
 } from '../knowledge-graph-service'
 
 function seedContact(id: string, name: string, extra: { role?: string; company?: string; email?: string } = {}) {
+  // ADV30-2 (round-32) — getNodeDetail + the graph contact mutations now gate the
+  // backing contact through filterVisibleEntityIds. Stamp a STRUCTURAL source ('user')
+  // so these functional-test contacts are genuinely VISIBLE (a NULL-source contact with
+  // no membership is legitimately suppressed on non-owner surfaces). The suppressed-
+  // contact behavior is covered in context-graph-suppressed-contact.round32.test.ts.
   dbRun(
-    'INSERT OR IGNORE INTO contacts (id, name, role, company, email, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    "INSERT OR IGNORE INTO contacts (id, name, role, company, email, first_seen_at, last_seen_at, source) VALUES (?, ?, ?, ?, ?, ?, ?, 'user')",
     [id, name, extra.role ?? null, extra.company ?? null, extra.email ?? null, '2026-01-01', '2026-01-01']
   )
 }
