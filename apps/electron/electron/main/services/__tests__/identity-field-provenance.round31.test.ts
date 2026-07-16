@@ -108,20 +108,42 @@ afterEach(() => {
 // v46 migration / schema
 // ---------------------------------------------------------------------------
 
-describe('v46 migration — contacts.role_source_recording_id', () => {
-  it('column exists after init and schema version is 47', () => {
-    expect(getTableColumns(getDatabase(), 'contacts')).toContain('role_source_recording_id')
-    // round-37 bumped 46 -> 47 (node-level graph provenance, ADV35-1).
+describe('v46/v48 migration — contacts.role_source_recording_id + role_origin', () => {
+  it('columns exist after init and schema version is 48', () => {
+    const cols = getTableColumns(getDatabase(), 'contacts')
+    expect(cols).toContain('role_source_recording_id')
+    // round-51 bumped 47 -> 48 (role provenance-trust marker, ADV49-2).
+    expect(cols).toContain('role_origin')
     const v = queryOne<{ v: number }>('SELECT MAX(version) AS v FROM schema_version')
-    expect(v?.v).toBe(47)
+    expect(v?.v).toBe(48)
   })
 
-  it('backfill/legacy: a role with NULL provenance is always shown', () => {
-    // Pre-v46 semantics: an existing role that predates field-provenance stays NULL
-    // ⇒ calendar/manual/legacy-authored ⇒ never blanked.
+  // ADV49-2 (round-51) FLIP: a role with NULL provenance is NO LONGER implicitly
+  // trusted. A transcript-origin entity whose role predates field-provenance (NULL
+  // role_source_recording_id, no role_origin marker) is an AMBIGUOUS legacy role ⇒
+  // BLANKED on non-owner surfaces (pre-v46 applyTranscriptEntities wrote transcript
+  // roles with the column NULL too, so NULL is not proof of a calendar/manual role).
+  it('legacy transcript role with NULL provenance is BLANKED (ADV49-2)', () => {
     contact('c-legacy', 'Legacy Role', 'transcript', null, 'CTO', null)
     const [safe] = blankIneligibleContactFields([getContactById('c-legacy')!])
-    expect(safe.role).toBe('CTO')
+    expect(safe.role).toBeNull()
+  })
+
+  // The trusted-structural side of the flip: a NULL-provenance role on a
+  // calendar/user entity is genuinely structural ⇒ still SHOWN.
+  it('legacy NULL-provenance role on a calendar/user entity is still shown', () => {
+    contact('c-cal-legacy', 'Cal Legacy', 'calendar', null, 'Director', null)
+    contact('c-user-legacy', 'User Legacy', 'user', null, 'Founder', null)
+    expect(blankIneligibleContactFields([getContactById('c-cal-legacy')!])[0].role).toBe('Director')
+    expect(blankIneligibleContactFields([getContactById('c-user-legacy')!])[0].role).toBe('Founder')
+  })
+
+  // An explicit role_origin='legacy' marker (what the v48 backfill stamps on
+  // ambiguous rows) is blanked regardless of the entity source.
+  it('an explicit role_origin=legacy marker is blanked', () => {
+    contact('c-marked', 'Marked Legacy', 'calendar', null, 'VP', null)
+    run(`UPDATE contacts SET role_origin = 'legacy' WHERE id = 'c-marked'`)
+    expect(blankIneligibleContactFields([getContactById('c-marked')!])[0].role).toBeNull()
   })
 })
 

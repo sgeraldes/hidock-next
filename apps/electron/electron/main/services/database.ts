@@ -8,7 +8,7 @@ import { normalizeName, isGenericSpeakerLabel, detectAmbiguousName } from './ent
 import { getEventBus } from './event-bus'
 import type { QualityRating } from '@/types/knowledge'
 
-const SCHEMA_VERSION = 47
+const SCHEMA_VERSION = 48
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -406,7 +406,16 @@ CREATE TABLE IF NOT EXISTS synced_files (
 -- a contact visible via an eligible recording B keeps a role enriched from an
 -- excluded recording A. role_source_recording_id records the recording that
 -- supplied the current role, and a NON-OWNER read BLANKS role when that recording
--- is ineligible. NULL = calendar/manual/legacy-authored role, always shown.
+-- is ineligible.
+-- v48 (F18/round-51, ADV49-2) role_origin PROVENANCE-TRUST MARKER. A NULL
+-- role_source_recording_id is NOT proof of a calendar/manual role — pre-v46
+-- applyTranscriptEntities wrote transcript-derived roles WITHOUT the column too, so
+-- they are NULL-provenance yet must NOT be trusted. role_origin disambiguates a
+-- NULL-provenance role: 'manual'|'calendar'|'user' ⇒ structural/owner-authored (SHOWN);
+-- 'transcript' ⇒ transcript-derived (also stamps role_source_recording_id, gated by it);
+-- 'legacy' ⇒ pre-v48 unattributable NULL-provenance role (BLANKED on non-owner, fail-closed);
+-- NULL ⇒ not-yet-backfilled / marker-less row: fall back to the entity source column
+-- (user/calendar ⇒ shown, else blanked).
 CREATE TABLE IF NOT EXISTS contacts (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -422,7 +431,8 @@ CREATE TABLE IF NOT EXISTS contacts (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     source TEXT,
     source_recording_id TEXT,
-    role_source_recording_id TEXT
+    role_source_recording_id TEXT,
+    role_origin TEXT
 );
 
 -- User-created projects for organizing meetings. Projects are full hubs (v29):
@@ -2401,6 +2411,68 @@ const MIGRATIONS: Record<number, () => void> = {
     addCol('origin')
     addCol('source_recording_id')
     console.log('Migration v47 complete')
+  },
+
+  48: () => {
+    // v48 (F18/round-51, ADV49-2): PROVENANCE-TRUST MARKER for the transcript-
+    // enriched contact scalar `role`. blankIneligibleContactFields treated EVERY
+    // role with a NULL role_source_recording_id as calendar/manual/legacy and
+    // always showed it — but pre-v46 applyTranscriptEntities wrote transcript-
+    // DERIVED roles with the column NULL too (v46 added the column with NO
+    // backfill), so a calendar/manual-retained contact could still expose a role
+    // learned SOLELY from a now-personal/deleted/value-excluded/purged recording.
+    // Add contacts.role_origin and CONSERVATIVELY classify existing role-bearing
+    // rows so a non-owner read can distinguish a trusted structural/manual role
+    // from an unattributable legacy transcript role.
+    // Rules (only role-bearing rows; leave role_origin NULL where role IS NULL):
+    //   (a) OPTION-A attribution — a transcript-ENTITY role with NULL provenance
+    //       is backfilled to the entity's minting recording (source_recording_id),
+    //       making it attributable (gated by that recording's eligibility);
+    //   (b) rows that already carry role_source_recording_id ⇒ 'transcript';
+    //   (c) NULL-provenance roles on a source='user'/'calendar' entity ⇒ 'manual'
+    //       (genuinely structural — must NOT be blanked);
+    //   (d) remaining NULL-provenance roles (source='transcript' with no
+    //       resolvable recording, or legacy source=NULL) ⇒ 'legacy' (AMBIGUOUS,
+    //       blanked on non-owner surfaces, fail-closed).
+    // Idempotent: guarded ALTER + UPDATEs that only touch role_origin-NULL rows.
+    // Documented in ARF-HIGHS-CHANGES.md.
+    console.log('Running migration to schema v48: role provenance-trust marker')
+    const database = getDatabase()
+    const cols = getTableColumns(database, 'contacts')
+    if (cols.length > 0 && !cols.includes('role_origin')) {
+      try {
+        database.run('ALTER TABLE contacts ADD COLUMN role_origin TEXT')
+      } catch (e) {
+        console.warn('[Migration v48] add contacts.role_origin failed:', e)
+      }
+    }
+    try {
+      // (a) attribute a transcript-entity's NULL-provenance role to its minting recording.
+      database.run(
+        `UPDATE contacts SET role_source_recording_id = source_recording_id
+          WHERE role IS NOT NULL AND role_source_recording_id IS NULL
+            AND source = 'transcript' AND source_recording_id IS NOT NULL`
+      )
+      // (b) already-attributed transcript roles.
+      database.run(
+        `UPDATE contacts SET role_origin = 'transcript'
+          WHERE role IS NOT NULL AND role_origin IS NULL AND role_source_recording_id IS NOT NULL`
+      )
+      // (c) structural/manual roles — trusted, always shown.
+      database.run(
+        `UPDATE contacts SET role_origin = 'manual'
+          WHERE role IS NOT NULL AND role_origin IS NULL AND role_source_recording_id IS NULL
+            AND source IN ('user', 'calendar')`
+      )
+      // (d) remaining ambiguous legacy NULL-provenance roles — untrusted, blanked.
+      database.run(
+        `UPDATE contacts SET role_origin = 'legacy'
+          WHERE role IS NOT NULL AND role_origin IS NULL AND role_source_recording_id IS NULL`
+      )
+    } catch (e) {
+      console.warn('[Migration v48] role_origin backfill failed (non-fatal):', e)
+    }
+    console.log('Migration v48 complete')
   }
 
 }
@@ -2531,6 +2603,11 @@ function repairPhase(): void {
     // v46/round-31 (ADV29-2) — per-field role provenance; force-add so an older
     // on-disk schema has it before any role read blanks on ineligible provenance.
     ['contacts', 'role_source_recording_id'],
+    // v48/round-51 (ADV49-2) — role provenance-trust marker; force-add so an older
+    // on-disk schema has it before any role read consults it. The one-time
+    // classification BACKFILL lives in the v48 migration (older rows stay NULL and
+    // fall back to the entity `source` until the migration classifies them).
+    ['contacts', 'role_origin'],
     ['projects', 'source'],
     ['projects', 'source_recording_id']
   ] as const) {
@@ -5713,10 +5790,14 @@ export interface Contact {
   source?: string | null
   /** v45 — recording whose transcript minted a transcript-origin entity. */
   source_recording_id?: string | null
-  /** v46 (ADV29-2) — recording that supplied the current `role`; NULL = calendar/
-   *  manual/legacy (always shown). Transcript-enriched role is blanked on non-owner
-   *  reads when this recording is ineligible. */
+  /** v46 (ADV29-2) — recording that supplied the current `role`. Transcript-enriched
+   *  role is blanked on non-owner reads when this recording is ineligible. */
   role_source_recording_id?: string | null
+  /** v48 (ADV49-2) — provenance-trust marker for a NULL-provenance role:
+   *  'manual'|'calendar'|'user' ⇒ structural (shown); 'transcript' ⇒ gated by
+   *  role_source_recording_id; 'legacy' ⇒ unattributable pre-v48 role (blanked on
+   *  non-owner); NULL ⇒ fall back to the entity `source`. */
+  role_origin?: string | null
 }
 
 export type ContactRole = 'organizer' | 'attendee'
@@ -6219,22 +6300,53 @@ export function filterVisibleEntityIds(kind: 'contact' | 'project', ids: Iterabl
  * original row through untouched otherwise, so internal (non-display) callers that
  * do NOT route through this keep the raw role. Only owner-management surfaces
  * (Library/Trash, MeetingDetail owner participant view) skip this helper.
+ *
+ * ADV49-2 (round-51) — a NULL role_source_recording_id is NO LONGER treated as
+ * always-trusted: pre-v46 applyTranscriptEntities wrote transcript-derived roles
+ * with the column NULL too, so a calendar/manual-retained contact could still
+ * expose a role learned solely from a now-excluded recording. A NULL-provenance
+ * role is shown ONLY when it is explicitly structural/manual (role_origin, or the
+ * entity `source` fallback for rows written before the v48 marker); an AMBIGUOUS
+ * legacy NULL-provenance role is BLANKED on non-owner surfaces (fail-closed).
  */
-export function blankIneligibleContactFields<T extends { role?: string | null; role_source_recording_id?: string | null }>(
-  contacts: T[]
-): T[] {
+export function blankIneligibleContactFields<
+  T extends { role?: string | null; role_source_recording_id?: string | null; role_origin?: string | null; source?: string | null }
+>(contacts: T[]): T[] {
   if (contacts.length === 0) return contacts
   const srcIds = new Set<string>()
   for (const c of contacts) {
     if (c.role && c.role_source_recording_id) srcIds.add(c.role_source_recording_id)
   }
-  if (srcIds.size === 0) return contacts // nothing is transcript-provenanced ⇒ all shown
+  // getEligibleRecordingIds handles an empty set (returns {eligible:∅, failClosed:false}).
   const { eligible, failClosed } = getEligibleRecordingIds(srcIds)
   return contacts.map((c) => {
-    if (!c.role || !c.role_source_recording_id) return c // no provenance ⇒ shown
-    const ok = !failClosed && eligible.has(c.role_source_recording_id)
-    return ok ? c : { ...c, role: null }
+    if (!c.role) return c // no role ⇒ nothing to blank
+    // (1) Attributable transcript role ⇒ gate by its source recording's eligibility
+    //     (fail-closed: a lookup failure blanks it).
+    if (c.role_source_recording_id) {
+      const ok = !failClosed && eligible.has(c.role_source_recording_id)
+      return ok ? c : { ...c, role: null }
+    }
+    // (2) NULL provenance ⇒ show ONLY an explicitly-structural/manual role.
+    return roleIsTrustedStructural(c) ? c : { ...c, role: null }
   })
+}
+
+/**
+ * ADV49-2 (round-51) — is a NULL-provenance (role_source_recording_id IS NULL) role
+ * trusted to show on a non-owner surface? Trusted when role_origin is an explicit
+ * structural/manual marker ('manual'|'calendar'|'user'); UNTRUSTED for 'legacy' or
+ * 'transcript' (a transcript role should have carried a source recording — if it
+ * lost it, fail closed). role_origin unset (a row written before the v48 marker was
+ * populated, incl. directly-inserted test rows) falls back to the entity `source`:
+ * a user/calendar entity's role is structural; anything else (transcript/legacy
+ * source) is an ambiguous legacy role ⇒ untrusted.
+ */
+function roleIsTrustedStructural(c: { role_origin?: string | null; source?: string | null }): boolean {
+  const origin = c.role_origin
+  if (origin === 'manual' || origin === 'calendar' || origin === 'user') return true
+  if (origin === 'legacy' || origin === 'transcript') return false
+  return c.source === 'user' || c.source === 'calendar'
 }
 
 /**
@@ -6553,7 +6665,10 @@ export function updateContact(id: string, updates: Partial<Contact>): void {
   if (updates.type !== undefined) { fields.push('type = ?'); params.push(updates.type); }
   // v46/round-31 (ADV29-2): a user-authored role is always shown — clear any
   // transcript field-provenance so read-blanking never hides an owner-set role.
-  if (updates.role !== undefined) { fields.push('role = ?'); params.push(updates.role); fields.push('role_source_recording_id = NULL'); }
+  // v48/round-51 (ADV49-2): also stamp role_origin='manual' so the owner-set role
+  // is trusted as structural even on a transcript-origin entity (a NULL provenance
+  // is no longer implicitly trusted).
+  if (updates.role !== undefined) { fields.push('role = ?'); params.push(updates.role); fields.push('role_source_recording_id = NULL'); fields.push("role_origin = 'manual'"); }
   if (updates.company !== undefined) { fields.push('company = ?'); params.push(updates.company); }
   if (updates.notes !== undefined) { fields.push('notes = ?'); params.push(updates.notes); }
   if (updates.tags !== undefined) { fields.push('tags = ?'); params.push(updates.tags); }
@@ -6843,6 +6958,10 @@ export function mergeContacts(keeperId: string, loserId: string): Contact {
     // value it came from, so a folded transcript role keeps being blanked on
     // non-owner reads when its source recording is excluded (no laundering via merge).
     const roleSrc = notEmpty(keeper.role) ? keeper.role_source_recording_id ?? null : loser.role_source_recording_id ?? null
+    // v48/round-51 (ADV49-2): carry the role's provenance-trust marker alongside the
+    // folded role so a folded structural/manual role stays trusted (and a folded
+    // ambiguous legacy role stays blanked) after the merge.
+    const roleOrigin = notEmpty(keeper.role) ? keeper.role_origin ?? null : loser.role_origin ?? null
     const company = notEmpty(keeper.company) ? keeper.company : loser.company ?? null
     const notes = notEmpty(keeper.notes) ? keeper.notes : loser.notes ?? null
     const type = keeper.type && keeper.type !== 'unknown' ? keeper.type : loser.type || 'unknown'
@@ -6869,9 +6988,9 @@ export function mergeContacts(keeperId: string, loserId: string): Contact {
     )
 
     runNoSave(
-      `UPDATE contacts SET email = ?, role = ?, role_source_recording_id = ?, company = ?, notes = ?, type = ?, tags = ?,
+      `UPDATE contacts SET email = ?, role = ?, role_source_recording_id = ?, role_origin = ?, company = ?, notes = ?, type = ?, tags = ?,
          first_seen_at = ?, last_seen_at = ? WHERE id = ?`,
-      [email, role, roleSrc, company, notes, type, tagsJson, firstSeen, lastSeen, keeperId]
+      [email, role, roleSrc, roleOrigin, company, notes, type, tagsJson, firstSeen, lastSeen, keeperId]
     )
 
     runNoSave('DELETE FROM contacts WHERE id = ?', [loserId])
