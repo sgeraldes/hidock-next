@@ -571,4 +571,23 @@ describe('revalidateSuggestionsForSurfacing — rarity recompute (ADV48-1 read p
     expect(ev.rarity).toBe('common') // still common ⇒ penalty preserved
     expect(Number(rows[0].confidence)).toBeCloseTo(0.55, 2)
   })
+
+  // ADV49-3 (round-51) FLIP of the round-50 "fail-closed to 0" behavior: a rarity
+  // mention-count lookup FAILURE must NOT be treated as a confident 0 (which would
+  // REMOVE the 'common' penalty and RAISE confidence). It must SUPPRESS at surfacing
+  // and REJECT at accept — otherwise a below-threshold suggestion could cross the
+  // accept bar precisely while eligibility can't be verified, authorizing a merge.
+  it('SUPPRESSES at surfacing and REFUSES accept when the rarity mention lookup fails (ADV49-3)', () => {
+    const id = insertCommonRaritySuggestion()
+    // Matching transcripts EXIST (so the eligibility lookup is actually attempted)…
+    seedMentions('t-live', 'Talk with Ana Lima', 3)
+    // …but the eligibility allowlist cannot complete (value-exclusion subquery table gone).
+    run('PRAGMA foreign_keys = OFF')
+    run('DROP TABLE knowledge_captures')
+
+    // Surfacing suppresses the suggestion — a bare-0 count must not raise confidence.
+    expect(surfaced()).toHaveLength(0)
+    // Accept refuses the merge (confidence not raised, merge not authorized).
+    expect(isSuggestionEligibleForAccept(getIdentitySuggestionById(id)!)).toBe(false)
+  })
 })

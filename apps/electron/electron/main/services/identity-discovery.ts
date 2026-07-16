@@ -198,34 +198,50 @@ function likeEscape(s: string): string {
  * coarse count-based inference about excluded content ("Common name"). Instead we
  * fetch the matching transcripts' RECORDING IDs and route them through the shared
  * fail-closed recording allowlist ({@link filterEligibleRecordingIds}), counting
- * only positively-eligible rows. A hard-purge orphan (recording row gone) or an
- * excluded recording is dropped by the positive allowlist; a lookup failure fails
- * CLOSED to 0 (the conservative rarity — never let an unfiltered count through).
+ * only positively-eligible rows.
+ *
+ * ADV49-3 (round-51) — CARRY the failClosed signal (was silently mapped to 0). A
+ * mention count of 0 is NOT conservative for rarity: 0 REMOVES the 'common'
+ * penalty (−0.15), RAISING confidence — so a lookup failure returning 0 could
+ * push a below-threshold suggestion over the accept bar precisely WHILE eligibility
+ * cannot be verified. The counter now returns { count, failClosed } so the caller
+ * can refuse to recompute (suppress at surfacing, reject at accept) on a failure
+ * rather than treat an unverifiable count as a confident 0.
  */
-function makeMentionCounter(): (name: string) => number {
-  const cache = new Map<string, number>()
-  return (name: string): number => {
+interface MentionCount {
+  count: number
+  /** True when the eligibility lookup could not complete → the count is unverified. */
+  failClosed: boolean
+}
+function makeMentionCounter(): (name: string) => MentionCount {
+  const cache = new Map<string, MentionCount>()
+  return (name: string): MentionCount => {
     const key = normalizeName(name)
-    if (!key) return 0
+    if (!key) return { count: 0, failClosed: false }
     const hit = cache.get(key)
     if (hit !== undefined) return hit
     const rows = safeQueryAll<{ recording_id: string | null }>(
       `SELECT recording_id FROM transcripts WHERE full_text LIKE ? ESCAPE '\\'`,
       [`%${likeEscape(name.trim())}%`]
     )
-    let n = 0
+    let result: MentionCount = { count: 0, failClosed: false }
     if (rows.length > 0) {
       const recIds = rows.map((r) => r.recording_id).filter((id): id is string => !!id)
       const { eligible, failClosed } = filterEligibleRecordingIds(recIds)
-      // failClosed ⇒ leave n = 0 (fail-closed conservative count).
-      if (!failClosed) {
+      if (failClosed) {
+        // Do NOT return a confident 0 — signal the failure up so the caller refuses
+        // to recompute rarity/confidence from an unverifiable count.
+        result = { count: 0, failClosed: true }
+      } else {
+        let n = 0
         for (const r of rows) {
           if (r.recording_id && eligible.has(r.recording_id)) n++
         }
+        result = { count: n, failClosed: false }
       }
     }
-    cache.set(key, n)
-    return n
+    cache.set(key, result)
+    return result
   }
 }
 
@@ -240,16 +256,23 @@ function pairRarity(
   aName: string,
   bName: string,
   bearers: Map<string, number>,
-  mentionsOf: (name: string) => number
-): { rarity: Rarity; delta: number } {
+  mentionsOf: (name: string) => MentionCount
+): { rarity: Rarity; delta: number; failClosed: boolean } {
   const at = foldedFirstToken(aName)
   const bt = foldedFirstToken(bName)
   const token = at === bt ? at : at.length <= bt.length ? at : bt
   const bearerCount = Math.max(bearers.get(at) ?? 0, bearers.get(bt) ?? 0)
   const byBearers = nameRarity({ bearers: bearerCount, tokenLength: token.length })
-  if (byBearers.rarity !== 'normal') return byBearers
-  const mentions = Math.max(mentionsOf(aName), mentionsOf(bName))
-  return nameRarity({ bearers: bearerCount, tokenLength: token.length, mentions })
+  // Bearer count already decided rare/common ⇒ the mention count is not consulted,
+  // so there is no eligibility lookup that could fail here.
+  if (byBearers.rarity !== 'normal') return { ...byBearers, failClosed: false }
+  // ADV49-3 (round-51) — the mention count IS consulted; propagate its failClosed
+  // so the caller refuses to recompute confidence from an unverifiable count.
+  const mA = mentionsOf(aName)
+  const mB = mentionsOf(bName)
+  const mentions = Math.max(mA.count, mB.count)
+  const failClosed = mA.failClosed || mB.failClosed
+  return { ...nameRarity({ bearers: bearerCount, tokenLength: token.length, mentions }), failClosed }
 }
 
 // ---------------------------------------------------------------------------
@@ -484,6 +507,12 @@ export function discoverContactMerges(): DiscoveryResult {
     if (rel === 'exact') emailBoost = EMAIL_EXACT_BOOST
     else if (rel === 'local') emailBoost = EMAIL_LOCAL_BOOST
 
+    // ADV49-3 (round-51) — at DISCOVERY scan a rarity mention-count lookup failure
+    // is not itself security-critical: pairRarity already returns the conservative
+    // bearer-based rarity (mentions treated as 0, no benefit granted), and every
+    // suggestion created here is revalidated at surface/accept, where a failClosed
+    // rarity recompute SUPPRESSES/REJECTS it. So scan keeps creating on the other
+    // signals (email/name/graph) rather than dropping a valid email-matched pair.
     const rar = pairRarity(a.name, b.name, tokenBearers, mentionsOf)
 
     let composite = NAME_WEIGHT * name + role.boost + graph + emailBoost + rar.delta
@@ -573,6 +602,9 @@ export function discoverProjectMerges(): DiscoveryResult {
     const tJac = jaccard(new Set(aNeighbors.keys()), new Set(bNeighbors.keys()))
     const graph = GRAPH_MAX_BOOST * clamp01(mJac.score + tJac.score)
 
+    // ADV49-3 (round-51) — scan keeps its conservative bearer-based rarity on a
+    // failClosed mention lookup (see the contact-discovery site above); the
+    // surface/accept recompute is the authoritative fail-closed gate.
     const rar = pairRarity(a.name, b.name, tokenBearers, mentionsOf)
 
     // Projects have no email/role → never auto-mergeable (that gate needs email corroboration).
@@ -653,10 +685,16 @@ function rarityDelta(r: Rarity | undefined | null): number {
  *
  * bearers (contacts/projects) are exclusion-independent, so a genuinely common
  * name (≥3 bearers) stays 'common'. The email-exact floor is preserved.
- * Fail-closed: any recompute error leaves the suggestion untouched (never raises
- * confidence on an error, and the label stays as persisted).
+ *
+ * ADV49-3 (round-51) — returns NULL to SUPPRESS the suggestion when the rarity
+ * mention count could not be verified (failClosed): a bare 0 there would REMOVE
+ * the 'common' penalty and RAISE confidence precisely while eligibility can't be
+ * checked, so the caller must drop it at surfacing and (via
+ * {@link isSuggestionEligibleForAccept}) reject it at accept. Only a CONFIRMED
+ * (non-failClosed) count recomputes confidence. A non-failClosed recompute error
+ * still leaves the suggestion untouched (never raises confidence).
  */
-function makeRarityRecomputer(): (s: IdentitySuggestion, ev: SuggestionEvidence) => IdentitySuggestion {
+function makeRarityRecomputer(): (s: IdentitySuggestion, ev: SuggestionEvidence) => IdentitySuggestion | null {
   const mentionsOf = makeMentionCounter() // ELIGIBLE mentions (ADV48-1)
   const bearersCache = new Map<'person' | 'project', Map<string, number>>()
   const bearersFor = (kind: 'person' | 'project'): Map<string, number> => {
@@ -669,13 +707,17 @@ function makeRarityRecomputer(): (s: IdentitySuggestion, ev: SuggestionEvidence)
     return hit
   }
 
-  return (s: IdentitySuggestion, ev: SuggestionEvidence): IdentitySuggestion => {
+  return (s: IdentitySuggestion, ev: SuggestionEvidence): IdentitySuggestion | null => {
     try {
       const keeperName = ev.keeperName ?? ''
       const loserName = ev.loserName ?? s.candidate_name ?? ''
       if (!keeperName || !loserName) return s // can't recompute ⇒ leave as-is
 
       const newRar = pairRarity(keeperName, loserName, bearersFor(s.kind), mentionsOf)
+      // ADV49-3 (round-51) — the rarity mention count could not be verified. Do NOT
+      // recompute confidence upward from a bare 0; SUPPRESS the suggestion (dropped
+      // at surfacing, and rejected at accept via isSuggestionEligibleForAccept).
+      if (newRar.failClosed) return null
       const oldRar = (ev.rarity as Rarity | undefined) ?? undefined
       const oldDelta = rarityDelta(oldRar)
       const newDelta = newRar.delta
@@ -791,7 +833,10 @@ export function revalidateSuggestionsForSurfacing(suggestions: IdentitySuggestio
         const { eligible, failClosed } = filterEligibleRecordingIds(src)
         if (failClosed) continue // fail-closed
         if (!src.some((id) => eligible.has(id))) continue // all sources excluded/purged ⇒ suppress
-        out.push(recomputeRarity(s, ev))
+        // ADV49-3 (round-51) — a NULL from the rarity recompute means the mention
+        // count could not be verified ⇒ suppress (do not surface).
+        const recomputed = recomputeRarity(s, ev)
+        if (recomputed) out.push(recomputed)
         continue
       }
       // NULL provenance + no graph. A DISCOVERY straggler always carries a `signals`
@@ -799,7 +844,8 @@ export function revalidateSuggestionsForSurfacing(suggestions: IdentitySuggestio
       // the legacy/missing-provenance transcript suggestions fail-closed (ADV26-1);
       // let genuine discovery stragglers through (they have no recording attribution).
       if (ev.signals) {
-        out.push(recomputeRarity(s, ev))
+        const recomputed = recomputeRarity(s, ev)
+        if (recomputed) out.push(recomputed) // ADV49-3 — null ⇒ suppress (unverifiable rarity)
       }
       continue
     }
@@ -856,8 +902,11 @@ export function revalidateSuggestionsForSurfacing(suggestions: IdentitySuggestio
       if (newComposite < SUGGEST_THRESHOLD) continue
 
       // Pass the graph-updated evidence on the base row so a rarity no-op still
-      // preserves the sharedTopics redaction + graph-signal rewrite.
-      out.push(recomputeRarity({ ...s, confidence: round2(newComposite), evidence: JSON.stringify(ev) }, ev))
+      // preserves the sharedTopics redaction + graph-signal rewrite. ADV49-3
+      // (round-51) — a NULL means the rarity mention count was unverifiable ⇒
+      // suppress this suggestion from surfacing.
+      const recomputed = recomputeRarity({ ...s, confidence: round2(newComposite), evidence: JSON.stringify(ev) }, ev)
+      if (recomputed) out.push(recomputed)
     } catch (e) {
       // Fail-closed: a recompute error suppresses this pending suggestion.
       console.error('[identity-discovery] suggestion revalidation failed — suppressing (fail-closed):', e)
