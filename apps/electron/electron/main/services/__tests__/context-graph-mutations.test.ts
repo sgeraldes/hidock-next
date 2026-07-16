@@ -194,7 +194,15 @@ describe('Context Graph merge', () => {
     const { person: keeper } = seedGraph({ personLabel: 'Bob' })
     const loser = store.upsertNode({ type: 'person', label: 'Robert', now: '2026-01-01' })
     const m = store.upsertNode({ type: 'meeting', label: 'Extra', props: { meetingId: 'mx', date: '2026-01-05' }, now: '2026-01-01' })
-    store.upsertEdge({ sourceId: loser, targetId: m, type: 'ATTENDED', now: '2026-01-01' })
+    const eLoser = store.upsertEdge({ sourceId: loser, targetId: m, type: 'ATTENDED', now: '2026-01-01' })
+    // ADV31-3 (round-33): getNodeDetail stats now derive from an EXCLUSION-FILTERED
+    // subgraph, which suppresses zero-provenance edges on the non-owner inspector
+    // surface. Real graph edges always carry provenance — attribute the loser's edge
+    // to the eligible seed recording so the post-merge meetingCount reflects it.
+    dbRun(
+      'INSERT OR IGNORE INTO graph_edge_sources (edge_id, recording_id, transcript_id, assertion_count, created_at) VALUES (?, ?, ?, 1, ?)',
+      [eLoser, 'rec-seed', 'tx-seed', '2026-01-01']
+    )
 
     const preview = mergeGraphPreview(keeper, loser)
     expect(preview.contactMerge).toBe(false)
