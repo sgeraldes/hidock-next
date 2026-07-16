@@ -19,7 +19,8 @@
  * for unit tests.
  */
 
-import { queryAll, queryOne, getContactById, getProjectById } from './database'
+import { queryAll, queryOne, getContactById, getProjectById, filterEligibleMembershipRows } from './database'
+import type { MembershipRow } from './database'
 import {
   normalizeName,
   accentFoldedKey,
@@ -112,57 +113,77 @@ function applyRarity(
 // Context (co-occurrence) sets
 // ---------------------------------------------------------------------------
 
+// ADV27-3 (round-28) — the resolver's co-occurrence context is read DIRECTLY from
+// meeting_contacts / meeting_projects, and applyTranscriptEntities feeds its own
+// meeting into the resolver. An EXCLUDED recording's transcript-derived membership
+// rows must NOT supply the context boost / sole-attendee signal that flips a later
+// ELIGIBLE transcript from ambiguous/new into an auto-link (which would write a NEW
+// durable membership attributed to the eligible recording — laundering excluded
+// evidence into identity state). Every contextual membership row is therefore
+// fetched WITH its per-row provenance (source, source_recording_id) and filtered
+// through {@link filterEligibleMembershipRows}: only calendar/user-authored rows OR
+// rows backed by a currently-eligible source recording contribute. Legacy
+// (NULL-provenance) rows and a fail-closed lookup are dropped.
+
 /** Contact ids that co-occur with the given context: attendees of the meeting,
- *  and people sharing any project with the meeting or the explicit projectIds. */
+ *  and people sharing any project with the meeting or the explicit projectIds.
+ *  Only ELIGIBLE membership rows contribute (see the note above). */
 function coOccurringContactIds(ctx?: ResolveContext): Set<string> {
   const ids = new Set<string>()
   if (!ctx) return ids
 
+  const addEligible = (rows: Array<MembershipRow & { contact_id: string }>): void => {
+    for (const r of filterEligibleMembershipRows(rows).eligible) ids.add(r.contact_id)
+  }
+
   if (ctx.meetingId) {
-    for (const r of queryAll<{ contact_id: string }>(
-      'SELECT contact_id FROM meeting_contacts WHERE meeting_id = ?',
-      [ctx.meetingId]
-    )) {
-      ids.add(r.contact_id)
-    }
-    for (const r of queryAll<{ contact_id: string }>(
-      `SELECT DISTINCT mc.contact_id FROM meeting_contacts mc
-       JOIN meeting_projects mp ON mc.meeting_id = mp.meeting_id
-       WHERE mp.project_id IN (SELECT project_id FROM meeting_projects WHERE meeting_id = ?)`,
-      [ctx.meetingId]
-    )) {
-      ids.add(r.contact_id)
-    }
+    addEligible(
+      queryAll<MembershipRow & { contact_id: string }>(
+        'SELECT contact_id, source, source_recording_id FROM meeting_contacts WHERE meeting_id = ?',
+        [ctx.meetingId]
+      )
+    )
+    addEligible(
+      queryAll<MembershipRow & { contact_id: string }>(
+        `SELECT DISTINCT mc.contact_id AS contact_id, mc.source AS source, mc.source_recording_id AS source_recording_id
+         FROM meeting_contacts mc
+         JOIN meeting_projects mp ON mc.meeting_id = mp.meeting_id
+         WHERE mp.project_id IN (SELECT project_id FROM meeting_projects WHERE meeting_id = ?)`,
+        [ctx.meetingId]
+      )
+    )
   }
 
   if (ctx.projectIds && ctx.projectIds.length > 0) {
     const placeholders = ctx.projectIds.map(() => '?').join(',')
-    for (const r of queryAll<{ contact_id: string }>(
-      `SELECT DISTINCT mc.contact_id FROM meeting_contacts mc
-       JOIN meeting_projects mp ON mc.meeting_id = mp.meeting_id
-       WHERE mp.project_id IN (${placeholders})`,
-      ctx.projectIds
-    )) {
-      ids.add(r.contact_id)
-    }
+    addEligible(
+      queryAll<MembershipRow & { contact_id: string }>(
+        `SELECT DISTINCT mc.contact_id AS contact_id, mc.source AS source, mc.source_recording_id AS source_recording_id
+         FROM meeting_contacts mc
+         JOIN meeting_projects mp ON mc.meeting_id = mp.meeting_id
+         WHERE mp.project_id IN (${placeholders})`,
+        ctx.projectIds
+      )
+    )
   }
 
   return ids
 }
 
 /** Project ids that co-occur with the context: projects linked to the meeting
- *  plus the explicit projectIds. */
+ *  (ELIGIBLE membership rows only) plus the explicit projectIds. */
 function coOccurringProjectIds(ctx?: ResolveContext): Set<string> {
   const ids = new Set<string>()
   if (!ctx) return ids
   if (ctx.meetingId) {
-    for (const r of queryAll<{ project_id: string }>(
-      'SELECT project_id FROM meeting_projects WHERE meeting_id = ?',
+    const rows = queryAll<MembershipRow & { project_id: string }>(
+      'SELECT project_id, source, source_recording_id FROM meeting_projects WHERE meeting_id = ?',
       [ctx.meetingId]
-    )) {
-      ids.add(r.project_id)
-    }
+    )
+    for (const r of filterEligibleMembershipRows(rows).eligible) ids.add(r.project_id)
   }
+  // Explicit projectIds are caller-supplied structural context (not a
+  // transcript-derived membership) — kept as-is.
   for (const p of ctx.projectIds ?? []) ids.add(p)
   return ids
 }

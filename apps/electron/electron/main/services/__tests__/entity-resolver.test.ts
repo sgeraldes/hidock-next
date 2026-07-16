@@ -28,7 +28,15 @@ vi.mock('../database', () => ({
     return rowsFrom(dbInstance.exec(sql, params))[0]
   },
   getContactById: (id: string) => (dbInstance ? rowsFrom(dbInstance.exec('SELECT * FROM contacts WHERE id = ?', [id]))[0] : undefined),
-  getProjectById: (id: string) => (dbInstance ? rowsFrom(dbInstance.exec('SELECT * FROM projects WHERE id = ?', [id]))[0] : undefined)
+  getProjectById: (id: string) => (dbInstance ? rowsFrom(dbInstance.exec('SELECT * FROM projects WHERE id = ?', [id]))[0] : undefined),
+  // ADV27-3 (round-28): the resolver now gates co-occurrence context through this
+  // per-row membership boundary. Mirror the structural rule (calendar/user-authored
+  // eligible; transcript rows would need a recording lookup, not modeled here; NULL
+  // legacy ineligible). These tests insert 'calendar' memberships so they contribute.
+  filterEligibleMembershipRows: (rows: Array<{ source?: string | null }>) => ({
+    eligible: rows.filter((r) => r.source != null && r.source !== 'transcript'),
+    failClosed: false
+  })
 }))
 
 import { resolveContact, resolveProject } from '../entity-resolver'
@@ -42,8 +50,8 @@ describe('entity-resolver', () => {
       CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT);
       CREATE TABLE contact_aliases (id TEXT PRIMARY KEY, alias_norm TEXT UNIQUE, contact_id TEXT, source TEXT, confidence REAL);
       CREATE TABLE project_aliases (id TEXT PRIMARY KEY, alias_norm TEXT UNIQUE, project_id TEXT, source TEXT, confidence REAL);
-      CREATE TABLE meeting_contacts (meeting_id TEXT, contact_id TEXT, role TEXT);
-      CREATE TABLE meeting_projects (meeting_id TEXT, project_id TEXT);
+      CREATE TABLE meeting_contacts (meeting_id TEXT, contact_id TEXT, role TEXT, source TEXT, source_recording_id TEXT);
+      CREATE TABLE meeting_projects (meeting_id TEXT, project_id TEXT, source TEXT, source_recording_id TEXT);
 
       INSERT INTO contacts (id, name, email) VALUES
         ('c-seb', 'Sebastián Geraldes', 'sebastian.geraldes@dfx5.com'),
@@ -96,7 +104,7 @@ describe('entity-resolver', () => {
   })
 
   it('context co-occurrence boosts a fuzzy match into auto-link range', () => {
-    dbInstance.run("INSERT INTO meeting_contacts (meeting_id, contact_id, role) VALUES ('m1', 'c-seb', 'attendee')")
+    dbInstance.run("INSERT INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES ('m1', 'c-seb', 'attendee', 'calendar')")
     const r = resolveContact('Sebastan Geraldes', { meetingId: 'm1' })
     expect(r.id).toBe('c-seb')
     expect(r.method).toBe('fuzzy-context')
@@ -142,15 +150,15 @@ describe('entity-resolver', () => {
     })
 
     it('splits by attendee context when exactly one candidate attended', () => {
-      dbInstance.run("INSERT INTO meeting_contacts (meeting_id, contact_id, role) VALUES ('m1', 'c-sh', 'attendee')")
+      dbInstance.run("INSERT INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES ('m1', 'c-sh', 'attendee', 'calendar')")
       const r = resolveContact('Sergio', { meetingId: 'm1' })
       expect(r).toEqual({ id: 'c-sh', confidence: 0.85, method: 'attendee-context' })
     })
 
     it('stays ambiguous when two candidates both attended (cannot decide)', () => {
       dbInstance.run(`
-        INSERT INTO meeting_contacts (meeting_id, contact_id, role) VALUES
-          ('m1', 'c-sh', 'attendee'), ('m1', 'c-sr', 'attendee');
+        INSERT INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES
+          ('m1', 'c-sh', 'attendee', 'calendar'), ('m1', 'c-sr', 'attendee', 'calendar');
       `)
       const r = resolveContact('Sergio', { meetingId: 'm1' })
       expect(r.ambiguous).toBe(true)
