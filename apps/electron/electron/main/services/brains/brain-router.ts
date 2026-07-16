@@ -15,6 +15,7 @@
  */
 import { getConfig } from '../config'
 import { getBrainRegistry, BrainRegistry } from './brain-registry'
+import { eligibleToGenerate } from './eligibility'
 import type {
   AIBrain,
   AudioAnalyzeInput,
@@ -49,26 +50,6 @@ const DEFAULT_ENABLED = new Set<BrainId>(['gemini-api', 'ollama'])
 const DEFAULT_BRAIN: BrainId = 'gemini-api'
 
 const NO_EXCLUDES: ReadonlySet<BrainId> = new Set()
-
-/**
- * ADV42-2 (round-44) — FAIL-CLOSED evaluation of a `shouldGenerate` eligibility
- * gate. The source is treated as eligible ONLY when the callback returns
- * EXACTLY `true`. A `false` return OR any thrown error ⇒ ineligible (do NOT
- * send content to a provider). A missing callback ⇒ eligible (no gate
- * configured — legacy behaviour). This is the single choke-point re-run
- * immediately before EVERY primary AND fallback provider attempt in chat/embed,
- * so an exclusion committed while a primary attempt is pending/failing never
- * reaches a fallback provider.
- */
-function eligibleToGenerate(shouldGenerate?: () => boolean): boolean {
-  if (!shouldGenerate) return true
-  try {
-    return shouldGenerate() === true
-  } catch (e) {
-    console.warn('[BrainRouter] shouldGenerate threw — treating source as ineligible (fail closed):', e)
-    return false
-  }
-}
 
 /**
  * The terminal failed attempt of a chat() call that returned null.
@@ -345,7 +326,11 @@ export class BrainRouter {
       // Recheck AGAIN after the geminiPrimary await, immediately before the call.
       if (!eligibleToGenerate(opts.shouldGenerate)) return ineligible()
       try {
-        return await primary.embed(texts)
+        // ADV43-2 (round-45) — thread shouldGenerate INTO the adapter so it
+        // re-checks before EACH internal batch (GeminiApiBrain.embed loops over
+        // 100-text batches with an await between them); the router's single
+        // pre-attempt check cannot see an exclusion committed mid-batch.
+        return await primary.embed(texts, opts)
       } catch (e) {
         console.error('[BrainRouter] Gemini embedding failed, trying Ollama fallback:', e)
       }
@@ -357,7 +342,9 @@ export class BrainRouter {
     if (!eligibleToGenerate(opts.shouldGenerate)) return ineligible()
 
     const fallback = this.capabilityFallback('embed', 'gemini-api')
-    return fallback?.embed ? fallback.embed(texts) : ineligible()
+    // ADV43-2 (round-45) — the Ollama adapter emits one request per text; thread
+    // shouldGenerate so it re-checks before EACH per-text request too.
+    return fallback?.embed ? fallback.embed(texts, opts) : ineligible()
   }
 
   /**
