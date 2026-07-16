@@ -30,6 +30,13 @@ const mockIsRecordingEligible = vi.fn((..._args: any[]) => true)
 // INC3/INC4 (round-5) — controllable vector store + queue-progress spy.
 const mockGetVectorStore = vi.fn((..._args: any[]) => null as any)
 const mockUpdateQueueProgress = vi.fn()
+// ADV42-1 (round-44) — stable spy for the Gemini analysis provider call so a
+// test can assert analyzeTranscriptWithGemini's provider was NEVER reached when
+// the recording became ineligible during audio transcription. Default rejects
+// (analysis "fails") — the historical behaviour this suite relied on.
+const mockGenerateContent = vi.fn(async () => {
+  throw new Error('API rate limit exceeded')
+})
 
 // spawnStreaming uses `spawn`, not `execFile`. We create a helper that manufactures
 // a fake ChildProcess whose stdout/stderr are minimal EventEmitters so spawnStreaming
@@ -142,7 +149,7 @@ vi.mock('../config', () => ({
 vi.mock('@google/generative-ai', () => ({
   GoogleGenerativeAI: vi.fn(() => ({
     getGenerativeModel: vi.fn(() => ({
-      generateContent: vi.fn().mockRejectedValue(new Error('API rate limit exceeded'))
+      generateContent: (...args: any[]) => mockGenerateContent(...args)
     }))
   }))
 }))
@@ -197,6 +204,7 @@ describe('Transcription Service', () => {
     // INC-2/INC3 test that flips them cannot leak into others.
     mockIsRecordingProcessable.mockReturnValue(true)
     mockIsRecordingEligible.mockReturnValue(true)
+    mockGenerateContent.mockRejectedValue(new Error('API rate limit exceeded'))
     mockGetVectorStore.mockReturnValue(null as any)
     mockConfig = {
       transcription: {
@@ -419,6 +427,50 @@ describe('Transcription Service', () => {
       const queueCalls = mockUpdateQueueItem.mock.calls
       expect(queueCalls.some((c: any[]) => c[0] === 'queue-adv40' && c[1] === 'cancelled')).toBe(true)
       expect(queueCalls.some((c: any[]) => c[0] === 'queue-adv40' && c[1] === 'completed')).toBe(false)
+    })
+
+    it('ADV42-1 (round-44) — a recording excluded DURING audio transcription never reaches the analysis provider', async () => {
+      // local-asr transcription itself runs (up-front gate passes), but the owner
+      // trashes/marks-personal/value-excludes the recording WHILE it is in flight.
+      // isRecordingEligible: TRUE at the up-front gate, FALSE at the 2nd-stage gate
+      // (immediately before analyzeTranscriptWithGemini). The shared boundary
+      // collapses every exclusion type into this one boolean, so a single flipped
+      // value represents soft-delete / personal / value-exclude / hard-purge.
+      mockConfig.transcription.provider = 'local-asr'
+      mockConfig.transcription.geminiApiKey = 'test-api-key' // so analyze WOULD call the provider absent the gate
+      mockIsRecordingProcessable.mockReturnValue(true)
+      mockIsRecordingEligible.mockReturnValueOnce(true).mockReturnValue(false)
+      mockGetQueueItems.mockImplementation((status?: string) =>
+        status === 'pending'
+          ? [{ id: 'queue-adv42', recording_id: 'rec-adv42', filename: 'a.wav', status: 'pending', attempts: 0 }]
+          : []
+      )
+      mockGetRecordingById.mockReturnValue({
+        id: 'rec-adv42',
+        filename: 'a.wav',
+        file_path: 'G:\\Recordings\\a.wav',
+        status: 'complete'
+      })
+      mockExecFile.mockImplementation(() =>
+        makeFakeChildProcess(
+          JSON.stringify({ text: 'Speaker 1: hola.', language: 'es', duration_seconds: 5, processing_time_seconds: 1 })
+        )
+      )
+
+      const { startTranscriptionProcessor, stopTranscriptionProcessor } = await import('../transcription')
+      startTranscriptionProcessor()
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      stopTranscriptionProcessor()
+
+      // Audio transcription DID run (proves this is the 2nd-stage gate, not the up-front one)...
+      expect(mockExecFile).toHaveBeenCalled()
+      // ...but the Gemini analysis provider was NEVER invoked — no transcript sent for analysis.
+      expect(mockGenerateContent).not.toHaveBeenCalled()
+      // Nothing persisted; the queue is cancelled, never completed.
+      expect(mockInsertTranscript).not.toHaveBeenCalled()
+      const queueCalls = mockUpdateQueueItem.mock.calls
+      expect(queueCalls.some((c: any[]) => c[0] === 'queue-adv42' && c[1] === 'cancelled')).toBe(true)
+      expect(queueCalls.some((c: any[]) => c[0] === 'queue-adv42' && c[1] === 'completed')).toBe(false)
     })
 
     it('C (round-4) — a recording ineligible AFTER the transcript persists is still marked cancelled, not completed', async () => {

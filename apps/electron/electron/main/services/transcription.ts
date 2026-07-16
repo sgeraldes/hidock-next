@@ -1088,7 +1088,8 @@ async function transcribeWithVibeVoice(
 
 async function analyzeTranscriptWithGemini(
   fullText: string,
-  candidateMeetings: ReturnType<typeof findCandidateMeetingsForRecording>
+  candidateMeetings: ReturnType<typeof findCandidateMeetingsForRecording>,
+  shouldGenerate?: () => boolean
 ): Promise<TranscriptAnalysis> {
   const config = getConfig()
   if (!resolveGeminiApiKey()) {
@@ -1252,6 +1253,15 @@ Respond in JSON format:
   ]
 
   for (const attempt of attempts) {
+    // ADV42-1 sweep (round-44) — the two-attempt strategy RE-INVOKES Gemini after
+    // the first attempt's await; an owner exclusion committed between attempts
+    // must stop the SECOND send. Recheck (fail-closed) immediately before EACH
+    // provider call — no await between here and generateContent. The caller's
+    // pre-call gate covers the first attempt; this covers every re-invocation.
+    if (shouldGenerate && !shouldGenerate()) {
+      console.log('[Analysis] recording became ineligible between attempts — aborting analysis (no further provider call)')
+      return { summary: 'Analysis failed', language: 'unknown' }
+    }
     try {
       const analysisResult = await model.generateContent({
         contents: [{ role: 'user', parts: [{ text: analysisPrompt }] }],
@@ -1538,7 +1548,11 @@ export async function reanalyzeFailedTranscripts(limit = 3): Promise<number> {
       }
       // Re-run with no candidate meetings — backfill only heals the analysis
       // fields; meeting matching already ran (or will re-run) elsewhere.
-      const analysis = await analyzeTranscriptWithGemini(row.full_text, [])
+      // ADV42-1 sweep (round-44) — gate the two-attempt retry inside analyze so a
+      // mid-analysis exclusion stops the second Gemini send for this row.
+      const analysis = await analyzeTranscriptWithGemini(row.full_text, [], () =>
+        isRecordingEligible(row.recording_id)
+      )
 
       // RE-2 — fresh eligibility re-check AFTER the await: a trash / mark-personal
       // / garbage-rating committed while the provider call was in flight must
@@ -1696,8 +1710,27 @@ Meeting ${i + 1}: "${m.subject}"
       : await transcribeWithGemini(recording.file_path, meetingContext, progressCallback)
   const fullText = rawTranscript.fullText
 
+  // ADV42-1 (round-44, HIGH) — SECOND-STAGE eligibility recheck. The up-front
+  // gate ran before audio transcription; that transcription is an await, so the
+  // owner could have trashed / marked personal / value-excluded this recording
+  // WHILE it was in flight. analyzeTranscriptWithGemini is a FRESH provider call
+  // (Gemini analysis) — sending the transcript to it after exclusion is a NEW
+  // disclosure to an external LLM that the later persist-time stillProcessable()
+  // checks cannot undo. Re-check SYNCHRONOUSLY here, adjacent to the analysis
+  // call (no await between), and return the cancelled outcome WITHOUT invoking
+  // the analysis provider when ineligible or the lookup fails closed.
+  if (!isRecordingEligible(recordingId)) {
+    console.log(
+      `[Transcription] Recording ${recordingId} became ineligible during audio transcription ` +
+        '— skipping Gemini analysis; no transcript sent to any external LLM for analysis'
+    )
+    return { status: 'cancelled' }
+  }
+
   progressCallback?.('analyzing', 50) // spec-014: progress reporting
-  const analysis = await analyzeTranscriptWithGemini(fullText, candidateMeetings)
+  const analysis = await analyzeTranscriptWithGemini(fullText, candidateMeetings, () =>
+    isRecordingEligible(recordingId)
+  )
 
   // RE-1 (Codex adversarial re-review round 2, BINDING — CX-ARF-3a/b): the
   // transcribe + analyze awaits ABOVE may have straddled a hard purge / soft
