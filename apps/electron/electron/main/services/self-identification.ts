@@ -50,7 +50,7 @@ import {
 } from './database'
 import { resolveContact } from './entity-resolver'
 import { isGenericSpeakerLabel, normalizeName, accentFoldedKey } from './entity-normalize'
-import { isRecordingEligible } from './recording-eligibility'
+import { isRecordingEligible, filterEligibleRecordingIds } from './recording-eligibility'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -572,12 +572,36 @@ function markMergeSuspected(recordingId: string, label: string, names: string[])
   setConfigMarker(`${MERGE_KEY_PREFIX}${recordingId}:${label}`, JSON.stringify({ recordingId, label, names }))
 }
 
-/** All recorded speaker-merge suspicions across the corpus (for UX + reporting). */
+/**
+ * All recorded speaker-merge suspicions across the corpus (for UX + reporting).
+ *
+ * ADV45-3 (round-47) — each marker's extracted self-names belong to a specific
+ * recording (encoded in the key `${MERGE_KEY_PREFIX}${recordingId}:${label}`),
+ * and a self-name is exactly the kind of excluded-recording content the deletion
+ * / personal / value-exclusion promise must suppress. Selecting only `value`
+ * (the prior behaviour) leaked names from trashed / personal / value-excluded /
+ * hard-purged recordings via self-id:getMergeSuspected + getSelfIdStatus. Now we
+ * select BOTH key and value, extract the recording id from each key, and route
+ * every candidate through the shared FAIL-CLOSED recording allowlist — only
+ * markers whose recording is eligible are parsed/returned; on any lookup failure
+ * the set is empty (fail-closed). getSelfIdStatus derives its count from THIS
+ * same filtered set.
+ */
 export function getMergeSuspectedMarkers(): MergeSuspected[] {
-  const rows = queryAll<{ value: string | null }>('SELECT value FROM config WHERE key LIKE ?', [`${MERGE_KEY_PREFIX}%`])
+  const rows = queryAll<{ key: string; value: string | null }>(
+    'SELECT key, value FROM config WHERE key LIKE ?',
+    [`${MERGE_KEY_PREFIX}%`]
+  )
+  // recordingId is a UUID (no ':'), so the substring after the prefix up to the
+  // first ':' is the recording id; the label (which may itself contain ' · ')
+  // follows.
+  const recIdOfKey = (key: string): string => key.slice(MERGE_KEY_PREFIX.length).split(':')[0]
+  const { eligible, failClosed } = filterEligibleRecordingIds(rows.map((r) => recIdOfKey(r.key)))
+  if (failClosed) return []
   const out: MergeSuspected[] = []
   for (const r of rows) {
     if (!r.value) continue
+    if (!eligible.has(recIdOfKey(r.key))) continue
     try {
       const parsed = JSON.parse(r.value) as { label?: string; names?: string[] }
       if (parsed.label && Array.isArray(parsed.names)) out.push({ label: parsed.label, names: parsed.names })
