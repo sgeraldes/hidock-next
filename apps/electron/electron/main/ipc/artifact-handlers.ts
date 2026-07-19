@@ -17,6 +17,7 @@ import {
   getArtifactById,
   type ArtifactRow
 } from '../services/artifact-service'
+import { isCaptureEligible } from '../services/recording-eligibility'
 
 function toSummary(row: ArtifactRow): ArtifactSummary {
   let metadata: Record<string, unknown> | null = null
@@ -100,6 +101,12 @@ export function registerArtifactHandlers(): void {
       if (!parsed.success) {
         return error('VALIDATION_ERROR', 'Invalid capture id', parsed.error.format())
       }
+      // ADV17-3 (round-18) — DISPLAY read boundary. Artifact summaries expose
+      // storagePath + metadata (incl. generated image descriptions) derived from
+      // a capture; gate on the shared fail-closed capture allowlist. A soft-
+      // deleted / low-value / garbage / recording-derived-excluded / missing
+      // capture — or a lookup failure — returns NO artifacts.
+      if (!isCaptureEligible(parsed.data)) return success([])
       return success(getArtifactsForCapture(parsed.data).map(toSummary))
     } catch (err) {
       console.error('artifacts:getForCapture error:', err)
@@ -115,6 +122,12 @@ export function registerArtifactHandlers(): void {
       }
       const artifact = getArtifactById(parsed.data)
       if (!artifact || !artifact.storage_path) {
+        return error('NOT_FOUND', 'Artifact not found or has no stored file')
+      }
+      // ADV17-3 (round-18) — revealing the stored blob path exposes the same
+      // capture-derived content; gate the owning capture through the shared
+      // fail-closed allowlist before showing it in the OS file manager.
+      if (!artifact.knowledge_capture_id || !isCaptureEligible(artifact.knowledge_capture_id)) {
         return error('NOT_FOUND', 'Artifact not found or has no stored file')
       }
       shell.showItemInFolder(artifact.storage_path)

@@ -25,8 +25,16 @@ interface FakeWikiRow {
 
 let tmpRoot = ''
 let currentRow: FakeWikiRow | null = null
-/** Rows the backfill iterates; empty for the single-export tests. */
-let backfillRows: { recording_id: string }[] = []
+/** Rows the backfill iterates; empty for the single-export tests. Widened to carry
+ *  full FakeWikiRow fields so the F17 eligibility tests can resolve rows straight
+ *  from here (beta's perf tests still push id-only rows + a rowById resolver). */
+let backfillRows: Array<{ recording_id: string } & Partial<FakeWikiRow>> = []
+// RE8-P1 (round-9) — in-memory model of the `config` KV table for the wiki
+// cleanup-retry ledger.
+let configStore = new Map<string, string>()
+// RE7-1 (round-7) — mutable exclusion so eligibility-gating tests can drive the
+// shared boundary. Default: nothing excluded, not fail-closed.
+let excludedResult: { ids: Set<string>; failClosed: boolean } = { ids: new Set<string>(), failClosed: false }
 /** When set, queryOne resolves per-id (backfill tests); otherwise currentRow. */
 let rowById: ((id: string) => FakeWikiRow | null) | null = null
 /** fs syscall counters — the quadratic-regression assertion reads these. */
@@ -70,10 +78,38 @@ vi.mock('../file-storage', () => ({
 }))
 
 vi.mock('../database', () => ({
-  // exportMeetingWiki reads exactly one row per call; return whatever the test set.
-  queryOne: (_sql: string, params: unknown[]) =>
-    rowById ? rowById(params[0] as string) : currentRow,
-  queryAll: () => backfillRows
+  // exportMeetingWiki / backfill read one transcript row per call, selected by id.
+  // Prefer an explicit rowById resolver (beta's backfill perf/resume tests); else
+  // resolve a full row from backfillRows (F17 tests); else the single currentRow.
+  queryOne: (_sql: string, params?: unknown[]) => {
+    const id = params?.[0] as string | undefined
+    if (rowById && id != null) return rowById(id)
+    if (backfillRows.length > 0 && id != null) return backfillRows.find((r) => r.recording_id === id) ?? null
+    return currentRow
+  },
+  // backfillMeetingWiki enumerates transcript rows via queryAll; the wiki
+  // cleanup-retry ledger (RE8-P1) reads config rows from an in-memory KV store.
+  queryAll: (sql: string, params?: unknown[]) => {
+    if (/FROM config WHERE key LIKE/i.test(sql)) {
+      const prefix = String(params?.[0] ?? '').replace(/%$/, '')
+      return [...configStore.entries()].filter(([k]) => k.startsWith(prefix)).map(([, v]) => ({ value: v }))
+    }
+    return backfillRows
+  },
+  // RE8-P1 (round-9) — reconcile/backfill write the retry ledger via run().
+  run: (sql: string, params?: unknown[]) => {
+    if (/INSERT OR REPLACE INTO config/i.test(sql)) configStore.set(String(params?.[0]), String(params?.[1]))
+    else if (/DELETE FROM config WHERE key/i.test(sql)) configStore.delete(String(params?.[0]))
+  },
+  // exportMeetingWiki / backfill gate on isRecordingEligible /
+  // filterEligibleRecordingIds (from ./recording-eligibility, which reads the
+  // POSITIVE allowlist getEligibleRecordingIds from here). Derive both from the
+  // same mutable exclusion set.
+  getExcludedRecordingIds: () => excludedResult,
+  getEligibleRecordingIds: (ids: Iterable<string>) =>
+    excludedResult.failClosed
+      ? { eligible: new Set<string>(), failClosed: true }
+      : { eligible: new Set([...ids].filter((i) => i && !excludedResult.ids.has(i))), failClosed: false }
 }))
 
 describe('exportMeetingWiki — stale page cleanup (ISSUE-8)', () => {
@@ -86,6 +122,8 @@ describe('exportMeetingWiki — stale page cleanup (ISSUE-8)', () => {
     currentRow = null
     backfillRows = []
     rowById = null
+    configStore = new Map<string, string>()
+    excludedResult = { ids: new Set<string>(), failClosed: false }
   })
 
   afterEach(() => {
@@ -196,6 +234,8 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
     currentRow = null
     backfillRows = []
     rowById = null
+    configStore = new Map<string, string>()
+    excludedResult = { ids: new Set<string>(), failClosed: false }
   })
 
   afterEach(() => {
@@ -227,7 +267,7 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
     expect(listWiki()).toHaveLength(1)
 
     // The purge must find it. Missing it here would leave purged content on disk.
-    expect(removeMeetingWiki('rec-deep')).toBe(1)
+    expect(removeMeetingWiki('rec-deep').removed).toBe(1)
     expect(listWiki()).toHaveLength(0)
   })
 
@@ -239,7 +279,7 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
     // Opens frontmatter but never closes it — ownership is undeterminable.
     writeFileSync(join(wikiDir(), 'truncated.md'), '---\ntitle: "half written"\nrecording_id: rec-x', 'utf-8')
 
-    expect(removeMeetingWiki('rec-x')).toBe(0)
+    expect(removeMeetingWiki('rec-x').removed).toBe(0)
     // Left on disk rather than deleted on a guess...
     expect(listWiki()).toEqual(['truncated.md'])
     // ...and the purge reports that it could not be verified, so a caller is
@@ -264,10 +304,10 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
     expect(listWiki()).toHaveLength(1)
 
     // Purging the id that only appears in the body must not touch the page.
-    expect(removeMeetingWiki('rec-spoofed')).toBe(0)
+    expect(removeMeetingWiki('rec-spoofed').removed).toBe(0)
     expect(listWiki()).toHaveLength(1)
     // The real owner still resolves.
-    expect(removeMeetingWiki('rec-real')).toBe(1)
+    expect(removeMeetingWiki('rec-real').removed).toBe(1)
   })
 
   /**
@@ -300,10 +340,10 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
     ])
 
     // Destructive cleanup cannot be redirected to the injected id...
-    expect(removeMeetingWiki('rec-victim')).toBe(0)
+    expect(removeMeetingWiki('rec-victim').removed).toBe(0)
     expect(listWiki()).toHaveLength(1)
     // ...and the real owner still resolves.
-    expect(removeMeetingWiki('rec-owner')).toBe(1)
+    expect(removeMeetingWiki('rec-owner').removed).toBe(1)
     expect(listWiki()).toHaveLength(0)
   })
 
@@ -323,7 +363,7 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
     expect(body.split(/\r?\n/).filter((l) => /^recording_id:/.test(l))).toEqual([
       'recording_id: rec-sep'
     ])
-    expect(removeMeetingWiki('v2')).toBe(0)
+    expect(removeMeetingWiki('v2').removed).toBe(0)
     expect(listWiki()).toHaveLength(1)
   })
 
@@ -342,8 +382,8 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
     )
 
     // Neither claim may be acted on.
-    expect(removeMeetingWiki('rec-victim')).toBe(0)
-    expect(removeMeetingWiki('rec-owner')).toBe(0)
+    expect(removeMeetingWiki('rec-victim').removed).toBe(0)
+    expect(removeMeetingWiki('rec-owner').removed).toBe(0)
     expect(listWiki()).toEqual(['legacy.md'])
     expect(error.mock.calls.map((c) => String(c[0])).join(' ')).toContain('2 recording_id values')
   })
@@ -386,8 +426,8 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
       write('legacy-term.md', legacyPage('x\n---\nrecording_id: rec-victim', 'rec-owner'))
 
       // Neither the injected id nor the real one may be acted on...
-      expect(removeMeetingWiki('rec-victim')).toBe(0)
-      expect(removeMeetingWiki('rec-owner')).toBe(0)
+      expect(removeMeetingWiki('rec-victim').removed).toBe(0)
+      expect(removeMeetingWiki('rec-owner').removed).toBe(0)
       expect(listWiki()).toEqual(['legacy-term.md'])
       // ...and the retained content IS reported, rather than passing as a clean purge.
       const logged = error.mock.calls.map((c) => String(c[0])).join(' ')
@@ -401,7 +441,7 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
 
       // A BOM used to fail the opening-delimiter test, so the page read as
       // unowned and survived its own purge.
-      expect(removeMeetingWiki('rec-bom')).toBe(1)
+      expect(removeMeetingWiki('rec-bom').removed).toBe(1)
       expect(listWiki()).toHaveLength(0)
     })
 
@@ -415,10 +455,10 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
       write('legacy-sep.md', legacyPage(`x${sep}recording_id: rec-victim${sep}y`, 'rec-owner'))
 
       // The injected claim is never honored...
-      expect(removeMeetingWiki('rec-victim')).toBe(0)
+      expect(removeMeetingWiki('rec-victim').removed).toBe(0)
       expect(listWiki()).toEqual(['legacy-sep.md'])
       // ...and the page still resolves to its true owner.
-      expect(removeMeetingWiki('rec-owner')).toBe(1)
+      expect(removeMeetingWiki('rec-owner').removed).toBe(1)
       expect(listWiki()).toHaveLength(0)
     })
 
@@ -443,8 +483,8 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
       expect(body).toContain('recording_id: rec-owner')
 
       // Neither owner's purge may delete it — it is unverifiable...
-      expect(removeMeetingWiki('rec-victim')).toBe(0)
-      expect(removeMeetingWiki('rec-owner')).toBe(0)
+      expect(removeMeetingWiki('rec-victim').removed).toBe(0)
+      expect(removeMeetingWiki('rec-owner').removed).toBe(0)
       expect(listWiki()).toEqual(['legacy-multiline.md'])
 
       // ...and BOTH purges must say so, rather than reporting a clean sweep
@@ -472,10 +512,10 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
       write('legacy-early-id.md', legacyPage('x\nrecording_id: rec-victim\n---', 'rec-owner'))
 
       // The injected claim must NOT delete the real owner's page...
-      expect(removeMeetingWiki('rec-victim')).toBe(0)
+      expect(removeMeetingWiki('rec-victim').removed).toBe(0)
       expect(listWiki()).toEqual(['legacy-early-id.md'])
       // ...and neither may the real owner's own purge act on it blindly.
-      expect(removeMeetingWiki('rec-owner')).toBe(0)
+      expect(removeMeetingWiki('rec-owner').removed).toBe(0)
       expect(listWiki()).toEqual(['legacy-early-id.md'])
 
       const reports = error.mock.calls
@@ -494,7 +534,7 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
       // page simply survived its real owner's purge with nothing reported.
       write('legacy-early-key.md', legacyPage('x\nfoo: bar\n---', 'rec-owner'))
 
-      expect(removeMeetingWiki('rec-owner')).toBe(0)
+      expect(removeMeetingWiki('rec-owner').removed).toBe(0)
       expect(listWiki()).toEqual(['legacy-early-key.md'])
       const logged = error.mock.calls.map((c) => String(c[0])).join(' ')
       expect(logged).toContain('could not verify')
@@ -508,7 +548,7 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
       write('legacy-clean.md', legacyPage('Reunion de Equipo', 'rec-clean'))
 
       // Well-formed with exactly one claim — no marker needed to act on it.
-      expect(removeMeetingWiki('rec-clean')).toBe(1)
+      expect(removeMeetingWiki('rec-clean').removed).toBe(1)
       expect(listWiki()).toHaveLength(0)
       expect(error).not.toHaveBeenCalled()
     })
@@ -532,7 +572,7 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
       expect(lines[1]).toBe('generator: hidock-meeting-wiki')
       expect(lines[2]).toBe('wiki_schema: 1')
 
-      expect(removeMeetingWiki('rec-marked')).toBe(1)
+      expect(removeMeetingWiki('rec-marked').removed).toBe(1)
       expect(listWiki()).toHaveLength(0)
     })
 
@@ -559,7 +599,7 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
 
       const { removeMeetingWiki } = await import('../meeting-wiki')
       // Not attributed to the injected id, and reported rather than ignored.
-      expect(removeMeetingWiki('rec-victim')).toBe(0)
+      expect(removeMeetingWiki('rec-victim').removed).toBe(0)
       expect(listWiki()).toEqual([name])
       expect(error.mock.calls.map((c) => String(c[0])).join(' ')).toContain('could not verify')
     })
@@ -581,7 +621,7 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
       exportMeetingWiki('rec-owner')
 
       // After the rewrite the page is attributable again and purges cleanly.
-      expect(removeMeetingWiki('rec-owner')).toBe(1)
+      expect(removeMeetingWiki('rec-owner').removed).toBe(1)
       expect(listWiki()).toHaveLength(0)
     })
   })
@@ -617,7 +657,7 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
     )
 
     // A page with no declaration of its own is simply not ours: never deleted...
-    expect(removeMeetingWiki('rec-ejemplo')).toBe(0)
+    expect(removeMeetingWiki('rec-ejemplo').removed).toBe(0)
     expect(listWiki()).toEqual(['mis-notas.md'])
     // ...and NOT reported as unverifiable, which would make every purge noisy.
     expect(error).not.toHaveBeenCalled()
@@ -638,7 +678,7 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
       writeFileSync(join(wikiDir(), name), body, 'utf-8')
 
       // Never deleted...
-      expect(removeMeetingWiki('rec-example')).toBe(0)
+      expect(removeMeetingWiki('rec-example').removed).toBe(0)
       expect(listWiki()).toEqual([name])
       return error.mock.calls.map((c) => String(c[0])).join(' ')
     }
@@ -836,7 +876,7 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
       mkdirSync(wikiDir(), { recursive: true })
       writeFileSync(join(wikiDir(), name), body, 'utf-8')
 
-      expect(removeMeetingWiki('rec-late')).toBe(0)
+      expect(removeMeetingWiki('rec-late').removed).toBe(0)
       expect(listWiki()).toEqual([name])
       return error.mock.calls.map((c) => String(c[0])).join(' ')
     }
@@ -927,6 +967,8 @@ describe('backfillMeetingWiki — bounded, yielding, resumable (F15)', () => {
     await resetBackfillCursor()
     currentRow = null
     backfillRows = []
+    configStore = new Map<string, string>()
+    excludedResult = { ids: new Set<string>(), failClosed: false }
     // A realistic corpus: each page carries a sizeable transcript body, which is
     // what made whole-file reads so expensive.
     const body = 'palabra '.repeat(1500)
@@ -985,6 +1027,96 @@ describe('backfillMeetingWiki — bounded, yielding, resumable (F15)', () => {
     // ceiling here is deliberately loose (2N) so the test pins the ORDER of
     // growth rather than an exact call count.
     expect(fsCalls.readFile).toBeLessThanOrEqual(2 * N)
+  })
+
+  it('reuses the single pass-wide scan when cleaning up excluded recordings too (F15 mixed-corpus guard)', async () => {
+    // The all-eligible guard above cannot catch a re-scan on the EXCLUDED-cleanup
+    // path: each excluded recording used to call removeMeetingWiki, which re-listed
+    // and re-read the whole directory (O(excluded × pages)) — the exact quadratic
+    // boot freeze F15 removed, hidden from the guard because it had no excluded rows.
+    const { backfillMeetingWiki } = await import('../meeting-wiki')
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    // Cold pass writes a page for all N (all eligible).
+    await backfillMeetingWiki()
+    expect(listWiki()).toHaveLength(N)
+
+    // Now exclude HALF of them — each still has a stale page on disk the backfill
+    // must remove. Reset the resume cursor so the pass revisits everything.
+    await resetBackfillCursor()
+    const excluded = new Set<string>()
+    for (let i = 0; i < N; i += 2) excluded.add(`rec-${String(i).padStart(3, '0')}`)
+    excludedResult = { ids: excluded, failClosed: false }
+
+    fsCalls.readFile = 0
+    fsCalls.readdir = 0
+    const result = await backfillMeetingWiki()
+
+    // Assert the scan count BEFORE listWiki() (which itself lists the directory):
+    // ONE listing for the entire pass — eligible re-verify AND excluded cleanup.
+    expect(fsCalls.readdir).toBe(1)
+    expect(fsCalls.readFile).toBeLessThanOrEqual(2 * N)
+    expect(result.failed).toBe(0)
+
+    // The excluded half's stale pages are gone; the eligible half remain.
+    expect(listWiki()).toHaveLength(N - excluded.size)
+  })
+
+  it('drains MANY pending cleanup retries within the SAME single boot scan (F15 recovery-path guard)', async () => {
+    // The recovery path the two quadratic guards above still miss: durable
+    // wiki-cleanup retries enqueued by earlier failed transitions. retryPendingWikiCleanups
+    // runs at the head of every backfill, and each pending id used to call
+    // removeMeetingWiki — a FRESH readdir + whole-page reads PER id — so after a
+    // transient failure parked N retries, boot did O(N) full directory scans
+    // before the single-scan backfill even began, reintroducing the F15 freeze on
+    // exactly this path. The fix shares ONE pass-wide index across the sweep and
+    // the pass, so the entire boot lists the directory once.
+    const { backfillMeetingWiki } = await import('../meeting-wiki')
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    // Cold pass writes a page for all N (all eligible).
+    await backfillMeetingWiki()
+    expect(listWiki()).toHaveLength(N)
+
+    // Exclude three recordings and PARK a durable cleanup retry for each — as if
+    // three earlier transitions had each failed cleanup and enqueued a retry.
+    const excludedIds = ['rec-000', 'rec-002', 'rec-004']
+    const excluded = new Set(excludedIds)
+    excludedResult = { ids: excluded, failClosed: false }
+    for (const id of excludedIds) configStore.set(`wiki_cleanup_pending:${id}`, id)
+    // A fourth parked retry whose recording became eligible again: the sweep must
+    // DROP it without removing its (legitimately retained) page.
+    configStore.set('wiki_cleanup_pending:rec-006', 'rec-006')
+
+    // Revisit everything on the measured pass.
+    await resetBackfillCursor()
+    fsCalls.readFile = 0
+    fsCalls.readdir = 0
+    const result = await backfillMeetingWiki()
+
+    // ONE directory listing for the ENTIRE boot — the pending-retry sweep AND the
+    // backfill pass share the single pass-wide index. Asserted BEFORE listWiki()
+    // (which lists the directory itself). Old code: one readdir per pending id
+    // PLUS one for the pass (4 here).
+    expect(fsCalls.readdir).toBe(1)
+    expect(fsCalls.readFile).toBeLessThanOrEqual(2 * N)
+    expect(result.failed).toBe(0)
+
+    // Every parked retry is resolved: the still-excluded three had their pages
+    // removed and their entries cleared; the eligible-again one was simply dropped.
+    for (const id of [...excludedIds, 'rec-006']) {
+      expect(configStore.has(`wiki_cleanup_pending:${id}`)).toBe(false)
+    }
+
+    // The three excluded pages are gone; everything else — including the
+    // eligible-again rec-006 — is retained.
+    const remaining = listWiki()
+    expect(remaining).toHaveLength(N - excluded.size)
+    expect(remaining.some((f) => f.includes('rec-006'))).toBe(true)
+    for (const id of excludedIds) {
+      expect(remaining.some((f) => f.includes(id))).toBe(false)
+    }
   })
 
   it('leaves unchanged pages alone instead of rewriting the whole wiki every boot', async () => {
@@ -1347,5 +1479,243 @@ describe('backfillMeetingWiki — bounded, yielding, resumable (F15)', () => {
     const bodies = listWiki().map((f) => readFileSync(join(tmpRoot, 'wiki', f), 'utf-8'))
     expect(bodies.filter((b) => b.includes(`recording_id: ${target}`))).toHaveLength(1)
     expect(bodies.some((b) => b.includes('Titulo Completamente Nuevo'))).toBe(true)
+  })
+})
+
+/**
+ * RE7-1 (round-7) — the meeting wiki is an EXPORT surface. A personal /
+ * soft-deleted / value-excluded recording must never keep a published wiki page,
+ * and export must refuse to (re)create one. All routed through the shared
+ * fail-closed eligibility boundary.
+ */
+describe('meeting-wiki — eligibility gating (RE7-1)', () => {
+  beforeEach(async () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'hidock-wiki-'))
+    cacheDirOverride = null
+    await resetBackfillCursor()
+    currentRow = null
+    backfillRows = []
+    rowById = null
+    configStore = new Map<string, string>()
+    excludedResult = { ids: new Set<string>(), failClosed: false }
+  })
+  afterEach(() => {
+    rmSync(tmpRoot, { recursive: true, force: true })
+  })
+
+  const listWiki = () => {
+    try {
+      return readdirSync(join(tmpRoot, 'wiki')).filter((f) => f.endsWith('.md')).sort()
+    } catch {
+      return []
+    }
+  }
+
+  it('exportMeetingWiki refuses and removes the page when the recording became excluded', async () => {
+    const { exportMeetingWiki } = await import('../meeting-wiki')
+
+    // First export while eligible → one page exists.
+    currentRow = {
+      recording_id: 'rec-x',
+      full_text: 'texto',
+      title_suggestion: 'Reunion Sensible',
+      date_recorded: '2026-07-07T00:00:00.000Z'
+    }
+    expect(exportMeetingWiki('rec-x')).not.toBeNull()
+    expect(listWiki()).toHaveLength(1)
+
+    // Recording is now excluded (personal / trashed / low-value). Re-export must
+    // refuse AND scrub the previously published page.
+    excludedResult = { ids: new Set(['rec-x']), failClosed: false }
+    expect(exportMeetingWiki('rec-x')).toBeNull()
+    expect(listWiki()).toHaveLength(0)
+  })
+
+  it('exportMeetingWiki fails closed when eligibility cannot be verified', async () => {
+    const { exportMeetingWiki } = await import('../meeting-wiki')
+    currentRow = {
+      recording_id: 'rec-y',
+      full_text: 'texto',
+      title_suggestion: 'Reunion',
+      date_recorded: '2026-07-07T00:00:00.000Z'
+    }
+    excludedResult = { ids: new Set<string>(), failClosed: true }
+    expect(exportMeetingWiki('rec-y')).toBeNull()
+    expect(listWiki()).toHaveLength(0)
+  })
+
+  it('reconcileWikiEligibility removes an existing page on a transition to excluded', async () => {
+    const { exportMeetingWiki, reconcileWikiEligibility } = await import('../meeting-wiki')
+    currentRow = {
+      recording_id: 'rec-z',
+      full_text: 'texto',
+      title_suggestion: 'Reunion Z',
+      date_recorded: '2026-07-07T00:00:00.000Z'
+    }
+    expect(exportMeetingWiki('rec-z')).not.toBeNull()
+    expect(listWiki()).toHaveLength(1)
+
+    // Simulate the transition (markPersonal / soft-delete / low value-rating).
+    excludedResult = { ids: new Set(['rec-z']), failClosed: false }
+    reconcileWikiEligibility('rec-z')
+    expect(listWiki()).toHaveLength(0)
+  })
+
+  it('backfillMeetingWiki skips excluded recordings and fails closed as a whole on an unverifiable lookup', async () => {
+    const { backfillMeetingWiki } = await import('../meeting-wiki')
+
+    backfillRows = [
+      { recording_id: 'r-ok', full_text: 'a', title_suggestion: 'A', date_recorded: '2026-07-01T00:00:00.000Z' },
+      { recording_id: 'r-bad', full_text: 'b', title_suggestion: 'B', date_recorded: '2026-07-02T00:00:00.000Z' }
+    ]
+    // r-bad excluded → only r-ok is written.
+    excludedResult = { ids: new Set(['r-bad']), failClosed: false }
+    const partial = await backfillMeetingWiki()
+    expect(partial.written).toBe(1)
+    expect(listWiki()).toHaveLength(1)
+
+    // Wipe and re-run with an unverifiable lookup → nothing is written at all.
+    rmSync(join(tmpRoot, 'wiki'), { recursive: true, force: true })
+    excludedResult = { ids: new Set<string>(), failClosed: true }
+    const closed = await backfillMeetingWiki()
+    expect(closed.written).toBe(0)
+    expect(listWiki()).toHaveLength(0)
+  })
+
+  it('RE7-P1a (round-8) — backfill REMOVES a stale page for a now-excluded recording (not just skips)', async () => {
+    const { exportMeetingWiki, backfillMeetingWiki } = await import('../meeting-wiki')
+
+    // A page exists from when the recording was eligible.
+    currentRow = { recording_id: 'r-stale', full_text: 'contenido', title_suggestion: 'Reunion Vieja', date_recorded: '2026-07-01T00:00:00.000Z' }
+    expect(exportMeetingWiki('r-stale')).not.toBeNull()
+    expect(listWiki()).toHaveLength(1)
+
+    // The recording is now excluded (e.g. newly value-classified low-value). A
+    // backfill pass must actively remove the stale markdown, not merely skip it.
+    backfillRows = [{ recording_id: 'r-stale', full_text: 'contenido', title_suggestion: 'Reunion Vieja', date_recorded: '2026-07-01T00:00:00.000Z' }]
+    excludedResult = { ids: new Set(['r-stale']), failClosed: false }
+    await backfillMeetingWiki()
+    expect(listWiki()).toHaveLength(0)
+  })
+})
+
+/**
+ * RE7-P1b (round-8) — removeMeetingWiki must surface filesystem failures via its
+ * result instead of swallowing them, so a privacy transition cannot report
+ * success while an excluded recording's page is still readable on disk.
+ */
+describe('removeMeetingWiki — cleanup result (RE7-P1b)', () => {
+  beforeEach(async () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'hidock-wiki-'))
+    cacheDirOverride = null
+    await resetBackfillCursor()
+    currentRow = null
+    backfillRows = []
+    rowById = null
+    configStore = new Map<string, string>()
+    excludedResult = { ids: new Set<string>(), failClosed: false }
+  })
+  afterEach(() => {
+    rmSync(tmpRoot, { recursive: true, force: true })
+  })
+
+  it('reports ok:true with a removed count when the page is deleted', async () => {
+    const { exportMeetingWiki, removeMeetingWiki } = await import('../meeting-wiki')
+    currentRow = { recording_id: 'r1', full_text: 'x', title_suggestion: 'T', date_recorded: '2026-07-01T00:00:00.000Z' }
+    expect(exportMeetingWiki('r1')).not.toBeNull()
+
+    const result = removeMeetingWiki('r1')
+    expect(result).toEqual({ removed: 1, failed: 0, ok: true })
+  })
+
+  it('reports ok:true (nothing to remove) when the wiki dir is absent', async () => {
+    const { removeMeetingWiki } = await import('../meeting-wiki')
+    // No page ever written → wiki dir does not exist → success, nothing removed.
+    expect(removeMeetingWiki('ghost')).toEqual({ removed: 0, failed: 0, ok: true })
+  })
+})
+
+/**
+ * RE8-P1 (round-9) — a transition (mark-personal / soft-delete / value-rating)
+ * whose wiki cleanup FAILS must not silently drop it: reconcileWikiEligibility
+ * enqueues a persistent retry, and a later sweep removes the page.
+ */
+describe('meeting-wiki — cleanup-retry ledger (RE8-P1)', () => {
+  beforeEach(async () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'hidock-wiki-'))
+    cacheDirOverride = null
+    await resetBackfillCursor()
+    currentRow = null
+    backfillRows = []
+    rowById = null
+    configStore = new Map<string, string>()
+    excludedResult = { ids: new Set<string>(), failClosed: false }
+  })
+  afterEach(() => {
+    rmSync(tmpRoot, { recursive: true, force: true })
+  })
+
+  it('a failed transition cleanup is enqueued, then cleared by a later retry', async () => {
+    const { reconcileWikiEligibility, retryPendingWikiCleanups } = await import('../meeting-wiki')
+
+    // Force removeMeetingWiki to fail (ok:false): put a FILE where the wiki
+    // directory is expected, so readdirSync throws ENOTDIR (not ENOENT).
+    writeFileSync(join(tmpRoot, 'wiki'), 'blocking file')
+    excludedResult = { ids: new Set(['rec-fail']), failClosed: false }
+
+    const result = reconcileWikiEligibility('rec-fail')
+    expect(result?.ok).toBe(false) // cleanup could not complete
+    // …and was ENQUEUED for retry rather than reported as success.
+    expect(configStore.has('wiki_cleanup_pending:rec-fail')).toBe(true)
+
+    // Unblock the directory; a later sweep now succeeds and clears the entry.
+    rmSync(join(tmpRoot, 'wiki'), { force: true })
+    const swept = retryPendingWikiCleanups()
+    expect(swept.cleared).toBe(1)
+    expect(configStore.has('wiki_cleanup_pending:rec-fail')).toBe(false)
+  })
+
+  it('retry drops a pending entry once the recording is eligible again (no purge needed)', async () => {
+    const { retryPendingWikiCleanups } = await import('../meeting-wiki')
+    // Pre-seed a pending entry for a recording that is now eligible again.
+    configStore.set('wiki_cleanup_pending:rec-back', 'rec-back')
+    excludedResult = { ids: new Set<string>(), failClosed: false } // rec-back eligible
+
+    const swept = retryPendingWikiCleanups()
+    expect(swept.cleared).toBe(1)
+    expect(configStore.has('wiki_cleanup_pending:rec-back')).toBe(false)
+  })
+
+  it('a BACKFILL cleanup that fails is counted, left unresolved, and enqueued for a durable retry', async () => {
+    // The boot backfill's excluded-recording branch used to DISCARD
+    // removeMeetingWiki's result and mark the item resolved regardless — so a
+    // failed unlink / unreadable dir left a stale, readable page while the pass
+    // reported failed=0, remainingMissing=0, and enqueued nothing to retry.
+    const { backfillMeetingWiki, retryPendingWikiCleanups } = await import('../meeting-wiki')
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    // An excluded recording whose page cannot be removed: a FILE sits where the
+    // wiki directory belongs, so the listing throws ENOTDIR (present-but-unreadable
+    // ⇒ fail-closed), standing in for a wiki dir unreadable at boot.
+    writeFileSync(join(tmpRoot, 'wiki'), 'blocking file')
+    backfillRows = [
+      { recording_id: 'rec-stuck', full_text: 'x', title_suggestion: 'T', date_recorded: '2026-07-01T00:00:00.000Z' }
+    ]
+    excludedResult = { ids: new Set(['rec-stuck']), failClosed: false }
+
+    const result = await backfillMeetingWiki()
+
+    // The failed cleanup is COUNTED (not silently resolved with failed=0)…
+    expect(result.failed).toBe(1)
+    // …the recording is left UNRESOLVED (its page may still be readable on disk)…
+    expect(result.remainingMissing).toBe(1)
+    // …and a durable retry was ENQUEUED so a later sweep removes the page.
+    expect(configStore.has('wiki_cleanup_pending:rec-stuck')).toBe(true)
+
+    // Unblock the directory; the enqueued retry now completes and clears the entry.
+    rmSync(join(tmpRoot, 'wiki'), { force: true })
+    const swept = retryPendingWikiCleanups()
+    expect(swept.cleared).toBe(1)
+    expect(configStore.has('wiki_cleanup_pending:rec-stuck')).toBe(false)
   })
 })

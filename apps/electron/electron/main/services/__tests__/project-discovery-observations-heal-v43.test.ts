@@ -43,7 +43,9 @@ describe('v43 heal: a database stranded with the pre-meeting_id table shape', ()
     await initializeDatabase()
 
     // Rebuild the EXACT first-cut state: drop the healed table and recreate it
-    // without meeting_id, leaving schema_version at 43 so migration 43 is skipped.
+    // without meeting_id. Migration 43 already ran on the first boot (recorded
+    // below the current version), so it is not re-run — repairPhase must heal the
+    // shape in place.
     run('DROP TABLE IF EXISTS project_discovery_observations')
     run(`
       CREATE TABLE project_discovery_observations (
@@ -78,8 +80,8 @@ describe('v43 heal: a database stranded with the pre-meeting_id table shape', ()
     closeDatabase()
   })
 
-  it('is still recorded at v43 — the migration is genuinely skipped, not re-run', () => {
-    expect(queryOne<{ v: number }>('SELECT MAX(version) AS v FROM schema_version')?.v).toBe(43)
+  it('reaches the current schema version; migration 43 is not re-run (repairPhase heals the shape)', () => {
+    expect(queryOne<{ v: number }>('SELECT MAX(version) AS v FROM schema_version')?.v).toBe(50)
   })
 
   it('repairPhase force-added meeting_id to the existing table', () => {

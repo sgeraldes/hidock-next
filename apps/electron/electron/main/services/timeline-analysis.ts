@@ -30,6 +30,8 @@
 
 import { GoogleGenerativeAI } from '@google/generative-ai'
 import { getRecordingById, resolveRecordingId, queryOne, queryAll, run } from './database'
+import { isRecordingEligible } from './recording-eligibility'
+import { eligibleToGenerate } from './brains/eligibility'
 
 export interface SentimentSegment {
   startSec: number
@@ -477,13 +479,34 @@ export function buildSentimentWindows(
   return windows
 }
 
-/** Scores keyed by window index, each clamped to [-1, 1]. */
-export type WindowScorer = (windows: SentimentWindow[]) => Promise<Map<number, number>>
+/**
+ * Scores keyed by window index, each clamped to [-1, 1].
+ *
+ * ADV43-3 (round-45) — the scorer receives a fail-closed `shouldGenerate` gate.
+ * The production scorer (geminiWindowScorer) awaits a dynamic config import
+ * BEFORE its `generateContent` call, so an owner exclusion committed during that
+ * setup await would otherwise reach Gemini unobserved. The scorer re-evaluates
+ * the gate SYNCHRONOUSLY after all awaited setup, immediately before the provider
+ * call, and aborts (returns an empty score map — sentiment simply omitted) on a
+ * `false` return or a throw. Absent ⇒ no gate (injected test scorers ignore it).
+ */
+export type WindowScorer = (
+  windows: SentimentWindow[],
+  shouldGenerate?: () => boolean
+) => Promise<Map<number, number>>
 
 export interface SentimentOptions {
   targetWindowSec?: number
   /** Inject a scorer (tests). Defaults to the Gemini scorer. */
   scoreWindows?: WindowScorer
+  /**
+   * ADV43-3 (round-45) — MANDATORY fail-closed eligibility gate for the
+   * PRODUCTION scorer. analyzeTimeline wires its recording-eligibility check
+   * here; deriveSentimentSegments forwards it to the scorer, which re-checks it
+   * after its setup await and immediately before generateContent. Omitted ⇒ no
+   * gate (direct/test callers).
+   */
+  shouldGenerate?: () => boolean
   /**
    * Invoked with the RAW scorer error when sentiment scoring fails (the series
    * is then omitted). Lets analyzeTimeline classify the failure while this
@@ -507,7 +530,9 @@ export async function deriveSentimentSegments(
   const scorer = opts.scoreWindows ?? geminiWindowScorer
   let scores: Map<number, number>
   try {
-    scores = await scorer(windows)
+    // ADV43-3 (round-45) — forward the fail-closed gate so the production scorer
+    // re-checks eligibility after its setup await, immediately before the Gemini call.
+    scores = await scorer(windows, opts.shouldGenerate)
   } catch (e) {
     console.warn('[Timeline] sentiment scoring failed:', e instanceof Error ? e.message : e)
     opts.onError?.(e)
@@ -528,13 +553,20 @@ export async function deriveSentimentSegments(
  * empty map when Gemini is not configured, so sentiment is simply omitted rather
  * than failing the whole analysis.
  */
-export const geminiWindowScorer: WindowScorer = async (windows) => {
+export const geminiWindowScorer: WindowScorer = async (windows, shouldGenerate) => {
   // Lazy import so this leaf module doesn't pull in config.ts (which touches the
   // Electron `app` at load) — keeps the pure pieces testable under plain node.
   const { getConfig } = await import('./config')
   const config = getConfig()
   const apiKey = config.transcription.geminiApiKey
   if (!apiKey) return new Map()
+
+  // ADV43-3 (round-45) — the dynamic import above is an AWAIT between
+  // analyzeTimeline's up-front eligibility check and this provider call. Re-check
+  // the fail-closed gate SYNCHRONOUSLY here — after all awaited setup, immediately
+  // before generateContent — and ABORT (return an empty map ⇒ sentiment omitted,
+  // NO provider call) when the source became ineligible or the check throws.
+  if (!eligibleToGenerate(shouldGenerate)) return new Map()
 
   const genAI = new GoogleGenerativeAI(apiKey)
   const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-3.5-flash' })
@@ -858,6 +890,13 @@ export interface AnalyzeProgress {
 export function getTimelineAnalysis(recordingId: string): TimelineAnalysis {
   const canonical = getRecordingById(recordingId) ?? resolveRecordingId(recordingId)
   const id = canonical?.id ?? recordingId
+  // ADV17-1 (round-18) — DISPLAY read boundary. Event markers persist labels
+  // derived from transcript action/decision text; the sibling analyzeTimeline is
+  // gated (round-8) so this read path must match. isRecordingEligible is a
+  // positive allowlist + fail-closed: a trashed / personal / value-excluded /
+  // hard-purged / unresolvable recording returns NO markers (empty), never the
+  // stale derived labels.
+  if (!isRecordingEligible(id)) return { ...EMPTY }
   const row = queryOne<TranscriptRow>(TRANSCRIPT_ROW_SELECT, [id])
   if (!row) return { ...EMPTY }
   const { segments, envelope } = parseSentimentColumn(row.sentiment_segments)
@@ -884,10 +923,28 @@ export function getTimelineAnalysis(recordingId: string): TimelineAnalysis {
 export async function analyzeTimeline(
   recordingId: string,
   onProgress?: (p: AnalyzeProgress) => void,
-  sentimentOpts?: SentimentOptions
+  sentimentOpts?: SentimentOptions,
+  /**
+   * P2 (round-3) — eligibility gate re-checked AFTER the sentiment LLM await
+   * and immediately BEFORE the synchronous UPDATE write. Returns false ⇒ the
+   * recording was trashed / marked personal / hard-purged while sentiment
+   * scoring was in flight, so the computed results are returned WITHOUT
+   * persisting. Omitted ⇒ always persists (manual/direct callers).
+   */
+  shouldPersist?: () => boolean
 ): Promise<TimelineAnalysis> {
   const canonical = getRecordingById(recordingId) ?? resolveRecordingId(recordingId)
   const id = canonical?.id ?? recordingId
+
+  // RE8-2 (round-8) — MANDATORY internal eligibility gate BEFORE the sentiment
+  // LLM. The prior design threaded eligibility only through the OPTIONAL
+  // `shouldPersist` callback, which the production recordings:analyzeTimeline IPC
+  // omits — so a trashed / personal / value-excluded recording's transcript went
+  // to Gemini anyway. Gate here so no caller can bypass it; fail-closed → empty.
+  if (!isRecordingEligible(id)) {
+    onProgress?.({ stage: 'complete', progress: 100 })
+    return { ...EMPTY }
+  }
 
   const row = queryOne<TranscriptRow>(TRANSCRIPT_ROW_SELECT, [id])
   if (!row) return { ...EMPTY }
@@ -902,6 +959,13 @@ export async function analyzeTimeline(
   const callerOnError = sentimentOpts?.onError
   const sentimentSegments = await deriveSentimentSegments(turns, {
     ...sentimentOpts,
+    // ADV43-3 (round-45) — MANDATORY fail-closed gate for the production scorer.
+    // geminiWindowScorer awaits a dynamic config import before generateContent;
+    // this re-checks recording eligibility after that await and immediately before
+    // the Gemini call, so an exclusion committed during the scorer's setup aborts
+    // the provider call (no transcript windows sent). Set AFTER the spread so it
+    // is not overridden by a caller-supplied value.
+    shouldGenerate: () => isRecordingEligible(id),
     onError: (err) => {
       analysisError = classifyAnalysisError(err)
       callerOnError?.(err)
@@ -926,11 +990,21 @@ export async function analyzeTimeline(
     markersAnalyzed: true,
     segments: sentimentSegments
   }
-  run('UPDATE transcripts SET sentiment_segments = ?, event_markers = ? WHERE recording_id = ?', [
-    JSON.stringify(envelope),
-    JSON.stringify(eventMarkers),
-    id
-  ])
+  // RE8-2 (round-8) / P2 (round-3) — re-check eligibility ADJACENT to the write
+  // (no await between here and the UPDATE). MANDATORY internal boundary check
+  // (covers value-exclusion + fail-closed for EVERY caller) AND the optional
+  // `shouldPersist` (the pipeline's in-flight cancel via isRecordingProcessable).
+  // A purge/trash/exclusion landing during the sentiment await must not persist a
+  // timeline derivative for a now-ineligible recording.
+  if (!isRecordingEligible(id) || (shouldPersist && !shouldPersist())) {
+    console.log(`[Timeline] Recording ${id} became ineligible mid-analysis — timeline not persisted`)
+  } else {
+    run('UPDATE transcripts SET sentiment_segments = ?, event_markers = ? WHERE recording_id = ?', [
+      JSON.stringify(envelope),
+      JSON.stringify(eventMarkers),
+      id
+    ])
+  }
 
   onProgress?.({ stage: 'complete', progress: 100 })
   const analysisStatus: TimelineAnalysisStatus = {

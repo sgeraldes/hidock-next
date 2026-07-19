@@ -2,6 +2,26 @@ import { GoogleGenerativeAI, type Part } from '@google/generative-ai'
 import { GoogleAIFileManager, FileState } from '@google/generative-ai/server'
 import { extname } from 'node:path'
 import type { TranscriptionEngine, TranscriptSegment, TranscribeOptions } from './engine-interface.js'
+import { TranscriptionCancelledError } from './engine-interface.js'
+
+/**
+ * ADV43-1 (round-45) — FAIL-CLOSED evaluation of a `shouldGenerate` gate,
+ * invoked SYNCHRONOUSLY immediately before EVERY concrete provider call inside
+ * the engine. Eligible ONLY when the callback returns EXACTLY `true`; a `false`
+ * return OR any thrown error ⇒ abort the pipeline by throwing
+ * TranscriptionCancelledError (never upload / generate further). A missing
+ * callback ⇒ eligible (no gate configured — legacy behaviour).
+ */
+function assertStillEligible(shouldGenerate?: () => boolean): void {
+  if (!shouldGenerate) return
+  let ok = false
+  try {
+    ok = shouldGenerate() === true
+  } catch {
+    ok = false
+  }
+  if (!ok) throw new TranscriptionCancelledError()
+}
 
 export interface GeminiEngineOptions {
   apiKey: string
@@ -503,7 +523,13 @@ export class GeminiEngine implements TranscriptionEngine {
    * finish server-side processing, returning a fileData Part for
    * generateContent. Required for audio above INLINE_LIMIT_BYTES.
    */
-  private async uploadViaFilesApi(filePath: string, mimeType: string): Promise<Part> {
+  private async uploadViaFilesApi(
+    filePath: string,
+    mimeType: string,
+    shouldGenerate?: () => boolean
+  ): Promise<Part> {
+    // Recheck IMMEDIATELY before the upload (the concrete provider call).
+    assertStillEligible(shouldGenerate)
     const fileManager = new GoogleAIFileManager(this.apiKey)
     const upload = await fileManager.uploadFile(filePath, { mimeType })
 
@@ -514,6 +540,9 @@ export class GeminiEngine implements TranscriptionEngine {
         throw new Error('Gemini Files API: timed out waiting for file processing')
       }
       await new Promise((resolve) => setTimeout(resolve, 2000))
+      // Recheck before EACH poll — an exclusion committed while the file is
+      // still processing server-side must stop us before generateContent.
+      assertStillEligible(shouldGenerate)
       file = await fileManager.getFile(file.name)
     }
 
@@ -532,7 +561,8 @@ export class GeminiEngine implements TranscriptionEngine {
   private async buildChunks(
     audio: Buffer,
     filePath: string,
-    mimeType: string
+    mimeType: string,
+    shouldGenerate?: () => boolean
   ): Promise<AudioChunk[]> {
     const split = splitWavIntoChunks(audio) ?? splitMp3IntoChunks(audio)
     if (split && split.length > 1) return split
@@ -540,7 +570,7 @@ export class GeminiEngine implements TranscriptionEngine {
     // Single call: inline when small, Files API when large (needs a filePath).
     const part =
       audio.length > GeminiEngine.INLINE_LIMIT_BYTES && filePath
-        ? await this.uploadViaFilesApi(filePath, mimeType)
+        ? await this.uploadViaFilesApi(filePath, mimeType, shouldGenerate)
         : { inlineData: { mimeType, data: audio.toString('base64') } }
     // startSec/durationSec unknown for a single whole-file part.
     return [{ data: audio, mimeType, startSec: 0, durationSec: 0, part } as AudioChunk & { part: Part }]
@@ -563,6 +593,14 @@ export class GeminiEngine implements TranscriptionEngine {
       throw new Error('Gemini API key not configured')
     }
 
+    // ADV43-1 (round-45) — fail-closed eligibility gate threaded from the caller.
+    // Re-checked synchronously before EVERY concrete provider call below (upload,
+    // each chunk generation, each retry). The caller already read the file bytes
+    // before invoking transcribe, so this first check covers the post-file-read
+    // window before any upload/generation happens.
+    const shouldGenerate = (options as { shouldGenerate?: () => boolean }).shouldGenerate
+    assertStillEligible(shouldGenerate)
+
     const filePath = (options as { filePath?: string }).filePath ?? ''
     const ext = extname(filePath).toLowerCase()
     // Sniff the actual bytes rather than trusting the extension: HiDock's MP3
@@ -573,7 +611,7 @@ export class GeminiEngine implements TranscriptionEngine {
     const genAI = new GoogleGenerativeAI(this.apiKey)
     const modelInstance = genAI.getGenerativeModel({ model: this.model })
 
-    const chunks = await this.buildChunks(audio, filePath, mimeType)
+    const chunks = await this.buildChunks(audio, filePath, mimeType, shouldGenerate)
     const defaultSpeaker = options.source === 'mic' ? 'you' : 'them'
     const contextSection = options.context ? `\n${options.context}` : ''
 
@@ -586,6 +624,9 @@ export class GeminiEngine implements TranscriptionEngine {
     } as Record<string, unknown>
 
     const transcribeChunk = async (chunk: AudioChunk & { part?: Part }, index: number, previousTail: string): Promise<string> => {
+      // Recheck at the START of EACH chunk — an exclusion committed while a
+      // previous chunk was in flight must stop this chunk before any provider call.
+      assertStillEligible(shouldGenerate)
       const part: Part =
         chunk.part ?? { inlineData: { mimeType: chunk.mimeType, data: chunk.data.toString('base64') } }
       const positionNote =
@@ -621,11 +662,16 @@ Return ONLY the transcription lines, no additional commentary.`
       }
 
       let res
+      // Recheck immediately before the FIRST generation call for this chunk.
+      assertStillEligible(shouldGenerate)
       try {
         res = await attempt(baseConfig)
       } catch (err) {
+        if (err instanceof TranscriptionCancelledError) throw err
         // If the model rejects thinkingConfig or the token cap, retry plain.
         if (String(err).includes('INVALID_ARGUMENT') || String(err).includes('thinking')) {
+          // Recheck before the plain-config RETRY (a fresh provider call).
+          assertStillEligible(shouldGenerate)
           res = await attempt({})
         } else {
           throw err
@@ -637,6 +683,8 @@ Return ONLY the transcription lines, no additional commentary.`
       // thinkingBudget 0 (the previous code dropped it, which re-enabled
       // thinking and returned ~1 token). If the retry is clean and longer, use it.
       if (res.finishReason === 'MAX_TOKENS') {
+        // Recheck before the MAX_TOKENS RETRY (another fresh provider call).
+        assertStillEligible(shouldGenerate)
         try {
           const retry = await attempt({ maxOutputTokens: 16384, thinkingConfig: { thinkingBudget: 0 } })
           if (retry.text && retry.finishReason !== 'MAX_TOKENS') res = retry

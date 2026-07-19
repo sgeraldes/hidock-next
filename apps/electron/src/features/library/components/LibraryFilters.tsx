@@ -275,6 +275,7 @@ export function LibraryFilters({
                 <option value="valuable">Valuable</option>
                 <option value="archived">Archived</option>
                 <option value="low-value">Low-value</option>
+                <option value="garbage">Garbage</option>
                 <option value="unrated">Unrated</option>
               </select>
               {!hasRatedQuality && (

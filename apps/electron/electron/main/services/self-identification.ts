@@ -45,10 +45,12 @@ import {
   getSpeakerMap,
   assignSpeaker,
   resolveMention,
-  getQueueItems
+  getQueueItems,
+  isRecordingProcessable
 } from './database'
 import { resolveContact } from './entity-resolver'
 import { isGenericSpeakerLabel, normalizeName, accentFoldedKey } from './entity-normalize'
+import { isRecordingEligible, filterEligibleRecordingIds } from './recording-eligibility'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -462,12 +464,21 @@ export function corroborateSelfIds(
 // Pure: end-to-end extractor (LLM injectable)
 // ---------------------------------------------------------------------------
 
-/** Default LLM: the cheap Gemini-flash text model via chat-llm (no new key). */
-async function defaultLLM(prompt: string, systemPrompt: string): Promise<string | null> {
+/** Default LLM: the cheap Gemini-flash text model via chat-llm (no new key).
+ *  ADV42-2 (round-44) — forwards an optional fail-closed `shouldGenerate` gate so
+ *  the BrainRouter re-checks recording eligibility before the PRIMARY and Ollama
+ *  FALLBACK attempts (the diarized turns must not reach a fallback after the
+ *  recording became trashed/personal/value-excluded mid-call). */
+async function defaultLLM(
+  prompt: string,
+  systemPrompt: string,
+  shouldGenerate?: () => boolean
+): Promise<string | null> {
   return getChatLLMService().generate([{ role: 'user', content: prompt }], {
     systemPrompt,
     temperature: 0,
-    maxTokens: 1024
+    maxTokens: 1024,
+    shouldGenerate
   })
 }
 
@@ -483,13 +494,17 @@ async function defaultLLM(prompt: string, systemPrompt: string): Promise<string 
  */
 export async function extractSelfIdentifications(
   turns: SpeakerTurn[],
-  deps: { llm?: SelfIdLLM } = {}
+  deps: { llm?: SelfIdLLM; shouldGenerate?: () => boolean } = {}
 ): Promise<SelfIdResult> {
   const cues = findSelfIdCues(turns)
   if (cues.length === 0) {
     return { identifications: [], mergeSuspected: [], usedLLM: false }
   }
-  const llm = deps.llm ?? defaultLLM
+  // ADV42-2 (round-44) — when no explicit test llm is injected, use the default
+  // chat-llm path with the caller's fail-closed eligibility gate wired into the
+  // BrainRouter (primary + fallback rechecks). An injected mock is used as-is.
+  const llm =
+    deps.llm ?? ((prompt: string, systemPrompt: string) => defaultLLM(prompt, systemPrompt, deps.shouldGenerate))
   let raw: string | null = null
   try {
     raw = await llm(buildSelfIdPrompt(cues), SELF_ID_SYSTEM_PROMPT)
@@ -557,12 +572,36 @@ function markMergeSuspected(recordingId: string, label: string, names: string[])
   setConfigMarker(`${MERGE_KEY_PREFIX}${recordingId}:${label}`, JSON.stringify({ recordingId, label, names }))
 }
 
-/** All recorded speaker-merge suspicions across the corpus (for UX + reporting). */
+/**
+ * All recorded speaker-merge suspicions across the corpus (for UX + reporting).
+ *
+ * ADV45-3 (round-47) — each marker's extracted self-names belong to a specific
+ * recording (encoded in the key `${MERGE_KEY_PREFIX}${recordingId}:${label}`),
+ * and a self-name is exactly the kind of excluded-recording content the deletion
+ * / personal / value-exclusion promise must suppress. Selecting only `value`
+ * (the prior behaviour) leaked names from trashed / personal / value-excluded /
+ * hard-purged recordings via self-id:getMergeSuspected + getSelfIdStatus. Now we
+ * select BOTH key and value, extract the recording id from each key, and route
+ * every candidate through the shared FAIL-CLOSED recording allowlist — only
+ * markers whose recording is eligible are parsed/returned; on any lookup failure
+ * the set is empty (fail-closed). getSelfIdStatus derives its count from THIS
+ * same filtered set.
+ */
 export function getMergeSuspectedMarkers(): MergeSuspected[] {
-  const rows = queryAll<{ value: string | null }>('SELECT value FROM config WHERE key LIKE ?', [`${MERGE_KEY_PREFIX}%`])
+  const rows = queryAll<{ key: string; value: string | null }>(
+    'SELECT key, value FROM config WHERE key LIKE ?',
+    [`${MERGE_KEY_PREFIX}%`]
+  )
+  // recordingId is a UUID (no ':'), so the substring after the prefix up to the
+  // first ':' is the recording id; the label (which may itself contain ' · ')
+  // follows.
+  const recIdOfKey = (key: string): string => key.slice(MERGE_KEY_PREFIX.length).split(':')[0]
+  const { eligible, failClosed } = filterEligibleRecordingIds(rows.map((r) => recIdOfKey(r.key)))
+  if (failClosed) return []
   const out: MergeSuspected[] = []
   for (const r of rows) {
     if (!r.value) continue
+    if (!eligible.has(recIdOfKey(r.key))) continue
     try {
       const parsed = JSON.parse(r.value) as { label?: string; names?: string[] }
       if (parsed.label && Array.isArray(parsed.names)) out.push({ label: parsed.label, names: parsed.names })
@@ -596,7 +635,7 @@ export interface SelfIdRunResult {
  */
 export async function runSelfIdentificationForRecording(
   recordingId: string,
-  opts: { force?: boolean; llm?: SelfIdLLM } = {}
+  opts: { force?: boolean; llm?: SelfIdLLM; shouldPersist?: () => boolean } = {}
 ): Promise<SelfIdRunResult> {
   if (!opts.force && isScanned(recordingId)) {
     return { bound: 0, mergeSuspected: 0, skipped: true }
@@ -611,7 +650,40 @@ export async function runSelfIdentificationForRecording(
     return { bound: 0, mergeSuspected: 0, skipped: false }
   }
 
-  const result = await extractSelfIdentifications(turns, { llm: opts.llm })
+  // RE8-3 (round-8) — MANDATORY internal eligibility gate BEFORE the LLM. The
+  // prior design ran this ONLY when the OPTIONAL `shouldPersist` callback was
+  // supplied; the production self-id:runForRecording IPC passes only {force}, so
+  // a trashed / personal / value-excluded recording's diarized turns went to the
+  // LLM (and created contacts/bindings) anyway. Gate here so EVERY caller is
+  // fail-closed. Skip WITHOUT marking scanned so a later restore can self-identify.
+  if (!isRecordingEligible(recordingId)) {
+    return { bound: 0, mergeSuspected: 0, skipped: true }
+  }
+
+  // P2 (round-3) — additional in-flight gate for the pipeline (isRecordingProcessable).
+  if (opts.shouldPersist && !opts.shouldPersist()) {
+    return { bound: 0, mergeSuspected: 0, skipped: true }
+  }
+
+  const result = await extractSelfIdentifications(turns, {
+    llm: opts.llm,
+    // ADV42-2 (round-44) — re-verify eligibility before the PRIMARY and FALLBACK
+    // provider attempts inside BrainRouter (the isRecordingEligible gate above is
+    // pre-await only). Fail-closed via isRecordingEligible.
+    shouldGenerate: () => isRecordingEligible(recordingId)
+  })
+
+  // RE8-3 (round-8) / P2 — post-await gate ADJACENT to the writes (assignSpeaker
+  // creates contacts + speaker bindings, resolveMention writes mention-resolutions,
+  // markMergeSuspected + markScanned write config markers — ALL below are
+  // synchronous, so this one check covers them). MANDATORY internal boundary check
+  // (covers value-exclusion + fail-closed for EVERY caller) AND the optional
+  // in-flight `shouldPersist`. A delete/trash/exclusion that landed while the LLM
+  // ran persists nothing and leaves the recording un-scanned.
+  if (!isRecordingEligible(recordingId) || (opts.shouldPersist && !opts.shouldPersist())) {
+    console.log(`[SelfID] ${recordingId} became ineligible mid-analysis — no bindings/markers persisted`)
+    return { bound: 0, mergeSuspected: 0, skipped: true }
+  }
 
   const meetingId = getRecordingById(recordingId)?.meeting_id ?? undefined
   // Existing bindings are the user's / prior settled truth — never overwrite them.
@@ -761,7 +833,10 @@ export async function backfillSelfIdentifications(pollMs = 30000): Promise<numbe
       i++
       if (isScanned(id)) continue
       try {
-        await runSelfIdentificationForRecording(id)
+        // P2 (round-3) — the id list was snapshotted at the start; a recording
+        // trashed/personal/purged since then must not have its turns sent to
+        // the provider or any binding/marker persisted.
+        await runSelfIdentificationForRecording(id, { shouldPersist: () => isRecordingProcessable(id) })
         processed++
       } catch (e) {
         console.warn(`[SelfID] backfill failed for ${id}:`, e instanceof Error ? e.message : e)

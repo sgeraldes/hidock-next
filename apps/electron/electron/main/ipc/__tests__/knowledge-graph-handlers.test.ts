@@ -2,10 +2,11 @@
  * Tests for knowledge-graph-handlers.ts
  *
  * Mocks the service layer and verifies:
- * - All 8 channels are registered
+ * - All 7 channels are registered
  * - Handlers return { success, data } on success
  * - Handlers return { success: false, error } on failure
  * - graph:ingestFolder rejects path traversal
+ * - the removed graph:listNodes / graph:resolvePerson channels are NOT registered
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -27,13 +28,6 @@ vi.mock('../../services/knowledge-graph-service', () => ({
   queryTopSkill: vi.fn(),
   queryPersonProfile: vi.fn(),
   queryMeetingGraph: vi.fn(),
-  queryListNodes: vi.fn(),
-}))
-
-// Mock the database (graph:resolvePerson uses getContactByName); avoids pulling
-// the real sql.js/file-storage/config chain into this service-mock test.
-vi.mock('../../services/database', () => ({
-  getContactByName: vi.fn(),
 }))
 
 import {
@@ -44,9 +38,7 @@ import {
   queryTopSkill,
   queryPersonProfile,
   queryMeetingGraph,
-  queryListNodes,
 } from '../../services/knowledge-graph-service'
-import { getContactByName } from '../../services/database'
 
 import { registerKnowledgeGraphHandlers } from '../knowledge-graph-handlers'
 
@@ -65,7 +57,7 @@ describe('knowledge-graph IPC handlers', () => {
   // -------------------------------------------------------------------------
   // Registration
   // -------------------------------------------------------------------------
-  it('registers all 9 channels', () => {
+  it('registers all 7 channels', () => {
     const expectedChannels = [
       'graph:stats',
       'graph:ingestAll',
@@ -74,38 +66,29 @@ describe('knowledge-graph IPC handlers', () => {
       'graph:topSkill',
       'graph:personProfile',
       'graph:meetingGraph',
-      'graph:listNodes',
-      'graph:resolvePerson',
     ]
     for (const channel of expectedChannels) {
       expect(ipcMain.handle).toHaveBeenCalledWith(channel, expect.any(Function))
     }
   })
 
-  // -------------------------------------------------------------------------
-  // graph:resolvePerson
-  // -------------------------------------------------------------------------
-  describe('graph:resolvePerson', () => {
-    it('returns the resolved contact', async () => {
-      const contact = { id: 'c1', name: 'Alice', email: null }
-      ;(getContactByName as any).mockReturnValue(contact)
+  // ADV33-1 (round 35): graph:listNodes was a DEAD IPC (no renderer consumer) that
+  // returned raw GraphNode objects leaking a suppressed backing contact's id. It was
+  // removed entirely; assert it is NOT registered and that no handler exists for it.
+  it('does NOT register the removed graph:listNodes channel', () => {
+    const registered = (ipcMain.handle as any).mock.calls.map((c: any[]) => c[0])
+    expect(registered).not.toContain('graph:listNodes')
+    expect(handlers['graph:listNodes']).toBeUndefined()
+  })
 
-      const result = await handlers['graph:resolvePerson']({}, 'Alice')
-      expect(result).toEqual({ success: true, data: contact })
-      expect(getContactByName).toHaveBeenCalledWith('Alice')
-    })
-
-    it('returns null data when no contact matches', async () => {
-      ;(getContactByName as any).mockReturnValue(undefined)
-      const result = await handlers['graph:resolvePerson']({}, 'Nobody')
-      expect(result).toEqual({ success: true, data: null })
-    })
-
-    it('rejects a non-string name', async () => {
-      const result = await handlers['graph:resolvePerson']({}, 123)
-      expect(result.success).toBe(false)
-      expect(result.error).toContain('name must be a non-empty string')
-    })
+  // ADV34-2 (round 36): graph:resolvePerson was a DEAD IPC (no renderer consumer)
+  // that returned a raw, unfiltered Contact (id/email/role/company/notes/tags/
+  // provenance) — leaking the identity of a contact backed only by an excluded /
+  // hard-purged recording. It was removed entirely; assert it is NOT registered.
+  it('does NOT register the removed graph:resolvePerson channel', () => {
+    const registered = (ipcMain.handle as any).mock.calls.map((c: any[]) => c[0])
+    expect(registered).not.toContain('graph:resolvePerson')
+    expect(handlers['graph:resolvePerson']).toBeUndefined()
   })
 
   // -------------------------------------------------------------------------
@@ -264,23 +247,4 @@ describe('knowledge-graph IPC handlers', () => {
     })
   })
 
-  // -------------------------------------------------------------------------
-  // graph:listNodes
-  // -------------------------------------------------------------------------
-  describe('graph:listNodes', () => {
-    it('returns all nodes when no type given', async () => {
-      const mockNodes = [{ id: 'person:alice', type: 'person', label: 'Alice', norm_key: 'alice', weight: 1 }]
-      ;(queryListNodes as any).mockReturnValue(mockNodes)
-
-      const result = await handlers['graph:listNodes']({})
-      expect(result).toEqual({ success: true, data: mockNodes })
-      expect(queryListNodes).toHaveBeenCalledWith(undefined)
-    })
-
-    it('passes type filter when provided', async () => {
-      ;(queryListNodes as any).mockReturnValue([])
-      await handlers['graph:listNodes']({}, 'person')
-      expect(queryListNodes).toHaveBeenCalledWith('person')
-    })
-  })
 })

@@ -25,6 +25,7 @@
 
 import { getChatLLMService } from './chat-llm'
 import { queryAll, queryOne, run, runInTransaction, saveDatabase, getQueueItems } from './database'
+import { isRecordingEligible, filterEligibleRecordingIds } from './recording-eligibility'
 import {
   classifyTranscriptFormat,
   scoreImportance,
@@ -227,6 +228,40 @@ function assessAll(threshold: number): TriageAssessment[] {
   return out
 }
 
+/**
+ * ADV45-4 (round-47) — THE single ELIGIBLE assessment set shared by scan,
+ * status, recommended ids, AND the reformat work list, so discovery and counts
+ * never drift from what is actually eligible to process. Round 8 filtered ONLY
+ * the reformat WORK LIST; getRecommendedRecordingIds + scanOldTranscripts still
+ * assessed/tallied every joined transcript (including excluded / unassociable
+ * rows whose recording is personal / trashed / value-excluded / hard-purged).
+ * Every discovery + count read now derives from this one filtered set.
+ *
+ * FAIL-CLOSED: returns `null` when the recording-eligibility lookup could not
+ * complete, so callers surface zero counts / empty ids rather than leaking.
+ */
+function eligibleAssessments(threshold: number): TriageAssessment[] | null {
+  const all = assessAll(threshold)
+  const { eligible, failClosed } = filterEligibleRecordingIds(all.map((a) => a.recordingId))
+  if (failClosed) {
+    console.error('[TranscriptUpgrade] assessment set suppressed — recording eligibility unavailable (fail closed)')
+    return null
+  }
+  return all.filter((a) => eligible.has(a.recordingId))
+}
+
+/** The zero result used whenever the eligible assessment set can't be built. */
+function emptyScan(threshold: number): ScanResult {
+  return {
+    totalTranscripts: 0,
+    legacyTotal: 0,
+    toReformat: 0,
+    recommendedRetranscription: 0,
+    alreadyReformatted: 0,
+    threshold
+  }
+}
+
 /** Roll a list of assessments up into the scan counts. `total` is the row count. */
 function tally(total: number, assessments: TriageAssessment[], threshold: number): ScanResult {
   let legacyTotal = 0
@@ -259,14 +294,12 @@ function tally(total: number, assessments: TriageAssessment[], threshold: number
  * not write anything, so it is safe to call against the live DB.
  */
 export function scanOldTranscripts(threshold = DEFAULT_TRIAGE_THRESHOLD): ScanResult {
-  const rows = loadTranscriptRows()
-  const projects = loadProjectLinkSets()
-  const assessments: TriageAssessment[] = []
-  for (const row of rows) {
-    if (!row.full_text || !row.full_text.trim()) continue
-    assessments.push(assess(row, projects, threshold))
-  }
-  return tally(rows.length, assessments, threshold)
+  // ADV45-4 (round-47) — tally ONLY the eligible assessment set; excluded /
+  // unassociable transcripts must not inflate any displayed count. Fail-closed:
+  // zero counts when eligibility can't be established.
+  const assessments = eligibleAssessments(threshold)
+  if (assessments === null) return emptyScan(threshold)
+  return tally(assessments.length, assessments, threshold)
 }
 
 /**
@@ -281,16 +314,27 @@ export function runUpgrade(threshold = DEFAULT_TRIAGE_THRESHOLD): ScanResult {
   return result
 }
 
-/** Recording ids of the flat transcripts flagged for audio re-transcription. */
+/** Recording ids of the flat transcripts flagged for audio re-transcription.
+ *  ADV45-4 (round-47) — sourced from the shared ELIGIBLE assessment set so an
+ *  excluded / unassociable recording is never surfaced via
+ *  transcript-upgrade:getRecommended; fail-closed empty. */
 export function getRecommendedRecordingIds(threshold = DEFAULT_TRIAGE_THRESHOLD): string[] {
-  return assessAll(threshold)
+  const assessments = eligibleAssessments(threshold)
+  if (assessments === null) return []
+  return assessments
     .filter((a) => a.formatClass === 'legacy' && a.band === 'recommend-retranscribe')
     .map((a) => a.recordingId)
 }
 
-/** Transcript ids of the flat, below-threshold band — the reformat work list. */
+/** Transcript ids of the flat, below-threshold band — the reformat work list.
+ *  RE8-1 (round-8) / ADV45-4 (round-47) — sourced from the SAME shared eligible
+ *  assessment set as scan/status/recommended (no drift) so an excluded (personal
+ *  / trashed / value-excluded / hard-purged) recording's transcript is never
+ *  enqueued for an LLM reformat; if eligibility can't be established, empty. */
 function getReformatTranscriptIds(threshold: number): string[] {
-  return assessAll(threshold)
+  const assessments = eligibleAssessments(threshold)
+  if (assessments === null) return []
+  return assessments
     .filter((a) => a.formatClass === 'legacy' && a.band === 'reformat')
     .map((a) => a.transcriptId)
 }
@@ -338,21 +382,39 @@ function isStillLegacy(transcriptId: string): boolean {
  * next run), or 'skipped' when the transcript has no text.
  */
 export async function reformatOne(transcriptId: string): Promise<'done' | 'failed' | 'skipped'> {
-  const row = queryOne<{ full_text: string | null }>(`SELECT full_text FROM transcripts WHERE id = ?`, [transcriptId])
+  const row = queryOne<{ full_text: string | null; recording_id: string | null }>(
+    `SELECT full_text, recording_id FROM transcripts WHERE id = ?`,
+    [transcriptId]
+  )
   const fullText = row?.full_text || ''
   if (!fullText.trim()) return 'skipped'
+
+  // RE8-1 (round-8) — MANDATORY internal eligibility gate. reformatOne is called
+  // by BOTH the worker (filtered list) and any direct caller; the transcript's
+  // full_text is about to be sent to the chat LLM, so gate it here so no caller
+  // can bypass it. Fail-closed: an unresolved/excluded recording sends nothing.
+  const recordingId = row?.recording_id || ''
+  if (!recordingId || !isRecordingEligible(recordingId)) return 'skipped'
 
   const blocks = splitIntoReformatBlocks(fullText)
   const svc = getChatLLMService()
   const segments: TriageStoredSegment[] = []
 
   for (const block of blocks) {
+    // Re-check before EVERY provider call: a trash/personal/value-exclusion that
+    // lands mid-run must stop further LLM sends for this transcript immediately.
+    if (!isRecordingEligible(recordingId)) return 'skipped'
     let response: string | null
     try {
       response = await svc.generate([{ role: 'user', content: buildReformatPrompt(block) }], {
         systemPrompt: REFORMAT_SYSTEM_PROMPT,
         temperature: 0.2,
-        maxTokens: 8192
+        maxTokens: 8192,
+        // ADV42-2 (round-44) — the pre-loop check above guards entry into the
+        // router; also gate the router's PRIMARY and FALLBACK attempts so a
+        // trash/personal/value-exclusion committed while the Gemini attempt is
+        // pending/failing never reaches the Ollama fallback for this block.
+        shouldGenerate: () => isRecordingEligible(recordingId)
       })
     } catch (e) {
       console.warn(
@@ -379,6 +441,11 @@ export async function reformatOne(transcriptId: string): Promise<'done' | 'faile
     console.warn(`[TranscriptUpgrade] reformat produced no structured turns for ${transcriptId}; leaving as-is`)
     return 'failed'
   }
+
+  // Final re-check ADJACENT to persistence (no await between here and the write):
+  // a recording trashed/excluded during the LLM round-trips must not get an
+  // upgraded transcript persisted.
+  if (!isRecordingEligible(recordingId)) return 'skipped'
 
   runInTransaction(() => {
     run(`UPDATE transcripts SET speakers = ? WHERE id = ?`, [JSON.stringify(usable), transcriptId])

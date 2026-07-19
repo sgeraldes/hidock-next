@@ -176,7 +176,11 @@ vi.mock('@/features/library/hooks', () => ({
     setStatusFilter: vi.fn(),
     setSearchQuery: vi.fn(),
     isPending: false
-  }))
+  })),
+  // F16/spec-003 Part F — mounted once on the Library page; no-op here since
+  // this suite doesn't exercise the suggestion-toast behavior (see
+  // useValueSuggestionToasts.test.tsx for that coverage).
+  useValueSuggestionToasts: vi.fn()
 }))
 
 const mockRefresh = vi.fn()
@@ -186,7 +190,8 @@ const transcriptionCancelledListeners: Array<() => void> = []
 
 // Mock electronAPI
 global.window.electronAPI = {
-  transcripts: { getByRecordingIds: vi.fn().mockResolvedValue({}) },
+  // ADV13: Library uses the owner-management batch accessor.
+  transcripts: { getByRecordingIds: vi.fn().mockResolvedValue({}), getByRecordingIdsOwner: vi.fn().mockResolvedValue({}) },
   meetings: { getByIds: vi.fn().mockResolvedValue({}) },
   storage: { openFolder: vi.fn() },
   recordings: {
@@ -196,7 +201,9 @@ global.window.electronAPI = {
     markPersonal: vi.fn().mockResolvedValue({ success: true, personal: true }),
     deletionImpact: vi.fn().mockResolvedValue({ success: true, data: { transcripts: 0, actionItems: 0, embeddings: 0, artifacts: 0, hasAudioFile: true } }),
     deleteCascade: vi.fn().mockResolvedValue({ success: true, mode: 'soft' }),
-    restore: vi.fn().mockResolvedValue({ success: true })
+    restore: vi.fn().mockResolvedValue({ success: true }),
+    // spec-005/F17 T5 — loaded eagerly on mount (for the Trash toggle's count).
+    getTrash: vi.fn().mockResolvedValue([])
   },
   downloadService: {
     queueDownloads: vi.fn()
@@ -241,6 +248,7 @@ describe('Library', () => {
     transcriptionFailedListeners.length = 0
     transcriptionCancelledListeners.length = 0
     vi.mocked(window.electronAPI.transcripts.getByRecordingIds).mockResolvedValue({})
+    vi.mocked(window.electronAPI.transcripts.getByRecordingIdsOwner).mockResolvedValue({})
     vi.mocked(window.electronAPI.meetings.getByIds).mockResolvedValue({})
     vi.mocked(useUnifiedRecordings).mockReturnValue({
       recordings: [],
@@ -461,7 +469,7 @@ describe('Library', () => {
         deviceConnected: false,
         stats: { total: 1, deviceOnly: 0, localOnly: 1, both: 0, synced: 1, unsynced: 0, onSource: 0, locallyAvailable: 1 }
       })
-      vi.mocked(window.electronAPI.transcripts.getByRecordingIds).mockResolvedValue({
+      vi.mocked(window.electronAPI.transcripts.getByRecordingIdsOwner).mockResolvedValue({
         'test-123': {
           id: 'transcript-1',
           recordingId: 'test-123',
@@ -486,7 +494,7 @@ describe('Library', () => {
 
       await waitFor(() => {
         expect(mockRefresh).toHaveBeenCalledWith(false)
-        expect(window.electronAPI.transcripts.getByRecordingIds).toHaveBeenCalledWith(['test-123'])
+        expect(window.electronAPI.transcripts.getByRecordingIdsOwner).toHaveBeenCalledWith(['test-123'])
       })
     })
   })

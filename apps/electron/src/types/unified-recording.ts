@@ -32,11 +32,35 @@ interface RecordingBase {
   knowledgeCaptureId?: string
   title?: string
   quality?: QualityRating
+  /** F16/spec-001: fixed tags explaining an AI content-based value classification
+   *  (see VALUE_REASON_TAGS in electron/main/services/value-classification.ts). */
+  qualityReasons?: string[]
+  /** Distinguishes an AI-set rating from one the user set by hand (F16/spec-003
+   *  manual override always stamps 'user'). */
+  qualitySource?: 'ai' | 'user'
   category?: string
   status?: string
   summary?: string
   /** v38: user-marked "personal" (ignored) — kept, but out of AI + default surfaces. */
   personal?: boolean
+  /**
+   * What actually backs this row (CX-T5-3, spec-005/F17 fix round):
+   *  - 'recording' — a real `recordings`-table row (device and/or disk audio).
+   *  - 'capture'   — a synthetic row synthesized for a knowledge_capture with
+   *    NO source recording (imported PDF/image/note). buildRecordingMap's
+   *    capture-only branch is the ONLY producer of this value.
+   *
+   * This is an EXPLICIT discriminator, replacing the old path-shape inference
+   * (`hasDeviceFile || hasLocalPath`): `recordings.file_path` is NULLABLE, so a
+   * real DB recording can legitimately surface as local-only with an empty
+   * path — inferring "capture-only" from that misclassified it and stripped
+   * its deletion/restore affordances (stranding it in Trash after a bulk
+   * soft-delete). Optional for constructor-site compatibility; an absent value
+   * means 'recording' (the fail-safe direction: a mis-stamped capture-only row
+   * shows affordances whose IPCs fail honestly with "Recording not found",
+   * whereas the inverse strands real user data).
+   */
+  sourceKind?: 'recording' | 'capture'
 }
 
 /**
@@ -181,4 +205,28 @@ export function hasLocalPath(rec: UnifiedRecording): rec is LocalOnlyRecording |
 
 export function hasDeviceFile(rec: UnifiedRecording): rec is DeviceOnlyRecording | BothLocationsRecording {
   return rec.location === 'device-only' || rec.location === 'both'
+}
+
+/**
+ * True when this row is backed by an actual `recordings`-table row (a real
+ * audio file on the device or disk) — as opposed to a synthetic "capture-only"
+ * row synthesized for a knowledge_capture with no source recording (imported
+ * PDF/image/note).
+ *
+ * Keys on the EXPLICIT `sourceKind` discriminator stamped at every synthesis
+ * site (buildRecordingMap's five branches + trashRowToUnified) — NOT on path
+ * shape. The old `hasDeviceFile || hasLocalPath` inference misclassified a
+ * real DB recording whose nullable `file_path` was empty as capture-only,
+ * stripping its restore/purge affordances and stranding it in Trash after a
+ * bulk soft-delete (CX-T5-3). An absent `sourceKind` counts as 'recording'
+ * (fail-safe: see the field's doc on RecordingBase).
+ *
+ * spec-005/F17 AR3-4 (adversarial amendment, binding): ALL recording-deletion
+ * affordances (Move to Trash, Delete from device, Delete permanently, Trash
+ * inclusion) gate on this — a capture-only row must render NO deletion items
+ * on ANY surface (row, reader, card). F20 (backlog) owns their future
+ * deletion/Trash contract.
+ */
+export function isRecordingBacked(rec: UnifiedRecording): boolean {
+  return rec.sourceKind !== 'capture'
 }

@@ -21,7 +21,8 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { AudioPlayer } from '@/components/AudioPlayer'
 import { formatDateTime, formatDuration, formatBytes } from '@/lib/utils'
 import { parseJsonArray, Transcript, Meeting } from '@/types'
-import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
+import { UnifiedRecording, hasLocalPath, isDeviceOnly, isRecordingBacked } from '@/types/unified-recording'
+import { LABEL_DELETE_FROM_DEVICE, LABEL_MOVE_TO_TRASH } from '@/features/library/utils/deletionCopy'
 import { StatusIcon } from './StatusIcon'
 import { TranscriptionStatusBadge } from './TranscriptionStatusBadge'
 import { useLibraryStore } from '@/store/useLibraryStore'
@@ -241,29 +242,30 @@ export const SourceCard = memo(function SourceCard({
               </Button>
             )}
 
-            {/* Delete button */}
-            <Button
-              variant="ghost"
-              size="icon"
-              className={
-                recording.location === 'device-only'
-                  ? 'text-destructive hover:text-destructive'
-                  : recording.location === 'local-only'
-                  ? 'text-orange-500 hover:text-orange-600'
-                  : 'text-muted-foreground hover:text-orange-500'
-              }
-              onClick={onDelete}
-              disabled={(recording.location === 'device-only' && !deviceConnected) || isDeleting}
-              title={
-                recording.location === 'device-only'
-                  ? 'Delete from device'
-                  : recording.location === 'local-only'
-                  ? 'Delete local file'
-                  : 'Delete local copy'
-              }
-            >
-              {isDeleting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
-            </Button>
+            {/* Delete button — spec-005/F17 T5 §D3b/AR3-4. Card view is a THIRD delete
+                surface; the `title` MUST match what onDelete actually does (routes
+                through Library's handleDelete → soft handleDeleteLocal for non-device
+                rows, i.e. Move to Trash, never a real delete). Card view intentionally
+                does not gain permanent-delete or synced device-delete affordances —
+                the list row + reader carry the full set (documented limitation).
+                AR3-4: capture-only synthetic rows (no source recording) show no
+                delete affordance at all. */}
+            {isRecordingBacked(recording) && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className={
+                  recording.location === 'device-only'
+                    ? 'text-destructive hover:text-destructive'
+                    : 'text-orange-500 hover:text-orange-600'
+                }
+                onClick={onDelete}
+                disabled={(recording.location === 'device-only' && !deviceConnected) || isDeleting}
+                title={recording.location === 'device-only' ? LABEL_DELETE_FROM_DEVICE : LABEL_MOVE_TO_TRASH}
+              >
+                {isDeleting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+              </Button>
+            )}
           </div>
         </div>
       </CardHeader>

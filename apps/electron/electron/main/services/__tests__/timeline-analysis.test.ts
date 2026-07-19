@@ -370,6 +370,46 @@ describe('getTimelineAnalysis', () => {
   })
 })
 
+// ADV17-1 (round-18) — the point-read must match analyzeTimeline's gate: an
+// excluded recording's persisted markers (labels derived from action/decision
+// text) are NEVER returned. Fail-closed = empty on false OR lookup failure.
+describe('getTimelineAnalysis — ADV17-1 eligibility gate', () => {
+  const EMPTY = { sentimentSegments: [], eventMarkers: [] }
+
+  beforeEach(async () => {
+    seedRecording('recGate')
+    seedTranscript('recGate', SPEAKERS_JSON)
+    seedCapture('capGate', 'recGate')
+    run('INSERT INTO action_items (id, knowledge_capture_id, content) VALUES (?, ?, ?)', [
+      'aiG',
+      'capGate',
+      'Carlos will prepare the rollback plan before the deploy window'
+    ])
+    // Persist markers WHILE the recording is still eligible.
+    await analyzeTimeline('recGate', undefined, { scoreWindows: fakeScorer })
+  })
+
+  it('returns persisted markers while the recording is eligible', () => {
+    const r = getTimelineAnalysis('recGate')
+    expect(r.eventMarkers.length).toBeGreaterThan(0)
+  })
+
+  it('returns EMPTY once the recording is soft-deleted', () => {
+    run('UPDATE recordings SET deleted_at = ? WHERE id = ?', ['2026-07-15T00:00:00.000Z', 'recGate'])
+    expect(getTimelineAnalysis('recGate')).toEqual(EMPTY)
+  })
+
+  it('returns EMPTY once the recording is marked personal', () => {
+    run('UPDATE recordings SET personal = 1 WHERE id = ?', ['recGate'])
+    expect(getTimelineAnalysis('recGate')).toEqual(EMPTY)
+  })
+
+  it('returns EMPTY once the recording is value-excluded (garbage capture)', () => {
+    run("UPDATE knowledge_captures SET quality_rating = 'garbage' WHERE id = ?", ['capGate'])
+    expect(getTimelineAnalysis('recGate')).toEqual(EMPTY)
+  })
+})
+
 describe('analyzeTimeline (persist + idempotent)', () => {
   beforeEach(() => {
     seedRecording('rec3')
@@ -398,6 +438,17 @@ describe('analyzeTimeline (persist + idempotent)', () => {
     expect(persisted.sentimentSegments.length).toBe(result.sentimentSegments.length)
   })
 
+  it('P2 (round-3) — shouldPersist()=false returns the computed result WITHOUT persisting', async () => {
+    const result = await analyzeTimeline('rec3', undefined, { scoreWindows: fakeScorer }, () => false)
+    // Computed + returned to the caller…
+    expect(result.sentimentSegments.length).toBeGreaterThan(0)
+    expect(result.eventMarkers.length).toBe(2)
+    // …but NOTHING is written back (a purge landed during the sentiment await).
+    const persisted = getTimelineAnalysis('rec3')
+    expect(persisted.sentimentSegments.length).toBe(0)
+    expect(persisted.eventMarkers.length).toBe(0)
+  })
+
   it('is idempotent — re-running yields the same persisted result', async () => {
     const first = await analyzeTimeline('rec3', undefined, { scoreWindows: fakeScorer })
     const second = await analyzeTimeline('rec3', undefined, { scoreWindows: fakeScorer })
@@ -414,6 +465,40 @@ describe('analyzeTimeline (persist + idempotent)', () => {
     expect(stages).toContain('sentiment')
     expect(stages).toContain('markers')
     expect(stages).toContain('complete')
+  })
+
+  // RE8-2 (round-8) — analyzeTimeline gates internally on isRecordingEligible, so
+  // the production recordings:analyzeTimeline IPC (which omits shouldPersist) can
+  // no longer send an excluded recording's transcript to Gemini or persist a
+  // sentiment derivative for it.
+  it('refuses (empty, no LLM) when the recording is excluded — even with no shouldPersist', async () => {
+    let scorerCalls = 0
+    const spyScorer = async (windows: SentimentWindow[]) => {
+      scorerCalls++
+      return fakeScorer(windows)
+    }
+    run('UPDATE recordings SET personal = 1 WHERE id = ?', ['rec3'])
+    const result = await analyzeTimeline('rec3', undefined, { scoreWindows: spyScorer })
+    expect(result).toEqual({ sentimentSegments: [], eventMarkers: [] })
+    expect(scorerCalls).toBe(0) // never sent to the provider
+    const persisted = getTimelineAnalysis('rec3')
+    expect(persisted.sentimentSegments.length).toBe(0)
+    expect(persisted.eventMarkers.length).toBe(0)
+  })
+
+  it('does not persist when the recording becomes excluded during the sentiment await (no shouldPersist needed)', async () => {
+    // Eligible at entry; the scorer trashes it mid-flight.
+    const flipScorer = async (windows: SentimentWindow[]) => {
+      run('UPDATE recordings SET deleted_at = ? WHERE id = ?', ['2026-07-15T00:00:00.000Z', 'rec3'])
+      return fakeScorer(windows)
+    }
+    const result = await analyzeTimeline('rec3', undefined, { scoreWindows: flipScorer })
+    // Computed + returned to the caller…
+    expect(result.sentimentSegments.length).toBeGreaterThan(0)
+    // …but NOTHING is written back for the now-excluded recording.
+    const persisted = getTimelineAnalysis('rec3')
+    expect(persisted.sentimentSegments.length).toBe(0)
+    expect(persisted.eventMarkers.length).toBe(0)
   })
 
   it('returns empty arrays when the recording has no transcript', async () => {

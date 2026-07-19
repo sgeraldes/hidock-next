@@ -192,6 +192,12 @@ export interface AppConfig {
     localAsrNumBeams: number
     autoTranscribe: boolean
     language: string
+    /** F16/spec-001 kill-switch (main-process config.ts) — mirrored here only
+     *  so Settings can show a hint when the manual backfill runs while live
+     *  classification is off; not itself a user-editable Settings field.
+     *  Optional (unlike its form-bound siblings above) since it's read
+     *  defensively (`=== false`) rather than round-tripped through a form. */
+    valueClassificationEnabled?: boolean
   }
   embeddings: {
     provider: 'ollama'

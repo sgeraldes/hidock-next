@@ -3,7 +3,12 @@
  * Simple in-memory vector store with SQLite persistence for meeting transcript embeddings
  */
 
-import { getDatabase, getExcludedRecordingIds } from './database'
+import { getDatabase, isRecordingProcessable } from './database'
+import {
+  filterEligibleRecordingIds,
+  filterEligibleProvenanceRows,
+  isRecordingEligible
+} from './recording-eligibility'
 import { getEmbeddingsService } from './embeddings'
 
 interface VectorDocument {
@@ -344,22 +349,72 @@ class VectorStore {
       sourceType?: string
       /** knowledge_capture id backing the source, carried onto every chunk. */
       captureId?: string
+      /**
+       * RE-1 (Codex adversarial re-review round 2) — optional eligibility gate
+       * re-checked AFTER embeddings are generated (an async await) and
+       * immediately BEFORE the synchronous write loop. Returns false ⇒ the
+       * caller's recording became ineligible (hard purge / trash / personal)
+       * while embeddings ran, so nothing is persisted (returns 0). Not stored on
+       * any chunk's metadata.
+       */
+      shouldPersist?: () => boolean
+      /**
+       * ADV41-2 (round-43) — PRE-PROVIDER eligibility gate. `shouldPersist`
+       * above runs only AFTER the embeddings await (post-provider), so it can
+       * block the WRITE but cannot un-send content to the external embeddings
+       * provider. This callback is invoked in the SAME synchronous step
+       * IMMEDIATELY BEFORE the embeddings provider call; returning false ⇒
+       * indexTranscript returns 0 WITHOUT calling the provider. Every caller
+       * whose recording can become excluded mid-run should pass it (the boot
+       * backfill does). Not stored on any chunk's metadata.
+       */
+      shouldGenerate?: () => boolean
     }
   ): Promise<number> {
+    // Destructure the gates out so they never land on a stored chunk's metadata.
+    const { shouldPersist, shouldGenerate, ...chunkMeta } = metadata
     // Check if already indexed
-    if (metadata.recordingId) {
+    if (chunkMeta.recordingId) {
       const existing = Array.from(this.documents.values()).filter(
-        (d) => d.metadata.recordingId === metadata.recordingId
+        (d) => d.metadata.recordingId === chunkMeta.recordingId
       )
       if (existing.length > 0) {
-        console.log(`Transcript ${metadata.recordingId} already indexed`)
+        console.log(`Transcript ${chunkMeta.recordingId} already indexed`)
         return 0
       }
     }
 
     // Chunk the transcript and embed all chunks in one batched call
     const chunks = chunkText(transcript)
-    const embeddings = await getEmbeddingsService().generateEmbeddings(chunks)
+
+    // ADV41-2 (round-43) — PRE-PROVIDER gate, adjacent to the provider call with
+    // NO await between here and generateEmbeddings. A top-of-function or batch
+    // snapshot is defeated when an owner exclusion commits while an EARLIER
+    // caller/row was awaiting; re-validate immediately before sending this
+    // content to the external embeddings provider. Fail-closed callers return
+    // false ⇒ nothing is sent, nothing is persisted (returns 0).
+    if (shouldGenerate && !shouldGenerate()) {
+      console.log(
+        `[VectorStore] ${chunkMeta.recordingId ?? 'doc'} not eligible — skipping index (pre-provider)`
+      )
+      return 0
+    }
+
+    // ADV42-2 (round-44) — also forward shouldGenerate INTO the embeddings call so
+    // the BrainRouter re-checks eligibility before the Gemini PRIMARY and the
+    // Ollama FALLBACK embed attempts. The pre-provider guard above only covers
+    // the moment before entering the router; if Gemini then fails and the router
+    // falls back to Ollama, an exclusion committed during that window must not
+    // reach the fallback provider either.
+    const embeddings = await getEmbeddingsService().generateEmbeddings(chunks, { shouldGenerate })
+
+    // RE-1 — re-check eligibility ADJACENT to the write, with no await between
+    // here and the synchronous INSERT loop below. A hard purge that committed
+    // while embeddings were generated must not leave orphaned vector rows.
+    if (shouldPersist && !shouldPersist()) {
+      console.log(`[VectorStore] ${chunkMeta.recordingId ?? 'doc'} no longer eligible — skipping index persist`)
+      return 0
+    }
 
     const db = getDatabase()
     let indexed = 0
@@ -367,12 +422,12 @@ class VectorStore {
       const embedding = embeddings[i]
       if (!embedding) continue
 
-      const id = `${metadata.recordingId || 'doc'}_${i}_${Date.now()}`
+      const id = `${chunkMeta.recordingId || 'doc'}_${i}_${Date.now()}`
       const doc: VectorDocument = {
         id,
         content: chunks[i],
         embedding,
-        metadata: { ...metadata, chunkIndex: i }
+        metadata: { ...chunkMeta, chunkIndex: i }
       }
       this.documents.set(id, doc)
       db.run(
@@ -383,13 +438,13 @@ class VectorStore {
           id,
           chunks[i],
           embeddingToBlob(embedding),
-          metadata.meetingId || null,
-          metadata.recordingId || null,
+          chunkMeta.meetingId || null,
+          chunkMeta.recordingId || null,
           i,
-          metadata.timestamp || null,
-          metadata.subject || null,
-          metadata.sourceType || null,
-          metadata.captureId || null
+          chunkMeta.timestamp || null,
+          chunkMeta.subject || null,
+          chunkMeta.sourceType || null,
+          chunkMeta.captureId || null
         ]
       )
       indexed++
@@ -399,6 +454,67 @@ class VectorStore {
     return indexed
   }
 
+  /**
+   * Round-6 (RE6-1) — THE single choke-point every vector read primitive routes
+   * through, so all consumers (global chat, meeting-scoped chat, summarize-
+   * Meeting, meeting-scoped findActionItems, the rag:get-chunks chunk viewer)
+   * inherit the same fail-closed eligibility policy.
+   *
+   * ADV23-1 (round-24) — POSITIVE PROVENANCE. Earlier the boundary KEPT any doc
+   * that lacked a recordingId ("no recordingId ⇒ keep"). Legacy rows from the
+   * removed optional-metadata rag:index-transcript path can carry NEITHER a
+   * recordingId NOR a captureId, so they were unassociable — they survived every
+   * recording exclusion / hard purge and still reached RAG + rag:get-chunks. A
+   * doc is now kept ONLY if it has POSITIVE, resolvable, eligible provenance:
+   * its recordingId resolves to an ELIGIBLE recording, OR its captureId resolves
+   * to an ELIGIBLE capture. A doc with NEITHER (incl. the legacy neither-id rows)
+   * is DROPPED. This is fail-closed and NON-DESTRUCTIVE — the rows stay in the
+   * store, they are simply never served (a reindex/purge migration is a separate
+   * follow-up). No legitimate doc lacks both: all four main-process indexers set
+   * recordingId, and artifacts additionally set captureId (round 17).
+   */
+  private filterEligibleDocs(docs: VectorDocument[]): VectorDocument[] {
+    // ADV11 (round-12) — POSITIVE PROVENANCE RESOLUTION against the DB.
+    //
+    // Round-11 discriminated recording-backed-ness by `captureId` PRESENCE
+    // (`recordingId && !captureId`). That TRUSTED an UNTRUSTED field: the
+    // `rag:index-transcript` IPC forwarded renderer-supplied metadata straight
+    // into indexTranscript with no runtime stripping (the TS type omitting
+    // captureId is compile-time only). A malicious/buggy renderer could index
+    // `{recordingId: <excludedId>, captureId: <anything>}` → those chunks skipped
+    // the recording allowlist and leaked an excluded recording's content back
+    // into search / meeting retrieval / chunk display / the LLM. A doc's
+    // `captureId` therefore cannot be a security discriminator.
+    //
+    // Instead, resolve provenance POSITIVELY: does `recordingId` name a REAL
+    // recording row (any state)? Then it is recording-backed and MUST obey the
+    // eligibility allowlist — a forged captureId cannot exempt a real excluded
+    // recording. If `recordingId` does NOT resolve to a recording, the doc is a
+    // genuine artifact ONLY when its `captureId` names an ELIGIBLE
+    // knowledge_captures row; otherwise it is a forged chunk, a hard-purged
+    // recording orphan, or an EXCLUDED artifact capture and is DROPPED (fail
+    // closed). Docs with no `recordingId` are never gated here.
+    //
+    // ADV16-3 (round-17): the artifact branch previously kept a doc when its
+    // captureId merely EXISTED (getExistingCaptureIds). Existence includes
+    // soft-deleted + garbage/low-value captures, so excluded pdf/md/txt/image
+    // artifact chunks reached global chat / meeting retrieval / chunk display.
+    // Require ELIGIBILITY via the shared capture boundary instead of existence —
+    // this still subsumes the forged-provenance protection (an ineligible/forged
+    // captureId is absent from the eligible set ⇒ dropped) while keeping genuine
+    // eligible artifacts (round-11 regression).
+    //
+    // ADV44 (round-46) — this positive-provenance logic is now the shared
+    // {@link filterEligibleProvenanceRows} so the Today briefing's eligible-chunk
+    // COUNT derives from the SAME implementation this read boundary uses (no
+    // drift between what search serves and what the count claims).
+    return filterEligibleProvenanceRows(
+      docs,
+      (d) => d.metadata.recordingId,
+      (d) => d.metadata.captureId
+    )
+  }
+
   async search(query: string, topK = 5): Promise<SearchResult[]> {
     const queryEmbedding = await getEmbeddingsService().generateEmbedding(query)
     if (!queryEmbedding) {
@@ -406,23 +522,9 @@ class VectorStore {
       return []
     }
 
-    // Exclude chunks from personal ("ignored") or soft-deleted recordings so the
-    // assistant never surfaces private content. Filtering at query time (rather
-    // than deleting chunks) makes marking a recording personal instantly
-    // effective and fully reversible without re-indexing.
-    let excluded: Set<string>
-    try {
-      excluded = getExcludedRecordingIds()
-    } catch {
-      excluded = new Set()
-    }
-
-    // Calculate similarity scores
+    // Calculate similarity scores over ELIGIBLE docs only (RE6-1 boundary).
     const results: SearchResult[] = []
-
-    for (const doc of this.documents.values()) {
-      const recId = doc.metadata.recordingId
-      if (recId && excluded.has(recId)) continue
+    for (const doc of this.filterEligibleDocs([...this.documents.values()])) {
       const score = cosineSimilarity(queryEmbedding, doc.embedding)
       results.push({ document: doc, score })
     }
@@ -457,14 +559,47 @@ class VectorStore {
     }
     stmt.free()
 
+    // ADV40 sweep (round-42) — route the candidate ids through THE shared
+    // fail-closed boundary BEFORE the embeddings provider call. The SELECT above
+    // only filters personal/deleted at the recording level, and its LEFT JOIN
+    // treats a HARD-PURGED recording's orphaned transcript (r.* all NULL) as
+    // eligible — so that content would be sent to the external embeddings
+    // provider on boot. filterEligibleRecordingIds additionally excludes
+    // value-excluded recordings and, being a positive allowlist, drops
+    // hard-purged orphans. Fail-closed: on any lookup error index NOTHING this
+    // pass (the RE-1 shouldPersist gate below remains for mid-run transitions).
+    const { eligible, failClosed } = filterEligibleRecordingIds(rows.map((r) => r.recording_id))
+    const eligibleRows = failClosed ? [] : rows.filter((r) => eligible.has(r.recording_id))
+
     let indexed = 0
-    let skipped = 0
-    for (const row of rows) {
+    let skipped = rows.length - eligibleRows.length
+    for (const row of eligibleRows) {
       try {
+        // ADV41-2 (round-43) — `eligibleRows` snapshotted eligibility ONCE
+        // before the loop. While an EARLIER row's indexTranscript awaited its
+        // embeddings, the owner can exclude a LATER row (delete / personal /
+        // value-exclude); that row is still in `eligibleRows`. Re-check per row
+        // in the SAME synchronous step immediately before the call so an
+        // excluded recording is never sent to the embeddings provider.
+        if (!isRecordingEligible(row.recording_id)) {
+          skipped++
+          continue
+        }
         const count = await this.indexTranscript(row.full_text, {
           recordingId: row.recording_id,
           timestamp: row.date_recorded,
-          subject: row.filename
+          subject: row.filename,
+          // ADV41-2 (round-43) — PRE-PROVIDER gate: re-validated by
+          // indexTranscript IMMEDIATELY before the embeddings provider call, so
+          // an exclusion committing during THIS row's own chunking window also
+          // blocks the send (the per-row check above closes the window opened by
+          // PRIOR rows' awaits; this closes the window inside indexTranscript).
+          shouldGenerate: () => isRecordingEligible(row.recording_id),
+          // P2 (round-3) — post-await defense: a hard purge / trash /
+          // mark-personal landing DURING the embeddings await is re-checked
+          // adjacent to the write (inside indexTranscript, after embeddings,
+          // before the INSERT loop) so nothing orphaned is persisted.
+          shouldPersist: () => isRecordingProcessable(row.recording_id)
         })
         if (count > 0) indexed++
         else skipped++
@@ -480,9 +615,11 @@ class VectorStore {
   }
 
   async searchByMeeting(meetingId: string): Promise<VectorDocument[]> {
-    return Array.from(this.documents.values())
-      .filter((d) => d.metadata.meetingId === meetingId)
-      .sort((a, b) => a.metadata.chunkIndex - b.metadata.chunkIndex)
+    // RE6-1 — meeting-scoped reads (meeting chat, summarizeMeeting, meeting-
+    // scoped findActionItems) route through the SAME eligibility boundary.
+    return this.filterEligibleDocs(
+      Array.from(this.documents.values()).filter((d) => d.metadata.meetingId === meetingId)
+    ).sort((a, b) => a.metadata.chunkIndex - b.metadata.chunkIndex)
   }
 
   async deleteByRecording(recordingId: string): Promise<number> {
@@ -550,8 +687,38 @@ class VectorStore {
     return meetingIds.size
   }
 
+  /**
+   * ADV44-1 (round-46) — the ELIGIBILITY-FILTERED document count for status
+   * surfaces (rag:status, Today statistics). getDocumentCount above returns the
+   * RAW in-memory corpus size; soft-delete / value-exclude / personal intentionally
+   * RETAIN their vector rows (retrieval filters them dynamically), so the raw size
+   * over-counts excluded chunks and can make Chat look "ready" with ZERO eligible
+   * docs. Route through the SAME fail-closed eligibility boundary search uses
+   * ({@link filterEligibleDocs}); a lookup failure yields 0 (fail-closed).
+   */
+  getEligibleDocumentCount(): number {
+    return this.filterEligibleDocs([...this.documents.values()]).length
+  }
+
+  /**
+   * ADV44-1 (round-46) — distinct meetings among ELIGIBLE documents only (see
+   * {@link getEligibleDocumentCount}). Excluded recordings no longer inflate the
+   * displayed meeting count; fail-closed to 0 on any eligibility lookup failure.
+   */
+  getEligibleMeetingCount(): number {
+    const meetingIds = new Set<string>()
+    for (const doc of this.filterEligibleDocs([...this.documents.values()])) {
+      if (doc.metadata.meetingId) {
+        meetingIds.add(doc.metadata.meetingId)
+      }
+    }
+    return meetingIds.size
+  }
+
   getAllDocuments(): VectorDocument[] {
-    return Array.from(this.documents.values())
+    // RE6-1 — the chunk viewer (rag:get-chunks) and any other consumer of the
+    // full document set inherit the fail-closed eligibility boundary here.
+    return this.filterEligibleDocs(Array.from(this.documents.values()))
   }
 }
 

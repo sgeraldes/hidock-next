@@ -70,7 +70,14 @@ describe('OllamaBrain', () => {
   it('embed() returns vectors when Ollama is available', async () => {
     const out = await brain.embed(['a'])
     expect(out).toEqual([[9, 9]])
-    expect(mockGenerateEmbeddings).toHaveBeenCalledWith(['a'])
+    // ADV43-2 (round-45) — forwards the shouldGenerate gate into the per-text loop.
+    expect(mockGenerateEmbeddings).toHaveBeenCalledWith(['a'], { shouldGenerate: undefined })
+  })
+
+  it('embed() forwards shouldGenerate to OllamaService.generateEmbeddings (round-45 ADV43-2)', async () => {
+    const shouldGenerate = () => true
+    await brain.embed(['a', 'b'], { shouldGenerate })
+    expect(mockGenerateEmbeddings).toHaveBeenCalledWith(['a', 'b'], { shouldGenerate })
   })
 
   it('embed() returns all-null when Ollama is unavailable', async () => {

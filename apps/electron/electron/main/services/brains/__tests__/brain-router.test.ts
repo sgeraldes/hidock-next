@@ -285,6 +285,90 @@ describe('BrainRouter.embed (convenience)', () => {
   })
 })
 
+describe('BrainRouter shouldGenerate gate (round-44 ADV42-2)', () => {
+  beforeEach(() => {
+    mockBrainsConfig = undefined
+  })
+
+  it('chat: shouldGenerate flips false during the primary failure — NO fallback receives content', async () => {
+    const gemini = makeBrain('gemini-api', ['chat'], true)
+    ;(gemini.chat as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('rate limit'))
+    const ollama = makeBrain('ollama', ['chat'], true)
+    const router = new BrainRouter(makeRegistry({ 'gemini-api': gemini, ollama }))
+    // Eligible before the primary attempt, EXCLUDED before the fallback attempt.
+    let calls = 0
+    const shouldGenerate = () => {
+      calls++
+      return calls === 1
+    }
+    const out = await router.chat('chat', [{ role: 'user', content: 'hi' }], { shouldGenerate })
+    expect(out).toBeNull()
+    expect(gemini.chat).toHaveBeenCalledTimes(1)
+    expect(ollama.chat).not.toHaveBeenCalled() // the fallback never saw the content
+  })
+
+  it('chat: a shouldGenerate that THROWS is fail-closed — no provider is called', async () => {
+    const gemini = makeBrain('gemini-api', ['chat'], true)
+    const ollama = makeBrain('ollama', ['chat'], true)
+    const router = new BrainRouter(makeRegistry({ 'gemini-api': gemini, ollama }))
+    const out = await router.chat('chat', [{ role: 'user', content: 'hi' }], {
+      shouldGenerate: () => {
+        throw new Error('exclusion lookup failed')
+      }
+    })
+    expect(out).toBeNull()
+    expect(gemini.chat).not.toHaveBeenCalled()
+    expect(ollama.chat).not.toHaveBeenCalled()
+  })
+
+  it('chat: shouldGenerate staying true still allows the normal fallback (control)', async () => {
+    const gemini = makeBrain('gemini-api', ['chat'], true)
+    ;(gemini.chat as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('rate limit'))
+    const ollama = makeBrain('ollama', ['chat'], true)
+    const router = new BrainRouter(makeRegistry({ 'gemini-api': gemini, ollama }))
+    expect(
+      await router.chat('chat', [{ role: 'user', content: 'hi' }], { shouldGenerate: () => true })
+    ).toBe('ollama:chat')
+    expect(ollama.chat).toHaveBeenCalledTimes(1)
+  })
+
+  it('embed: shouldGenerate flips false during the primary failure — fallback un-called', async () => {
+    const gemini = makeBrain('gemini-api', ['embed'], true)
+    ;(gemini.embed as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('boom'))
+    const ollama = makeBrain('ollama', ['embed'], true)
+    const router = new BrainRouter(makeRegistry({ 'gemini-api': gemini, ollama }))
+    // true for the pre-primary rechecks (before-primary + before-primary.embed),
+    // false for the pre-fallback recheck.
+    let calls = 0
+    const shouldGenerate = () => {
+      calls++
+      return calls <= 2
+    }
+    const out = await router.embed(['a'], { shouldGenerate })
+    expect(out).toEqual([null])
+    expect(gemini.embed).toHaveBeenCalledTimes(1)
+    expect(ollama.embed).not.toHaveBeenCalled()
+  })
+
+  it('embed: a shouldGenerate that is false up front sends NOTHING to any provider', async () => {
+    const gemini = makeBrain('gemini-api', ['embed'], true)
+    const ollama = makeBrain('ollama', ['embed'], true)
+    const router = new BrainRouter(makeRegistry({ 'gemini-api': gemini, ollama }))
+    expect(await router.embed(['a', 'b'], { shouldGenerate: () => false })).toEqual([null, null])
+    expect(gemini.embed).not.toHaveBeenCalled()
+    expect(ollama.embed).not.toHaveBeenCalled()
+  })
+
+  it('embed: shouldGenerate staying true still allows the normal fallback (control)', async () => {
+    const gemini = makeBrain('gemini-api', ['embed'], true)
+    ;(gemini.embed as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('boom'))
+    const ollama = makeBrain('ollama', ['embed'], true)
+    const router = new BrainRouter(makeRegistry({ 'gemini-api': gemini, ollama }))
+    expect(await router.embed(['a'], { shouldGenerate: () => true })).toEqual([[1]])
+    expect(ollama.embed).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('BrainRouter.chat (agentic default / routing)', () => {
   beforeEach(() => {
     mockBrainsConfig = undefined

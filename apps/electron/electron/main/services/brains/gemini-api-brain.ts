@@ -22,8 +22,10 @@ import type {
   BrainAuthStatus,
   BrainCapability,
   BrainMessage,
+  EmbedOptions,
   GenerateOptions,
 } from './types'
+import { eligibleToGenerate } from './eligibility'
 
 const DEFAULT_MODEL = 'gemini-3.5-flash'
 const GEMINI_EMBEDDING_MODEL = 'gemini-embedding-001'
@@ -158,8 +160,16 @@ export class GeminiApiBrain implements AIBrain {
   /**
    * Batch text embeddings (`gemini-embedding-001`, 3072-dim). Exact replica of
    * embeddings.ts `geminiBatch`. Throws on API error (caller falls back to Ollama).
+   *
+   * ADV43-2 (round-45) — a single call fans out to one `batchEmbedContents`
+   * request per 100-text slice, with an `await` between them. `opts.shouldGenerate`
+   * is re-evaluated fail-closed IMMEDIATELY before EACH batch: on ineligible the
+   * loop STOPS issuing further batches and fills every remaining (unembedded) text
+   * with `null` — the "no embedding available" shape callers persist as nothing —
+   * so an owner exclusion committed while an earlier batch was pending never sends
+   * the later batches to Gemini.
    */
-  async embed(texts: string[]): Promise<(number[] | null)[]> {
+  async embed(texts: string[], opts: EmbedOptions = {}): Promise<(number[] | null)[]> {
     if (texts.length === 0) return []
     const apiKey = resolveGeminiApiKey()
     if (!apiKey) throw new Error('Gemini API key not configured')
@@ -169,6 +179,11 @@ export class GeminiApiBrain implements AIBrain {
 
     const out: (number[] | null)[] = []
     for (let i = 0; i < texts.length; i += GEMINI_BATCH_LIMIT) {
+      // Recheck before EACH batch (the concrete provider call).
+      if (!eligibleToGenerate(opts.shouldGenerate)) {
+        while (out.length < texts.length) out.push(null)
+        return out
+      }
       const slice = texts.slice(i, i + GEMINI_BATCH_LIMIT)
       const res = await model.batchEmbedContents({
         requests: slice.map((t) => ({
@@ -214,6 +229,8 @@ export class GeminiApiBrain implements AIBrain {
       language: input.language || config.transcription.language,
       context: input.context || input.prompt || undefined,
       filePath: input.filePath,
+      // ADV43-1 (round-45) sweep — re-checked inside the engine before each provider call.
+      shouldGenerate: input.shouldGenerate,
     } as Parameters<typeof engine.transcribe>[1] & { filePath: string })) {
       const text = segment.text?.trim()
       if (text) parts.push(segment.speaker ? `${segment.speaker}: ${text}` : text)

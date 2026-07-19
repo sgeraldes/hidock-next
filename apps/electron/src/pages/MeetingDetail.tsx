@@ -215,8 +215,12 @@ export function MeetingDetail() {
 
       // R1b: load the meeting's canonical contacts so attendee chips can resolve
       // to /person/:id and expose a remove (X) action with the contact id.
+      // R28-RES-1 (round-29): OWNER meeting-management view — use the existence-scoped
+      // owner accessor so the owner sees every participant of their own meeting
+      // (including excluded-recording-derived ones). The gated default feeds only the
+      // assistant/hover/Today surfaces.
       try {
-        const contactsResult = await window.electronAPI.contacts.getForMeeting(meetingId)
+        const contactsResult = await window.electronAPI.contacts.getForMeetingOwner(meetingId)
         setMeetingContacts(contactsResult.success ? contactsResult.data : [])
       } catch (contactsErr) {
         console.error('Failed to load meeting contacts:', contactsErr)

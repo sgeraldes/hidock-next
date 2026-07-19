@@ -15,6 +15,7 @@ import { success, error, Result } from '../types/api'
 import { GenerateOutputRequestSchema } from '../validation/outputs'
 import type { OutputTemplate, GenerateOutputResponse } from '../types/api'
 import { run, runInTransaction, queryOne } from '../services/database'
+import { filterEligibleActionableRows } from '../services/actionable-eligibility'
 import { getConfig, updateConfig } from '../services/config'
 import { randomUUID } from 'crypto'
 
@@ -393,9 +394,10 @@ export function registerOutputsHandlers(): void {
           return error('VALIDATION_ERROR', 'actionableId must be a non-empty string')
         }
 
-        // Look up the actionable to get its artifact_id
-        const actionable = queryOne<{ artifact_id: string | null }>(
-          'SELECT artifact_id FROM actionables WHERE id = ?',
+        // Look up the actionable to get its artifact_id AND its source, so the
+        // persisted derivative can be gated by source eligibility.
+        const actionable = queryOne<{ artifact_id: string | null; source_knowledge_id: string | null }>(
+          'SELECT artifact_id, source_knowledge_id FROM actionables WHERE id = ?',
           [actionableId]
         )
 
@@ -405,6 +407,21 @@ export function registerOutputsHandlers(): void {
 
         if (!actionable.artifact_id) {
           // No output generated yet
+          return success(null)
+        }
+
+        // ADV16-5 (round-17) — gate the STORED generated derivative through the
+        // shared actionable/capture eligibility boundary. After the source
+        // recording/capture is trashed / marked personal / rated low-value /
+        // soft-deleted, the stale actionable id must NOT re-expose its persisted
+        // output content. filterEligibleActionableRows is fail-closed: a
+        // recording-derived/standalone-capture skid that becomes excluded — or an
+        // eligibility lookup error — drops the row, so we return no content.
+        const eligibleRows = filterEligibleActionableRows(
+          [actionable],
+          (r) => r.source_knowledge_id
+        )
+        if (eligibleRows.length === 0) {
           return success(null)
         }
 

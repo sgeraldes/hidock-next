@@ -20,7 +20,6 @@ import {
   getTopicsForProjectMeetings,
   getKnowledgeIdsForProject,
   getPersonIdsForProject,
-  mergeProjects,
   unmergeProjects,
   UnmergeResult,
   getProjectsForKnowledge,
@@ -29,12 +28,16 @@ import {
   updateProjectNote,
   deleteProjectNote,
   getActionablesForProject,
+  filterVisibleEntityIds,
   dismissDiscoveredProject,
   DismissDiscoveredError,
   MergeOrderConflictError,
   Project as DBProject,
   ProjectNote
 } from '../services/database'
+import { mergeProjectsWithGraph } from '../services/knowledge-graph-service'
+import { filterEligibleRecordingIds } from '../services/recording-eligibility'
+import { filterEligibleActionableRows } from '../services/actionable-eligibility'
 import { success, error, Result } from '../types/api'
 import {
   GetProjectsRequestSchema,
@@ -70,8 +73,16 @@ export function registerProjectsHandlers(): void {
         const { search, limit, offset, status } = parsed.data
         const result = getProjects(search, limit, offset, status)
 
+        // ADV27-1 (round-28) — Projects is a NON-OWNER identity surface: a
+        // transcript-created project ENTITY whose sole source recording is excluded
+        // must not stay listed. Route the page through the central visible-identity
+        // boundary (manual/user projects always survive; fail-closed). Total kept as
+        // the raw count (benign display over-count, never a leak).
+        const { visible } = filterVisibleEntityIds('project', result.projects.map((p) => p.id))
+        const projects = result.projects.filter((p) => visible.has(p.id))
+
         return success({
-          projects: result.projects.map(mapToProject),
+          projects: projects.map(mapToProject),
           total: result.total
         })
       } catch (err) {
@@ -98,17 +109,35 @@ export function registerProjectsHandlers(): void {
           return error('NOT_FOUND', `Project with ID ${parsed.data.id} not found`)
         }
 
+        // ADV27-1 (round-28) — POINT read on the non-owner surface: a
+        // transcript-created project whose provenance is fully excluded is treated
+        // as absent; manual/user projects pass. Fail-closed.
+        const { visible } = filterVisibleEntityIds('project', [parsed.data.id])
+        if (!visible.has(parsed.data.id)) {
+          return error('NOT_FOUND', `Project with ID ${parsed.data.id} not found`)
+        }
+
         const meetings = getMeetingsForProject(parsed.data.id)
 
-        // Extract topics via single JOIN query (replaces N+1 nested loops)
+        // Extract topics via single JOIN query (replaces N+1 nested loops).
+        // ADV15 (round-16) — route every topic row's source recording through the
+        // shared filterEligibleRecordingIds boundary and derive the topic set ONLY
+        // from ELIGIBLE recordings (personal/soft-deleted/value-excluded/hard-purged
+        // dropped); fail-closed → no topics (the recurring-topics trap on Projects).
         const topicsSet = new Set<string>()
-        const topicsJsonStrings = getTopicsForProjectMeetings(parsed.data.id)
-        for (const topicsJson of topicsJsonStrings) {
-          try {
-            const meetingTopics = JSON.parse(topicsJson) as string[]
-            meetingTopics.forEach((topic) => topicsSet.add(topic))
-          } catch {
-            // Invalid JSON, skip
+        const topicRows = getTopicsForProjectMeetings(parsed.data.id)
+        const { eligible: eligibleTopicRecs, failClosed: topicsFailClosed } = filterEligibleRecordingIds(
+          topicRows.map((r) => r.recording_id)
+        )
+        if (!topicsFailClosed) {
+          for (const { recording_id, topics } of topicRows) {
+            if (!eligibleTopicRecs.has(recording_id)) continue
+            try {
+              const meetingTopics = JSON.parse(topics) as string[]
+              meetingTopics.forEach((topic) => topicsSet.add(topic))
+            } catch {
+              // Invalid JSON, skip
+            }
           }
         }
 
@@ -177,6 +206,15 @@ export function registerProjectsHandlers(): void {
         const { id, name, description, status, folderPath, url } = parsed.data
         const project = getProjectById(id)
         if (!project) {
+          return error('NOT_FOUND', `Project with ID ${id} not found`)
+        }
+
+        // ADV36-2 sweep (round-38) — gate the update TARGET through the central
+        // visible-identity boundary (mirrors contacts:update). A SUPPRESSED project
+        // is already hidden from projects:getById / getAll, so a stale UI reference
+        // must not mutate (and thereby re-surface) it. Suppressed/failClosed ⇒ absent.
+        const { visible, failClosed } = filterVisibleEntityIds('project', [id])
+        if (failClosed || !visible.has(id)) {
           return error('NOT_FOUND', `Project with ID ${id} not found`)
         }
 
@@ -281,6 +319,20 @@ export function registerProjectsHandlers(): void {
           return error('NOT_FOUND', `Project with ID ${projectId} not found`)
         }
 
+        // ADV37-2 (round-39) — tagMeetingToProject writes an always-eligible
+        // source='calendar' meeting_projects membership. A stale/SUPPRESSED project
+        // (its sole provenance an excluded/personal/value-excluded/hard-purged
+        // recording) is already hidden from projects:getAll/getById, so tagging it
+        // here would REANIMATE it (reappearing in project lists/discovery/merge/
+        // legacy-node-backing). Gate the id through the central visible-identity
+        // boundary immediately before the write — no await in between, so on the
+        // single-threaded main process the check and the tag are atomic. Refuse
+        // generically (as not-found) on suppressed OR fail-closed lookup.
+        const { visible, failClosed } = filterVisibleEntityIds('project', [projectId])
+        if (failClosed || !visible.has(projectId)) {
+          return error('NOT_FOUND', `Project with ID ${projectId} not found`)
+        }
+
         tagMeetingToProject(meetingId, projectId)
 
         return success(undefined)
@@ -338,7 +390,24 @@ export function registerProjectsHandlers(): void {
           return error('NOT_FOUND', `Loser project ${loserId} not found`)
         }
 
-        const merged = mergeProjects(keeperId, loserId)
+        // ADV36-2 sweep (round-38) — the MANUAL project-merge analogue of
+        // contacts:merge. mergeProjects folds the loser's fields/memberships onto the
+        // keeper with NO visibility check, so a stale/SUPPRESSED loser project (sole
+        // source recording excluded) would launder excluded-derived identity into a
+        // VISIBLE keeper. Gate BOTH ids through the central visible-identity boundary
+        // immediately before the merge (atomic — no await between). Refuse
+        // generically unless BOTH visible AND the lookup succeeds; fail-closed.
+        const { visible, failClosed } = filterVisibleEntityIds('project', [keeperId, loserId])
+        if (failClosed || !visible.has(keeperId) || !visible.has(loserId)) {
+          return error('MERGE_NOT_ALLOWED', 'These projects cannot be merged.')
+        }
+
+        // ADV56-3 (round-58): route through the graph-aware composite so the loser's
+        // NAME-KEYED project node + edges + graph_edge_sources provenance fold onto the
+        // keeper in the SAME transaction as the relational merge. mergeProjects
+        // (relational-only) deletes the loser project WITHOUT touching its graph node,
+        // stranding the loser's project node/edges under a project that no longer exists.
+        const merged = mergeProjectsWithGraph(keeperId, loserId)
         return success(mapToProject(merged))
       } catch (err) {
         console.error('projects:merge error:', err)
@@ -510,7 +579,15 @@ export function registerProjectsHandlers(): void {
         if (!parsed.success) {
           return error('VALIDATION_ERROR', 'Invalid project ID', parsed.error.format())
         }
-        const rows = getActionablesForProject(parsed.data)
+        // ADV15 (round-16) — project actionables are assistant-facing DISPLAY;
+        // route through the ONE shared capture-aware boundary (identical to
+        // actionables:getAll) so an actionable whose capture/recording is excluded
+        // (personal/soft-deleted/value-excluded/soft-deleted-capture/standalone-
+        // garbage) is dropped, fail-closed. Replaces the ungated pass-through.
+        const rows = filterEligibleActionableRows(
+          getActionablesForProject(parsed.data),
+          (r) => (r.source_knowledge_id as string | null | undefined) ?? null
+        )
         return success(rows.map(mapToActionable))
       } catch (err) {
         console.error('projects:getActionables error:', err)

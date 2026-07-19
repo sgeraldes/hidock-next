@@ -100,7 +100,7 @@ function isQaLogsEnabled(): boolean {
 
 // --- IPC Logging Wrapper ---
 const callIPC = async (channel: string, ...args: any[]) => {
-  const isPolling = ['recordings:getTranscriptionStatus', 'db:get-recordings', 'knowledge:getAll'].includes(channel);
+  const isPolling = ['recordings:getTranscriptionStatus', 'db:get-recordings', 'knowledge:getAll', 'knowledge:getAllOwner'].includes(channel);
 
   try {
     const start = performance.now();
@@ -241,6 +241,8 @@ interface MergePreviewDTO {
   resulting: number
   contactMerge: boolean
   contactImpact?: { keeper: number; loser: number }
+  /** ADV32-2 (round-34) — the preview was refused (node/contact not visible). */
+  blocked?: boolean
 }
 
 /** Project issue / risk / note (v29). */
@@ -372,7 +374,10 @@ export interface ElectronAPI {
     unmerge: (journalId: string) => Promise<Result<UnmergeResult>>
     /** Atomic group Undo: unwinds all journals newest-first in ONE transaction — any rejection rolls back the whole group. */
     unmergeGroup: (journalIds: string[]) => Promise<Result<UnmergeResult[]>>
+    /** GATED (assistant/hover/Today): excluded-recording-derived attendees suppressed. */
     getForMeeting: (meetingId: string) => Promise<Result<Contact[]>>
+    /** OWNER-MANAGEMENT (existence-scoped): all participants of the owner's own meeting. */
+    getForMeetingOwner: (meetingId: string) => Promise<Result<Contact[]>>
   }
 
   // Projects
@@ -401,6 +406,10 @@ export interface ElectronAPI {
   // Database - Recordings
   recordings: {
     getAll: () => Promise<any[]>
+    // Soft-deleted (tombstoned) recordings feeding the Trash UI (spec-005/F17
+    // T5). Renderer casts the rows to its DatabaseRecording shape (same as
+    // getAll — the main-process Recording type isn't importable here).
+    getTrash: () => Promise<any[]>
     getById: (id: string) => Promise<any>
     getForMeeting: (meetingId: string) => Promise<any[]>
     updateStatus: (id: string, status: string) => Promise<any>
@@ -423,10 +432,20 @@ export interface ElectronAPI {
         artifacts: number
         meetingLinks: number
         hasAudioFile: boolean
+        // spec-006/F17 T6 D5/F-INFO-6
+        onDevice: boolean
+        deviceFilename: string | null
+        // spec-006/F17 T6 D5/AR3-8 — number = point-in-time estimate; null =
+        // the graph dry-run explicitly failed (UNKNOWN, never omitted).
+        graphEstimate: number | null
       }
       error?: string
     }>
-    deleteCascade: (id: string, hard: boolean) => Promise<{
+    // spec-006/F17 T6 AR3-3(c): the 3rd argument is the explicit
+    // skipGraphCleanup escape hatch — omit it (2-arg call) for the normal
+    // path; only pass it after an honest graphUnavailable failure and an
+    // explicit second user action.
+    deleteCascade: (id: string, hard: boolean, opts?: { skipGraphCleanup?: boolean }) => Promise<{
       success: boolean
       mode?: 'soft' | 'hard'
       removed?: {
@@ -438,11 +457,53 @@ export interface ElectronAPI {
         speakerBindings: number
         candidates: number
         meetingLinksRemoved: number
+        // spec-006/F17 T6 D1/D5 — actual (not estimated) graph cleanup counts.
+        markersRemoved: number
+        edgesRemoved: number
+        edgeSourceRowsRemoved: number
+        meetingNodesRemoved: number
+        orphanNodesRemoved: number
       }
       filesRemoved?: { audio: boolean; wikiPages: number; artifactBlobs: number }
+      // spec-006/F17 T6 AR3-2 — post-commit file-cleanup partial-result contract.
+      allFilesRemoved?: boolean
+      pendingFileKinds?: string[]
+      // ADV49-1 (round 51) — the failed file-cleanup targets could not be durably
+      // journaled, so they will NOT be auto-retried; the toast reports an honest
+      // unrecoverable failure instead of promising a retry.
+      cleanupUnrecoverable?: boolean
+      // spec-006/F17 T6 AR3-3(c)
+      graphCleanupSkipped?: boolean
+      journalId?: string
       error?: string
+      // spec-006/F17 T6 AR3-1/AR3-3 — set when the failure specifically means
+      // "the graph cleanup seam is unavailable"; the caller offers the
+      // skipGraphCleanup escape hatch only then, never automatically.
+      graphUnavailable?: boolean
     }>
     restore: (id: string) => Promise<{ success: boolean }>
+    // spec-006/F17 T6 AR3-6(b) — immediate single-recording device reconciliation.
+    // CX-T6-1 (fix round): deviceFilename is the fallback reconciliation key
+    // for the offline device cache when the id no longer resolves — i.e. the
+    // permanent flow, where the hard cascade already deleted the row before
+    // the device delete confirmed.
+    markNotOnDevice: (id: string, deviceFilename?: string) => Promise<{ success: boolean; error?: string }>
+    // spec-006/F17 T6 AR3-2 — bounded, non-fatal pending-file-cleanup retry sweep.
+    retryPendingCleanups: () => Promise<{
+      success: boolean
+      attempted?: number
+      cleared?: number
+      // OP-LOW-2 (fix round): journal ids the sweep fully cleared, so callers
+      // can distinguish "swept clean" from "not swept at all".
+      clearedJournalIds?: string[]
+      stillPending?: Record<string, string[]>
+      error?: string
+    }>
+    // F16/spec-003: manual per-row value-rating override (validated, capture-scoped).
+    setValueRating: (
+      id: string,
+      rating: 'valuable' | 'archived' | 'low-value' | 'garbage' | 'unrated'
+    ) => Promise<{ success: boolean; rating?: string; error?: string }>
     // Recording-Meeting linking dialog methods
     getCandidates: (recordingId: string) => Promise<{ success: boolean; data: any[]; error?: string }>
     getMeetingsNearDate: (date: string) => Promise<{ success: boolean; data: any[]; error?: string }>
@@ -497,6 +558,15 @@ export interface ElectronAPI {
   transcripts: {
     getByRecordingId: (recordingId: string) => Promise<any>
     getByRecordingIds: (recordingIds: string[]) => Promise<Record<string, any>>
+    /**
+     * ADV13 owner-management accessor — returns the transcript for an EXISTING
+     * recording even when it is soft-deleted / personal / value-excluded (owner
+     * viewing their OWN content), null for a hard-purged / nonexistent id. Use
+     * ONLY in owner-management UI (Library, SourceReader detail); assistant /
+     * discovery surfaces must use the gated getByRecordingId(s).
+     */
+    getByRecordingIdOwner: (recordingId: string) => Promise<any>
+    getByRecordingIdsOwner: (recordingIds: string[]) => Promise<Record<string, any>>
     search: (query: string) => Promise<any[]>
     getRecurringTopics: () => Promise<Array<{ topic: string; recordingCount: number }>>
     assignSpeaker: (request: { recordingId: string; speakerLabel: string; contactId?: string; newName?: string }) => Promise<Result<Contact>>
@@ -564,6 +634,10 @@ export interface ElectronAPI {
   // Knowledge Captures
   knowledge: {
     getAll: (options?: { limit?: number; offset?: number; status?: string }) => Promise<KnowledgeCapture[]>
+    // ROUND-15 RESIDUAL — owner-management accessor (existence-scoped). ONLY the
+    // owner Library (useUnifiedRecordings) may call this; assistant/discovery
+    // surfaces use the gated getAll.
+    getAllOwner: (options?: { limit?: number; offset?: number; status?: string }) => Promise<KnowledgeCapture[]>
     getById: (id: string) => Promise<KnowledgeCapture | null>
     getByIds: (ids: string[]) => Promise<KnowledgeCapture[]> // B-CHAT-004
     update: (id: string, updates: Partial<KnowledgeCapture>) => Promise<{ success: boolean; error?: string }>
@@ -589,7 +663,9 @@ export interface ElectronAPI {
     createConversation: (title?: string) => Promise<Conversation>
     deleteConversation: (id: string) => Promise<{ success: boolean; error?: string }>
     getMessages: (conversationId: string) => Promise<Message[]>
-    addMessage: (conversationId: string, role: 'user' | 'assistant', content: string, sources?: string) => Promise<Message>
+    addMessage: (conversationId: string, role: 'user' | 'assistant', content: string, sources?: string, generationId?: string) => Promise<Message>
+    /** ADV20-1 (round-21) — persist a main-owned non-RAG notice by fixed code (no free text). */
+    addNotice: (conversationId: string, code: string) => Promise<Message>
     updateConversationTitle: (conversationId: string, title: string) => Promise<{ success: boolean; error?: string }>
     addContext: (conversationId: string, knowledgeCaptureId: string) => Promise<{ success: boolean; error?: string }>
     removeContext: (conversationId: string, knowledgeCaptureId: string) => Promise<{ success: boolean; error?: string }>
@@ -599,7 +675,12 @@ export interface ElectronAPI {
   // Chat
   chat: {
     getHistory: (limit?: number) => Promise<any[]>
-    addMessage: (role: 'user' | 'assistant', content: string, sources?: string) => Promise<any>
+    /**
+     * ADV22-2 (round-23) — USER-ONLY. Assistant messages are created exclusively via
+     * the main-owned assistant.addMessage(generationId) path (main owns the content).
+     * This legacy write door accepts ONLY role='user'.
+     */
+    addMessage: (role: 'user', content: string, sources?: string) => Promise<any>
     clearHistory: () => Promise<boolean>
   }
 
@@ -691,15 +772,15 @@ export interface ElectronAPI {
   rag: {
     status: () => Promise<Result<RAGStatus>>
     chat: (request: RAGChatRequest) => Promise<Result<RAGChatResponse>>
+    /**
+     * ADV22-1 (round-23) — CONTENT-FREE. Returns ONLY the generationId + a non-content
+     * error string; NEVER the answer text or source excerpts. Obtain the displayable
+     * answer solely via assistant.addMessage(generationId).
+     */
     chatLegacy: (sessionId: string, message: string, meetingFilter?: string) => Promise<{
-      answer: string
-      sources: Array<{
-        content: string
-        meetingId?: string
-        subject?: string
-        timestamp?: string
-        score: number
-      }>
+      /** ADV19-4 — pass back to assistant.addMessage to release the sanitized answer. */
+      generationId?: string
+      /** Non-content status/error message for a failed generation. */
       error?: string
     }>
     summarizeMeeting: (meetingId: string) => Promise<Result<string>>
@@ -712,12 +793,6 @@ export interface ElectronAPI {
       meetingCount: number
       sessionCount: number
     }>
-    indexTranscript: (transcript: string, metadata: {
-      meetingId?: string
-      recordingId?: string
-      timestamp?: string
-      subject?: string
-    }) => Promise<{ indexed: number }>
     search: (query: string, limit?: number) => Promise<Array<{
       content: string
       meetingId?: string
@@ -924,6 +999,24 @@ export interface ElectronAPI {
     }) => Promise<Result<HandoverRunAgentResult>>
   }
 
+  // Value-classification backfill (F16/spec-003) — resumable, user-triggered
+  // ONLY from the Settings card; never auto-started (see value-backfill.ts).
+  valueBackfill: {
+    start: (order?: 'newest' | 'oldest') => Promise<{ success: boolean; started?: boolean; reason?: string; error?: string }>
+    cancel: () => Promise<{ success: boolean; cancelled?: boolean; error?: string }>
+    getStatus: () => Promise<{
+      success: boolean
+      data?: { running: boolean; total: number; done: number; marked: number; failed: number; remaining: number }
+      error?: string
+    }>
+    onProgress: (
+      callback: (progress: { processed: number; total: number; marked: number; failed: number }) => void
+    ) => () => void
+    onComplete: (
+      callback: (result: { processed: number; total: number; marked: number; failed: number; cancelled: boolean }) => void
+    ) => () => void
+  }
+
   // Migration - Database schema migration to V11 (Knowledge Captures)
   migration: MigrationAPI
 
@@ -997,8 +1090,8 @@ export interface ElectronAPI {
     topSkill: (skill: string) => Promise<{ success: boolean; data?: Array<{ person: string; personId: string; weight: number }>; error?: string }>
     personProfile: (name: string) => Promise<{ success: boolean; data?: { personId: string; personLabel: string; meetings: any[]; skills: any[]; actionItems: any[] } | undefined; error?: string }>
     meetingGraph: (meetingId: string) => Promise<{ success: boolean; data?: { meeting: any; nodes: any[]; edges: any[] }; error?: string }>
-    listNodes: (type?: string) => Promise<{ success: boolean; data?: any[]; error?: string }>
-    resolvePerson: (name: string) => Promise<{ success: boolean; data?: Contact | null; error?: string }>
+    // listNodes REMOVED (ADV33-1, round 35) — dead IPC that returned raw GraphNodes leaking suppressed contactId.
+    // resolvePerson REMOVED (ADV34-2, round 36) — dead IPC that returned a raw unfiltered Contact leaking excluded-recording-backed identity.
   }
 
   // Context Graph — interactive visualization + neighborhood retrieval
@@ -1252,7 +1345,8 @@ const electronAPI: ElectronAPI = {
     merge: (request) => callIPC('contacts:merge', request),
     unmerge: (journalId) => callIPC('contacts:unmerge', journalId),
     unmergeGroup: (journalIds) => callIPC('contacts:unmergeGroup', journalIds),
-    getForMeeting: (meetingId) => callIPC('contacts:getForMeeting', meetingId)
+    getForMeeting: (meetingId) => callIPC('contacts:getForMeeting', meetingId),
+    getForMeetingOwner: (meetingId) => callIPC('contacts:getForMeetingOwner', meetingId)
   },
 
   projects: {
@@ -1278,6 +1372,7 @@ const electronAPI: ElectronAPI = {
 
   recordings: {
     getAll: () => callIPC('db:get-recordings'),
+    getTrash: () => callIPC('recordings:getTrash'),
     getById: (id) => callIPC('db:get-recording', id),
     getForMeeting: (meetingId) => callIPC('db:get-recordings-for-meeting', meetingId),
     updateStatus: (id, status) => callIPC('db:update-recording-status', id, status),
@@ -1289,8 +1384,11 @@ const electronAPI: ElectronAPI = {
       callIPC('db:link-recording-to-meeting', recordingId, meetingId, confidence, method),
     markPersonal: (id, personal) => callIPC('recordings:markPersonal', id, personal),
     deletionImpact: (id) => callIPC('recordings:deletionImpact', id),
-    deleteCascade: (id, hard) => callIPC('recordings:deleteCascade', id, hard),
+    deleteCascade: (id, hard, opts) => callIPC('recordings:deleteCascade', id, hard, opts),
     restore: (id) => callIPC('recordings:restore', id),
+    markNotOnDevice: (id, deviceFilename) => callIPC('recordings:markNotOnDevice', id, deviceFilename),
+    retryPendingCleanups: () => callIPC('recordings:retryPendingCleanups'),
+    setValueRating: (id, rating) => callIPC('recordings:setValueRating', id, rating),
     // Recording-Meeting linking dialog methods
     getCandidates: (recordingId) => callIPC('recordings:getCandidates', recordingId),
     getMeetingsNearDate: (date) => callIPC('recordings:getMeetingsNearDate', date),
@@ -1324,6 +1422,8 @@ const electronAPI: ElectronAPI = {
   transcripts: {
     getByRecordingId: (recordingId) => callIPC('db:get-transcript', recordingId),
     getByRecordingIds: (recordingIds) => callIPC('db:get-transcripts-by-recording-ids', recordingIds),
+    getByRecordingIdOwner: (recordingId) => callIPC('db:get-transcript-owner', recordingId),
+    getByRecordingIdsOwner: (recordingIds) => callIPC('db:get-transcripts-by-recording-ids-owner', recordingIds),
     search: (query) => callIPC('db:search-transcripts', query),
     getRecurringTopics: () => callIPC('db:get-recurring-topics'),
     assignSpeaker: (request) => callIPC('transcripts:assignSpeaker', request),
@@ -1371,6 +1471,7 @@ const electronAPI: ElectronAPI = {
 
   knowledge: {
     getAll: (options) => callIPC('knowledge:getAll', options),
+    getAllOwner: (options) => callIPC('knowledge:getAllOwner', options),
     getById: (id) => callIPC('knowledge:getById', id),
     getByIds: (ids) => callIPC('knowledge:getByIds', ids), // B-CHAT-004
     update: (id, updates) => callIPC('knowledge:update', id, updates),
@@ -1393,7 +1494,8 @@ const electronAPI: ElectronAPI = {
     createConversation: (title) => callIPC('assistant:createConversation', title),
     deleteConversation: (id) => callIPC('assistant:deleteConversation', id),
     getMessages: (conversationId) => callIPC('assistant:getMessages', conversationId),
-    addMessage: (conversationId, role, content, sources) => callIPC('assistant:addMessage', conversationId, role, content, sources),
+    addMessage: (conversationId, role, content, sources, generationId) => callIPC('assistant:addMessage', conversationId, role, content, sources, generationId),
+    addNotice: (conversationId, code) => callIPC('assistant:addNotice', conversationId, code),
     updateConversationTitle: (conversationId, title) => callIPC('assistant:updateConversationTitle', conversationId, title),
     addContext: (conversationId, knowledgeCaptureId) => callIPC('assistant:addContext', conversationId, knowledgeCaptureId),
     removeContext: (conversationId, knowledgeCaptureId) => callIPC('assistant:removeContext', conversationId, knowledgeCaptureId),
@@ -1496,6 +1598,26 @@ const electronAPI: ElectronAPI = {
     runAgent: (args) => callIPC('handover:runAgent', args)
   },
 
+  valueBackfill: {
+    start: (order) => callIPC('value:startBackfill', order ? { order } : undefined),
+    cancel: () => callIPC('value:cancelBackfill'),
+    getStatus: () => callIPC('value:getBackfillStatus'),
+    onProgress: (callback) => {
+      const handler = (_event: any, progress: any) => callback(progress)
+      ipcRenderer.on('value:backfill-progress', handler)
+      return () => {
+        ipcRenderer.removeListener('value:backfill-progress', handler)
+      }
+    },
+    onComplete: (callback) => {
+      const handler = (_event: any, result: any) => callback(result)
+      ipcRenderer.on('value:backfill-complete', handler)
+      return () => {
+        ipcRenderer.removeListener('value:backfill-complete', handler)
+      }
+    }
+  },
+
   migration: {
     previewCleanup: () => callIPC('migration:previewCleanup'),
     runCleanup: () => callIPC('migration:runCleanup'),
@@ -1534,8 +1656,6 @@ const electronAPI: ElectronAPI = {
     removeLastMessages: (sessionId, count) => callIPC('rag:removeLastMessages', sessionId, count),
     clearSession: (sessionId) => callIPC('rag:clear-session', sessionId),
     stats: () => callIPC('rag:stats'),
-    indexTranscript: (transcript, metadata) =>
-      callIPC('rag:index-transcript', { transcript, metadata }),
     search: (query, limit) => callIPC('rag:search', { query, limit }),
     getChunks: () => callIPC('rag:get-chunks'),
     globalSearch: (query, limit) => callIPC('rag:globalSearch', { query, limit })
@@ -1724,8 +1844,8 @@ const electronAPI: ElectronAPI = {
     topSkill: (skill: string) => callIPC('graph:topSkill', skill),
     personProfile: (name: string) => callIPC('graph:personProfile', name),
     meetingGraph: (meetingId: string) => callIPC('graph:meetingGraph', meetingId),
-    listNodes: (type?: string) => callIPC('graph:listNodes', type),
-    resolvePerson: (name: string) => callIPC('graph:resolvePerson', name),
+    // listNodes REMOVED (ADV33-1, round 35) — dead IPC that leaked suppressed contactId.
+    // resolvePerson REMOVED (ADV34-2, round 36) — dead IPC that leaked a raw unfiltered Contact.
   },
 
   // Context Graph — interactive visualization + neighborhood retrieval

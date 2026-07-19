@@ -50,7 +50,30 @@ const fakeDb = vi.hoisted(() => ({
 
 vi.mock('../database', () => ({
   getDatabase: () => fakeDb,
-  getExcludedRecordingIds: () => new Set<string>()
+  // Round-6 — { ids, failClosed } shape.
+  getExcludedRecordingIds: () => ({ ids: new Set<string>(), failClosed: false }),
+  // ADV9 (round-9) — positive allowlist; nothing excluded here → all eligible.
+  getEligibleRecordingIds: (ids: Iterable<string>) => ({ eligible: new Set([...ids].filter((i) => !!i)), failClosed: false }),
+  // ADV11 (round-12) — provenance existence, keyed on this suite's id naming:
+  // 'rec-*' are real recordings; 'art*' are artifact ids (NOT recordings) whose
+  // 'cap-*' captureId names a real capture.
+  getExistingRecordingIds: (ids: Iterable<string>) => ({
+    ids: new Set([...ids].filter((i): i is string => !!i && !i.startsWith('art'))),
+    failClosed: false
+  }),
+  getExistingCaptureIds: (ids: Iterable<string>) => ({
+    ids: new Set([...ids].filter((i): i is string => !!i && i.startsWith('cap'))),
+    failClosed: false
+  }),
+  // ADV16-3 (round-17) — the artifact branch now requires capture ELIGIBILITY.
+  // 'cap-*' captures are eligible standalone captures here (unrated, not deleted).
+  getCaptureEligibilityRows: (ids: Iterable<string>) => ({
+    rows: [...ids]
+      .filter((i): i is string => !!i && i.startsWith('cap'))
+      .map((id) => ({ id, source_recording_id: null, quality_rating: null, deleted_at: null })),
+    failClosed: false
+  }),
+  isRecordingProcessable: () => true
 }))
 
 vi.mock('../embeddings', () => ({

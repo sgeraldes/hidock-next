@@ -56,8 +56,8 @@ describe('schema v42: projects.origin (provenance-enforced discovered-project di
   it("createProject stamps origin='manual'; the reconciler auto-create stamps 'discovered'", () => {
     const createFn = source.match(/export function createProject[\s\S]*?\n\}/)
     expect(createFn).not.toBeNull()
-    expect(createFn![0]).toMatch(/INSERT INTO projects \(id, name, description, status, origin\) VALUES \(\?, \?, \?, \?, 'manual'\)/)
-    expect(reconciler).toMatch(/INSERT INTO projects \(id, name, status, origin\) VALUES \(\?, \?, 'active', 'discovered'\)/)
+    expect(createFn![0]).toMatch(/INSERT INTO projects \(id, name, description, status, source, origin\) VALUES \(\?, \?, \?, \?, 'user', 'manual'\)/)
+    expect(reconciler).toMatch(/INSERT INTO projects \(id, name, status, origin, source, source_recording_id\) VALUES \(\?, \?, 'active', 'discovered', 'transcript', \?\)/)
   })
 
   it('dismissDiscoveredProject enforces provenance transactionally in the DB layer', () => {

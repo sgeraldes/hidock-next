@@ -1,4 +1,4 @@
-import { Plus, FileUp, FolderOpen, Download, Zap, RefreshCw, LayoutGrid, List } from 'lucide-react'
+import { Plus, FileUp, FolderOpen, Download, Zap, RefreshCw, LayoutGrid, List, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { TranscriptUpgradeButton } from './TranscriptUpgradeButton'
 
@@ -26,6 +26,10 @@ interface LibraryHeaderProps {
   onBulkProcess: () => void
   onRefresh: () => void
   onSetCompactView: (compact: boolean) => void
+  /** spec-005/F17 T5 §D1/§D4 — Trash view-mode toggle + its (eagerly-loaded) count. */
+  showTrash: boolean
+  trashCount: number
+  onToggleTrash: () => void
 }
 
 export function LibraryHeader({
@@ -43,7 +47,10 @@ export function LibraryHeader({
   onBulkDownload,
   onBulkProcess,
   onRefresh,
-  onSetCompactView
+  onSetCompactView,
+  showTrash,
+  trashCount,
+  onToggleTrash
 }: LibraryHeaderProps) {
   return (
     <header className="border-b px-6 py-4">
@@ -129,31 +136,49 @@ export function LibraryHeader({
             Refresh
           </Button>
 
-          {/* View Toggle */}
-          <div className="flex items-center border rounded-md overflow-hidden ml-2" role="group" aria-label="View layout" data-testid="grid-view-toggle">
-            <Button
-              variant={compactView ? 'ghost' : 'default'}
-              size="sm"
-              onClick={() => onSetCompactView(false)}
-              className="rounded-none border-0 px-2"
-              title="Card view"
-              aria-label="Card view"
-              aria-pressed={!compactView}
-            >
-              <LayoutGrid className="h-4 w-4" aria-hidden="true" />
-            </Button>
-            <Button
-              variant={compactView ? 'default' : 'ghost'}
-              size="sm"
-              onClick={() => onSetCompactView(true)}
-              className="rounded-none border-0 border-l px-2"
-              title="List view"
-              aria-label="List view"
-              aria-pressed={compactView}
-            >
-              <List className="h-4 w-4" aria-hidden="true" />
-            </Button>
-          </div>
+          {/* Trash toggle (spec-005/F17 T5 §D1/§D4) — a real button with
+              aria-pressed + a visible count, always available so the user can
+              exit Trash even though the filters/view-toggle disappear there. */}
+          <Button
+            type="button"
+            variant={showTrash ? 'default' : 'outline'}
+            size="sm"
+            onClick={onToggleTrash}
+            aria-pressed={showTrash}
+            title={showTrash ? 'Exit Trash' : 'View Trash'}
+          >
+            <Trash2 className="h-4 w-4 mr-2" aria-hidden="true" />
+            Trash ({trashCount})
+          </Button>
+
+          {/* View Toggle — hidden in Trash mode (§D1: Trash always forces the
+              SourceRow list; the card↔compact toggle has nothing to switch there). */}
+          {!showTrash && (
+            <div className="flex items-center border rounded-md overflow-hidden ml-2" role="group" aria-label="View layout" data-testid="grid-view-toggle">
+              <Button
+                variant={compactView ? 'ghost' : 'default'}
+                size="sm"
+                onClick={() => onSetCompactView(false)}
+                className="rounded-none border-0 px-2"
+                title="Card view"
+                aria-label="Card view"
+                aria-pressed={!compactView}
+              >
+                <LayoutGrid className="h-4 w-4" aria-hidden="true" />
+              </Button>
+              <Button
+                variant={compactView ? 'default' : 'ghost'}
+                size="sm"
+                onClick={() => onSetCompactView(true)}
+                className="rounded-none border-0 border-l px-2"
+                title="List view"
+                aria-label="List view"
+                aria-pressed={compactView}
+              >
+                <List className="h-4 w-4" aria-hidden="true" />
+              </Button>
+            </div>
+          )}
         </div>
       </div>
     </header>

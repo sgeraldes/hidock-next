@@ -20,6 +20,7 @@ vi.mock('electron', () => ({
 vi.mock('../../services/database', () => ({
   getRecordings: vi.fn(),
   getRecordingById: vi.fn(),
+  getTrashedRecordings: vi.fn(),
   getRecordingsForMeeting: vi.fn(),
   updateRecordingStatus: vi.fn(),
   updateRecordingTranscriptionStatus: vi.fn(),
@@ -121,6 +122,19 @@ vi.mock('../../services/transcription', () => ({
   markUserPriority: vi.fn()
 }))
 
+// ADV40-2 (round-42) — recordings:getCandidates gates the recording id through
+// the shared fail-closed eligibility boundary before reading its transcript.
+// Default: every input id eligible; individual tests override per-call.
+const { mockFilterEligibleRecordingIds } = vi.hoisted(() => ({
+  mockFilterEligibleRecordingIds: vi.fn((...args: any[]) => {
+    const ids = (args[0] ?? []) as Iterable<string>
+    return { eligible: new Set([...ids].filter((x: any) => !!x)), failClosed: false }
+  })
+}))
+vi.mock('../../services/recording-eligibility', () => ({
+  filterEligibleRecordingIds: (...args: any[]) => mockFilterEligibleRecordingIds(...args)
+}))
+
 // Mock config service
 vi.mock('../../services/config', () => ({
   getConfig: vi.fn(() => ({
@@ -151,6 +165,7 @@ describe('Recording IPC Handlers', () => {
   it('should register all expected handlers', () => {
     const expectedChannels = [
       'recordings:getAll',
+      'recordings:getTrash',
       'recordings:getById',
       'recordings:getForMeeting',
       'recordings:getAllWithTranscripts',
@@ -208,6 +223,34 @@ describe('Recording IPC Handlers', () => {
       })
 
       const result = await handlers['recordings:getAll'](null)
+
+      expect(result).toEqual([])
+    })
+  })
+
+  // spec-005/F17 T5 §D1 step 2 — mirrors recordings:getAll's try/catch → [] shape.
+  describe('recordings:getTrash', () => {
+    it('should return all soft-deleted recordings from the database', async () => {
+      const { getTrashedRecordings } = await import('../../services/database')
+      const mockTrashed = [
+        { id: 'rec-1', filename: 'meeting-01.wav', deleted_at: '2026-01-02T00:00:00.000Z' },
+        { id: 'rec-2', filename: 'meeting-02.wav', deleted_at: '2026-01-01T00:00:00.000Z' }
+      ]
+      vi.mocked(getTrashedRecordings).mockReturnValue(mockTrashed as any)
+
+      const result = await handlers['recordings:getTrash'](null)
+
+      expect(getTrashedRecordings).toHaveBeenCalled()
+      expect(result).toEqual(mockTrashed)
+    })
+
+    it('should return empty array on error', async () => {
+      const { getTrashedRecordings } = await import('../../services/database')
+      vi.mocked(getTrashedRecordings).mockImplementation(() => {
+        throw new Error('Database error')
+      })
+
+      const result = await handlers['recordings:getTrash'](null)
 
       expect(result).toEqual([])
     })
@@ -647,6 +690,35 @@ describe('Recording IPC Handlers', () => {
       const result = await handlers['recordings:getCandidates'](null, '2026Jul07-193144-Rec43.hda')
 
       expect(getCandidatesForRecordingWithDetails).not.toHaveBeenCalled()
+      expect(result).toEqual({ success: true, data: [], recordingContext: null })
+    })
+
+    it('ADV40-2 (round-42) — an EXCLUDED recording returns empty, never reading its transcript', async () => {
+      const { getCandidatesForRecordingWithDetails, getTranscriptByRecordingId, resolveRecordingId } =
+        await import('../../services/database')
+      const { recording } = primeRec46()
+      vi.mocked(resolveRecordingId).mockReturnValue(recording as any)
+      // Soft-deleted / personal / value-excluded / hard-purged: the boundary
+      // returns the id as NOT eligible.
+      mockFilterEligibleRecordingIds.mockReturnValueOnce({ eligible: new Set<string>(), failClosed: false })
+
+      const result = await handlers['recordings:getCandidates'](null, recId)
+
+      // No transcript-derived metadata was read or returned.
+      expect(getTranscriptByRecordingId).not.toHaveBeenCalled()
+      expect(getCandidatesForRecordingWithDetails).not.toHaveBeenCalled()
+      expect(result).toEqual({ success: true, data: [], recordingContext: null })
+    })
+
+    it('ADV40-2 (round-42) — an eligibility lookup FAILURE fails closed (empty, no transcript read)', async () => {
+      const { getTranscriptByRecordingId, resolveRecordingId } = await import('../../services/database')
+      const { recording } = primeRec46()
+      vi.mocked(resolveRecordingId).mockReturnValue(recording as any)
+      mockFilterEligibleRecordingIds.mockReturnValueOnce({ eligible: new Set<string>(), failClosed: true })
+
+      const result = await handlers['recordings:getCandidates'](null, recId)
+
+      expect(getTranscriptByRecordingId).not.toHaveBeenCalled()
       expect(result).toEqual({ success: true, data: [], recordingContext: null })
     })
 

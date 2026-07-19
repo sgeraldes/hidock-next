@@ -17,7 +17,7 @@ const USB_PRODUCT_IDS = [
   0xaf0f,  // P1 Mini
   0x2041   // P1 Mini (alternate)
 ]
-import { initializeDatabase, closeDatabase } from './services/database'
+import { initializeDatabase, closeDatabase, isGraphProvenanceCleanupRegistered } from './services/database'
 import { initializeConfig, getConfig } from './services/config'
 import { setAutoConnectChecker } from './services/jensen'
 import { initializeFileStorage } from './services/file-storage'
@@ -37,6 +37,7 @@ import { getRAGService } from './services/rag'
 import { setMainWindowForEventBus } from './services/event-bus'
 import { getStoragePolicyService } from './services/storage-policy'
 import { setMainWindowForMigration } from './ipc/migration-handlers'
+import { setMainWindowForValueBackfill } from './services/value-backfill'
 import { getIntegrityService } from './services/integrity-service'
 import { acquireSingleInstanceLock } from './single-instance'
 import { startBootScheduler } from './services/boot-scheduler'
@@ -195,6 +196,19 @@ async function initializeServices(): Promise<void> {
   registerIpcHandlers()
   console.log('IPC handlers registered')
 
+  // spec-006/F17 T6 AR3-1 — loud startup tripwire. registerRecordingDeletionHandlers()
+  // (called from registerIpcHandlers() above) wires the graph-provenance
+  // cleanup seam as a side effect of registration; the hard-purge branch
+  // itself already fails closed if this is ever skipped (a refactor that
+  // reorders registration, an early throw, etc.), but that failure would
+  // otherwise only surface the next time a user tries to permanently delete
+  // something. Converts a silent wiring regression into a loud boot error.
+  if (!isGraphProvenanceCleanupRegistered()) {
+    console.error(
+      '[startup] graph provenance cleanup NOT wired — permanent deletes will leak graph residue'
+    )
+  }
+
   // Living knowledge graph (v27): subscribe graph-sync to entity events now, so
   // renames/merges and finished transcripts keep the graph in step. DB-only +
   // debounced ingest; guarded so it can never break the pipeline.
@@ -232,6 +246,17 @@ async function initializeServices(): Promise<void> {
     .catch((e) => console.error('[Connectors] startup wiring failed:', e))
 
   updateSplashStatus('Starting application...', 100)
+}
+
+// Dev/QA isolation override — inert unless HIDOCK_DEV_USERDATA is set. Lets a
+// harness boot a fully isolated instance (own profile → own config/dataPath →
+// own single-instance lock scope) without editing source. MUST run before the
+// single-instance lock below and before anything reads userData. Every prior
+// QA pass had to temp-edit this file for the same effect (see .claude/qa/*).
+const devUserDataOverride = process.env.HIDOCK_DEV_USERDATA
+if (devUserDataOverride) {
+  app.setPath('userData', devUserDataOverride)
+  console.warn(`[DEV] userData overridden to ${devUserDataOverride}`)
 }
 
 // Single-instance guard — MUST run before any window is created and before the
@@ -279,8 +304,11 @@ if (process.platform === 'win32') {
 // Conditionally enable remote debugging (dev mode or explicit opt-in)
 const enableRemoteDebugging = is.dev || process.env.ENABLE_REMOTE_DEBUGGING === 'true'
 if (enableRemoteDebugging) {
-  app.commandLine.appendSwitch('remote-debugging-port', '9222')
-  console.warn('[SECURITY] Remote debugging enabled on port 9222')
+  // HIDOCK_DEV_CDP_PORT: dev/QA-only override so an isolated instance never
+  // contends with the default 9222 (inert when unset).
+  const cdpPort = process.env.HIDOCK_DEV_CDP_PORT || '9222'
+  app.commandLine.appendSwitch('remote-debugging-port', cdpPort)
+  console.warn(`[SECURITY] Remote debugging enabled on port ${cdpPort}`)
 }
 
 app.whenReady().then(async () => {
@@ -365,6 +393,7 @@ app.whenReady().then(async () => {
     setMainWindowForTranscription(mainWindow)
     setMainWindowForEventBus(mainWindow)
     setMainWindowForMigration(mainWindow)
+    setMainWindowForValueBackfill(mainWindow)
   }
 
   // The recording watcher is cheap and powers auto-refresh — start it now.

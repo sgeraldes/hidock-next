@@ -26,7 +26,8 @@ import {
 import { join } from 'path'
 import { StringDecoder } from 'string_decoder'
 import { getTranscriptsPath, getCachePath } from './file-storage'
-import { queryAll, queryOne } from './database'
+import { queryAll, queryOne, run } from './database'
+import { isRecordingEligible, filterEligibleRecordingIds } from './recording-eligibility'
 
 /**
  * Ownership of a wiki page, as declared by the `recording_id` in its YAML
@@ -215,6 +216,16 @@ function unquoteYamlScalar(value: string): string {
 /** Recording ids parsed out of page frontmatter, so the backfill never re-scans. */
 interface WikiIndex {
   dir: string
+  /**
+   * How the directory listing went, so a cleanup that REUSES this index keeps the
+   * same fail-closed semantics a fresh scan would have had (RE7-P1b / RE8-P1):
+   *   'ok'         — listed successfully; `owner`/`unreadable` are populated.
+   *   'absent'     — ENOENT: the dir does not exist ⇒ nothing to remove ⇒ success.
+   *   'unreadable' — present but unlistable (ENOTDIR / EACCES) ⇒ a purge that
+   *                  reuses this index must fail-closed (the page may still be
+   *                  there and we could not look).
+   */
+  status: 'ok' | 'absent' | 'unreadable'
   /** filename -> recording_id declared in that page's frontmatter */
   owner: Map<string, string>
   /**
@@ -391,8 +402,15 @@ function buildWikiIndex(dir: string): WikiIndex {
   let entries: string[]
   try {
     entries = readdirSync(dir)
-  } catch {
-    return { dir, owner, unreadable } // dir absent — nothing indexed
+  } catch (e) {
+    // Distinguish a truly ABSENT dir (ENOENT — nothing to index, a clean success
+    // for any cleanup that reuses this index) from a PRESENT-but-unlistable one
+    // (ENOTDIR / EACCES), which a privacy purge MUST treat as failure: the page
+    // may still be on disk and we could not look (RE7-P1b / RE8-P1). Carrying the
+    // status on the index lets removeMeetingWiki keep those fail-closed semantics
+    // while the backfill reuses ONE index instead of re-scanning per recording.
+    const status = (e as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'absent' : 'unreadable'
+    return { dir, status, owner, unreadable }
   }
   for (const entry of entries) {
     if (!entry.endsWith('.md')) continue
@@ -400,7 +418,7 @@ function buildWikiIndex(dir: string): WikiIndex {
     if (result.kind === 'owned') owner.set(entry, result.recordingId)
     else if (result.kind === 'error') unreadable.set(entry, result.reason)
   }
-  return { dir, owner, unreadable }
+  return { dir, status: 'ok', owner, unreadable }
 }
 
 /**
@@ -628,20 +646,78 @@ function removeStaleWikiPages(
 }
 
 /**
- * Delete every exported wiki page for a recording (privacy hard-purge). Matches
- * pages by the `recording_id` in their YAML frontmatter, so a page whose title
- * changed is still found. Returns the number of files removed. Safe to call when
- * the wiki dir does not exist.
+ * Result of a wiki-page cleanup. `ok` is false when ANY unexpected filesystem
+ * error occurred (an unreadable directory that IS present, or a matched page
+ * that could not be deleted) — i.e. a page for the recording may STILL be on
+ * disk. Callers on a privacy transition (mark-personal / soft-delete /
+ * value-rating) MUST surface / retry a `!ok` result rather than reporting
+ * success, because the whole point of the removal is that the page is gone.
+ * A simply-absent wiki dir is `ok: true` (nothing to remove is success).
  */
-export function removeMeetingWiki(recordingId: string): number {
-  const dir = getWikiDir()
-  const index = buildWikiIndex(dir)
+export interface WikiCleanupResult {
+  /** Pages actually deleted. */
+  removed: number
+  /** Matched pages that could not be verifiably removed (unlink failed, or ownership unreadable). */
+  failed: number
+  /** False when a page may still remain due to an FS error (dir unreadable / unlink failed). */
+  ok: boolean
+}
+
+/**
+ * Delete every exported wiki page for a recording (privacy hard-purge). Matches
+ * pages by the `recording_id` in their YAML frontmatter (via the ownership
+ * index), so a page whose title changed is still found. Returns a
+ * {@link WikiCleanupResult} that surfaces FS failures (RE7-P1b): `failed` counts
+ * pages that matched but could not be verifiably removed — unlink failures plus
+ * pages whose ownership could not be read (which may still hold this recording's
+ * content). Safe to call when the wiki dir does not exist.
+ */
+export function removeMeetingWiki(recordingId: string): WikiCleanupResult {
+  // Standalone purge (transition reconcile / retry sweep / re-export): build the
+  // index once — its `status` carries the ENOENT-vs-unreadable distinction, so the
+  // separate readdir probe this used to do is no longer needed — and delegate to
+  // the shared cleanup core.
+  return removeMeetingWikiUsingIndex(recordingId, buildWikiIndex(getWikiDir()))
+}
+
+/**
+ * Cleanup core shared by the standalone {@link removeMeetingWiki} and the boot
+ * backfill. The backfill passes its PASS-WIDE index so an excluded recording's
+ * page is removed WITHOUT a fresh per-recording directory scan — a re-scan per
+ * excluded recording was O(excluded × pages) of synchronous readdir + whole-page
+ * ownership reads, reintroducing the very F15 boot freeze the single-scan index
+ * exists to prevent. Each candidate is still ownership-revalidated immediately
+ * before the unlink (`unlinkIfStillOwnedBy` re-reads the page's frontmatter), so
+ * reusing a possibly-stale index never deletes a page that now belongs to a
+ * DIFFERENT recording.
+ *
+ * Fail-closed semantics survive index reuse via the index `status`: 'absent'
+ * (ENOENT) = nothing to remove = success; 'unreadable' (present but unlistable) =
+ * the page may still be there and we could not look = failure (RE7-P1b / RE8-P1).
+ */
+function removeMeetingWikiUsingIndex(recordingId: string, index: WikiIndex): WikiCleanupResult {
+  // ENOENT — truly nothing on disk to purge (a clean success).
+  if (index.status === 'absent') return { removed: 0, failed: 0, ok: true }
+  // Present-but-unlistable — a privacy purge must report failure (the recording's
+  // page may still be there and we could not look).
+  if (index.status === 'unreadable') {
+    console.warn(`[MeetingWiki] Could not read wiki dir to purge ${recordingId} (present but unlistable) — fail-closed`)
+    return { removed: 0, failed: 0, ok: false }
+  }
+  const dir = index.dir
   let removed = 0
+  let unlinkFailed = 0
   for (const [entry, owner] of [...index.owner]) {
     if (owner !== recordingId) continue
     if (unlinkIfStillOwnedBy(dir, entry, recordingId, index)) {
       removed++
       console.log(`[MeetingWiki] Purged wiki page ${entry} for ${recordingId}`)
+    } else if (index.owner.get(entry) === recordingId) {
+      // Still ours after the pre-delete re-read, yet the unlink did not take —
+      // the page remains on disk. (A page that was reclassified or is foreign is
+      // dropped from index.owner and is NOT counted here; a page that became
+      // unreadable is moved to index.unreadable and counted via its size below.)
+      unlinkFailed++
     }
   }
 
@@ -655,7 +731,137 @@ export function removeMeetingWiki(recordingId: string): number {
         [...index.unreadable].map(([f, why]) => `${f} (${why})`).join(', ')
     )
   }
-  return removed
+
+  // An unreadable page may still contain this recording's content, so it counts
+  // as an incomplete purge (fail-closed) alongside any outright unlink failure.
+  const failed = unlinkFailed + index.unreadable.size
+  return { removed, failed, ok: failed === 0 }
+}
+
+/**
+ * RE7-1 (round-7) — reconcile the on-disk wiki page with the recording's
+ * eligibility. Called on a personal / soft-delete / value-exclusion TRANSITION
+ * (which the transcription pipeline's re-export won't catch, since those
+ * transitions don't re-run analysis): remove any already-written page for a
+ * now-INELIGIBLE recording. Reversible — the boot backfill / next transcription
+ * regenerates the page once the recording is eligible again. Never throws.
+ */
+export function reconcileWikiEligibility(recordingId: string): WikiCleanupResult | null {
+  try {
+    if (!isRecordingEligible(recordingId)) {
+      const result = removeMeetingWiki(recordingId)
+      if (result.removed > 0) {
+        console.log(`[MeetingWiki] Removed ${result.removed} page(s) for now-excluded recording ${recordingId}`)
+      }
+      // RE8-P1 (round-9) — a transition (mark-personal / soft-delete /
+      // value-rating) MUST NOT report success while the page is still readable
+      // on disk. On a failed cleanup, ENQUEUE a persistent retry (mirrors the
+      // hard-purge pending-cleanup ledger) so the page is removed by a later
+      // sweep even if this attempt failed; on success, clear any stale entry.
+      if (!result.ok) {
+        console.warn(
+          `[MeetingWiki] wiki cleanup INCOMPLETE for excluded recording ${recordingId} ` +
+            `(removed=${result.removed}, failed=${result.failed}) — page may still be readable; enqueued for retry`
+        )
+        enqueueWikiCleanupRetry(recordingId)
+      } else {
+        clearWikiCleanupRetry(recordingId)
+      }
+      return result
+    }
+  } catch (e) {
+    console.warn(`[MeetingWiki] wiki eligibility reconcile failed for ${recordingId}:`, e)
+    return { removed: 0, failed: 0, ok: false }
+  }
+  return null // eligible — nothing to reconcile
+}
+
+const WIKI_CLEANUP_RETRY_PREFIX = 'wiki_cleanup_pending:'
+
+/** RE8-P1 — record that an excluded recording's wiki page could not be removed,
+ *  so a later sweep retries it. Persisted in the generic `config` KV table (no
+ *  schema change), mirroring the hard-purge pending-cleanup ledger. Never throws. */
+function enqueueWikiCleanupRetry(recordingId: string): void {
+  try {
+    run('INSERT OR REPLACE INTO config (key, value, updated_at) VALUES (?, ?, ?)', [
+      `${WIKI_CLEANUP_RETRY_PREFIX}${recordingId}`,
+      recordingId,
+      new Date().toISOString()
+    ])
+  } catch (e) {
+    console.warn(`[MeetingWiki] could not enqueue wiki-cleanup retry for ${recordingId}:`, e)
+  }
+}
+
+/** Clear a pending wiki-cleanup retry (page removed, or recording eligible again). */
+function clearWikiCleanupRetry(recordingId: string): void {
+  try {
+    run('DELETE FROM config WHERE key = ?', [`${WIKI_CLEANUP_RETRY_PREFIX}${recordingId}`])
+  } catch (e) {
+    console.warn(`[MeetingWiki] could not clear wiki-cleanup retry for ${recordingId}:`, e)
+  }
+}
+
+/**
+ * RE8-P1 (round-9) — retry every enqueued wiki-cleanup: for each pending
+ * recording, if it is STILL ineligible remove its page (clearing the entry only
+ * when the removal succeeds); if it became eligible again, drop the entry. Runs
+ * as part of the boot backfill and is safe to call anytime. Returns how many
+ * pending entries were cleared. Never throws.
+ *
+ * F15 (post-merge review) — the sweep shares ONE ownership index across every
+ * pending id instead of letting each call `removeMeetingWiki`, which re-listed
+ * and re-read the WHOLE wiki directory per id. After a transient failure enqueued
+ * N durable retries, that was O(N × pages) of synchronous main-process readdir +
+ * whole-page reads on the boot recovery path — reintroducing the very F15 freeze
+ * the single-scan backfill index exists to prevent. When called from
+ * {@link backfillMeetingWiki} the pass-wide `index` is passed in and reused, so
+ * the entire boot (cleanup sweep + backfill) does a SINGLE directory listing;
+ * otherwise the index is built lazily on first need, so an all-eligible-again
+ * sweep still touches the disk zero times. Each candidate is ownership-revalidated
+ * immediately before its unlink (`unlinkIfStillOwnedBy`), so a shared,
+ * possibly-stale index never removes a page that now belongs to a DIFFERENT
+ * recording, and per-id fail-closed semantics survive index reuse via the index
+ * `status` (see `removeMeetingWikiUsingIndex`).
+ */
+export function retryPendingWikiCleanups(index?: WikiIndex): { cleared: number; stillPending: number } {
+  let cleared = 0
+  let stillPending = 0
+  let rows: Array<{ value: string | null }>
+  try {
+    rows = queryAll<{ value: string | null }>('SELECT value FROM config WHERE key LIKE ?', [`${WIKI_CLEANUP_RETRY_PREFIX}%`])
+  } catch (e) {
+    console.warn('[MeetingWiki] could not read pending wiki cleanups:', e)
+    return { cleared: 0, stillPending: 0 }
+  }
+  // Reuse the backfill's pass-wide index when supplied; otherwise build one ONCE,
+  // lazily, the first time a still-ineligible id actually needs a removal. Never
+  // scans when every pending id turned eligible again. `buildWikiIndex` never
+  // throws (readdir errors are captured as an index `status`).
+  let sweepIndex = index
+  for (const r of rows) {
+    const recordingId = r.value
+    if (!recordingId) continue
+    try {
+      if (isRecordingEligible(recordingId)) {
+        clearWikiCleanupRetry(recordingId) // eligible again — nothing to purge
+        cleared++
+        continue
+      }
+      if (!sweepIndex) sweepIndex = buildWikiIndex(getWikiDir())
+      const result = removeMeetingWikiUsingIndex(recordingId, sweepIndex)
+      if (result.ok) {
+        clearWikiCleanupRetry(recordingId)
+        cleared++
+      } else {
+        stillPending++
+      }
+    } catch (e) {
+      console.warn(`[MeetingWiki] wiki-cleanup retry failed for ${recordingId}:`, e)
+      stillPending++
+    }
+  }
+  return { cleared, stillPending }
 }
 
 /** Load the transcript+recording row a wiki page is rendered from. */
@@ -720,6 +926,14 @@ function exportOne(
 
 /** Export (or re-export) the wiki page for one recording. Returns the path. */
 export function exportMeetingWiki(recordingId: string): string | null {
+  // RE7-1 (round-7) — the wiki markdown is readable by external agents/humans,
+  // so an excluded (personal/soft-deleted/value-excluded) recording must never
+  // get a page. Fail-closed via the shared boundary; if a page already exists
+  // (written while eligible, then trashed) remove it here too.
+  if (!isRecordingEligible(recordingId)) {
+    removeMeetingWiki(recordingId)
+    return null
+  }
   return exportOne(recordingId, getWikiDir())?.path ?? null
 }
 
@@ -917,6 +1131,20 @@ export function _resetBackfillCursorForTests(): void {
 export async function backfillMeetingWiki(
   options: WikiBackfillOptions = {}
 ): Promise<WikiBackfillResult> {
+  const dir = getWikiDir()
+  // ONE directory scan for the ENTIRE boot — the fix for the quadratic blowup.
+  // Built here, before the cleanup-retry sweep, so BOTH the sweep and the pass
+  // below share this single listing. Letting retryPendingWikiCleanups build its
+  // own (per-id) scans was O(pending × pages) of synchronous FS work on the boot
+  // recovery path — the F15 freeze on exactly that path (post-merge review).
+  const index = buildWikiIndex(dir)
+
+  // RE8-P1 (round-9) — first drain any wiki-cleanup retries enqueued by a failed
+  // transition cleanup, so an excluded recording's page is removed on boot even
+  // if the mark-personal / soft-delete / value-rating attempt failed earlier.
+  // Reuses the pass-wide index (no scans of its own); any page it removes is also
+  // dropped from `index.owner`, so the pass below sees the post-cleanup state.
+  retryPendingWikiCleanups(index)
   const batchSize = Math.max(1, options.batchSize ?? DEFAULT_BATCH_SIZE)
   const budgetMs = options.budgetMs ?? DEFAULT_BUDGET_MS
   const failureLimit = Math.max(1, options.maxFailures ?? DEFAULT_FAILURE_LIMIT)
@@ -925,10 +1153,14 @@ export async function backfillMeetingWiki(
   const rows = queryAll<{ recording_id: string }>(
     `SELECT recording_id FROM transcripts WHERE TRIM(COALESCE(full_text, '')) != ''`
   )
-
-  const dir = getWikiDir()
-  // ONE directory scan for the whole pass — the fix for the quadratic blowup.
-  const index = buildWikiIndex(dir)
+  // RE7-1 — filter candidates through the shared boundary FAIL-CLOSED: if
+  // eligibility can't be established, write nothing rather than export excluded
+  // transcripts to disk on boot.
+  const { eligible, failClosed } = filterEligibleRecordingIds(rows.map((r) => r.recording_id))
+  if (failClosed) {
+    console.error('[MeetingWiki] Backfill skipped — recording eligibility unavailable (fail closed)')
+    return { written: 0, unchanged: 0, failed: 0, remaining: 0, remainingMissing: 0 }
+  }
 
   // Recordings with no page yet go first, rotated so each pass starts past
   // whatever the last one attempted (see the resume-cursor note above).
@@ -966,26 +1198,60 @@ export async function backfillMeetingWiki(
     // Recorded BEFORE the attempt, and for failures too: the resume point must
     // advance past everything this pass tried, or a failing group pins it.
     if (stillMissing.has(recording_id)) lastAttemptedMissingId = recording_id
-    try {
-      const result = exportOne(recording_id, dir, index)
-      if (result?.changed) written++
-      else if (result) unchanged++
-      // A null result means there is nothing exportable for this recording; it is
-      // resolved, not pending, or it would be "missing" forever.
-      if (stillMissing.has(recording_id)) resolvedMissing.add(recording_id)
-    } catch (e) {
-      failed++
-      console.error(`[MeetingWiki] Export failed for ${recording_id}:`, e)
-      // Refund the failure's time so failures cannot monopolize the head of
-      // every pass and starve the recordings behind them.
-      deadline += Date.now() - startedAt
-      if (failed >= failureLimit) {
-        console.error(
-          `[MeetingWiki] Backfill stopped after ${failed} failures; ` +
-            `the destination looks unwritable. Remaining work resumes next start.`
+
+    if (!eligible.has(recording_id)) {
+      // RE7-P1a (round-8) — an excluded transcript (already personal/deleted/
+      // low-value, or newly value-classified) may STILL have a stale markdown
+      // page from when it was eligible. Don't merely skip — actively remove it,
+      // so the plain-files knowledge base can't leak an excluded recording.
+      //
+      // F15 (post-merge review): reuse the PASS-WIDE `index` instead of letting
+      // removeMeetingWiki re-scan the directory per excluded recording — that
+      // re-scan was O(excluded × pages) of synchronous readdir + page reads and
+      // reintroduced the boot freeze the single-scan index exists to prevent.
+      //
+      // RE8-P1 (post-merge review): INSPECT the cleanup result. Discarding it
+      // marked every excluded recording resolved with failed=0 even when the page
+      // could NOT be removed (unreadable dir / unlink failed), leaving a readable
+      // stale page while the backfill reported remainingMissing=0. On success it
+      // is resolved (and any stale retry cleared); on failure it is counted, left
+      // UNRESOLVED so remainingMissing reflects the outstanding work, and enqueued
+      // for a durable retry — mirroring reconcileWikiEligibility.
+      const cleanup = removeMeetingWikiUsingIndex(recording_id, index)
+      if (cleanup.ok) {
+        clearWikiCleanupRetry(recording_id)
+        // It will never get a page, so it counts as resolved rather than still-missing.
+        if (stillMissing.has(recording_id)) resolvedMissing.add(recording_id)
+      } else {
+        failed++
+        enqueueWikiCleanupRetry(recording_id)
+        console.warn(
+          `[MeetingWiki] Backfill could not remove the stale page for excluded ${recording_id} ` +
+            `(failed=${cleanup.failed}) — left unresolved and enqueued for retry`
         )
-        processed++
-        break
+      }
+    } else {
+      try {
+        const result = exportOne(recording_id, dir, index)
+        if (result?.changed) written++
+        else if (result) unchanged++
+        // A null result means there is nothing exportable for this recording; it is
+        // resolved, not pending, or it would be "missing" forever.
+        if (stillMissing.has(recording_id)) resolvedMissing.add(recording_id)
+      } catch (e) {
+        failed++
+        console.error(`[MeetingWiki] Export failed for ${recording_id}:`, e)
+        // Refund the failure's time so failures cannot monopolize the head of
+        // every pass and starve the recordings behind them.
+        deadline += Date.now() - startedAt
+        if (failed >= failureLimit) {
+          console.error(
+            `[MeetingWiki] Backfill stopped after ${failed} failures; ` +
+              `the destination looks unwritable. Remaining work resumes next start.`
+          )
+          processed++
+          break
+        }
       }
     }
     processed++

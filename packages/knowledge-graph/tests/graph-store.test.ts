@@ -6,7 +6,7 @@ import { join } from 'path'
 import { existsSync, rmSync } from 'fs'
 import { createRequire } from 'node:module'
 import { DatabaseEngine } from '@hidock/database'
-import { KnowledgeGraphStore } from '../src/graph-store.js'
+import { KnowledgeGraphStore, type GraphDb } from '../src/graph-store.js'
 
 // The engine requires the app-owned better-sqlite3 native module. Resolve the
 // database package's OWN copy (the one CI's "npm rebuild better-sqlite3"
@@ -143,6 +143,27 @@ describe('KnowledgeGraphStore', () => {
     const edges = engine.queryAll('SELECT * FROM graph_edges')
     expect(nodes).toHaveLength(0)
     expect(edges).toHaveLength(0)
+  })
+
+  it('clear (CX-T4-3) also removes graph_edge_sources — a rebuilt graph inherits no stale provenance', async () => {
+    const { store, engine, dbPath } = await makeStore('clear-sources')
+    paths.push(dbPath)
+
+    const person = store.upsertNode({ type: 'person', label: 'Grace' })
+    const meeting = store.upsertNode({ type: 'meeting', label: 'Sync' })
+    const edgeId = store.upsertEdge({ sourceId: person, targetId: meeting, type: 'ATTENDED' })
+    store.recordEdgeSource(edgeId, 'R-old', 'T-old')
+
+    store.clear()
+    expect(engine.queryAll('SELECT * FROM graph_edge_sources')).toHaveLength(0)
+
+    // Re-ingesting the identical pair mints the SAME deterministic edge id —
+    // it must start with no provenance.
+    const p2 = store.upsertNode({ type: 'person', label: 'Grace' })
+    const m2 = store.upsertNode({ type: 'meeting', label: 'Sync' })
+    const edgeId2 = store.upsertEdge({ sourceId: p2, targetId: m2, type: 'ATTENDED' })
+    expect(edgeId2).toBe(edgeId)
+    expect(engine.queryAll('SELECT * FROM graph_edge_sources WHERE edge_id = ?', [edgeId2])).toHaveLength(0)
   })
 
   it('id is deterministic (no Date.now/random): topic:machine_learning', async () => {
@@ -297,6 +318,62 @@ describe('KnowledgeGraphStore', () => {
     // taken id.
     expect(e2).toBe(`${e1}__${fnv1a36(`${combined}#1`)}`)
     expect(engine.queryAll('SELECT id FROM graph_edges')).toHaveLength(3)
+  })
+})
+
+// spec-006/F17 T6 AR3-3(b): initSchema() previously swallowed EVERY error from
+// EVERY DDL statement (a blanket try/catch with an empty catch block), on the
+// theory that IF NOT EXISTS makes them idempotent. That masks a genuine
+// failure (corrupt DB, disk full, permission denied, a future schema-edit
+// typo) as silent success. It must now tolerate ONLY an "already exists"
+// message and re-throw everything else. Uses a hand-written GraphDb stub
+// (not a real engine) so a specific statement can be made to fail on demand.
+describe('KnowledgeGraphStore.initSchema — DDL error surfacing (AR3-3b)', () => {
+  function makeFailingDb(shouldFail: (sql: string) => Error | null): GraphDb {
+    return {
+      run(sql: string) {
+        const err = shouldFail(sql)
+        if (err) throw err
+      },
+      queryAll: () => [],
+      queryOne: () => undefined,
+    }
+  }
+
+  it('tolerates an "already exists" error and keeps running the remaining statements', () => {
+    let ranCount = 0
+    const db = makeFailingDb((sql) => {
+      ranCount++
+      return sql.includes('graph_nodes') ? new Error('table graph_nodes already exists') : null
+    })
+    const store = new KnowledgeGraphStore(db)
+    expect(() => store.initSchema()).not.toThrow()
+    // More than one statement ran — the loop didn't stop at the tolerated error.
+    expect(ranCount).toBeGreaterThan(1)
+  })
+
+  it('is case-insensitive when matching "already exists"', () => {
+    const db = makeFailingDb((sql) => (sql.includes('graph_nodes') ? new Error('Table Graph_Nodes ALREADY EXISTS') : null))
+    const store = new KnowledgeGraphStore(db)
+    expect(() => store.initSchema()).not.toThrow()
+  })
+
+  it('surfaces (does not swallow) a non-"already exists" DDL failure', () => {
+    const db = makeFailingDb((sql) => (sql.includes('graph_edges') ? new Error('disk I/O error') : null))
+    const store = new KnowledgeGraphStore(db)
+    expect(() => store.initSchema()).toThrow('disk I/O error')
+  })
+
+  it('surfaces a non-Error throw (stringified) as well', () => {
+    const db: GraphDb = {
+      run(sql: string) {
+        if (sql.includes('graph_nodes')) throw 'weird string throw'
+      },
+      queryAll: () => [],
+      queryOne: () => undefined,
+    }
+    const store = new KnowledgeGraphStore(db)
+    expect(() => store.initSchema()).toThrow()
   })
 })
 

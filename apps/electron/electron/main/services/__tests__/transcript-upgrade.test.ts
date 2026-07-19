@@ -36,8 +36,20 @@ vi.mock('../database', () => ({
   runInTransaction: (fn: () => unknown) => fn(),
   saveDatabase: () => {},
   // Simulate the audio transcription backlog: when busy, 'pending' is non-empty.
-  getQueueItems: (status?: string) => (queueBusy && status === 'pending' ? [{ id: 'q1' }] : [])
+  getQueueItems: (status?: string) => (queueBusy && status === 'pending' ? [{ id: 'q1' }] : []),
+  // RE8-1 (round-8) — reformatOne + the work-list filter route recording ids
+  // through the eligibility boundary. ADV9 (round-9): the boundary now uses the
+  // POSITIVE allowlist getEligibleRecordingIds; derive it from the same source.
+  getExcludedRecordingIds: () => excludedResult,
+  getEligibleRecordingIds: (ids: Iterable<string>) =>
+    excludedResult.failClosed
+      ? { eligible: new Set<string>(), failClosed: true }
+      : { eligible: new Set([...ids].filter((i) => i && !excludedResult.ids.has(i))), failClosed: false }
 }))
+
+// RE8-1 (round-8) — mutable so eligibility-gating tests can exclude a recording
+// / force fail-closed.
+let excludedResult: { ids: Set<string>; failClosed: boolean } = { ids: new Set<string>(), failClosed: false }
 
 const mockGenerate = vi.fn()
 vi.mock('../chat-llm', () => ({
@@ -119,6 +131,7 @@ beforeEach(async () => {
   dbInstance = new SQL.Database()
   seedSchema()
   queueBusy = false
+  excludedResult = { ids: new Set<string>(), failClosed: false }
   mockGenerate.mockReset()
   vi.useFakeTimers()
 })
@@ -272,5 +285,133 @@ describe('getUpgradeStatus', () => {
     const status = getUpgradeStatus()
     expect(status.legacyTotal).toBe(1)
     expect(status.reformattingActive).toBe(false)
+  })
+})
+
+/**
+ * RE8-1 (round-8) — reformatOne sends the stored transcript to the chat LLM, so
+ * an excluded (personal / trashed / value-excluded) recording must never reach
+ * the provider and must never be persisted. The gate is INTERNAL + MANDATORY, so
+ * even a direct caller (not just the filtered worker) is fail-closed.
+ */
+describe('reformatOne — eligibility gate (RE8-1)', () => {
+  beforeEach(() => {
+    addTranscript({ id: 't1', fullText: 'texto plano para reformatear sin estructura alguna' })
+    mockGenerate.mockResolvedValue('[{"speaker":"Speaker 1","text":"texto plano"}]')
+  })
+
+  it('skips WITHOUT calling the LLM when the recording is excluded', async () => {
+    excludedResult = { ids: new Set(['rec-t1']), failClosed: false }
+    expect(await reformatOne('t1')).toBe('skipped')
+    expect(mockGenerate).not.toHaveBeenCalled()
+    expect(transcriptRow('t1').speakers).toBeNull()
+  })
+
+  it('fails closed (skips, no LLM) when eligibility cannot be verified', async () => {
+    excludedResult = { ids: new Set<string>(), failClosed: true }
+    expect(await reformatOne('t1')).toBe('skipped')
+    expect(mockGenerate).not.toHaveBeenCalled()
+    expect(transcriptRow('t1').speakers).toBeNull()
+  })
+
+  it('does not persist when the recording becomes excluded mid-run (after the LLM await)', async () => {
+    // Eligible at entry, but a trash/exclusion lands during the provider round-trip.
+    mockGenerate.mockImplementation(async () => {
+      excludedResult = { ids: new Set(['rec-t1']), failClosed: false }
+      return '[{"speaker":"Speaker 1","text":"texto plano"}]'
+    })
+    expect(await reformatOne('t1')).toBe('skipped')
+    expect(transcriptRow('t1').speakers).toBeNull()
+  })
+
+  it('kickReformatProcessing never enqueues an excluded transcript for the LLM', async () => {
+    excludedResult = { ids: new Set(['rec-t1']), failClosed: false }
+    queueBusy = false
+    await kickReformatProcessing(60, 5000)
+    expect(mockGenerate).not.toHaveBeenCalled()
+    expect(transcriptRow('t1').speakers).toBeNull()
+  })
+
+  it('kickReformatProcessing suppresses the whole work list when eligibility is unavailable', async () => {
+    excludedResult = { ids: new Set<string>(), failClosed: true }
+    queueBusy = false
+    await kickReformatProcessing(60, 5000)
+    expect(mockGenerate).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * ADV45-4 (round-47) — discovery (getRecommendedRecordingIds) AND counts
+ * (scanOldTranscripts / getUpgradeStatus) must share the SAME eligible
+ * assessment set the reformat work list uses, so an excluded / unassociable
+ * recording never appears in a recommendation OR inflates a displayed total.
+ * Fail-closed: eligibility unavailable ⇒ zero counts / empty ids.
+ */
+describe('discovery + counts — shared eligible assessment set (ADV45-4)', () => {
+  beforeEach(() => {
+    // A flat, high-importance transcript → recommend-retranscribe band.
+    addTranscript({
+      id: 't-flat-high',
+      fullText:
+        'Al final decidimos avanzar con el proyecto. Acordamos la fecha límite y firmamos el contrato. ' +
+        'El presupuesto fue aprobado y quedamos en los próximos pasos. '.repeat(30),
+      wordCount: 4000,
+      actionItems: JSON.stringify(['a', 'b', 'c', 'd']),
+      topics: JSON.stringify(['x', 'y', 'z', 'w']),
+      recording: { date: new Date().toISOString(), meetingId: 'm1' },
+      meeting: {
+        attendees: JSON.stringify([{ email: 'a@acme.com' }, { email: 'b@client.com' }]),
+        organizerEmail: 'me@acme.com'
+      }
+    })
+    dbInstance.run(`INSERT INTO meeting_projects (meeting_id, project_id) VALUES ('m1','p1')`)
+    // A flat, low-importance transcript → reformat band.
+    addTranscript({
+      id: 't-flat-low',
+      fullText: 'una charla informal sin decisiones ni compromisos, solo hablamos del clima un rato',
+      wordCount: 120
+    })
+  })
+
+  it('baseline: both legacy rows counted; the high-importance one is recommended', () => {
+    expect(getRecommendedRecordingIds()).toEqual(['rec-t-flat-high'])
+    const res = scanOldTranscripts()
+    expect(res.totalTranscripts).toBe(2)
+    expect(res.legacyTotal).toBe(2)
+    expect(res.recommendedRetranscription).toBe(1)
+    expect(res.toReformat).toBe(1)
+  })
+
+  it('excluding the recommended recording drops it from discovery AND every count', () => {
+    excludedResult = { ids: new Set(['rec-t-flat-high']), failClosed: false }
+    expect(getRecommendedRecordingIds()).toEqual([])
+    const res = scanOldTranscripts()
+    expect(res.totalTranscripts).toBe(1)
+    expect(res.legacyTotal).toBe(1)
+    expect(res.recommendedRetranscription).toBe(0)
+    expect(res.toReformat).toBe(1)
+    expect(getUpgradeStatus().legacyTotal).toBe(1)
+  })
+
+  it('excluding the reformat-band recording leaves the recommendation but shrinks counts', () => {
+    excludedResult = { ids: new Set(['rec-t-flat-low']), failClosed: false }
+    expect(getRecommendedRecordingIds()).toEqual(['rec-t-flat-high'])
+    const res = scanOldTranscripts()
+    expect(res.totalTranscripts).toBe(1)
+    expect(res.legacyTotal).toBe(1)
+    expect(res.toReformat).toBe(0)
+    expect(res.recommendedRetranscription).toBe(1)
+  })
+
+  it('fails closed (zero counts / empty ids) when eligibility cannot be established', () => {
+    excludedResult = { ids: new Set<string>(), failClosed: true }
+    expect(getRecommendedRecordingIds()).toEqual([])
+    const res = scanOldTranscripts()
+    expect(res.totalTranscripts).toBe(0)
+    expect(res.legacyTotal).toBe(0)
+    expect(res.recommendedRetranscription).toBe(0)
+    expect(res.toReformat).toBe(0)
+    expect(res.alreadyReformatted).toBe(0)
+    expect(getUpgradeStatus().legacyTotal).toBe(0)
   })
 })

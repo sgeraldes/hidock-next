@@ -13,7 +13,16 @@ const db = vi.hoisted(() => ({
   deleteRecordingCascade: vi.fn(),
   restoreRecording: vi.fn(),
   setRecordingPersonal: vi.fn(),
-  getRecordingDeletionImpact: vi.fn()
+  getRecordingDeletionImpact: vi.fn(),
+  // F17/T6 (spec-006 AR3-2) — the pending-file-cleanup ledger. Defaulted so
+  // every existing test's retry sweep (now unconditional on a hard purge) is
+  // a true no-op unless a test explicitly wires backlog rows.
+  recordPendingFileCleanups: vi.fn(),
+  getPendingFileCleanups: vi.fn().mockReturnValue([]),
+  updatePendingFileCleanups: vi.fn(),
+  // ARF-4 — the deferred graph-cleanup sweep, piggybacked on every hard purge.
+  // Defaulted to a benign no-op so existing tests aren't affected.
+  retryPendingGraphCleanups: vi.fn().mockReturnValue({ attempted: 0, cleared: 0, clearedJournalIds: [], stillPending: [] })
 }))
 const files = vi.hoisted(() => ({
   deleteRecording: vi.fn(),
@@ -25,7 +34,11 @@ const files = vi.hoisted(() => ({
 
 vi.mock('../database', () => db)
 vi.mock('../file-storage', () => ({ deleteRecording: files.deleteRecording }))
-vi.mock('../meeting-wiki', () => ({ removeMeetingWiki: files.removeMeetingWiki }))
+vi.mock('../meeting-wiki', () => ({
+  removeMeetingWiki: files.removeMeetingWiki,
+  // RE7-1 (round-7) — markPersonal + soft-delete reconcile the wiki; no-op here.
+  reconcileWikiEligibility: vi.fn()
+}))
 vi.mock('../vector-store', () => ({
   getVectorStore: () => ({ deleteByRecording: files.vectorDeleteByRecording })
 }))
@@ -38,11 +51,15 @@ import {
   markRecordingPersonal,
   deleteRecording,
   restoreDeletedRecording,
-  getDeletionImpact
+  getDeletionImpact,
+  retryPendingFileCleanups
 } from '../recording-deletion-service'
 
 beforeEach(() => {
   vi.clearAllMocks()
+  // RE7-P1b (round-8) — removeMeetingWiki now returns a WikiCleanupResult; a
+  // benign default so paths that don't set it explicitly still read `.removed`/`.ok`.
+  files.removeMeetingWiki.mockReturnValue({ removed: 0, failed: 0, ok: true })
 })
 
 describe('markRecordingPersonal', () => {
@@ -90,7 +107,7 @@ describe('deleteRecording (hard)', () => {
       removed: { transcripts: 1 }
     })
     files.deleteRecording.mockReturnValue(true)
-    files.removeMeetingWiki.mockReturnValue(2)
+    files.removeMeetingWiki.mockReturnValue({ removed: 2, failed: 0, ok: true })
     files.existsSync.mockReturnValue(true)
 
     const res = await deleteRecording('r1', { hard: true })
@@ -130,6 +147,309 @@ describe('deleteRecording (hard)', () => {
     db.deleteRecordingCascade.mockReturnValue(undefined)
     const res = await deleteRecording('ghost', { hard: true })
     expect(res.success).toBe(false)
+  })
+
+  // spec-006/F17 T6 AR3-2 — success reports allFilesRemoved:true and an empty
+  // pendingFileKinds list when every target was confirmed removed.
+  it('reports allFilesRemoved:true with no pending kinds when everything succeeds', async () => {
+    db.deleteRecordingCascade.mockReturnValue({
+      mode: 'hard',
+      recordingId: 'r1',
+      filename: 'r1.wav',
+      filePath: '/data/r1.wav',
+      artifactPaths: [],
+      removed: {},
+      journalId: 'journal-1'
+    })
+    files.deleteRecording.mockReturnValue(true)
+    files.existsSync.mockReturnValue(true)
+    files.removeMeetingWiki.mockReturnValue({ removed: 0, failed: 0, ok: true })
+
+    const res = await deleteRecording('r1', { hard: true })
+    expect(res.success).toBe(true)
+    if (!res.success) return
+    expect(res.allFilesRemoved).toBe(true)
+    expect(res.pendingFileKinds).toEqual([])
+    expect(db.recordPendingFileCleanups).not.toHaveBeenCalled()
+  })
+})
+
+// spec-006/F17 T6 AR3-1/AR3-3 — the cascade throw for an unwired graph seam
+// (or a pre-flight failure surfaced the same way) is translated into an
+// explicit graphUnavailable:true flag so the caller can offer the
+// skipGraphCleanup escape hatch — never automatically.
+describe('deleteRecording — graphUnavailable propagation', () => {
+  it('sets graphUnavailable:true for the fail-closed cascade message', async () => {
+    db.deleteRecordingCascade.mockImplementation(() => {
+      throw new Error('graph cleanup unavailable — purge refused (fail-closed)')
+    })
+    const res = await deleteRecording('r1', { hard: true })
+    expect(res.success).toBe(false)
+    if (res.success) return
+    expect(res.graphUnavailable).toBe(true)
+    expect(res.error).toMatch(/graph cleanup unavailable/i)
+  })
+
+  it('does NOT set graphUnavailable for an unrelated cascade failure', async () => {
+    db.deleteRecordingCascade.mockImplementation(() => {
+      throw new Error('disk I/O error')
+    })
+    const res = await deleteRecording('r1', { hard: true })
+    expect(res.success).toBe(false)
+    if (res.success) return
+    expect(res.graphUnavailable).toBeUndefined()
+  })
+})
+
+// spec-006/F17 T6 AR3-2 — post-commit file-cleanup partial-result contract:
+// a failed unlink is recorded durably (keyed by the journal row id) rather
+// than only logged, and the bounded retry sweep clears it on a later pass.
+describe('AR3-2 — partial file-cleanup + retry ledger round-trip', () => {
+  it('a locked audio file (existed, unlink failed) is recorded as pending and reported as a partial result', async () => {
+    db.deleteRecordingCascade.mockReturnValue({
+      mode: 'hard',
+      recordingId: 'r1',
+      filename: 'r1.wav',
+      filePath: '/data/r1.wav',
+      artifactPaths: [],
+      removed: {},
+      journalId: 'journal-locked'
+    })
+    files.deleteRecording.mockReturnValue(false) // unlink attempt failed
+    files.existsSync.mockReturnValue(true) // ...but the file DID exist
+    files.removeMeetingWiki.mockReturnValue({ removed: 0, failed: 0, ok: true })
+
+    const res = await deleteRecording('r1', { hard: true })
+    expect(res.success).toBe(true)
+    if (!res.success) return
+
+    expect(db.recordPendingFileCleanups).toHaveBeenCalledWith('journal-locked', [
+      { kind: 'audio', path: '/data/r1.wav' }
+    ])
+    expect(res.allFilesRemoved).toBe(false)
+    expect(res.pendingFileKinds).toContain('audio')
+  })
+
+  it('an audio file that no longer exists is NOT treated as a pending failure', async () => {
+    db.deleteRecordingCascade.mockReturnValue({
+      mode: 'hard',
+      recordingId: 'r1',
+      filename: 'r1.wav',
+      filePath: '/data/r1.wav',
+      artifactPaths: [],
+      removed: {},
+      journalId: 'journal-gone'
+    })
+    files.deleteRecording.mockReturnValue(false) // nothing to remove
+    files.existsSync.mockReturnValue(false) // ...because it was already gone
+    files.removeMeetingWiki.mockReturnValue({ removed: 0, failed: 0, ok: true })
+
+    const res = await deleteRecording('r1', { hard: true })
+    expect(res.success).toBe(true)
+    if (!res.success) return
+    expect(res.allFilesRemoved).toBe(true)
+    expect(db.recordPendingFileCleanups).not.toHaveBeenCalled()
+  })
+
+  it('a wiki-purge failure and a vector-store failure both record pending kinds', async () => {
+    db.deleteRecordingCascade.mockReturnValue({
+      mode: 'hard',
+      recordingId: 'r1',
+      filename: 'r1.wav',
+      filePath: null,
+      artifactPaths: [],
+      removed: {},
+      journalId: 'journal-mixed'
+    })
+    files.removeMeetingWiki.mockImplementation(() => {
+      throw new Error('wiki dir locked')
+    })
+    files.vectorDeleteByRecording.mockRejectedValue(new Error('vector store busy'))
+
+    const res = await deleteRecording('r1', { hard: true })
+    expect(res.success).toBe(true)
+    if (!res.success) return
+    expect(res.allFilesRemoved).toBe(false)
+    expect(res.pendingFileKinds.sort()).toEqual(['vector', 'wiki'])
+    expect(db.recordPendingFileCleanups).toHaveBeenCalledWith(
+      'journal-mixed',
+      expect.arrayContaining([{ kind: 'wiki' }, { kind: 'vector' }])
+    )
+  })
+
+  it('does not crash when the cascade result carries no journalId (defensive)', async () => {
+    db.deleteRecordingCascade.mockReturnValue({
+      mode: 'hard',
+      recordingId: 'r1',
+      filename: 'r1.wav',
+      filePath: '/data/r1.wav',
+      artifactPaths: [],
+      removed: {}
+      // no journalId
+    })
+    files.deleteRecording.mockReturnValue(false)
+    files.existsSync.mockReturnValue(true)
+
+    const res = await deleteRecording('r1', { hard: true })
+    expect(res.success).toBe(true)
+    if (!res.success) return
+    expect(res.allFilesRemoved).toBe(false)
+    expect(db.recordPendingFileCleanups).not.toHaveBeenCalled() // no journalId to key it by
+  })
+
+  // OP-LOW-2 (T6 fix round) — when the same-call sweep clears this purge's
+  // OWN fresh failure, the result must report clean (previously "swept
+  // clean" was indistinguishable from "not swept" and the stale pre-sweep
+  // counts over-warned "will retry" on a fully-completed cleanup).
+  it('reports allFilesRemoved:true when the piggybacked sweep clears this purge\'s own fresh failure', async () => {
+    db.deleteRecordingCascade.mockReturnValue({
+      mode: 'hard',
+      recordingId: 'r1',
+      filename: 'r1.wav',
+      filePath: '/data/r1.wav',
+      artifactPaths: [],
+      removed: {},
+      journalId: 'journal-locked'
+    })
+    // First unlink attempt fails (file locked), the sweep's retry succeeds
+    // (lock released within the same call).
+    files.deleteRecording.mockReturnValueOnce(false).mockReturnValueOnce(true)
+    files.existsSync.mockReturnValue(true)
+    files.removeMeetingWiki.mockReturnValue({ removed: 0, failed: 0, ok: true })
+    files.vectorDeleteByRecording.mockResolvedValue(0)
+    db.getPendingFileCleanups.mockReturnValueOnce([
+      { journalId: 'journal-locked', recordingId: 'r1', targets: [{ kind: 'audio', path: '/data/r1.wav' }] }
+    ])
+
+    const res = await deleteRecording('r1', { hard: true })
+    expect(res.success).toBe(true)
+    if (!res.success) return
+
+    // The failure WAS recorded first (durable even if the process dies
+    // mid-sweep) and then cleared by the sweep.
+    expect(db.recordPendingFileCleanups).toHaveBeenCalledWith('journal-locked', [
+      { kind: 'audio', path: '/data/r1.wav' }
+    ])
+    expect(db.updatePendingFileCleanups).toHaveBeenCalledWith('journal-locked', [])
+    // ...so the outcome reports CLEAN, not a false "will retry" partial.
+    expect(res.allFilesRemoved).toBe(true)
+    expect(res.pendingFileKinds).toEqual([])
+  })
+
+  // ADV49-1 (round 51, DELETION HONESTY) — the journal write is the ONLY
+  // durable record of a failed cleanup target (the authoritative rows are
+  // already committed and gone). If that write THROWS, the failed paths live
+  // only in memory and are lost the moment this call returns. The method must
+  // report an HONEST unrecoverable outcome — NOT a plain success promising an
+  // auto-retry that can never happen.
+  it('reports cleanupUnrecoverable (honest failure) when journaling the failed targets throws', async () => {
+    db.deleteRecordingCascade.mockReturnValue({
+      mode: 'hard',
+      recordingId: 'r1',
+      filename: 'r1.wav',
+      filePath: '/data/r1.wav',
+      artifactPaths: [],
+      removed: {},
+      journalId: 'journal-unrec'
+    })
+    files.deleteRecording.mockReturnValue(false) // unlink failed
+    files.existsSync.mockReturnValue(true) // ...but the file DID exist ⇒ a real pending target
+    files.removeMeetingWiki.mockReturnValue({ removed: 0, failed: 0, ok: true })
+    // The durable journal write itself fails (e.g. DB I/O / serialization).
+    db.recordPendingFileCleanups.mockImplementationOnce(() => {
+      throw new Error('journal write failed')
+    })
+
+    const res = await deleteRecording('r1', { hard: true })
+    expect(res.success).toBe(true)
+    if (!res.success) return
+
+    // The purge DID remove the rows, but file cleanup could not be guaranteed
+    // AND could not be journaled ⇒ honest unrecoverable outcome, no false
+    // "will retry automatically" promise, and the target is not silently lost.
+    expect(res.cleanupUnrecoverable).toBe(true)
+    expect(res.allFilesRemoved).toBe(false)
+    expect(res.pendingFileKinds).toContain('audio')
+  })
+
+  describe('retryPendingFileCleanups', () => {
+    it('clears a pending target once the retry succeeds', async () => {
+      db.getPendingFileCleanups.mockReturnValueOnce([
+        { journalId: 'journal-1', recordingId: 'r1', targets: [{ kind: 'audio', path: '/data/r1.wav' }] }
+      ])
+      files.existsSync.mockReturnValue(true) // file still there...
+      files.deleteRecording.mockReturnValue(true) // ...and the retry unlink succeeds this time
+
+      const result = await retryPendingFileCleanups()
+
+      expect(files.deleteRecording).toHaveBeenCalledWith('/data/r1.wav')
+      expect(db.updatePendingFileCleanups).toHaveBeenCalledWith('journal-1', [])
+      expect(result).toEqual({ attempted: 1, cleared: 1, clearedJournalIds: ['journal-1'], stillPending: {} })
+    })
+
+    // CX-T6-2/OP-LOW-1 (T6 fix round) — an externally-removed pending audio
+    // file is CLEAN, not a forever-failing retry: deleteRecordingFile returns
+    // false for a missing path, which previously kept the ledger row alive
+    // and futilely re-attempted on every sweep.
+    it('clears a pending audio target whose file was removed externally, without another unlink attempt', async () => {
+      db.getPendingFileCleanups.mockReturnValueOnce([
+        { journalId: 'journal-1', recordingId: 'r1', targets: [{ kind: 'audio', path: '/data/r1.wav' }] }
+      ])
+      files.existsSync.mockReturnValue(false) // already gone
+
+      const result = await retryPendingFileCleanups()
+
+      expect(files.deleteRecording).not.toHaveBeenCalled()
+      expect(db.updatePendingFileCleanups).toHaveBeenCalledWith('journal-1', [])
+      expect(result).toEqual({ attempted: 1, cleared: 1, clearedJournalIds: ['journal-1'], stillPending: {} })
+    })
+
+    it('keeps a target pending when the retry fails again', async () => {
+      db.getPendingFileCleanups.mockReturnValueOnce([
+        { journalId: 'journal-1', recordingId: 'r1', targets: [{ kind: 'audio', path: '/data/r1.wav' }] }
+      ])
+      files.deleteRecording.mockReturnValue(false)
+      files.existsSync.mockReturnValue(true)
+
+      const result = await retryPendingFileCleanups()
+
+      expect(db.updatePendingFileCleanups).toHaveBeenCalledWith('journal-1', [{ kind: 'audio', path: '/data/r1.wav' }])
+      expect(result).toEqual({ attempted: 1, cleared: 0, clearedJournalIds: [], stillPending: { 'journal-1': ['audio'] } })
+    })
+
+    it('retries wiki and vector targets by recordingId, and artifact targets by path', async () => {
+      db.getPendingFileCleanups.mockReturnValueOnce([
+        {
+          journalId: 'journal-2',
+          recordingId: 'r2',
+          targets: [{ kind: 'wiki' }, { kind: 'vector' }, { kind: 'artifact', path: '/data/artifacts/a.pdf' }]
+        }
+      ])
+      files.removeMeetingWiki.mockReturnValue({ removed: 1, failed: 0, ok: true })
+      files.vectorDeleteByRecording.mockResolvedValue(0)
+      files.existsSync.mockReturnValue(true)
+
+      const result = await retryPendingFileCleanups()
+
+      expect(files.removeMeetingWiki).toHaveBeenCalledWith('r2')
+      expect(files.vectorDeleteByRecording).toHaveBeenCalledWith('r2')
+      expect(files.unlinkSync).toHaveBeenCalledWith('/data/artifacts/a.pdf')
+      expect(db.updatePendingFileCleanups).toHaveBeenCalledWith('journal-2', [])
+      expect(result.cleared).toBe(1)
+      expect(result.clearedJournalIds).toEqual(['journal-2'])
+    })
+
+    it('is bounded and non-fatal — a read failure resolves cleanly instead of throwing', async () => {
+      db.getPendingFileCleanups.mockImplementationOnce(() => {
+        throw new Error('db unavailable')
+      })
+      await expect(retryPendingFileCleanups()).resolves.toEqual({
+        attempted: 0,
+        cleared: 0,
+        clearedJournalIds: [],
+        stillPending: {}
+      })
+    })
   })
 })
 

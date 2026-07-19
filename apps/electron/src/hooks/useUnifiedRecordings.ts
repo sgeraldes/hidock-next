@@ -16,7 +16,9 @@ import { UNKNOWN_DATE, isUnknownDate } from '@/lib/unknownDate'
 // can import the predicate without pulling this hook's React/store/device deps.
 export { UNKNOWN_DATE, isUnknownDate }
 
-interface DatabaseRecording {
+// Exported (spec-005/F17 T5 §D5) so features/library/utils/trashRow.ts can type
+// the recordings:getTrash row shape without duplicating this interface.
+export interface DatabaseRecording {
   id: string
   filename: string
   file_path: string
@@ -219,6 +221,7 @@ export function buildRecordingMap(
         dateRecorded,
         transcriptionStatus: mapTranscriptionStatus(dbRec?.transcription_status ?? dbRec?.status, capture?.status ?? undefined),
         meetingId: dbRec?.meeting_id,
+        sourceKind: 'recording',
         location: 'both',
         deviceFilename: deviceRec.filename,
         localPath: synced?.file_path || dbRec?.file_path || '',
@@ -226,6 +229,8 @@ export function buildRecordingMap(
         knowledgeCaptureId: capture?.id,
         title: capture?.title,
         quality: capture?.quality,
+        qualityReasons: capture?.qualityReasons ?? undefined,
+        qualitySource: capture?.qualitySource ?? undefined,
         category: capture?.category ?? undefined,
         status: capture?.status ?? undefined,
         summary: capture?.summary ?? undefined,
@@ -245,6 +250,7 @@ export function buildRecordingMap(
         duration: deviceRec.duration,
         dateRecorded,
         transcriptionStatus: 'none',
+        sourceKind: 'recording',
         location: 'device-only',
         deviceFilename: deviceRec.filename,
         syncStatus: 'not-synced'
@@ -277,6 +283,10 @@ export function buildRecordingMap(
         // to the legacy status only when it's absent (matches the 'both' branch).
         transcriptionStatus: mapTranscriptionStatus(dbRec.transcription_status ?? dbRec.status, capture?.status ?? undefined),
         meetingId: dbRec.meeting_id,
+        // CX-T5-3: explicit — this is a REAL recordings-table row even when its
+        // nullable file_path is empty (the old path inference misread that as
+        // capture-only and stripped its deletion/restore affordances).
+        sourceKind: 'recording',
         location: 'local-only',
         localPath: dbRec.file_path,
         syncStatus: 'synced',
@@ -284,6 +294,8 @@ export function buildRecordingMap(
         knowledgeCaptureId: capture?.id,
         title: capture?.title,
         quality: capture?.quality,
+        qualityReasons: capture?.qualityReasons ?? undefined,
+        qualitySource: capture?.qualitySource ?? undefined,
         category: capture?.category ?? undefined,
         status: capture?.status ?? undefined,
         summary: capture?.summary ?? undefined,
@@ -312,6 +324,7 @@ export function buildRecordingMap(
           duration: cached.duration_seconds || 0,
           dateRecorded,
           transcriptionStatus: 'none',
+          sourceKind: 'recording',
           location: 'device-only',
           deviceFilename: cached.filename,
           syncStatus: 'not-synced'
@@ -338,6 +351,10 @@ export function buildRecordingMap(
       duration: 0,
       dateRecorded: new Date(dateSource),
       transcriptionStatus: mapTranscriptionStatus(undefined, capture.status ?? undefined),
+      // CX-T5-3: the ONLY 'capture' producer in the app — this synthetic row has
+      // no recordings-table backing, so isRecordingBacked() hides every
+      // recording-deletion affordance on it (AR3-4; F20 owns its future contract).
+      sourceKind: 'capture',
       location: 'local-only',
       localPath: '',
       syncStatus: 'synced',
@@ -345,6 +362,8 @@ export function buildRecordingMap(
       knowledgeCaptureId: capture.id,
       title: capture.title,
       quality: capture.quality,
+      qualityReasons: capture.qualityReasons ?? undefined,
+      qualitySource: capture.qualitySource ?? undefined,
       category: capture.category ?? undefined,
       status: capture.status ?? undefined,
       summary: capture.summary ?? undefined
@@ -363,6 +382,24 @@ interface UseUnifiedRecordingsResult {
   loading: boolean
   error: string | null
   refresh: (forceDeviceRefresh?: boolean) => Promise<void>
+  /**
+   * spec-006/F17 T6 fix round 2 (CX-T6-4) — cache-only rebuild: re-reads DB +
+   * synced_files + device_file_cache + captures and rebuilds the unified list
+   * with NO device fetch and NO debounce. For call sites that have already
+   * reconciled main-process state themselves (e.g. the post-device-delete
+   * path, whose IPC just removed the cache entry) and only need the view to
+   * catch up — `refresh(false)` is swallowed by the 2s debounce there, and
+   * `refresh(true)` forces a FULL device list scan (~90s on a loaded device).
+   * Typed optional ONLY so existing tests' partial hook mocks stay valid
+   * (mirrors UnifiedRecording.sourceKind's precedent) — the real hook always
+   * returns it; callers use `refreshLocal?.()`.
+   *
+   * CX-T6-6 (fix round 3) — explicit failure contract: resolves `true` only
+   * when the list was actually rebuilt; `false` when a local read failed
+   * (previous list state untouched — callers surface the stale-view warning
+   * instead of claiming success). Never throws.
+   */
+  refreshLocal?: () => Promise<boolean>
   deviceConnected: boolean
   stats: {
     total: number
@@ -471,7 +508,13 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
         window.electronAPI.recordings.getAll() as Promise<DatabaseRecording[]>,
         window.electronAPI.syncedFiles.getAll() as Promise<SyncedFile[]>,
         window.electronAPI.deviceCache.getAll() as Promise<CachedDeviceFile[]>,
-        window.electronAPI.knowledge.getAll() as Promise<KnowledgeCapture[]>
+        // ROUND-15 RESIDUAL — owner Library uses the existence-scoped OWNER
+        // accessor so the owner still sees+manages captures of their own
+        // excluded (personal / soft-deleted / value-excluded) recordings, incl.
+        // their value badges. Standalone captures are value-gated identically to
+        // the default tier, so Today (which reads this same store slice via
+        // useTodayCaptures) cannot surface a value-excluded standalone capture.
+        window.electronAPI.knowledge.getAllOwner() as Promise<KnowledgeCapture[]>
       ])
       console.log('[useUnifiedRecordings] Loaded: dbRecs:', dbRecs.length, 'syncedFiles:', syncedFiles.length, 'cachedDeviceFiles:', cachedDeviceFiles.length, 'knowledgeCaptures:', knowledgeCaptures?.length)
 
@@ -586,6 +629,61 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
       console.log('[useUnifiedRecordings] loadRecordings completed')
     }
   }, [deviceService, setRecordings, incrementLoading, decrementLoading, setError, markLoaded])
+
+  // spec-006/F17 T6 fix round 2 (CX-T6-4) — cache-only rebuild. Re-reads the
+  // LOCAL sources (DB recordings, synced_files, device_file_cache, captures)
+  // plus the device service's in-memory list, and rebuilds the unified view
+  // WITHOUT any device fetch: no listRecordings() call, no Phase-2, no cache
+  // save-back. Used after a confirmed device delete, where the main process
+  // has already been reconciled (the markNotOnDevice IPC removed the
+  // device_file_cache entry, and the device service invalidated its in-memory
+  // list) and forcing a full device scan (~90s on a loaded device, awaited
+  // before the completion toast) is exactly what must NOT happen. Deliberately
+  // not gated by loadRecordings' 2s debounce (this is cheap, local-only work)
+  // and not contending for loadingRef — a concurrent full load would only
+  // re-set the same or fresher data afterwards.
+  // CX-T6-6 (fix round 3): explicit failure contract — resolves TRUE only
+  // when the list was actually rebuilt; FALSE when any local read failed (the
+  // previous state is left untouched). Never throws (the internal logging
+  // stays), so callers branch on the boolean: Library's post-device-delete
+  // path treats false as "the view may still show the pre-delete row" and
+  // shows the honest stale-view warning instead of a plain success toast.
+  const refreshLocal = useCallback(async (): Promise<boolean> => {
+    try {
+      if (!window.electronAPI?.recordings) return false
+      const isConnected = deviceService.isConnected()
+      setDeviceConnected(isConnected)
+      const [dbRecs, syncedFiles, cachedDeviceFiles, knowledgeCaptures] = await Promise.all([
+        window.electronAPI.recordings.getAll() as Promise<DatabaseRecording[]>,
+        window.electronAPI.syncedFiles.getAll() as Promise<SyncedFile[]>,
+        window.electronAPI.deviceCache.getAll() as Promise<CachedDeviceFile[]>,
+        // ROUND-15 RESIDUAL — owner Library uses the existence-scoped OWNER
+        // accessor so the owner still sees+manages captures of their own
+        // excluded (personal / soft-deleted / value-excluded) recordings, incl.
+        // their value badges. Standalone captures are value-gated identically to
+        // the default tier, so Today (which reads this same store slice via
+        // useTodayCaptures) cannot surface a value-excluded standalone capture.
+        window.electronAPI.knowledge.getAllOwner() as Promise<KnowledgeCapture[]>
+      ])
+      const memoryCachedDeviceRecs = isConnected ? deviceService.getCachedRecordings() : []
+      const rebuilt = buildRecordingMap(
+        memoryCachedDeviceRecs,
+        dbRecs,
+        syncedFiles,
+        cachedDeviceFiles,
+        isConnected,
+        knowledgeCaptures
+      )
+      setRecordings(rebuilt)
+      return true
+    } catch (e) {
+      // Never fatal — the caller's action already succeeded; the next full
+      // refresh/scan corrects the view. The FALSE return is the caller's
+      // signal to say so honestly (CX-T6-6).
+      console.error('[useUnifiedRecordings] refreshLocal failed:', e)
+      return false
+    }
+  }, [deviceService, setRecordings])
 
   const loadRecordingsRef = useRef(loadRecordings)
   loadRecordingsRef.current = loadRecordings
@@ -783,6 +881,7 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
     loading,
     error,
     refresh: loadRecordings,
+    refreshLocal,
     deviceConnected,
     stats
   }
@@ -791,7 +890,9 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
 /**
  * Map database status to transcription status
  */
-function mapTranscriptionStatus(status?: string, captureStatus?: string): UnifiedRecording['transcriptionStatus'] {
+// Exported (spec-005/F17 T5 §D5) so the Trash-row mapper can reuse the exact
+// same status mapping instead of duplicating it.
+export function mapTranscriptionStatus(status?: string, captureStatus?: string): UnifiedRecording['transcriptionStatus'] {
   if (captureStatus) {
     if (captureStatus === 'ready' || captureStatus === 'enriched') return 'complete'
     if (captureStatus === 'processing') return 'processing'

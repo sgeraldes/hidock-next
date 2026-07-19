@@ -34,7 +34,13 @@ function createMockElectronAPI() {
     recordings: { getAll: vi.fn().mockResolvedValue([]) },
     syncedFiles: { getAll: vi.fn().mockResolvedValue([]) },
     deviceCache: { getAll: vi.fn().mockResolvedValue([]), saveAll: vi.fn().mockResolvedValue(undefined) },
-    knowledge: { getAll: vi.fn().mockResolvedValue([]) },
+    // ROUND-15 RESIDUAL — the hook now calls the owner accessor. Alias getAll to
+    // the same fn so existing tests that drive/assert `knowledge.getAll` still
+    // resolve the value the hook consumes via getAllOwner.
+    knowledge: (() => {
+      const captures = vi.fn().mockResolvedValue([])
+      return { getAll: captures, getAllOwner: captures }
+    })(),
     onRecordingAdded: vi.fn(() => vi.fn())
   } as any
 }
@@ -75,7 +81,7 @@ describe('useUnifiedRecordings', () => {
       renderHook(() => useUnifiedRecordings())
 
       await waitFor(() => {
-        expect(window.electronAPI.knowledge.getAll).toHaveBeenCalled()
+        expect(window.electronAPI.knowledge.getAllOwner).toHaveBeenCalled()
         expect(window.electronAPI.recordings.getAll).toHaveBeenCalled()
       })
     })
@@ -155,6 +161,47 @@ describe('useUnifiedRecordings', () => {
       })
     })
 
+    // F16/spec-003 Part A — qualityReasons/qualitySource must thread through
+    // to the UnifiedRecording, alongside `quality`, so SourceRow's value
+    // badge/tooltip has the data it needs.
+    it('threads qualityReasons and qualitySource from the knowledge capture', async () => {
+      const mockRecs = [{
+        id: 'rec-1',
+        filename: 'test.wav',
+        file_path: '/recordings/test.wav',
+        file_size: 100,
+        status: 'complete',
+        date_recorded: '2025-01-01T10:00:00Z'
+      }]
+      const mockCaptures = [{
+        id: 'cap-1',
+        sourceRecordingId: 'rec-1',
+        title: 'Low value capture',
+        quality: 'low-value',
+        qualityReasons: ['personal_family', 'background_ambient'],
+        qualitySource: 'ai',
+        status: 'ready'
+      }]
+
+      // @ts-ignore - electronAPI members are vi.fn mocks in tests
+      window.electronAPI.recordings.getAll.mockResolvedValue(mockRecs)
+      // @ts-ignore - electronAPI members are vi.fn mocks in tests
+      window.electronAPI.knowledge.getAll.mockResolvedValue(mockCaptures)
+
+      renderHook(() => useUnifiedRecordings())
+
+      await waitFor(() => {
+        expect(storeState.setUnifiedRecordings).toHaveBeenCalledWith(expect.arrayContaining([
+          expect.objectContaining({
+            id: 'rec-1',
+            quality: 'low-value',
+            qualityReasons: ['personal_family', 'background_ambient'],
+            qualitySource: 'ai'
+          })
+        ]))
+      })
+    })
+
     it('leaves title undefined when no knowledge capture exists', async () => {
       const mockRecs = [{
         id: 'rec-1',
@@ -177,6 +224,87 @@ describe('useUnifiedRecordings', () => {
           expect(call[0][0].filename).toBe('test.wav')
           expect(call[0][0].title).toBeUndefined()
         }
+      })
+    })
+  })
+
+  // ============================================================
+  // sourceKind stamps (CX-T5-3, spec-005/F17 fix round) — the explicit
+  // discriminator every deletion affordance gates on. buildRecordingMap's
+  // capture-only branch is the ONLY 'capture' producer; every row built
+  // from a recordings-table row is 'recording' EVEN when its nullable
+  // file_path is null/empty (the old path inference misread that).
+  // ============================================================
+
+  describe('sourceKind stamps (CX-T5-3)', () => {
+    it('stamps a DB recording "recording" even when its file_path is null', async () => {
+      const mockRecs = [{
+        id: 'rec-null-path',
+        filename: 'no-path.wav',
+        file_path: null,
+        file_size: 100,
+        status: 'complete',
+        date_recorded: '2025-01-01T10:00:00Z'
+      }]
+      // @ts-ignore - electronAPI members are vi.fn mocks in tests
+      window.electronAPI.recordings.getAll.mockResolvedValue(mockRecs)
+      // @ts-ignore - electronAPI members are vi.fn mocks in tests
+      window.electronAPI.knowledge.getAll.mockResolvedValue([])
+
+      renderHook(() => useUnifiedRecordings())
+
+      await waitFor(() => {
+        expect(storeState.setUnifiedRecordings).toHaveBeenCalledWith(expect.arrayContaining([
+          expect.objectContaining({ id: 'rec-null-path', sourceKind: 'recording' })
+        ]))
+      })
+    })
+
+    it('stamps a capture-only synthetic row "capture" (the ONLY capture producer)', async () => {
+      // @ts-ignore - electronAPI members are vi.fn mocks in tests
+      window.electronAPI.recordings.getAll.mockResolvedValue([])
+      // @ts-ignore - electronAPI members are vi.fn mocks in tests
+      window.electronAPI.knowledge.getAll.mockResolvedValue([{
+        id: 'cap-standalone',
+        title: 'Imported PDF',
+        status: 'ready'
+        // no sourceRecordingId — the capture-only synthesis branch
+      }])
+
+      renderHook(() => useUnifiedRecordings())
+
+      await waitFor(() => {
+        expect(storeState.setUnifiedRecordings).toHaveBeenCalledWith(expect.arrayContaining([
+          expect.objectContaining({ id: 'cap-standalone', sourceKind: 'capture' })
+        ]))
+      })
+    })
+
+    it('stamps a recording-backed capture row "recording" (sourceRecordingId set)', async () => {
+      const mockRecs = [{
+        id: 'rec-1',
+        filename: 'test.wav',
+        file_path: '/recordings/test.wav',
+        file_size: 100,
+        status: 'complete',
+        date_recorded: '2025-01-01T10:00:00Z'
+      }]
+      // @ts-ignore - electronAPI members are vi.fn mocks in tests
+      window.electronAPI.recordings.getAll.mockResolvedValue(mockRecs)
+      // @ts-ignore - electronAPI members are vi.fn mocks in tests
+      window.electronAPI.knowledge.getAll.mockResolvedValue([{
+        id: 'cap-1',
+        sourceRecordingId: 'rec-1',
+        title: 'Backed capture',
+        status: 'ready'
+      }])
+
+      renderHook(() => useUnifiedRecordings())
+
+      await waitFor(() => {
+        expect(storeState.setUnifiedRecordings).toHaveBeenCalledWith(expect.arrayContaining([
+          expect.objectContaining({ id: 'rec-1', sourceKind: 'recording' })
+        ]))
       })
     })
   })

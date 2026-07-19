@@ -74,7 +74,17 @@ vi.mock('../database', () => ({
     return row
   }),
   queryAll: vi.fn(() => []),
-  escapeLikePattern: vi.fn((p: string) => p.replace(/[%_\\]/g, '\\$&'))
+  escapeLikePattern: vi.fn((p: string) => p.replace(/[%_\\]/g, '\\$&')),
+  // ADV19-2 (round-20) — the post-await recheck revalidates capture-backed vector
+  // chunks through filterEligibleCaptureIds. cap-42 is a standalone, eligible
+  // capture (no source recording, valuable rating) so the screenshot chunk stays.
+  getCaptureEligibilityRows: (ids: Iterable<string>) => ({
+    rows: [...ids].map((id) => ({ id, deleted_at: null, source_recording_id: null, quality_rating: 'valuable' })),
+    failClosed: false
+  }),
+  getEligibleRecordingIds: (ids: Iterable<string>) => ({ eligible: new Set([...ids]), failClosed: false }),
+  getExistingRecordingIds: (ids: Iterable<string>) => ({ ids: new Set([...ids]), failClosed: false }),
+  getExistingCaptureIds: (ids: Iterable<string>) => ({ ids: new Set([...ids]), failClosed: false })
 }))
 
 describe('RAG image-capture citations (F5 PixelRAG)', () => {

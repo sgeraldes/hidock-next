@@ -64,7 +64,10 @@ beforeEach(() => {
         getMergeHints: vi.fn().mockResolvedValue({ success: true, data: [] }),
       },
       contacts: {
+        // R28-RES-1 (round-29): SourceReader/useReaderPeople is an OWNER surface →
+        // it now calls the existence-scoped owner accessor.
         getForMeeting: vi.fn().mockResolvedValue({ success: true, data: [] }),
+        getForMeetingOwner: vi.fn().mockResolvedValue({ success: true, data: [] }),
         getAll: vi.fn().mockResolvedValue({ success: true, data: { contacts: [] } }),
       },
     },

@@ -14,7 +14,7 @@
  * Every handler is guarded so a graph failure never breaks the pipeline.
  */
 
-import type { KnowledgeGraphStore } from '@hidock/knowledge-graph'
+import { mergeNodes, type KnowledgeGraphStore } from '@hidock/knowledge-graph'
 import { getEventBus, type ContactChangedEvent, type TranscriptReadyEvent } from './event-bus'
 import { getKnowledgeGraphStore, ingestFromDbTranscripts } from './knowledge-graph-service'
 import { normalizeName } from './entity-normalize'
@@ -70,14 +70,16 @@ export function renameOrMergePersonNode(
 
   if (keeper.id === loser.id) return 'noop'
 
-  // A node already exists at the new name — fold the loser into it. Repoint
-  // edges (UNIQUE(source,target,type) may collide → move what fits, drop the
-  // rest), then delete the loser node.
-  db.run('UPDATE OR IGNORE graph_edges SET source_id = ? WHERE source_id = ?', [keeper.id, loser.id])
-  db.run('DELETE FROM graph_edges WHERE source_id = ?', [loser.id])
-  db.run('UPDATE OR IGNORE graph_edges SET target_id = ? WHERE target_id = ?', [keeper.id, loser.id])
-  db.run('DELETE FROM graph_edges WHERE target_id = ?', [loser.id])
-  db.run('DELETE FROM graph_nodes WHERE id = ?', [loser.id])
+  // A node already exists at the new name — fold the loser into it via the
+  // package's mergeNodes (F18/AR2-1, OP-F1): it repoints edges, and when a
+  // repoint COLLIDES with an edge the keeper already has, the dropped loser
+  // edge's graph_edge_sources rows + weight are folded into the surviving
+  // keeper edge FIRST — so per-recording provenance is never silently lost
+  // at this merge site, and a later recording-scoped cleanup judges the
+  // keeper edge shared/sole correctly. Otherwise identical to the previous
+  // inline UPDATE-OR-IGNORE + DELETE surgery: a fold never touches the
+  // keeper's label/norm_key, and edges reference node ids only.
+  mergeNodes(store, keeper.id, loser.id)
   return 'merged'
 }
 

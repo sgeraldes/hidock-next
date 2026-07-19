@@ -120,6 +120,61 @@ describe('Chat Component', () => {
     })
   })
 
+  // ADV39-MED (round-41): the renderer must RESPECT the addContext write result.
+  // The main-process gate refuses to pin a capture that became excluded between
+  // fetch and write; on refusal the capture must NOT be installed or displayed, and
+  // metadata must be re-fetched only AFTER a successful write.
+  describe('addContext result-respect (handleToggleContext)', () => {
+    it('addContext {success:true} ⇒ capture installed + displayed, metadata re-fetched', async () => {
+      ;(window.electronAPI.assistant.addContext as ReturnType<typeof vi.fn>).mockResolvedValue({ success: true })
+
+      render(
+        <MemoryRouter>
+          <Chat />
+        </MemoryRouter>
+      )
+      await screen.findByText('HISTORY')
+
+      fireEvent.click(await screen.findByTitle(/Add Context/i))
+      fireEvent.click(await screen.findByText('Knowledge 1'))
+
+      await waitFor(() => {
+        expect(window.electronAPI.assistant.addContext).toHaveBeenCalledWith('c3', 'k1')
+      })
+      // Installed → the attached-context bar renders, and metadata was re-fetched
+      // (only after the successful write).
+      await waitFor(() => {
+        expect(screen.getByText('Context:')).toBeInTheDocument()
+      })
+      expect(window.electronAPI.knowledge.getById).toHaveBeenCalledWith('k1')
+    })
+
+    it('addContext {success:false} ⇒ capture NOT installed/displayed, no metadata re-fetch', async () => {
+      ;(window.electronAPI.assistant.addContext as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: false,
+        error: 'Knowledge capture not found'
+      })
+
+      render(
+        <MemoryRouter>
+          <Chat />
+        </MemoryRouter>
+      )
+      await screen.findByText('HISTORY')
+
+      fireEvent.click(await screen.findByTitle(/Add Context/i))
+      fireEvent.click(await screen.findByText('Knowledge 1'))
+
+      await waitFor(() => {
+        expect(window.electronAPI.assistant.addContext).toHaveBeenCalledWith('c3', 'k1')
+      })
+      // Refused → the attached-context bar is never shown and metadata is NOT
+      // re-fetched (getById is only called on the success path).
+      expect(screen.queryByText('Context:')).toBeNull()
+      expect(window.electronAPI.knowledge.getById).not.toHaveBeenCalled()
+    })
+  })
+
   it('should sort conversations by most recent first', async () => {
     render(
       <MemoryRouter>

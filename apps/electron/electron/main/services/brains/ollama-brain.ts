@@ -15,6 +15,7 @@ import type {
   BrainAuthStatus,
   BrainCapability,
   BrainMessage,
+  EmbedOptions,
   GenerateOptions,
 } from './types'
 
@@ -64,12 +65,20 @@ export class OllamaBrain implements AIBrain {
     })
   }
 
-  async embed(texts: string[]): Promise<(number[] | null)[]> {
+  /**
+   * ADV43-2 (round-45) — Ollama emits ONE request per text (generateEmbeddings
+   * loops over generateEmbedding). `opts.shouldGenerate` is threaded into that
+   * loop and re-evaluated fail-closed before EACH per-text request, so an owner
+   * exclusion committed while an earlier request is pending stops every later
+   * request; already-fetched vectors are kept and the remaining texts return
+   * `null` (the "no embedding available" shape callers persist as nothing).
+   */
+  async embed(texts: string[], opts: EmbedOptions = {}): Promise<(number[] | null)[]> {
     if (texts.length === 0) return []
     try {
       const ollama = getOllamaService()
       if (await ollama.isAvailable()) {
-        return await ollama.generateEmbeddings(texts)
+        return await ollama.generateEmbeddings(texts, { shouldGenerate: opts.shouldGenerate })
       }
     } catch (e) {
       console.error('[OllamaBrain] embed failed:', e)

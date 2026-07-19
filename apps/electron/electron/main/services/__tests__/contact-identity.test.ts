@@ -40,9 +40,14 @@ import { pickKeeperContact, mergeDuplicateContacts } from '../org-reconciler'
 
 function seedContact(c: Partial<Contact> & { id: string; name: string }): void {
   const now = c.first_seen_at || '2026-01-01T00:00:00.000Z'
+  // round-39: default source='user' so a bare seed is a VISIBLE structural contact
+  // (matching a real owner/calendar contact). The round-39 entity-reference-WRITE
+  // gates reuse/bind only VISIBLE contacts; a NULL-source, no-membership contact is
+  // suppressed (hidden from every picker) and would never reach these write paths in
+  // production. Tests wanting a SUPPRESSED contact pass source:'transcript' + a recid.
   run(
-    `INSERT INTO contacts (id, name, email, type, role, company, notes, tags, first_seen_at, last_seen_at, meeting_count, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO contacts (id, name, email, type, role, company, notes, tags, first_seen_at, last_seen_at, meeting_count, created_at, source, source_recording_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       c.id,
       c.name,
@@ -55,7 +60,9 @@ function seedContact(c: Partial<Contact> & { id: string; name: string }): void {
       now,
       c.last_seen_at || now,
       c.meeting_count ?? 0,
-      c.created_at || now
+      c.created_at || now,
+      c.source ?? 'user',
+      c.source_recording_id ?? null
     ]
   )
 }

@@ -9,19 +9,22 @@ import { z } from 'zod'
 import {
   getContacts,
   getContactById,
-  getContactByName,
+  getContactsByName,
   createContact,
   updateContact,
   deleteContact,
   getMeetingsForContact,
   getContactsForMeeting,
-  mergeContacts,
+  getContactsForMeetingOwner,
   unmergeContacts,
+  filterVisibleEntityIds,
+  blankIneligibleContactFields,
   unmergeContactsGroup,
   MergeOrderConflictError,
   UnmergeResult,
   Contact
 } from '../services/database'
+import { mergeContactsWithGraph } from '../services/knowledge-graph-service'
 import { getEventBus } from '../services/event-bus'
 import { success, error, Result } from '../types/api'
 import {
@@ -51,8 +54,20 @@ export function registerContactsHandlers(): void {
         const { search, type, limit, offset } = parsed.data
         const result = getContacts(search, type, limit, offset)
 
+        // ADV27-1 (round-28) — People is a NON-OWNER identity surface: a
+        // transcript-created contact ENTITY whose sole source recording is
+        // excluded (personal/soft-deleted/value-excluded/hard-purged) must not stay
+        // searchable/listed here. Route the page through the central visible-identity
+        // boundary (manual/calendar entities always survive; fail-closed). The total
+        // is left as the raw count (an over-count is a benign display artifact, never
+        // a leak — the suppressed rows themselves never cross the boundary).
+        const { visible } = filterVisibleEntityIds('contact', result.contacts.map((c) => c.id))
+        const contacts = result.contacts.filter((c) => visible.has(c.id))
+
+        // ADV29-2 (round-31) — a contact kept visible by an eligible recording can
+        // still carry a `role` enriched from an excluded one; blank it fail-closed.
         return success({
-          contacts: result.contacts.map(mapToPerson),
+          contacts: blankIneligibleContactFields(contacts).map(mapToPerson),
           total: result.total
         })
       } catch (err) {
@@ -79,6 +94,15 @@ export function registerContactsHandlers(): void {
           return error('NOT_FOUND', `Contact with ID ${parsed.data.id} not found`)
         }
 
+        // ADV27-1 (round-28) — POINT read on the same non-owner surface. A
+        // transcript-created contact whose provenance is fully excluded is treated
+        // as absent (NOT_FOUND), consistent with its suppression from the list;
+        // manual/calendar contacts pass. Fail-closed.
+        const { visible } = filterVisibleEntityIds('contact', [parsed.data.id])
+        if (!visible.has(parsed.data.id)) {
+          return error('NOT_FOUND', `Contact with ID ${parsed.data.id} not found`)
+        }
+
         const meetings = getMeetingsForContact(parsed.data.id)
 
         // Calculate total meeting time
@@ -89,8 +113,11 @@ export function registerContactsHandlers(): void {
           totalMeetingTimeMinutes += Math.round((end - start) / 60000)
         }
 
+        // ADV29-2 (round-31) — blank a transcript-enriched role whose source
+        // recording is ineligible even though the entity itself stays visible.
+        const [safeContact] = blankIneligibleContactFields([contact])
         return success({
-          contact: mapToPerson(contact),
+          contact: mapToPerson(safeContact),
           meetings,
           totalMeetingTimeMinutes
         })
@@ -116,12 +143,36 @@ export function registerContactsHandlers(): void {
         }
 
         const name = parsed.data.name.trim()
-        const existing = getContactByName(name)
-        if (existing) {
-          return error('DUPLICATE_ENTRY', `A contact named ${existing.name} already exists`, {
-            existingId: existing.id,
-            existingName: existing.name
-          })
+        // ADV36-3 (round-38) — inspect EVERY exact-name candidate, not just the
+        // first (getContactByName LIMIT 1 was unordered). With BOTH a suppressed
+        // transcript-derived twin AND a visible same-name contact, an unordered
+        // LIMIT-1 could pick the suppressed row, ignore the visible duplicate, and
+        // mint another (duplicate identity). Route ALL candidates through the central
+        // visible-identity boundary in ONE call:
+        //   • ANY VISIBLE match ⇒ genuine duplicate — surface the VISIBLE one's id/name.
+        //   • only SUPPRESSED matches ⇒ treat as unavailable — do NOT reveal a hidden
+        //     id/name; fall through and mint a fresh manual contact.
+        //   • visibility EVALUATION FAILS (failClosed) ⇒ RETRYABLE error, do NOT create
+        //     (a transient DB error must not persist a duplicate).
+        const candidates = getContactsByName(name)
+        if (candidates.length > 0) {
+          const { visible, failClosed } = filterVisibleEntityIds(
+            'contact',
+            candidates.map((c) => c.id)
+          )
+          if (failClosed) {
+            return error(
+              'RETRYABLE_ERROR',
+              'Could not verify whether this contact already exists. Please try again.'
+            )
+          }
+          const visibleDup = candidates.find((c) => visible.has(c.id))
+          if (visibleDup) {
+            return error('DUPLICATE_ENTRY', `A contact named ${visibleDup.name} already exists`, {
+              existingId: visibleDup.id,
+              existingName: visibleDup.name
+            })
+          }
         }
 
         const created = createContact({
@@ -155,6 +206,17 @@ export function registerContactsHandlers(): void {
         const { id, tags, name, email, ...otherUpdates } = parsed.data
         const contact = getContactById(id)
         if (!contact) {
+          return error('NOT_FOUND', `Contact with ID ${id} not found`)
+        }
+
+        // ADV36-2 sweep (round-38) — gate the update TARGET through the central
+        // visible-identity boundary. A SUPPRESSED contact (transcript-derived, sole
+        // source recording excluded) is already hidden from contacts:getById /
+        // getAll, so a stale UI reference must not be able to mutate (and thereby
+        // re-surface / re-key) it. Treat a suppressed/failClosed target as absent,
+        // consistent with getById's NOT_FOUND suppression.
+        const { visible, failClosed } = filterVisibleEntityIds('contact', [id])
+        if (failClosed || !visible.has(id)) {
           return error('NOT_FOUND', `Contact with ID ${id} not found`)
         }
 
@@ -250,7 +312,26 @@ export function registerContactsHandlers(): void {
           return error('NOT_FOUND', `Loser contact ${loserId} not found`)
         }
 
-        const merged = mergeContacts(keeperId, loserId)
+        // ADV36-2 (round-38) — mergeContacts folds the loser's fields/aliases/
+        // memberships onto the keeper with NO visibility check, so a stale or
+        // SUPPRESSED loser (its sole source recording personal/soft-deleted/
+        // value-excluded/hard-purged) would launder excluded-derived identity+fields
+        // into a VISIBLE keeper. Round 30 gated the org-reconciler AUTO merge; this
+        // MANUAL IPC was missed. Gate BOTH ids through the central visible-identity
+        // boundary immediately before the merge (no await in between — atomic on the
+        // single-threaded main process). Refuse GENERICALLY (no identity details)
+        // unless BOTH are visible AND the lookup succeeds; fail-closed on lookup error.
+        const { visible, failClosed } = filterVisibleEntityIds('contact', [keeperId, loserId])
+        if (failClosed || !visible.has(keeperId) || !visible.has(loserId)) {
+          return error('MERGE_NOT_ALLOWED', 'These contacts cannot be merged.')
+        }
+
+        // ADV55-1 (round-57): route through the graph-aware composite so the loser's
+        // person node + edges + graph_edge_sources provenance fold onto the keeper
+        // in the SAME transaction as the relational merge, instead of relying on the
+        // post-commit name event (which NO-OPS for contact-keyed F18 nodes, leaving
+        // the loser's graph facts stranded under the deleted loser contact id).
+        const merged = mergeContactsWithGraph(keeperId, loserId)
         return success(mapToPerson(merged))
       } catch (err) {
         console.error('contacts:merge error:', err)
@@ -311,7 +392,12 @@ export function registerContactsHandlers(): void {
   })
 
   /**
-   * Get contacts for a specific meeting
+   * Get contacts for a specific meeting — GATED default (ASSISTANT / hover / Today
+   * tier). R28-RES-1 (round-29): the membership rows are filtered fail-closed
+   * through filterEligibleMembershipRows inside getContactsForMeeting, so a
+   * transcript-extracted attendee from an excluded recording never surfaces here.
+   * EntityHoverCards / CalendarTooltips / Today consume this via
+   * meeting-participants.ts.
    */
   ipcMain.handle(
     'contacts:getForMeeting',
@@ -321,10 +407,37 @@ export function registerContactsHandlers(): void {
           return error('VALIDATION_ERROR', 'Meeting ID must be a string')
         }
 
-        const contacts = getContactsForMeeting(meetingId)
+        // ADV29-2 (round-31) — assistant/hover tier: blank a transcript-enriched
+        // role whose source recording is ineligible (the participant may stay via a
+        // structural/eligible membership while its role came from an excluded one).
+        const contacts = blankIneligibleContactFields(getContactsForMeeting(meetingId))
         return success(contacts.map(mapToPerson))
       } catch (err) {
         console.error('contacts:getForMeeting error:', err)
+        return error('DATABASE_ERROR', 'Failed to fetch contacts for meeting', err)
+      }
+    }
+  )
+
+  /**
+   * R28-RES-1 (round-29) — OWNER-MANAGEMENT meeting participants (existence-scoped).
+   * Repointed ONLY by MeetingDetail + SourceReader/useReaderPeople so the owner sees
+   * every participant of their OWN meeting, including ones derived from an excluded
+   * recording. NOT used by any assistant/Today surface (those stay on the gated
+   * default above).
+   */
+  ipcMain.handle(
+    'contacts:getForMeetingOwner',
+    async (_, meetingId: unknown): Promise<Result<Person[]>> => {
+      try {
+        if (typeof meetingId !== 'string') {
+          return error('VALIDATION_ERROR', 'Meeting ID must be a string')
+        }
+
+        const contacts = getContactsForMeetingOwner(meetingId)
+        return success(contacts.map(mapToPerson))
+      } catch (err) {
+        console.error('contacts:getForMeetingOwner error:', err)
         return error('DATABASE_ERROR', 'Failed to fetch contacts for meeting', err)
       }
     }

@@ -31,7 +31,7 @@ import { deriveSpeakerRanges, type DerivedSpeakerRange } from '@/features/librar
 import { getDisplayTitle } from '@/features/library/utils/getDisplayTitle'
 import { useUIStore } from '@/store/useUIStore'
 import { useLibraryStore } from '@/store/useLibraryStore'
-import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
+import { UnifiedRecording, hasLocalPath, isDeviceOnly, isRecordingBacked } from '@/types/unified-recording'
 import { Transcript, Meeting, MeetingAttendee, parseJsonArray } from '@/types'
 import { Calendar, Download, Trash2, Wand2, RefreshCw, Play, Square, Pencil, Check, Edit2, Link, X, ExternalLink, FolderOpen, MoreHorizontal, Folder, Plus, EyeOff, Eye, Sparkles, ChevronDown, Cloud, Cpu, Users, Mail, UserCog, Pin } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -55,6 +55,17 @@ import {
 import { toast } from '@/components/ui/toaster'
 import { RecordingLinkDialog } from '@/components/RecordingLinkDialog'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
+import {
+  LABEL_DELETE_FROM_DEVICE,
+  LABEL_MOVE_TO_TRASH,
+  LABEL_DELETE_PERMANENTLY,
+  SCOPE_DEVICE_DELETE,
+  SCOPE_DEVICE_DELETE_SYNCED,
+  SCOPE_DEVICE_NOT_CONNECTED,
+  SCOPE_TRASH,
+  SCOPE_PERMANENT,
+  ariaLabelWithScope
+} from '@/features/library/utils/deletionCopy'
 import { formatDateTime, formatDuration, formatBytes, cn } from '@/lib/utils'
 import { formatSmartDate, formatRelativeDate } from '@/lib/smartDate'
 import { useTranscriptionStore } from '@/store/features/useTranscriptionStore'
@@ -223,6 +234,9 @@ interface SourceReaderProps {
   onReprocessVibeVoice?: () => void
   onDelete?: () => void
   onDeletePermanent?: () => void
+  /** Synced ("both") rows only (spec-005/F17 §D3) — erases the device copy via the
+   *  existing renderer device path, keeps the local copy. */
+  onDeleteFromDevice?: () => void
   onMarkPersonal?: () => void
   // State for button enabling/disabling
   deviceConnected?: boolean
@@ -253,6 +267,7 @@ export function SourceReader({
   // remains in the interface so existing callers (Library) still type-check.
   onDelete,
   onDeletePermanent,
+  onDeleteFromDevice,
   onMarkPersonal,
   deviceConnected = false,
   isDownloading = false,
@@ -370,7 +385,9 @@ export function SourceReader({
     let cancelled = false
     ;(async () => {
       try {
-        const fetched = await window.electronAPI?.transcripts?.getByRecordingId(recording.id)
+        // ADV13: owner-management detail viewer — use the owner accessor so the
+        // owner can still read their OWN trashed/personal/value-excluded transcript.
+        const fetched = await window.electronAPI?.transcripts?.getByRecordingIdOwner(recording.id)
         if (!cancelled && fetched) setFallbackTranscript(fetched as Transcript)
       } catch (err) {
         console.error('[SourceReader] Transcript fallback fetch failed:', err)
@@ -1032,31 +1049,65 @@ export function SourceReader({
                   </DropdownMenuItem>
                 </>
               )}
-              {onDelete && (
+              {/* spec-005/F17 T5 §D2/§D3/AR3-4 — mirrors SourceRow's delete block.
+                  AR3-4 (binding): capture-only synthetic rows (no source recording)
+                  render NONE of these — gated on isRecordingBacked. */}
+              {isRecordingBacked(recording) && onDelete && (
                 <>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem
                     onClick={onDelete}
                     disabled={(isDeviceOnly(recording) && !deviceConnected) || isDeleting}
-                    className="text-destructive focus:text-destructive"
+                    className="items-start gap-2 text-destructive focus:text-destructive"
+                    aria-label={ariaLabelWithScope(
+                      isDeviceOnly(recording) ? LABEL_DELETE_FROM_DEVICE : LABEL_MOVE_TO_TRASH,
+                      isDeviceOnly(recording)
+                        ? (deviceConnected ? SCOPE_DEVICE_DELETE : SCOPE_DEVICE_NOT_CONNECTED)
+                        : SCOPE_TRASH
+                    )}
                   >
                     {isDeleting ? (
-                      <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />
+                      <RefreshCw className="h-4 w-4 mt-0.5 shrink-0 animate-spin" aria-hidden="true" />
                     ) : (
-                      <Trash2 className="h-4 w-4" aria-hidden="true" />
+                      <Trash2 className="h-4 w-4 mt-0.5 shrink-0" aria-hidden="true" />
                     )}
-                    {isDeviceOnly(recording) ? 'Delete from device'
-                      : recording.location === 'local-only' ? 'Delete from computer'
-                        : 'Delete everywhere'}
+                    <span className="flex flex-col">
+                      <span>{isDeviceOnly(recording) ? LABEL_DELETE_FROM_DEVICE : LABEL_MOVE_TO_TRASH}</span>
+                      <span className="text-xs text-muted-foreground">
+                        {isDeviceOnly(recording)
+                          ? (deviceConnected ? SCOPE_DEVICE_DELETE : SCOPE_DEVICE_NOT_CONNECTED)
+                          : SCOPE_TRASH}
+                      </span>
+                    </span>
                   </DropdownMenuItem>
+                  {onDeleteFromDevice && recording.location === 'both' && (
+                    <DropdownMenuItem
+                      onClick={onDeleteFromDevice}
+                      disabled={!deviceConnected || isDeleting}
+                      className="items-start gap-2 text-destructive focus:text-destructive"
+                      aria-label={ariaLabelWithScope(LABEL_DELETE_FROM_DEVICE, deviceConnected ? SCOPE_DEVICE_DELETE_SYNCED : SCOPE_DEVICE_NOT_CONNECTED)}
+                    >
+                      <Trash2 className="h-4 w-4 mt-0.5 shrink-0" aria-hidden="true" />
+                      <span className="flex flex-col">
+                        <span>{LABEL_DELETE_FROM_DEVICE}</span>
+                        <span className="text-xs text-muted-foreground">
+                          {deviceConnected ? SCOPE_DEVICE_DELETE_SYNCED : SCOPE_DEVICE_NOT_CONNECTED}
+                        </span>
+                      </span>
+                    </DropdownMenuItem>
+                  )}
                   {onDeletePermanent && !isDeviceOnly(recording) && (
                     <DropdownMenuItem
                       onClick={onDeletePermanent}
                       disabled={isDeleting}
-                      className="text-destructive focus:text-destructive"
+                      className="items-start gap-2 text-destructive focus:text-destructive"
+                      aria-label={ariaLabelWithScope(LABEL_DELETE_PERMANENTLY, SCOPE_PERMANENT)}
                     >
-                      <Trash2 className="h-4 w-4" aria-hidden="true" />
-                      Delete permanently…
+                      <Trash2 className="h-4 w-4 mt-0.5 shrink-0" aria-hidden="true" />
+                      <span className="flex flex-col">
+                        <span>{LABEL_DELETE_PERMANENTLY}</span>
+                        <span className="text-xs text-muted-foreground">{SCOPE_PERMANENT}</span>
+                      </span>
                     </DropdownMenuItem>
                   )}
                 </>
