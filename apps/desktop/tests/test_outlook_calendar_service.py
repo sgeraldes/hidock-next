@@ -184,7 +184,13 @@ class TestOutlookCalendarService:
     @patch("outlook_calendar_service.OUTLOOK_AVAILABLE", True)
     @patch("outlook_calendar_service.Account")
     def test_authenticate_failure(self, mock_account_class, outlook_service):
-        """Test authentication failure."""
+        """A failed authentication must leave no trace of an authenticated session."""
+        # Seed the service as if an earlier sign-in had succeeded. A failed re-authentication must
+        # tear that state down rather than leave a stale account/schedule behind.
+        outlook_service.account = Mock(name="stale_account")
+        outlook_service.schedule = Mock(name="stale_schedule")
+        outlook_service._is_authenticated = True
+
         # Mock authentication failure
         mock_account = Mock()
         mock_account.authenticate.return_value = False
@@ -195,6 +201,29 @@ class TestOutlookCalendarService:
         assert result is False
         assert outlook_service._is_authenticated is False
         assert outlook_service.account is None
+        assert outlook_service.schedule is None
+        # The public predicate must agree: a failed sign-in is not an authenticated service.
+        assert outlook_service.is_authenticated() is False
+
+    @patch("outlook_calendar_service.OUTLOOK_AVAILABLE", True)
+    @patch("outlook_calendar_service.Account")
+    def test_authenticate_exception_clears_state(self, mock_account_class, outlook_service):
+        """An exception during authentication must also tear down any prior session state."""
+        outlook_service.account = Mock(name="stale_account")
+        outlook_service.schedule = Mock(name="stale_schedule")
+        outlook_service._is_authenticated = True
+
+        mock_account = Mock()
+        mock_account.authenticate.side_effect = Exception("network down")
+        mock_account_class.return_value = mock_account
+
+        result = outlook_service.authenticate("client_id", "client_secret")
+
+        assert result is False
+        assert outlook_service._is_authenticated is False
+        assert outlook_service.account is None
+        assert outlook_service.schedule is None
+        assert outlook_service.is_authenticated() is False
 
     def test_get_status_info(self, outlook_service):
         """Test status information retrieval."""
