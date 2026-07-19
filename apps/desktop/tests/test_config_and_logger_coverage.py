@@ -406,6 +406,53 @@ class TestLoggerFunctionality(unittest.TestCase):
         # Should be the same instance
         self.assertIs(logger1, logger2)
 
+    def test_file_logging_creates_the_missing_log_directory(self):
+        """File logging must create logs/ instead of silently disabling itself.
+
+        logs/ is git-ignored, so it does not exist in a fresh checkout. Without the
+        makedirs in _setup_file_logging, open() raises FileNotFoundError, the
+        `except IOError` branch swallows it into a printed warning, and file logging is
+        off even though enable_file_logging defaults to True. Nothing else in the suite
+        exercises this path, so the defect would regress unnoticed.
+        """
+        import shutil
+
+        from config_and_logger import Logger
+
+        temp_root = tempfile.mkdtemp()
+        # Stand in for a clean checkout: the app root itself does not exist yet, so both
+        # it and its logs/ subdirectory have to be created.
+        app_root = os.path.join(temp_root, "fresh_checkout")
+        log = None
+
+        try:
+            with patch("config_and_logger._APP_ROOT_DIR", app_root):
+                log = Logger(
+                    initial_config={
+                        "enable_file_logging": True,
+                        # Relative, so it resolves to <app_root>/logs/hidock.log
+                        "log_file_path": "hidock.log",
+                        "log_level": "INFO",
+                    }
+                )
+
+            expected_path = os.path.join(app_root, "logs", "hidock.log")
+
+            self.assertIsNotNone(log.log_file, "file logging was silently disabled")
+            self.assertTrue(os.path.isdir(os.path.join(app_root, "logs")), "logs/ was not created")
+            self.assertTrue(os.path.exists(expected_path), "log file was not created")
+
+            # And the logger actually writes through to it.
+            log.info("TestModule", "test_procedure", "regression marker line")
+
+            with open(expected_path, "r", encoding="utf-8") as f:
+                contents = f.read()
+            self.assertIn("regression marker line", contents)
+        finally:
+            if log is not None and log.log_file:
+                log.log_file.close()
+            shutil.rmtree(temp_root, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()
