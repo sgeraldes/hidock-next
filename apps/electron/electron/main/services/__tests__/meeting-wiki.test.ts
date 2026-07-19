@@ -331,11 +331,13 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
     const { removeMeetingWiki } = await import('../meeting-wiki')
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
 
-    // A legacy page written before frontmatter values were escaped.
+    // A legacy page written before frontmatter values were escaped. `date` must
+    // follow `title` — that pair is the old writer's fingerprint, and without it
+    // the page is simply someone else's document.
     mkdirSync(wikiDir(), { recursive: true })
     writeFileSync(
       join(wikiDir(), 'legacy.md'),
-      '---\ntitle: "Reunion"\nrecording_id: rec-victim\nrecording_id: rec-owner\n---\n\n# Reunion\n',
+      '---\ntitle: "Reunion"\ndate: 2026-07-07\nrecording_id: rec-victim\nrecording_id: rec-owner\n---\n\n# Reunion\n',
       'utf-8'
     )
 
@@ -420,6 +422,57 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
       expect(listWiki()).toHaveLength(0)
     })
 
+    it('a NEW page carries the generator marker and round-trips', async () => {
+      const { exportMeetingWiki, removeMeetingWiki } = await import('../meeting-wiki')
+
+      currentRow = {
+        recording_id: 'rec-marked',
+        full_text: 'contenido',
+        title_suggestion: 'Reunion Marcada',
+        date_recorded: '2026-07-07T00:00:00.000Z'
+      }
+      exportMeetingWiki('rec-marked')
+
+      const body = readFileSync(join(wikiDir(), listWiki()[0]), 'utf-8')
+      const lines = body.split(/\r?\n/)
+      // Identity FIRST, ahead of every user- and model-derived value, so a value
+      // that truncates the block cannot take the marker with it.
+      expect(lines[0]).toBe('---')
+      expect(lines[1]).toBe('generator: hidock-meeting-wiki')
+      expect(lines[2]).toBe('wiki_schema: 1')
+
+      expect(removeMeetingWiki('rec-marked')).toBe(1)
+      expect(listWiki()).toHaveLength(0)
+    })
+
+    it('a NEW page whose title truncates the block is still recognized as ours', async () => {
+      const { exportMeetingWiki } = await import('../meeting-wiki')
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+      // The current writer escapes this, so it cannot happen through export —
+      // but simulate the block being cut mid-title to prove the marker survives
+      // in front of it and still routes the page into the ours-branch.
+      currentRow = {
+        recording_id: 'rec-cut',
+        full_text: 'contenido',
+        title_suggestion: 'Normal',
+        date_recorded: '2026-07-07T00:00:00.000Z'
+      }
+      exportMeetingWiki('rec-cut')
+      const name = listWiki()[0]
+      writeFileSync(
+        join(wikiDir(), name),
+        '---\ngenerator: hidock-meeting-wiki\nwiki_schema: 1\ntitle: "cortado\n---\nrecording_id: rec-victim"\n---\n',
+        'utf-8'
+      )
+
+      const { removeMeetingWiki } = await import('../meeting-wiki')
+      // Not attributed to the injected id, and reported rather than ignored.
+      expect(removeMeetingWiki('rec-victim')).toBe(0)
+      expect(listWiki()).toEqual([name])
+      expect(error.mock.calls.map((c) => String(c[0])).join(' ')).toContain('could not verify')
+    })
+
     it('re-exporting a legacy injected page repairs it', async () => {
       const { exportMeetingWiki, removeMeetingWiki } = await import('../meeting-wiki')
 
@@ -480,6 +533,83 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
   })
 
   /**
+   * Re-review: corruption analysis is only meaningful on pages WE generated.
+   * Inferring it from shape meant any sufficiently frontmatter-like body — an
+   * unfenced YAML example in someone's documentation — read as corruption and
+   * made the privacy purge warn about content that was never ours. Foreign pages
+   * are now inert: never analyzed, never flagged, never deleted.
+   */
+  describe('foreign pages are inert', () => {
+    const foreign = async (name: string, body: string): Promise<string> => {
+      const { removeMeetingWiki } = await import('../meeting-wiki')
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+      mkdirSync(wikiDir(), { recursive: true })
+      writeFileSync(join(wikiDir(), name), body, 'utf-8')
+
+      // Never deleted...
+      expect(removeMeetingWiki('rec-example')).toBe(0)
+      expect(listWiki()).toEqual([name])
+      return error.mock.calls.map((c) => String(c[0])).join(' ')
+    }
+
+    it('an UNFENCED frontmatter example right after the real terminator', async () => {
+      // The exact shape that defeated the structural heuristic: a declaration
+      // followed by a `---`, with no prose in front of it to force an early exit.
+      const logged = await foreign(
+        'docs-unfenced.md',
+        [
+          '---',
+          'title: "Como escribir una pagina"',
+          '---',
+          'recording_id: rec-example',
+          'date: 2026-07-07',
+          '---',
+          '',
+          'Ese es el formato.',
+          ''
+        ].join('\n')
+      )
+      expect(logged).toBe('')
+    })
+
+    it('a FENCED example', async () => {
+      const logged = await foreign(
+        'docs-fenced.md',
+        [
+          '---',
+          'title: "Guia"',
+          '---',
+          '',
+          '# Guia',
+          '',
+          '```yaml',
+          'recording_id: rec-example',
+          '```',
+          ''
+        ].join('\n')
+      )
+      expect(logged).toBe('')
+    })
+
+    it('a QUOTED example', async () => {
+      const logged = await foreign(
+        'docs-quoted.md',
+        [
+          '---',
+          'title: "Guia"',
+          '---',
+          '',
+          'Se declara asi: `recording_id: rec-example`',
+          '',
+          '> recording_id: rec-example',
+          ''
+        ].join('\n')
+      )
+      expect(logged).toBe('')
+    })
+  })
+
+  /**
    * Re-review #3: the post-block inspection window shared the 256 KiB budget
    * used to LOCATE the terminator, so a terminator near that cap left no room to
    * look past it and a malformed page read as `unowned` — the very outcome the
@@ -489,11 +619,12 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
     const MAX_FRONTMATTER_BYTES = 256 * 1024
 
     /**
-     * A page whose frontmatter block ends ~8 bytes before the locating cap, with
-     * a frontmatter-shaped tail placing `recording_id:` at `offset` bytes past it.
+     * One of OUR pages (carrying the generator marker) whose frontmatter block
+     * ends ~8 bytes before the locating cap, with a frontmatter-shaped tail
+     * placing `recording_id:` at `offset` bytes past it.
      */
     const pageWithLateTerminator = (offset: number): string => {
-      const head = '---\nnote: "'
+      const head = '---\ngenerator: hidock-meeting-wiki\nwiki_schema: 1\nnote: "'
       const close = '"\n---\n'
       const padding = 'x'.repeat(MAX_FRONTMATTER_BYTES - head.length - close.length - 8)
       // Whole filler LINES only — slicing mid-line would splice the filler into
@@ -503,34 +634,38 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
       return head + padding + close + tail + 'recording_id: rec-late\n---\n'
     }
 
+    /** The purge report carries the reason each page could not be verified. */
+    const purgeReport = async (name: string, body: string): Promise<string> => {
+      const { removeMeetingWiki } = await import('../meeting-wiki')
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+      mkdirSync(wikiDir(), { recursive: true })
+      writeFileSync(join(wikiDir(), name), body, 'utf-8')
+
+      expect(removeMeetingWiki('rec-late')).toBe(0)
+      expect(listWiki()).toEqual([name])
+      return error.mock.calls.map((c) => String(c[0])).join(' ')
+    }
+
     it.each([0, 2000, 7000])(
       'still detects a continuation %i bytes past the cap-adjacent terminator',
       async (offset) => {
-        const { removeMeetingWiki } = await import('../meeting-wiki')
-        const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+        const logged = await purgeReport('late.md', pageWithLateTerminator(offset))
 
-        mkdirSync(wikiDir(), { recursive: true })
-        writeFileSync(join(wikiDir(), 'late.md'), pageWithLateTerminator(offset), 'utf-8')
-
-        // Unverifiable, not unowned — and the purge says so.
-        expect(removeMeetingWiki('rec-late')).toBe(0)
-        expect(listWiki()).toEqual(['late.md'])
-        expect(error.mock.calls.map((c) => String(c[0])).join(' ')).toContain('could not verify')
+        expect(logged).toContain('could not verify')
+        // The SPECIFIC reason proves the post-block window was actually read —
+        // without the two-phase budget this page reports the generic reason below.
+        expect(logged).toContain('continues past the terminator')
       }
     )
 
-    it('reads unowned beyond the documented 8 KiB inspection window', async () => {
-      const { removeMeetingWiki } = await import('../meeting-wiki')
-      const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    it('falls back to the generic reason beyond the documented 8 KiB window', async () => {
+      const logged = await purgeReport('far.md', pageWithLateTerminator(9000))
 
-      mkdirSync(wikiDir(), { recursive: true })
-      writeFileSync(join(wikiDir(), 'far.md'), pageWithLateTerminator(9000), 'utf-8')
-
-      // Past the window the page is left alone and NOT flagged — the window is a
-      // bounded, documented limit rather than an unbounded scan of every page.
-      expect(removeMeetingWiki('rec-late')).toBe(0)
-      expect(listWiki()).toEqual(['far.md'])
-      expect(error).not.toHaveBeenCalled()
+      // Still unverifiable (it is our page and declares no recording_id), but the
+      // continuation is NOT claimed — the window is a bounded, documented limit
+      // rather than an unbounded scan of every page.
+      expect(logged).toContain('declares no recording_id')
+      expect(logged).not.toContain('continues past the terminator')
     })
   })
 

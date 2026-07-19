@@ -67,6 +67,88 @@ const FRONTMATTER_END_RE = /\r?\n---[ \t]*(?:\r?\n|$)/
 const TOP_LEVEL_KEY_RE = /^([A-Za-z_][A-Za-z0-9_-]*):[ \t]*(.*)$/
 
 /**
+ * Written into every page we generate, as the FIRST frontmatter key.
+ *
+ * Ownership analysis is only safe on pages we produced. Without a marker the
+ * reader had to infer "is this corrupt?" from shape alone, and any sufficiently
+ * frontmatter-like body — an unfenced YAML example in someone's documentation —
+ * satisfied the test and made the privacy purge cry wolf. Asking "is this ours?"
+ * instead is unambiguous, and it makes foreign documents inert: they are never
+ * analyzed, never flagged, never deleted.
+ */
+const GENERATOR_ID = 'hidock-meeting-wiki'
+const WIKI_SCHEMA_VERSION = 1
+
+/** Where a page came from, which decides whether we may reason about it at all. */
+type PageKind = 'marked' | 'legacy' | 'foreign'
+
+interface FrontmatterEntry {
+  key: string
+  value: string
+}
+
+/** Top-level `key: value` entries of a frontmatter block, in order. */
+function topLevelEntries(block: string): FrontmatterEntry[] {
+  const entries: FrontmatterEntry[] = []
+  for (const line of block.split(/\r?\n/)) {
+    if (/^\s/.test(line)) continue // nested (list item / block value)
+    const match = line.match(TOP_LEVEL_KEY_RE)
+    if (match) entries.push({ key: match[1], value: match[2].trim() })
+  }
+  return entries
+}
+
+/** True when a double-quoted scalar closes its quote. */
+function isClosedQuotedScalar(value: string): boolean {
+  let i = 1
+  while (i < value.length) {
+    if (value[i] === '\\') {
+      i += 2
+      continue
+    }
+    if (value[i] === '"') return true
+    i++
+  }
+  return false
+}
+
+/**
+ * Exact opening shape of the OLD serializer, which wrote no marker.
+ *
+ * It always emitted `title` first as a double-quoted scalar, then `date` as a
+ * bare `YYYY-MM-DD`. Deliberately narrow: this is a fingerprint of one specific
+ * writer, not a general "looks like frontmatter" test, so a Jekyll or Hugo page
+ * that merely starts with a title does not match.
+ *
+ * The one exception is the truncated case. When a payload split the block
+ * mid-title there is nothing after `title:` to match on — but the old escaper
+ * turned `"` into `\"`, so the payload could never close the quote it opened.
+ * An unterminated quoted title as the block's ONLY entry is therefore that
+ * writer's signature too, and is what keeps an injected legacy page from being
+ * mistaken for a foreign document.
+ */
+function matchesLegacyWriter(entries: FrontmatterEntry[]): boolean {
+  const first = entries[0]
+  if (!first || first.key !== 'title' || !first.value.startsWith('"')) return false
+  if (!isClosedQuotedScalar(first.value)) return entries.length === 1
+  const second = entries[1]
+  return !!second && second.key === 'date' && /^\d{4}-\d{2}-\d{2}$/.test(second.value)
+}
+
+/**
+ * Decide whether a page is one of ours. Everything downstream — corruption
+ * detection, purge reporting — applies only when the answer is yes.
+ */
+function classifyPage(entries: FrontmatterEntry[]): PageKind {
+  for (const entry of entries) {
+    if (entry.key !== 'generator') continue
+    const value = entry.value.startsWith('"') ? unquoteYamlScalar(entry.value) : entry.value
+    if (value === GENERATOR_ID) return 'marked'
+  }
+  return matchesLegacyWriter(entries) ? 'legacy' : 'foreign'
+}
+
+/**
  * Read the `recording_id` declarations out of a completed frontmatter block.
  *
  * Parsed STRUCTURALLY, line by line at the top level, and every occurrence is
@@ -77,16 +159,11 @@ const TOP_LEVEL_KEY_RE = /^([A-Za-z_][A-Za-z0-9_-]*):[ \t]*(.*)$/
  *
  * Indented lines are list items under a key (`topics:`) and are not declarations.
  */
-function parseRecordingIds(frontmatter: string): string[] {
-  const found: string[] = []
-  for (const rawLine of frontmatter.split(/\r?\n/)) {
-    if (/^\s/.test(rawLine)) continue // nested (list item / block value)
-    const match = rawLine.match(TOP_LEVEL_KEY_RE)
-    if (!match || match[1] !== 'recording_id') continue
-    const value = match[2].trim()
-    found.push(value.startsWith('"') ? unquoteYamlScalar(value) : value)
-  }
-  return found.filter((id) => id.length > 0)
+function parseRecordingIds(entries: FrontmatterEntry[]): string[] {
+  return entries
+    .filter((e) => e.key === 'recording_id')
+    .map((e) => (e.value.startsWith('"') ? unquoteYamlScalar(e.value) : e.value))
+    .filter((id) => id.length > 0)
 }
 
 /**
@@ -99,45 +176,18 @@ function parseRecordingIds(frontmatter: string): string[] {
  * title's quote is still open. Recognizing that is what keeps such a page from
  * reading as an innocent "no recording_id here" file.
  */
-function hasUnterminatedQuotedScalar(block: string): boolean {
-  for (const line of block.split(/\r?\n/)) {
-    if (/^\s/.test(line)) continue
-    const match = line.match(TOP_LEVEL_KEY_RE)
-    if (!match) continue
-    const value = match[2].trim()
-    if (!value.startsWith('"')) continue
-    let i = 1
-    let closed = false
-    while (i < value.length) {
-      if (value[i] === '\\') {
-        i += 2
-        continue
-      }
-      if (value[i] === '"') {
-        closed = true
-        break
-      }
-      i++
-    }
-    if (!closed) return true
-  }
-  return false
+function hasUnterminatedQuotedScalar(entries: FrontmatterEntry[]): boolean {
+  return entries.some((e) => e.value.startsWith('"') && !isClosedQuotedScalar(e.value))
 }
 
 /**
  * Does the text after an early terminator look like the CONTINUATION of a
  * generated frontmatter block, rather than ordinary page body?
  *
- * Matching any `recording_id:` line here was too loose: a foreign markdown file
- * or a code sample that merely mentions the key would be classified as
- * corruption, and every privacy purge would then warn that content might remain.
- * A report that cries wolf is a report the user stops reading.
- *
- * So require the STRUCTURE the writer would actually have produced if a value
- * split the block: a top-level `recording_id:` declaration, then a `---`
- * terminator, with nothing in between but frontmatter-shaped lines (`key: value`,
- * indented list items, blanks). Body prose fails on its very first heading or
- * sentence.
+ * Only ever consulted for pages we generated (see `classifyPage`), and only to
+ * refine the reason reported — a page of ours with no `recording_id` is an error
+ * either way. Foreign documents never reach it, which is what keeps an unfenced
+ * YAML example in someone's README from being read as corruption.
  */
 function looksLikeFrontmatterContinuation(text: string): boolean {
   let sawRecordingId = false
@@ -248,8 +298,20 @@ function readPageOwner(path: string): PageOwner {
       }
     }
 
-    const block = text.slice(0, end)
-    const ids = parseRecordingIds(block)
+    const entries = topLevelEntries(text.slice(0, end))
+    const ids = parseRecordingIds(entries)
+    const kind = classifyPage(entries)
+
+    if (kind === 'foreign') {
+      // Someone else's document. We do not reason about its integrity at all:
+      // it is attributed only on an unambiguous single claim, and otherwise left
+      // strictly alone — never analyzed, never reported. This is what stops an
+      // unfenced YAML example in a README from being read as corruption and
+      // making every privacy purge warn about content that was never ours.
+      return ids.length === 1 ? { kind: 'owned', recordingId: ids[0] } : { kind: 'unowned' }
+    }
+
+    // --- Below here the page is ours, so its integrity IS our business. ---
 
     if (ids.length === 1) return { kind: 'owned', recordingId: ids[0] }
     if (ids.length > 1) {
@@ -260,37 +322,35 @@ function readPageOwner(path: string): PageOwner {
       }
     }
 
-    // Zero declarations. `unowned` must mean "provably has no recording_id",
-    // never "I stopped parsing early" — a page cut short by an injected `---`
-    // would otherwise be silently retained by the privacy purge with the real
+    // Zero declarations on a page we generated is itself the anomaly — the writer
+    // always emits exactly one. `unowned` must mean "provably has no
+    // recording_id", never "I stopped parsing early", or a page cut short by an
+    // injected `---` would be silently retained by the purge with the real
     // owner's content still in it.
-    if (hasUnterminatedQuotedScalar(block)) {
+    if (hasUnterminatedQuotedScalar(entries)) {
       return {
         kind: 'error',
         reason: 'frontmatter block ends inside an unterminated quoted value'
       }
     }
 
-    // A closed block whose tail continues as frontmatter means the terminator we
-    // honored was not the real one (hand-edited or corrupted page). Phase two:
-    // extend the budget so this window is available even when the terminator sat
-    // right at the locating cap.
+    // Phase two: extend the read budget so the inspection window is available
+    // even when the terminator sat right at the locating cap.
     readCap = consumed + AFTER_TERMINATOR_SCAN_BYTES
     while (text.length < bodyStart + AFTER_TERMINATOR_SCAN_BYTES && readMore()) {
       /* pull the inspection window in */
     }
     // Sliced from AFTER the terminator line, not from the terminator itself —
     // otherwise the structural check sees `---` as its first line and bails.
-    if (
-      looksLikeFrontmatterContinuation(text.slice(bodyStart, bodyStart + AFTER_TERMINATOR_SCAN_BYTES))
-    ) {
-      return {
-        kind: 'error',
-        reason: 'the frontmatter block continues past the terminator it appeared to end at'
-      }
+    const continues = looksLikeFrontmatterContinuation(
+      text.slice(bodyStart, bodyStart + AFTER_TERMINATOR_SCAN_BYTES)
+    )
+    return {
+      kind: 'error',
+      reason: continues
+        ? 'the frontmatter block continues past the terminator it appeared to end at'
+        : 'a generated page declares no recording_id'
     }
-
-    return { kind: 'unowned' }
   } catch (e) {
     return { kind: 'error', reason: e instanceof Error ? e.message : String(e) }
   } finally {
@@ -485,6 +545,12 @@ function buildMarkdown(row: WikiRow): { filename: string; content: string } {
   // Every interpolated value below is escaped or numerically coerced. A raw
   // interpolation here is an ownership-injection hole — see yamlEscape.
   const fm: string[] = ['---']
+  // Identity FIRST, before any user- or model-derived value. If a value ever
+  // truncates the block, whatever survives still carries the marker, so the page
+  // is still recognized as ours and gets the corruption analysis instead of
+  // being mistaken for someone else's document.
+  fm.push(`generator: ${GENERATOR_ID}`)
+  fm.push(`wiki_schema: ${WIKI_SCHEMA_VERSION}`)
   fm.push(`title: ${yamlEscape(title)}`)
   fm.push(`date: ${dateStr}`)
   if (row.filename) fm.push(`source_file: ${yamlEscape(row.filename)}`)
