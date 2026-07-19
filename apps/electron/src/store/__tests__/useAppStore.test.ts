@@ -1520,4 +1520,77 @@ describe('useAppStore', () => {
       expect(mockElectronAPI.meetings.getAll).toHaveBeenCalled()
     })
   })
+
+  /**
+   * F15 / re-review #3: the mount sync parks on the boot gate for the whole
+   * startup window. Driving the "Sync Now" control off the same flag disabled it
+   * during exactly the period the bounded manual path exists to serve, so the
+   * user could never reach it.
+   */
+  describe('syncCalendar — manual control state is separate from sync activity', () => {
+    beforeEach(() => {
+      useAppStore.setState({
+        calendarSyncing: false,
+        calendarManualSyncing: false,
+        calendarSyncActiveCount: 0
+      })
+    })
+
+    it('a mount sync shows activity but leaves the manual control usable', async () => {
+      let resolveSync: (v: unknown) => void = () => {}
+      mockElectronAPI.calendar.sync.mockImplementation(
+        () => new Promise((r) => { resolveSync = r })
+      )
+
+      const pending = useAppStore.getState().syncCalendar('mount')
+
+      // Something IS syncing (spinner/status), but no click is outstanding...
+      expect(useAppStore.getState().calendarSyncing).toBe(true)
+      // ...so the control stays enabled and the user can invoke the manual path.
+      expect(useAppStore.getState().calendarManualSyncing).toBe(false)
+
+      resolveSync({ success: true, meetingsCount: 0 })
+      await pending
+      expect(useAppStore.getState().calendarSyncing).toBe(false)
+    })
+
+    it('a manual sync gates the control and releases it on queued', async () => {
+      mockElectronAPI.calendar.sync.mockResolvedValue({
+        success: false,
+        queued: true,
+        meetingsCount: 0
+      })
+
+      const result = await useAppStore.getState().syncCalendar('manual')
+
+      expect(result.queued).toBe(true)
+      // The click was answered — the control must not stay disabled waiting on a
+      // background pass that has not started.
+      expect(useAppStore.getState().calendarManualSyncing).toBe(false)
+      expect(useAppStore.getState().calendarSyncing).toBe(false)
+    })
+
+    it('a manual sync finishing does not clear activity while a mount sync is still running', async () => {
+      let resolveMount: (v: unknown) => void = () => {}
+      mockElectronAPI.calendar.sync.mockImplementationOnce(
+        () => new Promise((r) => { resolveMount = r })
+      )
+      const mount = useAppStore.getState().syncCalendar('mount')
+
+      mockElectronAPI.calendar.sync.mockResolvedValueOnce({
+        success: false,
+        queued: true,
+        meetingsCount: 0
+      })
+      await useAppStore.getState().syncCalendar('manual')
+
+      // The manual request is done, but the mount sync is still in flight.
+      expect(useAppStore.getState().calendarManualSyncing).toBe(false)
+      expect(useAppStore.getState().calendarSyncing).toBe(true)
+
+      resolveMount({ success: true, meetingsCount: 0 })
+      await mount
+      expect(useAppStore.getState().calendarSyncing).toBe(false)
+    })
+  })
 })

@@ -24,7 +24,7 @@ import {
 } from 'fs'
 import { join } from 'path'
 import { StringDecoder } from 'string_decoder'
-import { getTranscriptsPath } from './file-storage'
+import { getTranscriptsPath, getCachePath } from './file-storage'
 import { queryAll, queryOne } from './database'
 
 /**
@@ -54,7 +54,43 @@ const MAX_FRONTMATTER_BYTES = 256 * 1024
 
 /** Frontmatter terminator: a line containing only `---`. */
 const FRONTMATTER_END_RE = /\r?\n---[ \t]*(?:\r?\n|$)/
-const RECORDING_ID_RE = /^recording_id:[ \t]*(\S+)[ \t]*$/m
+/** A top-level `key: value` line inside the frontmatter block. */
+const TOP_LEVEL_KEY_RE = /^([A-Za-z_][A-Za-z0-9_-]*):[ \t]*(.*)$/
+
+/**
+ * Read the `recording_id` declarations out of a completed frontmatter block.
+ *
+ * Parsed STRUCTURALLY, line by line at the top level, and every occurrence is
+ * collected — the caller requires exactly one. Taking the first match instead
+ * was the injection payoff: a page carrying two ownership lines (one smuggled in
+ * through a multi-line title) would be attributed to whichever came first, and
+ * the privacy purge would delete a page belonging to a different recording.
+ *
+ * Indented lines are list items under a key (`topics:`) and are not declarations.
+ */
+function parseRecordingIds(frontmatter: string): string[] {
+  const found: string[] = []
+  for (const rawLine of frontmatter.split(/\r?\n/)) {
+    if (/^\s/.test(rawLine)) continue // nested (list item / block value)
+    const match = rawLine.match(TOP_LEVEL_KEY_RE)
+    if (!match || match[1] !== 'recording_id') continue
+    const value = match[2].trim()
+    found.push(value.startsWith('"') ? unquoteYamlScalar(value) : value)
+  }
+  return found.filter((id) => id.length > 0)
+}
+
+/** Decode a YAML double-quoted scalar written by `yamlEscape`. */
+function unquoteYamlScalar(value: string): string {
+  const body = value.replace(/^"/, '').replace(/"$/, '')
+  return body.replace(/\\(u[0-9a-fA-F]{4}|.)/g, (_all, esc: string) => {
+    if (esc[0] === 'u') return String.fromCodePoint(parseInt(esc.slice(1), 16))
+    if (esc === 'n') return '\n'
+    if (esc === 'r') return '\r'
+    if (esc === 't') return '\t'
+    return esc
+  })
+}
 
 /** Recording ids parsed out of page frontmatter, so the backfill never re-scans. */
 interface WikiIndex {
@@ -106,9 +142,16 @@ function readPageOwner(path: string): PageOwner {
 
       const end = text.search(FRONTMATTER_END_RE)
       if (end !== -1) {
-        const frontmatter = text.slice(0, end)
-        const match = frontmatter.match(RECORDING_ID_RE)
-        return match ? { kind: 'owned', recordingId: match[1] } : { kind: 'unowned' }
+        const ids = parseRecordingIds(text.slice(0, end))
+        if (ids.length === 1) return { kind: 'owned', recordingId: ids[0] }
+        if (ids.length === 0) return { kind: 'unowned' }
+        // Two or more ownership claims: the page is not trustworthy to delete on.
+        // Legacy pages written before frontmatter values were escaped can look
+        // like this; re-exporting rewrites them cleanly.
+        return {
+          kind: 'error',
+          reason: `frontmatter declares ${ids.length} recording_id values (${ids.join(', ')})`
+        }
       }
     }
 
@@ -236,8 +279,66 @@ function slugify(text: string): string {
     .slice(0, 70)
 }
 
+/**
+ * Serialize a string as a YAML double-quoted scalar that CANNOT span lines.
+ *
+ * This is a security boundary, not formatting. `title_suggestion`, `language`
+ * and `topics` are model output derived from user transcripts, and the previous
+ * version escaped only backslashes and quotes — a value containing a newline
+ * followed by `recording_id: <other-recording>` wrote a SECOND ownership line
+ * into the frontmatter, ahead of the real one, and the privacy purge would then
+ * delete a page belonging to a different recording. No malice required: the
+ * model just has to emit a multi-line title.
+ *
+ * So every character that YAML treats as a line break — LF, CR, NEL (U+0085),
+ * LS (U+2028), PS (U+2029) — plus all other control characters are emitted as
+ * escape sequences. The result is guaranteed to be one line.
+ */
 function yamlEscape(value: string): string {
-  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+  let out = '"'
+  for (const char of value) {
+    const code = char.codePointAt(0) as number
+    if (char === '\\') out += '\\\\'
+    else if (char === '"') out += '\\"'
+    else if (char === '\n') out += '\\n'
+    else if (char === '\r') out += '\\r'
+    else if (char === '\t') out += '\\t'
+    else if (
+      code < 0x20 || // C0 controls
+      code === 0x7f || // DEL
+      (code >= 0x80 && code <= 0x9f) || // C1 controls, incl. NEL (0x85)
+      code === 0x2028 || // LINE SEPARATOR
+      code === 0x2029 // PARAGRAPH SEPARATOR
+    ) {
+      out += `\\u${code.toString(16).padStart(4, '0')}`
+    } else {
+      out += char
+    }
+  }
+  return out + '"'
+}
+
+/**
+ * Identifiers safe to emit as a bare YAML scalar. Anything else is quoted and
+ * escaped — `recording_id` comes from the database, and a bare value carrying a
+ * line break would be the same injection as above on the one key that decides
+ * which recording a page belongs to.
+ */
+const BARE_SCALAR_RE = /^[A-Za-z0-9._:@-]+$/
+
+function yamlScalar(value: string): string {
+  return BARE_SCALAR_RE.test(value) ? value : yamlEscape(value)
+}
+
+/** Emit a finite number, or nothing when the value is not usable. */
+function yamlNumber(value: unknown): string | null {
+  const n = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(n) ? String(n) : null
+}
+
+/** Collapse a value to a single line for use in body prose (headings). */
+function singleLine(value: string): string {
+  return value.replace(/\s+/g, ' ').trim()
 }
 
 export function getWikiDir(): string {
@@ -252,21 +353,25 @@ function buildMarkdown(row: WikiRow): { filename: string; content: string } {
   const actionItems = parseJsonArray(row.action_items)
   const keyPoints = parseJsonArray(row.key_points)
 
+  // Every interpolated value below is escaped or numerically coerced. A raw
+  // interpolation here is an ownership-injection hole — see yamlEscape.
   const fm: string[] = ['---']
   fm.push(`title: ${yamlEscape(title)}`)
   fm.push(`date: ${dateStr}`)
   if (row.filename) fm.push(`source_file: ${yamlEscape(row.filename)}`)
-  fm.push(`recording_id: ${row.recording_id}`)
-  if (row.language) fm.push(`language: ${row.language}`)
-  if (row.duration_seconds) fm.push(`duration_minutes: ${Math.round(row.duration_seconds / 60)}`)
-  if (row.word_count) fm.push(`word_count: ${row.word_count}`)
+  fm.push(`recording_id: ${yamlScalar(row.recording_id)}`)
+  if (row.language) fm.push(`language: ${yamlScalar(row.language)}`)
+  const durationMinutes = row.duration_seconds ? yamlNumber(row.duration_seconds) : null
+  if (durationMinutes !== null) fm.push(`duration_minutes: ${Math.round(Number(durationMinutes) / 60)}`)
+  const wordCount = row.word_count ? yamlNumber(row.word_count) : null
+  if (wordCount !== null) fm.push(`word_count: ${wordCount}`)
   if (topics.length > 0) {
     fm.push('topics:')
     for (const t of topics) fm.push(`  - ${yamlEscape(t)}`)
   }
   fm.push('---')
 
-  const sections: string[] = [fm.join('\n'), `# ${title}`]
+  const sections: string[] = [fm.join('\n'), `# ${singleLine(title) || row.recording_id}`]
 
   if (row.summary) {
     sections.push(`## Summary\n\n${row.summary}`)
@@ -458,6 +563,47 @@ function yieldToEventLoop(): Promise<void> {
 }
 
 /**
+ * Recordings whose export failed on a previous pass, remembered ACROSS restarts.
+ *
+ * Without this, `maxFailures` traded one starvation for another: the missing-set
+ * ordering is rebuilt identically on every boot, so a block of persistently
+ * failing recordings at the head is retried — and hits the cutoff — in exactly
+ * the same place every time, and the healthy recordings behind them are never
+ * reached. Quarantined ids are ordered BEHIND recordings that have never been
+ * attempted, so each pass makes progress on new work first and still retries the
+ * failures with whatever budget is left.
+ *
+ * Derived state: losing the file only costs one extra retry round.
+ */
+const QUARANTINE_FILE = 'meeting-wiki-backfill.json'
+const QUARANTINE_LIMIT = 500
+
+function quarantinePath(): string {
+  return join(getCachePath(), QUARANTINE_FILE)
+}
+
+function loadQuarantine(): Set<string> {
+  try {
+    const parsed = JSON.parse(readFileSync(quarantinePath(), 'utf-8')) as { failedIds?: unknown }
+    return new Set(Array.isArray(parsed?.failedIds) ? parsed.failedIds.map(String) : [])
+  } catch {
+    return new Set() // absent or unreadable — start clean
+  }
+}
+
+function saveQuarantine(ids: Set<string>): void {
+  try {
+    const dir = getCachePath()
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+    // Keep the most recent entries; the list is a hint, not a ledger.
+    const failedIds = [...ids].slice(-QUARANTINE_LIMIT)
+    writeFileSync(quarantinePath(), JSON.stringify({ failedIds }), 'utf-8')
+  } catch (e) {
+    console.warn('[MeetingWiki] Could not persist the backfill retry list:', e)
+  }
+}
+
+/**
  * Re-export the wiki page for every transcript, in bounded batches.
  *
  * ## Why this is async and chunked (F15)
@@ -513,11 +659,20 @@ export async function backfillMeetingWiki(
   // ONE directory scan for the whole pass — the fix for the quadratic blowup.
   const index = buildWikiIndex(dir)
 
-  // Missing pages first (see the resumability note above). Recordings that
-  // already have a page are re-verified afterwards, with whatever budget is left.
+  // Ordering, in priority order (see the resumability note above):
+  //   1. missing and never-failed  — new work, always attempted first
+  //   2. missing and previously failed — retried behind new work, so a block of
+  //      persistent failures cannot pin the cutoff at the same place every boot
+  //   3. already has a page — re-verified with whatever budget is left
+  const quarantined = loadQuarantine()
   const havePage = new Set(index.owner.values())
-  const missing = rows.filter((r) => !havePage.has(r.recording_id))
-  const ordered = [...missing, ...rows.filter((r) => havePage.has(r.recording_id))]
+  const isMissing = (id: string): boolean => !havePage.has(id)
+  const missing = [
+    ...rows.filter((r) => isMissing(r.recording_id) && !quarantined.has(r.recording_id)),
+    ...rows.filter((r) => isMissing(r.recording_id) && quarantined.has(r.recording_id))
+  ]
+  const ordered = [...missing, ...rows.filter((r) => !isMissing(r.recording_id))]
+  const quarantineBefore = quarantined.size
 
   // Recordings from the missing set that ended this pass with a page (or with
   // nothing exportable). This — not `processed` — is what closes out the work.
@@ -538,8 +693,10 @@ export async function backfillMeetingWiki(
       // A null result means there is nothing exportable for this recording; it is
       // resolved, not pending, or it would be "missing" forever.
       if (stillMissing.has(recording_id)) resolvedMissing.add(recording_id)
+      quarantined.delete(recording_id) // recovered — retry it normally next time
     } catch (e) {
       failed++
+      quarantined.add(recording_id)
       console.error(`[MeetingWiki] Export failed for ${recording_id}:`, e)
       // Refund the failure's time so failures cannot monopolize the head of
       // every pass and starve the recordings behind them.
@@ -564,6 +721,9 @@ export async function backfillMeetingWiki(
 
   const remaining = ordered.length - processed
   const remainingMissing = missing.length - resolvedMissing.size
+
+  // Only touch the file when the set actually moved.
+  if (quarantined.size !== quarantineBefore) saveQuarantine(quarantined)
 
   if (rows.length > 0) {
     console.log(

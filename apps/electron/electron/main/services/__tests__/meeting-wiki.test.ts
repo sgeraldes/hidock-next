@@ -55,7 +55,9 @@ vi.mock('fs', async (importOriginal) => {
 })
 
 vi.mock('../file-storage', () => ({
-  getTranscriptsPath: () => tmpRoot
+  getTranscriptsPath: () => tmpRoot,
+  // Per-test tmpRoot, so the backfill's cross-pass retry list is isolated.
+  getCachePath: () => join(tmpRoot, 'cache')
 }))
 
 vi.mock('../database', () => ({
@@ -77,7 +79,14 @@ describe('exportMeetingWiki — stale page cleanup (ISSUE-8)', () => {
     rmSync(tmpRoot, { recursive: true, force: true })
   })
 
-  const listWiki = () => readdirSync(join(tmpRoot, 'wiki')).filter((f) => f.endsWith('.md')).sort()
+  // Tolerates an absent dir: a pass that writes nothing never creates it.
+  const listWiki = (): string[] => {
+    try {
+      return readdirSync(join(tmpRoot, 'wiki')).filter((f) => f.endsWith('.md')).sort()
+    } catch {
+      return []
+    }
+  }
 
   it('replaces the old page when the title (and thus filename) changes', async () => {
     const { exportMeetingWiki } = await import('../meeting-wiki')
@@ -178,7 +187,13 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
   })
 
   const wikiDir = () => join(tmpRoot, 'wiki')
-  const listWiki = () => readdirSync(wikiDir()).filter((f) => f.endsWith('.md')).sort()
+  const listWiki = (): string[] => {
+    try {
+      return readdirSync(wikiDir()).filter((f) => f.endsWith('.md')).sort()
+    } catch {
+      return []
+    }
+  }
 
   it('attributes a page whose recording_id sits far past any fixed head window', async () => {
     const { exportMeetingWiki, removeMeetingWiki } = await import('../meeting-wiki')
@@ -236,6 +251,82 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
     expect(listWiki()).toHaveLength(1)
     // The real owner still resolves.
     expect(removeMeetingWiki('rec-real')).toBe(1)
+  })
+
+  /**
+   * Re-review #1: title_suggestion is model output over user transcripts. A
+   * title containing a newline used to write a SECOND `recording_id:` line into
+   * the frontmatter ahead of the real one — and the reader took the first match,
+   * so purging the injected id deleted a page belonging to another recording.
+   */
+  it('a multi-line title cannot smuggle an ownership line into the frontmatter', async () => {
+    const { exportMeetingWiki, removeMeetingWiki } = await import('../meeting-wiki')
+
+    currentRow = {
+      recording_id: 'rec-owner',
+      full_text: 'contenido',
+      // The payload: close the quoted scalar, claim another recording, and try
+      // to terminate the frontmatter early.
+      title_suggestion: 'Reunion"\nrecording_id: rec-victim\n---\ntrailing',
+      date_recorded: '2026-07-07T00:00:00.000Z'
+    }
+    exportMeetingWiki('rec-owner')
+    const pages = listWiki()
+    expect(pages).toHaveLength(1)
+
+    const body = readFileSync(join(wikiDir(), pages[0]), 'utf-8')
+    // The whole title is one escaped scalar on one line.
+    expect(body).toContain('\\nrecording_id: rec-victim\\n---')
+    // Exactly one real ownership line exists.
+    expect(body.split(/\r?\n/).filter((l) => /^recording_id:/.test(l))).toEqual([
+      'recording_id: rec-owner'
+    ])
+
+    // Destructive cleanup cannot be redirected to the injected id...
+    expect(removeMeetingWiki('rec-victim')).toBe(0)
+    expect(listWiki()).toHaveLength(1)
+    // ...and the real owner still resolves.
+    expect(removeMeetingWiki('rec-owner')).toBe(1)
+    expect(listWiki()).toHaveLength(0)
+  })
+
+  it('escapes every YAML line break, not just LF', async () => {
+    const { exportMeetingWiki, removeMeetingWiki } = await import('../meeting-wiki')
+
+    currentRow = {
+      recording_id: 'rec-sep',
+      full_text: 'contenido',
+      // CR, NEL, LINE SEPARATOR and PARAGRAPH SEPARATOR are all YAML breaks.
+      title_suggestion: 'A\rrecording_id: v1recording_id: v2 recording_id: v3 x',
+      date_recorded: '2026-07-07T00:00:00.000Z'
+    }
+    exportMeetingWiki('rec-sep')
+
+    const body = readFileSync(join(wikiDir(), listWiki()[0]), 'utf-8')
+    expect(body.split(/\r?\n/).filter((l) => /^recording_id:/.test(l))).toEqual([
+      'recording_id: rec-sep'
+    ])
+    expect(removeMeetingWiki('v2')).toBe(0)
+    expect(listWiki()).toHaveLength(1)
+  })
+
+  it('treats a page with two ownership claims as unverifiable, never as owned by the first', async () => {
+    const { removeMeetingWiki } = await import('../meeting-wiki')
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    // A legacy page written before frontmatter values were escaped.
+    mkdirSync(wikiDir(), { recursive: true })
+    writeFileSync(
+      join(wikiDir(), 'legacy.md'),
+      '---\ntitle: "Reunion"\nrecording_id: rec-victim\nrecording_id: rec-owner\n---\n\n# Reunion\n',
+      'utf-8'
+    )
+
+    // Neither claim may be acted on.
+    expect(removeMeetingWiki('rec-victim')).toBe(0)
+    expect(removeMeetingWiki('rec-owner')).toBe(0)
+    expect(listWiki()).toEqual(['legacy.md'])
+    expect(error.mock.calls.map((c) => String(c[0])).join(' ')).toContain('2 recording_id values')
   })
 
   it('re-checks ownership at delete time — a page rewritten mid-pass is NOT destroyed', async () => {
@@ -319,7 +410,14 @@ describe('backfillMeetingWiki — bounded, yielding, resumable (F15)', () => {
     rmSync(tmpRoot, { recursive: true, force: true })
   })
 
-  const listWiki = () => readdirSync(join(tmpRoot, 'wiki')).filter((f) => f.endsWith('.md')).sort()
+  // Tolerates an absent dir: a pass that writes nothing never creates it.
+  const listWiki = (): string[] => {
+    try {
+      return readdirSync(join(tmpRoot, 'wiki')).filter((f) => f.endsWith('.md')).sort()
+    } catch {
+      return []
+    }
+  }
 
   it('writes every page on a cold pass', async () => {
     const { backfillMeetingWiki } = await import('../meeting-wiki')
@@ -493,6 +591,67 @@ describe('backfillMeetingWiki — bounded, yielding, resumable (F15)', () => {
     // But two pages genuinely do not exist, so the wiki is NOT complete.
     expect(result.remainingMissing).toBe(2)
     expect(listWiki()).toHaveLength(N - 2)
+  })
+
+  /**
+   * Re-review #2: refunding failure time fixed budget consumption, but the loop
+   * still BREAKS at maxFailures — and the missing-first ordering is rebuilt
+   * identically on every boot, so a block of persistent failures at the head hit
+   * the cutoff in the same place forever and the healthy tail was never reached.
+   */
+  it('healthy rows behind a wall of persistent failures are written on a later pass', async () => {
+    const { backfillMeetingWiki } = await import('../meeting-wiki')
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    // 50 rows that always fail, sitting ahead of 10 healthy ones — exactly the
+    // failure count that trips the default cutoff.
+    const base = rowById!
+    const doomed = new Set<string>()
+    for (let i = 0; i < 50; i++) doomed.add(`rec-${String(i).padStart(3, '0')}`)
+    rowById = (id) => {
+      if (doomed.has(id)) throw new Error('EACCES: permission denied')
+      return base(id)
+    }
+
+    // Pass 1 burns its whole attempt budget on the failures and writes nothing.
+    const first = await backfillMeetingWiki({ maxFailures: 50 })
+    expect(first.failed).toBe(50)
+    expect(first.written).toBe(0)
+    expect(listWiki()).toHaveLength(0)
+
+    // Pass 2 (a later boot) puts the known-bad ids BEHIND the untried ones, so
+    // the healthy rows are reached instead of starving forever.
+    const second = await backfillMeetingWiki({ maxFailures: 50 })
+    expect(second.written).toBe(N - 50)
+    expect(listWiki()).toHaveLength(N - 50)
+  })
+
+  it('drops a recording from the retry list once it succeeds again', async () => {
+    const { backfillMeetingWiki } = await import('../meeting-wiki')
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const base = rowById!
+    let brokenDisk = true
+    rowById = (id) => {
+      if (brokenDisk && id === 'rec-000') throw new Error('ENOSPC: no space left')
+      return base(id)
+    }
+
+    const first = await backfillMeetingWiki()
+    expect(first.failed).toBe(1)
+    expect(first.remainingMissing).toBe(1)
+
+    // The transient condition clears; the quarantined recording recovers.
+    brokenDisk = false
+    const second = await backfillMeetingWiki()
+    expect(second.failed).toBe(0)
+    expect(second.remainingMissing).toBe(0)
+    expect(listWiki()).toHaveLength(N)
+
+    // And a third pass finds nothing outstanding — it left the retry list.
+    const third = await backfillMeetingWiki()
+    expect(third.written).toBe(0)
+    expect(third.unchanged).toBe(N)
   })
 
   it('gives up after the failure limit rather than grinding through a dead destination', async () => {

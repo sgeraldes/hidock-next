@@ -16,7 +16,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Switch } from '@/components/ui/switch'
-import { useAppStore, useCalendarSyncing } from '@/store/useAppStore'
+import { useAppStore, useCalendarSyncing, useCalendarManualSyncing } from '@/store/useAppStore'
 import { useConfigStore } from '@/store/domain/useConfigStore'
 import { useUIStore } from '@/store/ui/useUIStore'
 import { formatBytes, cn } from '@/lib/utils'
@@ -52,6 +52,11 @@ export function Settings() {
   // SM-09 fix: Use granular selectors
   const syncCalendar = useAppStore((s) => s.syncCalendar)
   const calendarSyncing = useCalendarSyncing()
+  // Gate the control on the USER's own request, not on any sync: the startup
+  // mount sync parks on the boot gate for the whole startup window, and gating
+  // on it disabled this button during exactly the period the bounded manual
+  // path exists to serve.
+  const calendarManualSyncing = useCalendarManualSyncing()
   // QA Logs toggle — moved here from the sidebar footer (advanced/dev setting).
   const qaLogsEnabled = useUIStore((s) => s.qaLogsEnabled)
   const setQaLogsEnabled = useUIStore((s) => s.setQaLogsEnabled)
@@ -749,7 +754,7 @@ export function Settings() {
                 <Button
                   variant="outline"
                   onClick={() => syncCalendar('manual')}
-                  disabled={calendarSyncing || saving}
+                  disabled={calendarManualSyncing || saving}
                   aria-label="Sync calendar now"
                 >
                   <RefreshCw className={`h-4 w-4 mr-2 ${calendarSyncing ? 'animate-spin' : ''}`} aria-hidden="true" />
