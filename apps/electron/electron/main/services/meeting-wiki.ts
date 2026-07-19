@@ -84,17 +84,14 @@ const WIKI_SCHEMA_VERSION = 1
  * a newer build is still ours, and treating it as foreign would make it inert —
  * never purged, never reported.
  */
-const SUPPORTED_WIKI_SCHEMAS = new Set([1])
-
-/** The bare `YYYY-MM-DD` the old writer emitted for `date`. */
-const LEGACY_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
-
-/** Where a page came from, which decides whether we may reason about it at all. */
-type PageKind = 'marked' | 'legacy' | 'foreign'
+const SUPPORTED_WIKI_SCHEMAS = new Set(['1'])
 
 interface FrontmatterEntry {
   key: string
+  /** Trimmed value, for general parsing. */
   value: string
+  /** Exactly as written. Identity checks compare this — see `hasIdentityHeader`. */
+  raw: string
 }
 
 /** Top-level `key: value` entries of a frontmatter block, in order. */
@@ -103,7 +100,7 @@ function topLevelEntries(block: string): FrontmatterEntry[] {
   for (const line of block.split(/\r?\n/)) {
     if (/^\s/.test(line)) continue // nested (list item / block value)
     const match = line.match(TOP_LEVEL_KEY_RE)
-    if (match) entries.push({ key: match[1], value: match[2].trim() })
+    if (match) entries.push({ key: match[1], value: match[2].trim(), raw: match[2] })
   }
   return entries
 }
@@ -123,82 +120,30 @@ function isClosedQuotedScalar(value: string): boolean {
 }
 
 /**
- * Exact opening shape of the OLD serializer, which wrote no marker.
- *
- * It always emitted `title` first as a double-quoted scalar, then `date` as a
- * bare `YYYY-MM-DD`. Deliberately narrow: this is a fingerprint of one specific
- * writer, not a general "looks like frontmatter" test, so a Jekyll or Hugo page
- * that merely starts with a title does not match.
- *
- * The one exception is the truncated case. When a payload split the block
- * mid-title there is nothing after `title:` to match on — but the old escaper
- * turned `"` into `\"`, so the payload could never close the quote it opened.
- * An unterminated quoted title as the block's ONLY entry is therefore that
- * writer's signature too, and is what keeps an injected legacy page from being
- * mistaken for a foreign document.
- */
-function matchesLegacyWriter(entries: FrontmatterEntry[]): boolean {
-  const first = entries[0]
-  if (!first || first.key !== 'title' || !first.value.startsWith('"')) return false
-
-  // Intact page: the writer always emitted `date` immediately after `title`.
-  if (isClosedQuotedScalar(first.value)) {
-    const second = entries[1]
-    return !!second && second.key === 'date' && LEGACY_DATE_RE.test(second.value)
-  }
-
-  // Unterminated title — the block was cut inside the title value. Two shapes:
-  //
-  //  1. A payload injected a `---`, truncating the block right there, so nothing
-  //     of the writer survives after it.
-  //  2. A payload contained only a raw newline (no terminator). The title spills
-  //     across lines, but the writer's OWN SUBSEQUENT KEYS are still in the
-  //     block — a `date: YYYY-MM-DD` entry after the title is the tail
-  //     fingerprint that identifies this as ours.
-  //
-  // Shape 2 is why `entries.length === 1` alone was not enough: such a page has
-  // an injected id AND the real one, so being misread as foreign made its
-  // multiple claims resolve to `unowned` — retained through BOTH owners' privacy
-  // purges, with nothing reported.
-  if (entries.length === 1) return true
-  return entries.slice(1).some((e) => e.key === 'date' && LEGACY_DATE_RE.test(e.value))
-}
-
-/** Unwrap a scalar that may or may not be double-quoted. */
-function scalarValue(raw: string): string {
-  return raw.startsWith('"') ? unquoteYamlScalar(raw) : raw
-}
-
-/**
  * Does the block carry our identity header, EXACTLY as the writer emits it?
  *
  * The contract is "the first two keys are the marker", so it is enforced as
- * written rather than as "a generator key appears somewhere". A looser test let
- * any page that merely mentions the marker — a Jekyll site, or documentation
- * describing this very format — into the ours-only corruption analysis, which is
- * both wrong and unsafe under marker collision.
+ * written rather than as "a generator key appears somewhere". Values are
+ * compared as RAW LEXICAL TOKENS — no unquoting, no numeric coercion — because
+ * our writer emits one specific byte sequence and anything else did not come
+ * from it. `Number()` in particular accepted `01`, `1.0`, `1e0`, `+1` and `0x1`
+ * as schema 1, and unquoting accepted `"hidock-meeting-wiki"`.
  *
  * Duplicate identity keys are rejected outright: if a page declares the marker
  * twice we cannot tell which claim to trust, and our writer never produces that.
+ *
+ * Being strict here is safe precisely because failing this check no longer means
+ * "inert" — it means the page falls through to the fail-safe unmarked rule below,
+ * which still attributes a clean single-id page and still reports an ambiguous one.
  */
 function hasIdentityHeader(entries: FrontmatterEntry[]): boolean {
   if (entries.filter((e) => e.key === 'generator').length !== 1) return false
   if (entries.filter((e) => e.key === 'wiki_schema').length !== 1) return false
 
   const [generator, schema] = entries
-  if (!generator || generator.key !== 'generator') return false
-  if (scalarValue(generator.value) !== GENERATOR_ID) return false
+  if (!generator || generator.key !== 'generator' || generator.raw !== GENERATOR_ID) return false
   if (!schema || schema.key !== 'wiki_schema') return false
-  return SUPPORTED_WIKI_SCHEMAS.has(Number(scalarValue(schema.value)))
-}
-
-/**
- * Decide whether a page is one of ours. Everything downstream — corruption
- * detection, purge reporting — applies only when the answer is yes.
- */
-function classifyPage(entries: FrontmatterEntry[]): PageKind {
-  if (hasIdentityHeader(entries)) return 'marked'
-  return matchesLegacyWriter(entries) ? 'legacy' : 'foreign'
+  return SUPPORTED_WIKI_SCHEMAS.has(schema.raw)
 }
 
 /**
@@ -237,7 +182,7 @@ function hasUnterminatedQuotedScalar(entries: FrontmatterEntry[]): boolean {
  * Does the text after an early terminator look like the CONTINUATION of a
  * generated frontmatter block, rather than ordinary page body?
  *
- * Only ever consulted for pages we generated (see `classifyPage`), and only to
+ * Only ever consulted for MARKED pages (see `hasIdentityHeader`), and only to
  * refine the reason reported — a page of ours with no `recording_id` is an error
  * either way. Foreign documents never reach it, which is what keeps an unfenced
  * YAML example in someone's README from being read as corruption.
@@ -353,42 +298,56 @@ function readPageOwner(path: string): PageOwner {
 
     const entries = topLevelEntries(text.slice(0, end))
     const ids = parseRecordingIds(entries)
-    const kind = classifyPage(entries)
+    const unterminated = hasUnterminatedQuotedScalar(entries)
 
-    if (kind === 'foreign') {
-      // Someone else's document. We do not reason about its integrity at all:
-      // it is attributed only on an unambiguous single claim, and otherwise left
-      // strictly alone — never analyzed, never reported. This is what stops an
-      // unfenced YAML example in a README from being read as corruption and
-      // making every privacy purge warn about content that was never ours.
-      return ids.length === 1 ? { kind: 'owned', recordingId: ids[0] } : { kind: 'unowned' }
-    }
-
-    // --- Below here the page is ours, so its integrity IS our business. ---
-
-    if (ids.length === 1) return { kind: 'owned', recordingId: ids[0] }
-    if (ids.length > 1) {
-      // Two or more ownership claims: not trustworthy to delete on.
+    // --- UNMARKED pages: fail-safe by construction -------------------------
+    //
+    // We used to ask "does this match a known corruption fingerprint?" and
+    // enumerate the shapes the old writer could produce. That is unwinnable —
+    // every round surfaced another combination, and the last one attributed an
+    // injected id to a page whose REAL owner then lost it to a purge.
+    //
+    // So the question is inverted: is this block unambiguously clean? Only a
+    // provably well-formed block may be acted on. Everything else is reported
+    // and retained, without us needing to predict how it got mangled.
+    if (!hasIdentityHeader(entries)) {
+      if (unterminated) {
+        return {
+          kind: 'error',
+          reason: 'frontmatter block ends inside an unterminated quoted value'
+        }
+      }
+      // Well-formed and silent about ownership: an ordinary foreign document.
+      if (ids.length === 0) return { kind: 'unowned' }
+      if (ids.length === 1) return { kind: 'owned', recordingId: ids[0] }
+      // Well-formed but self-contradictory. Rare for a genuine document, and a
+      // page asserting recording ids we cannot reconcile is worth surfacing.
       return {
         kind: 'error',
         reason: `frontmatter declares ${ids.length} recording_id values (${ids.join(', ')})`
       }
     }
 
-    // Zero declarations on a page we generated is itself the anomaly — the writer
-    // always emits exactly one. `unowned` must mean "provably has no
-    // recording_id", never "I stopped parsing early", or a page cut short by an
-    // injected `---` would be silently retained by the purge with the real
-    // owner's content still in it.
-    if (hasUnterminatedQuotedScalar(entries)) {
+    // --- MARKED pages: known to be ours, so integrity IS our business ------
+
+    if (ids.length === 1) return { kind: 'owned', recordingId: ids[0] }
+    if (ids.length > 1) {
+      return {
+        kind: 'error',
+        reason: `frontmatter declares ${ids.length} recording_id values (${ids.join(', ')})`
+      }
+    }
+    if (unterminated) {
       return {
         kind: 'error',
         reason: 'frontmatter block ends inside an unterminated quoted value'
       }
     }
 
-    // Phase two: extend the read budget so the inspection window is available
-    // even when the terminator sat right at the locating cap.
+    // Zero declarations on a page we generated is itself the anomaly — the
+    // writer always emits exactly one. Phase two extends the read budget so the
+    // inspection window is available even when the terminator sat right at the
+    // locating cap; it only refines the reason reported.
     readCap = consumed + AFTER_TERMINATOR_SCAN_BYTES
     while (text.length < bodyStart + AFTER_TERMINATOR_SCAN_BYTES && readMore()) {
       /* pull the inspection window in */

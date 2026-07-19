@@ -453,7 +453,64 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
       const reports = logged.filter((m) => m.includes('could not verify'))
       expect(reports).toHaveLength(2)
       expect(reports.every((m) => m.includes('legacy-multiline.md'))).toBe(true)
-      expect(reports[0]).toContain('2 recording_id values')
+      // The block is not provably clean — that alone is enough to refuse it.
+      expect(reports[0]).toContain('unterminated quoted value')
+    })
+
+    /**
+     * Final review: an old title of `x\nrecording_id: rec-victim\n---` produces
+     * two entries before an EARLY terminator with no surviving `date`. Every
+     * shape-fingerprint arm returned false, the page became foreign, and its
+     * single injected id was attributed to rec-victim — so purging rec-victim
+     * DELETED THE REAL OWNER'S PAGE. Enumerating shapes could not close this;
+     * requiring the block to be provably clean does.
+     */
+    it('an injected id before an early terminator cannot redirect a deletion', async () => {
+      const { removeMeetingWiki } = await import('../meeting-wiki')
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+      write('legacy-early-id.md', legacyPage('x\nrecording_id: rec-victim\n---', 'rec-owner'))
+
+      // The injected claim must NOT delete the real owner's page...
+      expect(removeMeetingWiki('rec-victim')).toBe(0)
+      expect(listWiki()).toEqual(['legacy-early-id.md'])
+      // ...and neither may the real owner's own purge act on it blindly.
+      expect(removeMeetingWiki('rec-owner')).toBe(0)
+      expect(listWiki()).toEqual(['legacy-early-id.md'])
+
+      const reports = error.mock.calls
+        .map((c) => String(c[0]))
+        .filter((m) => m.includes('could not verify'))
+      expect(reports).toHaveLength(2)
+      expect(reports.every((m) => m.includes('legacy-early-id.md'))).toBe(true)
+      expect(reports.every((m) => m.includes('unterminated quoted value'))).toBe(true)
+    })
+
+    it('a non-id injected key before an early terminator is reported, not silently kept', async () => {
+      const { removeMeetingWiki } = await import('../meeting-wiki')
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+      // Same cut, but the smuggled key is not an ownership claim. Previously the
+      // page simply survived its real owner's purge with nothing reported.
+      write('legacy-early-key.md', legacyPage('x\nfoo: bar\n---', 'rec-owner'))
+
+      expect(removeMeetingWiki('rec-owner')).toBe(0)
+      expect(listWiki()).toEqual(['legacy-early-key.md'])
+      const logged = error.mock.calls.map((c) => String(c[0])).join(' ')
+      expect(logged).toContain('could not verify')
+      expect(logged).toContain('legacy-early-key.md')
+    })
+
+    it('a clean legacy page (no marker) is still owned and purgeable', async () => {
+      const { removeMeetingWiki } = await import('../meeting-wiki')
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+      write('legacy-clean.md', legacyPage('Reunion de Equipo', 'rec-clean'))
+
+      // Well-formed with exactly one claim — no marker needed to act on it.
+      expect(removeMeetingWiki('rec-clean')).toBe(1)
+      expect(listWiki()).toHaveLength(0)
+      expect(error).not.toHaveBeenCalled()
     })
 
     it('a NEW page carries the generator marker and round-trips', async () => {
@@ -664,6 +721,41 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
           'wiki_schema: 1',
           '---'
         ]
+      ],
+      // Identity values are matched as RAW LEXICAL TOKENS. Unquoting and
+      // Number() coercion previously let all of these into ours-analysis, though
+      // the writer emits none of them.
+      [
+        'quoted generator value',
+        ['---', 'generator: "hidock-meeting-wiki"', 'wiki_schema: 1', '---']
+      ],
+      [
+        'quoted schema value',
+        ['---', 'generator: hidock-meeting-wiki', 'wiki_schema: "1"', '---']
+      ],
+      [
+        'padded schema value',
+        ['---', 'generator: hidock-meeting-wiki', 'wiki_schema: 1   ', '---']
+      ],
+      [
+        'leading-zero schema value',
+        ['---', 'generator: hidock-meeting-wiki', 'wiki_schema: 01', '---']
+      ],
+      [
+        'decimal schema value',
+        ['---', 'generator: hidock-meeting-wiki', 'wiki_schema: 1.0', '---']
+      ],
+      [
+        'exponent schema value',
+        ['---', 'generator: hidock-meeting-wiki', 'wiki_schema: 1e0', '---']
+      ],
+      [
+        'signed schema value',
+        ['---', 'generator: hidock-meeting-wiki', 'wiki_schema: +1', '---']
+      ],
+      [
+        'hex schema value',
+        ['---', 'generator: hidock-meeting-wiki', 'wiki_schema: 0x1', '---']
       ]
     ])('is foreign: %s', async (_label, frontmatter) => {
       // Each of these has zero recording_id declarations, so if it were wrongly
