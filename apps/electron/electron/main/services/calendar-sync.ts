@@ -5,6 +5,7 @@ import { join } from 'path'
 import { getCachePath } from './file-storage'
 import { upsertMeetingsBatch, Meeting } from './database'
 import { getConfig, updateConfig } from './config'
+import { whenBootTasksSettled } from './boot-scheduler'
 
 // Re-export package types and correlate for consumers (e.g. recording-watcher)
 export { correlate }
@@ -20,6 +21,131 @@ export interface CalendarSyncResult {
   error?: string
   errorCategory?: CalendarErrorCategory
   lastSync?: string
+}
+
+export interface CalendarSyncOptions {
+  /**
+   * F15: how long to wait for the boot tasks to finish before starting. A sync
+   * running alongside the boot drain put two heavy passes on the one main-process
+   * event loop and froze the window. `0` starts immediately (tests, and any
+   * caller that has already waited).
+   */
+  waitForBootMs?: number
+  /** Attempts for the ICS fetch. Transient failures back off between attempts. */
+  fetchAttempts?: number
+  /** First backoff delay; doubles per attempt, with jitter. */
+  fetchBaseDelayMs?: number
+  /**
+   * Force a fresh pass instead of joining an in-flight one. Used by
+   * clear-and-sync, whose caller has just emptied the table and must not be
+   * handed the result of a sync that started before the clear.
+   */
+  fresh?: boolean
+}
+
+/**
+ * Cap on the boot wait. The F15 freeze window is the first ~30 s after start; if
+ * boot work is somehow still running well past that, syncing is better than
+ * never syncing.
+ */
+const BOOT_WAIT_MS = 45000
+
+/** ICS fetch attempts, and the first backoff step (doubled per retry). */
+const DEFAULT_FETCH_ATTEMPTS = 3
+const DEFAULT_FETCH_BASE_DELAY_MS = 1000
+
+/**
+ * Transport failures that are worth retrying. The owner's crash (F15) surfaced
+ * as `TypeError: fetch failed` wrapping `read ECONNRESET` — a reset mid-transfer,
+ * which succeeds on a retry. Configuration failures (ECONNREFUSED, ENOTFOUND,
+ * auth) are NOT here: retrying those just burns the boot window.
+ */
+const TRANSIENT_NETWORK_CODES = [
+  'ECONNRESET',
+  'ECONNABORTED',
+  'ETIMEDOUT',
+  'EPIPE',
+  'EAI_AGAIN',
+  'ENETRESET',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_SOCKET',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT'
+]
+
+/**
+ * Collect `code`/`message` from an error and everything it wraps.
+ *
+ * Node's fetch reports transport failures as a bare `TypeError: fetch failed`
+ * and hides the real reason on `.cause` (often nested), so the actual
+ * `ECONNRESET` is invisible unless the chain is walked.
+ */
+function errorSignals(error: unknown): string {
+  const parts: string[] = []
+  let current: unknown = error
+  for (let depth = 0; depth < 5 && current; depth++) {
+    const e = current as { code?: unknown; message?: unknown; cause?: unknown }
+    if (typeof e.code === 'string') parts.push(e.code)
+    if (typeof e.message === 'string') parts.push(e.message)
+    current = e.cause
+  }
+  return parts.join(' | ')
+}
+
+/** True when the failure looks like a transient transport hiccup worth retrying. */
+export function isTransientNetworkError(error: unknown): boolean {
+  const signals = errorSignals(error)
+  if (TRANSIENT_NETWORK_CODES.some((code) => signals.includes(code))) return true
+  return /socket hang up|fetch failed|network error/i.test(signals)
+}
+
+/** Sleep without blocking the event loop. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)))
+}
+
+/**
+ * Fetch the ICS feed, retrying transient transport failures and 429/5xx with
+ * exponential backoff plus jitter.
+ *
+ * Before this, one `ECONNRESET` mid-download failed the entire sync pass — and
+ * because the periodic timer just tried again on its own schedule, a flaky link
+ * produced repeated whole-pass failures instead of one retried request (F15).
+ */
+async function fetchIcsWithRetry(
+  icsUrl: string,
+  attempts: number,
+  baseDelayMs: number
+): Promise<Response> {
+  let lastError: unknown
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    let transient: boolean
+    try {
+      const response = await fetch(icsUrl)
+      if (response.ok) return response
+      lastError = new Error(`Failed to fetch calendar: ${response.status} ${response.statusText}`)
+      // 429 = asked to slow down; 5xx = server-side blip. Other 4xx are ours to fix.
+      transient = response.status === 429 || response.status >= 500
+    } catch (error) {
+      lastError = error
+      transient = isTransientNetworkError(error)
+    }
+
+    if (!transient || attempt === attempts) break
+
+    // Exponential backoff with 0.5x-1.5x jitter so repeated failures across
+    // restarts do not resynchronize into a thundering herd on the feed.
+    const backoffMs = Math.round(baseDelayMs * 2 ** (attempt - 1) * (0.5 + Math.random()))
+    console.warn(
+      `[calendar-sync] ICS fetch attempt ${attempt}/${attempts} failed ` +
+        `(${lastError instanceof Error ? lastError.message : String(lastError)}); ` +
+        `retrying in ${backoffMs}ms`
+    )
+    await sleep(backoffMs)
+  }
+  throw lastError
 }
 
 /**
@@ -45,7 +171,9 @@ export function categorizeCalendarError(error: unknown): { message: string; cate
     return { message, category: 'auth' }
   }
 
-  // Network errors
+  // Network errors. Node's fetch reports transport failures as a bare
+  // `TypeError: fetch failed` and hides the real code (e.g. ECONNRESET) on
+  // `.cause`, so check the whole chain — otherwise a reset lands in 'unknown'.
   if (
     message.includes('fetch') ||
     message.includes('ECONNREFUSED') ||
@@ -54,7 +182,8 @@ export function categorizeCalendarError(error: unknown): { message: string; cate
     message.includes('network') ||
     message.includes('Failed to fetch') ||
     message.includes('ERR_NETWORK') ||
-    /^Failed to fetch calendar: \d+/.test(message)
+    /^Failed to fetch calendar: \d+/.test(message) ||
+    isTransientNetworkError(error)
   ) {
     return { message, category: 'network' }
   }
@@ -560,9 +689,79 @@ export function expandMeetingOccurrences(
   return rows
 }
 
-export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> {
-  console.log('Starting calendar sync...')
+/** The sync currently running (or queued); null when idle. */
+let inFlight: Promise<CalendarSyncResult> | null = null
+
+/** True while a sync is running or queued. */
+export function isCalendarSyncActive(): boolean {
+  return inFlight !== null
+}
+
+/**
+ * Sync the calendar from an ICS feed.
+ *
+ * ## Serialization (F15)
+ *
+ * Concurrent syncs were real, not theoretical: the main process starts one at
+ * boot (`initializeCalendarAutoSync`) while the renderer fires another from
+ * `Layout`'s mount effect, and the periodic `setInterval` could stack a third on
+ * top of a slow pass. Each runs a full fetch → parse → recurrence expansion →
+ * chunked DB write → `reconcileOrganization()` on the same main-process event
+ * loop. Overlapping passes are pure duplicated load on the thread that also has
+ * to answer every renderer IPC.
+ *
+ * Callers now JOIN an in-flight sync instead of starting a second one; they all
+ * wanted "the calendar, current", and one pass gives everyone that. `fresh: true`
+ * opts out for clear-and-sync, which must not be handed a result produced before
+ * its clear.
+ *
+ * Syncs also wait for the boot drain (`waitForBootMs`) so a startup or periodic
+ * sync cannot land on top of the boot tasks.
+ */
+export async function syncCalendar(
+  icsUrl: string,
+  options: CalendarSyncOptions = {}
+): Promise<CalendarSyncResult> {
+  const previous = inFlight
+  if (previous && !options.fresh) return previous
+
+  const run = (async () => {
+    // A `fresh` pass still must not overlap the sync it displaces.
+    if (previous) {
+      try {
+        await previous
+      } catch {
+        /* the previous pass failing must not cancel this one */
+      }
+    }
+    return runSyncCalendar(icsUrl, options)
+  })()
+
+  inFlight = run
+  try {
+    return await run
+  } finally {
+    if (inFlight === run) inFlight = null
+  }
+}
+
+async function runSyncCalendar(
+  icsUrl: string,
+  options: CalendarSyncOptions
+): Promise<CalendarSyncResult> {
   const { emitActivityLog } = await import('./activity-log')
+
+  // F15: never compete with the boot tasks for the main-process event loop.
+  const waitForBootMs = options.waitForBootMs ?? BOOT_WAIT_MS
+  if (waitForBootMs > 0) {
+    const { isBootDrainActive } = await import('./boot-scheduler')
+    if (isBootDrainActive()) {
+      emitActivityLog('info', 'Calendar sync queued', 'Waiting for startup tasks to finish')
+    }
+    await whenBootTasksSettled(waitForBootMs)
+  }
+
+  console.log('Starting calendar sync...')
   emitActivityLog('info', 'Syncing calendar...', 'Fetching calendar events')
 
   try {
@@ -578,12 +777,12 @@ export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> 
       }
     }
 
-    // Fetch ICS file
-    const response = await fetch(icsUrl)
-
-    if (!response.ok) {
-      throw new Error(`Failed to fetch calendar: ${response.status} ${response.statusText}`)
-    }
+    // Fetch ICS file, retrying transient resets/timeouts with backoff (F15).
+    const response = await fetchIcsWithRetry(
+      icsUrl,
+      Math.max(1, options.fetchAttempts ?? DEFAULT_FETCH_ATTEMPTS),
+      options.fetchBaseDelayMs ?? DEFAULT_FETCH_BASE_DELAY_MS
+    )
 
     const icsData = await response.text()
 

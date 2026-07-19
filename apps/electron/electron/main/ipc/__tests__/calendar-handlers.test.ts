@@ -111,7 +111,11 @@ describe('Calendar IPC Handlers', () => {
       const result = await handlers['calendar:clear-and-sync'](null)
 
       expect(clearAllMeetings).toHaveBeenCalled()
-      expect(syncCalendar).toHaveBeenCalledWith('https://calendar.example.com/feed.ics')
+      // F15: `fresh` opts out of joining an in-flight sync — a pass that started
+      // before the clear would hand back pre-clear data.
+      expect(syncCalendar).toHaveBeenCalledWith('https://calendar.example.com/feed.ics', {
+        fresh: true
+      })
       expect(result).toEqual(syncResult)
     })
 
