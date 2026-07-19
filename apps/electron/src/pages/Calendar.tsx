@@ -13,7 +13,7 @@ import {
   useCalendarSyncing,
   useDownloadQueue,
   useSetLastCalendarSync,
-  useSetCalendarSyncing,
+  useAcquireCalendarSync, useReleaseCalendarSync,
 } from '@/store/useAppStore'
 import { useConfigStore } from '@/store/domain/useConfigStore'
 import type { Meeting, Recording } from '@/types'
@@ -135,7 +135,11 @@ export function Calendar() {
   const updateConfig = useConfigStore((s) => s.updateConfig)
   // B-CAL-001: Named action selectors replace raw useAppStore.setState()
   const setLastCalendarSync = useSetLastCalendarSync()
-  const setCalendarSyncing = useSetCalendarSyncing()
+  // Counted acquire/release, not a boolean: clear-and-sync can overlap a
+  // startup or manual sync, and a raw setter would drive the shared flag to
+  // false while that other sync was still running.
+  const acquireCalendarSync = useAcquireCalendarSync()
+  const releaseCalendarSync = useReleaseCalendarSync()
 
   // Navigate the calendar to a requested date (e.g. "Go to Calendar" from a
   // meeting detail page) instead of always showing the current week.
@@ -527,7 +531,8 @@ export function Calendar() {
 
   const handleSync = useCallback(async () => {
     console.log('[Calendar] Clearing cache and resyncing...')
-    setCalendarSyncing(true)
+    // This is a user-initiated sync, so it gates the manual control too.
+    acquireCalendarSync(true)
     try {
       const result = await window.electronAPI.calendar.clearAndSync()
       console.log('[Calendar] Clear and sync result:', result)
@@ -553,9 +558,9 @@ export function Calendar() {
       // CA-07 FIX: Already showing error to user via toast
       toast.error('Calendar sync failed', err instanceof Error ? err.message : 'An unexpected error occurred')
     } finally {
-      setCalendarSyncing(false)
+      releaseCalendarSync(true)
     }
-  }, [viewDates, loadMeetings, setCalendarSyncing, setLastCalendarSync])
+  }, [viewDates, loadMeetings, acquireCalendarSync, releaseCalendarSync, setLastCalendarSync])
 
   // Handle navigation (memoized)
   const handleNavigatePrev = useCallback(() => {

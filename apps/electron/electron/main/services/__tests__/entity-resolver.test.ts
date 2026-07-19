@@ -124,6 +124,32 @@ describe('entity-resolver', () => {
     expect(r.method).toBe('alias')
   })
 
+  /**
+   * Short-acronym cross-linking. The length-gated edit-distance rule alone was
+   * not enough: the separate PREFIX rule still scored "crm" vs "crmx" at 0.68,
+   * and the co-occurrence boost (+0.15) carried it to 0.83 — over the 0.8
+   * auto-link line — silently attaching a distinct acronym project to another in
+   * the same meeting. Both projects are linked to the meeting here so the
+   * context boost is genuinely in play.
+   */
+  it('does not auto-link a short acronym project onto a prefix sibling, even with co-occurrence context', () => {
+    dbInstance.run(`
+      INSERT INTO projects (id, name) VALUES ('p-crm', 'CRM');
+      INSERT INTO meeting_projects (meeting_id, project_id) VALUES ('m-ctx', 'p-crm');
+    `)
+    const r = resolveProject('CRMX', { meetingId: 'm-ctx' })
+    expect(r.confidence).toBeLessThan(0.8) // never auto-links
+    expect(r.id).toBeNull() // and is not even a fuzzy candidate
+  })
+
+  it('still resolves a genuine prefix expansion of a long-enough name', () => {
+    dbInstance.run("INSERT INTO projects (id, name) VALUES ('p-plat', 'Plataforma')")
+    // "plataforma" -> "plataformadepagos": a real expansion, not a 1-char variant.
+    const r = resolveProject('Plataformadepagos')
+    expect(r.id).toBe('p-plat')
+    expect(r.confidence).toBeGreaterThan(0.6)
+  })
+
   it('resolves a project whose stored name differs only by Unicode form (NFKC-exact, tier 1b)', () => {
     // Stored decomposed (e + U+0301), queried composed (U+00E9): SQLite's
     // ASCII-only LOWER can't equate them and tier 3 skips pNorm === norm, so
