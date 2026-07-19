@@ -564,17 +564,27 @@ export function applyTranscriptEntities(opts: {
         // row; anything weaker is remembered as a deferred suggestion instead of
         // becoming a zero-item dead-end project.
         //
-        // Source identity is the CONVERSATION, not the analysis run: prefer the
-        // meeting so two recordings of one meeting count once, and re-analysing a
-        // recording upserts its existing row. Without either id there is nothing
-        // to corroborate against, so we neither record nor create.
+        // The ledger key must be STABLE across re-processing, so it identifies
+        // the CAPTURE (the recording), not the meeting: a recording id never
+        // changes, while its meeting_id is assigned late by correlation and
+        // rewritten by occurrence merges. Keying on the meeting let one
+        // conversation bank two sightings — once as 'r:x' before it was
+        // correlated, again as 'm:y' after — manufacturing the very corroboration
+        // this gate exists to require. The meeting rides along separately so the
+        // count still collapses two recordings of one conversation into one
+        // source. With neither id there is nothing to corroborate against, so we
+        // neither record nor create.
         const quality = scoreProjectNameCandidate(projectName)
-        const sourceKey = opts.meetingId ? `m:${opts.meetingId}` : opts.recordingId ? `r:${opts.recordingId}` : null
+        const sourceKey = opts.recordingId
+          ? `r:${opts.recordingId}`
+          : opts.meetingId
+            ? `m:${opts.meetingId}`
+            : null
         // Score 0 is structural noise (a sentence fragment, digit soup) — dropped
         // before it reaches the ledger so the deferred queue stays reviewable.
         const distinctSources =
           quality.score > 0 && sourceKey
-            ? recordProjectDiscoveryObservation(projectName, sourceKey, quality.score)
+            ? recordProjectDiscoveryObservation(projectName, sourceKey, opts.meetingId ?? null, quality.score)
             : 0
         const decision = decideProjectDiscovery({ name: projectName, distinctSources })
 
@@ -968,6 +978,16 @@ export function mergeDuplicateMeetingOccurrences(): number {
         }
         if (existingTables.has('recording_preassignments')) {
           run(`UPDATE recording_preassignments SET meeting_id = ? WHERE meeting_id = ?`, [keeper.id, loser.id])
+        }
+        // Discovery ledger (v43): the sightings of the two occurrences describe
+        // ONE conversation. Without this repoint the merged-away meeting id
+        // survives in the ledger and the distinct-source count double-counts it,
+        // which would let a single conversation clear the recurrence bar alone.
+        if (existingTables.has('project_discovery_observations')) {
+          run(`UPDATE project_discovery_observations SET meeting_id = ? WHERE meeting_id = ?`, [
+            keeper.id,
+            loser.id
+          ])
         }
         // Composite-key link tables — move what won't collide, drop leftovers.
         run(`UPDATE OR IGNORE meeting_contacts SET meeting_id = ? WHERE meeting_id = ?`, [keeper.id, loser.id])

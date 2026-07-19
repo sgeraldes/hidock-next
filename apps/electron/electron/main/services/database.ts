@@ -643,13 +643,22 @@ CREATE TABLE IF NOT EXISTS project_discovery_rejections (
 -- row per (name, source). The reconciler auto-creates a project only once a name
 -- clears the plausibility floor AND appears in >= 2 DISTINCT sources. Everything
 -- else stays here as a deferred discovery suggestion the user can promote.
--- The composite PK is what makes recurrence honest: re-analysing the same
--- recording (or two recordings of one meeting) upserts a single row, so
--- re-processing can never manufacture corroboration.
+-- Recurrence is only honest if the key is STABLE across re-processing, so
+-- source_key identifies the CAPTURE ('r:<recordingId>', preferred) rather than
+-- the meeting: a recording's id never changes, whereas its meeting_id is
+-- assigned late by correlation and rewritten by occurrence merges. Keying on the
+-- meeting let one conversation bank two sightings (once as 'r:x' before
+-- correlation, again as 'm:y' after). meeting_id is carried alongside and the
+-- count collapses on it, so two recordings of one meeting still count once.
 CREATE TABLE IF NOT EXISTS project_discovery_observations (
     name_norm TEXT NOT NULL,
-    -- 'm:<meetingId>' when the mention has a meeting, else 'r:<recordingId>'.
+    -- Stable capture identity: 'r:<recordingId>', or 'm:<meetingId>' when the
+    -- mention arrives with no recording at all.
     source_key TEXT NOT NULL,
+    -- Conversation this capture belongs to, when known. NULL for a standalone
+    -- recording. Repointed by mergeDuplicateMeetingOccurrences like every other
+    -- meeting-referencing table.
+    meeting_id TEXT,
     original_name TEXT NOT NULL,
     -- Best name-plausibility score seen for this name (project-discovery-gate.ts).
     score REAL NOT NULL DEFAULT 0,
@@ -2325,6 +2334,7 @@ const MIGRATIONS: Record<number, () => void> = {
         CREATE TABLE IF NOT EXISTS project_discovery_observations (
           name_norm TEXT NOT NULL,
           source_key TEXT NOT NULL,
+          meeting_id TEXT,
           original_name TEXT NOT NULL,
           score REAL NOT NULL DEFAULT 0,
           first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -6138,38 +6148,54 @@ export interface PendingProjectDiscovery {
  * Record one sighting of an extracted project name and return how many DISTINCT
  * sources have now mentioned it (this sighting included).
  *
- * `sourceKey` must identify the *conversation*, not the analysis run — the
- * reconciler passes `m:<meetingId>` when the mention has a meeting and
- * `r:<recordingId>` otherwise. The composite primary key then makes re-analysis
- * idempotent: re-transcribing the same recording, or two recordings of one
- * meeting, upsert a single row and never inflate the count. `score` keeps the
- * best value seen so a cleanly-spelled later mention can lift a name that first
- * arrived mangled.
+ * `sourceKey` must be STABLE for a given capture across re-processing — the
+ * reconciler passes `r:<recordingId>` whenever a recording is known, falling
+ * back to `m:<meetingId>` only for a mention with no recording at all. The
+ * composite primary key then makes re-analysis idempotent: re-transcribing the
+ * same recording upserts its existing row instead of banking a second sighting,
+ * even if the recording has since been correlated to a meeting (which is exactly
+ * what a meeting-keyed scheme got wrong). `meetingId` rides along so the count
+ * can still collapse two recordings of one conversation into a single source.
+ *
+ * `score` keeps the best value seen, so a cleanly-spelled later mention can lift
+ * a name that first arrived mangled.
  */
-export function recordProjectDiscoveryObservation(name: string, sourceKey: string, score: number): number {
+export function recordProjectDiscoveryObservation(
+  name: string,
+  sourceKey: string,
+  meetingId: string | null,
+  score: number
+): number {
   const norm = normalizeName(name)
   if (!norm || !sourceKey) return 0
   const now = new Date().toISOString()
   run(
     `INSERT INTO project_discovery_observations
-       (name_norm, source_key, original_name, score, first_seen_at, last_seen_at)
-     VALUES (?, ?, ?, ?, ?, ?)
+       (name_norm, source_key, meeting_id, original_name, score, first_seen_at, last_seen_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(name_norm, source_key) DO UPDATE SET
+       -- Late correlation must UPDATE the row's meeting, not mint a new one.
+       meeting_id = COALESCE(excluded.meeting_id, project_discovery_observations.meeting_id),
        original_name = excluded.original_name,
        score = MAX(project_discovery_observations.score, excluded.score),
        last_seen_at = excluded.last_seen_at`,
-    [norm, sourceKey, name, score, now, now]
+    [norm, sourceKey, meetingId ?? null, name, score, now, now]
   )
   return countProjectDiscoverySources(name)
 }
 
-/** How many distinct sources have mentioned this project name. */
+/**
+ * How many distinct CONVERSATIONS have mentioned this project name. Captures
+ * that share a meeting collapse to one; a capture with no meeting counts on its
+ * own stable key.
+ */
 export function countProjectDiscoverySources(name: string): number {
   const norm = normalizeName(name)
   if (!norm) return 0
   return (
     queryOne<{ n: number }>(
-      'SELECT COUNT(*) AS n FROM project_discovery_observations WHERE name_norm = ?',
+      `SELECT COUNT(DISTINCT COALESCE(meeting_id, source_key)) AS n
+         FROM project_discovery_observations WHERE name_norm = ?`,
       [norm]
     )?.n ?? 0
   )
@@ -6191,9 +6217,16 @@ export function clearProjectDiscoveryObservations(name: string): void {
  * strongest evidence first. Tombstoned names and names that already exist as a
  * project are filtered out defensively (both are purged on the way in, so this is
  * belt-and-braces against a ledger written before either happened).
+ *
+ * The already-a-project filter is applied in JS on the NFKC key, NOT as
+ * `name_norm NOT IN (SELECT LOWER(name) FROM projects)`: SQLite's LOWER() is
+ * ASCII-only and does no Unicode folding or whitespace collapsing, so a project
+ * whose stored name differs from the key only by accent composition or spacing
+ * would slip through and be offered as a "new" discovery. This is the same
+ * ASCII-LOWER trap resolveProject's tier 1b exists to close.
  */
 export function getPendingProjectDiscoveries(limit = 50): PendingProjectDiscovery[] {
-  return queryAll<{
+  const rows = queryAll<{
     name_norm: string
     name: string
     score: number
@@ -6202,26 +6235,38 @@ export function getPendingProjectDiscoveries(limit = 50): PendingProjectDiscover
     last_seen_at: string
   }>(
     `SELECT o.name_norm AS name_norm,
-            MAX(o.original_name) AS name,
+            -- Most RECENT spelling, not MAX() (which is lexicographic order).
+            (SELECT o2.original_name FROM project_discovery_observations o2
+              WHERE o2.name_norm = o.name_norm
+              ORDER BY o2.last_seen_at DESC, o2.rowid DESC LIMIT 1) AS name,
             MAX(o.score) AS score,
-            COUNT(*) AS source_count,
+            COUNT(DISTINCT COALESCE(o.meeting_id, o.source_key)) AS source_count,
             MIN(o.first_seen_at) AS first_seen_at,
             MAX(o.last_seen_at) AS last_seen_at
        FROM project_discovery_observations o
       WHERE o.name_norm NOT IN (SELECT name_norm FROM project_discovery_rejections)
-        AND o.name_norm NOT IN (SELECT LOWER(name) FROM projects)
       GROUP BY o.name_norm
-      ORDER BY source_count DESC, score DESC, last_seen_at DESC
-      LIMIT ?`,
-    [limit]
-  ).map((r) => ({
-    nameNorm: r.name_norm,
-    name: r.name,
-    score: r.score,
-    sourceCount: r.source_count,
-    firstSeenAt: r.first_seen_at,
-    lastSeenAt: r.last_seen_at
-  }))
+      ORDER BY source_count DESC, score DESC, last_seen_at DESC`
+  )
+
+  const existing = new Set(
+    queryAll<{ name: string }>('SELECT name FROM projects').map((p) => normalizeName(p.name))
+  )
+
+  const out: PendingProjectDiscovery[] = []
+  for (const r of rows) {
+    if (existing.has(r.name_norm)) continue
+    out.push({
+      nameNorm: r.name_norm,
+      name: r.name,
+      score: r.score,
+      sourceCount: r.source_count,
+      firstSeenAt: r.first_seen_at,
+      lastSeenAt: r.last_seen_at
+    })
+    if (out.length >= limit) break
+  }
+  return out
 }
 
 /** Typed failure reasons for {@link dismissDiscoveredProject}. */

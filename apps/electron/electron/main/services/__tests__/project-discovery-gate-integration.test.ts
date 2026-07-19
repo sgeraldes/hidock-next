@@ -32,8 +32,13 @@ import {
   countProjectDiscoverySources,
   getPendingProjectDiscoveries
 } from '../database'
-import { applyTranscriptEntities } from '../org-reconciler'
+import { applyTranscriptEntities, mergeDuplicateMeetingOccurrences } from '../org-reconciler'
 import { MIN_DISTINCT_SOURCES } from '../project-discovery-gate'
+
+/** Twin rows for ONE real occurrence: a bare-uid row and its `uid::slotISO` twin. */
+const TWIN_SLOT_ISO = '2026-03-01T10:00:00Z'
+const TWIN_BARE = 'twin-series'
+const TWIN_SLOT = `twin-series::${TWIN_SLOT_ISO}`
 
 function projectRowsByName(name: string): Array<{ id: string; name: string; origin: string | null }> {
   return queryAll<{ id: string; name: string; origin: string | null }>(
@@ -82,6 +87,16 @@ describe('F12: project discovery gate (v43)', () => {
         subject,
         `2026-02-${day}T10:00:00Z`,
         `2026-02-${day}T11:00:00Z`
+      ])
+    }
+    // Twin occurrence rows for ONE real meeting slot — mergeDuplicateMeetingOccurrences
+    // groups on (base uid, start_time), so these two collapse into the bare-uid keeper.
+    for (const id of [TWIN_BARE, TWIN_SLOT]) {
+      run(`INSERT INTO meetings (id, subject, start_time, end_time) VALUES (?, ?, ?, ?)`, [
+        id,
+        'Recurring Standup',
+        TWIN_SLOT_ISO,
+        '2026-03-01T11:00:00Z'
       ])
     }
     run(`INSERT INTO recordings (id, filename, date_recorded) VALUES ('r1', 'a.wav', '2026-02-01T10:00:00Z')`)
@@ -157,6 +172,67 @@ describe('F12: project discovery gate (v43)', () => {
       // Second recording corroborates: the gate opens (no meeting to link to).
       applyTranscriptEntities({ recordingId: 'r2', project: { name } })
       expect(projectRowsByName(name)).toHaveLength(1)
+    })
+
+    /**
+     * Adversarial review finding: the ledger key must be stable across
+     * re-processing. It first keyed on the MEETING, so a recording analysed
+     * before correlation ('r:x') and again after ('m:y') banked TWO sightings —
+     * one conversation clearing the recurrence bar by itself, defeating the gate.
+     */
+    it('late meeting correlation updates the existing sighting instead of banking a second', () => {
+      const name = 'Lantern Grove'
+      // Pass 1: transcribed before the recording was correlated to a meeting.
+      expect(applyTranscriptEntities({ recordingId: 'r1', project: { name } }).projectLinked).toBe(false)
+      expect(countProjectDiscoverySources(name)).toBe(1)
+
+      // Pass 2: same recording re-analysed, now correlated to m1.
+      expect(
+        applyTranscriptEntities({ meetingId: 'm1', recordingId: 'r1', project: { name } }).projectLinked
+      ).toBe(false)
+
+      expect(countProjectDiscoverySources(name)).toBe(1)
+      expect(projectRowsByName(name)).toHaveLength(0)
+      // The row was updated in place, and now carries the meeting.
+      expect(
+        queryOne<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM project_discovery_observations WHERE name_norm = 'lantern grove'`
+        )?.n
+      ).toBe(1)
+      expect(
+        queryOne<{ meeting_id: string | null }>(
+          `SELECT meeting_id FROM project_discovery_observations WHERE name_norm = 'lantern grove'`
+        )?.meeting_id
+      ).toBe('m1')
+    })
+
+    /**
+     * Same class, via the other path: mergeDuplicateMeetingOccurrences collapses
+     * two rows describing ONE real occurrence. Their ledger sightings must
+     * collapse with them, or the merged-away meeting id keeps double-counting a
+     * single conversation.
+     *
+     * Driven with a below-floor name so the evidence stays observable — a name
+     * that clears the floor is created the instant it reaches two distinct
+     * meetings, which is before any merge could run. (That residual is real but
+     * bounded: reconcileOrganization() merges occurrences on every pass, so the
+     * twin window is short, and anything created inside it is a normal
+     * origin='discovered' row the user can dismiss.)
+     */
+    it('merging duplicate meeting occurrences collapses their sightings into one source', () => {
+      const name = 'the recurring update' // all-generic: recorded, never created
+      // Two recordings, each attributed to one of the twin occurrence rows
+      // (the bare-uid row and its `uid::slotISO` twin — same base uid, same slot).
+      applyTranscriptEntities({ meetingId: TWIN_BARE, recordingId: 'r1', project: { name } })
+      applyTranscriptEntities({ meetingId: TWIN_SLOT, recordingId: 'r2', project: { name } })
+      // Before the merge they look like two conversations.
+      expect(countProjectDiscoverySources(name)).toBe(2)
+
+      mergeDuplicateMeetingOccurrences()
+
+      // After it, one conversation — the phantom corroboration is gone.
+      expect(countProjectDiscoverySources(name)).toBe(1)
+      expect(projectRowsByName(name)).toHaveLength(0)
     })
 
     it('creates nothing when the mention carries no source identity at all', () => {
@@ -302,6 +378,64 @@ describe('F12: project discovery gate (v43)', () => {
 
     it('respects the limit', () => {
       expect(getPendingProjectDiscoveries(1).length).toBeLessThanOrEqual(1)
+    })
+
+    /**
+     * Review finding: the display name was MAX(original_name) — SQL's
+     * LEXICOGRAPHIC max, not the most recent spelling the field documents. With
+     * sightings spelled "Zenith Coil" then "Aurora Coil", MAX() returns the
+     * alphabetically-last ("Zenith Coil") regardless of which arrived last.
+     */
+    it('reports the most RECENTLY seen spelling, not the alphabetically last', () => {
+      applyTranscriptEntities({ meetingId: 'm1', recordingId: 'r1', project: { name: 'Zenith Coil' } })
+      // Same normalized key is required for these to be one discovery, so vary
+      // only the case — a later sighting whose spelling sorts BEFORE the first.
+      run(
+        `UPDATE project_discovery_observations SET original_name = 'ZENITH COIL', last_seen_at = '2000-01-01T00:00:00Z'
+           WHERE name_norm = 'zenith coil'`
+      )
+      run(
+        `INSERT INTO project_discovery_observations
+           (name_norm, source_key, meeting_id, original_name, score, first_seen_at, last_seen_at)
+         VALUES ('zenith coil', 'r:late', NULL, 'Zenith Coil (renamed)', 0.9, '2030-01-01T00:00:00Z', '2030-01-01T00:00:00Z')`
+      )
+
+      const entry = getPendingProjectDiscoveries().find((d) => d.nameNorm === 'zenith coil')
+      expect(entry).toBeDefined()
+      expect(entry!.name).toBe('Zenith Coil (renamed)')
+    })
+
+    /**
+     * Review finding: the already-a-project filter used
+     * `name_norm NOT IN (SELECT LOWER(name) FROM projects)`. SQLite's LOWER() is
+     * ASCII-only — no NFKC folding, no whitespace collapsing — so a project whose
+     * stored name differs from the NFKC key only by accent composition or spacing
+     * slipped through and was offered as a brand-new discovery. Same trap
+     * resolveProject's tier 1b exists to close.
+     */
+    it('excludes an existing project whose stored name differs only by Unicode form or spacing', () => {
+      // Two Unicode forms of the same name. The assertions below pin the
+      // premise at runtime, so if anything ever re-normalizes this file the test
+      // fails loudly instead of silently passing for the wrong reason.
+      const NFC = 'Café Motor' // composed e-acute
+      const NFD = 'Café  Motor' // decomposed e + combining acute, double space
+      // Pin the premise: genuinely different strings, identical NFKC key.
+      expect(NFD).not.toBe(NFC)
+      expect(norm(NFD)).toBe(norm(NFC))
+
+      // A project stored in the DECOMPOSED, double-spaced form. SQLite's
+      // ASCII-only LOWER(name) can never match the NFKC ledger key, so the old
+      // `name_norm NOT IN (SELECT LOWER(name) FROM projects)` filter let this
+      // already-existing project resurface as a brand-new discovery.
+      run(`INSERT INTO projects (id, name, status, origin) VALUES ('nfkc-proj', ?, 'active', 'manual')`, [NFD])
+      run(
+        `INSERT INTO project_discovery_observations
+           (name_norm, source_key, meeting_id, original_name, score, first_seen_at, last_seen_at)
+         VALUES (?, 'r:nfkc', NULL, ?, 0.9, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+        [norm(NFC), NFC]
+      )
+
+      expect(pendingNames()).not.toContain(norm(NFC))
     })
   })
 })

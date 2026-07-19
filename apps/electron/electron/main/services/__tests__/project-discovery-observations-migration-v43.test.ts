@@ -54,6 +54,9 @@ describe('schema v43: project_discovery_observations (F12 discovery gate)', () =
     expect(block).toContain('name_norm TEXT NOT NULL')
     expect(block).toContain('source_key TEXT NOT NULL')
     expect(block).toContain('score REAL NOT NULL')
+    // Carried alongside the stable capture key so the distinct-source count can
+    // collapse two recordings of one conversation.
+    expect(block).toContain('meeting_id TEXT')
     // The composite PK is what makes recurrence honest — re-analysing one source
     // upserts a single row instead of inflating the distinct-source count.
     expect(block).toContain('PRIMARY KEY (name_norm, source_key)')
