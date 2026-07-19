@@ -333,6 +333,12 @@ export interface ElectronAPI {
       isPackaged: boolean
       platform: string
     }>
+    /**
+     * Push the QA Logs toggle to the main process. Main has no localStorage and
+     * no store access, so main-process QA logs (e.g. BootScheduler task timings)
+     * depend on this push. Call on mount and on every toggle.
+     */
+    setQaLogsEnabled: (enabled: boolean) => Promise<{ success: boolean }>
   }
 
   // Config
@@ -1210,7 +1216,8 @@ export interface ElectronAPI {
 const electronAPI: ElectronAPI = {
   app: {
     restart: () => callIPC('app:restart'),
-    info: () => callIPC('app:info')
+    info: () => callIPC('app:info'),
+    setQaLogsEnabled: (enabled) => callIPC('qa:set-logs-enabled', enabled)
   },
 
   config: {

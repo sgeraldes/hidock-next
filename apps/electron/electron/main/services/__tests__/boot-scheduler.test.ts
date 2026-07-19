@@ -4,11 +4,14 @@
  * synchronous burst in the app-ready handler.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import {
   registerBootTask,
   startBootScheduler,
   pendingBootTaskCount,
+  getBootTaskTimings,
+  isBootDrainActive,
+  whenBootTasksSettled,
   _resetBootSchedulerForTests
 } from '../boot-scheduler'
 
@@ -101,5 +104,106 @@ describe('boot-scheduler', () => {
     // The second task starts at least ~one gap after the first — proof the loop
     // yields between heavy passes rather than running them back-to-back.
     expect(startTimes[1] - startTimes[0]).toBeGreaterThanOrEqual(30)
+  })
+})
+
+/**
+ * F15: sequencing alone did not stop the boot freeze — one task could still hold
+ * the main process for tens of seconds. These cover the evidence surface that
+ * makes such a stall attributable to a specific task.
+ */
+describe('boot-scheduler — per-task timing (F15)', () => {
+  beforeEach(() => _resetBootSchedulerForTests())
+  afterEach(() => {
+    _resetBootSchedulerForTests()
+    vi.restoreAllMocks()
+  })
+
+  it('records name, start and elapsed for every task, in completion order', async () => {
+    registerBootTask({ name: 'fast', run: () => {} })
+    registerBootTask({ name: 'slower', run: async () => { await new Promise((r) => setTimeout(r, 30)) } })
+
+    const before = Date.now()
+    await startBootScheduler({ startDelayMs: 0, gapMs: 0, ...silent })
+
+    const timings = getBootTaskTimings()
+    expect(timings.map((t) => t.name)).toEqual(['fast', 'slower'])
+    expect(timings.every((t) => t.ok)).toBe(true)
+    expect(timings.every((t) => t.startedAt >= before)).toBe(true)
+    // The slow task's measured elapsed reflects the awaited work, not just the
+    // synchronous part — this is what attributes a stall to the right task.
+    expect(timings[1].elapsedMs).toBeGreaterThanOrEqual(25)
+  })
+
+  it('records a failing task as ok:false with its message, and keeps going', async () => {
+    registerBootTask({ name: 'boom', run: () => { throw new Error('disk on fire') } })
+    registerBootTask({ name: 'after', run: () => {} })
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    await startBootScheduler({ startDelayMs: 0, gapMs: 0, ...silent })
+
+    const timings = getBootTaskTimings()
+    expect(timings.map((t) => t.name)).toEqual(['boom', 'after'])
+    expect(timings[0].ok).toBe(false)
+    expect(timings[0].error).toBe('disk on fire')
+    expect(timings[1].ok).toBe(true)
+  })
+
+  it('always warns about a task slow enough to freeze the window, even with QA logs off', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    // 3000ms is the warn threshold; fake the clock rather than actually stalling.
+    const realNow = Date.now
+    let t = realNow()
+    vi.spyOn(Date, 'now').mockImplementation(() => t)
+    registerBootTask({ name: 'hog', run: () => { t += 9000 } })
+
+    await startBootScheduler({ startDelayMs: 0, gapMs: 0, ...silent })
+
+    expect(getBootTaskTimings()[0].elapsedMs).toBe(9000)
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(String(warn.mock.calls[0][0])).toContain('SLOW boot task "hog" took 9000ms')
+  })
+})
+
+/**
+ * F15: heavy work outside the scheduler (the startup/periodic calendar sync) must
+ * not overlap the boot drain. `whenBootTasksSettled` is the gate it waits on.
+ */
+describe('boot-scheduler — settle gate (F15)', () => {
+  beforeEach(() => _resetBootSchedulerForTests())
+  afterEach(() => _resetBootSchedulerForTests())
+
+  it('holds a waiter until the drain finishes, then releases it', async () => {
+    let released = false
+    registerBootTask({ name: 'slow', run: async () => { await new Promise((r) => setTimeout(r, 40)) } })
+
+    const gate = whenBootTasksSettled(5000).then(() => { released = true })
+    const drain = startBootScheduler({ startDelayMs: 0, gapMs: 0, ...silent })
+
+    // Still inside the drain: the waiter has NOT been let through.
+    await new Promise((r) => setTimeout(r, 10))
+    expect(isBootDrainActive()).toBe(true)
+    expect(released).toBe(false)
+
+    await drain
+    await gate
+    expect(released).toBe(true)
+    expect(isBootDrainActive()).toBe(false)
+  })
+
+  it('resolves immediately once the drain has already settled', async () => {
+    registerBootTask({ name: 'x', run: () => {} })
+    await startBootScheduler({ startDelayMs: 0, gapMs: 0, ...silent })
+
+    // No timers involved — an already-settled gate must not re-queue a waiter.
+    await expect(whenBootTasksSettled(0)).resolves.toBeUndefined()
+  })
+
+  it('resolves on timeout so a scheduler that never starts cannot wedge callers', async () => {
+    // Nothing registered, nothing started — the waiter must still be released.
+    const t0 = Date.now()
+    await whenBootTasksSettled(30)
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(20)
+    expect(isBootDrainActive()).toBe(false)
   })
 })
