@@ -2502,9 +2502,28 @@ function repairPhase(): void {
   const obsCols = getTableColumns(database, 'project_discovery_observations')
   if (obsCols.length > 0 && !obsCols.includes('meeting_id')) {
     console.log('[Database] Repairing project_discovery_observations: adding meeting_id')
+    let alterError: unknown
     try {
       database.run('ALTER TABLE project_discovery_observations ADD COLUMN meeting_id TEXT')
-    } catch { /* column exists */ }
+    } catch (e) {
+      alterError = e
+    }
+    // FAIL CLOSED. For a DB already recorded at v43 the migration is SKIPPED, so
+    // this repair is the ONLY heal path — swallowing a failed ALTER would let the
+    // boot continue with a table that cannot accept an observation write,
+    // recreating the stranded condition for the whole session and, under a
+    // persistent failure, forever. Re-read the columns and refuse to continue
+    // unless the column is actually there. The re-read also subsumes the benign
+    // duplicate-column race: if the ALTER lost that race the column exists, so
+    // the check passes and the error is correctly ignored.
+    const healed = getTableColumns(database, 'project_discovery_observations')
+    if (!healed.includes('meeting_id')) {
+      throw new Error(
+        '[Database] project_discovery_observations is missing meeting_id and could not be repaired; ' +
+          'refusing to start with a table that cannot record project discoveries' +
+          (alterError ? ` (ALTER failed: ${(alterError as Error).message})` : '')
+      )
+    }
   }
 
   // Repair transcript_speakers (v25): a new table has no columns to ALTER, but

@@ -106,6 +106,17 @@ const GENDER_PAIR_PENALTY = 0.25
 const MIN_LEN_FOR_EDIT_1 = 4
 const MIN_LEN_FOR_EDIT_2 = 5
 
+/**
+ * For a SHORT name, a prefix match must be a genuine expansion rather than a
+ * one-or-two-character variant. Without this the prefix rule quietly undoes the
+ * length-gated edit-distance rule above: "crm" vs "crmx" is rejected as an edit
+ * (distance 1 on 3 chars) but still scored 0.68 as a prefix, and the resolver's
+ * co-occurrence boost (+0.15) carried it to 0.83 — over the 0.8 auto-link line —
+ * silently attaching one short acronym project to a different one in the same
+ * meeting. Nickname expansions are unaffected: "edu"/"eduardo" grows by 4.
+ */
+const MIN_PREFIX_GROWTH = 2
+
 /** True when two ≥3-char tokens are identical but for a final a↔o (Sergio/Sergia). */
 function isGenderVowelSwap(a: string, b: string): boolean {
   if (a.length !== b.length || a.length < 3) return false
@@ -164,7 +175,13 @@ export function fuzzyNameScore(aNorm: string, bNorm: string): number {
     // "misspelling" rather than "different word".
     if (dist === 1 && minLen >= MIN_LEN_FOR_EDIT_1) score = 0.78
     else if (dist === 2 && minLen >= MIN_LEN_FOR_EDIT_2) score = 0.7
-    else if (minLen >= 3 && (aNorm.startsWith(bNorm) || bNorm.startsWith(aNorm))) score = 0.68
+    else if (
+      minLen >= 3 &&
+      (aNorm.startsWith(bNorm) || bNorm.startsWith(aNorm)) &&
+      // Short names must GROW meaningfully to count as a prefix expansion.
+      (minLen >= MIN_LEN_FOR_EDIT_2 || Math.max(aNorm.length, bNorm.length) - minLen >= MIN_PREFIX_GROWTH)
+    )
+      score = 0.68
     else if (sharesWord(aNorm, bNorm)) score = 0.62
     else return 0
   }

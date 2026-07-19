@@ -56,16 +56,15 @@ export const CREATE_CONFIDENCE_FLOOR = 0.6
 /** Distinct meetings/recordings a name must appear in before it can be created. */
 export const MIN_DISTINCT_SOURCES = 2
 
-/**
- * Shortest normalized name worth keeping. Deliberately 2, not 3: the old 3-rule
- * ran before any Unicode-aware analysis and DROPPED real short names outright —
- * "AI", "XR", and 2-character CJK names were discarded, not deferred.
- */
-const MIN_NAME_LENGTH = 2
 /** Longer than this and it is prose, not a name. */
 const MAX_NAME_LENGTH = 60
 /** More whitespace tokens than this and it is prose, not a name. */
 const MAX_NAME_TOKENS = 6
+/**
+ * Sentence punctuation only proves prose above this token count. "Yahoo!" and
+ * "What If?" are plausible names; "What is the plan?" is a question.
+ */
+const PROSE_MIN_TOKENS = 3
 
 /** Anything that clears the shape rules is at least plausible — and deferred. */
 const BASE_PLAUSIBLE = 0.3
@@ -118,6 +117,22 @@ const GENERIC_NAME_TOKENS = new Set([
   'general', 'misc', 'miscellaneous', 'other', 'others', 'various', 'unknown', 'none', 'na', 'tbd', 'todo',
   'followup', 'follow', 'up', 'next', 'steps', 'step', 'plan', 'plans', 'planning',
   'new', 'old', 'current', 'upcoming', 'ongoing',
+  // --- English: business-process / artifact nouns ---------------------------
+  // Title Case cannot rescue a phrase built only from these: "Customer Feedback"
+  // and "Action Items" are noun phrases a model emits when the transcript never
+  // named a project, and they arrive Title-Cased from structured model output.
+  'customer', 'customers', 'client', 'clients', 'user', 'users', 'team', 'teams',
+  'feedback', 'action', 'actions', 'note', 'notes', 'issue', 'issues',
+  'request', 'requests', 'list', 'lists', 'report', 'reports', 'summary', 'summaries',
+  'ticket', 'tickets', 'bug', 'bugs', 'question', 'questions', 'answer', 'answers',
+  'decision', 'decisions', 'risk', 'risks', 'blocker', 'blockers',
+  'priority', 'priorities', 'goal', 'goals', 'objective', 'objectives',
+  'metric', 'metrics', 'number', 'numbers', 'revenue', 'cost', 'costs',
+  'budget', 'budgets', 'deadline', 'deadlines', 'timeline', 'timelines',
+  'schedule', 'roadmap', 'backlog', 'sprint', 'retro', 'retrospective',
+  'kickoff', 'onboarding', 'headcount', 'hiring', 'checkin',
+  // Status adjectives that qualify an artifact rather than name one.
+  'open', 'closed', 'active', 'inactive', 'done', 'blocked', 'draft', 'final',
   // --- Spanish: determiners / connectives ---
   'el', 'la', 'los', 'las', 'un', 'una', 'unos', 'unas', 'este', 'esta', 'estos', 'estas',
   'nuestro', 'nuestra', 'nuestros', 'nuestras', 'mi', 'tu', 'su', 'sus',
@@ -132,6 +147,15 @@ const GENERIC_NAME_TOKENS = new Set([
   'varios', 'varias', 'otro', 'otros', 'otra', 'otras', 'desconocido', 'desconocida',
   'ninguno', 'ninguna', 'pendiente', 'pendientes', 'seguimiento',
   'siguiente', 'siguientes', 'paso', 'pasos',
+  // --- Spanish: business-process / artifact nouns ---------------------------
+  'cliente', 'clientes', 'usuario', 'usuarios', 'equipo', 'equipos',
+  'comentarios', 'retroalimentacion', 'accion', 'acciones', 'nota', 'notas',
+  'incidencia', 'incidencias', 'solicitud', 'solicitudes', 'lista', 'listas',
+  'informe', 'informes', 'resumen', 'resumenes', 'pregunta', 'preguntas',
+  'respuesta', 'respuestas', 'decision', 'decisiones', 'riesgo', 'riesgos',
+  'objetivo', 'objetivos', 'meta', 'metas', 'metrica', 'metricas',
+  'numero', 'numeros', 'ingresos', 'costo', 'costos', 'presupuesto',
+  'plazo', 'plazos', 'cronograma', 'calendario',
   'planes', 'planificacion', 'generales',
   'nuevo', 'nueva', 'nuevos', 'nuevas', 'viejo', 'vieja', 'viejos', 'viejas',
   'actual', 'actuales', 'proximo', 'proxima', 'proximos', 'proximas'
@@ -155,17 +179,34 @@ export type NameEvidence =
   | 'acronym'
   /** A compact token in a caseless script, where case cannot signal anything. */
   | 'uncased-script'
+  /** Orthography no ordinary noun phrase produces: "HiDock", "S4HANA". */
+  | 'distinctive-orthography'
   /** Multi-token with a capitalized non-generic token: "Meridian Alpha". */
   | 'proper-multi'
+
+/** Sentence-terminal punctuation anywhere in the raw string. */
+const SENTENCE_PUNCTUATION = /[!?]|\.\s|\.$/
 
 /**
  * Look for positive name-like structure in the RAW (un-normalized) string —
  * capitalization is the signal, so this must not run on a lowercased key.
  *
+ * Tiers, strongest first. The first three are VOCABULARY-INDEPENDENT: they read
+ * orthography, not word lists, so noise cannot escape them by using a word the
+ * generic list happens not to enumerate.
+ *
+ * `proper-multi` is the weak tier, and its precision does rest on the generic
+ * vocabulary: Title Case alone cannot separate "Customer Feedback" from
+ * "Meridian Alpha" — both are two ordinary capitalized nouns — so the generic set
+ * carries business-process vocabulary and an all-generic phrase is capped below
+ * the floor before this function is ever consulted. Stated plainly because it is
+ * the residual false-positive path: business jargon outside that vocabulary can
+ * still earn proper-multi. Recurrence plus a dismissable origin='discovered' row
+ * is the backstop.
+ *
  * A single capitalized token ("Atlas", "Budget") is deliberately NOT evidence:
  * structurally the real name and the noise word are identical, and the extractor
  * is prompted for "2-5 words", so a lone capitalized word is already off-pattern.
- * Those defer to the suggestion queue rather than auto-creating.
  */
 export function nameLikeEvidence(raw: string): NameEvidence | null {
   const tokens = (raw || '').trim().split(/\s+/).filter(Boolean)
@@ -184,10 +225,17 @@ export function nameLikeEvidence(raw: string): NameEvidence | null {
     if (len >= MIN_ACRONYM && len <= MAX_ACRONYM && /^[\p{Lu}\p{N}]+$/u.test(token)) {
       if ((token.match(/\p{Lu}/gu) ?? []).length >= 2) return 'acronym'
     }
+
+    // Distinctive orthography — an internal capital ("HiDock", "McKinsey") or a
+    // letter/digit mix ("S4HANA", "Q3Platform"). No ordinary noun phrase does
+    // this, so it is a name marker independent of any word list.
+    if (/\p{Ll}\p{Lu}/u.test(token)) return 'distinctive-orthography'
+    if (/\p{L}/u.test(token) && /\p{N}/u.test(token)) return 'distinctive-orthography'
   }
 
-  // Proper-noun structure only counts alongside a second token.
-  if (tokens.length >= 2) {
+  // Weak tier. Skipped entirely for a punctuation-bearing shape ("What If?"):
+  // those are retained for review, never auto-created.
+  if (tokens.length >= 2 && !SENTENCE_PUNCTUATION.test(raw)) {
     for (const token of tokens) {
       if (isGeneric(token)) continue
       if ([...token].length >= 2 && /^\p{Lu}/u.test(token)) return 'proper-multi'
@@ -218,16 +266,23 @@ export function scoreProjectNameCandidate(name: string): ProjectNameQuality {
   const raw = (name || '').trim()
   const norm = normalizeName(raw)
 
-  // --- Shape rules: a hard 0 (extraction noise, never remembered) ------------
+  // --- Shape rules ----------------------------------------------------------
+  // DROP is reserved for input with NO usable name content: nothing here may
+  // discard something that could plausibly be a name. A one-letter codename
+  // ("X") and punctuation-bearing shapes ("Yahoo!", "What If?") are therefore
+  // DEFERRED, not dropped — an earlier cut discarded them outright, which
+  // contradicted this module's own defer-by-default design. They are held back
+  // from auto-creation instead (see nameLikeEvidence).
   const none = (reason: string): ProjectNameQuality => ({ score: 0, reasons: [reason], evidence: null })
   if (!norm) return none('empty')
-  if ([...norm].length < MIN_NAME_LENGTH) return none('too-short')
-  if ([...norm].length > MAX_NAME_LENGTH) return none('too-long')
-  if (/[\n\r!?]/.test(raw)) return none('sentence-punctuation')
   if (!/\p{L}/u.test(norm)) return none('no-letters')
+  if ([...norm].length > MAX_NAME_LENGTH) return none('too-long')
 
   const tokens = norm.split(' ').filter(Boolean)
   if (tokens.length > MAX_NAME_TOKENS) return none('too-many-tokens')
+  // Prose, proven rather than assumed: sentence punctuation ALONE is not enough
+  // ("Yahoo!" is a name), but sentence punctuation on a multi-word clause is.
+  if (tokens.length > PROSE_MIN_TOKENS && SENTENCE_PUNCTUATION.test(raw)) return none('prose')
 
   // --- All-generic vocabulary: deferred forever, never auto-created ----------
   if (tokens.every((t) => isGeneric(t))) {

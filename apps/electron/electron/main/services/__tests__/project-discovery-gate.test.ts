@@ -33,16 +33,15 @@ function expectNeverCreates(name: string): void {
   }
 }
 
-describe('scoreProjectNameCandidate — shape rules (drop)', () => {
+describe('scoreProjectNameCandidate — shape rules', () => {
+  /** DROP is reserved for input with NO usable name content at all. */
   it.each([
     ['', 'empty'],
     ['   ', 'whitespace only'],
-    ['x', 'single character'],
     ['2026', 'digits only'],
     ['---', 'punctuation only'],
     ['we should probably revisit the pricing model before the next board meeting', 'prose'],
-    ['What is the plan?', 'sentence punctuation'],
-    ['Migration\nPlan', 'embedded newline']
+    ['What is the plan?', 'a question — sentence punctuation on a multi-word clause']
   ])('drops %j (%s) — never even remembered', (name) => {
     expect(scoreProjectNameCandidate(name).score).toBe(0)
     expect(actionAt(name, 99)).toBe('drop')
@@ -50,6 +49,23 @@ describe('scoreProjectNameCandidate — shape rules (drop)', () => {
 
   it('drops a name longer than the length cap even with few tokens', () => {
     expect(scoreProjectNameCandidate('Supercalifragilistic'.repeat(4)).score).toBe(0)
+  })
+
+  /**
+   * The drop set previously discarded these outright, contradicting the module's
+   * own defer-by-default design: a one-letter codename and punctuation-bearing
+   * shapes are plausible names and must stay reviewable. They are held back from
+   * auto-creation instead of being thrown away.
+   */
+  it.each(['X', 'Yahoo!', 'What If?'])('keeps %j for review — deferred, never dropped, never created', (name) => {
+    const { score } = scoreProjectNameCandidate(name)
+    expect(score).toBeGreaterThan(0)
+    expectNeverCreates(name)
+  })
+
+  it('treats an embedded newline as whitespace rather than a reason to discard', () => {
+    // normalizeName collapses it, so this is simply the name "Migration Plan".
+    expect(scoreProjectNameCandidate('Migration\nPlan').score).toBeGreaterThan(0)
   })
 })
 
@@ -96,6 +112,32 @@ describe('false POSITIVES — recurring extraction noise must never auto-create'
 
   it('folds accents before checking the generic vocabulary', () => {
     expect(scoreProjectNameCandidate('la revisión').score).toBeLessThan(CREATE_CONFIDENCE_FLOOR)
+  })
+
+  /**
+   * The primary false-positive path, and the one Title Case alone cannot close:
+   * structured model output emits business noun phrases in exactly this cased
+   * form, and "Customer Feedback" is structurally identical to "Meridian Alpha".
+   * Held back by covering business-process vocabulary in the generic set, so the
+   * phrase is all-generic and capped below the floor before capitalization is
+   * ever consulted.
+   */
+  it.each(['Customer Feedback', 'Action Items', 'Meeting Notes', 'Status Update', 'Client Requests', 'Open Issues'])(
+    'Title-Cased generic noun phrase %j defers and never creates',
+    (name) => {
+      const { score } = scoreProjectNameCandidate(name)
+      expect(score).toBeGreaterThan(0) // still reviewable
+      expect(score).toBeLessThan(CREATE_CONFIDENCE_FLOOR)
+      expect(nameLikeEvidence(name)).toBeNull()
+      expectNeverCreates(name)
+    }
+  )
+
+  it('genuine two-token names still create despite the Title-Case tightening', () => {
+    for (const name of ['Meridian Alpha', 'Basalt Orchard']) {
+      expect(scoreProjectNameCandidate(name).score).toBeGreaterThanOrEqual(CREATE_CONFIDENCE_FLOOR)
+      expect(actionAt(name, MIN_DISTINCT_SOURCES)).toBe('create')
+    }
   })
 
   it('a lone capitalized word is not evidence — the real name and the noise word look identical', () => {
@@ -162,7 +204,7 @@ describe('auto-create requires positive name structure', () => {
     ['Project Atlas', 'proper-multi'],
     ['Phantom Initiative', 'proper-multi'],
     ['Migration Plan', 'proper-multi'],
-    ['HiDock Firmware', 'proper-multi'],
+    ['HiDock Firmware', 'distinctive-orthography'],
     ['DFX5 Gateway', 'acronym'],
     ['Plataforma de Pagos', 'proper-multi']
   ])('%j clears the floor via %s', (name, evidence) => {
@@ -171,15 +213,32 @@ describe('auto-create requires positive name structure', () => {
     expect(q.score).toBeGreaterThanOrEqual(CREATE_CONFIDENCE_FLOOR)
   })
 
+  /**
+   * The vocabulary-independent tiers. Unlike proper-multi these read orthography
+   * rather than a word list, so noise cannot escape them by picking a word the
+   * generic set happens not to enumerate.
+   */
+  it.each([
+    ['HiDock', 'internal capital'],
+    ['McKinsey', 'internal capital'],
+    ['Q3Platform', 'letter/digit mix']
+  ])('%j earns distinctive-orthography evidence (%s) without any word list', (name) => {
+    expect(nameLikeEvidence(name)).toBe('distinctive-orthography')
+  })
+
+  it('an all-caps letter/digit product name is caught by the acronym tier', () => {
+    expect(nameLikeEvidence('S4HANA')).toBe('acronym')
+  })
+
   it('never exceeds 1', () => {
     expect(scoreProjectNameCandidate('Meridian Alpha Program').score).toBeLessThanOrEqual(1)
   })
 
   it('reports why a name was docked or accepted', () => {
     expect(scoreProjectNameCandidate('next steps').reasons).toContain('all-generic-tokens')
-    expect(scoreProjectNameCandidate('budget').reasons).toContain('no-name-structure')
+    expect(scoreProjectNameCandidate('pricing issue').reasons).toContain('no-name-structure')
     expect(scoreProjectNameCandidate('Meridian Alpha').reasons).toContain('evidence:proper-multi')
-    expect(scoreProjectNameCandidate('x').reasons).toContain('too-short')
+    expect(scoreProjectNameCandidate('What is the plan?').reasons).toContain('prose')
   })
 })
 
