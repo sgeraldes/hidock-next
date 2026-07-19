@@ -12,6 +12,7 @@ from unittest.mock import Mock, mock_open, patch
 # Import the module under test
 import desktop_device_adapter
 import pytest
+from constants import ALL_VENDOR_IDS
 from desktop_device_adapter import DesktopDeviceAdapter
 from device_interface import ConnectionStats, DeviceCapability, DeviceHealth, DeviceInfo, DeviceModel, StorageInfo
 
@@ -57,16 +58,18 @@ class TestDeviceDiscovery:
 
     @pytest.mark.asyncio
     async def test_discover_devices_success(self):
-        """Test successful device discovery."""
+        """Test successful device discovery across the full vendor/product matrix."""
+        # Only these PIDs report a device; discovery probes each one under every vendor ID.
+        matching_pids = [0xAF0C, 0xAF0D]
+
         with (
             patch("desktop_device_adapter.detect_device_model") as mock_detect,
             patch("desktop_device_adapter.HiDockJensen") as mock_jensen_class,
         ):
             mock_detect.return_value = DeviceModel.H1E
 
-            # Mock only first 2 product IDs to return devices
             def mock_find_device(vid, pid):
-                if pid in [0xAF0C, 0xAF0D]:  # Only first 2 PIDs have devices
+                if pid in matching_pids:
                     mock_device = Mock()
                     mock_device.serial_number = f"TEST{pid:04X}"
                     return mock_device
@@ -78,10 +81,17 @@ class TestDeviceDiscovery:
 
             devices = await self.adapter.discover_devices()
 
-            assert len(devices) == 2
+            # discover_devices() walks the full ALL_VENDOR_IDS x HIDOCK_PRODUCT_IDS
+            # cross-product, so a matching PID is reported once per vendor ID.
+            # Derive the expectation from the constant so that adding a vendor ID
+            # cannot silently invalidate this test.
+            expected_ids = [f"{vid:04x}:{pid:04x}" for vid in ALL_VENDOR_IDS for pid in matching_pids]
+
+            assert len(devices) == len(ALL_VENDOR_IDS) * len(matching_pids)
             assert all(isinstance(device, DeviceInfo) for device in devices)
-            assert devices[0].id == "10d6:af0c"
-            assert devices[1].id == "10d6:af0d"
+            assert [device.id for device in devices] == expected_ids
+            # Serial number is read off the discovered USB device handle
+            assert devices[0].serial_number == "TESTAF0C"
 
     @pytest.mark.asyncio
     async def test_discover_devices_empty_list(self):
@@ -293,8 +303,15 @@ class TestStorageOperations:
 
     @pytest.mark.asyncio
     async def test_get_storage_info_success(self):
-        """Test successful storage info retrieval."""
-        mock_card_info = {"capacity": 1000, "used": 750, "status_raw": 0}  # MB  # MB
+        """Test successful storage info retrieval.
+
+        The device firmware reports FREE space in the card-info "used" field, so
+        get_storage_info() must derive used_space as capacity - free. The same
+        interpretation is used by the web adapter and documented in
+        packages/storage-controller/USB_PROTOCOL_FINDINGS.md (GET_CARD_INFO).
+        """
+        # "used" is really FREE space as reported by firmware (MB); "capacity" is total (MB)
+        mock_card_info = {"capacity": 1000, "used": 750, "status_raw": 0}
         mock_file_count = {"count": 50}
 
         self.mock_jensen.is_connected.return_value = True
@@ -307,9 +324,11 @@ class TestStorageOperations:
 
         assert isinstance(result, StorageInfo)
         assert result.total_capacity == 1000 * 1024 * 1024  # Convert MB to bytes
-        assert result.used_space == 750 * 1024 * 1024
-        assert result.free_space == 250 * 1024 * 1024
+        assert result.free_space == 750 * 1024 * 1024  # Firmware "used" field is really free space
+        assert result.used_space == 250 * 1024 * 1024  # capacity - free
+        assert result.used_space + result.free_space == result.total_capacity
         assert result.file_count == 50
+        assert result.status_raw == 0
 
     @pytest.mark.asyncio
     async def test_get_storage_info_exception(self):
@@ -371,10 +390,12 @@ class TestRecordingOperations:
             ]
         }
         self.mock_jensen.is_connected.return_value = True
-        self.mock_jensen.list_files.return_value = mock_files_info
+        self.mock_jensen.list_files_with_retry.return_value = mock_files_info
 
         result = await self.adapter.get_recordings()
 
+        # get_recordings() uses the retry wrapper so incomplete transfers are retried
+        self.mock_jensen.list_files_with_retry.assert_called_once_with(timeout_s=20, max_retries=2)
         assert len(result) == 2
         assert result[0]["filename"] == "recording1.hta"
         assert result[1]["size"] == 2048
@@ -409,22 +430,15 @@ class TestRecordingOperations:
         """Test successful recording deletion."""
         progress_callback = Mock()
 
-        # Create a mock recording object that has both dict access and attributes
-        class MockRecording:
-            def __init__(self, id_val, filename):
-                self.id = id_val
-                self.filename = filename
-
-        mock_recording = MockRecording("test.hta", "test.hta")
-
         self.mock_jensen.is_connected.return_value = True
         self.mock_jensen.delete_file.return_value = {"result": "success"}
 
-        # Mock the get_recordings method to return our mock recording
-        with patch.object(self.adapter, "get_recordings", return_value=[mock_recording]):
-            await self.adapter.delete_recording("test.hta", progress_callback)
+        await self.adapter.delete_recording("test.hta", progress_callback)
 
+        # recording_id is passed straight through as the filename; deletion must not
+        # pay for a full file list just to resolve the name.
         self.mock_jensen.delete_file.assert_called_once_with("test.hta")
+        self.mock_jensen.list_files_with_retry.assert_not_called()
 
 
 class TestProgressManagement:
@@ -684,12 +698,12 @@ class TestErrorHandling:
 
     @pytest.mark.asyncio
     async def test_operation_with_jensen_exception(self):
-        """Test operations handle Jensen device exceptions."""
+        """Test operations propagate Jensen device exceptions."""
         self.mock_jensen.is_connected.return_value = True
-        self.mock_jensen.list_files.side_effect = Exception("Device communication error")
+        self.mock_jensen.list_files_with_retry.side_effect = RuntimeError("Device communication error")
 
-        # Should handle gracefully
-        with pytest.raises(Exception):
+        # The underlying device error must surface, not be swallowed or masked
+        with pytest.raises(RuntimeError, match="Device communication error"):
             await self.adapter.get_recordings()
 
     @pytest.mark.asyncio
@@ -697,7 +711,7 @@ class TestErrorHandling:
         """Test download with invalid filename."""
         progress_callback = Mock()
         self.mock_jensen.is_connected.return_value = True
-        self.mock_jensen.list_files.return_value = {"files": []}
+        self.mock_jensen.list_files_with_retry.return_value = {"files": []}
 
         with pytest.raises(FileNotFoundError):
             await self.adapter.download_recording("", "/tmp/output.wav", progress_callback)
