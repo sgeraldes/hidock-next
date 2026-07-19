@@ -341,6 +341,56 @@ describe('syncCalendar — transient fetch retry (F15)', () => {
     expect(categorizeCalendarError(econnreset()).category).toBe('network')
     expect(categorizeCalendarError(new Error('read ECONNRESET')).category).toBe('network')
   })
+
+  /**
+   * Adversarial review #4: node wraps ECONNREFUSED and ENOTFOUND in exactly the
+   * same `TypeError: fetch failed` as a reset, so falling back to the wrapper
+   * message retried both — contradicting the documented exclusion and burning
+   * the boot window on failures that cannot succeed.
+   */
+  it('does NOT retry a wrapped ECONNREFUSED — nothing is listening, retrying cannot help', async () => {
+    const wrapped = Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new Error('connect ECONNREFUSED 10.0.0.1:443'), { code: 'ECONNREFUSED' })
+    })
+    const fetchMock = vi.fn().mockRejectedValue(wrapped)
+    global.fetch = fetchMock as never
+
+    const result = await syncCalendar('https://calendar.example.com/refused.ics', now)
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(result.success).toBe(false)
+  })
+
+  it('does NOT retry a wrapped ENOTFOUND — the host does not resolve', async () => {
+    const wrapped = Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new Error('getaddrinfo ENOTFOUND nope.example.com'), {
+        code: 'ENOTFOUND'
+      })
+    })
+    const fetchMock = vi.fn().mockRejectedValue(wrapped)
+    global.fetch = fetchMock as never
+
+    const result = await syncCalendar('https://nope.example.com/f.ics', now)
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(result.success).toBe(false)
+  })
+
+  it('classifies from the concrete code, not the generic wrapper message', async () => {
+    const { isTransientNetworkError } = await import('../calendar-sync')
+    const wrap = (code: string) =>
+      Object.assign(new TypeError('fetch failed'), {
+        cause: Object.assign(new Error(`socket ${code}`), { code })
+      })
+
+    expect(isTransientNetworkError(wrap('ECONNRESET'))).toBe(true)
+    expect(isTransientNetworkError(wrap('ETIMEDOUT'))).toBe(true)
+    expect(isTransientNetworkError(wrap('ECONNREFUSED'))).toBe(false)
+    expect(isTransientNetworkError(wrap('ENOTFOUND'))).toBe(false)
+    expect(isTransientNetworkError(wrap('CERT_HAS_EXPIRED'))).toBe(false)
+    // A bare wrapper with no cause is not evidence of anything retryable.
+    expect(isTransientNetworkError(new TypeError('fetch failed'))).toBe(false)
+  })
 })
 
 /**
@@ -408,6 +458,75 @@ describe('syncCalendar — serialization (F15)', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2)
     expect(b).not.toBe(a)
+  })
+
+  /**
+   * Adversarial review #3: the generation was only checked AFTER syncCalendar
+   * returned — by which point the pass had already written the cache, upserted
+   * meetings, reconciled and broadcast. Stopping auto-sync suppressed the log
+   * line and nothing else.
+   */
+  it('a pass invalidated while parked on the boot gate performs NO side effects', async () => {
+    const boot = await import('../boot-scheduler')
+    const { upsertMeetingsBatch } = await import('../database')
+    const { writeFile } = await import('fs/promises')
+    boot._resetBootSchedulerForTests()
+    emitDomainEvent.mockClear()
+    vi.mocked(upsertMeetingsBatch).mockClear()
+    vi.mocked(writeFile).mockClear()
+
+    const fetchMock = vi.fn().mockResolvedValue(okResponse())
+    global.fetch = fetchMock as never
+
+    // The pass is abandoned the moment this flips.
+    let wanted = true
+    boot.registerBootTask({
+      name: 'slow-boot',
+      run: async () => {
+        await new Promise((r) => setTimeout(r, 40))
+        wanted = false // e.g. stopAutoSync() ran while the sync waited
+      }
+    })
+
+    const sync = calendarSync.syncCalendar('https://calendar.example.com/cancel.ics', {
+      waitForBootMs: 5000,
+      isStillWanted: () => wanted
+    })
+    const drain = boot.startBootScheduler({ startDelayMs: 0, gapMs: 0, log: () => {} })
+    const [result] = await Promise.all([sync, drain])
+    boot._resetBootSchedulerForTests()
+
+    expect(result.success).toBe(false)
+    expect(result.errorCategory).toBe('cancelled')
+    // Nothing was fetched, cached, written or broadcast.
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(writeFile).not.toHaveBeenCalled()
+    expect(upsertMeetingsBatch).not.toHaveBeenCalled()
+    expect(emitDomainEvent).not.toHaveBeenCalled()
+  })
+
+  it('a joined caller keeps the pass alive when the scheduled sync that started it is cancelled', async () => {
+    const { upsertMeetingsBatch } = await import('../database')
+    vi.mocked(upsertMeetingsBatch).mockClear()
+    global.fetch = slowFetch() as never
+
+    // Scheduled sync starts, then its schedule is torn down...
+    let scheduleWanted = true
+    const scheduled = calendarSync.syncCalendar('https://calendar.example.com/j.ics', {
+      waitForBootMs: 0,
+      isStillWanted: () => scheduleWanted
+    })
+    // ...but a user-initiated sync joined it and still wants the result.
+    const joined = calendarSync.syncCalendar('https://calendar.example.com/j.ics', {
+      waitForBootMs: 0
+    })
+    scheduleWanted = false
+
+    const [a, b] = await Promise.all([scheduled, joined])
+
+    expect(a.success).toBe(true)
+    expect(b).toBe(a)
+    expect(upsertMeetingsBatch).toHaveBeenCalled()
   })
 
   it('waits for the boot drain before touching the feed', async () => {

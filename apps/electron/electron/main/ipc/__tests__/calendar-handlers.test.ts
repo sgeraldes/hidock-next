@@ -349,7 +349,12 @@ describe('Calendar IPC Handlers', () => {
       // Need to flush the microtask queue
       await vi.advanceTimersByTimeAsync(0)
 
-      expect(syncCalendar).toHaveBeenCalledWith('https://calendar.example.com/feed.ics')
+      // F15: scheduled syncs carry a cancellation token so a pass parked on the
+      // boot gate can be abandoned before it writes if auto-sync is stopped.
+      expect(syncCalendar).toHaveBeenCalledWith(
+        'https://calendar.example.com/feed.ics',
+        expect.objectContaining({ isStillWanted: expect.any(Function) })
+      )
     })
   })
 })

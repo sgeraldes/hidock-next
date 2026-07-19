@@ -171,9 +171,15 @@ let autoSyncGeneration = 0
 /**
  * Run one scheduled (startup or periodic) sync.
  *
- * F15: `syncCalendar` itself waits for the boot drain and joins any in-flight
- * pass, so this only has to skip ticks that would queue redundant work behind a
- * sync already under way, and drop ticks whose schedule has since been stopped.
+ * F15: `syncCalendar` waits for the boot drain and joins any in-flight pass, so
+ * this only has to skip ticks that would queue redundant work behind a sync
+ * already under way.
+ *
+ * The generation is handed to `syncCalendar` as a cancellation token rather than
+ * being checked on return: the boot wait can be long, and by the time the pass
+ * returned it would already have written the cache, upserted meetings,
+ * reconciled and broadcast. Checking afterwards suppressed the log line and
+ * nothing else.
  */
 async function runScheduledSync(generation: number, reason: 'startup' | 'periodic'): Promise<void> {
   if (reason === 'periodic' && isCalendarSyncActive()) {
@@ -187,7 +193,9 @@ async function runScheduledSync(generation: number, reason: 'startup' | 'periodi
   if (!currentConfig.calendar.icsUrl) return
 
   try {
-    const result = await syncCalendar(currentConfig.calendar.icsUrl)
+    const result = await syncCalendar(currentConfig.calendar.icsUrl, {
+      isStillWanted: () => generation === autoSyncGeneration
+    })
     // The schedule may have been stopped while this was waiting on boot tasks.
     if (generation !== autoSyncGeneration) return
     if (!result.success) {

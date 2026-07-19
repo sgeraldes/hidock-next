@@ -149,7 +149,14 @@ export interface CalendarSettings {
 }
 
 // B-CAL-004: Error category for calendar sync failures
-export type CalendarErrorCategory = 'network' | 'parse' | 'database' | 'validation' | 'unknown'
+export type CalendarErrorCategory =
+  | 'network'
+  | 'parse'
+  | 'database'
+  | 'validation'
+  | 'auth'
+  | 'cancelled'
+  | 'unknown'
 
 export interface CalendarSyncResult {
   success: boolean
