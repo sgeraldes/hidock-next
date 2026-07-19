@@ -69,9 +69,9 @@ function projectRowsByNormalizedName(name: string): Array<{ id: string; name: st
   )
 }
 
-/** One transcript analysis mentioning `name`, attributed to meeting `meetingId`. */
-function mention(name: string, meetingId: string): boolean {
-  return applyTranscriptEntities({ meetingId, project: { name } }).projectLinked
+/** One transcript analysis mentioning `name`, attributed to meeting `meetingId` and optionally the `recordingId` it came from (as production always supplies). The F18 visibility model gates a discovered project on its source recording's eligibility, so wiring an eligible recording keeps the created project resolvable by a later mention. */
+function mention(name: string, meetingId: string, recordingId?: string): boolean {
+  return applyTranscriptEntities({ meetingId, recordingId, project: { name } }).projectLinked
 }
 
 describe('F12: project discovery gate (v43)', () => {
@@ -248,10 +248,10 @@ describe('F12: project discovery gate (v43)', () => {
   describe('recurring + confident → created', () => {
     it('creates the project on the second distinct source, stamped origin=discovered', () => {
       const name = 'MeridianFalcon'
-      expect(mention(name, 'm1')).toBe(false)
+      expect(mention(name, 'm1', 'r1')).toBe(false)
       expect(projectRowsByName(name)).toHaveLength(0)
 
-      expect(mention(name, 'm2')).toBe(true)
+      expect(mention(name, 'm2', 'r2')).toBe(true)
 
       const rows = projectRowsByName(name)
       expect(rows).toHaveLength(1)
@@ -275,7 +275,7 @@ describe('F12: project discovery gate (v43)', () => {
     })
 
     it('a later mention links to the existing project instead of re-discovering it', () => {
-      expect(mention('MeridianFalcon', 'm3')).toBe(true)
+      expect(mention('MeridianFalcon', 'm3', 'r1')).toBe(true)
       expect(projectRowsByName('MeridianFalcon')).toHaveLength(1)
       expect(countProjectDiscoverySources('MeridianFalcon')).toBe(0)
     })

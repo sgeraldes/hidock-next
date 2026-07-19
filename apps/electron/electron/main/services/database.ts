@@ -414,9 +414,9 @@ CREATE TABLE IF NOT EXISTS synced_files (
 -- calendar/user-CLASSIFIED contact's NULL-provenance role is NOT proof of structural
 -- authorship either. role_origin carries POSITIVE authorship evidence and disambiguates
 -- a NULL-provenance role: 'manual' (owner edit) | 'calendar' (calendar/connector create)
--- | 'user' (manual create) ⇒ structural/owner-authored (SHOWN);
--- 'transcript' ⇒ transcript-derived (also stamps role_source_recording_id, gated by it);
--- 'legacy' ⇒ pre-v48 unattributable NULL-provenance role (BLANKED on non-owner, fail-closed);
+-- | 'user' (manual create) ⇒ structural/owner-authored (SHOWN),
+-- 'transcript' ⇒ transcript-derived (also stamps role_source_recording_id, gated by it),
+-- 'legacy' ⇒ pre-v48 unattributable NULL-provenance role (BLANKED on non-owner, fail-closed),
 -- NULL ⇒ marker-less row (only directly-inserted/test rows, since every production write
 -- path stamps role_origin) ⇒ AMBIGUOUS ⇒ BLANKED, fail-closed (no entity-source fallback:
 -- calendar/user CLASSIFICATION ≠ calendar/manual AUTHORSHIP, ADV50-1).

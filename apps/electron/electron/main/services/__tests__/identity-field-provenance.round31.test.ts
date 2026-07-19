@@ -260,10 +260,16 @@ describe('ADV29-1 — resolver bars suppressed entities as link targets', () => 
     expect(fresh[0].source_recording_id).toBe('r-new')
     expect(filterVisibleEntityIds('contact', [fresh[0].id]).visible.has(fresh[0].id)).toBe(true)
 
-    // Same for the project: the suppressed p-old is not relinked to m-new.
+    // Same for the project: the suppressed p-old is not relinked to m-new. Unlike
+    // the contact path (created immediately above), projects flow through the F12
+    // discovery gate (merged from beta, schema v43): a single transcript mention of
+    // a name that resolves to nothing VISIBLE is DEFERRED as a discovery observation,
+    // not minted on the spot — so no fresh project row appears from this one mention.
+    // The security invariant is unchanged and is the point of this test: the
+    // suppressed p-old is NEVER reanimated (never linked to m-new).
     expect(queryOne('SELECT 1 FROM meeting_projects WHERE meeting_id = ? AND project_id = ?', ['m-new', 'p-old'])).toBeUndefined()
     const freshP = queryAll<{ id: string }>("SELECT id FROM projects WHERE LOWER(name) = 'oldproject' AND id <> 'p-old'")
-    expect(freshP).toHaveLength(1)
+    expect(freshP).toHaveLength(0)
   })
 
   it('fail-closed: when eligibility cannot be determined, resolver creates new rather than linking', () => {
