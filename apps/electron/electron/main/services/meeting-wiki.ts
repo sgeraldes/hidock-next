@@ -17,6 +17,7 @@ import {
   readdirSync,
   readFileSync,
   unlinkSync,
+  renameSync,
   statSync,
   openSync,
   readSync,
@@ -53,6 +54,12 @@ const BOM_CODE_POINT = 0xfeff
  * an error rather than assumed unowned.
  */
 const MAX_FRONTMATTER_BYTES = 256 * 1024
+/**
+ * Bytes read PAST the terminator when inspecting whether the block really ended
+ * there. Budgeted separately from the locating cap above, so a terminator near
+ * that cap still gets a full inspection window.
+ */
+const AFTER_TERMINATOR_SCAN_BYTES = 8192
 
 /** Frontmatter terminator: a line containing only `---`. */
 const FRONTMATTER_END_RE = /\r?\n---[ \t]*(?:\r?\n|$)/
@@ -117,9 +124,32 @@ function hasUnterminatedQuotedScalar(block: string): boolean {
   return false
 }
 
-/** Does this text declare a recording_id at the start of a line? */
-function declaresRecordingId(text: string): boolean {
-  return /^recording_id:[ \t]*\S/m.test(text)
+/**
+ * Does the text after an early terminator look like the CONTINUATION of a
+ * generated frontmatter block, rather than ordinary page body?
+ *
+ * Matching any `recording_id:` line here was too loose: a foreign markdown file
+ * or a code sample that merely mentions the key would be classified as
+ * corruption, and every privacy purge would then warn that content might remain.
+ * A report that cries wolf is a report the user stops reading.
+ *
+ * So require the STRUCTURE the writer would actually have produced if a value
+ * split the block: a top-level `recording_id:` declaration, then a `---`
+ * terminator, with nothing in between but frontmatter-shaped lines (`key: value`,
+ * indented list items, blanks). Body prose fails on its very first heading or
+ * sentence.
+ */
+function looksLikeFrontmatterContinuation(text: string): boolean {
+  let sawRecordingId = false
+  for (const line of text.split(/\r?\n/)) {
+    if (/^---[ \t]*$/.test(line)) return sawRecordingId // reached the real terminator
+    if (line.trim() === '') continue
+    if (/^\s/.test(line)) continue // nested list item / block continuation
+    const match = line.match(TOP_LEVEL_KEY_RE)
+    if (!match) return false // prose — this is a page body, not a frontmatter tail
+    if (match[1] === 'recording_id' && match[2].trim().length > 0) sawRecordingId = true
+  }
+  return false // window ran out before a terminator — not enough evidence
 }
 
 /** Decode a YAML double-quoted scalar written by `yamlEscape`. */
@@ -168,10 +198,18 @@ function readPageOwner(path: string): PageOwner {
     let text = ''
     let consumed = 0
     let atEof = false
+    /**
+     * Two-phase budget. The 256 KiB cap bounds the search for the terminator;
+     * once it is found the cap is extended so the post-block inspection window
+     * is genuinely available. Sharing one budget meant a terminator sitting near
+     * the cap left no room to look past it, and a page that should have been
+     * classified as corrupt read as `unowned` instead.
+     */
+    let readCap = MAX_FRONTMATTER_BYTES
 
-    /** Pull the next chunk in; returns false at EOF or at the byte cap. */
+    /** Pull the next chunk in; returns false at EOF or at the current cap. */
     const readMore = (): boolean => {
-      if (atEof || consumed >= MAX_FRONTMATTER_BYTES) return false
+      if (atEof || consumed >= readCap) return false
       const bytes = readSync(fd as number, buf, 0, FRONTMATTER_CHUNK_BYTES, consumed)
       if (bytes === 0) {
         text += decoder.end()
@@ -187,11 +225,17 @@ function readPageOwner(path: string): PageOwner {
     }
 
     let end = -1
+    /** First index AFTER the terminator line — where the page body starts. */
+    let bodyStart = -1
     while (readMore()) {
       // Not one of our pages at all (no opening delimiter) — leave it alone.
       if (text.length >= 4 && !/^---\r?\n/.test(text)) return { kind: 'unowned' }
-      end = text.search(FRONTMATTER_END_RE)
-      if (end !== -1) break
+      const match = FRONTMATTER_END_RE.exec(text)
+      if (match) {
+        end = match.index
+        bodyStart = match.index + match[0].length
+        break
+      }
     }
 
     if (text.length < 4 || !/^---\r?\n/.test(text)) return { kind: 'unowned' }
@@ -227,16 +271,22 @@ function readPageOwner(path: string): PageOwner {
       }
     }
 
-    // A closed block with a later ownership declaration means the terminator we
-    // honored was not the real one (hand-edited or corrupted page).
-    const AFTER_TERMINATOR_SCAN = 8192
-    while (text.length < end + AFTER_TERMINATOR_SCAN && readMore()) {
-      /* pull a little more of the file to inspect what follows the block */
+    // A closed block whose tail continues as frontmatter means the terminator we
+    // honored was not the real one (hand-edited or corrupted page). Phase two:
+    // extend the budget so this window is available even when the terminator sat
+    // right at the locating cap.
+    readCap = consumed + AFTER_TERMINATOR_SCAN_BYTES
+    while (text.length < bodyStart + AFTER_TERMINATOR_SCAN_BYTES && readMore()) {
+      /* pull the inspection window in */
     }
-    if (declaresRecordingId(text.slice(end + 1, end + 1 + AFTER_TERMINATOR_SCAN))) {
+    // Sliced from AFTER the terminator line, not from the terminator itself —
+    // otherwise the structural check sees `---` as its first line and bails.
+    if (
+      looksLikeFrontmatterContinuation(text.slice(bodyStart, bodyStart + AFTER_TERMINATOR_SCAN_BYTES))
+    ) {
       return {
         kind: 'error',
-        reason: 'a recording_id is declared after the frontmatter block ended'
+        reason: 'the frontmatter block continues past the terminator it appeared to end at'
       }
     }
 
@@ -642,7 +692,7 @@ function yieldToEventLoop(): Promise<void> {
 }
 
 /**
- * Where the backfill resumes, remembered ACROSS restarts.
+ * Where the backfill resumes.
  *
  * ## Why a cursor and not a failure list
  *
@@ -654,39 +704,96 @@ function yieldToEventLoop(): Promise<void> {
  *
  * A position is bounded by construction. `missing` is sorted by recording id —
  * a total order that is stable across passes — and each pass starts at the first
- * id strictly after `resumeAfterId`, wrapping at the end. Every pass attempts at
+ * id strictly after the resume point, wrapping at the end. Every pass attempts at
  * least one recording and records the LAST id it attempted, including when it
  * stops at the failure limit, so the resume point strictly advances past every
- * group it just tried. Any recording that can be written is therefore reached
- * within one wrap, no matter how many failures exist or where they sit.
+ * group it just tried.
  *
- * Derived state: losing the file only costs one extra rotation.
+ * ## What that guarantees, exactly
+ *
+ * - **Within one process**: progress is monotonic unconditionally. The cursor is
+ *   held in memory, so it advances even when nothing can be written to disk, and
+ *   every writable recording is reached within one wrap.
+ * - **Across restarts**: monotonic only while the state file is writable. If
+ *   persistence is failing, a restart begins from the start of the sorted order
+ *   again — so a prefix that exhausts `maxFailures` would be retried each time.
+ *   That degraded state is reported rather than swallowed; it is a real gap, not
+ *   a guarantee.
  */
 const BACKFILL_STATE_FILE = 'meeting-wiki-backfill.json'
+
+/**
+ * Latest cursor for THIS process. Survives a failed write, which is the whole
+ * point: without it a persistence failure silently reset progress to the start
+ * on every pass and reinstated the starvation the cursor exists to prevent.
+ */
+let sessionResumeAfterId: string | null = null
+/** Set once persistence starts failing, so the warning is logged once. */
+let persistenceDegraded = false
 
 function backfillStatePath(): string {
   return join(getCachePath(), BACKFILL_STATE_FILE)
 }
 
 function loadResumeAfterId(): string | null {
+  // In-memory first: it is at least as advanced as anything on disk, and it is
+  // the only copy that exists when persistence is unavailable.
+  if (sessionResumeAfterId !== null) return sessionResumeAfterId
   try {
     const parsed = JSON.parse(readFileSync(backfillStatePath(), 'utf-8')) as {
       resumeAfterId?: unknown
     }
-    return typeof parsed?.resumeAfterId === 'string' ? parsed.resumeAfterId : null
+    if (typeof parsed?.resumeAfterId === 'string') {
+      sessionResumeAfterId = parsed.resumeAfterId
+      return sessionResumeAfterId
+    }
+    return null
   } catch {
     return null // absent or unreadable — start from the top
   }
 }
 
 function saveResumeAfterId(resumeAfterId: string): void {
+  // Record in memory FIRST: this must hold even if every disk operation below
+  // fails, so a pass in this process always advances past what it attempted.
+  sessionResumeAfterId = resumeAfterId
+
+  const target = backfillStatePath()
+  const temp = `${target}.tmp`
   try {
     const dir = getCachePath()
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-    writeFileSync(backfillStatePath(), JSON.stringify({ resumeAfterId }), 'utf-8')
+    // Write-then-rename: a crash mid-write must not leave a truncated state file
+    // that parses as "no cursor" and silently restarts the rotation.
+    writeFileSync(temp, JSON.stringify({ resumeAfterId }), 'utf-8')
+    renameSync(temp, target)
+    if (persistenceDegraded) {
+      persistenceDegraded = false
+      console.log('[MeetingWiki] Backfill resume point is persistable again.')
+    }
   } catch (e) {
-    console.warn('[MeetingWiki] Could not persist the backfill resume point:', e)
+    try {
+      if (existsSync(temp)) unlinkSync(temp)
+    } catch {
+      /* best effort */
+    }
+    if (!persistenceDegraded) {
+      persistenceDegraded = true
+      console.error(
+        `[MeetingWiki] DEGRADED: cannot persist the backfill resume point to ${target}. ` +
+          'Passes in this session still advance, but a restart will begin from the start ' +
+          'of the list again — recordings behind a persistently failing block may not be ' +
+          'reached until the cache path is writable:',
+        e
+      )
+    }
   }
+}
+
+/** Test-only: forget the in-process cursor and the degraded flag. */
+export function _resetBackfillCursorForTests(): void {
+  sessionResumeAfterId = null
+  persistenceDegraded = false
 }
 
 /**

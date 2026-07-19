@@ -54,10 +54,19 @@ vi.mock('fs', async (importOriginal) => {
   }
 })
 
+/** Lets a test point the backfill's state file at an unwritable location. */
+let cacheDirOverride: string | null = null
+
+/** Clears the in-process resume cursor, which otherwise leaks between tests. */
+const resetBackfillCursor = async (): Promise<void> => {
+  const { _resetBackfillCursorForTests } = await import('../meeting-wiki')
+  _resetBackfillCursorForTests()
+}
+
 vi.mock('../file-storage', () => ({
   getTranscriptsPath: () => tmpRoot,
-  // Per-test tmpRoot, so the backfill's cross-pass retry list is isolated.
-  getCachePath: () => join(tmpRoot, 'cache')
+  // Per-test tmpRoot, so the backfill's resume cursor is isolated.
+  getCachePath: () => cacheDirOverride ?? join(tmpRoot, 'cache')
 }))
 
 vi.mock('../database', () => ({
@@ -68,8 +77,12 @@ vi.mock('../database', () => ({
 }))
 
 describe('exportMeetingWiki — stale page cleanup (ISSUE-8)', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'hidock-wiki-'))
+    cacheDirOverride = null
+    // The resume cursor is also held in memory, so it must be cleared between
+    // tests or one test's rotation leaks into the next.
+    await resetBackfillCursor()
     currentRow = null
     backfillRows = []
     rowById = null
@@ -174,8 +187,12 @@ describe('exportMeetingWiki — stale page cleanup (ISSUE-8)', () => {
  * it is not guaranteed to sit in any fixed prefix.
  */
 describe('wiki page ownership — safe for deletion (adversarial review #1)', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'hidock-wiki-own-'))
+    cacheDirOverride = null
+    // The resume cursor is also held in memory, so it must be cleared between
+    // tests or one test's rotation leaks into the next.
+    await resetBackfillCursor()
     currentRow = null
     backfillRows = []
     rowById = null
@@ -425,6 +442,98 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
     })
   })
 
+  /**
+   * Re-review #2: classifying ANY `recording_id:` line after the block as
+   * corruption meant ordinary body prose landed in the unreadable list, and
+   * every privacy purge then warned that content might remain. A report that
+   * cries wolf is a report the user stops reading.
+   */
+  it('does not flag a foreign page whose BODY merely mentions recording_id', async () => {
+    const { removeMeetingWiki } = await import('../meeting-wiki')
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    mkdirSync(wikiDir(), { recursive: true })
+    writeFileSync(
+      join(wikiDir(), 'mis-notas.md'),
+      [
+        '---',
+        'title: "Mis notas"',
+        '---',
+        '',
+        '# Mis notas',
+        '',
+        'El formato de la pagina es asi:',
+        '',
+        'recording_id: rec-ejemplo',
+        '',
+        'y despues sigue el texto.',
+        ''
+      ].join('\n'),
+      'utf-8'
+    )
+
+    // A page with no declaration of its own is simply not ours: never deleted...
+    expect(removeMeetingWiki('rec-ejemplo')).toBe(0)
+    expect(listWiki()).toEqual(['mis-notas.md'])
+    // ...and NOT reported as unverifiable, which would make every purge noisy.
+    expect(error).not.toHaveBeenCalled()
+  })
+
+  /**
+   * Re-review #3: the post-block inspection window shared the 256 KiB budget
+   * used to LOCATE the terminator, so a terminator near that cap left no room to
+   * look past it and a malformed page read as `unowned` — the very outcome the
+   * classification rule exists to prevent.
+   */
+  describe('terminator sitting at the byte cap', () => {
+    const MAX_FRONTMATTER_BYTES = 256 * 1024
+
+    /**
+     * A page whose frontmatter block ends ~8 bytes before the locating cap, with
+     * a frontmatter-shaped tail placing `recording_id:` at `offset` bytes past it.
+     */
+    const pageWithLateTerminator = (offset: number): string => {
+      const head = '---\nnote: "'
+      const close = '"\n---\n'
+      const padding = 'x'.repeat(MAX_FRONTMATTER_BYTES - head.length - close.length - 8)
+      // Whole filler LINES only — slicing mid-line would splice the filler into
+      // the recording_id line and change what is being tested.
+      let tail = ''
+      for (let i = 0; tail.length < offset; i++) tail += `pad${i}: filler\n`
+      return head + padding + close + tail + 'recording_id: rec-late\n---\n'
+    }
+
+    it.each([0, 2000, 7000])(
+      'still detects a continuation %i bytes past the cap-adjacent terminator',
+      async (offset) => {
+        const { removeMeetingWiki } = await import('../meeting-wiki')
+        const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+        mkdirSync(wikiDir(), { recursive: true })
+        writeFileSync(join(wikiDir(), 'late.md'), pageWithLateTerminator(offset), 'utf-8')
+
+        // Unverifiable, not unowned — and the purge says so.
+        expect(removeMeetingWiki('rec-late')).toBe(0)
+        expect(listWiki()).toEqual(['late.md'])
+        expect(error.mock.calls.map((c) => String(c[0])).join(' ')).toContain('could not verify')
+      }
+    )
+
+    it('reads unowned beyond the documented 8 KiB inspection window', async () => {
+      const { removeMeetingWiki } = await import('../meeting-wiki')
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+      mkdirSync(wikiDir(), { recursive: true })
+      writeFileSync(join(wikiDir(), 'far.md'), pageWithLateTerminator(9000), 'utf-8')
+
+      // Past the window the page is left alone and NOT flagged — the window is a
+      // bounded, documented limit rather than an unbounded scan of every page.
+      expect(removeMeetingWiki('rec-late')).toBe(0)
+      expect(listWiki()).toEqual(['far.md'])
+      expect(error).not.toHaveBeenCalled()
+    })
+  })
+
   it('re-checks ownership at delete time — a page rewritten mid-pass is NOT destroyed', async () => {
     const { backfillMeetingWiki } = await import('../meeting-wiki')
 
@@ -480,8 +589,12 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
 describe('backfillMeetingWiki — bounded, yielding, resumable (F15)', () => {
   const N = 60
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'hidock-wiki-bf-'))
+    cacheDirOverride = null
+    // The resume cursor is also held in memory, so it must be cleared between
+    // tests or one test's rotation leaks into the next.
+    await resetBackfillCursor()
     currentRow = null
     backfillRows = []
     // A realistic corpus: each page carries a sizeable transcript body, which is
@@ -763,6 +876,58 @@ describe('backfillMeetingWiki — bounded, yielding, resumable (F15)', () => {
     // the multi-pass one and did not converge by accident.
     expect(passes).toBeGreaterThanOrEqual(11)
     expect(passes).toBeLessThanOrEqual(13)
+  })
+
+  /**
+   * Re-review #1: progress used to live ONLY in the state file, and write
+   * failures were swallowed. With an unwritable cache path every pass reloaded
+   * "no cursor", retried the same sorted prefix, hit maxFailures in the same
+   * place, and never reached the healthy rows — the starvation returning
+   * whenever the cache path is unwritable while the wiki destination is not.
+   */
+  it('advances within the session even when the resume point cannot be persisted', async () => {
+    const { backfillMeetingWiki } = await import('../meeting-wiki')
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    // Point the state file at a path under a FILE, so mkdir/write both fail.
+    const blocker = join(tmpRoot, 'blocker')
+    writeFileSync(blocker, 'not a directory', 'utf-8')
+    cacheDirOverride = join(blocker, 'cache')
+
+    const base = rowById!
+    const doomed = new Set<string>()
+    for (let i = 0; i < 50; i++) doomed.add(`rec-${String(i).padStart(3, '0')}`)
+    rowById = (id) => {
+      if (doomed.has(id)) throw new Error('EACCES: permission denied')
+      return base(id)
+    }
+
+    const first = await backfillMeetingWiki({ maxFailures: 50 })
+    expect(first.failed).toBe(50)
+    expect(listWiki()).toHaveLength(0)
+
+    // Second pass in the SAME process: the in-memory cursor carries the position
+    // even though nothing reached disk, so the healthy tail is reached.
+    const second = await backfillMeetingWiki({ maxFailures: 50 })
+    expect(second.written).toBe(N - 50)
+    expect(listWiki()).toHaveLength(N - 50)
+
+    // And the inability to persist is reported, not swallowed.
+    const logged = error.mock.calls.map((c) => String(c[0])).join(' ')
+    expect(logged).toContain('DEGRADED')
+    expect(logged).toContain('restart will begin from the start')
+  })
+
+  it('persists the resume point atomically, leaving no temp file behind', async () => {
+    const { backfillMeetingWiki } = await import('../meeting-wiki')
+    await backfillMeetingWiki()
+
+    const cacheDir = join(tmpRoot, 'cache')
+    const entries = readdirSync(cacheDir)
+    expect(entries).toContain('meeting-wiki-backfill.json')
+    // A crash mid-write must not leave a truncated file that parses as "no
+    // cursor"; the write goes to a temp path and is renamed into place.
+    expect(entries.filter((f) => f.endsWith('.tmp'))).toEqual([])
   })
 
   it('resumes past the failures it already attempted rather than retrying them first', async () => {
