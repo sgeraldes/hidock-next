@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
 
 import requests
+
 from config_and_logger import load_config, logger, save_config
 
 try:
@@ -263,21 +264,22 @@ class HiDockAuthService:
     def _save_user_info(self, user_info: Dict):
         """Save user information to config."""
         try:
+            updates: Dict[str, str] = {}
             if user_info.get("user_id"):
-                self.config["hidock_user_id"] = user_info["user_id"]
+                updates["hidock_user_id"] = user_info["user_id"]
             if user_info.get("email"):
-                self.config["hidock_user_email"] = user_info["email"]
+                updates["hidock_user_email"] = user_info["email"]
             if user_info.get("username"):
-                self.config["hidock_username"] = user_info["username"]
+                updates["hidock_username"] = user_info["username"]
             if user_info.get("refresh_token"):
-                encrypted_refresh = self._encrypt_token(user_info["refresh_token"])
-                self.config["hidock_refresh_token_encrypted"] = encrypted_refresh
+                updates["hidock_refresh_token_encrypted"] = self._encrypt_token(user_info["refresh_token"])
             if user_info.get("expires_in"):
                 # Calculate expiry timestamp
                 expiry_time = datetime.now() + timedelta(seconds=user_info["expires_in"])
-                self.config["hidock_token_expiry"] = expiry_time.isoformat()
+                updates["hidock_token_expiry"] = expiry_time.isoformat()
 
-            save_config()
+            self.config.update(updates)
+            save_config(updates)
             logger.info("HiDockAuth", "save_user_info", "User info saved")
         except Exception as e:
             logger.error("HiDockAuth", "save_user_info", f"Error saving user info: {e}")
@@ -285,11 +287,13 @@ class HiDockAuthService:
     def _save_token(self, access_token: str, username: str):
         """Save access token to config (encrypted)."""
         try:
-            encrypted_token = self._encrypt_token(access_token)
-            self.config["hidock_access_token_encrypted"] = encrypted_token
-            self.config["hidock_last_login_username"] = username
-            self.config["hidock_last_login_time"] = datetime.now().isoformat()
-            save_config()
+            updates = {
+                "hidock_access_token_encrypted": self._encrypt_token(access_token),
+                "hidock_last_login_username": username,
+                "hidock_last_login_time": datetime.now().isoformat(),
+            }
+            self.config.update(updates)
+            save_config(updates)
             logger.info("HiDockAuth", "save_token", "Token saved securely")
         except Exception as e:
             logger.error("HiDockAuth", "save_token", f"Error saving token: {e}")
@@ -395,10 +399,11 @@ class HiDockAuthService:
             ]
 
             for key in keys_to_remove:
-                if key in self.config:
-                    del self.config[key]
+                self.config.pop(key, None)
 
-            save_config()
+            # save_config() merges with the on-disk config, so simply dropping the keys from
+            # self.config would leave the stored credentials on disk. Blank them explicitly.
+            save_config({key: "" for key in keys_to_remove})
             logger.info("HiDockAuth", "logout", "User logged out successfully")
 
         except Exception as e:
