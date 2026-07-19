@@ -45,9 +45,9 @@ afterEach(() => {
 })
 
 describe('v47 schema', () => {
-  it('boot schema version is 48', () => {
+  it('boot schema version is 49', () => {
     const row = queryOne<{ v: number }>('SELECT MAX(version) AS v FROM schema_version')!
-    expect(row.v).toBe(48)
+    expect(row.v).toBe(49)
   })
 
   it('a freshly created graph_nodes table has origin + source_recording_id (GRAPH_SCHEMA)', () => {

@@ -1,12 +1,16 @@
 /**
- * v42 re-key failure injection: a failed tombstone rewrite must NOT record v42.
+ * v49 re-key failure injection: a failed tombstone rewrite must NOT record v49.
+ *
+ * (The re-key shipped as migration 42 originally; the merge into
+ * beta/meeting-intelligence renumbered it to 49 because HEAD's F16/F18 chain
+ * already occupies 42-48. See the [Migration v49] renumber note in database.ts.)
  *
  * Adversarial re-review (HIGH): the transactional re-key rolled back on
  * failure but the catch swallowed the exception, so schema_version still
- * advanced to 42 and the rewrite never retried — a transient failure stranded
- * v41 keys permanently. Migration 42 now rethrows after logging; the engine
+ * advanced to 49 and the rewrite never retried — a transient failure stranded
+ * v41 keys permanently. Migration 49 now rethrows after logging; the engine
  * records a version only AFTER its migration returns, so a failed rewrite
- * leaves the DB at v41 and the next boot retries.
+ * leaves the DB at v48 and the next boot retries.
  *
  * Injection: a BEFORE DELETE trigger on project_discovery_rejections that
  * RAISE(ABORT)s — it makes the re-key's rewrite DELETE fail exactly like a
@@ -36,7 +40,7 @@ function maxVersion(): number {
   return queryOne<{ v: number }>('SELECT MAX(version) AS v FROM schema_version')?.v ?? 0
 }
 
-describe('migration v42: failed tombstone re-key does not advance schema_version', () => {
+describe('migration v49: failed tombstone re-key does not advance schema_version', () => {
   beforeAll(async () => {
     await initializeDatabase()
   })
@@ -59,28 +63,30 @@ describe('migration v42: failed tombstone re-key does not advance schema_version
     }
   })
 
-  it('rolls back, leaves the DB at v41, and a reopen retries the migration successfully', async () => {
-    expect(maxVersion()).toBe(42)
+  it('rolls back, leaves the DB at v48, and a reopen retries the migration successfully', async () => {
+    expect(maxVersion()).toBe(49)
 
     // Seed a stranded v41-style tombstone (old non-NFKC key) so the re-key has
-    // a rewrite to perform, roll the version back to 41, and plant the poison.
+    // a rewrite to perform, roll only the re-key version (49) back so it re-runs
+    // on reopen, and plant the poison. Migrations 42-48 don't touch this table,
+    // so leaving them recorded keeps the reopen focused on the re-key alone.
     run(
       `INSERT INTO project_discovery_rejections (name_norm, original_name, source_meeting_id, rejected_at) VALUES (?, ?, NULL, ?)`,
       [v41Norm(DECOMPOSED), DECOMPOSED, '2026-01-01T00:00:00Z']
     )
-    run('DELETE FROM schema_version WHERE version >= 42')
+    run('DELETE FROM schema_version WHERE version >= 49')
     run(
       "CREATE TRIGGER poison_rekey BEFORE DELETE ON project_discovery_rejections BEGIN SELECT RAISE(ABORT, 'injected re-key failure'); END"
     )
     closeDatabase()
 
-    // Reopen: migration 42's rewrite DELETE hits the trigger and must FAIL the
+    // Reopen: migration 49's rewrite DELETE hits the trigger and must FAIL the
     // whole initialization — not be swallowed.
     await expect(initializeDatabase()).rejects.toThrow(/injected re-key failure/)
 
-    // The transaction rolled back and v42 was never recorded: still at 41,
+    // The transaction rolled back and v49 was never recorded: still at 48,
     // and the tombstone still carries its OLD (stranded) key, untouched.
-    expect(maxVersion()).toBe(41)
+    expect(maxVersion()).toBe(48)
     const row = queryOne<{ name_norm: string }>(
       'SELECT name_norm FROM project_discovery_rejections WHERE original_name = ?',
       [DECOMPOSED]
@@ -92,7 +98,7 @@ describe('migration v42: failed tombstone re-key does not advance schema_version
     closeDatabase()
     await initializeDatabase()
 
-    expect(maxVersion()).toBe(42)
+    expect(maxVersion()).toBe(49)
     const rekeyed = queryOne<{ name_norm: string }>(
       'SELECT name_norm FROM project_discovery_rejections WHERE original_name = ?',
       [DECOMPOSED]

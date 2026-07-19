@@ -19,7 +19,7 @@ vi.mock('electron', () => ({
   ipcMain: { handle: vi.fn() }
 }))
 
-let mockConfig: any = {
+const mockConfig: any = {
   transcription: {
     provider: 'gemini',
     geminiApiKey: 'test-api-key', // pragma: allowlist secret

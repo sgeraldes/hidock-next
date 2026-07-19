@@ -83,12 +83,13 @@ afterEach(() => {
 })
 
 describe('v44 schema', () => {
-  it('boot schema version is 48', () => {
+  it('boot schema version is 49', () => {
     // F18/round-28 bumped 44 -> 45 (entity provenance); round-31 bumped 45 -> 46
     // (per-field role provenance, ADV29-2); round-37 bumped 46 -> 47 (node-level
-    // graph provenance, ADV35-1).
+    // graph provenance, ADV35-1); the projects.origin re-key landed at 49
+    // (current SCHEMA_VERSION).
     const row = queryOne<{ v: number }>('SELECT MAX(version) AS v FROM schema_version')!
-    expect(row.v).toBe(48)
+    expect(row.v).toBe(49)
   })
 
   it('adds the per-row provenance columns (idempotent — table already has them)', () => {

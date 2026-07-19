@@ -6757,7 +6757,7 @@ export function getPersonContext(idOrName: string, limit = 4): PersonContext {
       WHERE p.type = 'person' AND p.norm_key = ?`,
     [normKey]
   )
-  let topics = suppressExcludedTopicLabels(topicRows, cap)
+  const topics = suppressExcludedTopicLabels(topicRows, cap)
 
   if (topics.length === 0 && contactId) {
     // ADV26-2 (round-27) — this relational fallback returns project labels via

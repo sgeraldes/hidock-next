@@ -13,9 +13,9 @@
  * collided key.
  *
  * This test simulates the REAL upgrade: initialize, seed v41-style rows (keys
- * computed with the old non-NFKC normalization), roll schema_version back to
- * 41, close, and re-open — the engine then runs migration 42 against the same
- * on-disk database, exactly as a user's app would on update.
+ * computed with the old non-NFKC normalization), roll schema_version back
+ * below 49, close, and re-open — the engine then runs migration 49 against the
+ * same on-disk database, exactly as a user's app would on update.
  *
  * @vitest-environment node
  */
@@ -105,7 +105,7 @@ describe('migration v49 re-keys pre-NFKC tombstones to NFKC', () => {
 
   it('re-keys every tombstone from original_name and collapses NFKC collisions to the newest row', () => {
     const rows = tombstones()
-    // 3 v41 rows → 2 v42 rows: the composed/decomposed twins collide on one key.
+    // 3 v41 rows → 2 post-migration rows: the composed/decomposed twins collide on one key.
     expect(rows).toHaveLength(2)
 
     const cafe = rows.find((r) => r.name_norm === COMPOSED.normalize('NFKC').toLowerCase())

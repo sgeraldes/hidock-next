@@ -429,7 +429,7 @@ export function resolveProject(name: string, ctx?: ResolveContext): ResolveResul
   // project's own exact name beats a competing alias holding the same NFKC
   // key — the same precedence the SQL exact tier already gives ASCII names.
   for (const p of candidates) {
-    if (blocked(p.id)) continue
+    if (blocked(p.id) || barred(p.id)) continue
     if (normalizeName(p.name) === norm) {
       return { id: p.id, confidence: 0.95, method: 'exact-name' }
     }

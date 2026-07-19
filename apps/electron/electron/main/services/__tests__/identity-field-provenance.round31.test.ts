@@ -110,13 +110,15 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('v46/v48 migration — contacts.role_source_recording_id + role_origin', () => {
-  it('columns exist after init and schema version is 48', () => {
+  it('columns exist after init and schema version is 49', () => {
     const cols = getTableColumns(getDatabase(), 'contacts')
     expect(cols).toContain('role_source_recording_id')
-    // round-51 bumped 47 -> 48 (role provenance-trust marker, ADV49-2).
+    // round-51 bumped 47 -> 48 (role provenance-trust marker, ADV49-2); the
+    // projects.origin re-key landed at 49 (current SCHEMA_VERSION), so a full
+    // boot reports 49 here.
     expect(cols).toContain('role_origin')
     const v = queryOne<{ v: number }>('SELECT MAX(version) AS v FROM schema_version')
-    expect(v?.v).toBe(48)
+    expect(v?.v).toBe(49)
   })
 
   // ADV49-2 (round-51) FLIP: a role with NULL provenance is NO LONGER implicitly
