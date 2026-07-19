@@ -111,6 +111,50 @@ jobs:
       working-directory: ./apps/web
       run: npm run build
 
+  # Legacy desktop app (Python/CustomTkinter device management)
+  test-desktop:
+    # windows-latest matches the electron job and the platform the desktop app
+    # targets: the Windows-only calendar integration (pywin32/Outlook COM) and the
+    # bundled libusb-1.0.dll are only exercised there. Python 3.12 is the repo's
+    # version; setup-python ships tkinter, which customtkinter needs.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Use Python 3.12
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+        cache: 'pip'
+
+    # pyproject.toml is the canonical dependency list; config/requirements*.txt are
+    # generated mirrors. Editable install also generates _version.py via setuptools_scm.
+    - name: Install dependencies
+      working-directory: ./apps/desktop
+      run: python -m pip install --upgrade pip && pip install -e ".[dev]"
+
+    # Tests marked `device` drive real HiDock hardware over USB and skip themselves
+    # here (is_ci_environment picks up GITHUB_ACTIONS).
+    #
+    # pyproject addopts sets --cov-fail-under=80. Measured coverage on the green suite
+    # is 36.34% (17084 statements, 10875 uncovered) and the 80% target has never been
+    # met -- the suite could not even be collected while it was unmaintained, so the
+    # threshold was never enforced. The gap is concentrated in the CustomTkinter GUI
+    # layer (settings_window 13%, gui_actions_device 11%, gui_treeview 11%,
+    # gui_event_handlers 15%) plus two modules with no tests at all
+    # (jensen_protocol_extensions and jensen_command_discovery, both 0%).
+    #
+    # The 80% target is deliberately left in pyproject as the goal. This job pins a
+    # ratchet just below today's real number so CI blocks a regression without
+    # pretending the target is met. Raise it as coverage improves.
+    - name: Run tests
+      working-directory: ./apps/desktop
+      run: python -m pytest --cov-fail-under=35
+
   # Security Scanning
   security:
     runs-on: ubuntu-latest
@@ -133,7 +177,3 @@ jobs:
       uses: pypa/gh-action-pip-audit@v1.0.8
       with:
         inputs: apps/desktop/
-
-# NOTE: the legacy desktop (Python) test job is intentionally absent — the
-# suite currently fails collection (missing tests/helpers module, tracked).
-# Re-add a test-desktop matrix job once `pytest` passes in apps/desktop.
