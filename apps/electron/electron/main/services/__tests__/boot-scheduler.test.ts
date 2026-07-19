@@ -11,6 +11,7 @@ import {
   pendingBootTaskCount,
   getBootTaskTimings,
   isBootDrainActive,
+  areBootTasksSettled,
   whenBootTasksSettled,
   _resetBootSchedulerForTests
 } from '../boot-scheduler'
@@ -197,6 +198,15 @@ describe('boot-scheduler — settle gate (F15)', () => {
 
     // No timers involved — an already-settled gate must not re-queue a waiter.
     await expect(whenBootTasksSettled(0)).resolves.toBeUndefined()
+  })
+
+  it('is NOT "settled" before the scheduler starts — the window boot syncs arrive in', () => {
+    registerBootTask({ name: 'pending', run: () => {} })
+
+    // Nothing is draining yet, but the work is still ahead. A caller keying off
+    // isBootDrainActive() alone would wrongly conclude it may start now.
+    expect(isBootDrainActive()).toBe(false)
+    expect(areBootTasksSettled()).toBe(false)
   })
 
   it('resolves on timeout so a scheduler that never starts cannot wedge callers', async () => {

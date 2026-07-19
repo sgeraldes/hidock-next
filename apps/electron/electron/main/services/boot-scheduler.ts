@@ -143,6 +143,15 @@ export function isBootDrainActive(): boolean {
 }
 
 /**
+ * True once the boot tasks have finished. Distinct from `!isBootDrainActive()`,
+ * which is also true BEFORE the scheduler starts — the window in which the
+ * boot-time calendar syncs arrive, and precisely when a caller must still wait.
+ */
+export function areBootTasksSettled(): boolean {
+  return settled
+}
+
+/**
  * Resolve once the boot tasks have finished — used to keep other heavy
  * main-process work (notably calendar sync) from overlapping the boot drain.
  *

@@ -5,7 +5,7 @@ import { join } from 'path'
 import { getCachePath } from './file-storage'
 import { upsertMeetingsBatch, Meeting } from './database'
 import { getConfig, updateConfig } from './config'
-import { whenBootTasksSettled } from './boot-scheduler'
+import { whenBootTasksSettled, areBootTasksSettled } from './boot-scheduler'
 
 // Re-export package types and correlate for consumers (e.g. recording-watcher)
 export { correlate }
@@ -753,11 +753,11 @@ async function runSyncCalendar(
 
   // F15: never compete with the boot tasks for the main-process event loop.
   const waitForBootMs = options.waitForBootMs ?? BOOT_WAIT_MS
-  if (waitForBootMs > 0) {
-    const { isBootDrainActive } = await import('./boot-scheduler')
-    if (isBootDrainActive()) {
-      emitActivityLog('info', 'Calendar sync queued', 'Waiting for startup tasks to finish')
-    }
+  if (waitForBootMs > 0 && !areBootTasksSettled()) {
+    // Tell the user why nothing is happening yet. This covers the whole wait,
+    // including the window before the scheduler has started draining — which is
+    // exactly when the boot-time syncs arrive.
+    emitActivityLog('info', 'Calendar sync queued', 'Waiting for startup tasks to finish')
     await whenBootTasksSettled(waitForBootMs)
   }
 
