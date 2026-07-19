@@ -35,16 +35,36 @@ import {
 } from '../database'
 import { applyTranscriptEntities } from '../org-reconciler'
 
-const NAME = 'Phantom Initiative'
+const NAME = 'PhantomOps'
 
 function projectRowsByName(name: string): Array<{ id: string; name: string }> {
   return queryAll<{ id: string; name: string }>('SELECT id, name FROM projects WHERE LOWER(name) = LOWER(?)', [name])
+}
+
+/**
+ * Drive a project into existence through the reconciler's DISCOVERY path.
+ *
+ * F12 (v43) gates that path: a name is only auto-created once it clears the
+ * plausibility floor AND recurs across >= 2 DISTINCT sources. So every case below
+ * that needs a *discovered* project now drives two sightings — the first (from
+ * `m2`) is deferred to the discovery queue, the second (from `m1`) creates and
+ * links it. The provenance/tombstone semantics under test are unchanged; only the
+ * precondition for reaching the create branch is.
+ */
+function discoverProject(name: string): void {
+  const first = applyTranscriptEntities({ meetingId: 'm2', project: { name } })
+  expect(first.projectLinked).toBe(false) // one mention is not evidence of a project
+  expect(projectRowsByName(name)).toHaveLength(0)
+  const second = applyTranscriptEntities({ meetingId: 'm1', project: { name } })
+  expect(second.projectLinked).toBe(true)
 }
 
 describe('project discovery rejection tombstones (v41)', () => {
   beforeAll(async () => {
     await initializeDatabase()
     run(`INSERT INTO meetings (id, subject, start_time, end_time) VALUES ('m1', 'Weekly Sync', '2026-01-02T10:00:00Z', '2026-01-02T11:00:00Z')`)
+    // Second source so the F12 recurrence gate (>= 2 distinct meetings) can be met.
+    run(`INSERT INTO meetings (id, subject, start_time, end_time) VALUES ('m2', 'Kickoff', '2026-01-01T10:00:00Z', '2026-01-01T11:00:00Z')`)
   })
 
   afterAll(() => {
@@ -54,16 +74,17 @@ describe('project discovery rejection tombstones (v41)', () => {
     }
   })
 
-  it('a transcript mention auto-creates and links the project (baseline)', () => {
-    const res = applyTranscriptEntities({ meetingId: 'm1', project: { name: NAME } })
-    expect(res.projectLinked).toBe(true)
+  it('a RECURRING transcript mention auto-creates and links the project (baseline)', () => {
+    discoverProject(NAME)
     const rows = projectRowsByName(NAME)
     expect(rows).toHaveLength(1)
-    const link = queryOne<{ meeting_id: string }>(
+    // Both corroborating meetings are linked (F12 backfill), not just the one
+    // whose sighting crossed the recurrence threshold.
+    const linked = queryAll<{ meeting_id: string }>(
       'SELECT meeting_id FROM meeting_projects WHERE project_id = ?',
       [rows[0].id]
-    )
-    expect(link?.meeting_id).toBe('m1')
+    ).map((r) => r.meeting_id)
+    expect(linked.sort()).toEqual(['m1', 'm2'])
   })
 
   it('dismiss (tombstone + delete) prevents re-analysis from re-creating it', () => {
@@ -84,7 +105,7 @@ describe('project discovery rejection tombstones (v41)', () => {
   })
 
   it('tombstone matching is name-normalized (case/whitespace-insensitive)', () => {
-    const res = applyTranscriptEntities({ meetingId: 'm1', project: { name: '  phantom   INITIATIVE ' } })
+    const res = applyTranscriptEntities({ meetingId: 'm1', project: { name: '  PHANTOMOPS ' } })
     expect(res.projectLinked).toBe(false)
     expect(projectRowsByName(NAME)).toHaveLength(0)
   })
@@ -123,10 +144,9 @@ describe('project discovery rejection tombstones (v41)', () => {
    */
   describe('v42: dismissDiscoveredProject enforces discovery provenance (fail-closed)', () => {
     it('a DISCOVERED project CAN be dismissed: tombstone + delete, and re-analysis does not re-create it', () => {
-      const name = 'Meridian Alpha'
-      // A transcript mention auto-creates it → origin='discovered'.
-      const created = applyTranscriptEntities({ meetingId: 'm1', project: { name } })
-      expect(created.projectLinked).toBe(true)
+      const name = 'MeridianOne'
+      // Recurring transcript mentions auto-create it → origin='discovered'.
+      discoverProject(name)
       const [row] = projectRowsByName(name)
       expect(row).toBeDefined()
       expect(
@@ -202,10 +222,9 @@ describe('project discovery rejection tombstones (v41)', () => {
     })
 
     it('manual re-create after a discovered dismissal clears the tombstone, re-links, and is itself no longer dismissable', () => {
-      const name = 'Verdant Delta'
+      const name = 'VerdantFour'
       // 1) discovered → dismiss → tombstone.
-      const created = applyTranscriptEntities({ meetingId: 'm1', project: { name } })
-      expect(created.projectLinked).toBe(true)
+      discoverProject(name)
       const [row] = projectRowsByName(name)
       dismissDiscoveredProject(row.id)
       expect(isProjectDiscoveryRejected(name)).toBe(true)
@@ -243,8 +262,7 @@ describe('project discovery rejection tombstones (v41)', () => {
   describe('v42: merge provenance dominance (manual data never becomes dismissable)', () => {
     /** Auto-create a discovered project via the reconciler and return its row id. */
     function createDiscovered(name: string): string {
-      const res = applyTranscriptEntities({ meetingId: 'm1', project: { name } })
-      expect(res.projectLinked).toBe(true)
+      discoverProject(name)
       const [row] = projectRowsByName(name)
       expect(row).toBeDefined()
       expect(originOf(row.id)).toBe('discovered')
@@ -265,7 +283,7 @@ describe('project discovery rejection tombstones (v41)', () => {
     }
 
     it('DISCOVERED keeper + MANUAL loser -> merged row becomes manual and cannot be dismissed (the review ordering)', () => {
-      const keeperId = createDiscovered('Zephyr Windmill')
+      const keeperId = createDiscovered('ZephyrMill')
       createProject({ id: 'manual-brook', name: 'Cobalt Brook', description: null, status: 'active' })
 
       mergeProjects(keeperId, 'manual-brook')
@@ -277,7 +295,7 @@ describe('project discovery rejection tombstones (v41)', () => {
 
     it('MANUAL keeper + DISCOVERED loser -> merged row stays manual and cannot be dismissed', () => {
       createProject({ id: 'manual-quill', name: 'Umber Quill', description: null, status: 'active' })
-      const loserId = createDiscovered('Russet Lantern')
+      const loserId = createDiscovered('RussetLantern')
 
       mergeProjects('manual-quill', loserId)
 
@@ -286,21 +304,21 @@ describe('project discovery rejection tombstones (v41)', () => {
     })
 
     it('DISCOVERED + DISCOVERED -> merged row remains discovered and dismissable', () => {
-      const keeperId = createDiscovered('Juniper Kestrel')
-      const loserId = createDiscovered('Basalt Otter')
+      const keeperId = createDiscovered('JuniperKes')
+      const loserId = createDiscovered('BasaltOtter')
 
       mergeProjects(keeperId, loserId)
 
       expect(originOf(keeperId)).toBe('discovered')
       dismissDiscoveredProject(keeperId)
       expect(queryOne('SELECT 1 FROM projects WHERE id = ?', [keeperId])).toBeUndefined()
-      expect(isProjectDiscoveryRejected('Juniper Kestrel')).toBe(true)
+      expect(isProjectDiscoveryRejected('JuniperKes')).toBe(true)
     })
 
     it('LEGACY NULL keeper + DISCOVERED loser -> merged row stays NULL (fail-closed) and cannot be dismissed', () => {
       run("INSERT INTO projects (id, name, status) VALUES ('legacy-fjord', 'Tundra Fjord', 'active')")
       expect(originOf('legacy-fjord')).toBeNull()
-      const loserId = createDiscovered('Sable Mesa')
+      const loserId = createDiscovered('SableMesa')
 
       mergeProjects('legacy-fjord', loserId)
 
@@ -310,7 +328,7 @@ describe('project discovery rejection tombstones (v41)', () => {
     })
 
     it('unmerge restores the keeper\'s own discovered origin (fold is journaled)', () => {
-      const keeperId = createDiscovered('Vermilion Osprey')
+      const keeperId = createDiscovered('VermilionOsprey')
       createProject({ id: 'manual-dune', name: 'Ochre Dune', description: null, status: 'active' })
 
       mergeProjects(keeperId, 'manual-dune')
@@ -334,7 +352,7 @@ describe('project discovery rejection tombstones (v41)', () => {
       // Unmerging M1 FIRST would restore D to 'discovered' while M2's manual
       // data is still folded in — making the hub dismissable. The LIFO guard
       // rejects it; only newest-first unwinding is allowed.
-      const keeperId = createDiscovered('Cinder Falcon')
+      const keeperId = createDiscovered('CinderFalcon')
       createProject({ id: 'manual-anchor', name: 'Pewter Anchor', description: null, status: 'active' })
       createProject({ id: 'manual-kite', name: 'Saffron Kite', description: null, status: 'active' })
 
@@ -365,7 +383,7 @@ describe('project discovery rejection tombstones (v41)', () => {
       // Only with every merge unwound is the keeper dismissable again.
       dismissDiscoveredProject(keeperId)
       expect(queryOne('SELECT 1 FROM projects WHERE id = ?', [keeperId])).toBeUndefined()
-      expect(isProjectDiscoveryRejected('Cinder Falcon')).toBe(true)
+      expect(isProjectDiscoveryRejected('CinderFalcon')).toBe(true)
     })
   })
 })

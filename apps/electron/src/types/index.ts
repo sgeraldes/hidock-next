@@ -149,7 +149,14 @@ export interface CalendarSettings {
 }
 
 // B-CAL-004: Error category for calendar sync failures
-export type CalendarErrorCategory = 'network' | 'parse' | 'database' | 'validation' | 'unknown'
+export type CalendarErrorCategory =
+  | 'network'
+  | 'parse'
+  | 'database'
+  | 'validation'
+  | 'auth'
+  | 'cancelled'
+  | 'unknown'
 
 export interface CalendarSyncResult {
   success: boolean
@@ -157,6 +164,12 @@ export interface CalendarSyncResult {
   error?: string
   errorCategory?: CalendarErrorCategory
   lastSync?: string
+  /**
+   * The sync did not run inline — startup work was still going, so main started
+   * it in the background and calendar:synced will land when it completes. Only a
+   * user-initiated ('manual') sync can come back this way.
+   */
+  queued?: boolean
 }
 
 export interface AppConfig {

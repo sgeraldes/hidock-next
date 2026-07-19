@@ -7,11 +7,25 @@ This module tests the specific fixes implemented for:
 2. API key decryption failures
 """
 
+import base64
+import os
 import unittest
 from unittest.mock import Mock, patch
 
 from file_operations_manager import FileOperationStatus, FileOperationType
 from gui_actions_file import FileActionsMixin
+
+# conftest's autouse ``setup_test_environment`` fixture replaces ``settings_window.SettingsDialog``
+# with a stub ``MockSettingsDialog`` so that no test can ever spawn a real CustomTkinter dialog.
+# The API key tests below exercise the *real* dialog's pure-logic encryption helpers, so bind the
+# genuine class here at import time: pytest imports test modules during collection, before any
+# fixture gets the chance to swap the module attribute out.
+from settings_window import SettingsDialog as RealSettingsDialog
+
+# A syntactically valid Fernet key (url-safe base64 of 32 bytes). _decrypt_api_key builds a real
+# Fernet from whatever _generate_encryption_key() hands back before it ever touches the payload,
+# so the stub used below has to return something Fernet will actually accept.
+VALID_FERNET_KEY = base64.urlsafe_b64encode(b"\x00" * 32)
 
 
 class TestFileStatusFixes(unittest.TestCase):
@@ -148,12 +162,14 @@ class TestAPIKeyFixes(unittest.TestCase):
 
     def test_decrypt_api_key_invalid_base64(self):
         """Test that invalid base64 data is handled gracefully."""
-        from settings_window import SettingsDialog
-
         # Create a settings dialog instance
-        settings_dialog = SettingsDialog.__new__(SettingsDialog)
+        settings_dialog = RealSettingsDialog.__new__(RealSettingsDialog)
         settings_dialog.parent_gui = self.mock_parent
         settings_dialog.local_vars = self.mock_dialog.local_vars
+
+        # _generate_encryption_key() reads/writes a key file on disk. Stub it so this test stays
+        # focused on _decrypt_api_key's handling of a bad payload and touches no real filesystem.
+        settings_dialog._generate_encryption_key = Mock(return_value=VALID_FERNET_KEY)
 
         # Mock the encryption availability and update function
         with patch("settings_window.ENCRYPTION_AVAILABLE", True):
@@ -169,12 +185,16 @@ class TestAPIKeyFixes(unittest.TestCase):
 
     def test_decrypt_api_key_corrupted_encryption_key(self):
         """Test that corrupted encryption key file is handled gracefully."""
-        from settings_window import SettingsDialog
-
         # Create a settings dialog instance
-        settings_dialog = SettingsDialog.__new__(SettingsDialog)
+        settings_dialog = RealSettingsDialog.__new__(RealSettingsDialog)
         settings_dialog.parent_gui = self.mock_parent
         settings_dialog.local_vars = self.mock_dialog.local_vars
+
+        # _generate_encryption_key() reads the key file off disk; patching os.path.exists alone
+        # only makes it try to open a file that is not there, which short-circuits _decrypt_api_key
+        # before it ever attempts to decrypt. Stub it so the decryption failure path is the thing
+        # under test.
+        settings_dialog._generate_encryption_key = Mock(return_value=VALID_FERNET_KEY)
 
         # Mock the encryption components to simulate corruption
         with patch("settings_window.ENCRYPTION_AVAILABLE", True):
@@ -192,15 +212,16 @@ class TestAPIKeyFixes(unittest.TestCase):
                             # Should return empty string
                             assert result == ""
 
-                            # Should attempt to remove corrupted key file
-                            mock_remove.assert_called_once()
+                            # Should remove the corrupted key file - and exactly that file
+                            expected_key_file = os.path.join(
+                                os.path.dirname(self.mock_parent.config["config_file_path"]), ".hidock_key.dat"
+                            )
+                            mock_remove.assert_called_once_with(expected_key_file)
 
     def test_load_api_key_status_decryption_failure(self):
         """Test that API key status loading handles decryption failures gracefully."""
-        from settings_window import SettingsDialog
-
         # Create a settings dialog instance
-        settings_dialog = SettingsDialog.__new__(SettingsDialog)
+        settings_dialog = RealSettingsDialog.__new__(RealSettingsDialog)
         settings_dialog.parent_gui = self.mock_parent
         settings_dialog.local_vars = self.mock_dialog.local_vars
 

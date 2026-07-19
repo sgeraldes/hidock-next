@@ -8,8 +8,8 @@
 pyusb
 customtkinter
 Pillow
-pygame
-google-generativeai
+pygame-ce
+google-genai
 matplotlib
 numpy
 scipy

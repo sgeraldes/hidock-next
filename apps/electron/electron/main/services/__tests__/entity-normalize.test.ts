@@ -102,6 +102,24 @@ describe('fuzzyNameScore', () => {
     expect(fuzzyNameScore('a', 'b')).toBeLessThanOrEqual(0.8)
   })
 
+  /**
+   * Edit distance is only a typo signal RELATIVE to length. With flat thresholds
+   * every short name was a near-miss for every other — "ai" vs "xr" is distance
+   * 2 on a 2-char string, i.e. entirely different, yet scored 0.7. With a
+   * co-occurrence boost that was enough to auto-link one acronym project onto
+   * another. Surfaced by F12 making short acronym projects creatable.
+   */
+  it('does not treat short unrelated names as edits of each other', () => {
+    expect(fuzzyNameScore('ai', 'xr')).toBe(0) // distance 2 on 2 chars
+    expect(fuzzyNameScore('crm', 'erp')).toBe(0)
+    expect(fuzzyNameScore('ana', 'ane')).toBe(0) // distance 1 on 3 chars
+  })
+
+  it('still scores edits on names long enough for the distance to mean a typo', () => {
+    expect(fuzzyNameScore('atlas', 'atlus')).toBeGreaterThanOrEqual(0.7) // lev 1, len 5
+    expect(fuzzyNameScore('meridian', 'meridain')).toBeGreaterThanOrEqual(0.6) // lev 2, len 8
+  })
+
   it('docks opposite-gender Spanish pairs below a plain edit-1 match', () => {
     // Fernando/Fernanda differ only in the final a↔o — an edit distance of 1 that
     // would otherwise score 0.78; the gender penalty drops it by 0.25.

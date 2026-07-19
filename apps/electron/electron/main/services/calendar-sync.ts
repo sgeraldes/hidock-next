@@ -5,6 +5,7 @@ import { join } from 'path'
 import { getCachePath } from './file-storage'
 import { upsertMeetingsBatch, Meeting } from './database'
 import { getConfig, updateConfig } from './config'
+import { whenBootTasksSettled, areBootTasksSettled } from './boot-scheduler'
 
 // Re-export package types and correlate for consumers (e.g. recording-watcher)
 export { correlate }
@@ -12,7 +13,16 @@ export type { CalendarEvent }
 
 // B-CAL-004: Error category for calendar sync failures
 // CS-003: Added 'auth' category for 401/403 errors
-export type CalendarErrorCategory = 'network' | 'parse' | 'database' | 'validation' | 'auth' | 'unknown'
+// CS-003: Added 'auth' for 401/403. 'cancelled' marks a pass abandoned before it
+// wrote anything (its schedule was torn down while it waited on the boot gate).
+export type CalendarErrorCategory =
+  | 'network'
+  | 'parse'
+  | 'database'
+  | 'validation'
+  | 'auth'
+  | 'cancelled'
+  | 'unknown'
 
 export interface CalendarSyncResult {
   success: boolean
@@ -20,6 +30,181 @@ export interface CalendarSyncResult {
   error?: string
   errorCategory?: CalendarErrorCategory
   lastSync?: string
+  /**
+   * The sync did not run inline — boot work was still going, so it was started
+   * in the background and will complete on its own (the renderer picks it up via
+   * `calendar:synced`). Only a user-initiated sync can come back this way; it
+   * exists so a click is answered immediately instead of parking the control for
+   * the whole startup window.
+   */
+  queued?: boolean
+}
+
+export interface CalendarSyncOptions {
+  /**
+   * F15: how long to wait for the boot tasks to finish before starting. A sync
+   * running alongside the boot drain put two heavy passes on the one main-process
+   * event loop and froze the window. `0` starts immediately (tests, and any
+   * caller that has already waited).
+   */
+  waitForBootMs?: number
+  /** Attempts for the ICS fetch. Transient failures back off between attempts. */
+  fetchAttempts?: number
+  /** First backoff delay; doubles per attempt, with jitter. */
+  fetchBaseDelayMs?: number
+  /**
+   * Force a fresh pass instead of joining an in-flight one. Used by
+   * clear-and-sync, whose caller has just emptied the table and must not be
+   * handed the result of a sync that started before the clear.
+   */
+  fresh?: boolean
+  /**
+   * Cancellation token. Returning false abandons the pass — checked after the
+   * boot gate and before EVERY side-effecting phase.
+   *
+   * A scheduled sync can sit parked on the boot gate for a long time, during
+   * which auto-sync may be disabled or reconfigured. Checking only after the
+   * pass returned would suppress the log line and nothing else: the invalidated
+   * pass would still have written the cache, upserted meetings, reconciled and
+   * broadcast. Callers that join an in-flight pass each contribute a token, and
+   * the pass continues while ANY of them still wants it.
+   */
+  isStillWanted?: () => boolean
+}
+
+/**
+ * Cap on the boot wait. The F15 freeze window is the first ~30 s after start; if
+ * boot work is somehow still running well past that, syncing is better than
+ * never syncing.
+ */
+const BOOT_WAIT_MS = 45000
+
+/** ICS fetch attempts, and the first backoff step (doubled per retry). */
+const DEFAULT_FETCH_ATTEMPTS = 3
+const DEFAULT_FETCH_BASE_DELAY_MS = 1000
+
+/**
+ * Transport failures that are worth retrying. The owner's crash (F15) surfaced
+ * as `TypeError: fetch failed` wrapping `read ECONNRESET` — a reset mid-transfer,
+ * which succeeds on a retry. Configuration failures (ECONNREFUSED, ENOTFOUND,
+ * auth) are NOT here: retrying those just burns the boot window.
+ */
+const TRANSIENT_NETWORK_CODES = [
+  'ECONNRESET',
+  'ECONNABORTED',
+  'ETIMEDOUT',
+  'EPIPE',
+  'EAI_AGAIN',
+  'ENETRESET',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_SOCKET',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT'
+]
+
+/**
+ * Failures that will keep failing until a human changes something: the host does
+ * not resolve, nothing is listening, or the certificate is wrong. Retrying these
+ * during boot buys nothing and delays everything behind the sync.
+ */
+const PERMANENT_NETWORK_CODES = [
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'EHOSTDOWN',
+  'EPROTO',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+  'CERT_HAS_EXPIRED',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'ERR_INVALID_URL',
+  'ERR_UNSUPPORTED_PROTOCOL'
+]
+
+/** Walk an error and everything it wraps, collecting a field from each level. */
+function collectFromCauseChain(error: unknown, field: 'code' | 'message'): string[] {
+  const found: string[] = []
+  let current: unknown = error
+  for (let depth = 0; depth < 5 && current; depth++) {
+    const e = current as { code?: unknown; message?: unknown; cause?: unknown }
+    const value = e[field]
+    if (typeof value === 'string') found.push(value)
+    current = e.cause
+  }
+  return found
+}
+
+/**
+ * True when the failure looks like a transient transport hiccup worth retrying.
+ *
+ * Node's fetch reports EVERY transport failure — transient resets and permanent
+ * DNS/connection errors alike — as a bare `TypeError: fetch failed`, with the
+ * real reason hidden on `.cause`. So when a concrete error code exists anywhere
+ * in the chain it is authoritative and the generic wrapper message is ignored;
+ * falling back to matching "fetch failed" would retry ECONNREFUSED and ENOTFOUND
+ * exactly as if they were resets.
+ */
+export function isTransientNetworkError(error: unknown): boolean {
+  const codes = collectFromCauseChain(error, 'code')
+  if (codes.length > 0) {
+    return codes.some((code) => TRANSIENT_NETWORK_CODES.includes(code))
+  }
+
+  // No structured code (a plain Error, or a message-only failure) — fall back to
+  // the text, but still only on a recognized signal, never on the wrapper.
+  const messages = collectFromCauseChain(error, 'message').join(' | ')
+  if (PERMANENT_NETWORK_CODES.some((code) => messages.includes(code))) return false
+  if (TRANSIENT_NETWORK_CODES.some((code) => messages.includes(code))) return true
+  return /socket hang up|network error/i.test(messages)
+}
+
+/** Sleep without blocking the event loop. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)))
+}
+
+/**
+ * Fetch the ICS feed, retrying transient transport failures and 429/5xx with
+ * exponential backoff plus jitter.
+ *
+ * Before this, one `ECONNRESET` mid-download failed the entire sync pass — and
+ * because the periodic timer just tried again on its own schedule, a flaky link
+ * produced repeated whole-pass failures instead of one retried request (F15).
+ */
+async function fetchIcsWithRetry(
+  icsUrl: string,
+  attempts: number,
+  baseDelayMs: number
+): Promise<Response> {
+  let lastError: unknown
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    let transient: boolean
+    try {
+      const response = await fetch(icsUrl)
+      if (response.ok) return response
+      lastError = new Error(`Failed to fetch calendar: ${response.status} ${response.statusText}`)
+      // 429 = asked to slow down; 5xx = server-side blip. Other 4xx are ours to fix.
+      transient = response.status === 429 || response.status >= 500
+    } catch (error) {
+      lastError = error
+      transient = isTransientNetworkError(error)
+    }
+
+    if (!transient || attempt === attempts) break
+
+    // Exponential backoff with 0.5x-1.5x jitter so repeated failures across
+    // restarts do not resynchronize into a thundering herd on the feed.
+    const backoffMs = Math.round(baseDelayMs * 2 ** (attempt - 1) * (0.5 + Math.random()))
+    console.warn(
+      `[calendar-sync] ICS fetch attempt ${attempt}/${attempts} failed ` +
+        `(${lastError instanceof Error ? lastError.message : String(lastError)}); ` +
+        `retrying in ${backoffMs}ms`
+    )
+    await sleep(backoffMs)
+  }
+  throw lastError
 }
 
 /**
@@ -45,7 +230,9 @@ export function categorizeCalendarError(error: unknown): { message: string; cate
     return { message, category: 'auth' }
   }
 
-  // Network errors
+  // Network errors. Node's fetch reports transport failures as a bare
+  // `TypeError: fetch failed` and hides the real code (e.g. ECONNRESET) on
+  // `.cause`, so check the whole chain — otherwise a reset lands in 'unknown'.
   if (
     message.includes('fetch') ||
     message.includes('ECONNREFUSED') ||
@@ -54,7 +241,8 @@ export function categorizeCalendarError(error: unknown): { message: string; cate
     message.includes('network') ||
     message.includes('Failed to fetch') ||
     message.includes('ERR_NETWORK') ||
-    /^Failed to fetch calendar: \d+/.test(message)
+    /^Failed to fetch calendar: \d+/.test(message) ||
+    isTransientNetworkError(error)
   ) {
     return { message, category: 'network' }
   }
@@ -560,9 +748,115 @@ export function expandMeetingOccurrences(
   return rows
 }
 
-export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> {
-  console.log('Starting calendar sync...')
+/**
+ * One sync pass, plus the cancellation tokens of every caller attached to it.
+ * The pass runs while ANY attached caller still wants it, so a joined manual
+ * sync is not cancelled just because the scheduled sync it joined was.
+ */
+interface SyncPass {
+  promise: Promise<CalendarSyncResult>
+  waiters: Array<() => boolean>
+}
+
+/** The sync currently running (or queued); null when idle. */
+let currentPass: SyncPass | null = null
+
+/** True while a sync is running or queued. */
+export function isCalendarSyncActive(): boolean {
+  return currentPass !== null
+}
+
+/**
+ * Sync the calendar from an ICS feed.
+ *
+ * ## Serialization (F15)
+ *
+ * Concurrent syncs were real, not theoretical: the main process starts one at
+ * boot (`initializeCalendarAutoSync`) while the renderer fires another from
+ * `Layout`'s mount effect, and the periodic `setInterval` could stack a third on
+ * top of a slow pass. Each runs a full fetch → parse → recurrence expansion →
+ * chunked DB write → `reconcileOrganization()` on the same main-process event
+ * loop. Overlapping passes are pure duplicated load on the thread that also has
+ * to answer every renderer IPC.
+ *
+ * Callers now JOIN an in-flight sync instead of starting a second one; they all
+ * wanted "the calendar, current", and one pass gives everyone that. `fresh: true`
+ * opts out for clear-and-sync, which must not be handed a result produced before
+ * its clear.
+ *
+ * Syncs also wait for the boot drain (`waitForBootMs`) so a startup or periodic
+ * sync cannot land on top of the boot tasks.
+ */
+export async function syncCalendar(
+  icsUrl: string,
+  options: CalendarSyncOptions = {}
+): Promise<CalendarSyncResult> {
+  const wanted = options.isStillWanted ?? (() => true)
+  const previous = currentPass
+
+  // Join the pass already under way, contributing this caller's token to it.
+  if (previous && !options.fresh) {
+    previous.waiters.push(wanted)
+    return previous.promise
+  }
+
+  const waiters: Array<() => boolean> = [wanted]
+  const pass = { waiters } as SyncPass
+  pass.promise = (async () => {
+    // A `fresh` pass still must not overlap the sync it displaces.
+    if (previous) {
+      try {
+        await previous.promise
+      } catch {
+        /* the previous pass failing must not cancel this one */
+      }
+    }
+    return runSyncCalendar(icsUrl, options, () => waiters.some((isWanted) => isWanted()))
+  })()
+
+  currentPass = pass
+  try {
+    return await pass.promise
+  } finally {
+    if (currentPass === pass) currentPass = null
+  }
+}
+
+/** Result for a pass abandoned before it wrote anything. */
+function cancelledResult(): CalendarSyncResult {
+  return {
+    success: false,
+    meetingsCount: 0,
+    error: 'Calendar sync cancelled before it made any changes',
+    errorCategory: 'cancelled'
+  }
+}
+
+async function runSyncCalendar(
+  icsUrl: string,
+  options: CalendarSyncOptions,
+  stillWanted: () => boolean
+): Promise<CalendarSyncResult> {
   const { emitActivityLog } = await import('./activity-log')
+
+  // F15: never compete with the boot tasks for the main-process event loop.
+  const waitForBootMs = options.waitForBootMs ?? BOOT_WAIT_MS
+  if (waitForBootMs > 0 && !areBootTasksSettled()) {
+    // Tell the user why nothing is happening yet. This covers the whole wait,
+    // including the window before the scheduler has started draining — which is
+    // exactly when the boot-time syncs arrive.
+    emitActivityLog('info', 'Calendar sync queued', 'Waiting for startup tasks to finish')
+    await whenBootTasksSettled(waitForBootMs)
+  }
+
+  // The wait above can be long, and auto-sync may have been disabled or
+  // reconfigured during it. Nothing has been written yet, so bail cleanly.
+  if (!stillWanted()) {
+    console.log('Calendar sync abandoned: its schedule was stopped while it waited')
+    return cancelledResult()
+  }
+
+  console.log('Starting calendar sync...')
   emitActivityLog('info', 'Syncing calendar...', 'Fetching calendar events')
 
   try {
@@ -578,14 +872,17 @@ export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> 
       }
     }
 
-    // Fetch ICS file
-    const response = await fetch(icsUrl)
-
-    if (!response.ok) {
-      throw new Error(`Failed to fetch calendar: ${response.status} ${response.statusText}`)
-    }
+    // Fetch ICS file, retrying transient resets/timeouts with backoff (F15).
+    const response = await fetchIcsWithRetry(
+      icsUrl,
+      Math.max(1, options.fetchAttempts ?? DEFAULT_FETCH_ATTEMPTS),
+      options.fetchBaseDelayMs ?? DEFAULT_FETCH_BASE_DELAY_MS
+    )
 
     const icsData = await response.text()
+
+    // First side effect of the pass — nothing has touched disk before this.
+    if (!stillWanted()) return cancelledResult()
 
     // CS-009: Use async writeFile to avoid blocking the event loop
     const cachePath = join(getCachePath(), 'calendar.ics')
@@ -600,6 +897,10 @@ export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> 
 
     // Yield before heavy database work
     await yieldToEventLoop()
+
+    // Last checkpoint before the DB is touched. Past this the pass has committed
+    // rows, so it runs to completion rather than leaving a half-applied sync.
+    if (!stillWanted()) return cancelledResult()
 
     // CS/H7 FIX: Write meetings in chunks, yielding to the event loop between
     // chunks, so the sync never blocks the main process for a long stretch.

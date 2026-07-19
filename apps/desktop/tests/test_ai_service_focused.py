@@ -7,9 +7,10 @@ focusing on provider availability, basic initialization, and error handling.
 
 from unittest.mock import patch
 
+import pytest
+
 # Import the module under test
 import ai_service
-import pytest
 from ai_service import AIProvider, AIServiceManager, GeminiProvider, OpenAIProvider
 
 
@@ -66,7 +67,6 @@ class TestGeminiProviderBasics:
     @patch("ai_service.genai")
     def test_gemini_provider_can_be_instantiated(self, mock_genai):
         """Test that GeminiProvider can be instantiated."""
-        mock_genai.configure.return_value = None
         provider = GeminiProvider(self.test_api_key, self.test_config)
         assert provider.api_key == self.test_api_key
         assert provider.config == self.test_config
@@ -75,7 +75,6 @@ class TestGeminiProviderBasics:
     @patch("ai_service.genai")
     def test_gemini_provider_is_available_when_available(self, mock_genai):
         """Test is_available returns True when Gemini is available."""
-        mock_genai.configure.return_value = None
         provider = GeminiProvider(self.test_api_key)
         assert provider.is_available() is True
 
@@ -174,11 +173,12 @@ class TestErrorHandling:
     @patch("ai_service.GEMINI_AVAILABLE", True)
     @patch("ai_service.genai")
     def test_gemini_provider_handles_api_exceptions(self, mock_genai):
-        """Test GeminiProvider handling of API exceptions."""
-        mock_genai.configure.side_effect = Exception("API configuration error")
+        """Test GeminiProvider surfaces client construction failures to its caller."""
+        # google-genai SDK: __init__ builds a genai.Client(). Failures are deliberately not
+        # swallowed here - AIServiceManager.configure_provider/validate_provider catch them.
+        mock_genai.Client.side_effect = Exception("API client error")
 
-        # Should raise the exception since we're not handling it in init
-        with pytest.raises(Exception, match="API configuration error"):
+        with pytest.raises(Exception, match="API client error"):
             GeminiProvider("test_key")
 
 

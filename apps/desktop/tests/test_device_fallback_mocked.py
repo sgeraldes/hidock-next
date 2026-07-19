@@ -9,6 +9,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from constants import DEFAULT_PRODUCT_ID, DEFAULT_VENDOR_ID
+
 # Import the modules we're testing
 from desktop_device_adapter import DesktopDeviceAdapter
 from device_interface import DeviceInfo, DeviceModel
@@ -70,14 +72,19 @@ class TestDeviceFallbackMocked:
         ]
 
     @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_discover_all_device_types(self, mock_adapter, sample_devices):
         """Test discovery of all HiDock device types."""
         adapter, mock_jensen = mock_adapter
 
         # Mock the HiDockJensen class creation inside discover_devices
         with patch("desktop_device_adapter.HiDockJensen") as mock_jensen_class:
-            # Create a mock for each test device instance
+            # Create a mock for each test device instance. discover_devices() scans every
+            # vendor ID in ALL_VENDOR_IDS, and a real device answers on exactly one of them,
+            # so the mock has to key on the VID as well as the PID.
             def mock_find_device(vid, pid):
+                if vid != DEFAULT_VENDOR_ID:
+                    return None
                 device_map = {
                     0xB00D: MagicMock(serial_number="H1E123456"),  # H1E
                     0xAF0C: MagicMock(serial_number="H1123456"),  # H1
@@ -100,15 +107,17 @@ class TestDeviceFallbackMocked:
             assert "HiDock hidock-p1" in device_names
 
     @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_discover_single_device(self, mock_adapter):
         """Test discovery when only one device type is available."""
         adapter, mock_jensen = mock_adapter
 
         # Mock the HiDockJensen class creation inside discover_devices
         with patch("desktop_device_adapter.HiDockJensen") as mock_jensen_class:
-            # Only H1E is available
+            # Only H1E is available, and only on its own vendor ID (discover_devices()
+            # scans every vendor ID in ALL_VENDOR_IDS).
             def mock_find_device(vid, pid):
-                if pid == 0xB00D:  # H1E
+                if vid == DEFAULT_VENDOR_ID and pid == 0xB00D:  # H1E
                     return MagicMock(serial_number="H1E123456")
                 return None
 
@@ -125,6 +134,7 @@ class TestDeviceFallbackMocked:
             assert discovered[0].product_id == 0xB00D
 
     @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_discover_no_devices(self, mock_adapter):
         """Test discovery when no devices are available (offline scenario)."""
         adapter, mock_jensen = mock_adapter
@@ -137,6 +147,7 @@ class TestDeviceFallbackMocked:
         assert len(discovered) == 0
 
     @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_connect_configured_device_success(self, mock_adapter):
         """Test successful connection to configured device."""
         adapter, mock_jensen = mock_adapter
@@ -156,6 +167,7 @@ class TestDeviceFallbackMocked:
         )
 
     @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_connect_configured_device_failure(self, mock_adapter):
         """Test connection failure to configured device."""
         adapter, mock_jensen = mock_adapter
@@ -168,6 +180,7 @@ class TestDeviceFallbackMocked:
             await adapter.connect(device_id="10d6:af0e")
 
     @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_connect_fallback_to_first_available(self, mock_adapter):
         """Test that connection fails when specified device unavailable (no fallback in current implementation)."""
         adapter, mock_jensen = mock_adapter
@@ -180,6 +193,7 @@ class TestDeviceFallbackMocked:
             await adapter.connect(device_id="10d6:af0e")
 
     @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_connect_no_device_available_offline(self, mock_adapter):
         """Test graceful handling when no devices available (offline)."""
         adapter, mock_jensen = mock_adapter
@@ -193,6 +207,7 @@ class TestDeviceFallbackMocked:
             await adapter.connect(device_id="10d6:af0e")
 
     @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_connect_auto_retry_disabled(self, mock_adapter):
         """Test connection with auto_retry disabled."""
         adapter, mock_jensen = mock_adapter
@@ -207,6 +222,7 @@ class TestDeviceFallbackMocked:
         )
 
     @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_connect_invalid_device_id_format(self, mock_adapter):
         """Test connection with invalid device ID format."""
         adapter, mock_jensen = mock_adapter
@@ -215,18 +231,19 @@ class TestDeviceFallbackMocked:
         mock_jensen.get_device_info.return_value = {"sn": "H1E123456", "versionCode": "1.2.0"}
 
         # Test with invalid device ID - should use defaults
-        result = await adapter.connect(device_id="invalid:format")
+        await adapter.connect(device_id="invalid:format")
 
-        # Should use default VID/PID (H1E)
+        # Should fall back to the configured defaults rather than a hardcoded model.
         mock_jensen.connect.assert_called_once_with(
             target_interface_number=0,
-            vid=0x10D6,  # DEFAULT_VENDOR_ID
-            pid=0xB00D,  # DEFAULT_PRODUCT_ID (H1E)
+            vid=DEFAULT_VENDOR_ID,
+            pid=DEFAULT_PRODUCT_ID,
             auto_retry=True,
             force_reset=False,
         )
 
     @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_connect_no_device_id_uses_defaults(self, mock_adapter):
         """Test connection without device_id uses default values."""
         adapter, mock_jensen = mock_adapter
@@ -235,18 +252,19 @@ class TestDeviceFallbackMocked:
         mock_jensen.get_device_info.return_value = {"sn": "H1E123456", "versionCode": "1.2.0"}
 
         # Test with None device_id
-        result = await adapter.connect(device_id=None)
+        await adapter.connect(device_id=None)
 
-        # Should use default VID/PID (H1E)
+        # Should fall back to the configured defaults rather than a hardcoded model.
         mock_jensen.connect.assert_called_once_with(
             target_interface_number=0,
-            vid=0x10D6,  # DEFAULT_VENDOR_ID
-            pid=0xB00D,  # DEFAULT_PRODUCT_ID (H1E)
+            vid=DEFAULT_VENDOR_ID,
+            pid=DEFAULT_PRODUCT_ID,
             auto_retry=True,
             force_reset=False,
         )
 
     @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_disconnect_success(self, mock_adapter):
         """Test successful device disconnection."""
         adapter, mock_jensen = mock_adapter
@@ -270,6 +288,7 @@ class TestDeviceFallbackMocked:
         assert adapter._connection_start_time is None
 
     @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_disconnect_failure(self, mock_adapter):
         """Test disconnect failure handling."""
         adapter, mock_jensen = mock_adapter
@@ -298,6 +317,7 @@ class TestDeviceFallbackMocked:
         assert adapter.is_connected() is False
 
     @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_get_device_info_connected(self, mock_adapter):
         """Test get_device_info when device is connected."""
         adapter, mock_jensen = mock_adapter
@@ -321,6 +341,7 @@ class TestDeviceFallbackMocked:
         assert result.serial_number == "H1E123456"
 
     @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_get_device_info_not_connected(self, mock_adapter):
         """Test get_device_info when no device is connected (offline)."""
         adapter, mock_jensen = mock_adapter
@@ -331,6 +352,7 @@ class TestDeviceFallbackMocked:
             await adapter.get_device_info()
 
     @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_offline_operations_fail_gracefully(self, mock_adapter):
         """Test that all operations fail gracefully when offline."""
         adapter, mock_jensen = mock_adapter
@@ -380,6 +402,7 @@ class TestDeviceFallbackMocked:
         assert result == DeviceModel.UNKNOWN  # Should return UNKNOWN for unknown devices
 
     @pytest.mark.integration
+    @pytest.mark.asyncio
     async def test_full_connection_workflow_successful_connection(self, mock_adapter):
         """Integration test: Successful connection workflow."""
         adapter, mock_jensen = mock_adapter

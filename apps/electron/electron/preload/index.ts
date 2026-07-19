@@ -333,6 +333,12 @@ export interface ElectronAPI {
       isPackaged: boolean
       platform: string
     }>
+    /**
+     * Push the QA Logs toggle to the main process. Main has no localStorage and
+     * no store access, so main-process QA logs (e.g. BootScheduler task timings)
+     * depend on this push. Call on mount and on every toggle.
+     */
+    setQaLogsEnabled: (enabled: boolean) => Promise<{ success: boolean }>
   }
 
   // Config
@@ -599,7 +605,12 @@ export interface ElectronAPI {
 
   // Calendar
   calendar: {
-    sync: () => Promise<any>
+    /**
+     * `trigger` tells main whether a human asked for this. 'manual' gets a short
+     * bounded wait and may come back `queued: true` during startup; 'mount' (the
+     * default) is an app-initiated startup sync and waits for the boot tasks.
+     */
+    sync: (trigger?: 'manual' | 'mount') => Promise<any>
     clearAndSync: () => Promise<any>
     getLastSync: () => Promise<string | null>
     setUrl: (url: string) => Promise<any>
@@ -1210,7 +1221,8 @@ export interface ElectronAPI {
 const electronAPI: ElectronAPI = {
   app: {
     restart: () => callIPC('app:restart'),
-    info: () => callIPC('app:info')
+    info: () => callIPC('app:info'),
+    setQaLogsEnabled: (enabled) => callIPC('qa:set-logs-enabled', enabled)
   },
 
   config: {
@@ -1395,7 +1407,7 @@ const electronAPI: ElectronAPI = {
   },
 
   calendar: {
-    sync: () => callIPC('calendar:sync'),
+    sync: (trigger) => callIPC('calendar:sync', trigger ?? 'mount'),
     clearAndSync: () => callIPC('calendar:clear-and-sync'),
     getLastSync: () => callIPC('calendar:get-last-sync'),
     setUrl: (url) => callIPC('calendar:set-url', url),
