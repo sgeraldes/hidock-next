@@ -103,10 +103,15 @@ describe('schema v43: project_discovery_observations (F12 discovery gate)', () =
     expect(owned[0].toUpperCase().startsWith('CREATE TABLE')).toBe(true)
   })
 
-  it('migration 43 creates the table idempotently', () => {
+  it('migration 43 creates the table from the shared DDL', () => {
     const migration = source.match(/\n {2}43: \(\) => \{[\s\S]*?\n {2}\}/)
     expect(migration).not.toBeNull()
-    expect(migration![0]).toContain('CREATE TABLE IF NOT EXISTS project_discovery_observations')
+    expect(migration![0]).toContain('OBSERVATIONS_TABLE_DDL')
+    // One DDL constant, so the two heal paths cannot drift apart.
+    const ddl = source.match(/const OBSERVATIONS_TABLE_DDL = `[\s\S]*?`/)
+    expect(ddl).not.toBeNull()
+    expect(ddl![0]).toContain('CREATE TABLE IF NOT EXISTS project_discovery_observations')
+    expect(ddl![0]).toContain('meeting_id TEXT')
   })
 
   /**
@@ -117,24 +122,44 @@ describe('schema v43: project_discovery_observations (F12 discovery gate)', () =
    * repairPhase must verify-and-ALTER. (Runtime heal proven against the real
    * engine in project-discovery-observations-heal-v43.test.ts.)
    */
-  it('migration 43 adds meeting_id when the table already exists without it', () => {
+  it('both heal paths add meeting_id when the table already exists without it', () => {
     const migration = source.match(/\n {2}43: \(\) => \{[\s\S]*?\n {2}\}/)![0]
-    expect(migration).toContain('ALTER TABLE project_discovery_observations ADD COLUMN meeting_id TEXT')
+    const repair = source.match(/function repairPhase\(\): void \{[\s\S]*?\n\}/)![0]
+    for (const block of [migration, repair]) {
+      expect(block).toContain('ALTER TABLE project_discovery_observations ADD COLUMN meeting_id TEXT')
+    }
   })
 
-  it('migration 43 fails loudly rather than recording v43 over an unusable table', () => {
+  /**
+   * The verification must be UNCONDITIONAL and type-checked. An earlier cut only
+   * verified when PRAGMA returned at least one column, so an ABSENT table (e.g.
+   * blocked by a same-named index, where PRAGMA returns []) skipped the check and
+   * the boot continued with discovery silently dead.
+   */
+  it('both heal paths end in the shared unconditional verification', () => {
+    const migration = source.match(/\n {2}43: \(\) => \{[\s\S]*?\n {2}\}/)![0]
+    const repair = source.match(/function repairPhase\(\): void \{[\s\S]*?\n\}/)![0]
+    for (const block of [migration, repair]) {
+      expect(block).toContain('assertObservationsTableUsable(database')
+    }
+  })
+
+  it('the verification asks sqlite_master for the object type, not just PRAGMA columns', () => {
+    const assertFn = source.match(/function assertObservationsTableUsable\([\s\S]*?\n\}/)
+    expect(assertFn).not.toBeNull()
+    const body = assertFn![0]
+    // Existence + type + column, each with its own throw. No PRAGMA-length gate.
+    expect(body).toContain("SELECT type FROM sqlite_master WHERE name = 'project_discovery_observations'")
+    expect(body).toContain("type !== 'table'")
+    expect(body).toContain("includes('meeting_id')")
+    expect((body.match(/throw new Error/g) ?? []).length).toBe(3)
+  })
+
+  it('migration 43 fails loudly rather than recording v43 over an unusable schema', () => {
     const migration = source.match(/\n {2}43: \(\) => \{[\s\S]*?\n {2}\}/)![0]
     // No swallowing catch: the engine records a version only after the migration
     // returns, so a swallowed failure would strand the DB at 43 with a table that
     // cannot accept an insert. Same fail-loud policy as the v42 tombstone re-key.
     expect(migration).not.toMatch(/catch\s*\(/)
-    expect(migration).toContain('throw new Error')
-  })
-
-  it('repairPhase force-adds meeting_id on every boot', () => {
-    const repair = source.match(/function repairPhase\(\): void \{[\s\S]*?\n\}/)
-    expect(repair).not.toBeNull()
-    expect(repair![0]).toContain('CREATE TABLE IF NOT EXISTS project_discovery_observations')
-    expect(repair![0]).toContain('ALTER TABLE project_discovery_observations ADD COLUMN meeting_id TEXT')
   })
 })

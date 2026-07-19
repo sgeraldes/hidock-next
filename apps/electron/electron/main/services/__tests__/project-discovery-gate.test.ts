@@ -133,11 +133,53 @@ describe('false POSITIVES — recurring extraction noise must never auto-create'
     }
   )
 
-  it('genuine two-token names still create despite the Title-Case tightening', () => {
-    for (const name of ['Meridian Alpha', 'Basalt Orchard']) {
-      expect(scoreProjectNameCandidate(name).score).toBeGreaterThanOrEqual(CREATE_CONFIDENCE_FLOOR)
-      expect(actionAt(name, MIN_DISTINCT_SOURCES)).toBe('create')
+  /**
+   * The class that vocabulary could not close. These sit OUTSIDE the generic
+   * list — extending it twice did not help, because there is always one more
+   * business phrase — so they are held back by the rule that ordinary Title Case
+   * is not distinctive evidence at all. Recurrence cannot separate them either:
+   * jargon recurs at least as much as real projects do, hence the source sweep.
+   */
+  it.each([
+    'Vendor Onboarding',
+    'Pricing Review',
+    'Partner Integration',
+    'Quarterly Planning',
+    'Team Sync',
+    'Security Audit',
+    'Data Migration',
+    'Platform Rollout'
+  ])('Title-Cased business jargon %j never creates at any source count', (name) => {
+    const { score, evidence } = scoreProjectNameCandidate(name)
+    expect(score).toBeGreaterThan(0) // reviewable, not discarded
+    expect(score).toBeLessThan(CREATE_CONFIDENCE_FLOOR)
+    // It may still LOOK like a proper name — that is exactly the point: the tier
+    // is reported for ranking but carries no authority to create.
+    expect(['proper-multi', null]).toContain(evidence)
+    expectNeverCreates(name)
+  })
+
+  /**
+   * The accepted consequence of that decision, asserted rather than hidden: real
+   * two-word names now DEFER. F12 exists because auto-creation was too eager, and
+   * one real project waiting for a click beats a stream of dead-end projects.
+   */
+  it.each(['Meridian Alpha', 'Basalt Orchard', 'Project Atlas', 'Café Motor', 'Plataforma de Pagos'])(
+    'ordinary Title-Cased real name %j now DEFERS instead of auto-creating',
+    (name) => {
+      const q = scoreProjectNameCandidate(name)
+      expect(q.evidence).toBe('proper-multi') // recognised…
+      expect(q.score).toBeLessThan(CREATE_CONFIDENCE_FLOOR) // …but not authorised
+      expect(q.reasons).toContain('title-case-not-distinctive')
+      expectNeverCreates(name)
     }
+  )
+
+  it('still ranks a Title-Cased candidate above a structureless one in the queue', () => {
+    // proper-multi earns no create authority but does order the suggestion list.
+    expect(scoreProjectNameCandidate('Meridian Alpha').score).toBeGreaterThan(
+      scoreProjectNameCandidate('pricing issue').score
+    )
   })
 
   it('a lone capitalized word is not evidence — the real name and the noise word look identical', () => {
@@ -182,12 +224,14 @@ describe('false NEGATIVES — short and non-Latin names must defer, never drop',
     expect(actionAt(name, MIN_DISTINCT_SOURCES)).toBe('create')
   })
 
-  it('an accented proper name is not dropped and clears the floor', () => {
-    const q = scoreProjectNameCandidate('Café Motor')
-    expect(q.evidence).toBe('proper-multi')
-    expect(q.score).toBeGreaterThanOrEqual(CREATE_CONFIDENCE_FLOOR)
-    expect(actionAt('Café Motor', 1)).toBe('defer')
-    expect(actionAt('Café Motor', 2)).toBe('create')
+  it('an accented name is never dropped, and creates once it is distinctive', () => {
+    // Ordinary Title Case defers even with an accent…
+    expect(scoreProjectNameCandidate('Café Motor').score).toBeGreaterThan(0)
+    expectNeverCreates('Café Motor')
+    // …while an accented name with distinctive orthography creates on recurrence.
+    expect(scoreProjectNameCandidate('CaféMotor').evidence).toBe('distinctive-orthography')
+    expect(actionAt('CaféMotor', 1)).toBe('defer')
+    expect(actionAt('CaféMotor', 2)).toBe('create')
   })
 
   it('scores identically across Unicode normalization forms', () => {
@@ -198,19 +242,18 @@ describe('false NEGATIVES — short and non-Latin names must defer, never drop',
   })
 })
 
-describe('auto-create requires positive name structure', () => {
+describe('auto-create requires DISTINCTIVE name structure', () => {
   it.each([
-    ['Meridian Alpha', 'proper-multi'],
-    ['Project Atlas', 'proper-multi'],
-    ['Phantom Initiative', 'proper-multi'],
-    ['Migration Plan', 'proper-multi'],
     ['HiDock Firmware', 'distinctive-orthography'],
     ['DFX5 Gateway', 'acronym'],
-    ['Plataforma de Pagos', 'proper-multi']
+    ['CRM', 'acronym'],
+    ['MeridianOps', 'distinctive-orthography'],
+    ['研究 Alpha', 'uncased-script']
   ])('%j clears the floor via %s', (name, evidence) => {
     const q = scoreProjectNameCandidate(name)
     expect(q.evidence).toBe(evidence)
     expect(q.score).toBeGreaterThanOrEqual(CREATE_CONFIDENCE_FLOOR)
+    expect(actionAt(name, MIN_DISTINCT_SOURCES)).toBe('create')
   })
 
   /**
@@ -255,28 +298,28 @@ describe('decideProjectDiscovery — combining the two bars', () => {
     expect(d.reasons).toContain('below-confidence-floor')
   })
 
-  it('defers a well-formed name seen in a single source', () => {
-    const d = decideProjectDiscovery({ name: 'Meridian Alpha', distinctSources: 1 })
+  it('defers a distinctive name seen in a single source', () => {
+    const d = decideProjectDiscovery({ name: 'HiDock Firmware', distinctSources: 1 })
     expect(d.action).toBe('defer')
     expect(d.reasons).toContain('single-occurrence')
   })
 
-  it('defers a well-formed name with no source at all', () => {
-    expect(actionAt('Meridian Alpha', 0)).toBe('defer')
+  it('defers a distinctive name with no source at all', () => {
+    expect(actionAt('HiDock Firmware', 0)).toBe('defer')
   })
 
-  it('creates a well-formed name once it recurs across the required sources', () => {
-    const d = decideProjectDiscovery({ name: 'Meridian Alpha', distinctSources: MIN_DISTINCT_SOURCES })
+  it('creates a distinctive name once it recurs across the required sources', () => {
+    const d = decideProjectDiscovery({ name: 'HiDock Firmware', distinctSources: MIN_DISTINCT_SOURCES })
     expect(d.action).toBe('create')
     expect(d.reasons).toContain('recurring')
   })
 
   it('treats a negative source count as zero rather than passing the bar', () => {
-    expect(actionAt('Meridian Alpha', -3)).toBe('defer')
+    expect(actionAt('HiDock Firmware', -3)).toBe('defer')
   })
 
   it('exposes the evidence it decided on', () => {
-    const d = decideProjectDiscovery({ name: 'Meridian Alpha', distinctSources: 3 })
+    const d = decideProjectDiscovery({ name: 'HiDock Firmware', distinctSources: 3 })
     expect(d.distinctSources).toBe(3)
     expect(d.score).toBeGreaterThanOrEqual(CREATE_CONFIDENCE_FLOOR)
   })

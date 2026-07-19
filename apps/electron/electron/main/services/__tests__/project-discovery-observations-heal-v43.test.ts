@@ -93,45 +93,68 @@ describe('v43 heal: a database stranded with the pre-meeting_id table shape', ()
   })
 
   it('observation inserts referencing meeting_id now succeed', () => {
-    expect(recordProjectDiscoveryObservation('Healed Beacon', 'r:h1', 'h1', 0.7)).toBe(1)
-    expect(countProjectDiscoverySources('Healed Beacon')).toBe(1)
+    expect(recordProjectDiscoveryObservation('HealedBeacon', 'r:h1', 'h1', 0.7)).toBe(1)
+    expect(countProjectDiscoverySources('HealedBeacon')).toBe(1)
   })
 
   /**
    * Fail-closed proof. For an already-v43 DB migration 43 is SKIPPED, so
-   * repairPhase is the ONLY heal path — if its ALTER fails and the failure is
-   * swallowed, the boot continues with a table that cannot accept an observation
+   * repairPhase is the ONLY heal path — if its repair fails and the failure is
+   * swallowed, the boot continues with a schema that cannot accept an observation
    * write, recreating the stranded condition for the whole session and, under a
    * persistent failure, indefinitely.
    *
-   * Injection: replace the table with a VIEW of the same name. `CREATE TABLE IF
-   * NOT EXISTS` then fails (object exists), PRAGMA table_info still reports
-   * columns (so the repair sees a shape missing meeting_id), and ALTER TABLE on a
-   * view fails — exactly the persistent-failure case. Boot must throw.
+   * Two injections, because they exercise DIFFERENT code paths:
+   *
+   *   VIEW  — PRAGMA table_info still reports columns, so the repair sees a shape
+   *           missing meeting_id and attempts (and fails) the ALTER.
+   *   INDEX — the nastier one. SQLite shares a namespace across tables, views and
+   *           indexes, so CREATE TABLE fails with "there is already an index
+   *           named …" while PRAGMA table_info returns []. An earlier cut gated
+   *           its verification on PRAGMA returning rows, so an EMPTY column list
+   *           skipped the check entirely and the boot continued.
+   *
+   * Both must throw, and a later boot with the injection cleared must heal.
    */
-  it('fails the boot loudly when the repair cannot add the column', async () => {
+  it.each([
+    [
+      'a same-named VIEW',
+      `CREATE VIEW project_discovery_observations AS
+         SELECT 'x' AS name_norm, 'x' AS source_key, 'x' AS original_name, 0 AS score,
+                '' AS first_seen_at, '' AS last_seen_at`,
+      'DROP VIEW project_discovery_observations',
+      /exists as a view, not a table/
+    ],
+    [
+      'a same-named INDEX (empty-PRAGMA path)',
+      `CREATE TABLE decoy_for_index (col TEXT);
+       CREATE INDEX project_discovery_observations ON decoy_for_index(col)`,
+      'DROP INDEX project_discovery_observations',
+      /exists as a index, not a table/
+    ]
+  ])('fails the boot loudly when %s blocks the repair', async (_label, inject, cleanup, expected) => {
     const backup = queryAll<{ name_norm: string; source_key: string; original_name: string; score: number }>(
       'SELECT name_norm, source_key, original_name, score FROM project_discovery_observations'
     )
     run('DROP TABLE project_discovery_observations')
-    run(`
-      CREATE VIEW project_discovery_observations AS
-        SELECT 'x' AS name_norm, 'x' AS source_key, 'x' AS original_name, 0 AS score,
-               '' AS first_seen_at, '' AS last_seen_at
-    `)
+    for (const stmt of inject.split(';').map((s) => s.trim()).filter(Boolean)) run(stmt)
     closeDatabase()
 
-    await expect(initializeDatabase()).rejects.toThrow(/missing meeting_id and could not be repaired/)
+    try {
+      await expect(initializeDatabase()).rejects.toThrow(expected)
+    } finally {
+      // Always clear the injection, so a failed assertion cannot strand the DB
+      // for the remaining cases in this file.
+      run(cleanup)
+      closeDatabase()
+      await initializeDatabase()
+    }
 
-    // Clear the injected failure: a later boot heals and starts normally.
-    run('DROP VIEW project_discovery_observations')
-    closeDatabase()
-    await initializeDatabase()
-
+    // A later boot with the injection gone heals and starts normally.
     expect(observationColumns()).toContain('meeting_id')
     for (const row of backup) {
       run(
-        `INSERT INTO project_discovery_observations
+        `INSERT OR IGNORE INTO project_discovery_observations
            (name_norm, source_key, original_name, score, first_seen_at, last_seen_at)
          VALUES (?, ?, ?, ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
         [row.name_norm, row.source_key, row.original_name, row.score]
@@ -140,7 +163,7 @@ describe('v43 heal: a database stranded with the pre-meeting_id table shape', ()
   })
 
   it('discovery reconciliation works end to end on the healed database', () => {
-    const name = 'Restored Compass'
+    const name = 'RestoredCompass'
     expect(applyTranscriptEntities({ meetingId: 'h1', project: { name } }).projectLinked).toBe(false)
     expect(applyTranscriptEntities({ meetingId: 'h2', project: { name } }).projectLinked).toBe(true)
 

@@ -2329,39 +2329,77 @@ const MIGRATIONS: Record<number, () => void> = {
     // else as a deferred suggestion. Idempotent: CREATE IF NOT EXISTS.
     console.log('Running migration to schema v43: project_discovery_observations')
     const database = getDatabase()
-    database.run(`
-      CREATE TABLE IF NOT EXISTS project_discovery_observations (
-        name_norm TEXT NOT NULL,
-        source_key TEXT NOT NULL,
-        meeting_id TEXT,
-        original_name TEXT NOT NULL,
-        score REAL NOT NULL DEFAULT 0,
-        first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (name_norm, source_key)
-      )
-    `)
+    database.run(OBSERVATIONS_TABLE_DDL)
     // CREATE TABLE IF NOT EXISTS is a no-op against a table that already exists
     // with the wrong shape, so add the column explicitly when it is missing.
     const cols = getTableColumns(database, 'project_discovery_observations')
     if (cols.length > 0 && !cols.includes('meeting_id')) {
       database.run('ALTER TABLE project_discovery_observations ADD COLUMN meeting_id TEXT')
     }
-    // VERIFY, then let any failure propagate. The engine records a version only
-    // AFTER its migration returns, so throwing here leaves the DB below 43 and
-    // the next boot retries — swallowing would mark the migration complete over a
-    // table that cannot accept an insert, killing discovery silently. Same
-    // fail-loud policy migration 42 adopted for the tombstone re-key.
-    const finalCols = getTableColumns(database, 'project_discovery_observations')
-    if (!finalCols.includes('meeting_id')) {
-      throw new Error(
-        '[Migration v43] project_discovery_observations is missing meeting_id after repair; ' +
-          'refusing to record schema v43 over an unusable table'
-      )
-    }
+    // VERIFY (shared, unconditional, type-checked) and let any failure propagate.
+    // The engine records a version only AFTER its migration returns, so throwing
+    // here leaves the DB below 43 and the next boot retries — swallowing would
+    // mark the migration complete over a table that cannot accept an insert,
+    // killing discovery silently. Same fail-loud policy as the v42 re-key.
+    assertObservationsTableUsable(database, '[Migration v43]')
     console.log('Migration v43 complete')
   }
 
+}
+
+/** Single source of truth for the v43 ledger DDL — used by repairPhase and migration 43. */
+const OBSERVATIONS_TABLE_DDL = `
+  CREATE TABLE IF NOT EXISTS project_discovery_observations (
+    name_norm TEXT NOT NULL,
+    source_key TEXT NOT NULL,
+    meeting_id TEXT,
+    original_name TEXT NOT NULL,
+    score REAL NOT NULL DEFAULT 0,
+    first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (name_norm, source_key)
+  )
+`
+
+/**
+ * Verify project_discovery_observations is usable, or refuse to continue.
+ *
+ * UNCONDITIONAL, and deliberately not gated on PRAGMA returning rows. An earlier
+ * cut only verified when `getTableColumns` returned at least one column, so an
+ * ABSENT table sailed through: SQLite shares one namespace across tables, views
+ * and indexes, so a same-named INDEX makes CREATE TABLE fail ("there is already
+ * an index named …") while PRAGMA table_info returns [] — the guard saw an empty
+ * column list, skipped the check, and an already-v43 DB booted "fine" while every
+ * observation write failed, silently disabling discovery.
+ *
+ * So this asks sqlite_master directly: the object must EXIST, be a TABLE (not a
+ * view or index), and carry meeting_id. Anything else throws. Called after the
+ * create/ALTER attempts in both heal paths, so it is the single decision point
+ * and the two paths cannot drift.
+ */
+function assertObservationsTableUsable(database: ReturnType<typeof getDatabase>, context: string): void {
+  const found = database.exec(
+    "SELECT type FROM sqlite_master WHERE name = 'project_discovery_observations'"
+  )
+  const type = found[0]?.values?.[0]?.[0]
+  if (!type) {
+    throw new Error(
+      `${context}: project_discovery_observations does not exist and could not be created; ` +
+        'refusing to start with a schema that cannot record project discoveries'
+    )
+  }
+  if (type !== 'table') {
+    throw new Error(
+      `${context}: project_discovery_observations exists as a ${String(type)}, not a table; ` +
+        'refusing to start with a schema that cannot record project discoveries'
+    )
+  }
+  if (!getTableColumns(database, 'project_discovery_observations').includes('meeting_id')) {
+    throw new Error(
+      `${context}: project_discovery_observations is missing meeting_id and could not be repaired; ` +
+        'refusing to start with a table that cannot record project discoveries'
+    )
+  }
 }
 
 /**
@@ -2486,45 +2524,23 @@ function repairPhase(): void {
   // discovery reconciliation would be dead for all new candidates. repairPhase
   // runs on every boot BEFORE migrations, so this heals such a DB in place.
   try {
-    database.run(`
-      CREATE TABLE IF NOT EXISTS project_discovery_observations (
-        name_norm TEXT NOT NULL,
-        source_key TEXT NOT NULL,
-        meeting_id TEXT,
-        original_name TEXT NOT NULL,
-        score REAL NOT NULL DEFAULT 0,
-        first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (name_norm, source_key)
-      )
-    `)
-  } catch { /* table already exists */ }
+    database.run(OBSERVATIONS_TABLE_DDL)
+  } catch (e) {
+    // May legitimately already exist — the unconditional verify below decides.
+    console.warn('[Database] project_discovery_observations create skipped:', (e as Error).message)
+  }
   const obsCols = getTableColumns(database, 'project_discovery_observations')
   if (obsCols.length > 0 && !obsCols.includes('meeting_id')) {
     console.log('[Database] Repairing project_discovery_observations: adding meeting_id')
-    let alterError: unknown
     try {
       database.run('ALTER TABLE project_discovery_observations ADD COLUMN meeting_id TEXT')
     } catch (e) {
-      alterError = e
-    }
-    // FAIL CLOSED. For a DB already recorded at v43 the migration is SKIPPED, so
-    // this repair is the ONLY heal path — swallowing a failed ALTER would let the
-    // boot continue with a table that cannot accept an observation write,
-    // recreating the stranded condition for the whole session and, under a
-    // persistent failure, forever. Re-read the columns and refuse to continue
-    // unless the column is actually there. The re-read also subsumes the benign
-    // duplicate-column race: if the ALTER lost that race the column exists, so
-    // the check passes and the error is correctly ignored.
-    const healed = getTableColumns(database, 'project_discovery_observations')
-    if (!healed.includes('meeting_id')) {
-      throw new Error(
-        '[Database] project_discovery_observations is missing meeting_id and could not be repaired; ' +
-          'refusing to start with a table that cannot record project discoveries' +
-          (alterError ? ` (ALTER failed: ${(alterError as Error).message})` : '')
-      )
+      // Swallowed here ONLY because the verify below is unconditional; a benign
+      // duplicate-column race leaves the column present and passes.
+      console.warn('[Database] project_discovery_observations ALTER failed:', (e as Error).message)
     }
   }
+  assertObservationsTableUsable(database, '[Database] repairPhase')
 
   // Repair transcript_speakers (v25): a new table has no columns to ALTER, but
   // force-create it here so an older on-disk DB that skipped the migration still

@@ -35,7 +35,7 @@ import {
 } from '../database'
 import { applyTranscriptEntities } from '../org-reconciler'
 
-const NAME = 'Phantom Initiative'
+const NAME = 'PhantomOps'
 
 function projectRowsByName(name: string): Array<{ id: string; name: string }> {
   return queryAll<{ id: string; name: string }>('SELECT id, name FROM projects WHERE LOWER(name) = LOWER(?)', [name])
@@ -105,7 +105,7 @@ describe('project discovery rejection tombstones (v41)', () => {
   })
 
   it('tombstone matching is name-normalized (case/whitespace-insensitive)', () => {
-    const res = applyTranscriptEntities({ meetingId: 'm1', project: { name: '  phantom   INITIATIVE ' } })
+    const res = applyTranscriptEntities({ meetingId: 'm1', project: { name: '  PHANTOMOPS ' } })
     expect(res.projectLinked).toBe(false)
     expect(projectRowsByName(NAME)).toHaveLength(0)
   })
@@ -144,7 +144,7 @@ describe('project discovery rejection tombstones (v41)', () => {
    */
   describe('v42: dismissDiscoveredProject enforces discovery provenance (fail-closed)', () => {
     it('a DISCOVERED project CAN be dismissed: tombstone + delete, and re-analysis does not re-create it', () => {
-      const name = 'Meridian Alpha'
+      const name = 'MeridianOne'
       // Recurring transcript mentions auto-create it → origin='discovered'.
       discoverProject(name)
       const [row] = projectRowsByName(name)
@@ -222,7 +222,7 @@ describe('project discovery rejection tombstones (v41)', () => {
     })
 
     it('manual re-create after a discovered dismissal clears the tombstone, re-links, and is itself no longer dismissable', () => {
-      const name = 'Verdant Delta'
+      const name = 'VerdantFour'
       // 1) discovered → dismiss → tombstone.
       discoverProject(name)
       const [row] = projectRowsByName(name)
@@ -283,7 +283,7 @@ describe('project discovery rejection tombstones (v41)', () => {
     }
 
     it('DISCOVERED keeper + MANUAL loser -> merged row becomes manual and cannot be dismissed (the review ordering)', () => {
-      const keeperId = createDiscovered('Zephyr Windmill')
+      const keeperId = createDiscovered('ZephyrMill')
       createProject({ id: 'manual-brook', name: 'Cobalt Brook', description: null, status: 'active' })
 
       mergeProjects(keeperId, 'manual-brook')
@@ -295,7 +295,7 @@ describe('project discovery rejection tombstones (v41)', () => {
 
     it('MANUAL keeper + DISCOVERED loser -> merged row stays manual and cannot be dismissed', () => {
       createProject({ id: 'manual-quill', name: 'Umber Quill', description: null, status: 'active' })
-      const loserId = createDiscovered('Russet Lantern')
+      const loserId = createDiscovered('RussetLantern')
 
       mergeProjects('manual-quill', loserId)
 
@@ -304,21 +304,21 @@ describe('project discovery rejection tombstones (v41)', () => {
     })
 
     it('DISCOVERED + DISCOVERED -> merged row remains discovered and dismissable', () => {
-      const keeperId = createDiscovered('Juniper Kestrel')
-      const loserId = createDiscovered('Basalt Otter')
+      const keeperId = createDiscovered('JuniperKes')
+      const loserId = createDiscovered('BasaltOtter')
 
       mergeProjects(keeperId, loserId)
 
       expect(originOf(keeperId)).toBe('discovered')
       dismissDiscoveredProject(keeperId)
       expect(queryOne('SELECT 1 FROM projects WHERE id = ?', [keeperId])).toBeUndefined()
-      expect(isProjectDiscoveryRejected('Juniper Kestrel')).toBe(true)
+      expect(isProjectDiscoveryRejected('JuniperKes')).toBe(true)
     })
 
     it('LEGACY NULL keeper + DISCOVERED loser -> merged row stays NULL (fail-closed) and cannot be dismissed', () => {
       run("INSERT INTO projects (id, name, status) VALUES ('legacy-fjord', 'Tundra Fjord', 'active')")
       expect(originOf('legacy-fjord')).toBeNull()
-      const loserId = createDiscovered('Sable Mesa')
+      const loserId = createDiscovered('SableMesa')
 
       mergeProjects('legacy-fjord', loserId)
 
@@ -328,7 +328,7 @@ describe('project discovery rejection tombstones (v41)', () => {
     })
 
     it('unmerge restores the keeper\'s own discovered origin (fold is journaled)', () => {
-      const keeperId = createDiscovered('Vermilion Osprey')
+      const keeperId = createDiscovered('VermilionOsprey')
       createProject({ id: 'manual-dune', name: 'Ochre Dune', description: null, status: 'active' })
 
       mergeProjects(keeperId, 'manual-dune')
@@ -352,7 +352,7 @@ describe('project discovery rejection tombstones (v41)', () => {
       // Unmerging M1 FIRST would restore D to 'discovered' while M2's manual
       // data is still folded in — making the hub dismissable. The LIFO guard
       // rejects it; only newest-first unwinding is allowed.
-      const keeperId = createDiscovered('Cinder Falcon')
+      const keeperId = createDiscovered('CinderFalcon')
       createProject({ id: 'manual-anchor', name: 'Pewter Anchor', description: null, status: 'active' })
       createProject({ id: 'manual-kite', name: 'Saffron Kite', description: null, status: 'active' })
 
@@ -383,7 +383,7 @@ describe('project discovery rejection tombstones (v41)', () => {
       // Only with every merge unwound is the keeper dismissable again.
       dismissDiscoveredProject(keeperId)
       expect(queryOne('SELECT 1 FROM projects WHERE id = ?', [keeperId])).toBeUndefined()
-      expect(isProjectDiscoveryRejected('Cinder Falcon')).toBe(true)
+      expect(isProjectDiscoveryRejected('CinderFalcon')).toBe(true)
     })
   })
 })

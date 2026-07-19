@@ -165,7 +165,7 @@ describe('F12: project discovery gate (v43)', () => {
     })
 
     it('standalone recordings with no meeting are distinct sources', () => {
-      const name = 'Granite Weaver'
+      const name = 'GraniteWeaver'
       expect(applyTranscriptEntities({ recordingId: 'r1', project: { name } }).projectLinked).toBe(false)
       expect(countProjectDiscoverySources(name)).toBe(1)
 
@@ -247,7 +247,7 @@ describe('F12: project discovery gate (v43)', () => {
 
   describe('recurring + confident → created', () => {
     it('creates the project on the second distinct source, stamped origin=discovered', () => {
-      const name = 'Meridian Falcon'
+      const name = 'MeridianFalcon'
       expect(mention(name, 'm1')).toBe(false)
       expect(projectRowsByName(name)).toHaveLength(0)
 
@@ -270,27 +270,27 @@ describe('F12: project discovery gate (v43)', () => {
     })
 
     it('clears the deferred evidence once the project exists', () => {
-      expect(countProjectDiscoverySources('Meridian Falcon')).toBe(0)
+      expect(countProjectDiscoverySources('MeridianFalcon')).toBe(0)
       expect(pendingNames()).not.toContain('meridian falcon')
     })
 
     it('a later mention links to the existing project instead of re-discovering it', () => {
-      expect(mention('Meridian Falcon', 'm3')).toBe(true)
-      expect(projectRowsByName('Meridian Falcon')).toHaveLength(1)
-      expect(countProjectDiscoverySources('Meridian Falcon')).toBe(0)
+      expect(mention('MeridianFalcon', 'm3')).toBe(true)
+      expect(projectRowsByName('MeridianFalcon')).toHaveLength(1)
+      expect(countProjectDiscoverySources('MeridianFalcon')).toBe(0)
     })
 
     it('counts sources by NFKC-normalized name, so spelling variants corroborate each other', () => {
-      const name = 'Basalt Orchard'
+      const name = 'BasaltOrchard Prime'
       expect(mention(name, 'm1')).toBe(false)
       // Same name, different case/whitespace — the same discovery, not a new one.
-      expect(mention('  basalt   ORCHARD ', 'm2')).toBe(true)
+      expect(mention('  basaltorchard   PRIME ', 'm2')).toBe(true)
       // Exactly ONE project, not one per spelling.
       expect(projectRowsByNormalizedName(name)).toHaveLength(1)
     })
 
     it('needs exactly MIN_DISTINCT_SOURCES sources — not more', () => {
-      const name = 'Quartz Lantern'
+      const name = 'QuartzLantern'
       const meetings = ['m1', 'm2', 'm3']
       let created = 0
       for (let i = 0; i < MIN_DISTINCT_SOURCES; i++) {
@@ -308,7 +308,21 @@ describe('F12: project discovery gate (v43)', () => {
    * under 3 code units (so "AI" and CJK names were discarded, not deferred).
    */
   describe('recurring extraction noise never becomes a project', () => {
-    it.each(['budget', 'customer feedback', 'headcount'])(
+    it.each([
+      'budget',
+      'customer feedback',
+      'headcount',
+      // Title-Cased business jargon — the form structured model output actually
+      // emits, and the class ordinary capitalization cannot separate from a real
+      // two-word name. Held back by Title Case no longer being create-authority.
+      'Vendor Onboarding',
+      'Pricing Review',
+      'Partner Integration',
+      // …and the same rule defers real two-word names. Accepted consequence: a
+      // real project waits for a click instead of dead-end projects piling up.
+      'Meridian Alpha',
+      'Basalt Orchard'
+    ])(
       '%j recurs across three meetings and is still only a suggestion',
       (name) => {
         expect(mention(name, 'm1')).toBe(false)
@@ -429,22 +443,22 @@ describe('F12: project discovery gate (v43)', () => {
      * alphabetically-last ("Zenith Coil") regardless of which arrived last.
      */
     it('reports the most RECENTLY seen spelling, not the alphabetically last', () => {
-      applyTranscriptEntities({ meetingId: 'm1', recordingId: 'r1', project: { name: 'Zenith Coil' } })
+      applyTranscriptEntities({ meetingId: 'm1', recordingId: 'r1', project: { name: 'ZenithCoil' } })
       // Same normalized key is required for these to be one discovery, so vary
       // only the case — a later sighting whose spelling sorts BEFORE the first.
       run(
-        `UPDATE project_discovery_observations SET original_name = 'ZENITH COIL', last_seen_at = '2000-01-01T00:00:00Z'
-           WHERE name_norm = 'zenith coil'`
+        `UPDATE project_discovery_observations SET original_name = 'ZENITHCOIL', last_seen_at = '2000-01-01T00:00:00Z'
+           WHERE name_norm = 'zenithcoil'`
       )
       run(
         `INSERT INTO project_discovery_observations
            (name_norm, source_key, meeting_id, original_name, score, first_seen_at, last_seen_at)
-         VALUES ('zenith coil', 'r:late', NULL, 'Zenith Coil (renamed)', 0.9, '2030-01-01T00:00:00Z', '2030-01-01T00:00:00Z')`
+         VALUES ('zenithcoil', 'r:late', NULL, 'ZenithCoil (renamed)', 0.9, '2030-01-01T00:00:00Z', '2030-01-01T00:00:00Z')`
       )
 
-      const entry = getPendingProjectDiscoveries().find((d) => d.nameNorm === 'zenith coil')
+      const entry = getPendingProjectDiscoveries().find((d) => d.nameNorm === 'zenithcoil')
       expect(entry).toBeDefined()
-      expect(entry!.name).toBe('Zenith Coil (renamed)')
+      expect(entry!.name).toBe('ZenithCoil (renamed)')
     })
 
     /**

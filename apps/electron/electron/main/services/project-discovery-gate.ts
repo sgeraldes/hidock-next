@@ -26,6 +26,22 @@
  * enumerates and recreates the exact problem this gate exists to kill. Auto-
  * creation now needs a POSITIVE signal — see {@link nameLikeEvidence}.
  *
+ * WHY ORDINARY TITLE CASE IS NOT ENOUGH. Capitalization alone is not
+ * distinctive — it is just English. "Vendor Onboarding", "Pricing Review" and
+ * "Partner Integration" are structurally identical to "Meridian Alpha", so any
+ * rule that creates the latter creates the former. We extended the generic
+ * vocabulary twice trying to separate them and the class stayed open, because it
+ * is unclosable by enumeration: there is always one more business phrase. Nor can
+ * recurrence separate them — jargon recurs at least as much as real projects do.
+ *
+ * So auto-creation requires the name itself to be structurally distinctive:
+ * `acronym`, `uncased-script`, or `distinctive-orthography`. Ordinary Title Case
+ * (`proper-multi`) DEFERS. The consequence is deliberate and accepted: real
+ * two-word names like "Meridian Alpha" now wait in the suggestion queue instead
+ * of auto-creating. F12 exists because auto-creation was too eager, and one real
+ * project waiting for a click is a far smaller harm than a stream of dead-end
+ * projects the user must hunt down and dismiss.
+ *
  * WHY NOT THE EXTRACTOR'S OWN FLAG. The analysis hands us `{ name, is_new? }`
  * and nothing else — no entity type, no per-project confidence (the sibling
  * `meeting_confidence` scores meeting selection, not this). `is_new: true` means
@@ -34,11 +50,6 @@
  * reaches this gate when the resolver already failed to find the project the
  * model claimed to be matching — a contradiction, not evidence. So the flag
  * carries no positive signal in either state and is deliberately unused.
- *
- * KNOWN LIMIT, stated rather than hidden: structure cannot separate a Title-Cased
- * common phrase ("Customer Feedback") from a Title-Cased real name ("Meridian
- * Alpha"). Recurrence plus a dismissable origin='discovered' row is the backstop.
- * The gate's job is to cut the obvious noise, not to be an oracle.
  *
  * Kept dependency-free (no DB, no electron) so the thresholds are unit-testable
  * in isolation and the reconciler stays the only place that touches storage.
@@ -68,8 +79,17 @@ const PROSE_MIN_TOKENS = 3
 
 /** Anything that clears the shape rules is at least plausible — and deferred. */
 const BASE_PLAUSIBLE = 0.3
-/** Positive name-like structure. The ONLY way to reach the create floor. */
-const NAME_EVIDENCE_BONUS = 0.35
+/**
+ * Structurally DISTINCTIVE name evidence — acronym, caseless script, or unusual
+ * orthography. The ONLY way to reach the create floor.
+ */
+const DISTINCTIVE_EVIDENCE_BONUS = 0.35
+/**
+ * Ordinary Title Case ("Meridian Alpha"). Deliberately sized to stay BELOW the
+ * create floor: it ranks a candidate higher in the deferred queue without ever
+ * authorising auto-creation. See the header for why.
+ */
+const PROPER_CASE_BONUS = 0.15
 /** 2-4 tokens reads like a real project name; a nudge, never decisive. */
 const MULTI_TOKEN_BONUS = 0.05
 /** Ceiling for a name built ENTIRELY of generic vocabulary — deferred forever. */
@@ -191,18 +211,15 @@ const SENTENCE_PUNCTUATION = /[!?]|\.\s|\.$/
  * Look for positive name-like structure in the RAW (un-normalized) string —
  * capitalization is the signal, so this must not run on a lowercased key.
  *
- * Tiers, strongest first. The first three are VOCABULARY-INDEPENDENT: they read
+ * Tiers, strongest first. The first three are VOCABULARY-INDEPENDENT — they read
  * orthography, not word lists, so noise cannot escape them by using a word the
- * generic list happens not to enumerate.
+ * generic list happens not to enumerate — and they are the ONLY tiers that
+ * authorise auto-creation.
  *
- * `proper-multi` is the weak tier, and its precision does rest on the generic
- * vocabulary: Title Case alone cannot separate "Customer Feedback" from
- * "Meridian Alpha" — both are two ordinary capitalized nouns — so the generic set
- * carries business-process vocabulary and an all-generic phrase is capped below
- * the floor before this function is ever consulted. Stated plainly because it is
- * the residual false-positive path: business jargon outside that vocabulary can
- * still earn proper-multi. Recurrence plus a dismissable origin='discovered' row
- * is the backstop.
+ * `proper-multi` is the weak tier and is DEFER-ONLY. It is still reported (and
+ * still nudges the score) because a Title-Cased candidate is a better suggestion
+ * than a lowercase one, but it can never reach the create floor: ordinary
+ * capitalization does not distinguish "Vendor Onboarding" from "Meridian Alpha".
  *
  * A single capitalized token ("Atlas", "Budget") is deliberately NOT evidence:
  * structurally the real name and the noise word are identical, and the extractor
@@ -299,8 +316,12 @@ export function scoreProjectNameCandidate(name: string): ProjectNameQuality {
   }
 
   const evidence = nameLikeEvidence(raw)
-  if (evidence) {
-    score += NAME_EVIDENCE_BONUS
+  if (evidence === 'proper-multi') {
+    // Ranks the suggestion, never authorises creation (stays below the floor).
+    score += PROPER_CASE_BONUS
+    reasons.push('evidence:proper-multi', 'title-case-not-distinctive')
+  } else if (evidence) {
+    score += DISTINCTIVE_EVIDENCE_BONUS
     reasons.push(`evidence:${evidence}`)
   } else {
     reasons.push('no-name-structure')
