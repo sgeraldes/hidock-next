@@ -48,8 +48,8 @@ export function registerContactsHandlers(): void {
           return error('VALIDATION_ERROR', 'Invalid request parameters', parsed.error.format())
         }
 
-        const { search, type, limit, offset } = parsed.data
-        const result = getContacts(search, type, limit, offset)
+        const { search, type, limit, offset, sortBy } = parsed.data
+        const result = getContacts(search, type, limit, offset, sortBy)
 
         return success({
           contacts: result.contacts.map(mapToPerson),

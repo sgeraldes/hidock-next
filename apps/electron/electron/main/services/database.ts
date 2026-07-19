@@ -1114,7 +1114,7 @@ const MIGRATIONS: Record<number, () => void> = {
         // Table exists, check for ALL columns added during redesign
         const captureInfo = database.exec("PRAGMA table_info(knowledge_captures)")
         const existingCols = captureInfo[0].values.map(col => col[1])
-        
+
         const requiredColumns = [
           { name: 'category', def: "category TEXT CHECK(category IN ('meeting', 'interview', '1:1', 'brainstorm', 'note', 'other')) DEFAULT 'meeting'" },
           { name: 'status', def: "status TEXT CHECK(status IN ('processing', 'ready', 'enriched')) DEFAULT 'ready'" },
@@ -2852,7 +2852,8 @@ export function upsertMeetingsBatch(meetings: Omit<Meeting, 'created_at' | 'upda
         runNoSave(
           `UPDATE meetings SET
             subject = ?, start_time = ?, end_time = ?, location = ?,
-            organizer_name = ?, organizer_email = ?, attendees = ?,
+            organizer_name = ?, organizer_email = ?,
+            attendees = COALESCE(?, attendees),
             description = ?, is_recurring = ?, recurrence_rule = ?,
             meeting_url = ?, is_all_day = ?, all_day_date = ?, updated_at = CURRENT_TIMESTAMP
           WHERE id = ?`,
@@ -4619,7 +4620,15 @@ export interface MeetingContact {
   role: ContactRole
 }
 
-export function getContacts(search?: string, type?: string, limit = 100, offset = 0): { contacts: Contact[]; total: number } {
+export type ContactSortBy = 'name' | 'lastSeen' | 'interactions'
+
+export function getContacts(
+  search?: string,
+  type?: string,
+  limit = 100,
+  offset = 0,
+  sortBy?: ContactSortBy
+): { contacts: Contact[]; total: number } {
   let countSql = 'SELECT COUNT(*) as count FROM contacts'
   let sql = 'SELECT * FROM contacts'
   const params: unknown[] = []
@@ -4627,7 +4636,9 @@ export function getContacts(search?: string, type?: string, limit = 100, offset 
 
   if (search) {
     const escaped = escapeLikePattern(search)
-    whereClauses.push("(name LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\' OR company LIKE ? ESCAPE '\\' OR role LIKE ? ESCAPE '\\')")
+    whereClauses.push(
+      "(name LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\' OR company LIKE ? ESCAPE '\\' OR role LIKE ? ESCAPE '\\')"
+    )
     params.push(`%${escaped}%`, `%${escaped}%`, `%${escaped}%`, `%${escaped}%`)
   }
 
@@ -4642,7 +4653,15 @@ export function getContacts(search?: string, type?: string, limit = 100, offset 
     sql += whereClause
   }
 
-  sql += ' ORDER BY meeting_count DESC, last_seen_at DESC LIMIT ? OFFSET ?'
+  const orderBy = {
+    name: 'name COLLATE NOCASE ASC, id ASC',
+    lastSeen: 'last_seen_at DESC, name COLLATE NOCASE ASC, id ASC',
+    interactions: 'meeting_count DESC, last_seen_at DESC, name COLLATE NOCASE ASC, id ASC'
+  } satisfies Record<ContactSortBy, string>
+  const selectedOrder = sortBy
+    ? orderBy[sortBy]
+    : 'meeting_count DESC, last_seen_at DESC, id ASC'
+  sql += ` ORDER BY ${selectedOrder} LIMIT ? OFFSET ?`
 
   const countResult = queryOne<{ count: number }>(countSql, params)
   const contacts = queryAll<Contact>(sql, [...params, limit, offset])

@@ -53,7 +53,9 @@ import {
   getProjectNotes,
   updateProjectNote,
   deleteProjectNote,
-  getActionablesForProject
+  getActionablesForProject,
+  getMeetingById,
+  upsertMeetingsBatch
 } from '../database'
 
 // ---------------------------------------------------------------------------
@@ -548,7 +550,35 @@ describe('Database Service', () => {
   })
 
   // =========================================================================
-  // 12. Recording lifecycle: insert / status / download / resolve
+  // 12. Meeting attendee synchronization
+  // =========================================================================
+  describe('upsertMeetingsBatch()', () => {
+    const meeting = {
+      id: 'meeting-1',
+      subject: 'Planning',
+      start_time: '2026-01-01T10:00:00.000Z',
+      end_time: '2026-01-01T11:00:00.000Z',
+      attendees: JSON.stringify([{ name: 'Invitee', email: 'invitee@example.com' }]),
+      is_recurring: 0
+    }
+
+    it('preserves stored attendees when an incremental update omits them', () => {
+      upsertMeetingsBatch([meeting])
+      upsertMeetingsBatch([{ ...meeting, subject: 'Updated', attendees: undefined }])
+
+      expect(getMeetingById(meeting.id)?.attendees).toBe(meeting.attendees)
+    })
+
+    it('clears stored attendees when an update explicitly supplies an empty list', () => {
+      upsertMeetingsBatch([meeting])
+      upsertMeetingsBatch([{ ...meeting, attendees: '[]' }])
+
+      expect(getMeetingById(meeting.id)?.attendees).toBe('[]')
+    })
+  })
+
+  // =========================================================================
+  // 13. Recording lifecycle: insert / status / download / resolve
   // =========================================================================
   describe('insertRecording()', () => {
     it('persists the lifecycle columns rather than the device-oriented DDL defaults', () => {

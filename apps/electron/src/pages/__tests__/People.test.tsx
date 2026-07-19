@@ -212,12 +212,12 @@ describe('People Page', () => {
 
     await screen.findByText('Mario')
 
-    // Should show "Showing 1-3 of 3 people"
-    expect(screen.getByText(/Showing 1/)).toBeInTheDocument()
+    // Should show "Showing 3 of 3 people"
+    expect(screen.getByText(/Showing 3/)).toBeInTheDocument()
     expect(screen.getByText(/of 3 people/)).toBeInTheDocument()
   })
 
-  // C-006: Pagination - page size used is 30
+  // C-006: Pagination - page size used is 40
   it('should pass pagination offset to API', async () => {
     render(
       <MemoryRouter>
@@ -227,17 +227,17 @@ describe('People Page', () => {
 
     await screen.findByText('Mario')
 
-    // First call should use offset 0 with limit 30
+    // First call should use offset 0 with limit 40
     expect(mockGetAll).toHaveBeenCalledWith(
       expect.objectContaining({
-        limit: 30,
+        limit: 40,
         offset: 0
       })
     )
   })
 
-  // C-006: Pagination controls render when needed
-  it('should show pagination controls when total exceeds page size', async () => {
+  // C-006: "Load more" renders when there are additional pages, and fetches the next chunk
+  it('should show a Load more control when total exceeds page size, and append the next page on click', async () => {
     mockGetAll.mockResolvedValueOnce({
       success: true,
       data: {
@@ -255,7 +255,27 @@ describe('People Page', () => {
             company: null
           }
         ],
-        total: 60 // Two pages of 30
+        total: 60 // More than one page of 40
+      }
+    })
+    mockGetAll.mockResolvedValueOnce({
+      success: true,
+      data: {
+        contacts: [
+          {
+            id: 'p2',
+            name: 'Second Page Person',
+            type: 'team',
+            interactionCount: 1,
+            lastSeenAt: '2026-01-01T00:00:00Z',
+            firstSeenAt: '2026-01-01T00:00:00Z',
+            tags: [],
+            email: null,
+            role: null,
+            company: null
+          }
+        ],
+        total: 60
       }
     })
 
@@ -267,14 +287,60 @@ describe('People Page', () => {
 
     await screen.findByText('Test Person')
 
-    // Pagination controls should be visible
-    expect(screen.getByLabelText('Previous page')).toBeInTheDocument()
-    expect(screen.getByLabelText('Next page')).toBeInTheDocument()
-    expect(screen.getByText('Page 1 of 2')).toBeInTheDocument()
+    const loadMoreButton = screen.getByRole('button', { name: /load more/i })
+    expect(loadMoreButton).toBeInTheDocument()
+
+    fireEvent.click(loadMoreButton)
+
+    await screen.findByText('Second Page Person')
+
+    // Second call should append starting at offset 1 (the count already loaded)
+    expect(mockGetAll).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        limit: 40,
+        offset: 1
+      })
+    )
   })
 
-  // C-006: No pagination controls when not needed
-  it('should not show pagination controls when total fits one page', async () => {
+  it('should hide stale pagination immediately when the active query changes', async () => {
+    mockGetAll.mockResolvedValueOnce({
+      success: true,
+      data: {
+        contacts: [
+          {
+            id: 'p1',
+            name: 'Test Person',
+            type: 'team',
+            interactionCount: 1,
+            lastSeenAt: '2026-01-01T00:00:00Z',
+            firstSeenAt: '2026-01-01T00:00:00Z',
+            tags: [],
+            email: null,
+            role: null,
+            company: null
+          }
+        ],
+        total: 60
+      }
+    })
+
+    render(
+      <MemoryRouter>
+        <People />
+      </MemoryRouter>
+    )
+
+    await screen.findByText('Test Person')
+    expect(screen.getByRole('button', { name: /load more/i })).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('Sort contacts'), { target: { value: 'interactions' } })
+
+    expect(screen.queryByRole('button', { name: /load more/i })).not.toBeInTheDocument()
+  })
+
+  // C-006: No "Load more" control when not needed
+  it('should not show a Load more control when total fits one page', async () => {
     render(
       <MemoryRouter>
         <People />
@@ -283,9 +349,8 @@ describe('People Page', () => {
 
     await screen.findByText('Mario')
 
-    // No pagination buttons since total (3) fits in one page (30)
-    expect(screen.queryByLabelText('Previous page')).not.toBeInTheDocument()
-    expect(screen.queryByLabelText('Next page')).not.toBeInTheDocument()
+    // No "Load more" control since total (3) fits in one page (40)
+    expect(screen.queryByRole('button', { name: /load more/i })).not.toBeInTheDocument()
   })
 
   // C-006: Safe date formatting for invalid dates

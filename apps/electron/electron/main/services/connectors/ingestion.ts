@@ -45,7 +45,9 @@ export function externalMeetingToRow(connectorId: string, m: ExternalMeeting): M
     location: m.location ?? null,
     organizer_name: m.organizer?.name ?? null,
     organizer_email: m.organizer?.email ?? null,
-    attendees: JSON.stringify(m.attendees.map((a) => ({ name: a.name, email: a.email }))),
+    attendees: m.attendees
+      ? JSON.stringify(m.attendees.map((a) => ({ name: a.name, email: a.email })))
+      : undefined,
     description: m.description ?? null,
     is_recurring: m.metadata?.seriesMasterId ? 1 : 0,
     meeting_url: m.onlineJoinUrl,
@@ -109,9 +111,9 @@ export class ConnectorIngestionSink implements IngestionSink {
 
     for (const item of items) {
       try {
-        if (item.kind === 'meeting' && item.entity && 'attendees' in item.entity) {
+        if (item.kind === 'meeting' && item.entity) {
           meetingRows.push(externalMeetingToRow(connectorId, item.entity as ExternalMeeting))
-        } else if (item.kind === 'contact' && item.entity && !('attendees' in item.entity)) {
+        } else if (item.kind === 'contact' && item.entity) {
           this.deps.applyContact(item.entity as ExternalPerson)
           outcome.contacts++
         } else {

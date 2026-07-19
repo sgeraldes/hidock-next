@@ -146,6 +146,7 @@ export interface RAGSource {
 export interface GetContactsRequest {
   search?: string
   type?: 'team' | 'candidate' | 'customer' | 'external' | 'unknown' | 'all'
+  sortBy?: 'name' | 'lastSeen' | 'interactions'
   limit?: number
   offset?: number
 }

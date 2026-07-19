@@ -61,6 +61,11 @@ describe('externalMeetingToRow', () => {
     expect(row.is_recurring).toBe(1) // seriesMasterId present
     expect(row.meeting_url).toBe('https://teams/join')
   })
+
+  it('preserves omitted attendees while mapping an explicit empty list', () => {
+    expect(externalMeetingToRow('m365', { ...meeting, attendees: undefined }).attendees).toBeUndefined()
+    expect(externalMeetingToRow('m365', { ...meeting, attendees: [] }).attendees).toBe('[]')
+  })
 })
 
 describe('extensionForItem', () => {
