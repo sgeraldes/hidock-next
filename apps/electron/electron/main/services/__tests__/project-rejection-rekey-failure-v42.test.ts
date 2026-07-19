@@ -19,7 +19,12 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { existsSync, unlinkSync } from 'fs'
+import { existsSync, unlinkSync, readFileSync } from 'fs'
+
+/** Target schema version read from database.ts — see database.test.ts for why. */
+const EXPECTED_SCHEMA_VERSION = Number(
+  readFileSync(join(__dirname, '..', 'database.ts'), 'utf-8').match(/const SCHEMA_VERSION = (\d+)\b/)![1]
+)
 
 const dbPath = join(tmpdir(), `hidock-rekey-failure-test-${Date.now()}.db`)
 vi.mock('../file-storage', () => ({ getDatabasePath: () => dbPath }))
@@ -60,7 +65,7 @@ describe('migration v42: failed tombstone re-key does not advance schema_version
   })
 
   it('rolls back, leaves the DB at v41, and a reopen retries the migration successfully', async () => {
-    expect(maxVersion()).toBe(42)
+    expect(maxVersion()).toBe(EXPECTED_SCHEMA_VERSION)
 
     // Seed a stranded v41-style tombstone (old non-NFKC key) so the re-key has
     // a rewrite to perform, roll the version back to 41, and plant the poison.
@@ -92,7 +97,9 @@ describe('migration v42: failed tombstone re-key does not advance schema_version
     closeDatabase()
     await initializeDatabase()
 
-    expect(maxVersion()).toBe(42)
+    // v42 succeeds this time, and the boot continues through every later
+    // migration to the app's current target version.
+    expect(maxVersion()).toBe(EXPECTED_SCHEMA_VERSION)
     const rekeyed = queryOne<{ name_norm: string }>(
       'SELECT name_norm FROM project_discovery_rejections WHERE original_name = ?',
       [DECOMPOSED]

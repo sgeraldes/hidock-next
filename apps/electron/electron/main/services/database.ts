@@ -7,7 +7,7 @@ import { DatabaseEngine, getTableColumns, type SqlJsDatabase } from '@hidock/dat
 import { normalizeName, isGenericSpeakerLabel, detectAmbiguousName } from './entity-normalize'
 import { getEventBus } from './event-bus'
 
-const SCHEMA_VERSION = 42
+const SCHEMA_VERSION = 43
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -638,6 +638,26 @@ CREATE TABLE IF NOT EXISTS project_discovery_rejections (
     rejected_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Discovery observation ledger (v43, F12). Every plausible project name a
+-- transcript analysis extracts is recorded here BEFORE anything is created, one
+-- row per (name, source). The reconciler auto-creates a project only once a name
+-- clears the plausibility floor AND appears in >= 2 DISTINCT sources. Everything
+-- else stays here as a deferred discovery suggestion the user can promote.
+-- The composite PK is what makes recurrence honest: re-analysing the same
+-- recording (or two recordings of one meeting) upserts a single row, so
+-- re-processing can never manufacture corroboration.
+CREATE TABLE IF NOT EXISTS project_discovery_observations (
+    name_norm TEXT NOT NULL,
+    -- 'm:<meetingId>' when the mention has a meeting, else 'r:<recordingId>'.
+    source_key TEXT NOT NULL,
+    original_name TEXT NOT NULL,
+    -- Best name-plausibility score seen for this name (project-discovery-gate.ts).
+    score REAL NOT NULL DEFAULT 0,
+    first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (name_norm, source_key)
+);
+
 -- Identity suggestion queue (v27). The 0.5–0.8 resolver band lands here as
 -- reviewable cards. Accept writes an alias and links, reject blocks the pairing.
 CREATE TABLE IF NOT EXISTS identity_suggestions (
@@ -723,7 +743,7 @@ CREATE TABLE IF NOT EXISTS turn_speaker_overrides (
 -- Speaker splits (v37). Forks a diarization label into an independently
 -- assignable derived label from a chosen turn onward. Fixes the merged-speaker
 -- case (one label = two real people): split at the boundary, then assign each
--- half its own contact. from_turn_index is the first turn of the derived label;
+-- half its own contact. from_turn_index is the first turn of the derived label.
 -- derived_label (e.g. "Speaker 1 · B") becomes a first-class key in
 -- transcript_speakers. Reversible by deleting the row ("merge back").
 CREATE TABLE IF NOT EXISTS speaker_splits (
@@ -2288,6 +2308,34 @@ const MIGRATIONS: Record<number, () => void> = {
       throw e
     }
     console.log('Migration v42 complete')
+  },
+
+  43: () => {
+    // v43 (F12): project_discovery_observations — the ledger that gates spurious
+    // project auto-creation. Before v43 the reconciler created a real projects
+    // row for ANY extracted name the resolver failed to match, so a one-off
+    // phrase became a zero-item dead-end project. The ledger records each
+    // (name, source) sighting so the reconciler can require BOTH a plausible
+    // name and >= 2 distinct sources before creating, and surface everything
+    // else as a deferred suggestion. Idempotent: CREATE IF NOT EXISTS.
+    console.log('Running migration to schema v43: project_discovery_observations')
+    const database = getDatabase()
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS project_discovery_observations (
+          name_norm TEXT NOT NULL,
+          source_key TEXT NOT NULL,
+          original_name TEXT NOT NULL,
+          score REAL NOT NULL DEFAULT 0,
+          first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (name_norm, source_key)
+        )
+      `)
+    } catch (e) {
+      console.warn('[Migration v43] create project_discovery_observations failed:', e)
+    }
+    console.log('Migration v43 complete')
   }
 
 }
@@ -6012,6 +6060,9 @@ export function createProject(project: Omit<Project, 'created_at' | 'folder_path
   // Manual beats rejection: an explicit create clears any discovery tombstone for
   // this name, so future transcript mentions resolve and link to it normally.
   clearProjectDiscoveryRejection(project.name)
+  // The project now exists, so its pending discovery evidence (v43) is settled —
+  // future mentions resolve to this row instead of accumulating sightings.
+  clearProjectDiscoveryObservations(project.name)
   return { ...project, folder_path: null, url: null, origin: 'manual', created_at: new Date().toISOString() }
 }
 
@@ -6037,6 +6088,10 @@ export function addProjectDiscoveryRejection(name: string, sourceMeetingId?: str
        rejected_at = excluded.rejected_at`,
     [norm, name, sourceMeetingId ?? null, new Date().toISOString()]
   )
+  // The user has answered the question for this name — drop its accumulated
+  // sightings so it cannot linger in the deferred-discovery queue (the
+  // suggestion-surface equivalent of the dismiss->reappear loop v41 fixed).
+  clearProjectDiscoveryObservations(name)
 }
 
 /** True when this name was dismissed as a spurious discovery (blocks auto-create only). */
@@ -6054,6 +6109,119 @@ export function clearProjectDiscoveryRejection(name: string): void {
   const norm = normalizeName(name)
   if (!norm) return
   run('DELETE FROM project_discovery_rejections WHERE name_norm = ?', [norm])
+}
+
+// ---------------------------------------------------------------------------
+// Project discovery observation ledger (v43, F12)
+// ---------------------------------------------------------------------------
+// The recurrence half of the auto-creation gate. Each plausible extracted
+// project name is recorded here per SOURCE before anything is created, so the
+// reconciler can ask "has this name actually come back?" instead of trusting a
+// single mention. Names that never clear both bars stay here as deferred
+// discovery suggestions rather than becoming zero-item projects.
+
+/** One name's accumulated discovery evidence — a deferred suggestion row. */
+export interface PendingProjectDiscovery {
+  /** NFKC-normalized key (same normalization the tombstones use). */
+  nameNorm: string
+  /** Most recently seen original spelling. */
+  name: string
+  /** Best name-plausibility score observed (project-discovery-gate.ts). */
+  score: number
+  /** How many DISTINCT meetings/recordings mentioned it. */
+  sourceCount: number
+  firstSeenAt: string
+  lastSeenAt: string
+}
+
+/**
+ * Record one sighting of an extracted project name and return how many DISTINCT
+ * sources have now mentioned it (this sighting included).
+ *
+ * `sourceKey` must identify the *conversation*, not the analysis run — the
+ * reconciler passes `m:<meetingId>` when the mention has a meeting and
+ * `r:<recordingId>` otherwise. The composite primary key then makes re-analysis
+ * idempotent: re-transcribing the same recording, or two recordings of one
+ * meeting, upsert a single row and never inflate the count. `score` keeps the
+ * best value seen so a cleanly-spelled later mention can lift a name that first
+ * arrived mangled.
+ */
+export function recordProjectDiscoveryObservation(name: string, sourceKey: string, score: number): number {
+  const norm = normalizeName(name)
+  if (!norm || !sourceKey) return 0
+  const now = new Date().toISOString()
+  run(
+    `INSERT INTO project_discovery_observations
+       (name_norm, source_key, original_name, score, first_seen_at, last_seen_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(name_norm, source_key) DO UPDATE SET
+       original_name = excluded.original_name,
+       score = MAX(project_discovery_observations.score, excluded.score),
+       last_seen_at = excluded.last_seen_at`,
+    [norm, sourceKey, name, score, now, now]
+  )
+  return countProjectDiscoverySources(name)
+}
+
+/** How many distinct sources have mentioned this project name. */
+export function countProjectDiscoverySources(name: string): number {
+  const norm = normalizeName(name)
+  if (!norm) return 0
+  return (
+    queryOne<{ n: number }>(
+      'SELECT COUNT(*) AS n FROM project_discovery_observations WHERE name_norm = ?',
+      [norm]
+    )?.n ?? 0
+  )
+}
+
+/**
+ * Forget a name's accumulated sightings. Called whenever the name stops being an
+ * open question — the project got created (auto or manual), or the user dismissed
+ * it — so a settled name never lingers in the deferred-suggestion queue.
+ */
+export function clearProjectDiscoveryObservations(name: string): void {
+  const norm = normalizeName(name)
+  if (!norm) return
+  run('DELETE FROM project_discovery_observations WHERE name_norm = ?', [norm])
+}
+
+/**
+ * The deferred discovery queue: names the gate saw but refused to auto-create,
+ * strongest evidence first. Tombstoned names and names that already exist as a
+ * project are filtered out defensively (both are purged on the way in, so this is
+ * belt-and-braces against a ledger written before either happened).
+ */
+export function getPendingProjectDiscoveries(limit = 50): PendingProjectDiscovery[] {
+  return queryAll<{
+    name_norm: string
+    name: string
+    score: number
+    source_count: number
+    first_seen_at: string
+    last_seen_at: string
+  }>(
+    `SELECT o.name_norm AS name_norm,
+            MAX(o.original_name) AS name,
+            MAX(o.score) AS score,
+            COUNT(*) AS source_count,
+            MIN(o.first_seen_at) AS first_seen_at,
+            MAX(o.last_seen_at) AS last_seen_at
+       FROM project_discovery_observations o
+      WHERE o.name_norm NOT IN (SELECT name_norm FROM project_discovery_rejections)
+        AND o.name_norm NOT IN (SELECT LOWER(name) FROM projects)
+      GROUP BY o.name_norm
+      ORDER BY source_count DESC, score DESC, last_seen_at DESC
+      LIMIT ?`,
+    [limit]
+  ).map((r) => ({
+    nameNorm: r.name_norm,
+    name: r.name,
+    score: r.score,
+    sourceCount: r.source_count,
+    firstSeenAt: r.first_seen_at,
+    lastSeenAt: r.last_seen_at
+  }))
 }
 
 /** Typed failure reasons for {@link dismissDiscoveredProject}. */

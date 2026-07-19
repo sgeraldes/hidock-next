@@ -27,10 +27,13 @@ import {
   getBucketResolution,
   healRecordingStatusFromTranscripts,
   isProjectDiscoveryRejected,
+  recordProjectDiscoveryObservation,
+  clearProjectDiscoveryObservations,
   type RecordingPreassignment
 } from './database'
 import { resolveContact, resolveProject } from './entity-resolver'
 import { isGenericSpeakerLabel, cleanRole } from './entity-normalize'
+import { decideProjectDiscovery, scoreProjectNameCandidate } from './project-discovery-gate'
 import { canUpgrade, methodConfidence } from './signal-tiers'
 import { LONG_MEETING_MS } from './recording-match-scoring'
 import { randomUUID } from 'crypto'
@@ -551,12 +554,51 @@ export function applyTranscriptEntities(opts: {
         // re-creation on re-analysis. Only the AUTO-create path is blocked:
         // if the user manually creates a project with this name, createProject
         // clears the tombstone and resolveProject links to it normally above.
+        // Deliberately short-circuits BEFORE the discovery gate: a dismissed name
+        // must not even accumulate sightings, or it would climb back into the
+        // deferred-suggestion queue the user just cleared.
       } else {
-        const id = randomUUID()
-        // origin='discovered' (v42): durable provenance — ONLY rows created here
-        // are dismissable via projects:dismissDiscovered (fail-closed elsewhere).
-        run(`INSERT INTO projects (id, name, status, origin) VALUES (?, ?, 'active', 'discovered')`, [id, projectName])
-        projectId = id
+        // F12 discovery gate. The resolver landing here means only "this is not a
+        // project I already know" — NOT "this is a project". Require a plausible
+        // name AND corroboration across >= 2 distinct sources before minting a
+        // row; anything weaker is remembered as a deferred suggestion instead of
+        // becoming a zero-item dead-end project.
+        //
+        // Source identity is the CONVERSATION, not the analysis run: prefer the
+        // meeting so two recordings of one meeting count once, and re-analysing a
+        // recording upserts its existing row. Without either id there is nothing
+        // to corroborate against, so we neither record nor create.
+        const quality = scoreProjectNameCandidate(projectName)
+        const sourceKey = opts.meetingId ? `m:${opts.meetingId}` : opts.recordingId ? `r:${opts.recordingId}` : null
+        // Score 0 is structural noise (a sentence fragment, digit soup) — dropped
+        // before it reaches the ledger so the deferred queue stays reviewable.
+        const distinctSources =
+          quality.score > 0 && sourceKey
+            ? recordProjectDiscoveryObservation(projectName, sourceKey, quality.score)
+            : 0
+        const decision = decideProjectDiscovery({ name: projectName, distinctSources })
+
+        if (decision.action === 'create') {
+          const id = randomUUID()
+          // origin='discovered' (v42): durable provenance — ONLY rows created here
+          // are dismissable via projects:dismissDiscovered (fail-closed elsewhere).
+          run(`INSERT INTO projects (id, name, status, origin) VALUES (?, ?, 'active', 'discovered')`, [
+            id,
+            projectName
+          ])
+          projectId = id
+          // The name is settled — stop tracking it as an open discovery question.
+          clearProjectDiscoveryObservations(projectName)
+          console.log(
+            `[OrgReconciler] Discovered project "${projectName}" ` +
+              `(name score ${decision.score}, seen in ${decision.distinctSources} sources)`
+          )
+        } else {
+          console.log(
+            `[OrgReconciler] Withheld project "${projectName}" — ${decision.action} ` +
+              `(name score ${decision.score}, ${decision.distinctSources} source(s): ${decision.reasons.join(', ')})`
+          )
+        }
       }
 
       if (projectId && opts.meetingId) {

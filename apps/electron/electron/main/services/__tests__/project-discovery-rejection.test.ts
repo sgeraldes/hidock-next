@@ -41,10 +41,30 @@ function projectRowsByName(name: string): Array<{ id: string; name: string }> {
   return queryAll<{ id: string; name: string }>('SELECT id, name FROM projects WHERE LOWER(name) = LOWER(?)', [name])
 }
 
+/**
+ * Drive a project into existence through the reconciler's DISCOVERY path.
+ *
+ * F12 (v43) gates that path: a name is only auto-created once it clears the
+ * plausibility floor AND recurs across >= 2 DISTINCT sources. So every case below
+ * that needs a *discovered* project now drives two sightings — the first (from
+ * `m2`) is deferred to the discovery queue, the second (from `m1`) creates and
+ * links it. The provenance/tombstone semantics under test are unchanged; only the
+ * precondition for reaching the create branch is.
+ */
+function discoverProject(name: string): void {
+  const first = applyTranscriptEntities({ meetingId: 'm2', project: { name } })
+  expect(first.projectLinked).toBe(false) // one mention is not evidence of a project
+  expect(projectRowsByName(name)).toHaveLength(0)
+  const second = applyTranscriptEntities({ meetingId: 'm1', project: { name } })
+  expect(second.projectLinked).toBe(true)
+}
+
 describe('project discovery rejection tombstones (v41)', () => {
   beforeAll(async () => {
     await initializeDatabase()
     run(`INSERT INTO meetings (id, subject, start_time, end_time) VALUES ('m1', 'Weekly Sync', '2026-01-02T10:00:00Z', '2026-01-02T11:00:00Z')`)
+    // Second source so the F12 recurrence gate (>= 2 distinct meetings) can be met.
+    run(`INSERT INTO meetings (id, subject, start_time, end_time) VALUES ('m2', 'Kickoff', '2026-01-01T10:00:00Z', '2026-01-01T11:00:00Z')`)
   })
 
   afterAll(() => {
@@ -54,9 +74,8 @@ describe('project discovery rejection tombstones (v41)', () => {
     }
   })
 
-  it('a transcript mention auto-creates and links the project (baseline)', () => {
-    const res = applyTranscriptEntities({ meetingId: 'm1', project: { name: NAME } })
-    expect(res.projectLinked).toBe(true)
+  it('a RECURRING transcript mention auto-creates and links the project (baseline)', () => {
+    discoverProject(NAME)
     const rows = projectRowsByName(NAME)
     expect(rows).toHaveLength(1)
     const link = queryOne<{ meeting_id: string }>(
@@ -124,9 +143,8 @@ describe('project discovery rejection tombstones (v41)', () => {
   describe('v42: dismissDiscoveredProject enforces discovery provenance (fail-closed)', () => {
     it('a DISCOVERED project CAN be dismissed: tombstone + delete, and re-analysis does not re-create it', () => {
       const name = 'Meridian Alpha'
-      // A transcript mention auto-creates it → origin='discovered'.
-      const created = applyTranscriptEntities({ meetingId: 'm1', project: { name } })
-      expect(created.projectLinked).toBe(true)
+      // Recurring transcript mentions auto-create it → origin='discovered'.
+      discoverProject(name)
       const [row] = projectRowsByName(name)
       expect(row).toBeDefined()
       expect(
@@ -204,8 +222,7 @@ describe('project discovery rejection tombstones (v41)', () => {
     it('manual re-create after a discovered dismissal clears the tombstone, re-links, and is itself no longer dismissable', () => {
       const name = 'Verdant Delta'
       // 1) discovered → dismiss → tombstone.
-      const created = applyTranscriptEntities({ meetingId: 'm1', project: { name } })
-      expect(created.projectLinked).toBe(true)
+      discoverProject(name)
       const [row] = projectRowsByName(name)
       dismissDiscoveredProject(row.id)
       expect(isProjectDiscoveryRejected(name)).toBe(true)
@@ -243,8 +260,7 @@ describe('project discovery rejection tombstones (v41)', () => {
   describe('v42: merge provenance dominance (manual data never becomes dismissable)', () => {
     /** Auto-create a discovered project via the reconciler and return its row id. */
     function createDiscovered(name: string): string {
-      const res = applyTranscriptEntities({ meetingId: 'm1', project: { name } })
-      expect(res.projectLinked).toBe(true)
+      discoverProject(name)
       const [row] = projectRowsByName(name)
       expect(row).toBeDefined()
       expect(originOf(row.id)).toBe('discovered')
