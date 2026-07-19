@@ -2329,21 +2329,35 @@ const MIGRATIONS: Record<number, () => void> = {
     // else as a deferred suggestion. Idempotent: CREATE IF NOT EXISTS.
     console.log('Running migration to schema v43: project_discovery_observations')
     const database = getDatabase()
-    try {
-      database.run(`
-        CREATE TABLE IF NOT EXISTS project_discovery_observations (
-          name_norm TEXT NOT NULL,
-          source_key TEXT NOT NULL,
-          meeting_id TEXT,
-          original_name TEXT NOT NULL,
-          score REAL NOT NULL DEFAULT 0,
-          first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
-          last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
-          PRIMARY KEY (name_norm, source_key)
-        )
-      `)
-    } catch (e) {
-      console.warn('[Migration v43] create project_discovery_observations failed:', e)
+    database.run(`
+      CREATE TABLE IF NOT EXISTS project_discovery_observations (
+        name_norm TEXT NOT NULL,
+        source_key TEXT NOT NULL,
+        meeting_id TEXT,
+        original_name TEXT NOT NULL,
+        score REAL NOT NULL DEFAULT 0,
+        first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (name_norm, source_key)
+      )
+    `)
+    // CREATE TABLE IF NOT EXISTS is a no-op against a table that already exists
+    // with the wrong shape, so add the column explicitly when it is missing.
+    const cols = getTableColumns(database, 'project_discovery_observations')
+    if (cols.length > 0 && !cols.includes('meeting_id')) {
+      database.run('ALTER TABLE project_discovery_observations ADD COLUMN meeting_id TEXT')
+    }
+    // VERIFY, then let any failure propagate. The engine records a version only
+    // AFTER its migration returns, so throwing here leaves the DB below 43 and
+    // the next boot retries — swallowing would mark the migration complete over a
+    // table that cannot accept an insert, killing discovery silently. Same
+    // fail-loud policy migration 42 adopted for the tombstone re-key.
+    const finalCols = getTableColumns(database, 'project_discovery_observations')
+    if (!finalCols.includes('meeting_id')) {
+      throw new Error(
+        '[Migration v43] project_discovery_observations is missing meeting_id after repair; ' +
+          'refusing to record schema v43 over an unusable table'
+      )
     }
     console.log('Migration v43 complete')
   }
@@ -2462,6 +2476,36 @@ function repairPhase(): void {
       )
     `)
   } catch { /* table already exists */ }
+
+  // Repair project_discovery_observations (v43): force-create the table AND
+  // force-add meeting_id. This one is not hypothetical — the column shipped one
+  // commit AFTER the table, under the SAME schema version, so a DB that reached
+  // v43 from the earlier build has the table WITHOUT meeting_id and will never
+  // run migration 43 again. CREATE TABLE IF NOT EXISTS cannot fix an existing
+  // table, so without this guarded ALTER every observation insert would fail and
+  // discovery reconciliation would be dead for all new candidates. repairPhase
+  // runs on every boot BEFORE migrations, so this heals such a DB in place.
+  try {
+    database.run(`
+      CREATE TABLE IF NOT EXISTS project_discovery_observations (
+        name_norm TEXT NOT NULL,
+        source_key TEXT NOT NULL,
+        meeting_id TEXT,
+        original_name TEXT NOT NULL,
+        score REAL NOT NULL DEFAULT 0,
+        first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (name_norm, source_key)
+      )
+    `)
+  } catch { /* table already exists */ }
+  const obsCols = getTableColumns(database, 'project_discovery_observations')
+  if (obsCols.length > 0 && !obsCols.includes('meeting_id')) {
+    console.log('[Database] Repairing project_discovery_observations: adding meeting_id')
+    try {
+      database.run('ALTER TABLE project_discovery_observations ADD COLUMN meeting_id TEXT')
+    } catch { /* column exists */ }
+  }
 
   // Repair transcript_speakers (v25): a new table has no columns to ALTER, but
   // force-create it here so an older on-disk DB that skipped the migration still
@@ -6199,6 +6243,25 @@ export function countProjectDiscoverySources(name: string): number {
       [norm]
     )?.n ?? 0
   )
+}
+
+/**
+ * Every distinct meeting that mentioned this project name.
+ *
+ * Read by the reconciler at creation time so the meetings whose corroboration
+ * EARNED the project are linked to it. Without this the first sighting's meeting
+ * — the evidence itself — was dropped when the ledger was cleared, and the graph
+ * permanently omitted a valid association unless that transcript happened to be
+ * reprocessed later.
+ */
+export function getProjectDiscoveryMeetingIds(name: string): string[] {
+  const norm = normalizeName(name)
+  if (!norm) return []
+  return queryAll<{ meeting_id: string }>(
+    `SELECT DISTINCT meeting_id FROM project_discovery_observations
+      WHERE name_norm = ? AND meeting_id IS NOT NULL`,
+    [norm]
+  ).map((r) => r.meeting_id)
 }
 
 /**

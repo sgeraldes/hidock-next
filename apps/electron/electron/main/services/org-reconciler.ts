@@ -29,6 +29,7 @@ import {
   isProjectDiscoveryRejected,
   recordProjectDiscoveryObservation,
   clearProjectDiscoveryObservations,
+  getProjectDiscoveryMeetingIds,
   type RecordingPreassignment
 } from './database'
 import { resolveContact, resolveProject } from './entity-resolver'
@@ -597,11 +598,27 @@ export function applyTranscriptEntities(opts: {
             projectName
           ])
           projectId = id
+
+          // Link EVERY meeting whose mention earned this project, not just the one
+          // that happened to cross the threshold. The corroborating sightings are
+          // the evidence for creating it; dropping them when the ledger is cleared
+          // left the graph permanently missing those associations (the first
+          // meeting could only ever be linked by reprocessing its transcript).
+          // Runs BEFORE the purge, inside applyTranscriptEntities' transaction.
+          const corroborating = getProjectDiscoveryMeetingIds(projectName)
+          let backfilled = 0
+          for (const mid of corroborating) {
+            if (mid === opts.meetingId) continue // linked below by the normal path
+            run(`INSERT OR IGNORE INTO meeting_projects (meeting_id, project_id) VALUES (?, ?)`, [mid, id])
+            backfilled++
+          }
+
           // The name is settled — stop tracking it as an open discovery question.
           clearProjectDiscoveryObservations(projectName)
           console.log(
             `[OrgReconciler] Discovered project "${projectName}" ` +
-              `(name score ${decision.score}, seen in ${decision.distinctSources} sources)`
+              `(name score ${decision.score}, seen in ${decision.distinctSources} sources` +
+              `${backfilled > 0 ? `, linked ${backfilled} corroborating meeting(s)` : ''})`
           )
         } else {
           console.log(

@@ -257,11 +257,16 @@ describe('F12: project discovery gate (v43)', () => {
       expect(rows).toHaveLength(1)
       // Lane B (v42) provenance must survive the gate.
       expect(rows[0].origin).toBe('discovered')
-      // Linked to the meeting that tipped it over.
-      expect(
-        queryOne<{ meeting_id: string }>('SELECT meeting_id FROM meeting_projects WHERE project_id = ?', [rows[0].id])
-          ?.meeting_id
-      ).toBe('m2')
+
+      // BOTH corroborating meetings are linked — not just the one that tipped it
+      // over. The first sighting IS the evidence that earned the project; before
+      // the backfill it was discarded with the ledger and m1 could only ever be
+      // linked by reprocessing its transcript.
+      const linked = queryAll<{ meeting_id: string }>(
+        'SELECT meeting_id FROM meeting_projects WHERE project_id = ?',
+        [rows[0].id]
+      ).map((r) => r.meeting_id)
+      expect(linked.sort()).toEqual(['m1', 'm2'])
     })
 
     it('clears the deferred evidence once the project exists', () => {
@@ -293,6 +298,43 @@ describe('F12: project discovery gate (v43)', () => {
       }
       expect(created).toBe(1)
       expect(projectRowsByName(name)).toHaveLength(1)
+    })
+  })
+
+  /**
+   * End-to-end adversarial fixtures for the recalibrated scorer, in both
+   * directions. The earlier calibration cleared the floor on blocklist-absence
+   * alone (so recurring common nouns auto-created) and hard-dropped anything
+   * under 3 code units (so "AI" and CJK names were discarded, not deferred).
+   */
+  describe('recurring extraction noise never becomes a project', () => {
+    it.each(['budget', 'customer feedback', 'headcount'])(
+      '%j recurs across three meetings and is still only a suggestion',
+      (name) => {
+        expect(mention(name, 'm1')).toBe(false)
+        expect(mention(name, 'm2')).toBe(false)
+        expect(mention(name, 'm3')).toBe(false)
+
+        expect(projectRowsByName(name)).toHaveLength(0)
+        // Remembered, not discarded — the user can still promote it.
+        expect(countProjectDiscoverySources(name)).toBe(3)
+        expect(pendingNames()).toContain(norm(name))
+      }
+    )
+  })
+
+  describe('short and non-Latin names are deferred, then creatable', () => {
+    it.each(['AI', 'XR', '研究'])('%j defers on one source and is created on the second', (name) => {
+      // Never dropped: the sighting is remembered from the first mention.
+      expect(mention(name, 'm1')).toBe(false)
+      expect(projectRowsByName(name)).toHaveLength(0)
+      expect(countProjectDiscoverySources(name)).toBe(1)
+
+      // Structure (acronym / caseless script) plus recurrence opens the gate.
+      expect(mention(name, 'm2')).toBe(true)
+      const rows = projectRowsByName(name)
+      expect(rows).toHaveLength(1)
+      expect(rows[0].origin).toBe('discovered')
     })
   })
 

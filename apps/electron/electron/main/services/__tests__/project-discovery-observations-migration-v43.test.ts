@@ -107,8 +107,34 @@ describe('schema v43: project_discovery_observations (F12 discovery gate)', () =
     const migration = source.match(/\n {2}43: \(\) => \{[\s\S]*?\n {2}\}/)
     expect(migration).not.toBeNull()
     expect(migration![0]).toContain('CREATE TABLE IF NOT EXISTS project_discovery_observations')
-    // Failure to create the ledger must not abort the boot — it is rebuilt from
-    // future sightings, unlike the v42 tombstone re-key which must fail loudly.
-    expect(migration![0]).toContain('catch')
+  })
+
+  /**
+   * The column shipped one commit AFTER the table under the SAME schema version,
+   * so a DB that reached v43 from the first build has the table without
+   * meeting_id and never re-runs the migration. CREATE TABLE IF NOT EXISTS
+   * cannot fix an existing table, so both the migration and the every-boot
+   * repairPhase must verify-and-ALTER. (Runtime heal proven against the real
+   * engine in project-discovery-observations-heal-v43.test.ts.)
+   */
+  it('migration 43 adds meeting_id when the table already exists without it', () => {
+    const migration = source.match(/\n {2}43: \(\) => \{[\s\S]*?\n {2}\}/)![0]
+    expect(migration).toContain('ALTER TABLE project_discovery_observations ADD COLUMN meeting_id TEXT')
+  })
+
+  it('migration 43 fails loudly rather than recording v43 over an unusable table', () => {
+    const migration = source.match(/\n {2}43: \(\) => \{[\s\S]*?\n {2}\}/)![0]
+    // No swallowing catch: the engine records a version only after the migration
+    // returns, so a swallowed failure would strand the DB at 43 with a table that
+    // cannot accept an insert. Same fail-loud policy as the v42 tombstone re-key.
+    expect(migration).not.toMatch(/catch\s*\(/)
+    expect(migration).toContain('throw new Error')
+  })
+
+  it('repairPhase force-adds meeting_id on every boot', () => {
+    const repair = source.match(/function repairPhase\(\): void \{[\s\S]*?\n\}/)
+    expect(repair).not.toBeNull()
+    expect(repair![0]).toContain('CREATE TABLE IF NOT EXISTS project_discovery_observations')
+    expect(repair![0]).toContain('ALTER TABLE project_discovery_observations ADD COLUMN meeting_id TEXT')
   })
 })

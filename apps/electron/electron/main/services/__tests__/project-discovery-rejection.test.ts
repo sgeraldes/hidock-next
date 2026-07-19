@@ -78,11 +78,13 @@ describe('project discovery rejection tombstones (v41)', () => {
     discoverProject(NAME)
     const rows = projectRowsByName(NAME)
     expect(rows).toHaveLength(1)
-    const link = queryOne<{ meeting_id: string }>(
+    // Both corroborating meetings are linked (F12 backfill), not just the one
+    // whose sighting crossed the recurrence threshold.
+    const linked = queryAll<{ meeting_id: string }>(
       'SELECT meeting_id FROM meeting_projects WHERE project_id = ?',
       [rows[0].id]
-    )
-    expect(link?.meeting_id).toBe('m1')
+    ).map((r) => r.meeting_id)
+    expect(linked.sort()).toEqual(['m1', 'm2'])
   })
 
   it('dismiss (tombstone + delete) prevents re-analysis from re-creating it', () => {

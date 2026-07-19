@@ -98,6 +98,14 @@ function sharesWord(a: string, b: string): boolean {
 /** How much an opposite-gender Spanish name pair is docked from its fuzzy score. */
 const GENDER_PAIR_PENALTY = 0.25
 
+/**
+ * Shortest name for which a 1- or 2-character edit distance still reads as a
+ * misspelling rather than a different word. Below these, distance is noise:
+ * every 2-char string is within distance 2 of every other.
+ */
+const MIN_LEN_FOR_EDIT_1 = 4
+const MIN_LEN_FOR_EDIT_2 = 5
+
 /** True when two ≥3-char tokens are identical but for a final a↔o (Sergio/Sergia). */
 function isGenderVowelSwap(a: string, b: string): boolean {
   if (a.length !== b.length || a.length < 3) return false
@@ -148,8 +156,14 @@ export function fuzzyNameScore(aNorm: string, bNorm: string): number {
   } else {
     const dist = levenshtein(aNorm, bNorm)
     const minLen = Math.min(aNorm.length, bNorm.length)
-    if (dist === 1) score = 0.78
-    else if (dist === 2) score = 0.7
+    // An edit distance only signals a typo RELATIVE to length. Flat thresholds
+    // made every short name a near-miss for every other: "AI" vs "XR" is
+    // distance 2 on a 2-char string — i.e. entirely different — yet scored 0.7
+    // and, with a context boost, auto-linked one acronym project onto another.
+    // Require the shorter name to be long enough for the distance to mean
+    // "misspelling" rather than "different word".
+    if (dist === 1 && minLen >= MIN_LEN_FOR_EDIT_1) score = 0.78
+    else if (dist === 2 && minLen >= MIN_LEN_FOR_EDIT_2) score = 0.7
     else if (minLen >= 3 && (aNorm.startsWith(bNorm) || bNorm.startsWith(aNorm))) score = 0.68
     else if (sharesWord(aNorm, bNorm)) score = 0.62
     else return 0
