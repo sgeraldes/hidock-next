@@ -1062,6 +1062,63 @@ describe('backfillMeetingWiki — bounded, yielding, resumable (F15)', () => {
     expect(listWiki()).toHaveLength(N - excluded.size)
   })
 
+  it('drains MANY pending cleanup retries within the SAME single boot scan (F15 recovery-path guard)', async () => {
+    // The recovery path the two quadratic guards above still miss: durable
+    // wiki-cleanup retries enqueued by earlier failed transitions. retryPendingWikiCleanups
+    // runs at the head of every backfill, and each pending id used to call
+    // removeMeetingWiki — a FRESH readdir + whole-page reads PER id — so after a
+    // transient failure parked N retries, boot did O(N) full directory scans
+    // before the single-scan backfill even began, reintroducing the F15 freeze on
+    // exactly this path. The fix shares ONE pass-wide index across the sweep and
+    // the pass, so the entire boot lists the directory once.
+    const { backfillMeetingWiki } = await import('../meeting-wiki')
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    // Cold pass writes a page for all N (all eligible).
+    await backfillMeetingWiki()
+    expect(listWiki()).toHaveLength(N)
+
+    // Exclude three recordings and PARK a durable cleanup retry for each — as if
+    // three earlier transitions had each failed cleanup and enqueued a retry.
+    const excludedIds = ['rec-000', 'rec-002', 'rec-004']
+    const excluded = new Set(excludedIds)
+    excludedResult = { ids: excluded, failClosed: false }
+    for (const id of excludedIds) configStore.set(`wiki_cleanup_pending:${id}`, id)
+    // A fourth parked retry whose recording became eligible again: the sweep must
+    // DROP it without removing its (legitimately retained) page.
+    configStore.set('wiki_cleanup_pending:rec-006', 'rec-006')
+
+    // Revisit everything on the measured pass.
+    await resetBackfillCursor()
+    fsCalls.readFile = 0
+    fsCalls.readdir = 0
+    const result = await backfillMeetingWiki()
+
+    // ONE directory listing for the ENTIRE boot — the pending-retry sweep AND the
+    // backfill pass share the single pass-wide index. Asserted BEFORE listWiki()
+    // (which lists the directory itself). Old code: one readdir per pending id
+    // PLUS one for the pass (4 here).
+    expect(fsCalls.readdir).toBe(1)
+    expect(fsCalls.readFile).toBeLessThanOrEqual(2 * N)
+    expect(result.failed).toBe(0)
+
+    // Every parked retry is resolved: the still-excluded three had their pages
+    // removed and their entries cleared; the eligible-again one was simply dropped.
+    for (const id of [...excludedIds, 'rec-006']) {
+      expect(configStore.has(`wiki_cleanup_pending:${id}`)).toBe(false)
+    }
+
+    // The three excluded pages are gone; everything else — including the
+    // eligible-again rec-006 — is retained.
+    const remaining = listWiki()
+    expect(remaining).toHaveLength(N - excluded.size)
+    expect(remaining.some((f) => f.includes('rec-006'))).toBe(true)
+    for (const id of excludedIds) {
+      expect(remaining.some((f) => f.includes(id))).toBe(false)
+    }
+  })
+
   it('leaves unchanged pages alone instead of rewriting the whole wiki every boot', async () => {
     const { backfillMeetingWiki } = await import('../meeting-wiki')
     await backfillMeetingWiki()

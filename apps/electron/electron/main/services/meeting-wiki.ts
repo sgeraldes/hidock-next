@@ -808,8 +808,23 @@ function clearWikiCleanupRetry(recordingId: string): void {
  * when the removal succeeds); if it became eligible again, drop the entry. Runs
  * as part of the boot backfill and is safe to call anytime. Returns how many
  * pending entries were cleared. Never throws.
+ *
+ * F15 (post-merge review) — the sweep shares ONE ownership index across every
+ * pending id instead of letting each call `removeMeetingWiki`, which re-listed
+ * and re-read the WHOLE wiki directory per id. After a transient failure enqueued
+ * N durable retries, that was O(N × pages) of synchronous main-process readdir +
+ * whole-page reads on the boot recovery path — reintroducing the very F15 freeze
+ * the single-scan backfill index exists to prevent. When called from
+ * {@link backfillMeetingWiki} the pass-wide `index` is passed in and reused, so
+ * the entire boot (cleanup sweep + backfill) does a SINGLE directory listing;
+ * otherwise the index is built lazily on first need, so an all-eligible-again
+ * sweep still touches the disk zero times. Each candidate is ownership-revalidated
+ * immediately before its unlink (`unlinkIfStillOwnedBy`), so a shared,
+ * possibly-stale index never removes a page that now belongs to a DIFFERENT
+ * recording, and per-id fail-closed semantics survive index reuse via the index
+ * `status` (see `removeMeetingWikiUsingIndex`).
  */
-export function retryPendingWikiCleanups(): { cleared: number; stillPending: number } {
+export function retryPendingWikiCleanups(index?: WikiIndex): { cleared: number; stillPending: number } {
   let cleared = 0
   let stillPending = 0
   let rows: Array<{ value: string | null }>
@@ -819,6 +834,11 @@ export function retryPendingWikiCleanups(): { cleared: number; stillPending: num
     console.warn('[MeetingWiki] could not read pending wiki cleanups:', e)
     return { cleared: 0, stillPending: 0 }
   }
+  // Reuse the backfill's pass-wide index when supplied; otherwise build one ONCE,
+  // lazily, the first time a still-ineligible id actually needs a removal. Never
+  // scans when every pending id turned eligible again. `buildWikiIndex` never
+  // throws (readdir errors are captured as an index `status`).
+  let sweepIndex = index
   for (const r of rows) {
     const recordingId = r.value
     if (!recordingId) continue
@@ -828,7 +848,8 @@ export function retryPendingWikiCleanups(): { cleared: number; stillPending: num
         cleared++
         continue
       }
-      const result = removeMeetingWiki(recordingId)
+      if (!sweepIndex) sweepIndex = buildWikiIndex(getWikiDir())
+      const result = removeMeetingWikiUsingIndex(recordingId, sweepIndex)
       if (result.ok) {
         clearWikiCleanupRetry(recordingId)
         cleared++
@@ -1110,10 +1131,20 @@ export function _resetBackfillCursorForTests(): void {
 export async function backfillMeetingWiki(
   options: WikiBackfillOptions = {}
 ): Promise<WikiBackfillResult> {
+  const dir = getWikiDir()
+  // ONE directory scan for the ENTIRE boot — the fix for the quadratic blowup.
+  // Built here, before the cleanup-retry sweep, so BOTH the sweep and the pass
+  // below share this single listing. Letting retryPendingWikiCleanups build its
+  // own (per-id) scans was O(pending × pages) of synchronous FS work on the boot
+  // recovery path — the F15 freeze on exactly that path (post-merge review).
+  const index = buildWikiIndex(dir)
+
   // RE8-P1 (round-9) — first drain any wiki-cleanup retries enqueued by a failed
   // transition cleanup, so an excluded recording's page is removed on boot even
   // if the mark-personal / soft-delete / value-rating attempt failed earlier.
-  retryPendingWikiCleanups()
+  // Reuses the pass-wide index (no scans of its own); any page it removes is also
+  // dropped from `index.owner`, so the pass below sees the post-cleanup state.
+  retryPendingWikiCleanups(index)
   const batchSize = Math.max(1, options.batchSize ?? DEFAULT_BATCH_SIZE)
   const budgetMs = options.budgetMs ?? DEFAULT_BUDGET_MS
   const failureLimit = Math.max(1, options.maxFailures ?? DEFAULT_FAILURE_LIMIT)
@@ -1130,10 +1161,6 @@ export async function backfillMeetingWiki(
     console.error('[MeetingWiki] Backfill skipped — recording eligibility unavailable (fail closed)')
     return { written: 0, unchanged: 0, failed: 0, remaining: 0, remainingMissing: 0 }
   }
-
-  const dir = getWikiDir()
-  // ONE directory scan for the whole pass — the fix for the quadratic blowup.
-  const index = buildWikiIndex(dir)
 
   // Recordings with no page yet go first, rotated so each pass starts past
   // whatever the last one attempted (see the resume-cursor note above).
