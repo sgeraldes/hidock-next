@@ -41,6 +41,29 @@ except ImportError:
 HIDOCK_API_BASE = "https://hinotes.hidock.com"
 HIDOCK_API_VERSION = "v1"
 
+# Config keys holding reusable credentials. None of these may reach disk unless the user
+# asked to be remembered.
+CREDENTIAL_CONFIG_KEYS = (
+    "hidock_access_token",  # legacy plain-text token, still read for backwards compatibility
+    "hidock_access_token_encrypted",
+    "hidock_refresh_token_encrypted",
+    "hidock_token_expiry",
+)
+
+# Config keys identifying the signed-in account and the last login. Not directly reusable
+# as credentials, but they are session state and must not outlive a logout.
+IDENTITY_CONFIG_KEYS = (
+    "hidock_user_id",
+    "hidock_user_email",
+    "hidock_username",
+    "hidock_last_login_username",
+    "hidock_last_login_time",
+)
+
+# Everything the service can write to the config file. Logout clears all of it; keep this
+# in sync when adding a key, and cover it in tests/test_hidock_auth_service.py.
+PERSISTED_SESSION_KEYS = CREDENTIAL_CONFIG_KEYS + IDENTITY_CONFIG_KEYS
+
 
 class AuthenticationError(Exception):
     """Raised when authentication fails."""
@@ -201,14 +224,19 @@ class HiDockAuthService:
                 if access_token:
                     logger.info("HiDockAuth", "login", f"Login successful for {username}")
 
-                    # Store token if remember_me
-                    if remember_me:
-                        self._save_token(access_token, username)
-
-                    # Extract additional info
                     user_info = self._extract_user_info(data)
+
+                    if not remember_me:
+                        # The user declined "remember me", so nothing from this login may be
+                        # written -- including the refresh token and expiry that arrive via
+                        # user_info. Clear first: a previous "remember me" session must not
+                        # survive a later login that opted out. Ordering matters, since this
+                        # also drops the keys from self.config.
+                        self._clear_persisted_session()
+
+                    self._save_token(access_token, username, persist=remember_me)
                     if user_info:
-                        self._save_user_info(user_info)
+                        self._save_user_info(user_info, persist=remember_me)
 
                     return True, access_token, None
                 else:
@@ -261,8 +289,15 @@ class HiDockAuthService:
             logger.warning("HiDockAuth", "extract_user_info", f"Could not extract user info: {e}")
             return None
 
-    def _save_user_info(self, user_info: Dict):
-        """Save user information to config."""
+    def _save_user_info(self, user_info: Dict, persist: bool = True):
+        """Record user information for the session, optionally writing it to the config file.
+
+        Args:
+            user_info: Parsed user info from the login response.
+            persist: When False the values are kept in memory for this session only. The
+                refresh token lives in here, so this must follow the user's "remember me"
+                choice rather than defaulting to a disk write.
+        """
         try:
             updates: Dict[str, str] = {}
             if user_info.get("user_id"):
@@ -279,13 +314,20 @@ class HiDockAuthService:
                 updates["hidock_token_expiry"] = expiry_time.isoformat()
 
             self.config.update(updates)
-            save_config(updates)
-            logger.info("HiDockAuth", "save_user_info", "User info saved")
+            if persist:
+                save_config(updates)
+                logger.info("HiDockAuth", "save_user_info", "User info saved")
         except Exception as e:
             logger.error("HiDockAuth", "save_user_info", f"Error saving user info: {e}")
 
-    def _save_token(self, access_token: str, username: str):
-        """Save access token to config (encrypted)."""
+    def _save_token(self, access_token: str, username: str, persist: bool = True):
+        """Record the access token for the session, optionally writing it to the config file.
+
+        Args:
+            access_token: The access token returned by the login endpoint.
+            username: The account the token belongs to.
+            persist: When False the token is kept in memory for this session only.
+        """
         try:
             updates = {
                 "hidock_access_token_encrypted": self._encrypt_token(access_token),
@@ -293,10 +335,22 @@ class HiDockAuthService:
                 "hidock_last_login_time": datetime.now().isoformat(),
             }
             self.config.update(updates)
-            save_config(updates)
-            logger.info("HiDockAuth", "save_token", "Token saved securely")
+            if persist:
+                save_config(updates)
+                logger.info("HiDockAuth", "save_token", "Token saved securely")
         except Exception as e:
             logger.error("HiDockAuth", "save_token", f"Error saving token: {e}")
+
+    def _clear_persisted_session(self):
+        """Remove every stored credential and identity key, in memory and on disk.
+
+        save_config() merges into the existing on-disk config, so the keys have to be
+        blanked explicitly -- dropping them from self.config alone would leave the values
+        in the file.
+        """
+        for key in PERSISTED_SESSION_KEYS:
+            self.config.pop(key, None)
+        save_config({key: "" for key in PERSISTED_SESSION_KEYS})
 
     def get_stored_token(self) -> Optional[str]:
         """
@@ -386,24 +440,8 @@ class HiDockAuthService:
                 except:
                     pass  # Logout endpoint might not exist
 
-            # Clear stored credentials
-            keys_to_remove = [
-                "hidock_access_token",
-                "hidock_access_token_encrypted",
-                "hidock_refresh_token_encrypted",
-                "hidock_user_id",
-                "hidock_user_email",
-                "hidock_username",
-                "hidock_token_expiry",
-                "hidock_last_login_time",
-            ]
-
-            for key in keys_to_remove:
-                self.config.pop(key, None)
-
-            # save_config() merges with the on-disk config, so simply dropping the keys from
-            # self.config would leave the stored credentials on disk. Blank them explicitly.
-            save_config({key: "" for key in keys_to_remove})
+            # Clear every stored credential and identity key
+            self._clear_persisted_session()
             logger.info("HiDockAuth", "logout", "User logged out successfully")
 
         except Exception as e:
