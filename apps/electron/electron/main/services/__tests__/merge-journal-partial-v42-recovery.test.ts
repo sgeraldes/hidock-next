@@ -24,7 +24,12 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { existsSync, unlinkSync } from 'fs'
+import { existsSync, unlinkSync, readFileSync } from 'fs'
+
+/** Target schema version read from database.ts — see database.test.ts for why. */
+const EXPECTED_SCHEMA_VERSION = Number(
+  readFileSync(join(__dirname, '..', 'database.ts'), 'utf-8').match(/const SCHEMA_VERSION = (\d+)\b/)![1]
+)
 
 const dbPath = join(tmpdir(), `hidock-partial-v42-recovery-test-${Date.now()}.db`)
 vi.mock('../file-storage', () => ({ getDatabasePath: () => dbPath }))
@@ -80,11 +85,9 @@ describe('partial v42: NULL journal ordering columns are healed on upgrade; unhe
        VALUES ('j-malformed', 'project', 'ghost-keeper', '{not json', '{}', '2026-01-01T00:00:00Z')`
     )
 
-    // Roll back below schema 49 and reopen: the engine re-runs migration 49
-    // (the merge_journal seq/loser_id heal, re-keyed here from its original
-    // v42 during the beta/meeting-intelligence merge) against this exact
-    // partial state.
-    run('DELETE FROM schema_version WHERE version >= 49')
+    // Roll back to schema 41 and reopen: the engine re-runs migration 42
+    // against this exact partial state.
+    run('DELETE FROM schema_version WHERE version >= 42')
     closeDatabase()
     await initializeDatabase()
   })
@@ -108,8 +111,10 @@ describe('partial v42: NULL journal ordering columns are healed on upgrade; unhe
   })
 
   it('completes the migration despite the malformed row and heals every valid journal', () => {
+    // The rollback drops >= 42, so reopening re-runs v42 AND every later
+    // migration — the boot must land on the app's current target version.
     const version = queryOne<{ v: number }>('SELECT MAX(version) AS v FROM schema_version')?.v
-    expect(version).toBe(49)
+    expect(version).toBe(EXPECTED_SCHEMA_VERSION)
 
     const rows = journalRows()
     expect(rows).toHaveLength(3)

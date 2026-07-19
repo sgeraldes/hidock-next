@@ -361,6 +361,13 @@ class Logger:
         self._rotate_log_file_if_needed(log_file_path)
 
         try:
+            # logs/ is git-ignored, so it does not exist in a fresh checkout. Without this
+            # the open() below raises FileNotFoundError and file logging is silently
+            # disabled even though enable_file_logging defaults to True.
+            log_dir = os.path.dirname(log_file_path)
+            if log_dir:
+                os.makedirs(log_dir, exist_ok=True)
+
             self.log_file = open(log_file_path, "a", encoding="utf-8")
             # Remember the resolved path and track the live byte count so we can rotate
             # mid-session (rotation otherwise only ran at startup, letting a single long
@@ -641,6 +648,12 @@ def save_config(config_data_to_save):
         # Merge new settings with existing ones (new settings take precedence)
         merged_config = existing_config.copy()
         merged_config.update(config_data_to_save)
+
+        # Ensure the config directory exists before writing, so a missing directory
+        # does not turn every settings change into a silently swallowed IOError.
+        config_dir = os.path.dirname(_CONFIG_FILE_PATH)
+        if config_dir:
+            os.makedirs(config_dir, exist_ok=True)
 
         # Save the merged configuration
         with open(_CONFIG_FILE_PATH, "w", encoding="utf-8") as f:

@@ -17,7 +17,10 @@ vi.mock('@/store/useAppStore', () => ({
     if (typeof selector === 'function') return selector(state)
     return state
   }),
-  useCalendarSyncing: vi.fn(() => false)
+  useCalendarSyncing: vi.fn(() => false),
+  // F15: the "Sync Now" control gates on the user's own request, not on any
+  // sync — a startup mount sync must not disable it.
+  useCalendarManualSyncing: vi.fn(() => false)
 }))
 
 vi.mock('@/store/domain/useConfigStore', () => ({
@@ -274,5 +277,36 @@ describe('Settings Page', () => {
   it('hides the kill-switch hint when valueClassificationEnabled is not explicitly false', async () => {
     render(<Settings />)
     expect(screen.queryByText(/Automatic rating of newly transcribed recordings is turned off/)).not.toBeInTheDocument()
+  })
+
+  /**
+   * F15 / re-review #3: the startup mount sync parks on the boot gate for the
+   * whole startup window. Gating this control on "any sync in flight" disabled
+   * it during exactly the period the bounded manual path exists to serve.
+   */
+  describe('Sync Now availability during a startup sync', () => {
+    it('stays enabled while only a background/mount sync is in flight', async () => {
+      const { useCalendarSyncing, useCalendarManualSyncing } = await import('@/store/useAppStore')
+      vi.mocked(useCalendarSyncing).mockReturnValue(true) // something IS syncing
+      vi.mocked(useCalendarManualSyncing).mockReturnValue(false) // but not the user's
+
+      render(<Settings />)
+
+      const button = screen.getByRole('button', { name: 'Sync calendar now' })
+      expect(button).not.toBeDisabled()
+
+      // And clicking it reaches the manual path.
+      fireEvent.click(button)
+      expect(mockSyncCalendar).toHaveBeenCalledWith('manual')
+    })
+
+    it('is disabled while the user’s own request is outstanding', async () => {
+      const { useCalendarManualSyncing } = await import('@/store/useAppStore')
+      vi.mocked(useCalendarManualSyncing).mockReturnValue(true)
+
+      render(<Settings />)
+
+      expect(screen.getByRole('button', { name: 'Sync calendar now' })).toBeDisabled()
+    })
   })
 })

@@ -1,7 +1,13 @@
 import { ipcMain } from 'electron'
 import { getConfig, updateConfig } from '../services/config'
-import { syncCalendar, getLastSyncTime, CalendarSyncResult } from '../services/calendar-sync'
+import {
+  syncCalendar,
+  getLastSyncTime,
+  isCalendarSyncActive,
+  CalendarSyncResult
+} from '../services/calendar-sync'
 import { clearAllMeetings } from '../services/database'
+import { whenBootTasksSettled, areBootTasksSettled } from '../services/boot-scheduler'
 import {
   SetIcsUrlSchema,
   ToggleAutoSyncSchema,
@@ -10,10 +16,24 @@ import {
 
 let syncInterval: NodeJS.Timeout | null = null
 
+/**
+ * What caused a `calendar:sync` call. `mount` is the renderer's startup effect —
+ * an app-initiated sync that happens to share the channel with the user's
+ * "Sync Now" button, and which must keep the full boot gate.
+ */
+type CalendarSyncTrigger = 'manual' | 'mount'
+
+/**
+ * How long a user-initiated sync waits for boot work before reporting itself
+ * queued. Long enough to absorb the tail of a normal boot drain, short enough
+ * that a click always gets an answer.
+ */
+const MANUAL_BOOT_WAIT_MS = 2500
+
 export function registerCalendarHandlers(): void {
   // Sync calendar now
   // AUD2-010: Verify sync result and catch unexpected errors at the IPC boundary
-  ipcMain.handle('calendar:sync', async (): Promise<CalendarSyncResult> => {
+  ipcMain.handle('calendar:sync', async (_event, rawTrigger: unknown): Promise<CalendarSyncResult> => {
     const config = getConfig()
 
     if (!config.calendar.icsUrl) {
@@ -24,8 +44,44 @@ export function registerCalendarHandlers(): void {
       }
     }
 
+    // F15: this one channel serves both a deliberate "Sync Now" click and the
+    // renderer's mount effect, which is really a startup sync. Only the click
+    // gets the short wait; anything unrecognized is treated as app-initiated and
+    // keeps the full boot gate (the conservative default).
+    const trigger: CalendarSyncTrigger = rawTrigger === 'manual' ? 'manual' : 'mount'
+
     try {
-      const result = await syncCalendar(config.calendar.icsUrl)
+      if (trigger === 'manual' && !areBootTasksSettled()) {
+        // Give boot work a brief chance to finish, so the common case still
+        // syncs inline and the user sees a normal result.
+        await whenBootTasksSettled(MANUAL_BOOT_WAIT_MS)
+
+        if (!areBootTasksSettled()) {
+          // Still busy. Start the sync behind the full gate and answer NOW, so
+          // the control is not silently unresponsive for the whole boot window.
+          void syncCalendar(config.calendar.icsUrl).catch((e) =>
+            console.error('[calendar:sync] queued sync failed:', e)
+          )
+          const { emitActivityLog } = await import('../services/activity-log')
+          emitActivityLog(
+            'info',
+            'Calendar sync queued',
+            'Startup tasks are still running; the sync will start on its own'
+          )
+          return {
+            success: false,
+            queued: true,
+            meetingsCount: 0,
+            error: 'Startup tasks are still running — the calendar sync is queued and will start automatically.'
+          }
+        }
+      }
+
+      // A manual sync that got here has already done its waiting.
+      const result = await syncCalendar(
+        config.calendar.icsUrl,
+        trigger === 'manual' ? { waitForBootMs: 0 } : {}
+      )
       // AUD2-010: Verify result is well-formed before returning to renderer
       if (!result || typeof result.success !== 'boolean') {
         console.error('[calendar:sync] syncCalendar returned malformed result:', result)
@@ -55,7 +111,8 @@ export function registerCalendarHandlers(): void {
 
     try {
       clearAllMeetings()
-      const result = await syncCalendar(config.calendar.icsUrl)
+      // `fresh`: must not join a sync that started before the clear.
+      const result = await syncCalendar(config.calendar.icsUrl, { fresh: true })
       if (!result || typeof result.success !== 'boolean') {
         console.error('[calendar:clear-and-sync] syncCalendar returned malformed result:', result)
         return { success: false, error: 'Sync returned an invalid result', meetingsCount: 0 }
@@ -155,39 +212,75 @@ export function initializeCalendarAutoSync(): void {
   }
 }
 
+/**
+ * Bumped whenever auto-sync is stopped or restarted, so a sync that is parked
+ * behind the boot gate can tell that its schedule was torn down while it waited
+ * and bow out instead of firing late.
+ */
+let autoSyncGeneration = 0
+
+/**
+ * Run one scheduled (startup or periodic) sync.
+ *
+ * F15: `syncCalendar` waits for the boot drain and joins any in-flight pass, so
+ * this only has to skip ticks that would queue redundant work behind a sync
+ * already under way.
+ *
+ * The generation is handed to `syncCalendar` as a cancellation token rather than
+ * being checked on return: the boot wait can be long, and by the time the pass
+ * returned it would already have written the cache, upserted meetings,
+ * reconciled and broadcast. Checking afterwards suppressed the log line and
+ * nothing else.
+ */
+async function runScheduledSync(generation: number, reason: 'startup' | 'periodic'): Promise<void> {
+  if (reason === 'periodic' && isCalendarSyncActive()) {
+    // A previous pass is still going (slow feed, or parked behind boot tasks).
+    // Stacking another achieves nothing — the next tick will pick it up.
+    console.log('Skipping periodic calendar sync: a sync is already in progress')
+    return
+  }
+
+  const currentConfig = getConfig()
+  if (!currentConfig.calendar.icsUrl) return
+
+  try {
+    const result = await syncCalendar(currentConfig.calendar.icsUrl, {
+      isStillWanted: () => generation === autoSyncGeneration
+    })
+    // The schedule may have been stopped while this was waiting on boot tasks.
+    if (generation !== autoSyncGeneration) return
+    if (!result.success) {
+      // syncCalendar already emits 'error' log, but periodic failures should
+      // also be visible so users know background sync is not working
+      const { emitActivityLog } = await import('../services/activity-log')
+      emitActivityLog('warning', 'Background calendar sync failed', result.error ?? 'Unknown error')
+    }
+  } catch (err) {
+    console.error('Calendar sync failed:', err)
+    if (generation !== autoSyncGeneration) return
+    const { emitActivityLog } = await import('../services/activity-log')
+    emitActivityLog('error', 'Background calendar sync crashed', err instanceof Error ? err.message : 'Unknown error')
+  }
+}
+
 function startAutoSync(): void {
   stopAutoSync() // Clear any existing interval
 
   const config = getConfig()
   const intervalMs = config.calendar.syncIntervalMinutes * 60 * 1000
+  const generation = autoSyncGeneration
 
   console.log(`Starting calendar auto-sync every ${config.calendar.syncIntervalMinutes} minutes`)
 
-  // Sync immediately on start
+  // Sync on start. This does NOT run now: syncCalendar defers it until the boot
+  // tasks have drained (F15), so it no longer competes with them.
   if (config.calendar.icsUrl) {
-    syncCalendar(config.calendar.icsUrl).catch((err) => {
-      console.error('Initial calendar sync failed:', err)
-    })
+    void runScheduledSync(generation, 'startup')
   }
 
   // Set up periodic sync
-  syncInterval = setInterval(async () => {
-    const currentConfig = getConfig()
-    if (currentConfig.calendar.icsUrl) {
-      try {
-        const result = await syncCalendar(currentConfig.calendar.icsUrl)
-        if (!result.success) {
-          // syncCalendar already emits 'error' log, but periodic failures should
-          // also be visible so users know background sync is not working
-          const { emitActivityLog } = await import('../services/activity-log')
-          emitActivityLog('warning', 'Background calendar sync failed', result.error ?? 'Unknown error')
-        }
-      } catch (err) {
-        console.error('Calendar sync failed:', err)
-        const { emitActivityLog } = await import('../services/activity-log')
-        emitActivityLog('error', 'Background calendar sync crashed', err instanceof Error ? err.message : 'Unknown error')
-      }
-    }
+  syncInterval = setInterval(() => {
+    void runScheduledSync(generation, 'periodic')
   }, intervalMs)
 }
 
@@ -196,6 +289,8 @@ function startAutoSync(): void {
  * B-CAL-002: Exported so it can be called during app quit cleanup.
  */
 export function stopAutoSync(): void {
+  // Invalidate any sync currently parked behind the boot gate.
+  autoSyncGeneration++
   if (syncInterval) {
     clearInterval(syncInterval)
     syncInterval = null

@@ -26,9 +26,9 @@ from .test_ci_skip import device_test_ci_skip
 from .test_race_condition_fix import device_test_manager, ensure_device_disconnected
 
 
-def test_device_reset():
+def _run_device_reset():
     """Test the device reset functionality."""
-    with device_test_manager.exclusive_device_access("test_device_reset"):
+    with device_test_manager.exclusive_device_access("device_reset"):
         print("Testing HiDock device reset functionality...")
 
     # Initialize USB backend
@@ -113,9 +113,9 @@ def test_device_reset():
         return True
 
 
-async def test_connection_with_timeout_recovery():
+async def _run_connection_with_timeout_recovery():
     """Test connection with automatic timeout recovery."""
-    async with device_test_manager.exclusive_async_device_access("test_connection_with_timeout_recovery"):
+    async with device_test_manager.exclusive_async_device_access("connection_with_timeout_recovery"):
         print("\nTesting connection with timeout recovery...")
 
         try:
@@ -172,7 +172,7 @@ async def test_connection_with_timeout_recovery():
 @device_test_ci_skip
 def test_device_reset_functionality():
     """Pytest wrapper for device reset functionality test."""
-    success = test_device_reset()
+    success = _run_device_reset()
     assert success, "Device reset functionality test failed"
 
 
@@ -182,7 +182,7 @@ def test_device_reset_functionality():
 async def test_connection_timeout_recovery():
     """Pytest wrapper for connection timeout recovery test."""
     try:
-        success = await test_connection_with_timeout_recovery()
+        success = await _run_connection_with_timeout_recovery()
         # If no device is available or access is denied, consider test passed
         assert success, "Connection timeout recovery test failed"
     except Exception as e:
@@ -197,12 +197,12 @@ if __name__ == "__main__":
     print("=" * 40)
 
     # Test basic reset functionality
-    success1 = test_device_reset()
+    success1 = _run_device_reset()
 
     # Test connection with recovery
     import asyncio
 
-    success2 = asyncio.run(test_connection_with_timeout_recovery())
+    success2 = asyncio.run(_run_connection_with_timeout_recovery())
 
     if success1 and success2:
         print("\n✓ All tests completed successfully!")

@@ -1,12 +1,12 @@
 // @vitest-environment node
 
 /**
- * v44 (F18/round-27) — per-row membership provenance migration + backfill.
+ * v46 (F18/round-27) — per-row membership provenance migration + backfill.
  *
  *  1. The schema exposes source + source_recording_id on meeting_contacts /
  *     meeting_projects and source_recording_ids on identity_suggestions, and the
- *     boot schema version is 44.
- *  2. backfillMembershipProvenanceV44 classifies pre-v44 NULL-provenance rows
+ *     boot schema version is 50 (current).
+ *  2. backfillMembershipProvenanceV44 classifies pre-v46 NULL-provenance rows
  *     conservatively: a calendar-attendee/organizer row ⇒ 'calendar'; a
  *     recording-backed row ⇒ 'transcript' + that recording id; an unassociable
  *     row (no calendar match, no recording) ⇒ stays NULL. Idempotent.
@@ -19,7 +19,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { existsSync, rmSync } from 'fs'
 
-const dbPath = join(tmpdir(), `hidock-v44-migration-${process.pid}.sqlite`)
+const dbPath = join(tmpdir(), `hidock-v46-migration-${process.pid}.sqlite`)
 vi.mock('../file-storage', () => ({ getDatabasePath: () => dbPath }))
 
 import {
@@ -59,7 +59,7 @@ function project(id: string, name: string): void {
 function recording(id: string, meetingId: string): void {
   run(`INSERT INTO recordings (id, filename, date_recorded, meeting_id) VALUES (?, ?, '2026-01-02T10:00:00Z', ?)`, [id, `${id}.hda`, meetingId])
 }
-/** Legacy NULL-provenance junction rows, exactly as a pre-v44 DB holds them. */
+/** Legacy NULL-provenance junction rows, exactly as a pre-v46 DB holds them. */
 function legacyContact(meetingId: string, contactId: string, role = 'attendee'): void {
   run(`INSERT INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)`, [meetingId, contactId, role])
 }
@@ -82,14 +82,13 @@ afterEach(() => {
   if (existsSync(dbPath)) rmSync(dbPath, { force: true })
 })
 
-describe('v44 schema', () => {
-  it('boot schema version is 49', () => {
-    // F18/round-28 bumped 44 -> 45 (entity provenance); round-31 bumped 45 -> 46
-    // (per-field role provenance, ADV29-2); round-37 bumped 46 -> 47 (node-level
-    // graph provenance, ADV35-1); the projects.origin re-key landed at 49
-    // (current SCHEMA_VERSION).
+describe('v46 schema', () => {
+  it('boot schema version is 50', () => {
+    // On top of beta's v42 (projects.origin) / v43 (project_discovery_observations),
+    // F18's provenance chain runs 46 (membership) -> 47 (entity) -> 48 (per-field
+    // role) -> 49 (node) -> 50 (role provenance-trust marker, current SCHEMA_VERSION).
     const row = queryOne<{ v: number }>('SELECT MAX(version) AS v FROM schema_version')!
-    expect(row.v).toBe(49)
+    expect(row.v).toBe(50)
   })
 
   it('adds the per-row provenance columns (idempotent — table already has them)', () => {

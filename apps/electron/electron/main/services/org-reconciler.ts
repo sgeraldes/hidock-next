@@ -27,12 +27,16 @@ import {
   healRecordingStatusFromTranscripts,
   isProjectDiscoveryRejected,
   filterVisibleEntityIds,
+  recordProjectDiscoveryObservation,
+  clearProjectDiscoveryObservations,
+  getProjectDiscoveryMeetingIds,
   type RecordingPreassignment
 } from './database'
 import { filterEligibleRecordingIds } from './recording-eligibility'
 import { mergeContactsWithGraph } from './knowledge-graph-service'
 import { resolveContact, resolveProject } from './entity-resolver'
 import { isGenericSpeakerLabel, cleanRole } from './entity-normalize'
+import { decideProjectDiscovery, scoreProjectNameCandidate } from './project-discovery-gate'
 import { canUpgrade, methodConfidence } from './signal-tiers'
 import { LONG_MEETING_MS } from './recording-match-scoring'
 import { randomUUID } from 'crypto'
@@ -612,22 +616,81 @@ export function applyTranscriptEntities(opts: {
         // re-creation on re-analysis. Only the AUTO-create path is blocked:
         // if the user manually creates a project with this name, createProject
         // clears the tombstone and resolveProject links to it normally above.
+        // Deliberately short-circuits BEFORE the discovery gate: a dismissed name
+        // must not even accumulate sightings, or it would climb back into the
+        // deferred-suggestion queue the user just cleared.
       } else {
-        const id = randomUUID()
-        // This auto-create path stamps BOTH provenance families, which gate
-        // different guards:
-        //   origin='discovered' (v42) — durable provenance; ONLY rows created
-        //   here are dismissable via projects:dismissDiscovered (fail-closed
-        //   elsewhere).
-        //   source='transcript' + recording (v45/round-28) — the project ENTITY
-        //   is transcript-extracted, so it is suppressed on non-owner surfaces
-        //   once excluded (ADV27-1).
-        run(`INSERT INTO projects (id, name, status, origin, source, source_recording_id) VALUES (?, ?, 'active', 'discovered', 'transcript', ?)`, [
-          id,
-          projectName,
-          opts.recordingId ?? null
-        ])
-        projectId = id
+        // F12 discovery gate. The resolver landing here means only "this is not a
+        // project I already know" — NOT "this is a project". Require a plausible
+        // name AND corroboration across >= 2 distinct sources before minting a
+        // row; anything weaker is remembered as a deferred suggestion instead of
+        // becoming a zero-item dead-end project.
+        //
+        // The ledger key must be STABLE across re-processing, so it identifies
+        // the CAPTURE (the recording), not the meeting: a recording id never
+        // changes, while its meeting_id is assigned late by correlation and
+        // rewritten by occurrence merges. Keying on the meeting let one
+        // conversation bank two sightings — once as 'r:x' before it was
+        // correlated, again as 'm:y' after — manufacturing the very corroboration
+        // this gate exists to require. The meeting rides along separately so the
+        // count still collapses two recordings of one conversation into one
+        // source. With neither id there is nothing to corroborate against, so we
+        // neither record nor create.
+        const quality = scoreProjectNameCandidate(projectName)
+        const sourceKey = opts.recordingId
+          ? `r:${opts.recordingId}`
+          : opts.meetingId
+            ? `m:${opts.meetingId}`
+            : null
+        // Score 0 is structural noise (a sentence fragment, digit soup) — dropped
+        // before it reaches the ledger so the deferred queue stays reviewable.
+        const distinctSources =
+          quality.score > 0 && sourceKey
+            ? recordProjectDiscoveryObservation(projectName, sourceKey, opts.meetingId ?? null, quality.score)
+            : 0
+        const decision = decideProjectDiscovery({ name: projectName, distinctSources })
+
+        if (decision.action === 'create') {
+          const id = randomUUID()
+          // origin='discovered' (v42): durable provenance — ONLY rows created here
+          // are dismissable via projects:dismissDiscovered (fail-closed elsewhere).
+          // source='transcript' + recording (F18/round-28): the project ENTITY is
+          // transcript-extracted, so it is suppressed on non-owner surfaces once its
+          // source recording is excluded (ADV27-1).
+          run(`INSERT INTO projects (id, name, status, origin, source, source_recording_id) VALUES (?, ?, 'active', 'discovered', 'transcript', ?)`, [
+            id,
+            projectName,
+            opts.recordingId ?? null
+          ])
+          projectId = id
+
+          // Link EVERY meeting whose mention earned this project, not just the one
+          // that happened to cross the threshold. The corroborating sightings are
+          // the evidence for creating it; dropping them when the ledger is cleared
+          // left the graph permanently missing those associations (the first
+          // meeting could only ever be linked by reprocessing its transcript).
+          // Runs BEFORE the purge, inside applyTranscriptEntities' transaction.
+          const corroborating = getProjectDiscoveryMeetingIds(projectName)
+          let backfilled = 0
+          for (const mid of corroborating) {
+            if (mid === opts.meetingId) continue // linked below by the normal path
+            run(`INSERT OR IGNORE INTO meeting_projects (meeting_id, project_id) VALUES (?, ?)`, [mid, id])
+            backfilled++
+          }
+
+          // The name is settled — stop tracking it as an open discovery question.
+          clearProjectDiscoveryObservations(projectName)
+          console.log(
+            `[OrgReconciler] Discovered project "${projectName}" ` +
+              `(name score ${decision.score}, seen in ${decision.distinctSources} sources` +
+              `${backfilled > 0 ? `, linked ${backfilled} corroborating meeting(s)` : ''})`
+          )
+        } else {
+          console.log(
+            `[OrgReconciler] Withheld project "${projectName}" — ${decision.action} ` +
+              `(name score ${decision.score}, ${decision.distinctSources} source(s): ${decision.reasons.join(', ')})`
+          )
+        }
       }
 
       if (projectId && opts.meetingId) {
@@ -1041,6 +1104,16 @@ export function mergeDuplicateMeetingOccurrences(): number {
         }
         if (existingTables.has('recording_preassignments')) {
           run(`UPDATE recording_preassignments SET meeting_id = ? WHERE meeting_id = ?`, [keeper.id, loser.id])
+        }
+        // Discovery ledger (v43): the sightings of the two occurrences describe
+        // ONE conversation. Without this repoint the merged-away meeting id
+        // survives in the ledger and the distinct-source count double-counts it,
+        // which would let a single conversation clear the recurrence bar alone.
+        if (existingTables.has('project_discovery_observations')) {
+          run(`UPDATE project_discovery_observations SET meeting_id = ? WHERE meeting_id = ?`, [
+            keeper.id,
+            loser.id
+          ])
         }
         // Composite-key link tables — move what won't collide, drop leftovers.
         run(`UPDATE OR IGNORE meeting_contacts SET meeting_id = ? WHERE meeting_id = ?`, [keeper.id, loser.id])

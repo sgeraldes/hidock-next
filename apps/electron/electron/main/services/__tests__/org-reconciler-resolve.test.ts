@@ -13,6 +13,10 @@ const run = vi.fn()
 const queryOne = vi.fn(() => undefined)
 const queryAll = vi.fn(() => [])
 const insertIdentitySuggestion = vi.fn()
+const isProjectDiscoveryRejected = vi.fn(() => false)
+/** Distinct sources the F12 gate sees; default 2 so the create branch stays reachable. */
+const recordProjectDiscoveryObservation = vi.fn(() => 2)
+const clearProjectDiscoveryObservations = vi.fn()
 const getMentionResolution = vi.fn<() => { decided: boolean; contactId: string | null }>(() => ({
   decided: false,
   contactId: null
@@ -39,7 +43,10 @@ vi.mock('../database', () => ({
   getAmbiguousBuckets: vi.fn(() => []),
   getBucketResolution: vi.fn(() => null),
   getAllRecordingPreassignments: vi.fn(() => []),
-  meetingBaseUid: (id: string) => id
+  meetingBaseUid: (id: string) => id,
+  isProjectDiscoveryRejected: (...a: any[]) => (isProjectDiscoveryRejected as any)(...a),
+  recordProjectDiscoveryObservation: (...a: any[]) => (recordProjectDiscoveryObservation as any)(...a),
+  clearProjectDiscoveryObservations: (...a: any[]) => (clearProjectDiscoveryObservations as any)(...a)
 }))
 
 vi.mock('../entity-resolver', () => ({
@@ -61,6 +68,8 @@ describe('applyTranscriptEntities — resolver thresholds', () => {
     queryAll.mockReturnValue([])
     getMentionResolution.mockReturnValue({ decided: false, contactId: null })
     resolveProject.mockReturnValue({ id: null, confidence: 0, method: 'none' })
+    isProjectDiscoveryRejected.mockReturnValue(false)
+    recordProjectDiscoveryObservation.mockReturnValue(2)
   })
 
   it('links an existing contact at ≥0.8 without creating one', () => {

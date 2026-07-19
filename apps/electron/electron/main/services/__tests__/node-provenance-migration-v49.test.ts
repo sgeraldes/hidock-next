@@ -1,9 +1,9 @@
 // @vitest-environment node
 
 /**
- * v47 (F18/round-37, ADV35-1) — NODE-LEVEL graph provenance migration.
+ * v49 (F18/round-37, ADV35-1) — NODE-LEVEL graph provenance migration.
  *
- *  1. Boot schema version is 47.
+ *  1. Boot schema version is 50 (current).
  *  2. A graph_nodes table created lazily by the KnowledgeGraphStore carries the
  *     new origin + source_recording_id columns (from GRAPH_SCHEMA) on a fresh DB.
  *  3. The structural repair (run every boot) force-adds the columns to a LEGACY
@@ -18,7 +18,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { existsSync, rmSync } from 'fs'
 
-const dbPath = join(tmpdir(), `hidock-v47-node-provenance-${process.pid}.sqlite`)
+const dbPath = join(tmpdir(), `hidock-v49-node-provenance-${process.pid}.sqlite`)
 vi.mock('../file-storage', () => ({ getDatabasePath: () => dbPath }))
 
 import { initializeDatabase, closeDatabase, run, queryAll, queryOne } from '../database'
@@ -30,7 +30,7 @@ function graphNodeColumns(): string[] {
 beforeEach(async () => {
   // Defensive: a sibling |main-db| suite in the same worker may have left the
   // module-singleton connection open on ITS path; close it first so our rm +
-  // init truly re-point at a fresh v47 db (fixes full-run isolation flake).
+  // init truly re-point at a fresh v49 db (fixes full-run isolation flake).
   try {
     closeDatabase()
   } catch {
@@ -44,10 +44,10 @@ afterEach(() => {
   if (existsSync(dbPath)) rmSync(dbPath, { force: true })
 })
 
-describe('v47 schema', () => {
-  it('boot schema version is 49', () => {
+describe('v49 schema', () => {
+  it('boot schema version is 50', () => {
     const row = queryOne<{ v: number }>('SELECT MAX(version) AS v FROM schema_version')!
-    expect(row.v).toBe(49)
+    expect(row.v).toBe(50)
   })
 
   it('a freshly created graph_nodes table has origin + source_recording_id (GRAPH_SCHEMA)', () => {
@@ -62,8 +62,8 @@ describe('v47 schema', () => {
   })
 })
 
-describe('v47 structural repair — legacy graph_nodes gets the columns force-added', () => {
-  it('adds origin + source_recording_id to a pre-v47 table and preserves rows (idempotent)', async () => {
+describe('v49 structural repair — legacy graph_nodes gets the columns force-added', () => {
+  it('adds origin + source_recording_id to a pre-v49 table and preserves rows (idempotent)', async () => {
     // Simulate a graph created by an OLDER build (no node-provenance columns).
     run(`CREATE TABLE graph_nodes (
       id TEXT PRIMARY KEY, type TEXT NOT NULL, label TEXT NOT NULL, norm_key TEXT NOT NULL,

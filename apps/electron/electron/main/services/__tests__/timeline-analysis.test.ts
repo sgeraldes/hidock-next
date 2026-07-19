@@ -12,7 +12,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { existsSync, rmSync } from 'fs'
+import { existsSync, rmSync, readFileSync } from 'fs'
+
+/** Target schema version read from database.ts — see database.test.ts for why. */
+const EXPECTED_SCHEMA_VERSION = Number(
+  readFileSync(join(__dirname, '..', 'database.ts'), 'utf-8').match(/const SCHEMA_VERSION = (\d+)\b/)![1]
+)
 
 const dbPath = join(tmpdir(), `hidock-v39-timeline-${process.pid}.sqlite`)
 
@@ -111,12 +116,9 @@ afterEach(() => {
 })
 
 describe('schema v39 timeline columns', () => {
-  it('is at schema version 49', () => {
-    // round-31 bumped 45 -> 46 (per-field role provenance); round-37 bumped 46 -> 47
-    // (node-level graph provenance, ADV35-1); the projects.origin re-key landed at
-    // 49 (current SCHEMA_VERSION).
+  it('is at the current schema version', () => {
     const row = queryOne<{ version: number }>('SELECT version FROM schema_version ORDER BY version DESC LIMIT 1')
-    expect(row?.version).toBe(49)
+    expect(row?.version).toBe(EXPECTED_SCHEMA_VERSION)
   })
 
   it('transcripts has sentiment_segments + event_markers columns', () => {

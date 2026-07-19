@@ -8,7 +8,7 @@ import { normalizeName, isGenericSpeakerLabel, detectAmbiguousName } from './ent
 import { getEventBus } from './event-bus'
 import type { QualityRating } from '@/types/knowledge'
 
-const SCHEMA_VERSION = 49
+const SCHEMA_VERSION = 50
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -707,7 +707,37 @@ CREATE TABLE IF NOT EXISTS project_discovery_rejections (
     rejected_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
--- Resumable value-classification backfill cursor (v43/F16/spec-003). Durable
+-- Discovery observation ledger (v43, F12). Every plausible project name a
+-- transcript analysis extracts is recorded here BEFORE anything is created, one
+-- row per (name, source). The reconciler auto-creates a project only once a name
+-- clears the plausibility floor AND appears in >= 2 DISTINCT sources. Everything
+-- else stays here as a deferred discovery suggestion the user can promote.
+-- Recurrence is only honest if the key is STABLE across re-processing, so
+-- source_key identifies the CAPTURE ('r:<recordingId>', preferred) rather than
+-- the meeting: a recording's id never changes, whereas its meeting_id is
+-- assigned late by correlation and rewritten by occurrence merges. Keying on the
+-- meeting let one conversation bank two sightings (once as 'r:x' before
+-- correlation, again as 'm:y' after). meeting_id is carried alongside and the
+-- count collapses on it, so two recordings of one meeting still count once.
+CREATE TABLE IF NOT EXISTS project_discovery_observations (
+    name_norm TEXT NOT NULL,
+    -- Stable capture identity: 'r:<recordingId>', or 'm:<meetingId>' when the
+    -- mention arrives with no recording at all.
+    source_key TEXT NOT NULL,
+    -- Conversation this capture belongs to, when known. NULL for a standalone
+    -- recording. Repointed by mergeDuplicateMeetingOccurrences like every other
+    -- meeting-referencing table.
+    meeting_id TEXT,
+    original_name TEXT NOT NULL,
+    -- Best name-plausibility score seen for this name (project-discovery-gate.ts).
+    score REAL NOT NULL DEFAULT 0,
+    first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (name_norm, source_key)
+);
+
+
+-- Resumable value-classification backfill cursor (v45/F16/spec-003). Durable
 -- per-capture marker so the ~1,900-capture backfill can be cancelled/resumed
 -- across runs (and across app restarts) without re-billing an LLM call for a
 -- capture already classified. status: 'in_progress' (reserved, mid-attempt) |
@@ -725,7 +755,6 @@ CREATE TABLE IF NOT EXISTS value_backfill_state (
     last_error TEXT,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
-
 -- Identity suggestion queue (v27). The 0.5–0.8 resolver band lands here as
 -- reviewable cards. Accept writes an alias and links, reject blocks the pairing.
 CREATE TABLE IF NOT EXISTS identity_suggestions (
@@ -817,7 +846,7 @@ CREATE TABLE IF NOT EXISTS turn_speaker_overrides (
 -- Speaker splits (v37). Forks a diarization label into an independently
 -- assignable derived label from a chosen turn onward. Fixes the merged-speaker
 -- case (one label = two real people): split at the boundary, then assign each
--- half its own contact. from_turn_index is the first turn of the derived label;
+-- half its own contact. from_turn_index is the first turn of the derived label.
 -- derived_label (e.g. "Speaker 1 · B") becomes a first-class key in
 -- transcript_speakers. Reversible by deleting the row ("merge back").
 CREATE TABLE IF NOT EXISTS speaker_splits (
@@ -2241,279 +2270,26 @@ const MIGRATIONS: Record<number, () => void> = {
   },
 
   42: () => {
-    // v42: knowledge_captures.quality_reasons + quality_source — content-based
-    // VALUE classification (F16/spec-001). quality_reasons is a JSON array of
-    // fixed tags (see VALUE_REASON_TAGS in value-classification.ts);
-    // quality_source distinguishes an AI-set rating ('ai') from a user-set one
-    // ('user') so re-analysis can safely refresh an AI rating without ever
-    // touching a rating the user set by hand. Idempotent: guarded ALTERs.
-    console.log('Running migration to schema v42: knowledge_captures.quality_reasons + quality_source')
-    const database = getDatabase()
-    const cols = getTableColumns(database, 'knowledge_captures')
-    if (cols.length > 0 && !cols.includes('quality_reasons')) {
-      try {
-        database.run('ALTER TABLE knowledge_captures ADD COLUMN quality_reasons TEXT')
-      } catch (e) {
-        console.warn('[Migration v42] add quality_reasons failed:', e)
-      }
-    }
-    if (cols.length > 0 && !cols.includes('quality_source')) {
-      try {
-        database.run("ALTER TABLE knowledge_captures ADD COLUMN quality_source TEXT CHECK(quality_source IN ('ai','user'))")
-      } catch (e) {
-        console.warn('[Migration v42] add quality_source failed:', e)
-      }
-    }
-    console.log('Migration v42 complete')
-  },
-
-  43: () => {
-    // v43: value_backfill_state — resumable cursor for the F16/spec-003 value
-    // backfill (see value-backfill.ts). CREATE TABLE IF NOT EXISTS is
-    // idempotent, and this table is ALSO created via the SCHEMA string (Phase
-    // 1, every boot) and lazily at runner start (mirrors
-    // knowledge-graph-service.ts's _ensureIngestTrackingTable) — belt-and-
-    // suspenders, since repairPhase only force-adds missing COLUMNS, not new
-    // tables, so a brand-new table must not rely on this migration alone.
-    console.log('Running migration to schema v43: value_backfill_state')
-    const database = getDatabase()
-    try {
-      database.run(`
-        CREATE TABLE IF NOT EXISTS value_backfill_state (
-          capture_id TEXT PRIMARY KEY,
-          status TEXT NOT NULL,
-          result_rating TEXT,
-          attempts INTEGER NOT NULL DEFAULT 0,
-          run_id TEXT,
-          last_error TEXT,
-          updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-      `)
-    } catch (e) {
-      console.warn('[Migration v43] create value_backfill_state failed:', e)
-    }
-    console.log('Migration v43 complete')
-  },
-
-  44: () => {
-    // v44 (F18/round-27): PER-ROW membership provenance. meeting_contacts and
-    // meeting_projects are written by BOTH the calendar/user path (structural) AND
-    // applyTranscriptEntities (AI-extracted from a specific recording), for the
-    // SAME meeting. A meeting-level eligibility check LAUNDERS transcript-derived
-    // rows on a calendar meeting (ADV26-2/-3), so we track provenance at the ROW:
-    //   source='calendar'|'transcript'; source_recording_id = the recording whose
-    //   transcript produced a 'transcript' row. identity_suggestions gets
-    //   source_recording_ids (JSON) so a transcript-created (non-graph) suggestion
-    //   can be revalidated through the recording allowlist (ADV26-1).
-    // Idempotent: guarded ALTERs (matching v42), then a one-time BEST-EFFORT
-    // backfill that classifies existing NULL-provenance rows conservatively.
-    console.log('Running migration to schema v44: per-row membership provenance')
-    const database = getDatabase()
-    const addCol = (table: string, col: string, def: string): void => {
-      const cols = getTableColumns(database, table)
-      if (cols.length > 0 && !cols.includes(col)) {
-        try {
-          database.run(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`)
-        } catch (e) {
-          console.warn(`[Migration v44] add ${table}.${col} failed:`, e)
-        }
-      }
-    }
-    addCol('meeting_contacts', 'source', 'TEXT')
-    addCol('meeting_contacts', 'source_recording_id', 'TEXT')
-    addCol('meeting_projects', 'source', 'TEXT')
-    addCol('meeting_projects', 'source_recording_id', 'TEXT')
-    addCol('identity_suggestions', 'source_recording_ids', 'TEXT')
-    try {
-      backfillMembershipProvenanceV44()
-    } catch (e) {
-      console.warn('[Migration v44] provenance backfill failed (non-fatal):', e)
-    }
-    console.log('Migration v44 complete')
-  },
-
-  45: () => {
-    // v45 (F18/round-28): ENTITY-level provenance (ADV27-1). applyTranscriptEntities
-    // mints contact/project ENTITY rows from transcript participants; v44 tracked
-    // provenance only on the MEMBERSHIP rows, so excluding the sole source recording
-    // hid the membership but left the extracted entity searchable/openable on the
-    // People/Projects non-owner surfaces. Add contacts/projects.source +
-    // source_recording_id and a one-time BEST-EFFORT origin backfill derived from
-    // each entity's membership provenance.
-    // Idempotent: guarded ALTERs, then a backfill that only touches source-NULL rows.
-    console.log('Running migration to schema v45: entity-level identity provenance')
-    const database = getDatabase()
-    const addCol = (table: string, col: string, def: string): void => {
-      const cols = getTableColumns(database, table)
-      if (cols.length > 0 && !cols.includes(col)) {
-        try {
-          database.run(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`)
-        } catch (e) {
-          console.warn(`[Migration v45] add ${table}.${col} failed:`, e)
-        }
-      }
-    }
-    addCol('contacts', 'source', 'TEXT')
-    addCol('contacts', 'source_recording_id', 'TEXT')
-    addCol('projects', 'source', 'TEXT')
-    addCol('projects', 'source_recording_id', 'TEXT')
-    try {
-      backfillEntityProvenanceV45()
-    } catch (e) {
-      console.warn('[Migration v45] entity provenance backfill failed (non-fatal):', e)
-    }
-    console.log('Migration v45 complete')
-  },
-
-  46: () => {
-    // v46 (F18/round-31, ADV29-2): PER-FIELD provenance for the one contact scalar
-    // an AI transcript enriches — `role`. Entity-level visibility (v45) suppresses a
-    // whole transcript entity when its source recording is excluded, but a contact
-    // kept visible by an ELIGIBLE recording B can still display a role that was
-    // enriched from an EXCLUDED recording A (org-reconciler.applyTranscriptEntities
-    // fills an empty role from a specific recording). Add
-    // contacts.role_source_recording_id so a non-owner read can BLANK a role whose
-    // source recording is ineligible.
-    // NO backfill: existing role values are treated as calendar/manual/legacy
-    // (role_source_recording_id NULL ⇒ always shown). Only NEW transcript enrichment
-    // going forward stamps provenance — we do not retroactively blank a legacy role
-    // we cannot attribute to a recording (conservative; documented in ARF-HIGHS-CHANGES).
-    // Projects have NO transcript-enriched scalar (description is user-authored only),
-    // so no per-field column is needed there.
-    // Idempotent: single guarded ALTER (matching v44/v45).
-    console.log('Running migration to schema v46: per-field role provenance')
-    const database = getDatabase()
-    const cols = getTableColumns(database, 'contacts')
-    if (cols.length > 0 && !cols.includes('role_source_recording_id')) {
-      try {
-        database.run('ALTER TABLE contacts ADD COLUMN role_source_recording_id TEXT')
-      } catch (e) {
-        console.warn('[Migration v46] add contacts.role_source_recording_id failed:', e)
-      }
-    }
-    console.log('Migration v46 complete')
-  },
-
-  47: () => {
-    // v47 (F18/round-37, ADV35-1): NODE-LEVEL provenance on graph_nodes. Edge-level
-    // provenance (graph_edge_sources) can only suppress a node that HAS edges; an
-    // ISOLATED node (e.g. a risk extracted with no raiser, or a topic that never
-    // linked) has none, so the old "zero incident edges ⇒ visible" branch kept
-    // exposing an edgeless derived orphan after its recording was excluded/purged.
-    // Add graph_nodes.origin ('derived' | 'manual') + source_recording_id so an
-    // isolated node's visibility can be decided by NODE provenance:
-    //   manual/structural ⇒ visible; derived ⇒ visible only if its source recording
-    //   is eligible; legacy-null ⇒ structural KIND visible / derived KIND suppressed.
-    // Populated at ingest going forward (packages/knowledge-graph ingestExtraction:
-    // recording-backed ⇒ 'derived'+source; folder ⇒ 'manual').
-    // NO DATA BACKFILL: an isolated legacy node has NO edges and therefore NO
-    // graph_edge_sources rows to associate it to a recording, so its recording is
-    // not derivable — it stays origin=NULL and is resolved at READ time by the
-    // node-KIND heuristic (structural kinds visible, derived kinds suppressed
-    // fail-closed). A CONNECTED legacy node is left NULL too (edge-provenance
-    // governs it, unchanged). Documented in ARF-HIGHS-CHANGES.
-    // Idempotent: guarded ALTERs; the graph_nodes table may not exist yet on a
-    // brand-new DB (it is created lazily by the KnowledgeGraphStore with these
-    // columns already present in GRAPH_SCHEMA), so the length guard skips it.
-    console.log('Running migration to schema v47: node-level graph provenance')
-    const database = getDatabase()
-    const addCol = (col: string): void => {
-      const cols = getTableColumns(database, 'graph_nodes')
-      if (cols.length > 0 && !cols.includes(col)) {
-        try {
-          database.run(`ALTER TABLE graph_nodes ADD COLUMN ${col} TEXT`)
-        } catch (e) {
-          console.warn(`[Migration v47] add graph_nodes.${col} failed:`, e)
-        }
-      }
-    }
-    addCol('origin')
-    addCol('source_recording_id')
-    console.log('Migration v47 complete')
-  },
-
-  48: () => {
-    // v48 (F18/round-51, ADV49-2): PROVENANCE-TRUST MARKER for the transcript-
-    // enriched contact scalar `role`. blankIneligibleContactFields treated EVERY
-    // role with a NULL role_source_recording_id as calendar/manual/legacy and
-    // always showed it — but pre-v46 applyTranscriptEntities wrote transcript-
-    // DERIVED roles with the column NULL too (v46 added the column with NO
-    // backfill), so a calendar/manual-retained contact could still expose a role
-    // learned SOLELY from a now-personal/deleted/value-excluded/purged recording.
-    // Add contacts.role_origin and CONSERVATIVELY classify existing role-bearing
-    // rows so a non-owner read can distinguish a trusted structural/manual role
-    // from an unattributable legacy transcript role.
-    //
-    // ADV50-1 (round-52) — a contact being CALENDAR/USER-CLASSIFIED (v45 structural
-    // membership) is NOT positive evidence that its ROLE was calendar/manual-AUTHORED:
-    // the BASE (28bea428) applyTranscriptEntities filled ANY high-confidence existing
-    // contact's EMPTY role from transcript output, INCLUDING calendar/manual contacts,
-    // and did so with NULL role provenance. So an earlier rule that trusted
-    // "NULL-provenance role on a user/calendar entity ⇒ manual" LAUNDERED a
-    // transcript-derived role as structural — after the source recording was excluded,
-    // the role kept showing. There is NO reliable field-level evidence of authorship in
-    // pre-v46 data (no role_origin marker existed; calendar data carries no job-title
-    // field to match the scalar role against), so ALL pre-v46 NULL-provenance roles are
-    // treated as LEGACY/UNTRUSTED. Positive authorship evidence is stamped GOING FORWARD
-    // by the write paths (updateContact ⇒ 'manual'; createContact/upsertContact from a
-    // user/calendar create ⇒ that source; applyTranscriptEntities ⇒ 'transcript' +
-    // role_source_recording_id). Prefer under-trusting legacy: an owner can re-add a
-    // genuinely-manual role via the People UI; we must never keep exposing a
-    // transcript-derived one after its recording is excluded.
-    // Rules (only role-bearing rows; leave role_origin NULL where role IS NULL):
-    //   (a) OPTION-A attribution — a transcript-ENTITY role with NULL provenance
-    //       is backfilled to the entity's minting recording (source_recording_id),
-    //       making it attributable (gated by that recording's eligibility);
-    //   (b) rows that already carry role_source_recording_id ⇒ 'transcript';
-    //   (c) EVERY remaining NULL-provenance role ⇒ 'legacy' (AMBIGUOUS, blanked on
-    //       non-owner surfaces, fail-closed) — including user/calendar-classified
-    //       contacts, whose NULL-provenance role is NOT proof of manual/calendar
-    //       authorship (ADV50-1). No trusted-structural backfill from a downstream
-    //       classification.
-    // Idempotent: guarded ALTER + UPDATEs that only touch role_origin-NULL rows.
-    // Documented in ARF-HIGHS-CHANGES.md.
-    console.log('Running migration to schema v48: role provenance-trust marker')
-    const database = getDatabase()
-    const cols = getTableColumns(database, 'contacts')
-    if (cols.length > 0 && !cols.includes('role_origin')) {
-      try {
-        database.run('ALTER TABLE contacts ADD COLUMN role_origin TEXT')
-      } catch (e) {
-        console.warn('[Migration v48] add contacts.role_origin failed:', e)
-      }
-    }
-    try {
-      backfillRoleOriginV48()
-    } catch (e) {
-      console.warn('[Migration v48] role_origin backfill failed (non-fatal):', e)
-    }
-    console.log('Migration v48 complete')
-  },
-
-  49: () => {
-    // v49: projects.origin — durable provenance for the dismiss-discovered path.
+    // v42: projects.origin — durable provenance for the dismiss-discovered path.
     // 'manual' = explicit user create, 'discovered' = reconciler auto-create.
     // Legacy rows stay NULL (unknown) and are fail-closed: dismissDiscovered
     // refuses them, so a renderer bug or direct IPC call can never tombstone-
     // delete a manually created project. Idempotent: guarded ALTER.
-    // (Re-keyed from v42 on merge into beta/meeting-intelligence: HEAD's F16/F18
-    // chain already occupies 42-48. This migration was never integrated or
-    // published under 42, so no on-disk DB recorded it there — safe to renumber.)
-    console.log('Running migration to schema v49: projects.origin')
+    console.log('Running migration to schema v42: projects.origin')
     const database = getDatabase()
     const cols = getTableColumns(database, 'projects')
     if (cols.length > 0 && !cols.includes('origin')) {
       try {
         database.run('ALTER TABLE projects ADD COLUMN origin TEXT')
       } catch (e) {
-        console.warn('[Migration v49] add origin failed:', e)
+        console.warn('[Migration v42] add origin failed:', e)
       }
     }
 
-    // merge_journal.loser_id + seq (part of v49 — this version exists only on
+    // merge_journal.loser_id + seq (still v42 — this version exists only on
     // this lane and was never integrated or published, so the journal columns
     // for the dependency-aware newest-first unmerge guard extend the SAME
-    // migration instead of minting v50). loser_id makes the loser queryable
+    // migration instead of minting v43). loser_id makes the loser queryable
     // without JSON-parsing every snapshot; seq is the explicit immutable merge
     // order (rowid can be renumbered by VACUUM/dump-restore). Backfill:
     // loser_id from the snapshot's $.id, seq from rowid — rowid is monotonic
@@ -2525,31 +2301,31 @@ const MIGRATIONS: Record<number, () => void> = {
         try {
           database.run('ALTER TABLE merge_journal ADD COLUMN loser_id TEXT')
         } catch (e) {
-          console.warn('[Migration v49] add merge_journal.loser_id failed:', e)
+          console.warn('[Migration v42] add merge_journal.loser_id failed:', e)
         }
       }
       if (!journalCols.includes('seq')) {
         try {
           database.run('ALTER TABLE merge_journal ADD COLUMN seq INTEGER')
         } catch (e) {
-          console.warn('[Migration v49] add merge_journal.seq failed:', e)
+          console.warn('[Migration v42] add merge_journal.seq failed:', e)
         }
       }
       // Backfills run UNCONDITIONALLY (WHERE ... IS NULL makes them idempotent):
       // repairPhase may have force-added the columns on this same boot — or an
-      // earlier FAILED v49 attempt may have added both nullable columns and
+      // earlier FAILED v42 attempt may have added both nullable columns and
       // died before filling them — in which case the includes-guards above
       // skip the ALTERs but legacy rows still need their values.
       //
       // seq is ESSENTIAL (the unmerge ordering guard keys on it) and does not
       // depend on snapshot validity, so it runs first, alone, and a failure
-      // RETHROWS — v49 must not be recorded over NULL-seq journals (same
+      // RETHROWS — v42 must not be recorded over NULL-seq journals (same
       // policy as the tombstone re-key below), or they would be stranded
       // forever behind a recorded version with ordering unenforced.
       try {
         database.run('UPDATE merge_journal SET seq = rowid WHERE seq IS NULL')
       } catch (e) {
-        console.warn('[Migration v49] merge_journal seq backfill failed:', e)
+        console.warn('[Migration v42] merge_journal seq backfill failed:', e)
         throw e
       }
       // loser_id is backfilled per-row behind json_valid so ONE malformed
@@ -2563,7 +2339,7 @@ const MIGRATIONS: Record<number, () => void> = {
         )
         if (malformed.length > 0) {
           console.warn(
-            `[Migration v49] ${malformed.length} merge_journal row(s) have a malformed loser_snapshot and stay ` +
+            `[Migration v42] ${malformed.length} merge_journal row(s) have a malformed loser_snapshot and stay ` +
               `un-unmergeable (fail-closed): ${malformed.map((r) => r.id).join(', ')}`
           )
         }
@@ -2572,15 +2348,15 @@ const MIGRATIONS: Record<number, () => void> = {
             'WHERE loser_id IS NULL AND json_valid(loser_snapshot)'
         )
       } catch (e) {
-        console.warn('[Migration v49] merge_journal loser_id backfill failed:', e)
+        console.warn('[Migration v42] merge_journal loser_id backfill failed:', e)
         throw e
       }
     }
 
     // Re-key v41 tombstones under the NFKC name normalization that ships with
-    // v49. v41 wrote name_norm with the pre-NFKC normalizeName, so a tombstone
+    // v42. v41 wrote name_norm with the pre-NFKC normalizeName, so a tombstone
     // recorded under a decomposed (NFD) or compatibility form no longer matches
-    // post-v49 lookups: re-analysis would resurrect the dismissed project, and a
+    // post-v42 lookups: re-analysis would resurrect the dismissed project, and a
     // manual re-create could never clear the stranded key. Recompute every key
     // from original_name in one transaction. NFKC collisions (two old keys
     // folding to one) are resolved deterministically: keep the NEWEST rejection
@@ -2618,25 +2394,620 @@ const MIGRATIONS: Record<number, () => void> = {
             )
           }
           console.log(
-            `[Migration v49] re-keyed ${rekeyed} tombstone(s) to NFKC, ` +
+            `[Migration v42] re-keyed ${rekeyed} tombstone(s) to NFKC, ` +
               `dropped ${rows.length - winners.size} collision(s)`
           )
         }
       })
     } catch (e) {
       // Rethrow: the transaction has rolled back, and schema_version must NOT
-      // advance to 49 on a failed rewrite — swallowing here would strand the
-      // v41 keys permanently (the migration never retries once 49 is recorded).
+      // advance to 42 on a failed rewrite — swallowing here would strand the
+      // v41 keys permanently (the migration never retries once 42 is recorded).
       // The engine records each version only AFTER its migration returns, so
-      // failing loudly leaves the DB at 48 and the next boot retries the
+      // failing loudly leaves the DB at 41 and the next boot retries the
       // re-key. (The guarded ALTER above may have committed — that's fine:
       // it is idempotent and repairPhase force-adds the column anyway.)
-      console.warn('[Migration v49] tombstone re-key failed:', e)
+      console.warn('[Migration v42] tombstone re-key failed:', e)
       throw e
     }
+    console.log('Migration v42 complete')
+  },
+
+  43: () => {
+    // v43 (F12): project_discovery_observations — the ledger that gates spurious
+    // project auto-creation. Before v43 the reconciler created a real projects
+    // row for ANY extracted name the resolver failed to match, so a one-off
+    // phrase became a zero-item dead-end project. The ledger records each
+    // (name, source) sighting so the reconciler can require BOTH a plausible
+    // name and >= 2 distinct sources before creating, and surface everything
+    // else as a deferred suggestion. Idempotent: CREATE IF NOT EXISTS.
+    console.log('Running migration to schema v43: project_discovery_observations')
+    const database = getDatabase()
+    database.run(OBSERVATIONS_TABLE_DDL)
+    // CREATE TABLE IF NOT EXISTS is a no-op against a table that already exists
+    // with the wrong shape, so the shared helper repairs what ALTER can add and
+    // validates the FULL write contract (every column + the ON CONFLICT target).
+    // Any failure propagates: the engine records a version only AFTER its
+    // migration returns, so throwing leaves the DB below 43 and the next boot
+    // retries — swallowing would mark the migration complete over a table that
+    // cannot accept an insert. Same fail-loud policy as the v42 re-key.
+    ensureObservationsTableUsable(database, '[Migration v43]')
+    console.log('Migration v43 complete')
+  },
+
+  44: () => {
+    // v44: knowledge_captures.quality_reasons + quality_source — content-based
+    // VALUE classification (F16/spec-001). quality_reasons is a JSON array of
+    // fixed tags (see VALUE_REASON_TAGS in value-classification.ts);
+    // quality_source distinguishes an AI-set rating ('ai') from a user-set one
+    // ('user') so re-analysis can safely refresh an AI rating without ever
+    // touching a rating the user set by hand. Idempotent: guarded ALTERs.
+    console.log('Running migration to schema v44: knowledge_captures.quality_reasons + quality_source')
+    const database = getDatabase()
+    const cols = getTableColumns(database, 'knowledge_captures')
+    if (cols.length > 0 && !cols.includes('quality_reasons')) {
+      try {
+        database.run('ALTER TABLE knowledge_captures ADD COLUMN quality_reasons TEXT')
+      } catch (e) {
+        console.warn('[Migration v44] add quality_reasons failed:', e)
+      }
+    }
+    if (cols.length > 0 && !cols.includes('quality_source')) {
+      try {
+        database.run("ALTER TABLE knowledge_captures ADD COLUMN quality_source TEXT CHECK(quality_source IN ('ai','user'))")
+      } catch (e) {
+        console.warn('[Migration v44] add quality_source failed:', e)
+      }
+    }
+    console.log('Migration v44 complete')
+  },
+
+  45: () => {
+    // v45: value_backfill_state — resumable cursor for the F16/spec-003 value
+    // backfill (see value-backfill.ts). CREATE TABLE IF NOT EXISTS is
+    // idempotent, and this table is ALSO created via the SCHEMA string (Phase
+    // 1, every boot) and lazily at runner start (mirrors
+    // knowledge-graph-service.ts's _ensureIngestTrackingTable) — belt-and-
+    // suspenders, since repairPhase only force-adds missing COLUMNS, not new
+    // tables, so a brand-new table must not rely on this migration alone.
+    console.log('Running migration to schema v45: value_backfill_state')
+    const database = getDatabase()
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS value_backfill_state (
+          capture_id TEXT PRIMARY KEY,
+          status TEXT NOT NULL,
+          result_rating TEXT,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          run_id TEXT,
+          last_error TEXT,
+          updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+      `)
+    } catch (e) {
+      console.warn('[Migration v45] create value_backfill_state failed:', e)
+    }
+    console.log('Migration v45 complete')
+  },
+
+  46: () => {
+    // v46 (F18/round-27): PER-ROW membership provenance. meeting_contacts and
+    // meeting_projects are written by BOTH the calendar/user path (structural) AND
+    // applyTranscriptEntities (AI-extracted from a specific recording), for the
+    // SAME meeting. A meeting-level eligibility check LAUNDERS transcript-derived
+    // rows on a calendar meeting (ADV26-2/-3), so we track provenance at the ROW:
+    //   source='calendar'|'transcript'; source_recording_id = the recording whose
+    //   transcript produced a 'transcript' row. identity_suggestions gets
+    //   source_recording_ids (JSON) so a transcript-created (non-graph) suggestion
+    //   can be revalidated through the recording allowlist (ADV26-1).
+    // Idempotent: guarded ALTERs (matching v44), then a one-time BEST-EFFORT
+    // backfill that classifies existing NULL-provenance rows conservatively.
+    console.log('Running migration to schema v46: per-row membership provenance')
+    const database = getDatabase()
+    const addCol = (table: string, col: string, def: string): void => {
+      const cols = getTableColumns(database, table)
+      if (cols.length > 0 && !cols.includes(col)) {
+        try {
+          database.run(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`)
+        } catch (e) {
+          console.warn(`[Migration v46] add ${table}.${col} failed:`, e)
+        }
+      }
+    }
+    addCol('meeting_contacts', 'source', 'TEXT')
+    addCol('meeting_contacts', 'source_recording_id', 'TEXT')
+    addCol('meeting_projects', 'source', 'TEXT')
+    addCol('meeting_projects', 'source_recording_id', 'TEXT')
+    addCol('identity_suggestions', 'source_recording_ids', 'TEXT')
+    try {
+      backfillMembershipProvenanceV44()
+    } catch (e) {
+      console.warn('[Migration v46] provenance backfill failed (non-fatal):', e)
+    }
+    console.log('Migration v46 complete')
+  },
+
+  47: () => {
+    // v47 (F18/round-28): ENTITY-level provenance (ADV27-1). applyTranscriptEntities
+    // mints contact/project ENTITY rows from transcript participants; v46 tracked
+    // provenance only on the MEMBERSHIP rows, so excluding the sole source recording
+    // hid the membership but left the extracted entity searchable/openable on the
+    // People/Projects non-owner surfaces. Add contacts/projects.source +
+    // source_recording_id and a one-time BEST-EFFORT origin backfill derived from
+    // each entity's membership provenance.
+    // Idempotent: guarded ALTERs, then a backfill that only touches source-NULL rows.
+    console.log('Running migration to schema v47: entity-level identity provenance')
+    const database = getDatabase()
+    const addCol = (table: string, col: string, def: string): void => {
+      const cols = getTableColumns(database, table)
+      if (cols.length > 0 && !cols.includes(col)) {
+        try {
+          database.run(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`)
+        } catch (e) {
+          console.warn(`[Migration v47] add ${table}.${col} failed:`, e)
+        }
+      }
+    }
+    addCol('contacts', 'source', 'TEXT')
+    addCol('contacts', 'source_recording_id', 'TEXT')
+    addCol('projects', 'source', 'TEXT')
+    addCol('projects', 'source_recording_id', 'TEXT')
+    try {
+      backfillEntityProvenanceV45()
+    } catch (e) {
+      console.warn('[Migration v47] entity provenance backfill failed (non-fatal):', e)
+    }
+    console.log('Migration v47 complete')
+  },
+
+  48: () => {
+    // v48 (F18/round-31, ADV29-2): PER-FIELD provenance for the one contact scalar
+    // an AI transcript enriches — `role`. Entity-level visibility (v47) suppresses a
+    // whole transcript entity when its source recording is excluded, but a contact
+    // kept visible by an ELIGIBLE recording B can still display a role that was
+    // enriched from an EXCLUDED recording A (org-reconciler.applyTranscriptEntities
+    // fills an empty role from a specific recording). Add
+    // contacts.role_source_recording_id so a non-owner read can BLANK a role whose
+    // source recording is ineligible.
+    // NO backfill: existing role values are treated as calendar/manual/legacy
+    // (role_source_recording_id NULL ⇒ always shown). Only NEW transcript enrichment
+    // going forward stamps provenance — we do not retroactively blank a legacy role
+    // we cannot attribute to a recording (conservative; documented in ARF-HIGHS-CHANGES).
+    // Projects have NO transcript-enriched scalar (description is user-authored only),
+    // so no per-field column is needed there.
+    // Idempotent: single guarded ALTER (matching v46/v47).
+    console.log('Running migration to schema v48: per-field role provenance')
+    const database = getDatabase()
+    const cols = getTableColumns(database, 'contacts')
+    if (cols.length > 0 && !cols.includes('role_source_recording_id')) {
+      try {
+        database.run('ALTER TABLE contacts ADD COLUMN role_source_recording_id TEXT')
+      } catch (e) {
+        console.warn('[Migration v48] add contacts.role_source_recording_id failed:', e)
+      }
+    }
+    console.log('Migration v48 complete')
+  },
+
+  49: () => {
+    // v49 (F18/round-37, ADV35-1): NODE-LEVEL provenance on graph_nodes. Edge-level
+    // provenance (graph_edge_sources) can only suppress a node that HAS edges; an
+    // ISOLATED node (e.g. a risk extracted with no raiser, or a topic that never
+    // linked) has none, so the old "zero incident edges ⇒ visible" branch kept
+    // exposing an edgeless derived orphan after its recording was excluded/purged.
+    // Add graph_nodes.origin ('derived' | 'manual') + source_recording_id so an
+    // isolated node's visibility can be decided by NODE provenance:
+    //   manual/structural ⇒ visible; derived ⇒ visible only if its source recording
+    //   is eligible; legacy-null ⇒ structural KIND visible / derived KIND suppressed.
+    // Populated at ingest going forward (packages/knowledge-graph ingestExtraction:
+    // recording-backed ⇒ 'derived'+source; folder ⇒ 'manual').
+    // NO DATA BACKFILL: an isolated legacy node has NO edges and therefore NO
+    // graph_edge_sources rows to associate it to a recording, so its recording is
+    // not derivable — it stays origin=NULL and is resolved at READ time by the
+    // node-KIND heuristic (structural kinds visible, derived kinds suppressed
+    // fail-closed). A CONNECTED legacy node is left NULL too (edge-provenance
+    // governs it, unchanged). Documented in ARF-HIGHS-CHANGES.
+    // Idempotent: guarded ALTERs; the graph_nodes table may not exist yet on a
+    // brand-new DB (it is created lazily by the KnowledgeGraphStore with these
+    // columns already present in GRAPH_SCHEMA), so the length guard skips it.
+    console.log('Running migration to schema v49: node-level graph provenance')
+    const database = getDatabase()
+    const addCol = (col: string): void => {
+      const cols = getTableColumns(database, 'graph_nodes')
+      if (cols.length > 0 && !cols.includes(col)) {
+        try {
+          database.run(`ALTER TABLE graph_nodes ADD COLUMN ${col} TEXT`)
+        } catch (e) {
+          console.warn(`[Migration v49] add graph_nodes.${col} failed:`, e)
+        }
+      }
+    }
+    addCol('origin')
+    addCol('source_recording_id')
     console.log('Migration v49 complete')
+  },
+
+  50: () => {
+    // v50 (F18/round-51, ADV49-2): PROVENANCE-TRUST MARKER for the transcript-
+    // enriched contact scalar `role`. blankIneligibleContactFields treated EVERY
+    // role with a NULL role_source_recording_id as calendar/manual/legacy and
+    // always showed it — but pre-v48 applyTranscriptEntities wrote transcript-
+    // DERIVED roles with the column NULL too (v48 added the column with NO
+    // backfill), so a calendar/manual-retained contact could still expose a role
+    // learned SOLELY from a now-personal/deleted/value-excluded/purged recording.
+    // Add contacts.role_origin and CONSERVATIVELY classify existing role-bearing
+    // rows so a non-owner read can distinguish a trusted structural/manual role
+    // from an unattributable legacy transcript role.
+    //
+    // ADV50-1 (round-52) — a contact being CALENDAR/USER-CLASSIFIED (v47 structural
+    // membership) is NOT positive evidence that its ROLE was calendar/manual-AUTHORED:
+    // the BASE (28bea428) applyTranscriptEntities filled ANY high-confidence existing
+    // contact's EMPTY role from transcript output, INCLUDING calendar/manual contacts,
+    // and did so with NULL role provenance. So an earlier rule that trusted
+    // "NULL-provenance role on a user/calendar entity ⇒ manual" LAUNDERED a
+    // transcript-derived role as structural — after the source recording was excluded,
+    // the role kept showing. There is NO reliable field-level evidence of authorship in
+    // pre-v48 data (no role_origin marker existed; calendar data carries no job-title
+    // field to match the scalar role against), so ALL pre-v48 NULL-provenance roles are
+    // treated as LEGACY/UNTRUSTED. Positive authorship evidence is stamped GOING FORWARD
+    // by the write paths (updateContact ⇒ 'manual'; createContact/upsertContact from a
+    // user/calendar create ⇒ that source; applyTranscriptEntities ⇒ 'transcript' +
+    // role_source_recording_id). Prefer under-trusting legacy: an owner can re-add a
+    // genuinely-manual role via the People UI; we must never keep exposing a
+    // transcript-derived one after its recording is excluded.
+    // Rules (only role-bearing rows; leave role_origin NULL where role IS NULL):
+    //   (a) OPTION-A attribution — a transcript-ENTITY role with NULL provenance
+    //       is backfilled to the entity's minting recording (source_recording_id),
+    //       making it attributable (gated by that recording's eligibility);
+    //   (b) rows that already carry role_source_recording_id ⇒ 'transcript';
+    //   (c) EVERY remaining NULL-provenance role ⇒ 'legacy' (AMBIGUOUS, blanked on
+    //       non-owner surfaces, fail-closed) — including user/calendar-classified
+    //       contacts, whose NULL-provenance role is NOT proof of manual/calendar
+    //       authorship (ADV50-1). No trusted-structural backfill from a downstream
+    //       classification.
+    // Idempotent: guarded ALTER + UPDATEs that only touch role_origin-NULL rows.
+    // Documented in ARF-HIGHS-CHANGES.md.
+    console.log('Running migration to schema v50: role provenance-trust marker')
+    const database = getDatabase()
+    const cols = getTableColumns(database, 'contacts')
+    if (cols.length > 0 && !cols.includes('role_origin')) {
+      try {
+        database.run('ALTER TABLE contacts ADD COLUMN role_origin TEXT')
+      } catch (e) {
+        console.warn('[Migration v50] add contacts.role_origin failed:', e)
+      }
+    }
+    try {
+      backfillRoleOriginV48()
+    } catch (e) {
+      console.warn('[Migration v50] role_origin backfill failed (non-fatal):', e)
+    }
+    console.log('Migration v50 complete')
+  },
+
+}
+
+/** Single source of truth for the v43 ledger DDL — used by repairPhase and migration 43. */
+const OBSERVATIONS_TABLE_DDL = `
+  CREATE TABLE IF NOT EXISTS project_discovery_observations (
+    name_norm TEXT NOT NULL,
+    source_key TEXT NOT NULL,
+    meeting_id TEXT,
+    original_name TEXT NOT NULL,
+    score REAL NOT NULL DEFAULT 0,
+    first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (name_norm, source_key)
+  )
+`
+
+/** Every column recordProjectDiscoveryObservation writes. */
+const OBSERVATIONS_REQUIRED_COLUMNS = [
+  'name_norm',
+  'source_key',
+  'meeting_id',
+  'original_name',
+  'score',
+  'first_seen_at',
+  'last_seen_at'
+]
+
+/**
+ * Columns that can be ALTERed into an existing table: nullable, or NOT NULL with
+ * a CONSTANT default (SQLite rejects a non-constant one, which is why the
+ * timestamps are added bare — every writer passes them explicitly anyway).
+ *
+ * The rest (name_norm, source_key, original_name) are NOT NULL without a
+ * constant default and cannot be added at all. They are also the primary-key
+ * columns, so a table missing them is structurally wrong rather than incomplete.
+ */
+const OBSERVATIONS_REPAIRABLE_COLUMNS: Record<string, string> = {
+  meeting_id: 'TEXT',
+  score: 'REAL NOT NULL DEFAULT 0',
+  first_seen_at: 'TEXT',
+  last_seen_at: 'TEXT'
+}
+
+/** recordProjectDiscoveryObservation's ON CONFLICT target — needs a real constraint. */
+const OBSERVATIONS_CONFLICT_KEY = ['name_norm', 'source_key']
+
+/**
+ * THE write. Shared verbatim by recordProjectDiscoveryObservation and by the boot
+ * probe, so the statement the probe proves is the statement production runs —
+ * they cannot drift.
+ */
+const OBSERVATIONS_UPSERT_SQL = `
+  INSERT INTO project_discovery_observations
+    (name_norm, source_key, meeting_id, original_name, score, first_seen_at, last_seen_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(name_norm, source_key) DO UPDATE SET
+    meeting_id = COALESCE(excluded.meeting_id, project_discovery_observations.meeting_id),
+    original_name = excluded.original_name,
+    score = MAX(project_discovery_observations.score, excluded.score),
+    last_seen_at = excluded.last_seen_at
+`
+
+/**
+ * Prefix for the boot probe sentinel. The full key is generated FRESH per probe
+ * (prefix + UUID) and confirmed absent before use.
+ *
+ * A FIXED sentinel was a hole: normalizeName preserves any character and
+ * sourceKey accepts any non-empty string, so a real row could carry that exact
+ * (name_norm, source_key) pair — and then the first upsert takes the ON CONFLICT
+ * path instead of the INSERT path. A table with an AFTER INSERT trigger that
+ * aborts new rows would have PASSED the probe while every real observation
+ * insert failed, defeating the entire point of probing.
+ */
+const OBSERVATIONS_PROBE_PREFIX = 'hidock-schema-probe-'
+
+/**
+ * Run a pragma via its table-valued function form so its argument can be BOUND.
+ * String-interpolating an identifier breaks on any name needing SQL quoting — an
+ * index called `my "weird" idx` produced a syntax error and the reader silently
+ * returned nothing. Harmless now that metadata cannot refuse, but it made the
+ * diagnostics wrong precisely when they mattered most.
+ */
+function pragmaColumn(
+  database: ReturnType<typeof getDatabase>,
+  sql: string,
+  argument: string
+): string[] {
+  try {
+    const res = database.exec(sql, [argument])
+    return ((res[0]?.values as unknown[][]) ?? []).map((row) => String(row[0]))
+  } catch {
+    return []
+  }
+}
+
+const sameColumnSet = (a: string[], b: string[]): boolean =>
+  a.length === b.length && [...a].sort().join(' ') === [...b].sort().join(' ')
+
+/**
+ * Whether a UNIQUE constraint exists on exactly `target`, which is what SQLite
+ * requires to resolve an `ON CONFLICT(<target>)` clause. Checks the declared
+ * PRIMARY KEY (pragma_table_info's pk ordinal) and every non-partial UNIQUE index
+ * (pragma_index_list / pragma_index_info) — a partial index cannot be a target.
+ */
+function hasConflictTarget(
+  database: ReturnType<typeof getDatabase>,
+  table: string,
+  target: string[]
+): boolean {
+  const pkCols = pragmaColumn(
+    database,
+    'SELECT name FROM pragma_table_info(?) WHERE pk > 0 ORDER BY pk',
+    table
+  )
+  if (sameColumnSet(pkCols, target)) return true
+
+  const uniqueIndexes = pragmaColumn(
+    database,
+    'SELECT name FROM pragma_index_list(?) WHERE "unique" = 1 AND COALESCE(partial, 0) = 0',
+    table
+  )
+  for (const indexName of uniqueIndexes) {
+    if (sameColumnSet(pragmaColumn(database, 'SELECT name FROM pragma_index_info(?)', indexName), target)) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * Execute the REAL upsert (both its INSERT and its ON CONFLICT branch) with
+ * sentinel values inside a savepoint, then roll it back. Returns null on success
+ * or a description of the failure.
+ *
+ * This is the authority. Metadata inspection can only check the ways a schema is
+ * wrong that we thought to model, and that space is open-ended: an extra
+ * `NOT NULL` column with no default, a CHECK constraint, a trigger, a generated
+ * column — each passes every column-and-constraint check and then rejects the
+ * insert at runtime. Rather than chase them, run the actual write.
+ */
+function probeObservationsWrite(
+  database: ReturnType<typeof getDatabase>,
+  savepoint: string
+): { failure: string | null; cleanupError: string | null } {
+  const table = 'project_discovery_observations'
+  const reject = (e: unknown): string => `rejects the write it must accept (${(e as Error).message})`
+
+  // A FRESH key per probe, confirmed ABSENT, so the first upsert is guaranteed to
+  // take the INSERT path. Without this an existing row with the sentinel's key
+  // silently turned both statements into ON CONFLICT updates.
+  let key: string | null = null
+  for (let attempt = 0; attempt < 3 && key === null; attempt++) {
+    const candidate = `${OBSERVATIONS_PROBE_PREFIX}${randomUUID()}`
+    try {
+      const clash = database.exec(`SELECT 1 FROM ${table} WHERE name_norm = ? AND source_key = ?`, [
+        candidate,
+        candidate
+      ])
+      if ((clash[0]?.values?.length ?? 0) === 0) key = candidate
+    } catch (e) {
+      // The table cannot even be read the way the write reads it — a contract
+      // failure in its own right (e.g. the columns are missing).
+      return { failure: reject(e), cleanupError: null }
+    }
+  }
+  if (key === null) {
+    return { failure: 'could not obtain a collision-free probe key after 3 attempts', cleanupError: null }
   }
 
+  const now = new Date().toISOString()
+  const params = [key, key, null, key, 0, now, now]
+  let failure: string | null = null
+  let cleanupError: string | null = null
+  database.run(`SAVEPOINT ${savepoint}`)
+  try {
+    database.run(OBSERVATIONS_UPSERT_SQL, params) // the INSERT path
+    database.run(OBSERVATIONS_UPSERT_SQL, params) // the ON CONFLICT DO UPDATE path
+  } catch (e) {
+    failure = reject(e)
+  } finally {
+    // ALWAYS undo the probe — it must leave no rows behind, success or failure.
+    // FAIL CLOSED: if the undo itself fails (a RAISE(ROLLBACK) trigger destroys
+    // the savepoint stack, for instance) the state is indeterminate and the
+    // caller must surface it rather than proceed as though it were clean.
+    try {
+      database.run(`ROLLBACK TO ${savepoint}`)
+    } catch (e) {
+      cleanupError = `probe rollback failed: ${(e as Error).message}`
+    }
+    try {
+      database.run(`RELEASE ${savepoint}`)
+    } catch (e) {
+      cleanupError = cleanupError ?? `probe release failed: ${(e as Error).message}`
+    }
+  }
+  return { failure, cleanupError }
+}
+
+/**
+ * Bring project_discovery_observations up to its FULL write contract, or refuse
+ * to start — leaving a refused database byte-identical. Unconditional, and shared
+ * by both heal paths so they cannot drift.
+ *
+ * Three rounds of this guard leaked, each time because it MODELLED the contract
+ * instead of exercising it: "is a table" missed a missing column; "has
+ * meeting_id" missed the other columns; "has every column and a matching unique
+ * key" still missed an extra NOT NULL column the insert omits (and would equally
+ * miss CHECKs, triggers and generated columns). So the final authority is a real
+ * write — see {@link probeObservationsWrite}. The metadata checks are kept
+ * because they produce precise, actionable messages, but they no longer decide.
+ *
+ * Order matters, and it is the reason for the savepoint:
+ *   1. identity  — exists, and is a TABLE (not a view or index). No mutation.
+ *   2. PREFLIGHT — unrepairable column or missing conflict key? Refuse BEFORE
+ *                  touching anything, so a refused database is left untouched.
+ *                  (Repairing first and refusing after left half-ALTERed tables
+ *                  behind on a failed boot, since repairPhase is not itself
+ *                  transactional.)
+ *   3. repair    — ALTER in the columns ALTER can add.
+ *   4. probe     — run the real write; roll it back always.
+ *   5. commit the repairs, or roll them back too and throw.
+ */
+function ensureObservationsTableUsable(database: ReturnType<typeof getDatabase>, context: string): void {
+  const table = 'project_discovery_observations'
+  const refuse = (problem: string): never => {
+    throw new Error(`${context}: ${table} ${problem}; refusing to start with a schema that cannot record project discoveries`)
+  }
+
+  // --- 1. Identity. Read-only, so it can refuse before opening a savepoint. ---
+  const found = database.exec(`SELECT type FROM sqlite_master WHERE name = '${table}'`)
+  const type = found[0]?.values?.[0]?.[0]
+  if (!type) refuse('does not exist and could not be created')
+  if (type !== 'table') refuse(`exists as a ${String(type)}, not a table`)
+
+  const savepoint = 'hidock_observations_repair'
+  let failure: string | null = null
+  let cleanupError: string | null = null
+  const diagnostics: string[] = []
+
+  database.run(`SAVEPOINT ${savepoint}`)
+  try {
+    // --- 2. Preflight: DIAGNOSTICS ONLY. These never refuse. ---
+    // Metadata can misjudge a perfectly valid table (an index name needing SQL
+    // quoting, a constraint form the reader does not model), and a false refusal
+    // blocks boot on a healthy database. So the reader's findings are collected
+    // to make the eventual message actionable and nothing more — the probe below
+    // is the sole acceptance authority, which also collapses what used to be two
+    // parallel decision paths into one.
+    const original = new Set(getTableColumns(database, table))
+    const unrepairable = OBSERVATIONS_REQUIRED_COLUMNS.filter(
+      (c) => !original.has(c) && !OBSERVATIONS_REPAIRABLE_COLUMNS[c]
+    )
+    if (unrepairable.length > 0) {
+      diagnostics.push(
+        `is missing required column(s) ${unrepairable.join(', ')} which cannot be added by ALTER ` +
+          '(NOT NULL without a constant default); the table must be recreated'
+      )
+    }
+    if (!hasConflictTarget(database, table, OBSERVATIONS_CONFLICT_KEY)) {
+      diagnostics.push(
+        `has no UNIQUE constraint on (${OBSERVATIONS_CONFLICT_KEY.join(', ')}), which ` +
+          "recordProjectDiscoveryObservation's ON CONFLICT target requires; a primary key cannot be " +
+          'added by ALTER, so the table must be recreated'
+      )
+    }
+
+    // --- 3. Repair what ALTER can add (inside the savepoint, so a later refusal
+    //        rolls it back and leaves the database byte-identical). ---
+    for (const column of OBSERVATIONS_REQUIRED_COLUMNS) {
+      if (original.has(column)) continue
+      const definition = OBSERVATIONS_REPAIRABLE_COLUMNS[column]
+      if (!definition) continue // ALTER cannot add it; the probe will report it
+      console.log(`[Database] Repairing ${table}: adding ${column}`)
+      try {
+        database.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
+      } catch (e) {
+        console.warn(`[Database] ${table} ALTER ${column} failed:`, (e as Error).message)
+      }
+    }
+
+    // --- 4. Probe the real write contract. THE authority. ---
+    const probe = probeObservationsWrite(database, 'hidock_observations_probe')
+    failure = probe.failure
+    cleanupError = probe.cleanupError
+  } catch (e) {
+    failure = `could not be validated (${(e as Error).message})`
+  } finally {
+    // --- 5. Discard everything on failure; keep only the repairs on success.
+    //        Cleanup is FAIL CLOSED: if the undo itself fails the state is
+    //        indeterminate, and we must say so rather than continue. ---
+    if (failure || cleanupError) {
+      try {
+        database.run(`ROLLBACK TO ${savepoint}`)
+      } catch (e) {
+        cleanupError = cleanupError ?? `rollback failed: ${(e as Error).message}`
+      }
+    }
+    try {
+      database.run(`RELEASE ${savepoint}`)
+    } catch (e) {
+      cleanupError = cleanupError ?? `release failed: ${(e as Error).message}`
+    }
+  }
+
+  if (cleanupError) {
+    refuse(
+      `could not be restored to a known state after its schema check (${cleanupError}` +
+        (failure ? `; original problem: ${failure}` : '') +
+        ')'
+    )
+  }
+  // Only the probe refuses. Diagnostics ride along to make the message actionable.
+  if (failure) refuse([failure, ...diagnostics].join('; '))
+}
+
+/**
+ * Runtime self-check for the discovery ledger: same repair-and-probe the boot
+ * runs, callable on demand. Exported so the nesting behaviour is testable —
+ * savepoints must compose correctly when this executes inside an already-open
+ * transaction (repairPhase and initializeDatabase may hold one).
+ */
+export function verifyObservationsSchema(context = '[Database] verify'): void {
+  ensureObservationsTableUsable(getDatabase(), context)
 }
 
 /**
@@ -2806,6 +3177,22 @@ function repairPhase(): void {
       )
     `)
   } catch { /* table already exists */ }
+
+  // Repair project_discovery_observations (v43): force-create the table AND
+  // force-add meeting_id. This one is not hypothetical — the column shipped one
+  // commit AFTER the table, under the SAME schema version, so a DB that reached
+  // v43 from the earlier build has the table WITHOUT meeting_id and will never
+  // run migration 43 again. CREATE TABLE IF NOT EXISTS cannot fix an existing
+  // table, so without this guarded ALTER every observation insert would fail and
+  // discovery reconciliation would be dead for all new candidates. repairPhase
+  // runs on every boot BEFORE migrations, so this heals such a DB in place.
+  try {
+    database.run(OBSERVATIONS_TABLE_DDL)
+  } catch (e) {
+    // May legitimately already exist — the unconditional check below decides.
+    console.warn('[Database] project_discovery_observations create skipped:', (e as Error).message)
+  }
+  ensureObservationsTableUsable(database, '[Database] repairPhase')
 
   // Repair transcript_speakers (v25): a new table has no columns to ALTER, but
   // force-create it here so an older on-disk DB that skipped the migration still
@@ -8749,6 +9136,9 @@ export function createProject(project: Omit<Project, 'created_at' | 'folder_path
   // Manual beats rejection: an explicit create clears any discovery tombstone for
   // this name, so future transcript mentions resolve and link to it normally.
   clearProjectDiscoveryRejection(project.name)
+  // The project now exists, so its pending discovery evidence (v43) is settled —
+  // future mentions resolve to this row instead of accumulating sightings.
+  clearProjectDiscoveryObservations(project.name)
   return { ...project, folder_path: null, url: null, origin: 'manual', created_at: new Date().toISOString() }
 }
 
@@ -8774,6 +9164,10 @@ export function addProjectDiscoveryRejection(name: string, sourceMeetingId?: str
        rejected_at = excluded.rejected_at`,
     [norm, name, sourceMeetingId ?? null, new Date().toISOString()]
   )
+  // The user has answered the question for this name — drop its accumulated
+  // sightings so it cannot linger in the deferred-discovery queue (the
+  // suggestion-surface equivalent of the dismiss->reappear loop v41 fixed).
+  clearProjectDiscoveryObservations(name)
 }
 
 /** True when this name was dismissed as a spurious discovery (blocks auto-create only). */
@@ -8791,6 +9185,166 @@ export function clearProjectDiscoveryRejection(name: string): void {
   const norm = normalizeName(name)
   if (!norm) return
   run('DELETE FROM project_discovery_rejections WHERE name_norm = ?', [norm])
+}
+
+// ---------------------------------------------------------------------------
+// Project discovery observation ledger (v43, F12)
+// ---------------------------------------------------------------------------
+// The recurrence half of the auto-creation gate. Each plausible extracted
+// project name is recorded here per SOURCE before anything is created, so the
+// reconciler can ask "has this name actually come back?" instead of trusting a
+// single mention. Names that never clear both bars stay here as deferred
+// discovery suggestions rather than becoming zero-item projects.
+
+/** One name's accumulated discovery evidence — a deferred suggestion row. */
+export interface PendingProjectDiscovery {
+  /** NFKC-normalized key (same normalization the tombstones use). */
+  nameNorm: string
+  /** Most recently seen original spelling. */
+  name: string
+  /** Best name-plausibility score observed (project-discovery-gate.ts). */
+  score: number
+  /** How many DISTINCT meetings/recordings mentioned it. */
+  sourceCount: number
+  firstSeenAt: string
+  lastSeenAt: string
+}
+
+/**
+ * Record one sighting of an extracted project name and return how many DISTINCT
+ * sources have now mentioned it (this sighting included).
+ *
+ * `sourceKey` must be STABLE for a given capture across re-processing — the
+ * reconciler passes `r:<recordingId>` whenever a recording is known, falling
+ * back to `m:<meetingId>` only for a mention with no recording at all. The
+ * composite primary key then makes re-analysis idempotent: re-transcribing the
+ * same recording upserts its existing row instead of banking a second sighting,
+ * even if the recording has since been correlated to a meeting (which is exactly
+ * what a meeting-keyed scheme got wrong). `meetingId` rides along so the count
+ * can still collapse two recordings of one conversation into a single source.
+ *
+ * `score` keeps the best value seen, so a cleanly-spelled later mention can lift
+ * a name that first arrived mangled.
+ */
+export function recordProjectDiscoveryObservation(
+  name: string,
+  sourceKey: string,
+  meetingId: string | null,
+  score: number
+): number {
+  const norm = normalizeName(name)
+  if (!norm || !sourceKey) return 0
+  const now = new Date().toISOString()
+  // OBSERVATIONS_UPSERT_SQL is shared with the boot probe (see
+  // ensureObservationsTableUsable) so the schema check exercises THIS statement.
+  // Its ON CONFLICT branch is what makes late correlation UPDATE the row's
+  // meeting rather than mint a second one.
+  run(OBSERVATIONS_UPSERT_SQL, [norm, sourceKey, meetingId ?? null, name, score, now, now])
+  return countProjectDiscoverySources(name)
+}
+
+/**
+ * How many distinct CONVERSATIONS have mentioned this project name. Captures
+ * that share a meeting collapse to one; a capture with no meeting counts on its
+ * own stable key.
+ */
+export function countProjectDiscoverySources(name: string): number {
+  const norm = normalizeName(name)
+  if (!norm) return 0
+  return (
+    queryOne<{ n: number }>(
+      `SELECT COUNT(DISTINCT COALESCE(meeting_id, source_key)) AS n
+         FROM project_discovery_observations WHERE name_norm = ?`,
+      [norm]
+    )?.n ?? 0
+  )
+}
+
+/**
+ * Every distinct meeting that mentioned this project name.
+ *
+ * Read by the reconciler at creation time so the meetings whose corroboration
+ * EARNED the project are linked to it. Without this the first sighting's meeting
+ * — the evidence itself — was dropped when the ledger was cleared, and the graph
+ * permanently omitted a valid association unless that transcript happened to be
+ * reprocessed later.
+ */
+export function getProjectDiscoveryMeetingIds(name: string): string[] {
+  const norm = normalizeName(name)
+  if (!norm) return []
+  return queryAll<{ meeting_id: string }>(
+    `SELECT DISTINCT meeting_id FROM project_discovery_observations
+      WHERE name_norm = ? AND meeting_id IS NOT NULL`,
+    [norm]
+  ).map((r) => r.meeting_id)
+}
+
+/**
+ * Forget a name's accumulated sightings. Called whenever the name stops being an
+ * open question — the project got created (auto or manual), or the user dismissed
+ * it — so a settled name never lingers in the deferred-suggestion queue.
+ */
+export function clearProjectDiscoveryObservations(name: string): void {
+  const norm = normalizeName(name)
+  if (!norm) return
+  run('DELETE FROM project_discovery_observations WHERE name_norm = ?', [norm])
+}
+
+/**
+ * The deferred discovery queue: names the gate saw but refused to auto-create,
+ * strongest evidence first. Tombstoned names and names that already exist as a
+ * project are filtered out defensively (both are purged on the way in, so this is
+ * belt-and-braces against a ledger written before either happened).
+ *
+ * The already-a-project filter is applied in JS on the NFKC key, NOT as
+ * `name_norm NOT IN (SELECT LOWER(name) FROM projects)`: SQLite's LOWER() is
+ * ASCII-only and does no Unicode folding or whitespace collapsing, so a project
+ * whose stored name differs from the key only by accent composition or spacing
+ * would slip through and be offered as a "new" discovery. This is the same
+ * ASCII-LOWER trap resolveProject's tier 1b exists to close.
+ */
+export function getPendingProjectDiscoveries(limit = 50): PendingProjectDiscovery[] {
+  const rows = queryAll<{
+    name_norm: string
+    name: string
+    score: number
+    source_count: number
+    first_seen_at: string
+    last_seen_at: string
+  }>(
+    `SELECT o.name_norm AS name_norm,
+            -- Most RECENT spelling, not MAX() (which is lexicographic order).
+            (SELECT o2.original_name FROM project_discovery_observations o2
+              WHERE o2.name_norm = o.name_norm
+              ORDER BY o2.last_seen_at DESC, o2.rowid DESC LIMIT 1) AS name,
+            MAX(o.score) AS score,
+            COUNT(DISTINCT COALESCE(o.meeting_id, o.source_key)) AS source_count,
+            MIN(o.first_seen_at) AS first_seen_at,
+            MAX(o.last_seen_at) AS last_seen_at
+       FROM project_discovery_observations o
+      WHERE o.name_norm NOT IN (SELECT name_norm FROM project_discovery_rejections)
+      GROUP BY o.name_norm
+      ORDER BY source_count DESC, score DESC, last_seen_at DESC`
+  )
+
+  const existing = new Set(
+    queryAll<{ name: string }>('SELECT name FROM projects').map((p) => normalizeName(p.name))
+  )
+
+  const out: PendingProjectDiscovery[] = []
+  for (const r of rows) {
+    if (existing.has(r.name_norm)) continue
+    out.push({
+      nameNorm: r.name_norm,
+      name: r.name,
+      score: r.score,
+      sourceCount: r.source_count,
+      firstSeenAt: r.first_seen_at,
+      lastSeenAt: r.last_seen_at
+    })
+    if (out.length >= limit) break
+  }
+  return out
 }
 
 /** Typed failure reasons for {@link dismissDiscoveredProject}. */

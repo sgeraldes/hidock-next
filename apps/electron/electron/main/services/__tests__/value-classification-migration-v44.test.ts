@@ -1,5 +1,5 @@
 /**
- * Schema v42 — knowledge_captures.quality_reasons + quality_source (F16/spec-001).
+ * Schema v44 — knowledge_captures.quality_reasons + quality_source (F16/spec-001).
  *
  * ABI-independent migration contract test (same pattern as the v40/v41 tests):
  * pins the SOURCE of database.ts — version bump, fresh-schema columns, an
@@ -19,14 +19,14 @@ import { join } from 'path'
 
 const source = readFileSync(join(__dirname, '..', 'database.ts'), 'utf-8')
 
-describe('schema v42: knowledge_captures.quality_reasons + quality_source (content-based value classification)', () => {
-  it('bumps SCHEMA_VERSION to at least 42', () => {
-    // Floor, not exact pin: later schema bumps (v43+, F16/spec-003's
-    // value_backfill_state) must not break this v42 contract test. The CURRENT
-    // version is pinned by the newest migration test (value-backfill-migration-v43.test.ts).
+describe('schema v44: knowledge_captures.quality_reasons + quality_source (content-based value classification)', () => {
+  it('bumps SCHEMA_VERSION to at least 44', () => {
+    // Floor, not exact pin: later schema bumps (v45+, F16/spec-003's
+    // value_backfill_state) must not break this v44 contract test. The CURRENT
+    // version is pinned by the newest migration test (value-backfill-migration-v45.test.ts).
     const m = source.match(/const SCHEMA_VERSION = (\d+)\b/)
     expect(m).not.toBeNull()
-    expect(Number(m![1])).toBeGreaterThanOrEqual(42)
+    expect(Number(m![1])).toBeGreaterThanOrEqual(44)
   })
 
   it('fresh schema adds quality_reasons + quality_source to the knowledge_captures CREATE block', () => {
@@ -36,8 +36,8 @@ describe('schema v42: knowledge_captures.quality_reasons + quality_source (conte
     expect(createBlock![0]).toMatch(/quality_source TEXT CHECK\(quality_source IN \('ai', ?'user'\)\)/)
   })
 
-  it('defines an idempotent migration 42 with guarded ALTERs for both columns', () => {
-    const migration = source.match(/42: \(\) => \{[\s\S]*?\n {2}\}/)
+  it('defines an idempotent migration 44 with guarded ALTERs for both columns', () => {
+    const migration = source.match(/44: \(\) => \{[\s\S]*?\n {2}\}/)
     expect(migration).not.toBeNull()
     const body = migration![0]
     expect(body).toMatch(/getTableColumns\(database, 'knowledge_captures'\)/)
@@ -45,7 +45,7 @@ describe('schema v42: knowledge_captures.quality_reasons + quality_source (conte
     expect(body).toMatch(/!cols\.includes\('quality_source'\)/)
     expect(body).toContain('ALTER TABLE knowledge_captures ADD COLUMN quality_reasons TEXT')
     expect(body).toMatch(/ALTER TABLE knowledge_captures ADD COLUMN quality_source TEXT CHECK\(quality_source IN \('ai','user'\)\)/)
-    expect(body).toMatch(/console\.warn\('\[Migration v42\]/)
+    expect(body).toMatch(/console\.warn\('\[Migration v44\]/)
   })
 
   it('repairPhase force-adds both columns with the name embedded in def (A2 trap avoided)', () => {

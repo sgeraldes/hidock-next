@@ -1,21 +1,18 @@
 /**
- * Pre-NFKC → NFKC upgrade path: re-key of discovery-rejection tombstones.
- * This heal shipped originally as migration 42 and was renumbered to 49 during
- * the beta/meeting-intelligence merge; the runtime code lives in v49.
+ * v41 → v42 upgrade path: NFKC re-key of discovery-rejection tombstones.
  *
- * Adversarial review (MEDIUM): the pre-NFKC schema wrote
- * project_discovery_rejections.name_norm with the pre-NFKC normalizeName, so
- * once lookups switched to NFKC keys a tombstone recorded under a decomposed
- * (NFD) or compatibility form no longer matched — re-analysis would resurrect
- * the dismissed project, and a manual re-create could never clear the stranded
- * key. Migration 49 must transactionally re-key every existing rejection from
- * original_name, resolving NFKC collisions by keeping the NEWEST rejection per
- * collided key.
+ * Adversarial review (MEDIUM): v41 wrote project_discovery_rejections.name_norm
+ * with the pre-NFKC normalizeName, so after v42 switched lookups to NFKC keys a
+ * v41 tombstone recorded under a decomposed (NFD) or compatibility form no
+ * longer matched — re-analysis would resurrect the dismissed project, and a
+ * manual re-create could never clear the stranded key. Migration 42 must
+ * transactionally re-key every existing rejection from original_name, resolving
+ * NFKC collisions by keeping the NEWEST rejection per collided key.
  *
  * This test simulates the REAL upgrade: initialize, seed v41-style rows (keys
- * computed with the old non-NFKC normalization), roll schema_version back
- * below 49, close, and re-open — the engine then runs migration 49 against the
- * same on-disk database, exactly as a user's app would on update.
+ * computed with the old non-NFKC normalization), roll schema_version back to
+ * 41, close, and re-open — the engine then runs migration 42 against the same
+ * on-disk database, exactly as a user's app would on update.
  *
  * @vitest-environment node
  */
@@ -53,7 +50,7 @@ function tombstones(): Array<{ name_norm: string; original_name: string; rejecte
   return queryAll('SELECT name_norm, original_name, rejected_at FROM project_discovery_rejections ORDER BY name_norm')
 }
 
-describe('migration v49 re-keys pre-NFKC tombstones to NFKC', () => {
+describe('migration v42 re-keys v41 tombstones to NFKC', () => {
   beforeAll(async () => {
     await initializeDatabase()
     run(
@@ -81,11 +78,9 @@ describe('migration v49 re-keys pre-NFKC tombstones to NFKC', () => {
     expect(tombstones()).toHaveLength(3)
     expect(v41Norm(DECOMPOSED)).not.toBe(v41Norm(COMPOSED))
 
-    // Roll the schema back below v49 and re-open: the engine re-runs migration
-    // 49 — the NFKC tombstone re-key, renumbered here from its original v42
-    // during the beta/meeting-intelligence merge — against this same on-disk
-    // DB, the real upgrade path.
-    run('DELETE FROM schema_version WHERE version >= 49')
+    // Roll the schema back to v41 and re-open: the engine sees 41 < 42 and runs
+    // migration 42 against this same on-disk DB — the real upgrade path.
+    run('DELETE FROM schema_version WHERE version >= 42')
     closeDatabase()
     await initializeDatabase()
   })
@@ -105,7 +100,7 @@ describe('migration v49 re-keys pre-NFKC tombstones to NFKC', () => {
 
   it('re-keys every tombstone from original_name and collapses NFKC collisions to the newest row', () => {
     const rows = tombstones()
-    // 3 v41 rows → 2 post-migration rows: the composed/decomposed twins collide on one key.
+    // 3 v41 rows → 2 v42 rows: the composed/decomposed twins collide on one key.
     expect(rows).toHaveLength(2)
 
     const cafe = rows.find((r) => r.name_norm === COMPOSED.normalize('NFKC').toLowerCase())

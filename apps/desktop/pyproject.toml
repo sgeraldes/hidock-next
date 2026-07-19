@@ -237,6 +237,7 @@ markers = [
     "device: Tests requiring actual device connection (no parallel)",
     "gui: GUI tests (no parallel)",
     "fileio: File I/O tests (may need isolation)",
+    "contamination_check: Test-isolation/contamination proofs (used by test_edge_case_isolation and test_final_contamination_proof)",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning",

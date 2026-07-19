@@ -1,11 +1,11 @@
 /**
- * Schema v43 — value_backfill_state (resumable F16/spec-003 value backfill cursor).
+ * Schema v45 — value_backfill_state (resumable F16/spec-003 value backfill cursor).
  *
- * ABI-independent migration contract test (same pattern as the v40/v41/v42
+ * ABI-independent migration contract test (same pattern as the v40/v41/v44
  * tests): pins the SOURCE of database.ts — version bump (this IS the current
  * newest migration, so the exact value is pinned rather than a floor),
  * fresh-schema table, and an idempotent migration entry. A brand-new TABLE
- * (unlike v42's columns) has no repairPhase entry — repairPhase only
+ * (unlike v44's columns) has no repairPhase entry — repairPhase only
  * force-adds missing COLUMNS to existing tables — so the belt-and-suspenders
  * safety net for this table is the lazy `CREATE TABLE IF NOT EXISTS` at
  * runner start (value-backfill.ts), covered in value-backfill.test.ts. The
@@ -21,16 +21,16 @@ import { join } from 'path'
 
 const source = readFileSync(join(__dirname, '..', 'database.ts'), 'utf-8')
 
-describe('schema v43: value_backfill_state (resumable value-classification backfill cursor)', () => {
-  it('SCHEMA_VERSION is at least 43 and the v43 migration is registered', () => {
-    // v43 shipped value_backfill_state. The GLOBAL "current version" pin now lives
-    // in membership-provenance-migration-v44.test.ts (F18/round-27 bumped 43 -> 44);
+describe('schema v45: value_backfill_state (resumable value-classification backfill cursor)', () => {
+  it('SCHEMA_VERSION is at least 45 and the v45 migration is registered', () => {
+    // v45 shipped value_backfill_state. The GLOBAL "current version" pin now lives
+    // in membership-provenance-migration-v46.test.ts (F18/round-27 bumped 45 -> 46);
     // here we only assert v43's migration still exists and the version never
-    // regressed below it. A future bump updates the v44 test, not this one.
+    // regressed below it. A future bump updates the v46 test, not this one.
     const m = source.match(/const SCHEMA_VERSION = (\d+)\b/)
     expect(m).not.toBeNull()
-    expect(Number(m![1])).toBeGreaterThanOrEqual(43)
-    expect(source).toMatch(/^\s*43:\s*\(\)\s*=>/m) // MIGRATIONS[43] still registered
+    expect(Number(m![1])).toBeGreaterThanOrEqual(45)
+    expect(source).toMatch(/^\s*45:\s*\(\)\s*=>/m) // MIGRATIONS[45] still registered
   })
 
   it('fresh schema creates the value_backfill_state table with the resumability columns', () => {
@@ -45,18 +45,18 @@ describe('schema v43: value_backfill_state (resumable value-classification backf
     expect(body).toContain('last_error TEXT')
   })
 
-  it('defines an idempotent migration 43 (CREATE IF NOT EXISTS, warns on failure)', () => {
-    const migration = source.match(/43: \(\) => \{[\s\S]*?\n {2}\}/)
+  it('defines an idempotent migration 45 (CREATE IF NOT EXISTS, warns on failure)', () => {
+    const migration = source.match(/45: \(\) => \{[\s\S]*?\n {2}\}/)
     expect(migration).not.toBeNull()
     const body = migration![0]
     expect(body).toContain('CREATE TABLE IF NOT EXISTS value_backfill_state')
-    expect(body).toMatch(/console\.warn\('\[Migration v43\]/)
+    expect(body).toMatch(/console\.warn\('\[Migration v45\]/)
   })
 
-  it('migration 43 is appended AFTER migration 42 in the MIGRATIONS object (append-only discipline)', () => {
-    const idx42 = source.indexOf('42: () => {')
-    const idx43 = source.indexOf('43: () => {')
-    expect(idx42).toBeGreaterThan(-1)
-    expect(idx43).toBeGreaterThan(idx42)
+  it('migration 45 is appended AFTER migration 44 in the MIGRATIONS object (append-only discipline)', () => {
+    const idx44 = source.indexOf('44: () => {')
+    const idx45 = source.indexOf('45: () => {')
+    expect(idx44).toBeGreaterThan(-1)
+    expect(idx45).toBeGreaterThan(idx44)
   })
 })

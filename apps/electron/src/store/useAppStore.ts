@@ -86,7 +86,12 @@ interface AppState {
   meetings: Meeting[]
   meetingsLoading: boolean
   lastCalendarSync: string | null
+  /** Any calendar sync is in flight (spinners, status text). */
   calendarSyncing: boolean
+  /** A user-initiated sync is outstanding — gates the "Sync Now" control only. */
+  calendarManualSyncing: boolean
+  /** In-flight sync count backing `calendarSyncing`; not for UI use. */
+  calendarSyncActiveCount: number
 
   // Unified recordings (persists across page navigation)
   unifiedRecordings: UnifiedRecording[]
@@ -142,9 +147,16 @@ interface AppState {
   // Actions
   setMeetings: (meetings: Meeting[]) => void
   loadMeetings: (startDate?: string, endDate?: string) => Promise<void>
-  syncCalendar: () => Promise<CalendarSyncResult>
+  syncCalendar: (trigger?: 'manual' | 'mount') => Promise<CalendarSyncResult>
   setLastCalendarSync: (lastSync: string | null) => void
-  setCalendarSyncing: (syncing: boolean) => void
+  /**
+   * Take/return a slot in the calendar-sync activity count. Every sync path must
+   * pair these (try/finally), including Calendar's clear-and-sync. A raw boolean
+   * setter used to exist beside the count and could drive calendarSyncing to
+   * false while another sync was still running.
+   */
+  acquireCalendarSync: (manual: boolean) => void
+  releaseCalendarSync: (manual: boolean) => void
 
   // Unified recordings actions (persists across page navigation)
   setUnifiedRecordings: (recordings: UnifiedRecording[]) => void
@@ -216,6 +228,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   meetingsLoading: false,
   lastCalendarSync: null,
   calendarSyncing: false,
+  calendarManualSyncing: false,
+  calendarSyncActiveCount: 0,
 
   // Unified recordings initial state
   unifiedRecordings: [],
@@ -257,7 +271,22 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Meeting actions
   setMeetings: (meetings) => set({ meetings }),
   setLastCalendarSync: (lastSync) => set({ lastCalendarSync: lastSync }),
-  setCalendarSyncing: (syncing) => set({ calendarSyncing: syncing }),
+  acquireCalendarSync: (manual) =>
+    set((st) => ({
+      calendarSyncActiveCount: st.calendarSyncActiveCount + 1,
+      calendarSyncing: true,
+      ...(manual ? { calendarManualSyncing: true } : {})
+    })),
+
+  releaseCalendarSync: (manual) =>
+    set((st) => {
+      const count = Math.max(0, st.calendarSyncActiveCount - 1)
+      return {
+        calendarSyncActiveCount: count,
+        calendarSyncing: count > 0,
+        ...(manual ? { calendarManualSyncing: false } : {})
+      }
+    }),
 
   loadMeetings: async (startDate, endDate) => {
     set({ meetingsLoading: true })
@@ -270,10 +299,32 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  syncCalendar: async () => {
-    set({ calendarSyncing: true })
+  // Defaults to 'manual' because this action is only reached from a UI control;
+  // the startup path in Layout passes 'mount' explicitly so it keeps the full
+  // boot gate. (The raw preload API defaults the other way, to 'mount'.)
+  //
+  // Two flags, deliberately: `calendarSyncing` means "a sync is happening"
+  // (spinners, status text) while `calendarManualSyncing` means "this user's
+  // click is outstanding" (control gating). Driving both from one flag meant the
+  // mount sync — which parks on the boot gate for the whole startup window —
+  // disabled "Sync Now" during exactly the period the bounded manual path exists
+  // to serve, so the user could not reach it.
+  syncCalendar: async (trigger = 'manual') => {
+    const manual = trigger === 'manual'
+    // Counted, not boolean: a manual sync finishing must not clear the flag
+    // while a mount sync is still in flight.
+    get().acquireCalendarSync(manual)
+    const release = (): void => get().releaseCalendarSync(manual)
+
     try {
-      const result = await window.electronAPI.calendar.sync()
+      const result = await window.electronAPI.calendar.sync(trigger)
+      if (result.queued) {
+        // Boot work is still running; main started the sync in the background.
+        // This request is answered, so release it — the calendar:synced
+        // broadcast refreshes the views when the background pass lands.
+        release()
+        return result
+      }
       if (result.success) {
         // Reload meetings after sync
         const { currentDate, calendarView } = get()
@@ -282,11 +333,11 @@ export const useAppStore = create<AppState>((set, get) => ({
         await get().loadMeetings(startDate.toISOString(), endDate.toISOString())
         set({ lastCalendarSync: result.lastSync || new Date().toISOString() })
       }
-      set({ calendarSyncing: false })
+      release()
       return result
     } catch (error) {
       console.error('Failed to sync calendar:', error)
-      set({ calendarSyncing: false })
+      release()
       return { success: false, meetingsCount: 0, error: String(error) }
     }
   },
@@ -550,11 +601,14 @@ export const useMeetings = () => useAppStore((s) => s.meetings)
 export const useMeetingsLoading = () => useAppStore((s) => s.meetingsLoading)
 export const useLastCalendarSync = () => useAppStore((s) => s.lastCalendarSync)
 export const useCalendarSyncing = () => useAppStore((s) => s.calendarSyncing)
+/** True only while the user's own sync request is outstanding. */
+export const useCalendarManualSyncing = () => useAppStore((s) => s.calendarManualSyncing)
 export const useCalendarView = () => useAppStore((s) => s.calendarView)
 export const useCurrentDate = () => useAppStore((s) => s.currentDate)
 // Calendar action selectors (B-CAL-001: named actions replace raw setState)
 export const useSetLastCalendarSync = () => useAppStore((s) => s.setLastCalendarSync)
-export const useSetCalendarSyncing = () => useAppStore((s) => s.setCalendarSyncing)
+export const useAcquireCalendarSync = () => useAppStore((s) => s.acquireCalendarSync)
+export const useReleaseCalendarSync = () => useAppStore((s) => s.releaseCalendarSync)
 
 // Device state selectors
 export const useDeviceState = () => useAppStore((s) => s.deviceState)

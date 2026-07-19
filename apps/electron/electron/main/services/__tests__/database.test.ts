@@ -15,7 +15,16 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { existsSync, rmSync } from 'fs'
+import { existsSync, rmSync, readFileSync } from 'fs'
+
+/**
+ * The app's target schema version, read from database.ts rather than hardcoded.
+ * Pinning a literal here meant every schema bump silently drifted the assertion
+ * away from its own test title (it read "(40)" while asserting 42).
+ */
+const EXPECTED_SCHEMA_VERSION = Number(
+  readFileSync(join(__dirname, '..', 'database.ts'), 'utf-8').match(/const SCHEMA_VERSION = (\d+)\b/)![1]
+)
 
 // The engine resolves its file via file-storage.getDatabasePath. A hoisted
 // holder lets us point it at a unique temp path (vi.mock factories cannot close
@@ -193,15 +202,11 @@ describe('Database Service', () => {
   // 1. initializeDatabase — real boot + schema
   // =========================================================================
   describe('initializeDatabase()', () => {
-    it('initializes and reports the current schema version (49)', () => {
-      // round-31 bumped SCHEMA_VERSION 45 -> 46 (per-field role provenance, ADV29-2);
-      // round-37 bumped 46 -> 47 (node-level graph provenance, ADV35-1).
-      // The merge of beta/meeting-intelligence into HEAD carried the ladder to 49
-      // (SCHEMA_VERSION = 49 in database.ts); both pre-merge sides (48, 42) are stale.
+    it('initializes and reports the current schema version', () => {
       const row = queryOne<{ version: number }>(
         'SELECT version FROM schema_version ORDER BY version DESC LIMIT 1'
       )
-      expect(row?.version).toBe(49)
+      expect(row?.version).toBe(EXPECTED_SCHEMA_VERSION)
     })
 
     it('creates the expected core tables', () => {

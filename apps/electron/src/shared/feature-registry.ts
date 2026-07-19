@@ -502,6 +502,10 @@ export const CORE_CHANNEL_PREFIXES: string[] = [
   'app:',
   'config:',
   'db:',
+  // Diagnostics plumbing: the renderer mirrors its QA Logs toggle to the main
+  // process, which has no localStorage of its own (services/qa-logs.ts). Owned by
+  // no feature — main-process QA logging has to work under every preset.
+  'qa:',
   // `storage:` is deliberately NOT a blanket prefix (adversarial round-2 [HIGH]):
   // `storage:save-recording` carries a transcription side effect, so storage
   // channels are exact-listed in CORE_CHANNELS instead.

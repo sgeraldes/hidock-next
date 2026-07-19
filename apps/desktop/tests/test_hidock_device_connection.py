@@ -148,7 +148,10 @@ class TestHiDockJensenConnection:
         success, error = jensen_device._attempt_connection(0, DEFAULT_VENDOR_ID, DEFAULT_PRODUCT_ID)
 
         assert success is False
-        assert "Device is busy" in error
+        # errno 16 is handled inline and returns actionable guidance rather than
+        # falling through to the generic USBError handler.
+        assert "Device busy" in error
+        assert "close other applications" in error
         assert jensen_device._error_counts["connection_lost"] == 1
 
     @patch("hidock_device.usb.core.find")
@@ -231,7 +234,10 @@ class TestHiDockJensenConnection:
         success, error = jensen_device._attempt_connection(0, DEFAULT_VENDOR_ID, DEFAULT_PRODUCT_ID)
 
         assert success is False
-        assert "Device is busy" in error
+        # errno 16 is handled inline and returns actionable guidance rather than
+        # falling through to the generic USBError handler.
+        assert "Device busy" in error
+        assert "close other applications" in error
         assert jensen_device._error_counts["connection_lost"] == 1
 
     @patch("hidock_device.usb.core.find")
@@ -327,12 +333,15 @@ class TestHiDockJensenConnection:
         assert "Access denied" in error
 
         # Test USBError with errno 16 (Resource busy)
+        # Raised from usb.core.find, so this takes the generic USBError handler,
+        # whose errno-16 message differs from the inline set_configuration/claim path.
         usb_error = usb.core.USBError("Resource busy")
         usb_error.errno = 16
         mock_find.side_effect = usb_error
         success, error = jensen_device._attempt_connection(0, DEFAULT_VENDOR_ID, DEFAULT_PRODUCT_ID)
         assert success is False
-        assert "Device is busy" in error
+        assert "in use by another application" in error
+        assert "close other apps using the HiDock device" in error
 
         # Test generic USBError
         usb_error = usb.core.USBError("Generic USB error")

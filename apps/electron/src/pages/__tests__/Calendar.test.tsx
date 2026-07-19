@@ -49,7 +49,11 @@ vi.mock('@/store/useAppStore', () => ({
   useCalendarSyncing: () => false,
   useDownloadQueue: () => new Map(),
   useSetLastCalendarSync: () => vi.fn(),
-  useSetCalendarSyncing: () => vi.fn()
+  // Counted acquire/release replaced the raw boolean setter: clear-and-sync can
+  // overlap a startup sync, and the setter could drive the shared flag to false
+  // while that other sync was still running.
+  useAcquireCalendarSync: () => vi.fn(),
+  useReleaseCalendarSync: () => vi.fn()
 }))
 
 vi.mock('@/store/domain/useConfigStore', () => ({
