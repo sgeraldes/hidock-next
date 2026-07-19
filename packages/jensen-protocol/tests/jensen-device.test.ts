@@ -749,7 +749,11 @@ describe('JensenDevice (transport-agnostic core)', () => {
         if (type === 'connect') connectHandler = h
       }) as unknown as USB['addEventListener'],
     })
-    const hidockDevice = { vendorId: 0x10d6, productId: USB_PRODUCT_IDS[0], productName: 'HiDock H1E' }
+    // USB_PRODUCT_IDS is a NAMED-KEY map (H1/H1E/P1/...), not an array — a positional
+    // `[0]` lookup yields undefined, which isHiDockUsbDevice() only tolerates because
+    // its productName check ("hidock") short-circuits first. Use the real H1E id here and
+    // in the other stand-ins below so they are faithful devices that detectModel() resolves.
+    const hidockDevice = { vendorId: 0x10d6, productId: USB_PRODUCT_IDS.H1E, productName: 'HiDock H1E' }
 
     // Gate closed → the connect event is ignored, tryConnect is not called.
     const devOff = new JensenDevice(usb)
@@ -777,7 +781,7 @@ describe('JensenDevice (transport-agnostic core)', () => {
   function makeTeardownDevice(reset: ReturnType<typeof vi.fn>, close: ReturnType<typeof vi.fn>): USBDevice {
     return {
       vendorId: 0x10d6,
-      productId: USB_PRODUCT_IDS[0],
+      productId: USB_PRODUCT_IDS.H1E,
       productName: 'HiDock H1E',
       opened: true,
       open: vi.fn(async () => {}),
@@ -852,7 +856,7 @@ describe('JensenDevice (transport-agnostic core)', () => {
     }
     return {
       vendorId: 0x10d6,
-      productId: USB_PRODUCT_IDS[0],
+      productId: USB_PRODUCT_IDS.H1E,
       productName: 'HiDock H1E',
       opened: true,
       open: vi.fn(async () => {}),
@@ -1042,7 +1046,7 @@ describe('JensenDevice (transport-agnostic core)', () => {
     const reset = vi.fn(async () => {})
     const fakeDevice = {
       vendorId: 0x10d6,
-      productId: USB_PRODUCT_IDS[0],
+      productId: USB_PRODUCT_IDS.H1E,
       productName: 'HiDock H1E',
       opened: true,
       open: vi.fn(async () => {}),
