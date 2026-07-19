@@ -9,8 +9,6 @@
  *   graph:topSkill       — top skill demonstrators
  *   graph:personProfile  — person profile (meetings, skills, action items)
  *   graph:meetingGraph   — all nodes/edges for a meeting
- *   graph:listNodes      — list nodes, optionally filtered by type
- *   graph:resolvePerson  — resolve a graph person name to a canonical contact
  */
 
 import { ipcMain } from 'electron'
@@ -22,7 +20,6 @@ import {
   queryTopSkill,
   queryPersonProfile,
   queryMeetingGraph,
-  queryListNodes,
   queryContextGraph,
   queryNeighborhood,
   searchGraphNodes,
@@ -40,7 +37,6 @@ import {
   mergeGraphNodes,
   deleteGraphNode,
 } from '../services/knowledge-graph-service'
-import { getContactByName } from '../services/database'
 
 export function registerKnowledgeGraphHandlers(): void {
   ipcMain.handle('graph:stats', async () => {
@@ -134,32 +130,21 @@ export function registerKnowledgeGraphHandlers(): void {
     }
   })
 
-  ipcMain.handle('graph:listNodes', async (_event, type?: unknown) => {
-    try {
-      const nodeType = (type && typeof type === 'string') ? type : undefined
-      return { success: true, data: queryListNodes(nodeType) }
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e)
-      console.error('[graph:listNodes] Error:', e)
-      return { success: false, error: msg }
-    }
-  })
+  // graph:listNodes IPC REMOVED (ADV33-1, round 35): the handler returned raw
+  // GraphNode objects (norm_key `contact:<id>` + props.contactId) after only an
+  // edge-visibility check, so a graph-visible node backed by a SUPPRESSED contact
+  // leaked that contact's id — bypassing the round-34 nodeToDTO fail-closed boundary.
+  // The IPC had no renderer consumer (dead surface), so it is removed entirely
+  // rather than re-DTO'd (round-13 dead-surface-removal lesson). The underlying
+  // queryListNodes() export stays — it is still used internally by rag.ts grounding,
+  // which never returns raw nodes to a non-owner surface.
 
-  // Resolve a graph person node's name to a canonical contact (v26). Gives the
-  // renderer a direct, indexed lookup instead of scanning contacts.getAll.
-  ipcMain.handle('graph:resolvePerson', async (_event, name: unknown) => {
-    try {
-      if (!name || typeof name !== 'string') {
-        return { success: false, error: 'name must be a non-empty string' }
-      }
-      const contact = getContactByName(name)
-      return { success: true, data: contact ?? null }
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e)
-      console.error('[graph:resolvePerson] Error:', e)
-      return { success: false, error: msg }
-    }
-  })
+  // graph:resolvePerson IPC REMOVED (ADV34-2, round 36): the handler called raw
+  // getContactByName and returned the COMPLETE Contact (id/email/role/company/
+  // notes/tags/provenance) with NO visibility filter, so an exact name for a
+  // transcript-origin contact backed only by an excluded/hard-purged recording
+  // leaked everything. It had no renderer consumer (dead surface), so it is
+  // removed entirely rather than re-DTO'd (round-13 dead-surface-removal lesson).
 
   // -------------------------------------------------------------------------
   // Context Graph — interactive visualization + neighborhood retrieval

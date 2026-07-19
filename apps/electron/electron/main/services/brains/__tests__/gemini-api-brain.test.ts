@@ -167,5 +167,58 @@ describe('GeminiApiBrain', () => {
       expect(mockGetGenerativeModel).toHaveBeenCalledWith({ model: 'gemini-embedding-001' })
       expect(out).toEqual([[1, 2, 3]])
     })
+
+    // ADV43-2 (round-45) — the fail-closed shouldGenerate gate is re-checked
+    // IMMEDIATELY before EACH 100-text batch; an exclusion committed while an
+    // earlier batch is pending must stop every later batch.
+    describe('shouldGenerate gate (round-45 ADV43-2)', () => {
+      const texts = (n: number) => Array.from({ length: n }, (_v, i) => `t${i}`)
+
+      beforeEach(() => {
+        mockConfig.transcription.geminiApiKey = 'key-1' // pragma: allowlist secret
+      })
+
+      it('exclusion during the first batch ⇒ the second batch is NOT sent', async () => {
+        // 150 texts ⇒ 2 batches (limit 100). Flip excluded while batch 1 awaits.
+        let excluded = false
+        mockBatchEmbedContents.mockImplementation(async () => {
+          excluded = true
+          return { embeddings: Array.from({ length: 100 }, () => ({ values: [1, 2, 3] })) }
+        })
+        const out = await brain.embed(texts(150), { shouldGenerate: () => !excluded })
+        expect(mockBatchEmbedContents).toHaveBeenCalledTimes(1)
+        expect(out).toHaveLength(150)
+        expect(out.slice(0, 100).every((v) => Array.isArray(v))).toBe(true)
+        // The un-sent batch's texts come back null (persisted as nothing).
+        expect(out.slice(100).every((v) => v === null)).toBe(true)
+      })
+
+      it('false up front ⇒ NO batch is sent, all-null', async () => {
+        const out = await brain.embed(texts(150), { shouldGenerate: () => false })
+        expect(mockBatchEmbedContents).not.toHaveBeenCalled()
+        expect(out).toEqual(Array.from({ length: 150 }, () => null))
+      })
+
+      it('a shouldGenerate that THROWS is fail-closed ⇒ NO batch sent', async () => {
+        const out = await brain.embed(texts(150), {
+          shouldGenerate: () => {
+            throw new Error('eligibility lookup failed')
+          },
+        })
+        expect(mockBatchEmbedContents).not.toHaveBeenCalled()
+        expect(out).toEqual(Array.from({ length: 150 }, () => null))
+      })
+
+      it('control: a gate that stays true sends every batch', async () => {
+        // Return one embedding per requested text so the two batches (100 + 50)
+        // produce exactly 150 vectors.
+        mockBatchEmbedContents.mockImplementation(async (req: { requests: unknown[] }) => ({
+          embeddings: req.requests.map(() => ({ values: [9] })),
+        }))
+        const out = await brain.embed(texts(150), { shouldGenerate: () => true })
+        expect(mockBatchEmbedContents).toHaveBeenCalledTimes(2)
+        expect(out).toHaveLength(150)
+      })
+    })
   })
 })

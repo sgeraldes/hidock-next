@@ -535,6 +535,8 @@ export const CORE_CHANNEL_PREFIXES: string[] = [
  *   `storage:save-recording` carries a transcription side effect — saving stays
  *   core while the side effect itself is gated behind the transcription feature
  *   inside `queueTranscriptionIfEnabled` (adversarial round-2 [HIGH]).
+ * - `value:` maintains the Library's value index. It is not owned by an optional
+ *   feature, so its current user-triggered backfill controls are exact-listed.
  *
  * Anything new on these namespaces is `unclassified` until explicitly added.
  */
@@ -554,6 +556,9 @@ export const CORE_CHANNELS: string[] = [
   'storage:reveal-in-folder',
   'storage:save-recording',
   'storage:select-folder',
+  'value:cancelBackfill',
+  'value:getBackfillStatus',
+  'value:startBackfill',
   'recordings:addExternal',
   'recordings:addExternalByPath',
   'recordings:backfillDurations',
@@ -570,14 +575,18 @@ export const CORE_CHANNELS: string[] = [
   'recordings:getMeetingsNearDate',
   'recordings:getPreassignment',
   'recordings:getTranscript',
+  'recordings:getTrash',
   'recordings:getTranscriptionStatus',
   'recordings:getWatcherStatus',
   'recordings:linkToMeeting',
+  'recordings:markNotOnDevice',
   'recordings:markPersonal',
   'recordings:preassign',
   'recordings:restore',
+  'recordings:retryPendingCleanups',
   'recordings:scanFolder',
   'recordings:selectMeeting',
+  'recordings:setValueRating',
   'recordings:startWatcher',
   'recordings:stopWatcher',
   'recordings:unlinkFromMeeting',

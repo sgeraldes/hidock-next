@@ -20,6 +20,7 @@ import {
   parseTurns,
   detectAudioMimeType,
 } from '../src/engines/gemini-engine.js'
+import { TranscriptionCancelledError } from '../src/engines/engine-interface.js'
 
 const oneSecond = Buffer.alloc(16000 * 2)
 
@@ -190,6 +191,96 @@ describe('GeminiEngine', () => {
     await expect(collect(engine.transcribe(oneSecond, { source: 'mic' }))).rejects.toThrow(
       'Rate limit exceeded',
     )
+  })
+})
+
+// ADV43-1 (round-45) — the fail-closed shouldGenerate gate must be re-checked
+// SYNCHRONOUSLY inside the engine immediately before EVERY concrete provider
+// call (upload, each chunk generation, each retry). A false return or a throw
+// aborts the pipeline with TranscriptionCancelledError and issues NO further
+// provider call.
+describe('GeminiEngine shouldGenerate gate (round-45 ADV43-1)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockGenerateContentStream.mockResolvedValue(streamResponse('[00:00] Speaker 1: hola'))
+  })
+
+  it('false up front ⇒ aborts before ANY provider call', async () => {
+    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    await expect(
+      collect(engine.transcribe(oneSecond, { source: 'mic', shouldGenerate: () => false }))
+    ).rejects.toThrow(TranscriptionCancelledError)
+    expect(mockGenerateContentStream).not.toHaveBeenCalled()
+  })
+
+  it('a shouldGenerate that THROWS is fail-closed ⇒ no provider call', async () => {
+    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    await expect(
+      collect(
+        engine.transcribe(oneSecond, {
+          source: 'mic',
+          shouldGenerate: () => {
+            throw new Error('eligibility lookup failed')
+          },
+        })
+      )
+    ).rejects.toThrow(TranscriptionCancelledError)
+    expect(mockGenerateContentStream).not.toHaveBeenCalled()
+  })
+
+  it('exclusion committed after the first attempt ⇒ MAX_TOKENS retry is NOT called', async () => {
+    let excluded = false
+    mockGenerateContentStream.mockImplementation(async () => {
+      // The provider "returned" — simulate the owner excluding the recording
+      // while this response was in flight; the retry must not fire.
+      excluded = true
+      return streamResponse('partial cut off', 'MAX_TOKENS')
+    })
+    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    await expect(
+      collect(engine.transcribe(oneSecond, { source: 'mic', shouldGenerate: () => !excluded }))
+    ).rejects.toThrow(TranscriptionCancelledError)
+    // Exactly ONE call (the first attempt); the MAX_TOKENS retry was gated out.
+    expect(mockGenerateContentStream).toHaveBeenCalledTimes(1)
+  })
+
+  it('exclusion committed between chunks ⇒ the next chunk is NOT sent to the provider', async () => {
+    // A >600s MP3 splits into multiple ~10-minute chunks. Exclude after chunk 0
+    // generates; chunk 1 must never reach generateContentStream.
+    const frames = 20000 // 20000 * 0.036s ≈ 720s ⇒ 2 chunks at the 600s target
+    const mp3 = buildMp3(frames)
+    // Sanity: this really splits into more than one chunk.
+    expect(splitMp3IntoChunks(mp3)!.length).toBeGreaterThan(1)
+
+    let excluded = false
+    mockGenerateContentStream.mockImplementation(async () => {
+      excluded = true // exclude while chunk 0's response is in flight
+      return streamResponse('[00:00] Speaker 1: primer segmento')
+    })
+    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    await expect(
+      collect(engine.transcribe(mp3, { source: 'mic', shouldGenerate: () => !excluded }))
+    ).rejects.toThrow(TranscriptionCancelledError)
+    // Only chunk 0 was generated; the between-chunks recheck aborted chunk 1.
+    expect(mockGenerateContentStream).toHaveBeenCalledTimes(1)
+  })
+
+  it('control: a gate that stays true transcribes normally', async () => {
+    mockGenerateContentStream.mockResolvedValue(streamResponse('[00:03] Speaker 1: hola'))
+    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const segments = await collect(
+      engine.transcribe(oneSecond, { source: 'mic', shouldGenerate: () => true })
+    )
+    expect(segments).toHaveLength(1)
+    expect(mockGenerateContentStream).toHaveBeenCalledTimes(1)
+  })
+
+  it('no gate configured (undefined) ⇒ unchanged legacy behaviour', async () => {
+    mockGenerateContentStream.mockResolvedValue(streamResponse('[00:03] Speaker 1: hola'))
+    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const segments = await collect(engine.transcribe(oneSecond, { source: 'mic' }))
+    expect(segments).toHaveLength(1)
+    expect(mockGenerateContentStream).toHaveBeenCalledTimes(1)
   })
 })
 

@@ -165,6 +165,7 @@ beforeEach(() => {
       },
       contacts: {
         getForMeeting: vi.fn().mockResolvedValue({ success: true, data: [] }),
+        getForMeetingOwner: vi.fn().mockResolvedValue({ success: true, data: [] }),
       },
     },
     writable: true,

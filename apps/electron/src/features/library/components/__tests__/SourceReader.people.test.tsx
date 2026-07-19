@@ -113,7 +113,7 @@ beforeEach(() => {
   mockGetAllContacts.mockResolvedValue({ success: true, data: { contacts: [] } })
   Object.defineProperty(window, 'electronAPI', {
     value: {
-      contacts: { getForMeeting: mockGetForMeeting, getAll: mockGetAllContacts },
+      contacts: { getForMeeting: mockGetForMeeting, getForMeetingOwner: mockGetForMeeting, getAll: mockGetAllContacts },
       recordings: { reprocessWith: vi.fn().mockResolvedValue({ success: true }) },
       transcripts: {
         getSpeakerMap: mockGetSpeakerMap,

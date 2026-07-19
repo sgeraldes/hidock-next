@@ -12,6 +12,7 @@ import {
   isDeviceOnly,
   isLocalOnly,
   isBothLocations,
+  isRecordingBacked,
   matchesSemanticFilter,
   matchesExclusiveFilter,
   type UnifiedRecording,
@@ -243,6 +244,57 @@ describe('type narrowing', () => {
         }
       }
     }
+  })
+})
+
+// ============================================================
+// isRecordingBacked (spec-005/F17 T5 AR3-4 + CX-T5-3) — the gate that hides
+// ALL deletion affordances on capture-only synthetic rows. Keys on the
+// EXPLICIT sourceKind discriminator (stamped at every synthesis site), NOT on
+// path shape — recordings.file_path is NULLABLE, so a real DB recording can
+// surface local-only with an empty path and must keep its affordances.
+// ============================================================
+
+describe('isRecordingBacked', () => {
+  it('returns true for explicit sourceKind "recording"', () => {
+    expect(isRecordingBacked({ ...localOnlyRecording, sourceKind: 'recording' })).toBe(true)
+  })
+
+  it('returns false ONLY for explicit sourceKind "capture"', () => {
+    expect(isRecordingBacked({ ...localOnlyRecording, sourceKind: 'capture' })).toBe(false)
+  })
+
+  it('treats an absent sourceKind as recording-backed (documented fail-safe default)', () => {
+    expect(isRecordingBacked(deviceOnlyRecording)).toBe(true)
+    expect(isRecordingBacked(localOnlyRecording)).toBe(true)
+    expect(isRecordingBacked(bothLocationsRecording)).toBe(true)
+  })
+
+  it('CX-T5-3: a REAL recording with an empty localPath (nullable file_path) stays recording-backed', () => {
+    const nullPathRecording: LocalOnlyRecording = {
+      ...localOnlyRecording,
+      localPath: '',
+      sourceKind: 'recording'
+    }
+    expect(isRecordingBacked(nullPathRecording)).toBe(true)
+  })
+
+  it('a capture-only row is excluded regardless of its path shape', () => {
+    const captureWithPath: LocalOnlyRecording = {
+      ...localOnlyRecording,
+      localPath: '/data/some-artifact.pdf',
+      sourceKind: 'capture'
+    }
+    expect(isRecordingBacked(captureWithPath)).toBe(false)
+  })
+
+  it('a both-locations row with a pathologically empty localPath stays recording-backed', () => {
+    const emptyPath: BothLocationsRecording = {
+      ...bothLocationsRecording,
+      localPath: '',
+      sourceKind: 'recording'
+    }
+    expect(isRecordingBacked(emptyPath)).toBe(true)
   })
 })
 

@@ -3,9 +3,10 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { ipcMain } from 'electron'
+import { ipcMain, shell } from 'electron'
 import { registerStorageHandlers } from '../storage-handlers'
 import * as db from '../../services/database'
+import * as fileStorage from '../../services/file-storage'
 import * as config from '../../services/config'
 import * as transcription from '../../services/transcription'
 
@@ -29,7 +30,11 @@ vi.mock('../../services/database', () => ({
   insertRecording: vi.fn(),
   getMeetings: vi.fn(() => []),
   linkRecordingToMeeting: vi.fn(),
-  addSyncedFile: vi.fn()
+  addSyncedFile: vi.fn(),
+  // ADV45-2 (round-47) — raw-file IPCs resolve the path to a canonical recording
+  // row (existence-scoped owner gate). Default: resolves (owner's own file);
+  // gate tests override to null for orphan / hard-purged / arbitrary paths.
+  getRecordingIdByFilePath: vi.fn(() => 'rec-owner')
 }))
 
 vi.mock('../../services/config', () => ({
@@ -114,5 +119,62 @@ describe('storage:save-recording — auto-transcribe gating', () => {
     expect(res.success).toBe(true)
     const inserted = (db.insertRecording as ReturnType<typeof vi.fn>).mock.calls[0][0]
     expect(inserted.transcription_status).toBe('none')
+  })
+})
+
+/**
+ * ADV45-2 (round-47) — the raw-file IPCs (read audio / open / reveal) must
+ * resolve the requested path to a canonical recording ROW and refuse anything
+ * that does not (hard-purged / orphan / arbitrary path), while still serving the
+ * owner's own recording in ANY state (trashed / personal / low-value —
+ * existence-scoped, not the full eligibility allowlist). There is NO
+ * non-owner/assistant caller of these IPCs, so the existence-scoped owner gate
+ * is the complete policy.
+ */
+describe('storage raw-file IPCs — existence-scoped owner gate', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    ;(db.getRecordingIdByFilePath as ReturnType<typeof vi.fn>).mockReturnValue('rec-owner')
+  })
+
+  it('read-recording serves bytes when the path resolves to a real recording (any state)', async () => {
+    ;(fileStorage.readRecordingFile as ReturnType<typeof vi.fn>).mockReturnValue(Buffer.from([1, 2, 3]))
+    registerStorageHandlers()
+    const res = await getHandler('storage:read-recording')({}, '/mock/recordings/owned.hda')
+    expect(res.success).toBe(true)
+    expect((res as { data?: string }).data).toBe(Buffer.from([1, 2, 3]).toString('base64'))
+  })
+
+  it('read-recording REFUSES (no bytes) a hard-purged / orphan / arbitrary path', async () => {
+    ;(db.getRecordingIdByFilePath as ReturnType<typeof vi.fn>).mockReturnValue(null)
+    registerStorageHandlers()
+    const res = await getHandler('storage:read-recording')({}, '/etc/passwd')
+    expect(res.success).toBe(false)
+    // The file must never be read when no recording owns the path.
+    expect(fileStorage.readRecordingFile).not.toHaveBeenCalled()
+  })
+
+  it('read-recording fails closed when the lookup cannot resolve (null)', async () => {
+    ;(db.getRecordingIdByFilePath as ReturnType<typeof vi.fn>).mockReturnValue(null)
+    registerStorageHandlers()
+    const res = await getHandler('storage:read-recording')({}, '/mock/recordings/gone.hda')
+    expect(res.success).toBe(false)
+    expect(fileStorage.readRecordingFile).not.toHaveBeenCalled()
+  })
+
+  it('open-file REFUSES an orphan / arbitrary path (never calls shell.openPath)', async () => {
+    ;(db.getRecordingIdByFilePath as ReturnType<typeof vi.fn>).mockReturnValue(null)
+    registerStorageHandlers()
+    const res = await getHandler('storage:open-file')({}, '/etc/hosts')
+    expect(res.success).toBe(false)
+    expect(shell.openPath).not.toHaveBeenCalled()
+  })
+
+  it('reveal-in-folder REFUSES an orphan / arbitrary path (never calls shell.showItemInFolder)', async () => {
+    ;(db.getRecordingIdByFilePath as ReturnType<typeof vi.fn>).mockReturnValue(null)
+    registerStorageHandlers()
+    const res = await getHandler('storage:reveal-in-folder')({}, '/etc/hosts')
+    expect(res.success).toBe(false)
+    expect(shell.showItemInFolder).not.toHaveBeenCalled()
   })
 })

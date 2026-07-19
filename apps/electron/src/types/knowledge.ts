@@ -18,6 +18,12 @@ export interface KnowledgeCapture {
   quality: QualityRating
   qualityConfidence: number | null
   qualityAssessedAt: string | null
+  /** F16/spec-001: fixed tags explaining an AI content-based value classification
+   *  (see VALUE_REASON_TAGS in electron/main/services/value-classification.ts). */
+  qualityReasons: string[] | null
+  /** Distinguishes an AI-set rating from one the user set by hand, so a later
+   *  re-analysis never overwrites a manual rating (never-downgrade guard). */
+  qualitySource: 'ai' | 'user' | null
 
   // Storage tier and retention
   storageTier: StorageTier

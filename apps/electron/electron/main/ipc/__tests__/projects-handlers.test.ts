@@ -41,6 +41,17 @@ vi.mock('../../services/database', () => ({
   deleteProjectNote: vi.fn(),
   getActionablesForProject: vi.fn(),
   addProjectDiscoveryRejection: vi.fn(),
+  // ADV27-1 (round-28) — projects:getAll/getById route through the visible-identity
+  // boundary. Default to all-visible so these mapping/shape assertions are
+  // unaffected; behavioral suppression is covered by the real-temp-DB suites.
+  filterVisibleEntityIds: vi.fn((_kind: string, ids: Iterable<string>) => ({ visible: new Set([...ids]), failClosed: false })),
+  // ADV15 (round-16) — getById topics + getActionables now route through the
+  // shared eligibility boundaries. Default these DB helpers to no-op-eligible so
+  // these mapping/shape assertions are unaffected; behavioral exclusion is covered
+  // by the real-temp-DB projects-handlers.eligibility.test.ts.
+  getEligibleRecordingIds: vi.fn((ids: Iterable<string>) => ({ eligible: new Set([...ids]), failClosed: false })),
+  getExistingCaptureIds: vi.fn((_ids: Iterable<string>) => ({ ids: new Set<string>(), failClosed: false })),
+  getCaptureEligibilityRows: vi.fn((_ids: Iterable<string>) => ({ rows: [], failClosed: false })),
   dismissDiscoveredProject: vi.fn(),
   unmergeProjects: vi.fn(),
   // Real classes so the handlers' `err instanceof` guards work.
@@ -70,6 +81,14 @@ vi.mock('../../services/database', () => ({
   }))
 }))
 
+// ADV56-3 (round-58) — projects:merge now routes through the graph-aware composite
+// (mergeProjectsWithGraph) so the loser's NAME-KEYED project graph node/edges/provenance
+// fold atomically with the relational merge. Mock it here (the real one pulls in
+// @hidock/knowledge-graph); behavioral coverage lives in context-graph-mutations.test.ts.
+vi.mock('../../services/knowledge-graph-service', () => ({
+  mergeProjectsWithGraph: vi.fn()
+}))
+
 describe('Projects IPC Handlers', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -84,6 +103,27 @@ describe('Projects IPC Handlers', () => {
     expect(ipcMain.handle).toHaveBeenCalledWith('projects:delete', expect.any(Function))
     expect(ipcMain.handle).toHaveBeenCalledWith('projects:tagMeeting', expect.any(Function))
     expect(ipcMain.handle).toHaveBeenCalledWith('projects:untagMeeting', expect.any(Function))
+  })
+
+  const P_KEEPER = '550e8400-e29b-41d4-a716-446655440000'
+  const P_LOSER = '660e8400-e29b-41d4-a716-446655440001'
+
+  it('should merge two projects through the graph-aware composite (projects:merge, ADV56-3)', async () => {
+    const { getProjectById } = await import('../../services/database')
+    const { mergeProjectsWithGraph } = await import('../../services/knowledge-graph-service')
+    vi.mocked(getProjectById).mockReturnValue({ id: P_KEEPER, name: 'K', status: 'active', created_at: '2025-01-01' } as any)
+    vi.mocked(mergeProjectsWithGraph).mockReturnValue({ id: P_KEEPER, name: 'K', status: 'active', created_at: '2025-01-01' } as any)
+
+    registerProjectsHandlers()
+    expect(ipcMain.handle).toHaveBeenCalledWith('projects:merge', expect.any(Function))
+
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(call => call[0] === 'projects:merge')?.[1]
+    const result = await handler?.({} as any, { keeperId: P_KEEPER, loserId: P_LOSER }) as any
+
+    expect(result.success).toBe(true)
+    expect(result.data.id).toBe(P_KEEPER)
+    // Routed through the graph-aware composite (ADV56-3) rather than bare mergeProjects.
+    expect(mergeProjectsWithGraph).toHaveBeenCalledWith(P_KEEPER, P_LOSER)
   })
 
   it('should include status field in mapped project', async () => {

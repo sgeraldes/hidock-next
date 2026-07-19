@@ -1,4 +1,4 @@
-import { Cloud, HardDrive, Check, Circle, Clock, Loader2, CheckCircle2, AlertCircle, Info, type LucideIcon } from 'lucide-react'
+import { Cloud, HardDrive, Check, Circle, Clock, Loader2, CheckCircle2, AlertCircle, Info, TrendingDown, Ban, type LucideIcon } from 'lucide-react'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 
 interface LegendItem {
@@ -21,6 +21,13 @@ const TRANSCRIPTION_ITEMS: LegendItem[] = [
   { Icon: Loader2, color: 'text-yellow-600 dark:text-yellow-400', label: 'Transcribing' },
   { Icon: CheckCircle2, color: 'text-green-600 dark:text-green-400', label: 'Transcribed' },
   { Icon: AlertCircle, color: 'text-destructive', label: 'Failed' }
+]
+
+// Mirrors SourceRow's ValueBadge (F16/spec-003) — the content-based value
+// classification glyph, shown only for low-value/garbage captures.
+const VALUE_ITEMS: LegendItem[] = [
+  { Icon: TrendingDown, color: 'text-amber-600 dark:text-amber-400', label: 'Low value' },
+  { Icon: Ban, color: 'text-red-600 dark:text-red-400', label: 'Garbage' }
 ]
 
 /**
@@ -54,6 +61,15 @@ export function StatusLegend() {
           <div className="space-y-1.5">
             <div className="text-xs font-semibold text-foreground/70">Transcription</div>
             {TRANSCRIPTION_ITEMS.map(({ Icon, color, label }) => (
+              <div key={label} className="flex items-center gap-2 text-xs">
+                <Icon className={`h-3.5 w-3.5 shrink-0 ${color}`} aria-hidden="true" />
+                <span className="text-foreground/70">{label}</span>
+              </div>
+            ))}
+          </div>
+          <div className="space-y-1.5">
+            <div className="text-xs font-semibold text-foreground/70">Value</div>
+            {VALUE_ITEMS.map(({ Icon, color, label }) => (
               <div key={label} className="flex items-center gap-2 text-xs">
                 <Icon className={`h-3.5 w-3.5 shrink-0 ${color}`} aria-hidden="true" />
                 <span className="text-foreground/70">{label}</span>

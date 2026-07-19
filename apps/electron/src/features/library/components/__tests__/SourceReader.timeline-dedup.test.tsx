@@ -98,7 +98,8 @@ function installElectronAPI() {
   Object.defineProperty(window, 'electronAPI', {
     value: {
       recordings: { reprocessWith: vi.fn().mockResolvedValue({ success: true }) },
-      transcripts: { getByRecordingId },
+      // ADV13: SourceReader detail viewer now uses the owner-management accessor.
+      transcripts: { getByRecordingIdOwner: getByRecordingId },
       projects: {
         getForKnowledge: vi.fn().mockResolvedValue({ success: true, data: [] }),
         getAll: vi.fn().mockResolvedValue({ success: true, data: { projects: [], total: 0 } }),

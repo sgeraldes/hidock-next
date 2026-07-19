@@ -23,16 +23,18 @@
     "dev": "tsup --watch",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tests.json"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "license": "MIT",
   "devDependencies": {
     "@hidock/database": "file:../database",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
     "@types/sql.js": "1.4.9",
+    "better-sqlite3": "^12.11.1",
     "sql.js": "^1.11.0",
     "tsup": "^8.5.1",
     "typescript": "^5.6.0",

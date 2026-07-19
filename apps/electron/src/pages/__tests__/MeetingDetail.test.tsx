@@ -69,7 +69,11 @@ beforeEach(() => {
       getByMeeting: mockGetByMeeting,
     },
     contacts: {
+      // R28-RES-1 (round-29): MeetingDetail is an OWNER surface → it now calls the
+      // existence-scoped owner accessor. Point it at the same mock as the gated
+      // default so the existing fixtures drive it unchanged.
       getForMeeting: mockGetForMeeting,
+      getForMeetingOwner: mockGetForMeeting,
       // Used by the embedded TranscriptViewer's speaker picker.
       getAll: vi.fn().mockResolvedValue({ success: true, data: { contacts: [], total: 0 } }),
     },

@@ -15,6 +15,7 @@
  */
 import { getConfig } from '../config'
 import { getBrainRegistry, BrainRegistry } from './brain-registry'
+import { eligibleToGenerate } from './eligibility'
 import type {
   AIBrain,
   AudioAnalyzeInput,
@@ -267,6 +268,19 @@ export class BrainRouter {
       if (!brain) break
       tried.add(brain.id)
 
+      // ADV42-2 (round-44) — FAIL-CLOSED eligibility recheck immediately before
+      // THIS provider attempt (the primary AND every fallback). selectChatBrain
+      // above awaited authStatus, so the source could have been trashed / marked
+      // personal / value-excluded during that await; re-check synchronously,
+      // adjacent to the call, and ABORT the whole chat (attempt no further
+      // candidate) rather than send the now-excluded content to this brain.
+      // Returns null — the same signal the AbortError path uses — so no fallback
+      // provider ever receives content after the source became ineligible.
+      if (!eligibleToGenerate(opts.shouldGenerate)) {
+        console.warn(`[BrainRouter] chat aborted before ${brain.id}: source no longer eligible (fail closed)`)
+        return null
+      }
+
       try {
         const answer = await brain.chat(messages, opts)
         if (answer != null) return answer
@@ -292,20 +306,45 @@ export class BrainRouter {
    * single availability probe lives inside its adapter's embed() — this wrapper
    * adds none, so a transient probe never yields spurious null vectors (FIX 4).
    */
-  async embed(texts: string[]): Promise<(number[] | null)[]> {
+  async embed(
+    texts: string[],
+    opts: { shouldGenerate?: () => boolean } = {}
+  ): Promise<(number[] | null)[]> {
     if (texts.length === 0) return []
+
+    // ADV42-2 (round-44) — INELIGIBLE result: the null-vector shape callers
+    // already treat as "no embedding available" (same as no provider), so an
+    // aborted embed is indistinguishable from an unconfigured one and persists
+    // nothing.
+    const ineligible = (): (number[] | null)[] => texts.map(() => null)
+
+    // Recheck before the PRIMARY provider attempt.
+    if (!eligibleToGenerate(opts.shouldGenerate)) return ineligible()
 
     const primary = await this.geminiPrimary('embed', 'embed')
     if (primary?.embed) {
+      // Recheck AGAIN after the geminiPrimary await, immediately before the call.
+      if (!eligibleToGenerate(opts.shouldGenerate)) return ineligible()
       try {
-        return await primary.embed(texts)
+        // ADV43-2 (round-45) — thread shouldGenerate INTO the adapter so it
+        // re-checks before EACH internal batch (GeminiApiBrain.embed loops over
+        // 100-text batches with an await between them); the router's single
+        // pre-attempt check cannot see an exclusion committed mid-batch.
+        return await primary.embed(texts, opts)
       } catch (e) {
         console.error('[BrainRouter] Gemini embedding failed, trying Ollama fallback:', e)
       }
     }
 
+    // ADV42-2 (round-44) — recheck before the FALLBACK provider attempt: an
+    // exclusion committed while the primary embed was pending or failing must
+    // NOT reach the Ollama fallback.
+    if (!eligibleToGenerate(opts.shouldGenerate)) return ineligible()
+
     const fallback = this.capabilityFallback('embed', 'gemini-api')
-    return fallback?.embed ? fallback.embed(texts) : texts.map(() => null)
+    // ADV43-2 (round-45) — the Ollama adapter emits one request per text; thread
+    // shouldGenerate so it re-checks before EACH per-text request too.
+    return fallback?.embed ? fallback.embed(texts, opts) : ineligible()
   }
 
   /**

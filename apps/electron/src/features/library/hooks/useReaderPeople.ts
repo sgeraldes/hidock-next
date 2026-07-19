@@ -108,6 +108,10 @@ export function useReaderPeople({ meetingId, attendees, recordingId, segments }:
 
   // Canonical contacts for the linked meeting (the meeting_contacts join). Same
   // IPC MeetingDetail uses; no new read path.
+  // R28-RES-1 (round-29): SourceReader is the OWNER's transcript reader — use the
+  // existence-scoped owner accessor so the owner sees every participant of their own
+  // meeting. The gated default (contacts.getForMeeting) feeds only the
+  // assistant/hover/Today surfaces.
   useEffect(() => {
     let cancelled = false
     if (!meetingId) {
@@ -116,7 +120,7 @@ export function useReaderPeople({ meetingId, attendees, recordingId, segments }:
     }
     ;(async () => {
       try {
-        const res = await window.electronAPI.contacts.getForMeeting(meetingId)
+        const res = await window.electronAPI.contacts.getForMeetingOwner(meetingId)
         if (!cancelled) setContacts(res.success ? res.data : [])
       } catch (err) {
         console.error('Failed to load meeting contacts:', err)

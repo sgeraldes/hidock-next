@@ -34,13 +34,27 @@ import {
   runWithMassDeleteAllowed,
   getRecordings,
   getRecordingById,
+  getTrashedRecordings,
   setRecordingPersonal,
   getExcludedRecordingIds,
   getRecordingDeletionImpact,
   deleteRecordingCascade,
   restoreRecording,
   addToQueue,
-  getQueueItems
+  getQueueItems,
+  updateQueueItem,
+  setGraphProvenanceCleanup,
+  isGraphProvenanceCleanupRegistered,
+  recordPendingFileCleanups,
+  getPendingFileCleanups,
+  updatePendingFileCleanups,
+  getPendingGraphCleanups,
+  retryPendingGraphCleanups,
+  clearPendingGraphCleanup,
+  isRecordingProcessable,
+  markRecordingNotOnDeviceById,
+  removeDeviceFileCacheEntry,
+  type GraphProvenanceCleanupResult
 } from '../database'
 
 function cleanupDbFiles(base: string): void {
@@ -64,9 +78,11 @@ const DATA_TABLES = [
   'recording_meeting_candidates',
   'recording_preassignments',
   'meeting_contacts',
+  'value_backfill_state',
   'knowledge_captures',
   'quality_assessments',
   'deletion_journal',
+  'device_file_cache',
   'recordings',
   'contacts',
   'projects',
@@ -121,6 +137,22 @@ function seedContact(id: string, name: string, email?: string): void {
   )
 }
 
+// spec-006/F17 T6 AR3-1 — the hard branch FAILS CLOSED when the graph-cleanup
+// seam is unregistered, so every existing hard-purge test here (which doesn't
+// care about graph coupling) wires this explicit no-op stub. Individual AR3-1/
+// N2 tests below temporarily override it (null, or a throwing/failing stub)
+// and restore it in a `finally`.
+function noopGraphCleanup(): GraphProvenanceCleanupResult {
+  return {
+    ok: true,
+    markersRemoved: 0,
+    edgesRemoved: 0,
+    edgeSourceRowsRemoved: 0,
+    meetingNodesRemoved: 0,
+    orphanNodesRemoved: 0
+  }
+}
+
 describe('Privacy source-deletion (v38)', () => {
   beforeAll(async () => {
     cleanupDbFiles(paths.db)
@@ -137,12 +169,14 @@ describe('Privacy source-deletion (v38)', () => {
   })
 
   afterAll(() => {
+    setGraphProvenanceCleanup(null)
     try { closeDatabase() } catch { /* already closed */ }
     cleanupDbFiles(paths.db)
   })
 
   beforeEach(() => {
     wipeData()
+    setGraphProvenanceCleanup(noopGraphCleanup)
   })
 
   // -------------------------------------------------------------------------
@@ -152,15 +186,15 @@ describe('Privacy source-deletion (v38)', () => {
     it('setRecordingPersonal toggles the flag and getExcludedRecordingIds reflects it', () => {
       seedRecording('r1')
       seedRecording('r2')
-      expect(getExcludedRecordingIds().size).toBe(0)
+      expect(getExcludedRecordingIds().ids.size).toBe(0)
 
       expect(setRecordingPersonal('r1', true)).toBe(true)
-      const excluded = getExcludedRecordingIds()
+      const excluded = getExcludedRecordingIds().ids
       expect(excluded.has('r1')).toBe(true)
       expect(excluded.has('r2')).toBe(false)
 
       expect(setRecordingPersonal('r1', false)).toBe(false)
-      expect(getExcludedRecordingIds().has('r1')).toBe(false)
+      expect(getExcludedRecordingIds().ids.has('r1')).toBe(false)
     })
 
     it('returns undefined for an unknown recording', () => {
@@ -224,7 +258,60 @@ describe('Privacy source-deletion (v38)', () => {
     it('soft-deleted recordings are in the excluded set', () => {
       seedRecording('r1')
       deleteRecordingCascade('r1', { hard: false })
-      expect(getExcludedRecordingIds().has('r1')).toBe(true)
+      expect(getExcludedRecordingIds().ids.has('r1')).toBe(true)
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Trash surface (spec-005/F17 T5 §D1) — getTrashedRecordings()
+  // -------------------------------------------------------------------------
+  describe('getTrashedRecordings', () => {
+    it('returns only tombstoned (deleted_at IS NOT NULL) rows, live rows excluded', () => {
+      seedRecording('r1')
+      seedRecording('r2')
+      deleteRecordingCascade('r1', { hard: false })
+
+      const trashed = getTrashedRecordings()
+      expect(trashed.map((r) => r.id)).toEqual(['r1'])
+      expect(getRecordings().map((r) => r.id)).toEqual(['r2'])
+    })
+
+    it('orders newest-tombstone-first', () => {
+      seedRecording('r1')
+      seedRecording('r2')
+      seedRecording('r3')
+      deleteRecordingCascade('r1', { hard: false })
+      deleteRecordingCascade('r2', { hard: false })
+      deleteRecordingCascade('r3', { hard: false })
+      // Stamp explicit, unambiguous deleted_at values — three sequential
+      // real-clock calls can land in the same millisecond and make the ORDER BY
+      // non-deterministic; this isolates the test from that timing race.
+      run('UPDATE recordings SET deleted_at = ? WHERE id = ?', ['2026-01-01T10:00:00.000Z', 'r1'])
+      run('UPDATE recordings SET deleted_at = ? WHERE id = ?', ['2026-01-01T11:00:00.000Z', 'r2'])
+      run('UPDATE recordings SET deleted_at = ? WHERE id = ?', ['2026-01-01T12:00:00.000Z', 'r3'])
+
+      const trashed = getTrashedRecordings()
+      expect(trashed.map((r) => r.id)).toEqual(['r3', 'r2', 'r1'])
+    })
+
+    it('excludes personal (but not deleted) recordings — personal and trashed are independent', () => {
+      seedRecording('r1', { personal: 1 })
+      seedRecording('r2')
+      deleteRecordingCascade('r2', { hard: false })
+
+      const trashed = getTrashedRecordings()
+      expect(trashed.map((r) => r.id)).toEqual(['r2'])
+    })
+
+    it('a hard-purged recording never appears in Trash (it no longer exists)', () => {
+      seedRecording('r1')
+      deleteRecordingCascade('r1', { hard: true })
+      expect(getTrashedRecordings()).toEqual([])
+    })
+
+    it('returns an empty array when nothing is soft-deleted', () => {
+      seedRecording('r1')
+      expect(getTrashedRecordings()).toEqual([])
     })
   })
 
@@ -295,8 +382,54 @@ describe('Privacy source-deletion (v38)', () => {
       expect(res?.artifactPaths).toContain('/data/artifacts/r1.pdf')
     })
 
+    // CX-T3-3 (F16/spec-003 fix round): the v43 value-backfill classification
+    // markers are part of the purge contract — a hard-purged recording must
+    // not leave its captures' bookkeeping behind (FKs are OFF; every capture
+    // child is deleted explicitly).
+    it('removes value-backfill classification markers for the purged captures (CX-T3-3)', () => {
+      seedRecording('r1')
+      run('INSERT INTO knowledge_captures (id, title, captured_at, source_recording_id) VALUES (?, ?, ?, ?)', [
+        'r1-c', 'Cap', '2026-01-01T10:00:00.000Z', 'r1'
+      ])
+      run(
+        `INSERT INTO value_backfill_state (capture_id, status, result_rating, attempts)
+         VALUES ('r1-c', 'classified', 'garbage', 1)`
+      )
+      // An unrelated recording's marker must survive the scoped purge.
+      seedRecording('r2')
+      run('INSERT INTO knowledge_captures (id, title, captured_at, source_recording_id) VALUES (?, ?, ?, ?)', [
+        'r2-c', 'Cap2', '2026-01-01T10:00:00.000Z', 'r2'
+      ])
+      run(
+        `INSERT INTO value_backfill_state (capture_id, status, result_rating, attempts)
+         VALUES ('r2-c', 'classified', 'unrated', 1)`
+      )
+
+      const res = deleteRecordingCascade('r1', { hard: true })
+
+      expect(res?.mode).toBe('hard')
+      expect(queryAll('SELECT capture_id FROM value_backfill_state WHERE capture_id = ?', ['r1-c']).length).toBe(0)
+      expect(queryAll('SELECT capture_id FROM value_backfill_state WHERE capture_id = ?', ['r2-c']).length).toBe(1)
+    })
+
     it('returns undefined for an unknown recording', () => {
       expect(deleteRecordingCascade('ghost', { hard: true })).toBeUndefined()
+    })
+
+    // AC#9 (spec-005/F17 T5) — permanent-delete FROM Trash: hard-purging a
+    // recording that is currently soft-deleted (tombstoned) must still work,
+    // since getRecordingById doesn't filter deleted_at.
+    it('hard-purges a recording that is already soft-deleted (permanent-delete from Trash)', () => {
+      seedRecording('r1')
+      seedTranscript('t1', 'r1')
+      deleteRecordingCascade('r1', { hard: false })
+      expect(getTrashedRecordings().map((r) => r.id)).toEqual(['r1'])
+
+      const res = deleteRecordingCascade('r1', { hard: true })
+
+      expect(res?.mode).toBe('hard')
+      expect(getRecordingById('r1')).toBeUndefined()
+      expect(getTrashedRecordings()).toEqual([]) // it leaves the visible Trash list too
     })
   })
 
@@ -372,6 +505,722 @@ describe('Privacy source-deletion (v38)', () => {
 
     it('returns undefined for an unknown recording', () => {
       expect(getRecordingDeletionImpact('ghost')).toBeUndefined()
+    })
+
+    // AC#9 (spec-005/F17 T5) — the Trash-mode "Delete permanently…" path depends
+    // on getRecordingById NOT filtering deleted_at (verified anchor), so a
+    // soft-deleted (tombstoned) recording must still resolve here.
+    it('reports impact for a soft-deleted (tombstoned) recording', () => {
+      seedRecording('r1', { file_path: '/data/r1.wav' })
+      seedTranscript('t1', 'r1')
+      deleteRecordingCascade('r1', { hard: false })
+      expect(getRecordings().find((r) => r.id === 'r1')).toBeUndefined() // confirms it's really hidden
+
+      const impact = getRecordingDeletionImpact('r1')
+      expect(impact).toBeTruthy()
+      expect(impact?.transcripts).toBe(1)
+      expect(impact?.hasAudioFile).toBe(true)
+    })
+
+    // spec-006/F17 T6 D5 + F-INFO-6: onDevice/deviceFilename come straight
+    // from the DB row (not the renderer's UnifiedRecording, which loses
+    // deviceFilename entirely for a Trash row).
+    it('reports onDevice:true and deviceFilename when the recording is marked on-device', () => {
+      seedRecording('r1', { filename: 'on-device.wav' })
+      run('UPDATE recordings SET on_device = 1 WHERE id = ?', ['r1'])
+      const impact = getRecordingDeletionImpact('r1')
+      expect(impact?.onDevice).toBe(true)
+      expect(impact?.deviceFilename).toBe('on-device.wav')
+    })
+
+    it('reports onDevice:false and deviceFilename:null when not on device', () => {
+      seedRecording('r1')
+      const impact = getRecordingDeletionImpact('r1')
+      expect(impact?.onDevice).toBe(false)
+      expect(impact?.deviceFilename).toBeNull()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // spec-006/F17 T6 AR3-1 — fail-closed graph-cleanup seam
+  // -------------------------------------------------------------------------
+  describe('AR3-1 — fail-closed graph-cleanup seam', () => {
+    it('refuses (throws) a hard purge when the seam is unwired, leaving the recording and its children fully intact', () => {
+      seedRecording('r1')
+      seedTranscript('t1', 'r1')
+      setGraphProvenanceCleanup(null)
+      try {
+        expect(() => deleteRecordingCascade('r1', { hard: true })).toThrow(/graph cleanup unavailable/i)
+      } finally {
+        setGraphProvenanceCleanup(noopGraphCleanup)
+      }
+      expect(getRecordingById('r1')).toBeTruthy()
+      expect(queryOne('SELECT id FROM transcripts WHERE recording_id = ?', ['r1'])).toBeTruthy()
+      expect(queryOne("SELECT id FROM deletion_journal WHERE recording_id = ? AND mode = 'hard'", ['r1'])).toBeFalsy()
+    })
+
+    it('does not affect a soft delete — the seam is never consulted', () => {
+      seedRecording('r1')
+      setGraphProvenanceCleanup(null)
+      try {
+        expect(() => deleteRecordingCascade('r1', { hard: false })).not.toThrow()
+      } finally {
+        setGraphProvenanceCleanup(noopGraphCleanup)
+      }
+      expect(getRecordings().find((r) => r.id === 'r1')).toBeUndefined() // hidden, as expected
+    })
+
+    it('AR3-3(c) escape hatch: skipGraphCleanup bypasses the seam entirely, succeeding even while unwired', () => {
+      seedRecording('r1')
+      setGraphProvenanceCleanup(null)
+      let res
+      try {
+        res = deleteRecordingCascade('r1', { hard: true, skipGraphCleanup: true })
+      } finally {
+        setGraphProvenanceCleanup(noopGraphCleanup)
+      }
+      expect(res?.mode).toBe('hard')
+      expect(res?.graphCleanupSkipped).toBe(true)
+      expect(getRecordingById('r1')).toBeUndefined()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // N2 — a seam that reports/throws failure rolls back the WHOLE hard purge
+  // -------------------------------------------------------------------------
+  describe('N2 — crash-rollback when the graph-cleanup seam fails', () => {
+    function seedRichRecording(id: string): void {
+      seedRecording(id)
+      seedTranscript(`${id}-t`, id)
+      run('INSERT INTO knowledge_captures (id, title, captured_at, source_recording_id) VALUES (?, ?, ?, ?)', [
+        `${id}-c`, 'Cap', '2026-01-01T10:00:00.000Z', id
+      ])
+    }
+
+    it('a THROWING seam rolls back cascade rows + knowledge captures together (single-txn rollback)', () => {
+      seedRichRecording('r1')
+      setGraphProvenanceCleanup(() => {
+        throw new Error('graph store exploded')
+      })
+      try {
+        expect(() => deleteRecordingCascade('r1', { hard: true })).toThrow(/graph store exploded/)
+      } finally {
+        setGraphProvenanceCleanup(noopGraphCleanup)
+      }
+      expect(getRecordingById('r1')).toBeTruthy()
+      expect(queryAll('SELECT id FROM transcripts WHERE recording_id = ?', ['r1']).length).toBe(1)
+      expect(queryAll('SELECT id FROM knowledge_captures WHERE id = ?', ['r1-c']).length).toBe(1)
+      expect(queryOne("SELECT id FROM deletion_journal WHERE recording_id = ? AND mode = 'hard'", ['r1'])).toBeFalsy()
+    })
+
+    it('a seam reporting {ok:false} (no throw) also aborts the whole purge', () => {
+      seedRichRecording('r1')
+      setGraphProvenanceCleanup(() => ({
+        ok: false,
+        error: 'graph write failed',
+        markersRemoved: 0,
+        edgesRemoved: 0,
+        edgeSourceRowsRemoved: 0,
+        meetingNodesRemoved: 0,
+        orphanNodesRemoved: 0
+      }))
+      try {
+        expect(() => deleteRecordingCascade('r1', { hard: true })).toThrow(/graph write failed/)
+      } finally {
+        setGraphProvenanceCleanup(noopGraphCleanup)
+      }
+      expect(getRecordingById('r1')).toBeTruthy()
+      expect(queryAll('SELECT id FROM knowledge_captures WHERE id = ?', ['r1-c']).length).toBe(1)
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Journal privacy (AR3-7, extends D4) — the hard row's exact persisted shape
+  // -------------------------------------------------------------------------
+  describe('hard journal privacy (AR3-7)', () => {
+    it('a normal hard purge journals recording_snapshot=NULL and removed_counts=NULL, keeping only the opaque recording_id/mode/created_at', () => {
+      seedRecording('r1', { filename: 'secret.wav', original_filename: 'secret.hda' })
+      deleteRecordingCascade('r1', { hard: true })
+
+      const row = queryOne<{
+        id: string
+        recording_id: string
+        mode: string
+        recording_snapshot: string | null
+        removed_counts: string | null
+        created_at: string
+        restored_at: string | null
+      }>("SELECT * FROM deletion_journal WHERE recording_id = ? AND mode = 'hard'", ['r1'])
+
+      expect(row).toBeTruthy()
+      expect(row).toEqual({
+        id: row!.id,
+        recording_id: 'r1',
+        mode: 'hard',
+        recording_snapshot: null,
+        removed_counts: null,
+        created_at: row!.created_at,
+        restored_at: null
+      })
+      expect(row!.created_at).toBeTruthy()
+      // No filename/path leaked anywhere in the row.
+      expect(JSON.stringify(row)).not.toContain('secret')
+    })
+
+    it('the escape-hatch purge journals {mode, graph_cleanup_skipped, pending_graph ledger} and still nulls removed_counts (ARF-4)', () => {
+      seedRecording('r1')
+      const res = deleteRecordingCascade('r1', { hard: true, skipGraphCleanup: true })
+      const row = queryOne<{ recording_snapshot: string | null; removed_counts: string | null }>(
+        'SELECT recording_snapshot, removed_counts FROM deletion_journal WHERE id = ?',
+        [res!.journalId!]
+      )
+      // ARF-4 — the escape hatch now persists a durable pending-graph-cleanup
+      // ledger (ids for the deferred retry sweep) alongside the audit marker.
+      expect(JSON.parse(row!.recording_snapshot!)).toEqual({
+        mode: 'hard',
+        graph_cleanup_skipped: true,
+        pending_graph: { recordingId: 'r1', meetingId: 'r1', transcriptIds: [] }
+      })
+      expect(row!.removed_counts).toBeNull()
+    })
+
+    it('the soft-delete journal is UNCHANGED — full recording snapshot for restore fidelity', () => {
+      seedRecording('r1', { filename: 'keepme.wav' })
+      deleteRecordingCascade('r1', { hard: false })
+      const row = queryOne<{ recording_snapshot: string }>(
+        "SELECT recording_snapshot FROM deletion_journal WHERE recording_id = ? AND mode = 'soft'",
+        ['r1']
+      )
+      const snap = JSON.parse(row!.recording_snapshot)
+      expect(snap.id).toBe('r1')
+      expect(snap.filename).toBe('keepme.wav')
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Graph actual counts + pre-captured meetingId/transcriptIds threading (D1)
+  // -------------------------------------------------------------------------
+  describe('graph seam wiring — actual counts + pre-captured ids', () => {
+    it('merges the seam actual counts into removed', () => {
+      seedRecording('r1')
+      setGraphProvenanceCleanup(() => ({
+        ok: true,
+        markersRemoved: 2,
+        edgesRemoved: 3,
+        edgeSourceRowsRemoved: 4,
+        meetingNodesRemoved: 1,
+        orphanNodesRemoved: 5
+      }))
+      let res
+      try {
+        res = deleteRecordingCascade('r1', { hard: true })
+      } finally {
+        setGraphProvenanceCleanup(noopGraphCleanup)
+      }
+      expect(res?.removed.markersRemoved).toBe(2)
+      expect(res?.removed.edgesRemoved).toBe(3)
+      expect(res?.removed.edgeSourceRowsRemoved).toBe(4)
+      expect(res?.removed.meetingNodesRemoved).toBe(1)
+      expect(res?.removed.orphanNodesRemoved).toBe(5)
+    })
+
+    it('passes the pre-captured meetingId and transcriptIds to the seam', () => {
+      seedMeeting('m1')
+      seedRecording('r1', { meeting_id: 'm1' })
+      seedTranscript('t1', 'r1')
+      const seen: Array<{ id: string; opts: { meetingId?: string; transcriptIds?: string[] } }> = []
+      setGraphProvenanceCleanup((id, opts) => {
+        seen.push({ id, opts })
+        return noopGraphCleanup()
+      })
+      try {
+        deleteRecordingCascade('r1', { hard: true })
+      } finally {
+        setGraphProvenanceCleanup(noopGraphCleanup)
+      }
+      expect(seen).toEqual([{ id: 'r1', opts: { meetingId: 'm1', transcriptIds: ['t1'] } }])
+    })
+
+    it('falls back to recordingId as meetingId when the recording has no meeting_id', () => {
+      seedRecording('r1')
+      const seen: Array<{ meetingId?: string }> = []
+      setGraphProvenanceCleanup((_id, opts) => {
+        seen.push(opts)
+        return noopGraphCleanup()
+      })
+      try {
+        deleteRecordingCascade('r1', { hard: true })
+      } finally {
+        setGraphProvenanceCleanup(noopGraphCleanup)
+      }
+      expect(seen[0].meetingId).toBe('r1')
+    })
+
+    it('journalId is returned for a hard purge and points at a real journal row', () => {
+      seedRecording('r1')
+      const res = deleteRecordingCascade('r1', { hard: true })
+      expect(res?.journalId).toBeTruthy()
+      expect(queryOne('SELECT id FROM deletion_journal WHERE id = ?', [res?.journalId])).toBeTruthy()
+    })
+
+    it('journalId is absent for a soft delete', () => {
+      seedRecording('r1')
+      const res = deleteRecordingCascade('r1', { hard: false })
+      expect(res?.journalId).toBeUndefined()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // AR3-2 DB ledger helpers — pending post-commit file-cleanup round trip
+  // -------------------------------------------------------------------------
+  describe('AR3-2 pending-file-cleanup ledger (DB layer)', () => {
+    it('recordPendingFileCleanups writes pending_files, merging with an existing graph_cleanup_skipped flag rather than clobbering it', () => {
+      seedRecording('r1')
+      const res = deleteRecordingCascade('r1', { hard: true, skipGraphCleanup: true })
+      recordPendingFileCleanups(res!.journalId!, [{ kind: 'audio', path: '/data/r1.wav' }])
+
+      const row = queryOne<{ recording_snapshot: string }>(
+        'SELECT recording_snapshot FROM deletion_journal WHERE id = ?',
+        [res!.journalId!]
+      )
+      expect(JSON.parse(row!.recording_snapshot)).toEqual({
+        mode: 'hard',
+        graph_cleanup_skipped: true,
+        // ARF-4 — the escape hatch's pending_graph ledger coexists with pending_files.
+        pending_graph: { recordingId: 'r1', meetingId: 'r1', transcriptIds: [] },
+        pending_files: [{ kind: 'audio', path: '/data/r1.wav' }]
+      })
+    })
+
+    it('recordPendingFileCleanups([]) is a no-op — the row stays NULL', () => {
+      seedRecording('r1')
+      const res = deleteRecordingCascade('r1', { hard: true })
+      recordPendingFileCleanups(res!.journalId!, [])
+      const row = queryOne<{ recording_snapshot: string | null }>(
+        'SELECT recording_snapshot FROM deletion_journal WHERE id = ?',
+        [res!.journalId!]
+      )
+      expect(row!.recording_snapshot).toBeNull()
+    })
+
+    it('getPendingFileCleanups returns only rows carrying pending_files, newest first, respecting the limit', () => {
+      seedRecording('r1')
+      seedRecording('r2')
+      seedRecording('r3')
+      const res1 = deleteRecordingCascade('r1', { hard: true })!
+      const res2 = deleteRecordingCascade('r2', { hard: true })!
+      const res3 = deleteRecordingCascade('r3', { hard: true })!
+      // Explicit, unambiguous created_at ordering (avoids a same-millisecond race).
+      run("UPDATE deletion_journal SET created_at = '2026-01-01T10:00:00.000Z' WHERE id = ?", [res1.journalId])
+      run("UPDATE deletion_journal SET created_at = '2026-01-01T11:00:00.000Z' WHERE id = ?", [res2.journalId])
+      run("UPDATE deletion_journal SET created_at = '2026-01-01T12:00:00.000Z' WHERE id = ?", [res3.journalId])
+      recordPendingFileCleanups(res1.journalId!, [{ kind: 'audio', path: '/data/r1.wav' }])
+      recordPendingFileCleanups(res3.journalId!, [{ kind: 'wiki' }])
+      // res2 has no pending files — must not appear.
+
+      const all = getPendingFileCleanups(10)
+      expect(all.map((r) => r.journalId)).toEqual([res3.journalId, res1.journalId])
+
+      const limited = getPendingFileCleanups(1)
+      expect(limited.map((r) => r.journalId)).toEqual([res3.journalId])
+    })
+
+    it('updatePendingFileCleanups clears pending_files (nulls the column) when nothing else remains on the snapshot', () => {
+      seedRecording('r1')
+      const res = deleteRecordingCascade('r1', { hard: true })!
+      recordPendingFileCleanups(res.journalId!, [{ kind: 'audio', path: '/data/r1.wav' }])
+      updatePendingFileCleanups(res.journalId!, [])
+      const row = queryOne<{ recording_snapshot: string | null }>(
+        'SELECT recording_snapshot FROM deletion_journal WHERE id = ?',
+        [res.journalId!]
+      )
+      expect(row!.recording_snapshot).toBeNull()
+    })
+
+    it('updatePendingFileCleanups preserves graph_cleanup_skipped + pending_graph when clearing pending_files', () => {
+      seedRecording('r1')
+      const res = deleteRecordingCascade('r1', { hard: true, skipGraphCleanup: true })!
+      recordPendingFileCleanups(res.journalId!, [{ kind: 'audio', path: '/data/r1.wav' }])
+      updatePendingFileCleanups(res.journalId!, [])
+      const row = queryOne<{ recording_snapshot: string }>(
+        'SELECT recording_snapshot FROM deletion_journal WHERE id = ?',
+        [res.journalId!]
+      )
+      // ARF-4 — clearing the file ledger must not drop the graph ledger.
+      expect(JSON.parse(row!.recording_snapshot)).toEqual({
+        mode: 'hard',
+        graph_cleanup_skipped: true,
+        pending_graph: { recordingId: 'r1', meetingId: 'r1', transcriptIds: [] }
+      })
+    })
+
+    it('updatePendingFileCleanups writes back a still-remaining subset', () => {
+      seedRecording('r1')
+      const res = deleteRecordingCascade('r1', { hard: true })!
+      recordPendingFileCleanups(res.journalId!, [{ kind: 'audio', path: '/data/r1.wav' }, { kind: 'wiki' }])
+      updatePendingFileCleanups(res.journalId!, [{ kind: 'wiki' }])
+      const row = queryOne<{ recording_snapshot: string }>(
+        'SELECT recording_snapshot FROM deletion_journal WHERE id = ?',
+        [res.journalId!]
+      )
+      expect(JSON.parse(row!.recording_snapshot).pending_files).toEqual([{ kind: 'wiki' }])
+    })
+
+    // OP-NIT (T6 fix round): a rewrite of a missing/malformed snapshot must
+    // keep the JSON self-describing — seeded with {mode:'hard'}, matching
+    // recordPendingFileCleanups (the mode COLUMN stays authoritative either
+    // way; this is consistency, not correctness).
+    it('updatePendingFileCleanups preserves the in-JSON mode field when rewriting a malformed snapshot', () => {
+      seedRecording('r1')
+      const res = deleteRecordingCascade('r1', { hard: true })!
+      run("UPDATE deletion_journal SET recording_snapshot = 'not-json' WHERE id = ?", [res.journalId!])
+
+      updatePendingFileCleanups(res.journalId!, [{ kind: 'wiki' }])
+
+      const row = queryOne<{ recording_snapshot: string }>(
+        'SELECT recording_snapshot FROM deletion_journal WHERE id = ?',
+        [res.journalId!]
+      )
+      expect(JSON.parse(row!.recording_snapshot)).toEqual({ mode: 'hard', pending_files: [{ kind: 'wiki' }] })
+    })
+
+    it('updatePendingFileCleanups keeps the in-JSON mode when writing pending_files onto a NULL snapshot', () => {
+      seedRecording('r1')
+      const res = deleteRecordingCascade('r1', { hard: true })! // snapshot NULL per AR3-7
+
+      updatePendingFileCleanups(res.journalId!, [{ kind: 'audio', path: '/data/r1.wav' }])
+
+      const row = queryOne<{ recording_snapshot: string }>(
+        'SELECT recording_snapshot FROM deletion_journal WHERE id = ?',
+        [res.journalId!]
+      )
+      expect(JSON.parse(row!.recording_snapshot)).toEqual({
+        mode: 'hard',
+        pending_files: [{ kind: 'audio', path: '/data/r1.wav' }]
+      })
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // CX-T6-1 (fix round) — offline device-cache reconciliation by filename
+  // -------------------------------------------------------------------------
+  describe('removeDeviceFileCacheEntry (CX-T6-1)', () => {
+    it('does not throw when the device_file_cache table does not exist yet', () => {
+      run('DROP TABLE IF EXISTS device_file_cache')
+      expect(() => removeDeviceFileCacheEntry('ghost.hda')).not.toThrow()
+    })
+
+    it('removes exactly the named cache entry, leaving others intact', () => {
+      // The table is created lazily by deviceCache:saveAll in production;
+      // mirror its DDL here.
+      run(`CREATE TABLE IF NOT EXISTS device_file_cache (
+        filename TEXT PRIMARY KEY, size INTEGER, duration REAL, dateCreated TEXT
+      )`)
+      run("INSERT INTO device_file_cache (filename, size, duration, dateCreated) VALUES ('purged.hda', 10, 1.0, '2026-01-01')")
+      run("INSERT INTO device_file_cache (filename, size, duration, dateCreated) VALUES ('kept.hda', 20, 2.0, '2026-01-02')")
+
+      removeDeviceFileCacheEntry('purged.hda')
+
+      const rows = queryAll<{ filename: string }>('SELECT filename FROM device_file_cache')
+      expect(rows.map((r) => r.filename)).toEqual(['kept.hda'])
+    })
+
+    it('is a no-op for a filename that is not cached', () => {
+      run(`CREATE TABLE IF NOT EXISTS device_file_cache (
+        filename TEXT PRIMARY KEY, size INTEGER, duration REAL, dateCreated TEXT
+      )`)
+      run("INSERT INTO device_file_cache (filename, size, duration, dateCreated) VALUES ('kept.hda', 20, 2.0, '2026-01-02')")
+
+      expect(() => removeDeviceFileCacheEntry('never-cached.hda')).not.toThrow()
+      expect(queryAll('SELECT filename FROM device_file_cache').length).toBe(1)
+    })
+
+    // CX-T6-5 (fix round 2): ONLY the missing-table condition is tolerated —
+    // any REAL DB failure must propagate, so recordings:markNotOnDevice
+    // reports {success:false} instead of a false success that lets the
+    // ghost cache row survive a restart. Injected via a RAISE(ABORT)
+    // trigger — a genuine sqlite error whose message is NOT "no such table".
+    it('propagates a real (non-missing-table) DB failure instead of swallowing it', () => {
+      run(`CREATE TABLE IF NOT EXISTS device_file_cache (
+        filename TEXT PRIMARY KEY, size INTEGER, duration REAL, dateCreated TEXT
+      )`)
+      run("INSERT INTO device_file_cache (filename, size, duration, dateCreated) VALUES ('stuck.hda', 10, 1.0, '2026-01-01')")
+      run(`CREATE TRIGGER fail_cache_delete BEFORE DELETE ON device_file_cache
+           BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END`)
+      try {
+        expect(() => removeDeviceFileCacheEntry('stuck.hda')).toThrow(/disk I\/O error/)
+        // ...and the row genuinely survived (the failure was real, not cosmetic).
+        expect(queryAll('SELECT filename FROM device_file_cache').length).toBe(1)
+      } finally {
+        run('DROP TRIGGER IF EXISTS fail_cache_delete')
+      }
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // AR3-6(b) — immediate single-recording device reconciliation
+  // -------------------------------------------------------------------------
+  describe('markRecordingNotOnDeviceById (AR3-6b)', () => {
+    it('flips on_device to 0 and location to local-only when also on_local', () => {
+      seedRecording('r1')
+      run("UPDATE recordings SET on_device = 1, location = 'both' WHERE id = ?", ['r1'])
+      markRecordingNotOnDeviceById('r1')
+      const rec = getRecordingById('r1')
+      expect(rec?.on_device).toBe(0)
+      expect(rec?.location).toBe('local-only')
+    })
+
+    it('sets location to deleted when not on_local either', () => {
+      seedRecording('r1')
+      run("UPDATE recordings SET on_device = 1, on_local = 0, location = 'device-only' WHERE id = ?", ['r1'])
+      markRecordingNotOnDeviceById('r1')
+      const rec = getRecordingById('r1')
+      expect(rec?.location).toBe('deleted')
+    })
+
+    it('no-ops for an unknown recording (does not throw)', () => {
+      expect(() => markRecordingNotOnDeviceById('ghost')).not.toThrow()
+    })
+
+    it('no-ops when the recording is already not on device', () => {
+      seedRecording('r1')
+      markRecordingNotOnDeviceById('r1')
+      const rec = getRecordingById('r1')
+      expect(rec?.location).toBe('local-only') // unchanged from seedRecording's default
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // ARF-1 — a hard purge removes every PRIOR journal row for the recording
+  // (soft snapshots), leaving only the minimal opaque hard audit row.
+  // -------------------------------------------------------------------------
+  describe('ARF-1 — prior journal rows purged on hard delete', () => {
+    it('soft-delete then hard purge leaves NO journal row retaining the soft snapshot', () => {
+      seedRecording('r1', { filename: 'secret.wav', original_filename: 'secret.hda' })
+      seedTranscript('t1', 'r1')
+
+      // Soft delete writes a FULL-snapshot journal row (filename/paths/etc.).
+      deleteRecordingCascade('r1', { hard: false })
+      const softRow = queryOne<{ recording_snapshot: string }>(
+        "SELECT recording_snapshot FROM deletion_journal WHERE recording_id = ? AND mode = 'soft'",
+        ['r1']
+      )
+      expect(JSON.parse(softRow!.recording_snapshot).filename).toBe('secret.wav')
+
+      // Hard purge must delete that soft row and keep ONLY the minimal hard row.
+      deleteRecordingCascade('r1', { hard: true })
+      const rows = queryAll<{ mode: string; recording_snapshot: string | null }>(
+        'SELECT mode, recording_snapshot FROM deletion_journal WHERE recording_id = ?',
+        ['r1']
+      )
+      expect(rows.length).toBe(1)
+      expect(rows[0].mode).toBe('hard')
+      expect(rows[0].recording_snapshot).toBeNull()
+      // The soft snapshot's sensitive data is gone from the journal entirely.
+      const allJournal = queryAll<{ recording_snapshot: string | null }>(
+        'SELECT recording_snapshot FROM deletion_journal WHERE recording_id = ?',
+        ['r1']
+      )
+      expect(JSON.stringify(allJournal)).not.toContain('secret')
+    })
+
+    it('purges MULTIPLE prior soft rows (repeated trash/restore cycles) on hard delete', () => {
+      seedRecording('r1', { filename: 'keepme.wav' })
+      deleteRecordingCascade('r1', { hard: false })
+      restoreRecording('r1')
+      // Second trash writes a SECOND soft journal row for the same recording.
+      deleteRecordingCascade('r1', { hard: false })
+      expect(
+        queryAll("SELECT id FROM deletion_journal WHERE recording_id = ? AND mode = 'soft'", ['r1']).length
+      ).toBeGreaterThanOrEqual(2)
+
+      deleteRecordingCascade('r1', { hard: true })
+      const rows = queryAll<{ mode: string }>('SELECT mode FROM deletion_journal WHERE recording_id = ?', ['r1'])
+      expect(rows.map((r) => r.mode)).toEqual(['hard'])
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // ARF-3 — soft delete / mark-personal tombstones a PROCESSING queue row, and
+  // isRecordingProcessable gates in-flight post-analysis persistence.
+  // -------------------------------------------------------------------------
+  describe('ARF-3 — in-flight transcription is stopped', () => {
+    it('soft delete cancels a PROCESSING queue row (not just pending/failed)', () => {
+      seedRecording('r1')
+      const qid = addToQueue('r1')
+      updateQueueItem(qid, 'processing')
+      expect(getQueueItems('processing').map((q) => q.recording_id)).toEqual(['r1'])
+
+      deleteRecordingCascade('r1', { hard: false })
+
+      expect(getQueueItems('processing').length).toBe(0)
+      const row = queryOne<{ status: string }>('SELECT status FROM transcription_queue WHERE id = ?', [qid])
+      expect(row?.status).toBe('cancelled')
+    })
+
+    it('marking personal cancels a PROCESSING queue row', () => {
+      seedRecording('r1')
+      const qid = addToQueue('r1')
+      updateQueueItem(qid, 'processing')
+      setRecordingPersonal('r1', true)
+      const row = queryOne<{ status: string }>('SELECT status FROM transcription_queue WHERE id = ?', [qid])
+      expect(row?.status).toBe('cancelled')
+    })
+
+    it('isRecordingProcessable is true only for a live, non-deleted, non-personal recording', () => {
+      seedRecording('live')
+      seedRecording('personal', { personal: 1 })
+      seedRecording('trashed')
+      deleteRecordingCascade('trashed', { hard: false })
+
+      expect(isRecordingProcessable('live')).toBe(true)
+      expect(isRecordingProcessable('personal')).toBe(false)
+      expect(isRecordingProcessable('trashed')).toBe(false)
+      expect(isRecordingProcessable('ghost')).toBe(false)
+      // Restoring makes it processable again.
+      restoreRecording('trashed')
+      expect(isRecordingProcessable('trashed')).toBe(true)
+    })
+
+    it('a value-excluded (but live) recording is STILL processable — value gating is separate', () => {
+      seedRecording('r1')
+      run('INSERT INTO knowledge_captures (id, title, captured_at, source_recording_id, quality_rating) VALUES (?, ?, ?, ?, ?)', [
+        'r1-c', 'Cap', '2026-01-01T10:00:00.000Z', 'r1', 'garbage'
+      ])
+      expect(getExcludedRecordingIds().ids.has('r1')).toBe(true) // value-excluded from AI surfaces
+      expect(isRecordingProcessable('r1')).toBe(true) // but still transcribable / its own derivatives allowed
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // ARF-4 — durable pending-graph-cleanup ledger + retry sweep for the
+  // skipGraphCleanup escape hatch.
+  // -------------------------------------------------------------------------
+  describe('ARF-4 — deferred graph-cleanup ledger + sweep', () => {
+    it('the escape hatch writes a pending_graph ledger entry the sweep can read', () => {
+      seedMeeting('m1')
+      seedRecording('r1', { meeting_id: 'm1' })
+      seedTranscript('t1', 'r1')
+      const res = deleteRecordingCascade('r1', { hard: true, skipGraphCleanup: true })!
+
+      const pending = getPendingGraphCleanups()
+      expect(pending.length).toBe(1)
+      expect(pending[0]).toEqual({
+        journalId: res.journalId,
+        recordingId: 'r1',
+        meetingId: 'm1',
+        transcriptIds: ['t1']
+      })
+    })
+
+    it('retryPendingGraphCleanups calls the seam by ids and clears the entry on success', () => {
+      seedRecording('r1')
+      const res = deleteRecordingCascade('r1', { hard: true, skipGraphCleanup: true })!
+      // The escape hatch bypassed the seam, so the ledger entry exists.
+      expect(getPendingGraphCleanups().map((p) => p.journalId)).toEqual([res.journalId])
+
+      const seen: Array<{ id: string; opts: { meetingId?: string; transcriptIds?: string[] } }> = []
+      setGraphProvenanceCleanup((id, opts) => {
+        seen.push({ id, opts })
+        return noopGraphCleanup()
+      })
+      try {
+        const sweep = retryPendingGraphCleanups()
+        expect(sweep.attempted).toBe(1)
+        expect(sweep.cleared).toBe(1)
+        expect(sweep.clearedJournalIds).toEqual([res.journalId])
+      } finally {
+        setGraphProvenanceCleanup(noopGraphCleanup)
+      }
+      // Seam was invoked with the stored ids.
+      expect(seen).toEqual([{ id: 'r1', opts: { meetingId: 'r1', transcriptIds: [] } }])
+      // Ledger's pending_graph is cleared; the graph_cleanup_skipped AUDIT
+      // marker (that the hatch was used) is deliberately preserved.
+      expect(getPendingGraphCleanups()).toEqual([])
+      const row = queryOne<{ recording_snapshot: string | null }>(
+        'SELECT recording_snapshot FROM deletion_journal WHERE id = ?',
+        [res.journalId]
+      )
+      expect(JSON.parse(row!.recording_snapshot!)).toEqual({ mode: 'hard', graph_cleanup_skipped: true })
+    })
+
+    it('a failing seam leaves the ledger entry for a later sweep (crash/restart resilience)', () => {
+      seedRecording('r1')
+      const res = deleteRecordingCascade('r1', { hard: true, skipGraphCleanup: true })!
+
+      // Simulate the crash-between-purge-and-sweep window: the entry is durably
+      // on disk. A first sweep with a still-unhealthy graph fails to clear it.
+      setGraphProvenanceCleanup(() => ({
+        ok: false,
+        error: 'graph still down',
+        markersRemoved: 0,
+        edgesRemoved: 0,
+        edgeSourceRowsRemoved: 0,
+        meetingNodesRemoved: 0,
+        orphanNodesRemoved: 0
+      }))
+      let firstSweep
+      try {
+        firstSweep = retryPendingGraphCleanups()
+      } finally {
+        setGraphProvenanceCleanup(noopGraphCleanup)
+      }
+      expect(firstSweep!.cleared).toBe(0)
+      expect(firstSweep!.stillPending).toEqual([res.journalId])
+      // Entry SURVIVES for the next sweep.
+      expect(getPendingGraphCleanups().map((p) => p.journalId)).toEqual([res.journalId])
+
+      // Next sweep with a healthy graph clears it.
+      const secondSweep = retryPendingGraphCleanups()
+      expect(secondSweep.cleared).toBe(1)
+      expect(getPendingGraphCleanups()).toEqual([])
+    })
+
+    it('retryPendingGraphCleanups is a no-op when the seam is unwired (entries survive)', () => {
+      seedRecording('r1')
+      const res = deleteRecordingCascade('r1', { hard: true, skipGraphCleanup: true })!
+      setGraphProvenanceCleanup(null)
+      try {
+        const sweep = retryPendingGraphCleanups()
+        expect(sweep).toEqual({ attempted: 0, cleared: 0, clearedJournalIds: [], stillPending: [] })
+      } finally {
+        setGraphProvenanceCleanup(noopGraphCleanup)
+      }
+      expect(getPendingGraphCleanups().map((p) => p.journalId)).toEqual([res.journalId])
+    })
+
+    it('a normal (non-escape-hatch) hard purge leaves NO pending_graph entry', () => {
+      seedRecording('r1')
+      deleteRecordingCascade('r1', { hard: true })
+      expect(getPendingGraphCleanups()).toEqual([])
+    })
+
+    it('clearPendingGraphCleanup preserves other snapshot fields (e.g. pending_files)', () => {
+      seedRecording('r1')
+      const res = deleteRecordingCascade('r1', { hard: true, skipGraphCleanup: true })!
+      recordPendingFileCleanups(res.journalId!, [{ kind: 'audio', path: '/data/r1.wav' }])
+      clearPendingGraphCleanup(res.journalId!)
+      const row = queryOne<{ recording_snapshot: string }>(
+        'SELECT recording_snapshot FROM deletion_journal WHERE id = ?',
+        [res.journalId!]
+      )
+      expect(JSON.parse(row!.recording_snapshot)).toEqual({
+        mode: 'hard',
+        graph_cleanup_skipped: true,
+        pending_files: [{ kind: 'audio', path: '/data/r1.wav' }]
+      })
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Wiring-guard support — the seam-registration query itself
+  // -------------------------------------------------------------------------
+  describe('isGraphProvenanceCleanupRegistered', () => {
+    it('reflects the current wiring state', () => {
+      setGraphProvenanceCleanup(null)
+      expect(isGraphProvenanceCleanupRegistered()).toBe(false)
+      setGraphProvenanceCleanup(noopGraphCleanup)
+      expect(isGraphProvenanceCleanupRegistered()).toBe(true)
     })
   })
 })

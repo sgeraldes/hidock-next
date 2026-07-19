@@ -27,6 +27,9 @@ const kgMock = {
   neighborhoodFacts: vi.fn(),
   queryListNodes: vi.fn(),
   resolveEntityToNodeId: vi.fn(),
+  // ARF-2 / P1 — buildGraphContext computes the exclusion context once per
+  // query and threads it into every neighborhoodFacts call (object shape).
+  getGroundingExclusionSet: vi.fn(() => ({ ids: new Set<string>(), failClosed: false })),
 }
 vi.mock('../knowledge-graph-service', () => kgMock)
 
@@ -137,6 +140,7 @@ beforeEach(() => {
   kgMock.queryListNodes.mockReturnValue([])
   kgMock.resolveEntityToNodeId.mockImplementation((id: string) => id)
   kgMock.neighborhoodFacts.mockReturnValue('')
+  kgMock.getGroundingExclusionSet.mockReturnValue({ ids: new Set<string>(), failClosed: false })
   mockBrainChat.mockResolvedValue('AI Response')
 })
 
@@ -147,7 +151,7 @@ describe('buildGraphContext — entity detection tiers', () => {
 
     const parts = await buildGraphContext('what did Alice decide?')
     expect(parts).toContain('FACT-ALICE')
-    expect(kgMock.neighborhoodFacts).toHaveBeenCalledWith('p1', 1)
+    expect(kgMock.neighborhoodFacts).toHaveBeenCalledWith('p1', 1, 20, expect.objectContaining({ ids: expect.any(Set) }), undefined)
   })
 
   it('Tier 2 (accent-fold): matches "Yaravi" against a node labelled "Yaraví"', async () => {
@@ -336,9 +340,9 @@ describe('buildGraphContext — meeting scope resolves app id → graph node id'
     const parts = await buildGraphContext('summarize this', 'meeting-123')
     expect(parts).toContain('FACT-MEETING')
     expect(kgMock.resolveEntityToNodeId).toHaveBeenCalledWith('meeting-123')
-    expect(kgMock.neighborhoodFacts).toHaveBeenCalledWith('node-m1', 1)
+    expect(kgMock.neighborhoodFacts).toHaveBeenCalledWith('node-m1', 1, 20, expect.objectContaining({ ids: expect.any(Set) }), undefined)
     // The raw app meeting id must never reach the facts call.
-    expect(kgMock.neighborhoodFacts).not.toHaveBeenCalledWith('meeting-123', 1)
+    expect(kgMock.neighborhoodFacts).not.toHaveBeenCalledWith('meeting-123', 1, 20, expect.objectContaining({ ids: expect.any(Set) }), undefined)
   })
 
   it('skips cleanly when the meeting has no graph node', async () => {
@@ -541,5 +545,42 @@ describe('rag.chat — graph context flows into BrainRouter.chat (a)', () => {
     const userMessage = messages[messages.length - 1].content
     expect(userMessage).toContain('Context graph — Alice')
     expect(userMessage).toContain('Alice attended Standup')
+  })
+
+  // ADV20-3 (round-21) — unresolved graph provenance (a zero-provenance legacy edge
+  // OR a provenance-read failure, both surfaced as provOut.unresolved) must DROP the
+  // whole graph bundle from the PROMPT before the provider call — marking the answer
+  // unverifiable afterwards cannot un-send labels already disclosed to the LLM.
+  it('ADV20-3 — DROPS zero-provenance graph facts from the provider prompt (unresolved)', async () => {
+    kgMock.findMentionedEntity.mockReturnValue({ id: 'p1', label: 'Alice' })
+    kgMock.neighborhoodFacts.mockImplementation(
+      (_id: string, _hops?: number, _max?: number, _excl?: unknown, provOut?: { unresolved: boolean }) => {
+        if (provOut) provOut.unresolved = true // zero-provenance / read-failure ⇒ unresolved
+        return 'Context graph — Alice (person):\n- Alice attended SECRET_STANDUP'
+      }
+    )
+
+    const rag = getRAGService()
+    await rag.chat('session-1', 'tell me about Alice')
+
+    const userMessage = mockBrainChat.mock.calls[0][1].slice(-1)[0].content
+    // The unresolved graph labels NEVER cross the external LLM boundary.
+    expect(userMessage).not.toContain('SECRET_STANDUP')
+    expect(userMessage).not.toContain('Context graph — Alice')
+  })
+
+  it('ADV20-3 — KEEPS graph facts when provenance is RESOLVED (baseline: drop is unresolved-specific)', async () => {
+    kgMock.findMentionedEntity.mockReturnValue({ id: 'p1', label: 'Alice' })
+    kgMock.neighborhoodFacts.mockImplementation(
+      (_id: string, _hops?: number, _max?: number, _excl?: unknown, _provOut?: { unresolved: boolean }) =>
+        // provOut.unresolved stays false → the fact is attributed → kept in the prompt.
+        'Context graph — Alice (person):\n- Alice attended RESOLVED_STANDUP'
+    )
+
+    const rag = getRAGService()
+    await rag.chat('session-1', 'tell me about Alice')
+
+    const userMessage = mockBrainChat.mock.calls[0][1].slice(-1)[0].content
+    expect(userMessage).toContain('RESOLVED_STANDUP')
   })
 })

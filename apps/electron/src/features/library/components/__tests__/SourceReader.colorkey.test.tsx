@@ -99,8 +99,9 @@ beforeEach(() => {
         analyzeTimeline: vi.fn().mockResolvedValue({ sentimentSegments: [], eventMarkers: [] }),
       },
       contacts: {
-        // Alice is a linked-meeting contact…
+        // Alice is a linked-meeting contact… (owner reader → getForMeetingOwner)
         getForMeeting: vi.fn().mockResolvedValue({ success: true, data: [{ id: 'c-1', name: 'Alice', email: 'alice@x.com' }] }),
+        getForMeetingOwner: vi.fn().mockResolvedValue({ success: true, data: [{ id: 'c-1', name: 'Alice', email: 'alice@x.com' }] }),
         getAll: vi.fn().mockResolvedValue({ success: true, data: { contacts: [] } }),
       },
       transcripts: {

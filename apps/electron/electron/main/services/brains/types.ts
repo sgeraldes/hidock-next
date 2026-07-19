@@ -66,6 +66,40 @@ export interface GenerateOptions {
    */
   cwd?: string
   signal?: AbortSignal
+  /**
+   * ADV42-2 (round-44) — FAIL-CLOSED eligibility gate the router re-checks
+   * SYNCHRONOUSLY immediately before EVERY provider attempt (the primary AND
+   * each fallback attempt, after every intervening await). Returns `true` ⇒ the
+   * source recording/capture is still eligible; a `false` return OR a thrown
+   * error ⇒ treat the source as INELIGIBLE and ABORT the whole call without
+   * attempting any (further) provider. Callers pass the SAME recording/capture
+   * eligibility check they run up front so a source excluded while a primary
+   * attempt is pending or failing is never re-sent to a fallback provider. A
+   * missing callback means "no gate configured" (behaves exactly as before).
+   * Router-only — the brain adapters ignore it.
+   */
+  shouldGenerate?: () => boolean
+}
+
+/**
+ * Options for AIBrain.embed.
+ *
+ * ADV43-2 (round-45) — the fail-closed `shouldGenerate` gate threaded from the
+ * BrainRouter INTO the adapter so it is re-evaluated SYNCHRONOUSLY immediately
+ * before EVERY concrete provider call inside the adapter's own loop — each
+ * Gemini `batchEmbedContents` batch and each Ollama per-text request. The router
+ * checks it once before the primary/fallback attempt, but a single embed() call
+ * fans out to many provider requests across `await`s; without the in-adapter
+ * recheck an exclusion committed while an earlier batch/request is pending would
+ * still let every later batch/request go out. Same contract as
+ * GenerateOptions.shouldGenerate: returns EXACTLY `true` ⇒ eligible; a `false`
+ * return OR any thrown error ⇒ INELIGIBLE ⇒ the adapter STOPS issuing further
+ * batches/requests and fills the remaining outputs with `null` (the "no
+ * embedding available" shape callers already persist as nothing). Absent ⇒ no
+ * gate (legacy behaviour).
+ */
+export interface EmbedOptions {
+  shouldGenerate?: () => boolean
 }
 
 export interface AudioAnalyzeInput {
@@ -77,6 +111,16 @@ export interface AudioAnalyzeInput {
   language?: string
   context?: string
   signal?: AbortSignal
+  /**
+   * ADV43-1 (round-45) sweep — fail-closed eligibility gate threaded into the
+   * GeminiEngine multi-call pipeline this adapter drives (Files API upload/poll,
+   * per-chunk generation, retries). Same contract as elsewhere: `true` ⇒
+   * eligible; `false`/throw ⇒ abort mid-pipeline (the engine throws
+   * TranscriptionCancelledError). analyzeAudio is currently a capability-matrix /
+   * future-routing path with no production caller; the gate is here so that when
+   * it IS wired the same in-engine protection applies with no further change.
+   */
+  shouldGenerate?: () => boolean
 }
 
 export interface AgenticTask {
@@ -117,6 +161,6 @@ export interface AIBrain {
   generate(messages: BrainMessage[], opts?: GenerateOptions): Promise<string | null>
   chat(messages: BrainMessage[], opts?: GenerateOptions): Promise<string | null>
   analyzeAudio?(input: AudioAnalyzeInput): Promise<string | null>
-  embed?(texts: string[]): Promise<(number[] | null)[]>
+  embed?(texts: string[], opts?: EmbedOptions): Promise<(number[] | null)[]>
   runAgentic?(task: AgenticTask): Promise<AgenticResult>
 }

@@ -20,16 +20,26 @@ class EmbeddingsService {
     return 'ollama'
   }
 
-  async generateEmbedding(text: string): Promise<number[] | null> {
-    const results = await this.generateEmbeddings([text])
+  async generateEmbedding(
+    text: string,
+    opts: { shouldGenerate?: () => boolean } = {}
+  ): Promise<number[] | null> {
+    const results = await this.generateEmbeddings([text], opts)
     return results[0] ?? null
   }
 
-  async generateEmbeddings(texts: string[]): Promise<(number[] | null)[]> {
+  async generateEmbeddings(
+    texts: string[],
+    opts: { shouldGenerate?: () => boolean } = {}
+  ): Promise<(number[] | null)[]> {
     // Delegate to the BrainRouter: Gemini `gemini-embedding-001` first (when a
     // key is configured), else Ollama — the same routing as before, now shared
     // with chat-llm.ts and output-generator.ts via the brain seam.
-    return getBrainRouter().embed(texts)
+    // ADV42-2 (round-44) — forward shouldGenerate so the router re-checks
+    // eligibility before the PRIMARY and the Ollama FALLBACK embed attempts (the
+    // vector/image backfill's per-row snapshot cannot see an exclusion committed
+    // while the Gemini attempt is pending/failing — the router recheck can).
+    return getBrainRouter().embed(texts, opts)
   }
 }
 

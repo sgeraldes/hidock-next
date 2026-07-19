@@ -43,6 +43,37 @@ vi.mock('../database', () => ({
       [randomUUID(), kind, candidateName, targetId, confidence, JSON.stringify(evidence ?? {}), new Date().toISOString()]
     )
   },
+  // ADV24-2 (round-25): identity-discovery now routes graph neighbors through the
+  // shared edge-provenance boundary. These tests seed no ABOUT/RELATES_TO topic
+  // edges (graph closeness here comes from shared MEETINGS), so a pass-through
+  // (every candidate edge eligible) preserves their behavior. The real
+  // suppression is exercised in identity-suggestion-provenance.test.ts.
+  filterEligibleGraphEdgeIds: (edgeIds: Iterable<string>) => ({
+    eligibleEdgeIds: new Set([...edgeIds]),
+    failClosed: false,
+  }),
+  // ADV26-2 (round-27): discovery now gates shared-meeting mJac at the membership
+  // ROW through filterEligibleMembershipRows. These unit tests seed no
+  // recordings/calendar provenance (graph closeness here comes from shared
+  // meeting_contacts / meeting_projects rows), so a pass-through (every row
+  // eligible) preserves their behavior. The real per-row suppression is exercised
+  // against a real DB in identity-suggestion-provenance.test.ts +
+  // person-context-eligibility.test.ts.
+  filterEligibleMembershipRows: <T,>(rows: T[]) => ({ eligible: rows, failClosed: false }),
+  // ADV51-3 (round-53): the rarity bearer corpus is now VISIBILITY-filtered. These
+  // unit tests seed no exclusion/suppression provenance, so a pass-through (every
+  // entity visible) preserves their bearer counts. Real visibility filtering is
+  // exercised against a real DB in identity-suggestion-provenance.test.ts.
+  filterVisibleEntityIds: (_kind: string, ids: Iterable<string>) => ({
+    visible: new Set([...ids]),
+    failClosed: false,
+  }),
+  // ADV51-1 (round-53): discovery now sanitizes contact roles through the shared
+  // field-provenance boundary before scoring. These unit tests seed no excluded
+  // role provenance (roles have no source recording), so a pass-through (roles
+  // unchanged) preserves their role-signal behavior. Real role blanking is
+  // exercised against a real DB in identity-suggestion-provenance.test.ts.
+  blankIneligibleContactFields: <T,>(contacts: T[]) => contacts,
 }))
 
 import { discoverContactMerges, discoverProjectMerges } from '../identity-discovery'
@@ -57,8 +88,8 @@ function seedSchema(): void {
     CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT, description TEXT, status TEXT, created_at TEXT);
     CREATE TABLE contact_aliases (id TEXT PRIMARY KEY, alias_norm TEXT UNIQUE, contact_id TEXT, source TEXT, confidence REAL);
     CREATE TABLE project_aliases (id TEXT PRIMARY KEY, alias_norm TEXT UNIQUE, project_id TEXT, source TEXT, confidence REAL);
-    CREATE TABLE meeting_contacts (meeting_id TEXT, contact_id TEXT, role TEXT);
-    CREATE TABLE meeting_projects (meeting_id TEXT, project_id TEXT);
+    CREATE TABLE meeting_contacts (meeting_id TEXT, contact_id TEXT, role TEXT, source TEXT, source_recording_id TEXT);
+    CREATE TABLE meeting_projects (meeting_id TEXT, project_id TEXT, source TEXT, source_recording_id TEXT);
     CREATE TABLE identity_suggestions (
       id TEXT PRIMARY KEY, kind TEXT, candidate_name TEXT, target_id TEXT, confidence REAL,
       evidence TEXT, status TEXT DEFAULT 'pending', created_at TEXT,

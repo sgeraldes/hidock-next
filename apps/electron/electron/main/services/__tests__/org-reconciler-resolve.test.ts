@@ -92,7 +92,9 @@ describe('applyTranscriptEntities — resolver thresholds', () => {
       'Sebas',
       'c-maybe',
       0.65,
-      expect.objectContaining({ method: 'fuzzy', meetingId: 'm1' })
+      expect.objectContaining({ method: 'fuzzy', meetingId: 'm1' }),
+      // v44/round-27: no recordingId passed ⇒ empty source-recording-id array.
+      []
     )
     expect(runsMatching('INSERT INTO contacts')).toBe(0)
     expect(runsMatching('INSERT INTO meeting_contacts')).toBe(0)
@@ -125,7 +127,9 @@ describe('applyTranscriptEntities — resolver thresholds', () => {
       'Atlas',
       'p-maybe',
       0.7,
-      expect.objectContaining({ method: 'fuzzy', meetingId: 'm1' })
+      expect.objectContaining({ method: 'fuzzy', meetingId: 'm1' }),
+      // v44/round-27: no recordingId passed ⇒ empty source-recording-id array.
+      []
     )
     expect(runsMatching('INSERT INTO projects')).toBe(0)
     expect(runsMatching('INSERT INTO meeting_projects')).toBe(0)

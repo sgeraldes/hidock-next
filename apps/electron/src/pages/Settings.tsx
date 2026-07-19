@@ -25,6 +25,7 @@ import { ConnectorsSettings } from '@/components/settings/ConnectorsSettings'
 import { AIBrainsSettings } from '@/components/settings/AIBrainsSettings'
 import { FeaturesSettings } from '@/components/settings/FeaturesSettings'
 import { toast } from '@/components/ui/toaster'
+import { LEGACY_GRAPH_DISCLOSURE } from '@/features/library/utils/deletionCopy'
 import type { StorageInfo, AppConfig } from '@/types'
 
 // RAG configuration constants — MAX_CONTEXT_CHUNKS must match config.ts default (10)
@@ -412,6 +413,78 @@ export function Settings() {
       setSaving(false)
     }
   }
+
+  // F16/spec-003 Part I — Library value classification backfill card.
+  // Uses the SAVED config (not the possibly-dirty form fields above) since
+  // this reflects what the main process will actually see when the button
+  // is clicked — mirrors getProviderConfigFromSettings()'s exact condition.
+  const hasValueProvider = useMemo(
+    () => config?.chat.provider === 'gemini' && !!config?.transcription.geminiApiKey,
+    [config]
+  )
+  const [valueBackfillRunning, setValueBackfillRunning] = useState(false)
+  const [valueBackfillProgress, setValueBackfillProgress] = useState<{
+    processed: number
+    total: number
+    marked: number
+    failed: number
+  } | null>(null)
+  const [valueBackfillRemaining, setValueBackfillRemaining] = useState(0)
+
+  useEffect(() => {
+    let cancelledEffect = false
+    window.electronAPI?.valueBackfill?.getStatus().then((res) => {
+      if (cancelledEffect || !res?.success || !res.data) return
+      setValueBackfillRunning(res.data.running)
+      setValueBackfillRemaining(res.data.remaining)
+    })
+
+    const unsubProgress = window.electronAPI?.valueBackfill?.onProgress((progress) => {
+      setValueBackfillRunning(true)
+      setValueBackfillProgress(progress)
+    })
+    const unsubComplete = window.electronAPI?.valueBackfill?.onComplete((result) => {
+      setValueBackfillRunning(false)
+      setValueBackfillProgress(result)
+      setValueBackfillRemaining(Math.max(0, result.total - result.processed))
+      toast.success(
+        result.cancelled ? 'Classification cancelled' : 'Classification complete',
+        `${result.processed} classified · ${result.marked} marked low-value.`
+      )
+    })
+
+    return () => {
+      cancelledEffect = true
+      unsubProgress?.()
+      unsubComplete?.()
+    }
+  }, [])
+
+  const handleStartValueBackfill = useCallback(async () => {
+    setValueBackfillRunning(true)
+    try {
+      const res = await window.electronAPI.valueBackfill.start()
+      if (!res?.success || !res.started) {
+        setValueBackfillRunning(false)
+        if (res?.reason === 'no-provider') {
+          toast.error('No AI provider configured', 'Configure an AI provider above first.')
+        } else if (res?.reason !== 'already-running') {
+          toast.error('Could not start classification', res?.error || 'Unknown error')
+        }
+      }
+    } catch (error) {
+      setValueBackfillRunning(false)
+      toast.error('Could not start classification', error instanceof Error ? error.message : 'Unknown error')
+    }
+  }, [])
+
+  const handleCancelValueBackfill = useCallback(async () => {
+    try {
+      await window.electronAPI.valueBackfill.cancel()
+    } catch (error) {
+      console.error('Failed to cancel value backfill:', error)
+    }
+  }, [])
 
   const handleSaveChat = async () => {
     if (saving) {
@@ -1005,6 +1078,64 @@ export function Settings() {
                 <Save className="h-4 w-4 mr-2" aria-hidden="true" />
                 {isTranscriptionDirty ? 'Save' : 'Saved'}
               </Button>
+            </CardContent>
+          </Card>
+
+          {/* Library value classification (F16/spec-003) */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Find low-value recordings</CardTitle>
+              <CardDescription>
+                The AI reads the transcript of each recording you haven&apos;t rated yet and judges whether the
+                conversation is actually useful — or noise, like personal chatter, a call where nobody showed up, or
+                background audio picked up by mistake. Recordings judged as noise get a Low-value or Garbage badge in
+                the Library, and from then on — going forward — they are left out of Assistant answers, the Context
+                Graph, and action-item extraction. Nothing is deleted, and ratings you set yourself are never changed —
+                you can re-rate any recording from its row menu. Uses your configured AI provider (one request per
+                recording); runs in the background, and you can cancel and resume anytime.
+              </CardDescription>
+              {/* RE-3 — scope the promise honestly: the exclusion applies going
+                  forward to content this version rates + attributes; it does not
+                  retroactively pull already-woven graph facts from recordings an
+                  earlier version analyzed. */}
+              <p className="mt-1 px-6 text-xs text-muted-foreground">{LEGACY_GRAPH_DISCLOSURE}</p>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {!hasValueProvider && (
+                <p className="text-xs text-muted-foreground">Configure an AI provider above to enable.</p>
+              )}
+              {config?.transcription.valueClassificationEnabled === false && (
+                <p className="text-xs text-muted-foreground">
+                  Automatic rating of newly transcribed recordings is turned off in your config
+                  (valueClassificationEnabled) — this manual scan still works.
+                </p>
+              )}
+              <div className="flex items-center gap-2">
+                <Button
+                  onClick={handleStartValueBackfill}
+                  disabled={!hasValueProvider || valueBackfillRunning}
+                  aria-label="Scan library for low-value recordings"
+                >
+                  {valueBackfillRunning && <RefreshCw className="h-4 w-4 mr-2 animate-spin" aria-hidden="true" />}
+                  {valueBackfillRunning
+                    ? 'Scanning…'
+                    : valueBackfillRemaining > 0
+                      ? `Resume scan (${valueBackfillRemaining} left)`
+                      : 'Scan unrated recordings'}
+                </Button>
+                {valueBackfillRunning && (
+                  <Button variant="outline" onClick={handleCancelValueBackfill} aria-label="Cancel scan">
+                    Cancel
+                  </Button>
+                )}
+              </div>
+              {(valueBackfillRunning || valueBackfillProgress) && (
+                <p className="text-xs text-muted-foreground" aria-live="polite">
+                  {valueBackfillProgress
+                    ? `Checked ${valueBackfillProgress.processed} of ${valueBackfillProgress.total} recordings · ${valueBackfillProgress.marked} marked low-value`
+                    : 'Starting…'}
+                </p>
+              )}
             </CardContent>
           </Card>
 

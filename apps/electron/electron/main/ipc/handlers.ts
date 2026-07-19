@@ -38,6 +38,7 @@ import { registerGitCommitsHandlers } from './git-commits-handlers'
 import { registerWaveformCacheHandlers } from './waveform-cache-handlers'
 import { registerBrainsHandlers } from './brains-handlers'
 import { registerHandoverHandlers } from './handover-handlers'
+import { registerValueBackfillHandlers } from './value-backfill-handlers'
 import { ipcMain } from 'electron'
 import { installFeatureGate } from '../services/feature-gate'
 
@@ -97,6 +98,7 @@ export function registerIpcHandlers(): void {
   registerWaveformCacheHandlers()
   registerBrainsHandlers()
   registerHandoverHandlers()
+  registerValueBackfillHandlers()
 
   console.log('All IPC handlers registered')
 }

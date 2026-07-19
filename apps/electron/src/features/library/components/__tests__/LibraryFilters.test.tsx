@@ -97,3 +97,19 @@ describe('LibraryFilters — honest quality state', () => {
     expect(screen.queryByText(/Nothing is rated yet/i)).not.toBeInTheDocument()
   })
 })
+
+// F16/spec-003 Part D
+describe('LibraryFilters — quality options include Garbage', () => {
+  it('offers a Garbage option in the quality select', () => {
+    renderFilters()
+    fireEvent.click(screen.getByRole('button', { name: /More filters and sorting/i }))
+    expect(screen.getByRole('option', { name: 'Garbage' })).toBeInTheDocument()
+  })
+
+  it('is selectable and invokes onQualityFilterChange with "garbage"', () => {
+    const handlers = renderFilters()
+    fireEvent.click(screen.getByRole('button', { name: /More filters and sorting/i }))
+    fireEvent.change(screen.getByLabelText(/Filter by quality rating/i), { target: { value: 'garbage' } })
+    expect(handlers.onQualityFilterChange).toHaveBeenCalledWith('garbage')
+  })
+})

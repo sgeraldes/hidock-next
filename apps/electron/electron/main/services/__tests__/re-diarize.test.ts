@@ -44,7 +44,14 @@ import {
   assignSpeakerFromHere,
   getSpeakerSplits
 } from '../database'
-import { clearAutoSpeakerBindingsForReDiarize, reDiarizeRecording } from '../re-diarize'
+import * as database from '../database'
+import {
+  clearAutoSpeakerBindingsForReDiarize,
+  reDiarizeRecording,
+  ReDiarizeError,
+  RE_DIARIZE_INELIGIBLE,
+  RE_DIARIZE_ENQUEUE_FAILED
+} from '../re-diarize'
 
 const SELF_ID_METHOD = 'self-identification'
 
@@ -58,9 +65,12 @@ function seedRecording(id: string, meetingId: string | null = null): void {
 }
 
 function seedContact(id: string, name: string): void {
+  // round-39: source='user' ⇒ VISIBLE structural contact (a real owner contact). The
+  // entity-reference-WRITE gates bind only visible contacts; a bare NULL-source contact
+  // is suppressed and would never be offered by a picker in production.
   run(
-    `INSERT INTO contacts (id, name, type, first_seen_at, last_seen_at, meeting_count)
-     VALUES (?, ?, 'unknown', ?, ?, 0)`,
+    `INSERT INTO contacts (id, name, type, first_seen_at, last_seen_at, meeting_count, source)
+     VALUES (?, ?, 'unknown', ?, ?, 0, 'user')`,
     [id, name, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z']
   )
 }
@@ -210,6 +220,161 @@ describe('reDiarizeRecording', () => {
     )
     expect(rec?.transcription_status).toBe('queued')
     expect(markUserPriority).toHaveBeenCalledWith('rec1')
+    expect(processQueueManually).toHaveBeenCalled()
+  })
+})
+
+/**
+ * ADV46-1 (round-48) — re-diarize must ASSERT recording eligibility BEFORE it
+ * destroys any identity state, and clear+enqueue+status must be ONE atomic
+ * transaction that rolls back on any enqueue/status failure. Re-diarize feeds the
+ * transcription/analysis AI pipeline, so an excluded recording must not be
+ * re-diarized/re-queued (like `transcribe`) — this is NOT a deletion control.
+ */
+describe('reDiarizeRecording — eligibility gate + atomicity (ADV46-1)', () => {
+  const SCANNED_KEY = (recId: string): string => `self_id:scanned:${recId}`
+
+  /** Seed an ELIGIBLE recording carrying AUTO identity state (bindings + mention
+   *  + self-id marker). Bindings are created while the recording is eligible
+   *  (round-47's speaker-mutation gate blocks creating them on an excluded
+   *  recording), matching the real world: state exists, THEN the recording is
+   *  excluded, THEN a stale reDiarize arrives. */
+  function seedWithAutoState(recId: string): void {
+    seedRecording(recId)
+    autoBind(recId, 'Speaker 1', 'memo', 'Memo') // 1 binding + 1 self-id mention
+    setMarker(SCANNED_KEY(recId))
+  }
+
+  /** True iff the auto identity state seeded by {@link seedWithAutoState} is all
+   *  still present (nothing was cleared). */
+  function autoStateIntact(recId: string): boolean {
+    const bindings = getSpeakerMap(recId).length
+    const mentions = queryAll('SELECT id FROM mention_resolutions WHERE recording_id = ?', [recId]).length
+    const marker = queryAll('SELECT key FROM config WHERE key = ?', [SCANNED_KEY(recId)]).length
+    return bindings === 1 && mentions === 1 && marker === 1
+  }
+
+  function isQueued(recId: string): boolean {
+    return queryAll('SELECT id FROM transcription_queue WHERE recording_id = ?', [recId]).length > 0
+  }
+
+  function statusOf(recId: string): string | null | undefined {
+    return queryOne<{ transcription_status: string | null }>(
+      'SELECT transcription_status FROM recordings WHERE id = ?',
+      [recId]
+    )?.transcription_status
+  }
+
+  it('REFUSES a soft-deleted recording — nothing cleared, not queued, honest failure', async () => {
+    seedWithAutoState('rec-del')
+    run('UPDATE recordings SET deleted_at = ? WHERE id = ?', ['2026-07-01T00:00:00Z', 'rec-del'])
+    const statusBefore = statusOf('rec-del')
+
+    await expect(reDiarizeRecording('rec-del', 'gemini')).rejects.toMatchObject({
+      code: RE_DIARIZE_INELIGIBLE
+    })
+
+    expect(autoStateIntact('rec-del')).toBe(true)
+    expect(isQueued('rec-del')).toBe(false)
+    expect(statusOf('rec-del')).toBe(statusBefore)
+    expect(markUserPriority).not.toHaveBeenCalled()
+    expect(processQueueManually).not.toHaveBeenCalled()
+  })
+
+  it('REFUSES a personal recording — nothing cleared, not queued', async () => {
+    seedWithAutoState('rec-pers')
+    run('UPDATE recordings SET personal = 1 WHERE id = ?', ['rec-pers'])
+
+    await expect(reDiarizeRecording('rec-pers')).rejects.toMatchObject({ code: RE_DIARIZE_INELIGIBLE })
+
+    expect(autoStateIntact('rec-pers')).toBe(true)
+    expect(isQueued('rec-pers')).toBe(false)
+  })
+
+  it('REFUSES a value-excluded recording — nothing cleared, not queued', async () => {
+    seedWithAutoState('rec-val')
+    // A garbage capture with no keep-rated sibling ⇒ recording value-excluded.
+    run(
+      `INSERT INTO knowledge_captures (id, title, captured_at, source_recording_id, quality_rating)
+       VALUES (?, 'C', '2026-06-01', ?, 'garbage')`,
+      ['cap-rec-val', 'rec-val']
+    )
+
+    await expect(reDiarizeRecording('rec-val')).rejects.toMatchObject({ code: RE_DIARIZE_INELIGIBLE })
+
+    expect(autoStateIntact('rec-val')).toBe(true)
+    expect(isQueued('rec-val')).toBe(false)
+  })
+
+  it('REFUSES a hard-purged recording — marker left intact, not queued', async () => {
+    // Self-id config marker for a recording whose row is gone (hard-purged). The
+    // marker is NOT FK-linked to recordings, so it survives and must NOT be
+    // cleared by a refused re-diarize.
+    setMarker(SCANNED_KEY('rec-gone'))
+
+    await expect(reDiarizeRecording('rec-gone')).rejects.toMatchObject({ code: RE_DIARIZE_INELIGIBLE })
+
+    expect(queryAll('SELECT key FROM config WHERE key = ?', [SCANNED_KEY('rec-gone')]).length).toBe(1)
+    expect(isQueued('rec-gone')).toBe(false)
+  })
+
+  it('FAILS CLOSED when the eligibility lookup cannot complete — nothing cleared', async () => {
+    seedWithAutoState('rec-fc')
+    expect(queryAll('SELECT key FROM config WHERE key = ?', [SCANNED_KEY('rec-fc')]).length).toBe(1)
+    // Force the recording-eligibility lookup to throw ⇒ isRecordingEligible
+    // returns false (fail-closed) ⇒ re-diarize must refuse BEFORE the clear step.
+    // NOTE: DROP TABLE recordings does an implicit DELETE that cascades to the
+    // FK-linked identity tables (transcript_speakers / mention_resolutions), so
+    // those rows vanish as a TEST artifact — not from re-diarize. The self-id
+    // config marker is NOT FK-linked, so its survival is the true proof that the
+    // clear (which deletes that marker) never ran.
+    run('DROP TABLE recordings')
+
+    await expect(reDiarizeRecording('rec-fc')).rejects.toBeInstanceOf(ReDiarizeError)
+
+    // Clear never ran ⇒ the (non-cascaded) self-id marker is untouched.
+    expect(queryAll('SELECT key FROM config WHERE key = ?', [SCANNED_KEY('rec-fc')]).length).toBe(1)
+    // Not queued; queue never kicked.
+    expect(queryAll('SELECT id FROM transcription_queue WHERE recording_id = ?', ['rec-fc']).length).toBe(0)
+    expect(markUserPriority).not.toHaveBeenCalled()
+    expect(processQueueManually).not.toHaveBeenCalled()
+  })
+
+  it('ROLLS BACK everything when enqueue returns an empty id on an ELIGIBLE recording', async () => {
+    seedWithAutoState('rec-enq')
+    const statusBefore = statusOf('rec-enq')
+    // Inject an enqueue failure: addToQueue returns '' though the recording is eligible.
+    const spy = vi.spyOn(database, 'addToQueue').mockReturnValue('')
+    try {
+      await expect(reDiarizeRecording('rec-enq', 'gemini')).rejects.toMatchObject({
+        code: RE_DIARIZE_ENQUEUE_FAILED
+      })
+    } finally {
+      spy.mockRestore()
+    }
+
+    // FULL rollback: the clear was undone (bindings/mention/marker intact),
+    // status unchanged, nothing queued, queue never kicked.
+    expect(autoStateIntact('rec-enq')).toBe(true)
+    expect(statusOf('rec-enq')).toBe(statusBefore)
+    expect(isQueued('rec-enq')).toBe(false)
+    expect(markUserPriority).not.toHaveBeenCalled()
+    expect(processQueueManually).not.toHaveBeenCalled()
+  })
+
+  it('happy path — an ELIGIBLE recording is cleared, queued, and marked (unchanged behavior)', async () => {
+    seedWithAutoState('rec-ok')
+
+    const result = await reDiarizeRecording('rec-ok', 'gemini')
+
+    expect(result.cleared.clearedLabelBindings).toBe(1)
+    expect(result.cleared.clearedMentions).toBe(1)
+    expect(result.cleared.clearedMarkers).toBe(1)
+    expect(getSpeakerMap('rec-ok').length).toBe(0)
+    expect(result.queueItemId).toBeTruthy()
+    expect(isQueued('rec-ok')).toBe(true)
+    expect(statusOf('rec-ok')).toBe('queued')
+    expect(markUserPriority).toHaveBeenCalledWith('rec-ok')
     expect(processQueueManually).toHaveBeenCalled()
   })
 })

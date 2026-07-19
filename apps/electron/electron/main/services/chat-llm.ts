@@ -29,6 +29,14 @@ export interface ChatGenerateOptions {
   temperature?: number
   maxTokens?: number
   signal?: AbortSignal
+  /**
+   * ADV42-2 (round-44) — forwarded to BrainRouter.chat so the caller's
+   * recording/capture eligibility check is re-run SYNCHRONOUSLY before EVERY
+   * provider attempt (primary + each fallback). Fail-closed (false/throw ⇒
+   * abort). Callers whose source can be excluded mid-run (RAG chat, meeting
+   * summary/action items, self-identification, transcript reformat) pass it.
+   */
+  shouldGenerate?: () => boolean
 }
 
 class ChatLLMService {
@@ -74,13 +82,21 @@ class ChatLLMService {
       systemPrompt: options.systemPrompt,
       temperature: options.temperature,
       maxTokens: options.maxTokens,
-      signal: options.signal
+      signal: options.signal,
+      shouldGenerate: options.shouldGenerate
     })
   }
 
   /** Convenience: single-prompt generation (mirrors OllamaService.generate). */
-  async generateText(prompt: string, systemPrompt?: string): Promise<string | null> {
-    return this.generate([{ role: 'user', content: prompt }], { systemPrompt })
+  async generateText(
+    prompt: string,
+    systemPrompt?: string,
+    options: { shouldGenerate?: () => boolean } = {}
+  ): Promise<string | null> {
+    return this.generate([{ role: 'user', content: prompt }], {
+      systemPrompt,
+      shouldGenerate: options.shouldGenerate
+    })
   }
 }
 

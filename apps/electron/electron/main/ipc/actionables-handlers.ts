@@ -1,7 +1,33 @@
 
 import { ipcMain } from 'electron'
 import { queryAll, run } from '../services/database'
+import { filterEligibleActionableRows } from '../services/actionable-eligibility'
 import type { Actionable } from '@/types/knowledge'
+
+/**
+ * ADV15 (round-16) — actionables lists route through the ONE shared capture-aware
+ * boundary {@link filterEligibleActionableRows}. It resolves each row's
+ * `source_knowledge_id` to a live capture (gated via filterEligibleCaptureIds:
+ * deleted_at + recording-derived delegation + standalone quality) or, for legacy
+ * rows, a recording id (filterEligibleRecordingIds); truly standalone actionables
+ * (null source) are kept. This replaces the round-7 per-handler predicate that
+ * unconditionally kept null-source (standalone) captures (ADV15-3).
+ */
+const gateActionables = <T extends { source_knowledge_id?: string | null }>(rows: T[]): T[] =>
+  filterEligibleActionableRows(rows, (r) => r.source_knowledge_id)
+
+/**
+ * ADV38 sweep (round-40) — single-row eligibility gate for a MUTATION reached by a
+ * (possibly stale) actionable id. An actionable is a capture-derived derivative; a
+ * renderer holding a stale id could mark its source recording personal / delete /
+ * rate-low-value / trash the capture, then still hit a per-id mutation that reads
+ * back derived metadata (source_knowledge_id / suggested_template) or writes the
+ * excluded derivative. Route the row through the SAME shared actionable boundary
+ * (fail-closed) so an excluded/orphaned source refuses. Returns true iff the row
+ * is still eligible to read/mutate.
+ */
+const isActionableEligible = (row: { source_knowledge_id?: string | null }): boolean =>
+  filterEligibleActionableRows([row], (r) => r.source_knowledge_id).length > 0
 
 export function registerActionablesHandlers(): void {
   // Get all actionables
@@ -19,7 +45,7 @@ export function registerActionablesHandlers(): void {
       sql += ' ORDER BY created_at DESC'
 
       const rows = queryAll<any>(sql, params)
-      return rows.map(mapToActionable)
+      return gateActionables(rows).map(mapToActionable)
     } catch (error) {
       console.error('Failed to get actionables:', error)
       return []
@@ -32,6 +58,15 @@ export function registerActionablesHandlers(): void {
       // Validate status transition
       const actionable = queryAll<any>('SELECT * FROM actionables WHERE id = ?', [id])[0]
       if (!actionable) {
+        return { success: false, error: `Actionable ${id} not found` }
+      }
+
+      // ADV38 sweep (round-40) — refuse a stale-id status write whose source
+      // recording/capture became excluded (personal/deleted/value-excluded/
+      // hard-purged) or whose eligibility can't be verified. Generic not-found so
+      // the excluded derivative's existence is not disclosed; no output cleanup or
+      // status write happens on an excluded row.
+      if (!isActionableEligible(actionable)) {
         return { success: false, error: `Actionable ${id} not found` }
       }
 
@@ -97,7 +132,7 @@ export function registerActionablesHandlers(): void {
            OR r.meeting_id = ?
         ORDER BY a.created_at DESC
       `
-      const rows = queryAll<any>(sql, [meetingId, meetingId])
+      const rows = gateActionables(queryAll<any>(sql, [meetingId, meetingId]))
 
       // Log for debugging when no actionables found
       if (rows.length === 0) {
@@ -130,6 +165,14 @@ export function registerActionablesHandlers(): void {
       const actionable = queryAll<any>('SELECT * FROM actionables WHERE id = ?', [actionableId])[0]
 
       if (!actionable) {
+        return { success: false, error: `Actionable ${actionableId} not found` }
+      }
+
+      // ADV38 sweep (round-40) — refuse before reading back derived metadata
+      // (source_knowledge_id / suggested_template) or flipping status when the
+      // source recording/capture is excluded or can't be verified. Generic
+      // not-found; nothing derived is returned for an excluded actionable.
+      if (!isActionableEligible(actionable)) {
         return { success: false, error: `Actionable ${actionableId} not found` }
       }
 

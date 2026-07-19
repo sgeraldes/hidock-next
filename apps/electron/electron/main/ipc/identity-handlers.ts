@@ -12,7 +12,7 @@ import { ipcMain } from 'electron'
 import { z } from 'zod'
 import {
   getIdentitySuggestions,
-  acceptIdentitySuggestion,
+  getIdentitySuggestionById,
   rejectIdentitySuggestion,
   supersedeOrphanedSuggestions,
   getMergeJournal,
@@ -23,6 +23,7 @@ import {
   getAmbiguousBuckets,
   getBucketResolution,
   resolveMention,
+  filterVisibleEntityIds,
   IdentitySuggestion,
   AcceptSuggestionResult,
   MergeJournalEntry,
@@ -32,8 +33,17 @@ import {
   AmbiguousBucket,
   BucketResolution
 } from '../services/database'
-import { discoverContactMerges, discoverProjectMerges, DiscoveryResult } from '../services/identity-discovery'
+import {
+  discoverContactMerges,
+  discoverProjectMerges,
+  revalidateSuggestionsForSurfacing,
+  filterSuggestionsForNonOwnerDisplay,
+  isSuggestionEligibleForAccept,
+  DiscoveryResult
+} from '../services/identity-discovery'
+import { acceptIdentitySuggestionWithGraph } from '../services/knowledge-graph-service'
 import { autoSplitAmbiguousBuckets } from '../services/org-reconciler'
+import { isRecordingEligible } from '../services/recording-eligibility'
 import { success, error, Result } from '../types/api'
 
 const StatusSchema = z.enum(['pending', 'accepted', 'rejected'])
@@ -68,7 +78,16 @@ export function registerIdentityHandlers(): void {
         }
         status = parsed.data
       }
-      return success(getIdentitySuggestions(status))
+      // ADV24-2 (round-25): revalidate persisted suggestions at surfacing time —
+      // redact now-excluded/zero-provenance graph topics and supersede (drop)
+      // any pending suggestion whose graph/topic evidence no longer clears the
+      // surfacing threshold. Non-destructive (no status write); fail-closed.
+      // R28-RES-2 (round-29): additionally apply the non-owner DISPLAY gate so a
+      // discovery straggler pairing an excluded-only ENTITY never surfaces its name
+      // on Today / the People-Projects merge queue (whose entity LISTS already
+      // suppress it). The accept path is gated separately on evidence, not here.
+      const surfaced = revalidateSuggestionsForSurfacing(getIdentitySuggestions(status))
+      return success(filterSuggestionsForNonOwnerDisplay(surfaced))
     } catch (err) {
       console.error('identity:getSuggestions error:', err)
       return error('DATABASE_ERROR', 'Failed to fetch identity suggestions', err)
@@ -84,7 +103,30 @@ export function registerIdentityHandlers(): void {
       if (!parsed.success) {
         return error('VALIDATION_ERROR', 'Invalid suggestion id', parsed.error.format())
       }
-      return success(acceptIdentitySuggestion(parsed.data))
+      // ADV25-3 (round-26) — close the accept-time TOCTOU. getSuggestions
+      // revalidates on READ, but the source recording backing this card may have
+      // been trashed / marked personal / value-excluded / hard-purged between load
+      // and click. Fetch the persisted row and re-run the SAME revalidation as the
+      // surfacing path; REFUSE the merge (no-op) unless it still clears the
+      // surfacing threshold. There is NO await between this check and the merge, so
+      // the eligibility check + merge are atomic on the single-threaded main
+      // process (better-sqlite3 is synchronous) — nothing can interleave.
+      const row = getIdentitySuggestionById(parsed.data)
+      if (!row) {
+        return error('NOT_FOUND', 'Identity suggestion not found')
+      }
+      if (!isSuggestionEligibleForAccept(row)) {
+        return error(
+          'SUGGESTION_STALE',
+          'This suggestion can no longer be accepted because its supporting evidence was excluded or deleted.'
+        )
+      }
+      // ADV56-1 (round-58): route through the graph-aware, atomic accept so a
+      // resolvable-loser accept folds the loser's graph node in the SAME transaction
+      // as the relational merge, and the merge + supersede + status='accepted' write
+      // are all-or-nothing (bare acceptIdentitySuggestion merged in one tx and wrote
+      // the status in a separate tx — a failure stranded the accept half-done).
+      return success(acceptIdentitySuggestionWithGraph(parsed.data))
     } catch (err) {
       console.error('identity:acceptSuggestion error:', err)
       return error('DATABASE_ERROR', 'Failed to accept identity suggestion', err)
@@ -291,6 +333,35 @@ export function registerIdentityHandlers(): void {
         return error('VALIDATION_ERROR', 'Invalid resolve-mention request', parsed.error.format())
       }
       const { recordingId, sourceName, contactId, method } = parsed.data
+      // ADV27-4 (round-28) — accept-time eligibility recheck. resolveMention WRITES
+      // a mention resolution + (for a chosen contact) a durable meeting_contacts
+      // link. A bucket card can be loaded while its recording is eligible and clicked
+      // after it was trashed / marked personal / value-excluded / hard-purged. Revalidate
+      // the recording SYNCHRONOUSLY here — there is NO await between this check and the
+      // write, so on the single-threaded main process (better-sqlite3 is synchronous)
+      // the check and the write are atomic. Refuse fail-closed when ineligible.
+      if (!isRecordingEligible(recordingId)) {
+        return error(
+          'RECORDING_INELIGIBLE',
+          'This recording can no longer be edited because it was excluded or deleted.'
+        )
+      }
+      // ADV37 (round-39) — when a contact is chosen (contactId non-null), resolveMention
+      // links it via an always-eligible source='calendar' meeting_contacts membership.
+      // A stale/SUPPRESSED contactId (its provenance excluded/deleted/personal/purged)
+      // would be REANIMATED by that link, so gate the chosen contact through the central
+      // visible-identity boundary right before the write (atomic on the single-threaded
+      // main process). contactId=null (clear) needs no gate. Refuse on suppressed OR
+      // fail-closed lookup.
+      if (contactId) {
+        const { visible, failClosed } = filterVisibleEntityIds('contact', [contactId])
+        if (failClosed || !visible.has(contactId)) {
+          return error(
+            'CONTACT_INELIGIBLE',
+            'This person can no longer be linked because they were excluded or deleted.'
+          )
+        }
+      }
       resolveMention(recordingId, sourceName, contactId, method ?? 'manual', 1.0)
       return success({ ok: true })
     } catch (err) {

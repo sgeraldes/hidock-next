@@ -3,7 +3,7 @@
  */
 
 import { ipcMain } from 'electron'
-import { getRAGService, RAGResponse } from '../services/rag'
+import { getRAGService } from '../services/rag'
 import { getVectorStore } from '../services/vector-store'
 import { getChatLLMService } from '../services/chat-llm'
 import { success, error, Result } from '../types/api'
@@ -40,8 +40,15 @@ export function registerRAGHandlers(): void {
       // Chat is Gemini-first with Ollama fallback — availability reflects EITHER
       // a configured Gemini key OR a reachable Ollama (see chat-llm.ts).
       const chatStatus = await getChatLLMService().getStatus()
-      const docCount = vectorStore.getDocumentCount()
-      const meetingCount = vectorStore.getMeetingCount()
+      // ADV44-1 (round-46) — status must reflect the ELIGIBLE corpus, not the raw
+      // in-memory one. Soft-delete / value-exclude / personal RETAIN their vector
+      // rows (retrieval filters them dynamically), so the raw counts over-report
+      // excluded chunks and `ready` could be true with ZERO eligible documents —
+      // making the deletion/value controls visibly dishonest. Route the counts
+      // through the SAME fail-closed eligibility boundary search uses; base `ready`
+      // on the ELIGIBLE document count (fail-closed ⇒ 0 ⇒ not ready).
+      const docCount = vectorStore.getEligibleDocumentCount()
+      const meetingCount = vectorStore.getEligibleMeetingCount()
 
       return success({
         backend: chatStatus.backend,
@@ -101,14 +108,23 @@ export function registerRAGHandlers(): void {
 
         const response = await rag.chat(sessionId, message, meetingFilter)
 
+        // ADV22-1 (round-23) — CONTENT-FREE release. The RAG chat IPC returns ONLY the
+        // generationId + a non-content status; NEVER the answer text or source excerpts.
+        // The generated content stays in main's PendingGeneration (keyed by generationId)
+        // and reaches the renderer through EXACTLY ONE sanitized path:
+        // assistant:addMessage(generationId), which revalidates provenance at persist and
+        // redacts via the shared read boundary. A recording/capture can be excluded DURING
+        // the provider await (after the pre-call eligibility check), so releasing the raw
+        // answer here would bypass that final revalidation.
         if (response.error) {
-          return error('INTERNAL_ERROR', response.error)
+          // A provider/generation failure still carries a generationId whose MAIN-owned
+          // error text is replayed by assistant:addMessage. Surface it as a non-content
+          // error status so the renderer can trigger that replay (or the notice catalog
+          // when no generation exists).
+          return success({ generationId: response.generationId, status: 'error', error: response.error })
         }
 
-        return success({
-          answer: response.answer,
-          sources: response.sources
-        })
+        return success({ generationId: response.generationId, status: 'ok' })
       } catch (err) {
         console.error('rag:chat error:', err)
         return error('INTERNAL_ERROR', 'Failed to process chat message', err)
@@ -116,14 +132,18 @@ export function registerRAGHandlers(): void {
     }
   )
 
-  // Legacy handler for backwards compatibility
+  // Legacy handler for backwards compatibility — ALSO content-free (ADV22-1, round-23).
+  // Returns ONLY generationId + a non-content error string; never the answer or sources.
+  // Chat.tsx consumes this path and obtains the displayable answer solely via
+  // assistant:addMessage(generationId).
   ipcMain.handle(
     'rag:chat-legacy',
     async (
       _event,
       { sessionId, message, meetingFilter }: { sessionId: string; message: string; meetingFilter?: string }
-    ): Promise<RAGResponse> => {
-      return rag.chat(sessionId, message, meetingFilter)
+    ): Promise<{ generationId?: string; error?: string }> => {
+      const response = await rag.chat(sessionId, message, meetingFilter)
+      return { generationId: response.generationId, error: response.error }
     }
   )
 
@@ -214,28 +234,15 @@ export function registerRAGHandlers(): void {
     return rag.getStats()
   })
 
-  // Index a transcript manually
-  ipcMain.handle(
-    'rag:index-transcript',
-    async (
-      _event,
-      {
-        transcript,
-        metadata
-      }: {
-        transcript: string
-        metadata: {
-          meetingId?: string
-          recordingId?: string
-          timestamp?: string
-          subject?: string
-        }
-      }
-    ) => {
-      const count = await vectorStore.indexTranscript(transcript, metadata)
-      return { indexed: count }
-    }
-  )
+  // ADV12 (round-13) — the renderer-controlled raw-transcript indexing surface
+  // (`rag:index-transcript`) was REMOVED. It let the renderer supply arbitrary
+  // transcript text plus an arbitrary/optional recordingId, so excluded or
+  // foreign content could ride an eligible id (or no id) into vector search /
+  // RAG / LLM prompts — and it had ZERO renderer callers (dead, exploitable).
+  // A reindex-by-id feature, if ever needed, must live entirely in the main
+  // process: take ONLY a recordingId, load the authoritative transcript +
+  // metadata itself, and eligibility-check adjacent to persistence — never
+  // trust a renderer-supplied content↔recording association.
 
   // Search transcripts
   ipcMain.handle(

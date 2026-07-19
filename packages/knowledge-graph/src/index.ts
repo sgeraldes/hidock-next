@@ -1,7 +1,7 @@
 export { GRAPH_SCHEMA, NODE_TYPES, EDGE_TYPES } from './schema.js'
 export type { NodeType, EdgeType } from './schema.js'
 
-export { KnowledgeGraphStore } from './graph-store.js'
+export { KnowledgeGraphStore, deleteEdgesCleanly, runInGraphTransaction } from './graph-store.js'
 export type { GraphDb, GraphNode, GraphEdge, UpsertNodeInput, UpsertEdgeInput } from './graph-store.js'
 
 export { extractGraphFromTranscript } from './extract.js'
@@ -16,6 +16,13 @@ export type {
 
 export { ingestExtraction } from './ingest.js'
 export type { PersonResolver, IngestOptions } from './ingest.js'
+
+export { removeRecordingProvenance, pruneOrphanEdgeSources } from './recording-provenance.js'
+export type {
+  RecordingProvenanceRemoval,
+  RemoveRecordingProvenanceOptions,
+  PruneOrphanEdgeSourcesResult,
+} from './recording-provenance.js'
 
 export { isGenericEntityLabel, normalizeGenericLabel } from './stop-list.js'
 
