@@ -216,6 +216,16 @@ function unquoteYamlScalar(value: string): string {
 /** Recording ids parsed out of page frontmatter, so the backfill never re-scans. */
 interface WikiIndex {
   dir: string
+  /**
+   * How the directory listing went, so a cleanup that REUSES this index keeps the
+   * same fail-closed semantics a fresh scan would have had (RE7-P1b / RE8-P1):
+   *   'ok'         — listed successfully; `owner`/`unreadable` are populated.
+   *   'absent'     — ENOENT: the dir does not exist ⇒ nothing to remove ⇒ success.
+   *   'unreadable' — present but unlistable (ENOTDIR / EACCES) ⇒ a purge that
+   *                  reuses this index must fail-closed (the page may still be
+   *                  there and we could not look).
+   */
+  status: 'ok' | 'absent' | 'unreadable'
   /** filename -> recording_id declared in that page's frontmatter */
   owner: Map<string, string>
   /**
@@ -392,8 +402,15 @@ function buildWikiIndex(dir: string): WikiIndex {
   let entries: string[]
   try {
     entries = readdirSync(dir)
-  } catch {
-    return { dir, owner, unreadable } // dir absent — nothing indexed
+  } catch (e) {
+    // Distinguish a truly ABSENT dir (ENOENT — nothing to index, a clean success
+    // for any cleanup that reuses this index) from a PRESENT-but-unlistable one
+    // (ENOTDIR / EACCES), which a privacy purge MUST treat as failure: the page
+    // may still be on disk and we could not look (RE7-P1b / RE8-P1). Carrying the
+    // status on the index lets removeMeetingWiki keep those fail-closed semantics
+    // while the backfill reuses ONE index instead of re-scanning per recording.
+    const status = (e as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'absent' : 'unreadable'
+    return { dir, status, owner, unreadable }
   }
   for (const entry of entries) {
     if (!entry.endsWith('.md')) continue
@@ -401,7 +418,7 @@ function buildWikiIndex(dir: string): WikiIndex {
     if (result.kind === 'owned') owner.set(entry, result.recordingId)
     else if (result.kind === 'error') unreadable.set(entry, result.reason)
   }
-  return { dir, owner, unreadable }
+  return { dir, status: 'ok', owner, unreadable }
 }
 
 /**
@@ -656,20 +673,38 @@ export interface WikiCleanupResult {
  * content). Safe to call when the wiki dir does not exist.
  */
 export function removeMeetingWiki(recordingId: string): WikiCleanupResult {
-  const dir = getWikiDir()
-  // A privacy purge that cannot even LIST the wiki dir must report failure (RE7-P1b /
-  // RE8-P1): the recording's page may still be there and we could not look. buildWikiIndex
-  // deliberately swallows readdir errors (treating an unreadable dir as "nothing indexed",
-  // which is right for the backfill), so probe here to tell ENOENT (truly absent -> success)
-  // apart from a present-but-unreadable dir (ENOTDIR / EACCES -> fail-closed).
-  try {
-    readdirSync(dir)
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') return { removed: 0, failed: 0, ok: true }
-    console.warn(`[MeetingWiki] Could not read wiki dir to purge ${recordingId}:`, e)
+  // Standalone purge (transition reconcile / retry sweep / re-export): build the
+  // index once — its `status` carries the ENOENT-vs-unreadable distinction, so the
+  // separate readdir probe this used to do is no longer needed — and delegate to
+  // the shared cleanup core.
+  return removeMeetingWikiUsingIndex(recordingId, buildWikiIndex(getWikiDir()))
+}
+
+/**
+ * Cleanup core shared by the standalone {@link removeMeetingWiki} and the boot
+ * backfill. The backfill passes its PASS-WIDE index so an excluded recording's
+ * page is removed WITHOUT a fresh per-recording directory scan — a re-scan per
+ * excluded recording was O(excluded × pages) of synchronous readdir + whole-page
+ * ownership reads, reintroducing the very F15 boot freeze the single-scan index
+ * exists to prevent. Each candidate is still ownership-revalidated immediately
+ * before the unlink (`unlinkIfStillOwnedBy` re-reads the page's frontmatter), so
+ * reusing a possibly-stale index never deletes a page that now belongs to a
+ * DIFFERENT recording.
+ *
+ * Fail-closed semantics survive index reuse via the index `status`: 'absent'
+ * (ENOENT) = nothing to remove = success; 'unreadable' (present but unlistable) =
+ * the page may still be there and we could not look = failure (RE7-P1b / RE8-P1).
+ */
+function removeMeetingWikiUsingIndex(recordingId: string, index: WikiIndex): WikiCleanupResult {
+  // ENOENT — truly nothing on disk to purge (a clean success).
+  if (index.status === 'absent') return { removed: 0, failed: 0, ok: true }
+  // Present-but-unlistable — a privacy purge must report failure (the recording's
+  // page may still be there and we could not look).
+  if (index.status === 'unreadable') {
+    console.warn(`[MeetingWiki] Could not read wiki dir to purge ${recordingId} (present but unlistable) — fail-closed`)
     return { removed: 0, failed: 0, ok: false }
   }
-  const index = buildWikiIndex(dir)
+  const dir = index.dir
   let removed = 0
   let unlinkFailed = 0
   for (const [entry, owner] of [...index.owner]) {
@@ -1141,10 +1176,33 @@ export async function backfillMeetingWiki(
       // RE7-P1a (round-8) — an excluded transcript (already personal/deleted/
       // low-value, or newly value-classified) may STILL have a stale markdown
       // page from when it was eligible. Don't merely skip — actively remove it,
-      // so the plain-files knowledge base can't leak an excluded recording. It
-      // will never get a page, so it counts as resolved rather than still-missing.
-      removeMeetingWiki(recording_id)
-      if (stillMissing.has(recording_id)) resolvedMissing.add(recording_id)
+      // so the plain-files knowledge base can't leak an excluded recording.
+      //
+      // F15 (post-merge review): reuse the PASS-WIDE `index` instead of letting
+      // removeMeetingWiki re-scan the directory per excluded recording — that
+      // re-scan was O(excluded × pages) of synchronous readdir + page reads and
+      // reintroduced the boot freeze the single-scan index exists to prevent.
+      //
+      // RE8-P1 (post-merge review): INSPECT the cleanup result. Discarding it
+      // marked every excluded recording resolved with failed=0 even when the page
+      // could NOT be removed (unreadable dir / unlink failed), leaving a readable
+      // stale page while the backfill reported remainingMissing=0. On success it
+      // is resolved (and any stale retry cleared); on failure it is counted, left
+      // UNRESOLVED so remainingMissing reflects the outstanding work, and enqueued
+      // for a durable retry — mirroring reconcileWikiEligibility.
+      const cleanup = removeMeetingWikiUsingIndex(recording_id, index)
+      if (cleanup.ok) {
+        clearWikiCleanupRetry(recording_id)
+        // It will never get a page, so it counts as resolved rather than still-missing.
+        if (stillMissing.has(recording_id)) resolvedMissing.add(recording_id)
+      } else {
+        failed++
+        enqueueWikiCleanupRetry(recording_id)
+        console.warn(
+          `[MeetingWiki] Backfill could not remove the stale page for excluded ${recording_id} ` +
+            `(failed=${cleanup.failed}) — left unresolved and enqueued for retry`
+        )
+      }
     } else {
       try {
         const result = exportOne(recording_id, dir, index)

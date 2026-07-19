@@ -1029,6 +1029,39 @@ describe('backfillMeetingWiki — bounded, yielding, resumable (F15)', () => {
     expect(fsCalls.readFile).toBeLessThanOrEqual(2 * N)
   })
 
+  it('reuses the single pass-wide scan when cleaning up excluded recordings too (F15 mixed-corpus guard)', async () => {
+    // The all-eligible guard above cannot catch a re-scan on the EXCLUDED-cleanup
+    // path: each excluded recording used to call removeMeetingWiki, which re-listed
+    // and re-read the whole directory (O(excluded × pages)) — the exact quadratic
+    // boot freeze F15 removed, hidden from the guard because it had no excluded rows.
+    const { backfillMeetingWiki } = await import('../meeting-wiki')
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    // Cold pass writes a page for all N (all eligible).
+    await backfillMeetingWiki()
+    expect(listWiki()).toHaveLength(N)
+
+    // Now exclude HALF of them — each still has a stale page on disk the backfill
+    // must remove. Reset the resume cursor so the pass revisits everything.
+    await resetBackfillCursor()
+    const excluded = new Set<string>()
+    for (let i = 0; i < N; i += 2) excluded.add(`rec-${String(i).padStart(3, '0')}`)
+    excludedResult = { ids: excluded, failClosed: false }
+
+    fsCalls.readFile = 0
+    fsCalls.readdir = 0
+    const result = await backfillMeetingWiki()
+
+    // Assert the scan count BEFORE listWiki() (which itself lists the directory):
+    // ONE listing for the entire pass — eligible re-verify AND excluded cleanup.
+    expect(fsCalls.readdir).toBe(1)
+    expect(fsCalls.readFile).toBeLessThanOrEqual(2 * N)
+    expect(result.failed).toBe(0)
+
+    // The excluded half's stale pages are gone; the eligible half remain.
+    expect(listWiki()).toHaveLength(N - excluded.size)
+  })
+
   it('leaves unchanged pages alone instead of rewriting the whole wiki every boot', async () => {
     const { backfillMeetingWiki } = await import('../meeting-wiki')
     await backfillMeetingWiki()
@@ -1594,5 +1627,38 @@ describe('meeting-wiki — cleanup-retry ledger (RE8-P1)', () => {
     const swept = retryPendingWikiCleanups()
     expect(swept.cleared).toBe(1)
     expect(configStore.has('wiki_cleanup_pending:rec-back')).toBe(false)
+  })
+
+  it('a BACKFILL cleanup that fails is counted, left unresolved, and enqueued for a durable retry', async () => {
+    // The boot backfill's excluded-recording branch used to DISCARD
+    // removeMeetingWiki's result and mark the item resolved regardless — so a
+    // failed unlink / unreadable dir left a stale, readable page while the pass
+    // reported failed=0, remainingMissing=0, and enqueued nothing to retry.
+    const { backfillMeetingWiki, retryPendingWikiCleanups } = await import('../meeting-wiki')
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    // An excluded recording whose page cannot be removed: a FILE sits where the
+    // wiki directory belongs, so the listing throws ENOTDIR (present-but-unreadable
+    // ⇒ fail-closed), standing in for a wiki dir unreadable at boot.
+    writeFileSync(join(tmpRoot, 'wiki'), 'blocking file')
+    backfillRows = [
+      { recording_id: 'rec-stuck', full_text: 'x', title_suggestion: 'T', date_recorded: '2026-07-01T00:00:00.000Z' }
+    ]
+    excludedResult = { ids: new Set(['rec-stuck']), failClosed: false }
+
+    const result = await backfillMeetingWiki()
+
+    // The failed cleanup is COUNTED (not silently resolved with failed=0)…
+    expect(result.failed).toBe(1)
+    // …the recording is left UNRESOLVED (its page may still be readable on disk)…
+    expect(result.remainingMissing).toBe(1)
+    // …and a durable retry was ENQUEUED so a later sweep removes the page.
+    expect(configStore.has('wiki_cleanup_pending:rec-stuck')).toBe(true)
+
+    // Unblock the directory; the enqueued retry now completes and clears the entry.
+    rmSync(join(tmpRoot, 'wiki'), { force: true })
+    const swept = retryPendingWikiCleanups()
+    expect(swept.cleared).toBe(1)
+    expect(configStore.has('wiki_cleanup_pending:rec-stuck')).toBe(false)
   })
 })
