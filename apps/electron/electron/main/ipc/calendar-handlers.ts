@@ -7,6 +7,7 @@ import {
   CalendarSyncResult
 } from '../services/calendar-sync'
 import { clearAllMeetings } from '../services/database'
+import { whenBootTasksSettled, areBootTasksSettled } from '../services/boot-scheduler'
 import {
   SetIcsUrlSchema,
   ToggleAutoSyncSchema,
@@ -15,10 +16,24 @@ import {
 
 let syncInterval: NodeJS.Timeout | null = null
 
+/**
+ * What caused a `calendar:sync` call. `mount` is the renderer's startup effect —
+ * an app-initiated sync that happens to share the channel with the user's
+ * "Sync Now" button, and which must keep the full boot gate.
+ */
+type CalendarSyncTrigger = 'manual' | 'mount'
+
+/**
+ * How long a user-initiated sync waits for boot work before reporting itself
+ * queued. Long enough to absorb the tail of a normal boot drain, short enough
+ * that a click always gets an answer.
+ */
+const MANUAL_BOOT_WAIT_MS = 2500
+
 export function registerCalendarHandlers(): void {
   // Sync calendar now
   // AUD2-010: Verify sync result and catch unexpected errors at the IPC boundary
-  ipcMain.handle('calendar:sync', async (): Promise<CalendarSyncResult> => {
+  ipcMain.handle('calendar:sync', async (_event, rawTrigger: unknown): Promise<CalendarSyncResult> => {
     const config = getConfig()
 
     if (!config.calendar.icsUrl) {
@@ -29,8 +44,44 @@ export function registerCalendarHandlers(): void {
       }
     }
 
+    // F15: this one channel serves both a deliberate "Sync Now" click and the
+    // renderer's mount effect, which is really a startup sync. Only the click
+    // gets the short wait; anything unrecognized is treated as app-initiated and
+    // keeps the full boot gate (the conservative default).
+    const trigger: CalendarSyncTrigger = rawTrigger === 'manual' ? 'manual' : 'mount'
+
     try {
-      const result = await syncCalendar(config.calendar.icsUrl)
+      if (trigger === 'manual' && !areBootTasksSettled()) {
+        // Give boot work a brief chance to finish, so the common case still
+        // syncs inline and the user sees a normal result.
+        await whenBootTasksSettled(MANUAL_BOOT_WAIT_MS)
+
+        if (!areBootTasksSettled()) {
+          // Still busy. Start the sync behind the full gate and answer NOW, so
+          // the control is not silently unresponsive for the whole boot window.
+          void syncCalendar(config.calendar.icsUrl).catch((e) =>
+            console.error('[calendar:sync] queued sync failed:', e)
+          )
+          const { emitActivityLog } = await import('../services/activity-log')
+          emitActivityLog(
+            'info',
+            'Calendar sync queued',
+            'Startup tasks are still running; the sync will start on its own'
+          )
+          return {
+            success: false,
+            queued: true,
+            meetingsCount: 0,
+            error: 'Startup tasks are still running — the calendar sync is queued and will start automatically.'
+          }
+        }
+      }
+
+      // A manual sync that got here has already done its waiting.
+      const result = await syncCalendar(
+        config.calendar.icsUrl,
+        trigger === 'manual' ? { waitForBootMs: 0 } : {}
+      )
       // AUD2-010: Verify result is well-formed before returning to renderer
       if (!result || typeof result.success !== 'boolean') {
         console.error('[calendar:sync] syncCalendar returned malformed result:', result)

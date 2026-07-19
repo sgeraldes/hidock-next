@@ -748,7 +748,7 @@ export function Settings() {
                 </Button>
                 <Button
                   variant="outline"
-                  onClick={() => syncCalendar()}
+                  onClick={() => syncCalendar('manual')}
                   disabled={calendarSyncing || saving}
                   aria-label="Sync calendar now"
                 >

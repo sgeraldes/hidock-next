@@ -16,8 +16,18 @@ vi.mock('../../services/config', () => ({
 // Mock calendar-sync service
 vi.mock('../../services/calendar-sync', () => ({
   syncCalendar: vi.fn(),
-  getLastSyncTime: vi.fn()
+  getLastSyncTime: vi.fn(),
+  isCalendarSyncActive: vi.fn().mockReturnValue(false)
 }))
+
+// F15: the boot gate, under test control.
+const bootGate = vi.hoisted(() => ({ settled: true, wait: vi.fn() }))
+vi.mock('../../services/boot-scheduler', () => ({
+  areBootTasksSettled: () => bootGate.settled,
+  whenBootTasksSettled: bootGate.wait
+}))
+
+vi.mock('../../services/activity-log', () => ({ emitActivityLog: vi.fn() }))
 
 // Mock database
 vi.mock('../../services/database', () => ({
@@ -41,6 +51,8 @@ describe('Calendar IPC Handlers', () => {
     vi.clearAllMocks()
     vi.useFakeTimers()
     handlers = {}
+    bootGate.settled = true
+    bootGate.wait.mockResolvedValue(undefined)
 
     const { getConfig } = await import('../../services/config')
     vi.mocked(getConfig).mockReturnValue(defaultConfig as any)
@@ -81,7 +93,8 @@ describe('Calendar IPC Handlers', () => {
 
       const result = await handlers['calendar:sync'](null)
 
-      expect(syncCalendar).toHaveBeenCalledWith('https://calendar.example.com/feed.ics')
+      // No trigger => app-initiated, which keeps the full boot gate (options {}).
+      expect(syncCalendar).toHaveBeenCalledWith('https://calendar.example.com/feed.ics', {})
       expect(result).toEqual(syncResult)
     })
 
@@ -355,6 +368,74 @@ describe('Calendar IPC Handlers', () => {
         'https://calendar.example.com/feed.ics',
         expect.objectContaining({ isStillWanted: expect.any(Function) })
       )
+    })
+  })
+
+  /**
+   * F15 / adversarial review #5: one channel serves both the user's "Sync Now"
+   * button and the renderer's mount effect. Gating both on the full boot drain
+   * left a deliberate click looking hung for up to 45s.
+   */
+  describe('calendar:sync — manual vs app-initiated (review #5)', () => {
+    const url = 'https://calendar.example.com/feed.ics'
+
+    it('runs a manual sync inline when boot work is already done', async () => {
+      const { syncCalendar } = await import('../../services/calendar-sync')
+      vi.mocked(syncCalendar).mockResolvedValue({ success: true, meetingsCount: 3 } as any)
+      bootGate.settled = true
+
+      const result = await handlers['calendar:sync'](null, 'manual')
+
+      expect(result).toEqual({ success: true, meetingsCount: 3 })
+      // Already waited (or had nothing to wait for) — do not wait again.
+      expect(syncCalendar).toHaveBeenCalledWith(url, { waitForBootMs: 0 })
+    })
+
+    it('answers a manual click immediately with queued rather than parking it', async () => {
+      const { syncCalendar } = await import('../../services/calendar-sync')
+      const { emitActivityLog } = await import('../../services/activity-log')
+      vi.mocked(syncCalendar).mockResolvedValue({ success: true, meetingsCount: 1 } as any)
+      // Boot work is still running, and the short wait does not change that.
+      bootGate.settled = false
+
+      const result = await handlers['calendar:sync'](null, 'manual')
+
+      expect(result.queued).toBe(true)
+      expect(result.success).toBe(false)
+      expect(result.error).toMatch(/queued/i)
+      // Only a SHORT wait was requested, not the full boot gate.
+      expect(bootGate.wait).toHaveBeenCalledWith(2500)
+      // The sync really was started (behind the full gate), so "queued" is honest.
+      expect(syncCalendar).toHaveBeenCalledWith(url)
+      // And it is surfaced on the existing sync-status surface.
+      expect(emitActivityLog).toHaveBeenCalledWith(
+        'info',
+        'Calendar sync queued',
+        expect.stringContaining('Startup tasks')
+      )
+    })
+
+    it('keeps the full boot gate for the renderer mount sync', async () => {
+      const { syncCalendar } = await import('../../services/calendar-sync')
+      vi.mocked(syncCalendar).mockResolvedValue({ success: true, meetingsCount: 2 } as any)
+      bootGate.settled = false
+
+      const result = await handlers['calendar:sync'](null, 'mount')
+
+      expect(result.queued).toBeUndefined()
+      expect(bootGate.wait).not.toHaveBeenCalled()
+      expect(syncCalendar).toHaveBeenCalledWith(url, {})
+    })
+
+    it('treats an unrecognized trigger as app-initiated (conservative default)', async () => {
+      const { syncCalendar } = await import('../../services/calendar-sync')
+      vi.mocked(syncCalendar).mockResolvedValue({ success: true, meetingsCount: 0 } as any)
+      bootGate.settled = false
+
+      await handlers['calendar:sync'](null, undefined)
+
+      expect(bootGate.wait).not.toHaveBeenCalled()
+      expect(syncCalendar).toHaveBeenCalledWith(url, {})
     })
   })
 })

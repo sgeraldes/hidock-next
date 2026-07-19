@@ -22,7 +22,9 @@ export interface CalendarStore {
 
   // Actions
   loadMeetings: (startDate?: string, endDate?: string) => Promise<void>
-  syncCalendar: () => Promise<{ success: boolean; meetingsCount: number; error?: string }>
+  syncCalendar: (
+    trigger?: 'manual' | 'mount'
+  ) => Promise<{ success: boolean; meetingsCount: number; error?: string; queued?: boolean }>
   navigateWeek: (direction: 'prev' | 'next') => void
   navigateMonth: (direction: 'prev' | 'next') => void
   setView: (view: 'week' | 'month') => void

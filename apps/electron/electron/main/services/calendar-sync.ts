@@ -30,6 +30,14 @@ export interface CalendarSyncResult {
   error?: string
   errorCategory?: CalendarErrorCategory
   lastSync?: string
+  /**
+   * The sync did not run inline — boot work was still going, so it was started
+   * in the background and will complete on its own (the renderer picks it up via
+   * `calendar:synced`). Only a user-initiated sync can come back this way; it
+   * exists so a click is answered immediately instead of parking the control for
+   * the whole startup window.
+   */
+  queued?: boolean
 }
 
 export interface CalendarSyncOptions {

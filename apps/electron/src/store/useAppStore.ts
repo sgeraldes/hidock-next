@@ -142,7 +142,7 @@ interface AppState {
   // Actions
   setMeetings: (meetings: Meeting[]) => void
   loadMeetings: (startDate?: string, endDate?: string) => Promise<void>
-  syncCalendar: () => Promise<CalendarSyncResult>
+  syncCalendar: (trigger?: 'manual' | 'mount') => Promise<CalendarSyncResult>
   setLastCalendarSync: (lastSync: string | null) => void
   setCalendarSyncing: (syncing: boolean) => void
 
@@ -270,10 +270,21 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  syncCalendar: async () => {
+  // Defaults to 'manual' because this action is only reached from a UI control;
+  // the startup path in Layout passes 'mount' explicitly so it keeps the full
+  // boot gate. (The raw preload API defaults the other way, to 'mount'.)
+  syncCalendar: async (trigger = 'manual') => {
     set({ calendarSyncing: true })
     try {
-      const result = await window.electronAPI.calendar.sync()
+      const result = await window.electronAPI.calendar.sync(trigger)
+      if (result.queued) {
+        // Boot work is still running; main started the sync in the background.
+        // Release the control and let the calendar:synced broadcast refresh the
+        // views when it lands — leaving the spinner up would misreport a sync
+        // that has not started as one in progress.
+        set({ calendarSyncing: false })
+        return result
+      }
       if (result.success) {
         // Reload meetings after sync
         const { currentDate, calendarView } = get()

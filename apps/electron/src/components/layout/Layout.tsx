@@ -279,7 +279,8 @@ export function Layout({ children }: LayoutProps) {
   // Initial calendar sync if URL is configured
   useEffect(() => {
     if (config?.calendar.icsUrl && !lastCalendarSync) {
-      syncCalendar()
+      // App-initiated startup sync (not a user click) — keeps the full boot gate.
+      syncCalendar('mount')
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- initial sync only; keyed on icsUrl so it does not re-run when lastCalendarSync updates
   }, [config?.calendar.icsUrl])
