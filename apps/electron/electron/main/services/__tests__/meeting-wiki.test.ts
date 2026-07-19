@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, readdirSync, readFileSync } from 'fs'
+import { mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 
@@ -154,6 +154,129 @@ describe('exportMeetingWiki — stale page cleanup (ISSUE-8)', () => {
     const bodies = remaining.map((f) => readFileSync(join(tmpRoot, 'wiki', f), 'utf-8'))
     expect(bodies.some((b) => b.includes('recording_id: rec-B'))).toBe(true)
     expect(bodies.filter((b) => b.includes('recording_id: rec-A'))).toHaveLength(1)
+  })
+})
+
+/**
+ * Ownership drives DESTRUCTIVE work — stale-page cleanup and the privacy
+ * hard-purge — so "which recording does this page belong to?" must never be
+ * answered by a guess. Adversarial review flagged the original bounded 4 KB
+ * head-read: recording_id is preceded by arbitrary title/source_file values, so
+ * it is not guaranteed to sit in any fixed prefix.
+ */
+describe('wiki page ownership — safe for deletion (adversarial review #1)', () => {
+  beforeEach(() => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'hidock-wiki-own-'))
+    currentRow = null
+    backfillRows = []
+    rowById = null
+  })
+
+  afterEach(() => {
+    rmSync(tmpRoot, { recursive: true, force: true })
+    vi.restoreAllMocks()
+  })
+
+  const wikiDir = () => join(tmpRoot, 'wiki')
+  const listWiki = () => readdirSync(wikiDir()).filter((f) => f.endsWith('.md')).sort()
+
+  it('attributes a page whose recording_id sits far past any fixed head window', async () => {
+    const { exportMeetingWiki, removeMeetingWiki } = await import('../meeting-wiki')
+
+    // A title long enough to push `recording_id` well beyond a 4 KB prefix — the
+    // exact case the bounded head-read would have silently missed.
+    currentRow = {
+      recording_id: 'rec-deep',
+      full_text: 'contenido',
+      title_suggestion: 'T'.repeat(9000),
+      date_recorded: '2026-07-07T00:00:00.000Z'
+    }
+    expect(exportMeetingWiki('rec-deep')).not.toBeNull()
+    expect(listWiki()).toHaveLength(1)
+
+    // The purge must find it. Missing it here would leave purged content on disk.
+    expect(removeMeetingWiki('rec-deep')).toBe(1)
+    expect(listWiki()).toHaveLength(0)
+  })
+
+  it('never deletes a page whose frontmatter cannot be parsed, and says so loudly', async () => {
+    const { removeMeetingWiki } = await import('../meeting-wiki')
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    mkdirSync(wikiDir(), { recursive: true })
+    // Opens frontmatter but never closes it — ownership is undeterminable.
+    writeFileSync(join(wikiDir(), 'truncated.md'), '---\ntitle: "half written"\nrecording_id: rec-x', 'utf-8')
+
+    expect(removeMeetingWiki('rec-x')).toBe(0)
+    // Left on disk rather than deleted on a guess...
+    expect(listWiki()).toEqual(['truncated.md'])
+    // ...and the purge reports that it could not be verified, so a caller is
+    // never told a privacy purge was clean when it was not.
+    expect(error).toHaveBeenCalled()
+    const logged = error.mock.calls.map((c) => String(c[0])).join(' ')
+    expect(logged).toContain('could not verify')
+    expect(logged).toContain('truncated.md')
+  })
+
+  it('ignores a recording_id line that appears in transcript prose, not frontmatter', async () => {
+    const { exportMeetingWiki, removeMeetingWiki } = await import('../meeting-wiki')
+
+    currentRow = {
+      recording_id: 'rec-real',
+      // A transcript that quotes a frontmatter-looking line.
+      full_text: 'el agente escribió:\nrecording_id: rec-spoofed\ny continuó',
+      title_suggestion: 'Reunion Real',
+      date_recorded: '2026-07-07T00:00:00.000Z'
+    }
+    exportMeetingWiki('rec-real')
+    expect(listWiki()).toHaveLength(1)
+
+    // Purging the id that only appears in the body must not touch the page.
+    expect(removeMeetingWiki('rec-spoofed')).toBe(0)
+    expect(listWiki()).toHaveLength(1)
+    // The real owner still resolves.
+    expect(removeMeetingWiki('rec-real')).toBe(1)
+  })
+
+  it('re-checks ownership at delete time — a page rewritten mid-pass is NOT destroyed', async () => {
+    const { backfillMeetingWiki } = await import('../meeting-wiki')
+
+    // Page written for rec-A under the title "Shared".
+    const shared = '2026-07-07-shared.md'
+    backfillRows = [{ recording_id: 'rec-A' }]
+    rowById = () => ({
+      recording_id: 'rec-A',
+      full_text: 'contenido A',
+      title_suggestion: 'Shared',
+      date_recorded: '2026-07-07T00:00:00.000Z'
+    })
+    await backfillMeetingWiki()
+    expect(listWiki()).toEqual([shared])
+
+    // Next pass: the index is built while `shared` still belongs to rec-A. Before
+    // rec-A is processed, another exporter (a transcription finishing during one
+    // of the backfill's yields) replaces that same filename with rec-B's page.
+    // Deleting on the cached answer here would destroy rec-B's fresh page.
+    rowById = () => {
+      writeFileSync(
+        join(wikiDir(), shared),
+        '---\ntitle: "Shared"\nrecording_id: rec-B\n---\n\n# Shared\n\ncontenido B\n',
+        'utf-8'
+      )
+      // rec-A now renders under a NEW title, so cleanup targets the old filename.
+      return {
+        recording_id: 'rec-A',
+        full_text: 'contenido A',
+        title_suggestion: 'Renamed A',
+        date_recorded: '2026-07-07T00:00:00.000Z'
+      }
+    }
+    await backfillMeetingWiki()
+
+    // rec-B's page survived; rec-A got its renamed page alongside it.
+    expect(listWiki()).toContain(shared)
+    expect(readFileSync(join(wikiDir(), shared), 'utf-8')).toContain('recording_id: rec-B')
+    expect(listWiki()).toHaveLength(2)
   })
 })
 
@@ -315,6 +438,79 @@ describe('backfillMeetingWiki — bounded, yielding, resumable (F15)', () => {
       return head.match(/^recording_id:\s*(\S+)\s*$/m)?.[1]
     })
     expect(new Set(owners).size).toBe(N)
+  })
+
+  it('a persistently failing page does not starve the pages behind it', async () => {
+    const { backfillMeetingWiki } = await import('../meeting-wiki')
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    // Fake clock: the failing export burns 100ms of "wall time" per attempt.
+    // With a 50ms budget, charging that to the deadline would end the pass at the
+    // first batch boundary — on this boot and on every boot after it, since the
+    // failing row stays at the head of the missing set.
+    let clock = 1_000_000
+    vi.spyOn(Date, 'now').mockImplementation(() => clock)
+
+    backfillRows = []
+    for (let i = 0; i < 10; i++) backfillRows.push({ recording_id: `rec-${i}` })
+    rowById = (id) => {
+      if (id === 'rec-0') {
+        clock += 100
+        throw new Error('EACCES: permission denied')
+      }
+      return {
+        recording_id: id,
+        full_text: 'contenido',
+        title_suggestion: `Reunion ${id}`,
+        date_recorded: '2026-07-07T00:00:00.000Z'
+      }
+    }
+
+    const result = await backfillMeetingWiki({ batchSize: 1, budgetMs: 50 })
+
+    // The nine healthy pages behind the failure were all written in this pass.
+    expect(result.failed).toBe(1)
+    expect(result.written).toBe(9)
+    expect(listWiki()).toHaveLength(9)
+    // ...and the failure is still reported as outstanding work, not as progress.
+    expect(result.remainingMissing).toBe(1)
+  })
+
+  it('counts a failed page as still missing, never as progress', async () => {
+    const { backfillMeetingWiki } = await import('../meeting-wiki')
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const base = rowById!
+    rowById = (id) => {
+      if (id === 'rec-000' || id === 'rec-001') throw new Error('ENOSPC: no space left')
+      return base(id)
+    }
+
+    const result = await backfillMeetingWiki()
+
+    expect(result.failed).toBe(2)
+    expect(result.remaining).toBe(0) // every row was visited
+    // But two pages genuinely do not exist, so the wiki is NOT complete.
+    expect(result.remainingMissing).toBe(2)
+    expect(listWiki()).toHaveLength(N - 2)
+  })
+
+  it('gives up after the failure limit rather than grinding through a dead destination', async () => {
+    const { backfillMeetingWiki } = await import('../meeting-wiki')
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    rowById = () => {
+      throw new Error('EROFS: read-only file system')
+    }
+
+    const result = await backfillMeetingWiki({ batchSize: 5, maxFailures: 6 })
+
+    expect(result.failed).toBe(6)
+    expect(result.written).toBe(0)
+    // Stopped early: the rest is deferred to the next start rather than retried
+    // N times against a destination that is clearly not accepting writes.
+    expect(result.remaining).toBe(N - 6)
+    expect(result.remainingMissing).toBe(N)
   })
 
   it('still removes a superseded page when a title changed (cleanup survives the index)', async () => {
