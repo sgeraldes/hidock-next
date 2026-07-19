@@ -115,9 +115,7 @@ function wipeData(): void {
   })
 }
 
-let seq = 0
 function seedRecording(id: string, opts: { personal?: boolean } = {}): void {
-  seq++
   run(
     `INSERT INTO recordings
        (id, filename, file_path, date_recorded, status, location,
@@ -244,7 +242,6 @@ describe('value-backfill', () => {
 
   beforeEach(() => {
     wipeData()
-    seq = 0
     classifyCaptureValueRawMock.mockReset()
     classifyCaptureValueRawMock.mockImplementation(async () => successReply())
     // Default: route the apply seam straight to the REAL implementation.

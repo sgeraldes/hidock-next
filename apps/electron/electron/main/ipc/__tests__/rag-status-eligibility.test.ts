@@ -46,12 +46,12 @@ vi.mock('../../services/database', () => ({
   getMeetingsForProject: vi.fn(() => [])
 }))
 
-const handlers: Record<string, Function> = {}
+const handlers: Record<string, (...args: any[]) => any> = {}
 
 beforeEach(() => {
   vi.clearAllMocks()
   for (const k of Object.keys(handlers)) delete handlers[k]
-  vi.mocked(ipcMain.handle).mockImplementation((channel: string, handler: Function) => {
+  vi.mocked(ipcMain.handle).mockImplementation((channel: string, handler: (...args: any[]) => any) => {
     handlers[channel] = handler
     return undefined as never
   })

@@ -65,7 +65,7 @@ import { REDACTED_ANSWER } from '../../services/chat-source-provenance'
 import { registerAssistantHandlers } from '../assistant-handlers'
 import { registerDatabaseHandlers } from '../database-handlers'
 
-const handlers: Record<string, Function> = {}
+const handlers: Record<string, (...args: any[]) => any> = {}
 
 const DEFAULT_RAG_ANSWER = {
   kind: 'rag' as const,
@@ -112,7 +112,7 @@ beforeEach(async () => {
   vi.clearAllMocks()
   ragMock.answer = { ...DEFAULT_RAG_ANSWER }
   for (const k of Object.keys(handlers)) delete handlers[k]
-  vi.mocked(ipcMain.handle).mockImplementation((channel: string, handler: Function) => {
+  vi.mocked(ipcMain.handle).mockImplementation((channel: string, handler: (...args: any[]) => any) => {
     handlers[channel] = handler
     return undefined as never
   })

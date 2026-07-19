@@ -181,7 +181,7 @@ describe('Knowledge IPC Handlers', () => {
       // mockImplementationOnce (not mockImplementation): clearAllMocks() in
       // beforeEach only resets call history, not a persistent implementation,
       // so a lasting throw here would leak into every later test in this file.
-      // @ts-ignore
+      // @ts-ignore - run is a vi.fn mock; mockImplementationOnce isn't on its typed signature
       run.mockImplementationOnce(() => { throw new Error('Update failed') })
       const result = await handlers['knowledge:update']({}, '1', { title: 'X' })
       expect(result.success).toBe(false)

@@ -87,7 +87,7 @@ describe('useUnifiedRecordings.refreshLocal (CX-T6-4)', () => {
       setUnifiedRecordingsError: vi.fn(),
       markUnifiedRecordingsLoaded: vi.fn()
     }
-    // @ts-ignore
+    // @ts-ignore - useAppStore is vi-mocked; mockImplementation exists at runtime
     ;(useAppStore as any).mockImplementation((selector: any) => selector(storeState))
   })
 

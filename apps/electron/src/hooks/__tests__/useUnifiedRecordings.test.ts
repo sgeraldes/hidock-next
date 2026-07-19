@@ -183,9 +183,9 @@ describe('useUnifiedRecordings', () => {
         status: 'ready'
       }]
 
-      // @ts-ignore
+      // @ts-ignore - electronAPI members are vi.fn mocks in tests
       window.electronAPI.recordings.getAll.mockResolvedValue(mockRecs)
-      // @ts-ignore
+      // @ts-ignore - electronAPI members are vi.fn mocks in tests
       window.electronAPI.knowledge.getAll.mockResolvedValue(mockCaptures)
 
       renderHook(() => useUnifiedRecordings())
@@ -246,9 +246,9 @@ describe('useUnifiedRecordings', () => {
         status: 'complete',
         date_recorded: '2025-01-01T10:00:00Z'
       }]
-      // @ts-ignore
+      // @ts-ignore - electronAPI members are vi.fn mocks in tests
       window.electronAPI.recordings.getAll.mockResolvedValue(mockRecs)
-      // @ts-ignore
+      // @ts-ignore - electronAPI members are vi.fn mocks in tests
       window.electronAPI.knowledge.getAll.mockResolvedValue([])
 
       renderHook(() => useUnifiedRecordings())
@@ -261,9 +261,9 @@ describe('useUnifiedRecordings', () => {
     })
 
     it('stamps a capture-only synthetic row "capture" (the ONLY capture producer)', async () => {
-      // @ts-ignore
+      // @ts-ignore - electronAPI members are vi.fn mocks in tests
       window.electronAPI.recordings.getAll.mockResolvedValue([])
-      // @ts-ignore
+      // @ts-ignore - electronAPI members are vi.fn mocks in tests
       window.electronAPI.knowledge.getAll.mockResolvedValue([{
         id: 'cap-standalone',
         title: 'Imported PDF',
@@ -289,9 +289,9 @@ describe('useUnifiedRecordings', () => {
         status: 'complete',
         date_recorded: '2025-01-01T10:00:00Z'
       }]
-      // @ts-ignore
+      // @ts-ignore - electronAPI members are vi.fn mocks in tests
       window.electronAPI.recordings.getAll.mockResolvedValue(mockRecs)
-      // @ts-ignore
+      // @ts-ignore - electronAPI members are vi.fn mocks in tests
       window.electronAPI.knowledge.getAll.mockResolvedValue([{
         id: 'cap-1',
         sourceRecordingId: 'rec-1',
