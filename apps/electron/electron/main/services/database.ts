@@ -2403,48 +2403,69 @@ const OBSERVATIONS_UPSERT_SQL = `
     last_seen_at = excluded.last_seen_at
 `
 
-/** Sentinel key for the boot probe. Always rolled back — never reaches disk. */
-const OBSERVATIONS_PROBE_KEY = ' hidock-schema-probe'
+/**
+ * Prefix for the boot probe sentinel. The full key is generated FRESH per probe
+ * (prefix + UUID) and confirmed absent before use.
+ *
+ * A FIXED sentinel was a hole: normalizeName preserves any character and
+ * sourceKey accepts any non-empty string, so a real row could carry that exact
+ * (name_norm, source_key) pair — and then the first upsert takes the ON CONFLICT
+ * path instead of the INSERT path. A table with an AFTER INSERT trigger that
+ * aborts new rows would have PASSED the probe while every real observation
+ * insert failed, defeating the entire point of probing.
+ */
+const OBSERVATIONS_PROBE_PREFIX = 'hidock-schema-probe-'
 
-type PragmaRow = Array<string | number | null | Uint8Array>
-
-function pragmaRows(database: ReturnType<typeof getDatabase>, pragma: string): PragmaRow[] {
+/**
+ * Run a pragma via its table-valued function form so its argument can be BOUND.
+ * String-interpolating an identifier breaks on any name needing SQL quoting — an
+ * index called `my "weird" idx` produced a syntax error and the reader silently
+ * returned nothing. Harmless now that metadata cannot refuse, but it made the
+ * diagnostics wrong precisely when they mattered most.
+ */
+function pragmaColumn(
+  database: ReturnType<typeof getDatabase>,
+  sql: string,
+  argument: string
+): string[] {
   try {
-    const res = database.exec(`PRAGMA ${pragma}`)
-    return (res[0]?.values as PragmaRow[]) ?? []
+    const res = database.exec(sql, [argument])
+    return ((res[0]?.values as unknown[][]) ?? []).map((row) => String(row[0]))
   } catch {
     return []
   }
 }
 
 const sameColumnSet = (a: string[], b: string[]): boolean =>
-  a.length === b.length && [...a].sort().join(' ') === [...b].sort().join(' ')
+  a.length === b.length && [...a].sort().join(' ') === [...b].sort().join(' ')
 
 /**
  * Whether a UNIQUE constraint exists on exactly `target`, which is what SQLite
  * requires to resolve an `ON CONFLICT(<target>)` clause. Checks the declared
- * PRIMARY KEY (PRAGMA table_info's pk ordinal) and every non-partial UNIQUE index
- * (PRAGMA index_list/index_info) — partial indexes cannot be conflict targets.
+ * PRIMARY KEY (pragma_table_info's pk ordinal) and every non-partial UNIQUE index
+ * (pragma_index_list / pragma_index_info) — a partial index cannot be a target.
  */
 function hasConflictTarget(
   database: ReturnType<typeof getDatabase>,
   table: string,
   target: string[]
 ): boolean {
-  // table_info: [cid, name, type, notnull, dflt_value, pk]
-  const pkCols = pragmaRows(database, `table_info(${table})`)
-    .filter((r) => Number(r[5] ?? 0) > 0)
-    .sort((a, b) => Number(a[5]) - Number(b[5]))
-    .map((r) => String(r[1]))
+  const pkCols = pragmaColumn(
+    database,
+    'SELECT name FROM pragma_table_info(?) WHERE pk > 0 ORDER BY pk',
+    table
+  )
   if (sameColumnSet(pkCols, target)) return true
 
-  // index_list: [seq, name, unique, origin, partial]
-  for (const idx of pragmaRows(database, `index_list(${table})`)) {
-    if (Number(idx[2] ?? 0) !== 1) continue // not UNIQUE
-    if (Number(idx[4] ?? 0) === 1) continue // partial — not a valid conflict target
-    // index_info: [seqno, cid, name]
-    const cols = pragmaRows(database, `index_info('${String(idx[1])}')`).map((r) => String(r[2]))
-    if (sameColumnSet(cols, target)) return true
+  const uniqueIndexes = pragmaColumn(
+    database,
+    'SELECT name FROM pragma_index_list(?) WHERE "unique" = 1 AND COALESCE(partial, 0) = 0',
+    table
+  )
+  for (const indexName of uniqueIndexes) {
+    if (sameColumnSet(pragmaColumn(database, 'SELECT name FROM pragma_index_info(?)', indexName), target)) {
+      return true
+    }
   }
   return false
 }
@@ -2460,26 +2481,62 @@ function hasConflictTarget(
  * column — each passes every column-and-constraint check and then rejects the
  * insert at runtime. Rather than chase them, run the actual write.
  */
-function probeObservationsWrite(database: ReturnType<typeof getDatabase>, savepoint: string): string | null {
+function probeObservationsWrite(
+  database: ReturnType<typeof getDatabase>,
+  savepoint: string
+): { failure: string | null; cleanupError: string | null } {
+  const table = 'project_discovery_observations'
+  const reject = (e: unknown): string => `rejects the write it must accept (${(e as Error).message})`
+
+  // A FRESH key per probe, confirmed ABSENT, so the first upsert is guaranteed to
+  // take the INSERT path. Without this an existing row with the sentinel's key
+  // silently turned both statements into ON CONFLICT updates.
+  let key: string | null = null
+  for (let attempt = 0; attempt < 3 && key === null; attempt++) {
+    const candidate = `${OBSERVATIONS_PROBE_PREFIX}${randomUUID()}`
+    try {
+      const clash = database.exec(`SELECT 1 FROM ${table} WHERE name_norm = ? AND source_key = ?`, [
+        candidate,
+        candidate
+      ])
+      if ((clash[0]?.values?.length ?? 0) === 0) key = candidate
+    } catch (e) {
+      // The table cannot even be read the way the write reads it — a contract
+      // failure in its own right (e.g. the columns are missing).
+      return { failure: reject(e), cleanupError: null }
+    }
+  }
+  if (key === null) {
+    return { failure: 'could not obtain a collision-free probe key after 3 attempts', cleanupError: null }
+  }
+
   const now = new Date().toISOString()
-  const params = [OBSERVATIONS_PROBE_KEY, OBSERVATIONS_PROBE_KEY, null, OBSERVATIONS_PROBE_KEY, 0, now, now]
+  const params = [key, key, null, key, 0, now, now]
   let failure: string | null = null
+  let cleanupError: string | null = null
   database.run(`SAVEPOINT ${savepoint}`)
   try {
     database.run(OBSERVATIONS_UPSERT_SQL, params) // the INSERT path
     database.run(OBSERVATIONS_UPSERT_SQL, params) // the ON CONFLICT DO UPDATE path
   } catch (e) {
-    failure = `rejects the write it must accept (${(e as Error).message})`
+    failure = reject(e)
   } finally {
     // ALWAYS undo the probe — it must leave no rows behind, success or failure.
+    // FAIL CLOSED: if the undo itself fails (a RAISE(ROLLBACK) trigger destroys
+    // the savepoint stack, for instance) the state is indeterminate and the
+    // caller must surface it rather than proceed as though it were clean.
     try {
       database.run(`ROLLBACK TO ${savepoint}`)
-    } catch { /* transaction already unwound by the error */ }
+    } catch (e) {
+      cleanupError = `probe rollback failed: ${(e as Error).message}`
+    }
     try {
       database.run(`RELEASE ${savepoint}`)
-    } catch { /* savepoint already gone */ }
+    } catch (e) {
+      cleanupError = cleanupError ?? `probe release failed: ${(e as Error).message}`
+    }
   }
-  return failure
+  return { failure, cleanupError }
 }
 
 /**
@@ -2520,56 +2577,93 @@ function ensureObservationsTableUsable(database: ReturnType<typeof getDatabase>,
 
   const savepoint = 'hidock_observations_repair'
   let failure: string | null = null
+  let cleanupError: string | null = null
+  const diagnostics: string[] = []
+
   database.run(`SAVEPOINT ${savepoint}`)
   try {
-    // --- 2. Preflight the ORIGINAL shape, before any mutation. ---
+    // --- 2. Preflight: DIAGNOSTICS ONLY. These never refuse. ---
+    // Metadata can misjudge a perfectly valid table (an index name needing SQL
+    // quoting, a constraint form the reader does not model), and a false refusal
+    // blocks boot on a healthy database. So the reader's findings are collected
+    // to make the eventual message actionable and nothing more — the probe below
+    // is the sole acceptance authority, which also collapses what used to be two
+    // parallel decision paths into one.
     const original = new Set(getTableColumns(database, table))
     const unrepairable = OBSERVATIONS_REQUIRED_COLUMNS.filter(
       (c) => !original.has(c) && !OBSERVATIONS_REPAIRABLE_COLUMNS[c]
     )
     if (unrepairable.length > 0) {
-      failure =
+      diagnostics.push(
         `is missing required column(s) ${unrepairable.join(', ')} which cannot be added by ALTER ` +
-        '(NOT NULL without a constant default); the table must be recreated'
-    } else if (!hasConflictTarget(database, table, OBSERVATIONS_CONFLICT_KEY)) {
-      failure =
+          '(NOT NULL without a constant default); the table must be recreated'
+      )
+    }
+    if (!hasConflictTarget(database, table, OBSERVATIONS_CONFLICT_KEY)) {
+      diagnostics.push(
         `has no UNIQUE constraint on (${OBSERVATIONS_CONFLICT_KEY.join(', ')}), which ` +
-        "recordProjectDiscoveryObservation's ON CONFLICT target requires; a primary key cannot be " +
-        'added by ALTER, so the table must be recreated'
+          "recordProjectDiscoveryObservation's ON CONFLICT target requires; a primary key cannot be " +
+          'added by ALTER, so the table must be recreated'
+      )
     }
 
-    if (!failure) {
-      // --- 3. Repair what ALTER can add. ---
-      for (const column of OBSERVATIONS_REQUIRED_COLUMNS) {
-        if (original.has(column)) continue
-        console.log(`[Database] Repairing ${table}: adding ${column}`)
-        try {
-          database.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${OBSERVATIONS_REPAIRABLE_COLUMNS[column]}`)
-        } catch (e) {
-          // Swallowed only because the probe below is the real gate; a benign
-          // duplicate-column race leaves the column present and passes.
-          console.warn(`[Database] ${table} ALTER ${column} failed:`, (e as Error).message)
-        }
+    // --- 3. Repair what ALTER can add (inside the savepoint, so a later refusal
+    //        rolls it back and leaves the database byte-identical). ---
+    for (const column of OBSERVATIONS_REQUIRED_COLUMNS) {
+      if (original.has(column)) continue
+      const definition = OBSERVATIONS_REPAIRABLE_COLUMNS[column]
+      if (!definition) continue // ALTER cannot add it; the probe will report it
+      console.log(`[Database] Repairing ${table}: adding ${column}`)
+      try {
+        database.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
+      } catch (e) {
+        console.warn(`[Database] ${table} ALTER ${column} failed:`, (e as Error).message)
       }
-
-      // --- 4. Probe the real write contract. ---
-      failure = probeObservationsWrite(database, 'hidock_observations_probe')
     }
+
+    // --- 4. Probe the real write contract. THE authority. ---
+    const probe = probeObservationsWrite(database, 'hidock_observations_probe')
+    failure = probe.failure
+    cleanupError = probe.cleanupError
   } catch (e) {
     failure = `could not be validated (${(e as Error).message})`
   } finally {
-    // --- 5. Discard everything on failure; keep only the repairs on success. ---
-    if (failure) {
+    // --- 5. Discard everything on failure; keep only the repairs on success.
+    //        Cleanup is FAIL CLOSED: if the undo itself fails the state is
+    //        indeterminate, and we must say so rather than continue. ---
+    if (failure || cleanupError) {
       try {
         database.run(`ROLLBACK TO ${savepoint}`)
-      } catch { /* transaction already unwound */ }
+      } catch (e) {
+        cleanupError = cleanupError ?? `rollback failed: ${(e as Error).message}`
+      }
     }
     try {
       database.run(`RELEASE ${savepoint}`)
-    } catch { /* savepoint already gone */ }
+    } catch (e) {
+      cleanupError = cleanupError ?? `release failed: ${(e as Error).message}`
+    }
   }
 
-  if (failure) refuse(failure)
+  if (cleanupError) {
+    refuse(
+      `could not be restored to a known state after its schema check (${cleanupError}` +
+        (failure ? `; original problem: ${failure}` : '') +
+        ')'
+    )
+  }
+  // Only the probe refuses. Diagnostics ride along to make the message actionable.
+  if (failure) refuse([failure, ...diagnostics].join('; '))
+}
+
+/**
+ * Runtime self-check for the discovery ledger: same repair-and-probe the boot
+ * runs, callable on demand. Exported so the nesting behaviour is testable —
+ * savepoints must compose correctly when this executes inside an already-open
+ * transaction (repairPhase and initializeDatabase may hold one).
+ */
+export function verifyObservationsSchema(context = '[Database] verify'): void {
+  ensureObservationsTableUsable(getDatabase(), context)
 }
 
 /**

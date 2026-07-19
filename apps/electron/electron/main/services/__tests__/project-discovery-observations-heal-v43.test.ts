@@ -28,7 +28,9 @@ import {
   queryAll,
   queryOne,
   recordProjectDiscoveryObservation,
-  countProjectDiscoverySources
+  countProjectDiscoverySources,
+  verifyObservationsSchema,
+  runInTransaction
 } from '../database'
 import { applyTranscriptEntities } from '../org-reconciler'
 
@@ -212,6 +214,109 @@ describe('v43 heal: a database stranded with the pre-meeting_id table shape', ()
         [row.name_norm, row.source_key, row.original_name, row.score]
       )
     }
+  })
+
+  /**
+   * The probe's first UPSERT must genuinely take the INSERT path. With a FIXED
+   * sentinel a real row carrying that key turned both statements into ON CONFLICT
+   * updates, so an INSERT-only failure passed unnoticed. The key is now generated
+   * fresh per probe and confirmed absent, so the trigger below always fires.
+   */
+  it('exercises the INSERT path even when a legacy row occupies a sentinel-shaped key', async () => {
+    // The row that used to shadow the sentinel — inserted before the trigger so
+    // it is itself allowed in.
+    run(
+      `INSERT INTO project_discovery_observations
+         (name_norm, source_key, meeting_id, original_name, score, first_seen_at, last_seen_at)
+       VALUES ('hidock-schema-probe-', 'hidock-schema-probe-', NULL, 'legacy collision', 0,
+               '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`
+    )
+    // Fails NEW rows only; an ON CONFLICT update would sail straight past it.
+    run(
+      `CREATE TRIGGER block_new_observations AFTER INSERT ON project_discovery_observations
+       BEGIN SELECT RAISE(ABORT, 'insert blocked'); END`
+    )
+    closeDatabase()
+
+    try {
+      await expect(initializeDatabase()).rejects.toThrow(/rejects the write it must accept.*insert blocked/)
+    } finally {
+      run('DROP TRIGGER block_new_observations')
+      run(`DELETE FROM project_discovery_observations WHERE name_norm = 'hidock-schema-probe-'`)
+      closeDatabase()
+      await initializeDatabase()
+    }
+  })
+
+  /**
+   * Fail-closed cleanup. RAISE(ROLLBACK) unwinds the WHOLE transaction, so the
+   * probe's savepoint is gone by the time the undo runs and ROLLBACK TO fails.
+   * The boot must surface that rather than continue as though the state is clean.
+   */
+  it('refuses when the savepoint cleanup itself fails', async () => {
+    run(
+      `CREATE TRIGGER nuke_transaction AFTER INSERT ON project_discovery_observations
+       BEGIN SELECT RAISE(ROLLBACK, 'transaction nuked'); END`
+    )
+    closeDatabase()
+
+    try {
+      await expect(initializeDatabase()).rejects.toThrow(
+        /rejects the write it must accept|could not be restored to a known state/
+      )
+    } finally {
+      run('DROP TRIGGER nuke_transaction')
+      closeDatabase()
+      await initializeDatabase()
+    }
+  })
+
+  /**
+   * A valid table whose UNIQUE index NAME requires SQL quoting must boot fine.
+   * The pragma reader used to interpolate the name straight into the statement.
+   */
+  it('accepts a table whose unique index name requires quoting', async () => {
+    run(`CREATE UNIQUE INDEX "weird ""name"" idx" ON project_discovery_observations(name_norm, source_key)`)
+    closeDatabase()
+
+    try {
+      await expect(initializeDatabase()).resolves.toBeUndefined()
+      expect(recordProjectDiscoveryObservation('QuotedIndexProbe', 'r:q1', 'h1', 0.7)).toBe(1)
+    } finally {
+      run(`DROP INDEX "weird ""name"" idx"`)
+      run(`DELETE FROM project_discovery_observations WHERE name_norm = 'quotedindexprobe'`)
+    }
+  })
+
+  /**
+   * Savepoints must compose when the check runs inside an already-open
+   * transaction — repairPhase and initializeDatabase may hold one, and a botched
+   * nesting would corrupt the enclosing state instead of just failing.
+   */
+  it('composes with an already-open outer transaction', () => {
+    const before = queryOne<{ n: number }>('SELECT COUNT(*) AS n FROM project_discovery_observations')?.n
+
+    runInTransaction(() => {
+      verifyObservationsSchema('[test] nested')
+      // The enclosing transaction is still usable afterwards…
+      run(
+        `INSERT INTO project_discovery_observations
+           (name_norm, source_key, meeting_id, original_name, score, first_seen_at, last_seen_at)
+         VALUES ('nestedwrite', 'r:nested', NULL, 'NestedWrite', 0.7,
+                 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`
+      )
+    })
+
+    // …and its work committed, with no probe residue alongside it.
+    expect(queryOne<{ n: number }>('SELECT COUNT(*) AS n FROM project_discovery_observations')?.n).toBe(
+      (before ?? 0) + 1
+    )
+    expect(
+      queryOne<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM project_discovery_observations WHERE name_norm LIKE 'hidock-schema-probe-%'`
+      )?.n
+    ).toBe(0)
+    run(`DELETE FROM project_discovery_observations WHERE name_norm = 'nestedwrite'`)
   })
 
   /**

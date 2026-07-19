@@ -222,6 +222,51 @@ describe('schema v43: project_discovery_observations (F12 discovery gate)', () =
    * refusing after left half-ALTERed tables behind, because repairPhase is not
    * itself transactional.
    */
+  it('generates a FRESH probe key and confirms it is absent before writing', () => {
+    const probe = source.match(/function probeObservationsWrite\([\s\S]*?\n\}/)![0]
+    // Fresh per probe — a fixed sentinel could be shadowed by a real row, turning
+    // the INSERT path into a second ON CONFLICT update.
+    expect(probe).toContain('randomUUID()')
+    expect(probe).toContain('OBSERVATIONS_PROBE_PREFIX')
+    // …and proven absent, so the first upsert really does INSERT.
+    expect(probe).toMatch(/SELECT 1 FROM \$\{table\} WHERE name_norm = \? AND source_key = \?/)
+  })
+
+  /**
+   * Metadata is diagnostics ONLY. It can misjudge a valid table (an index name
+   * needing SQL quoting, a constraint form the reader does not model), and a
+   * false refusal would block boot on a healthy database.
+   */
+  it('never refuses on metadata alone — only the probe and cleanup can refuse', () => {
+    const body = source.match(/function ensureObservationsTableUsable\([\s\S]*?\n\}/)![0]
+    // The metadata findings are collected, not acted on.
+    expect(body).toContain('diagnostics.push(')
+    expect(body).not.toMatch(/failure =\s*$\s*`is missing required column/m)
+    // Exactly two refusal sites, both downstream of the probe.
+    const refusals = [...body.matchAll(/\n {2}if \((cleanupError|failure)\)/g)].map((m) => m[1])
+    expect(refusals).toEqual(['cleanupError', 'failure'])
+  })
+
+  it('binds pragma arguments instead of interpolating identifiers', () => {
+    const reader = source.match(/function hasConflictTarget\([\s\S]*?\n\}/)![0]
+    for (const call of ['pragma_table_info(?)', 'pragma_index_list(?)', 'pragma_index_info(?)']) {
+      expect(reader).toContain(call)
+    }
+    // No index name spliced into SQL — that broke on names requiring quoting.
+    expect(reader).not.toMatch(/index_info\('\$\{/)
+  })
+
+  it('treats a failed savepoint cleanup as fail-closed', () => {
+    const body = source.match(/function ensureObservationsTableUsable\([\s\S]*?\n\}/)![0]
+    const probe = source.match(/function probeObservationsWrite\([\s\S]*?\n\}/)![0]
+    // Both levels record the cleanup failure rather than swallowing it…
+    expect(probe).toContain('probe rollback failed')
+    expect(body).toContain('rollback failed')
+    expect(body).toContain('release failed')
+    // …and an indeterminate state refuses the boot.
+    expect(body).toContain('could not be restored to a known state')
+  })
+
   it('preflights before mutating and wraps the whole repair in a savepoint', () => {
     const body = source.match(/function ensureObservationsTableUsable\([\s\S]*?\n\}/)![0]
     expect(body).toContain('SAVEPOINT ${savepoint}')
