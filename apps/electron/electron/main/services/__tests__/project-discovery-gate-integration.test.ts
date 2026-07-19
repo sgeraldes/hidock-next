@@ -30,7 +30,10 @@ import {
   addProjectDiscoveryRejection,
   isProjectDiscoveryRejected,
   countProjectDiscoverySources,
-  getPendingProjectDiscoveries
+  getPendingProjectDiscoveries,
+  filterEligibleMembershipRows,
+  filterVisibleEntityIds,
+  type MembershipRow
 } from '../database'
 import { applyTranscriptEntities, mergeDuplicateMeetingOccurrences } from '../org-reconciler'
 import { MIN_DISTINCT_SOURCES } from '../project-discovery-gate'
@@ -267,6 +270,22 @@ describe('F12: project discovery gate (v43)', () => {
         [rows[0].id]
       ).map((r) => r.meeting_id)
       expect(linked.sort()).toEqual(['m1', 'm2'])
+
+      // ADV-F1 (post-merge review): every linked row — the BACKFILLED corroborating
+      // m1 as well as the threshold-crossing m2 — carries transcript provenance
+      // stamped with its OWN source recording. A provenance-less (source=NULL)
+      // backfill row is legacy/ineligible under filterEligibleMembershipRows, so
+      // excluding r2 later would erase the project even though r1 still corroborates
+      // it (filterVisibleEntityIds keeps a transcript entity only while >= 1
+      // membership is eligible). Asserting raw existence alone (above) missed this.
+      const prov = queryAll<{ meeting_id: string; source: string | null; source_recording_id: string | null }>(
+        'SELECT meeting_id, source, source_recording_id FROM meeting_projects WHERE project_id = ? ORDER BY meeting_id',
+        [rows[0].id]
+      )
+      expect(prov).toEqual([
+        { meeting_id: 'm1', source: 'transcript', source_recording_id: 'r1' },
+        { meeting_id: 'm2', source: 'transcript', source_recording_id: 'r2' }
+      ])
     })
 
     it('clears the deferred evidence once the project exists', () => {
@@ -492,6 +511,112 @@ describe('F12: project discovery gate (v43)', () => {
       )
 
       expect(pendingNames()).not.toContain(norm(NFC))
+    })
+  })
+
+  /**
+   * ADV-F1 (post-merge review) — the backfilled corroborating meeting_projects
+   * rows must carry the SAME per-row transcript provenance the normal link path
+   * stamps (source='transcript' + the recording that produced the sighting), not
+   * source=NULL. Otherwise filterEligibleMembershipRows treats them as legacy /
+   * ineligible, and excluding the threshold-crossing recording erases a project
+   * that a still-eligible corroborating recording continues to support — a
+   * transcript entity stays visible only while it has >= 1 ELIGIBLE membership.
+   * These pin the provenance COLUMNS and the VISIBILITY outcome when EITHER
+   * corroborating recording is excluded independently, plus a regression that
+   * shows the old provenance-less row would hide the project.
+   */
+  describe('backfilled corroboration carries transcript provenance and survives exclusion', () => {
+    const NAME = 'HeliotropeBastion' // distinctive orthography ⇒ clears the create floor on the 2nd source
+
+    beforeAll(() => {
+      for (const [id, day] of [['bm1', '05'], ['bm2', '06']]) {
+        run(`INSERT INTO meetings (id, subject, start_time, end_time) VALUES (?, 'Backfill Prov', ?, ?)`, [
+          id,
+          `2026-04-${day}T10:00:00Z`,
+          `2026-04-${day}T11:00:00Z`
+        ])
+      }
+      run(`INSERT INTO recordings (id, filename, date_recorded) VALUES ('br1', 'bf1.wav', '2026-04-05T10:00:00Z')`)
+      run(`INSERT INTO recordings (id, filename, date_recorded) VALUES ('br2', 'bf2.wav', '2026-04-06T10:00:00Z')`)
+    })
+
+    function membershipRows(pid: string): Array<MembershipRow & { meeting_id: string }> {
+      return queryAll<MembershipRow & { meeting_id: string }>(
+        'SELECT meeting_id, source, source_recording_id FROM meeting_projects WHERE project_id = ? ORDER BY meeting_id',
+        [pid]
+      )
+    }
+    const eligibleMeetings = (pid: string): string[] =>
+      filterEligibleMembershipRows(membershipRows(pid))
+        .eligible.map((r) => r.meeting_id)
+        .sort()
+
+    it('stamps the backfilled corroborating row with source=transcript + its own recording', () => {
+      // bm1/br1 corroborates below the bar; bm2/br2 crosses it and creates.
+      expect(mention(NAME, 'bm1', 'br1')).toBe(false)
+      expect(mention(NAME, 'bm2', 'br2')).toBe(true)
+
+      const rows = projectRowsByName(NAME)
+      expect(rows).toHaveLength(1)
+      expect(membershipRows(rows[0].id)).toEqual([
+        // Backfilled corroborating meeting — the row this fix repairs (was source=NULL).
+        { meeting_id: 'bm1', source: 'transcript', source_recording_id: 'br1' },
+        // Threshold-crossing meeting via the normal link path.
+        { meeting_id: 'bm2', source: 'transcript', source_recording_id: 'br2' }
+      ])
+    })
+
+    it('both corroborating memberships are eligible while both recordings are eligible', () => {
+      expect(eligibleMeetings(projectRowsByName(NAME)[0].id)).toEqual(['bm1', 'bm2'])
+    })
+
+    it('excluding the threshold-crossing recording keeps the project visible via the corroborating one', () => {
+      const pid = projectRowsByName(NAME)[0].id
+      // Exclude br2: the entity's own source_recording_id AND the bm2 membership
+      // both go dead; only the backfilled bm1/br1 membership can keep it visible.
+      run(`UPDATE recordings SET deleted_at = '2026-05-01T00:00:00Z' WHERE id = 'br2'`)
+      try {
+        expect(filterVisibleEntityIds('project', [pid]).visible.has(pid)).toBe(true)
+        expect(eligibleMeetings(pid)).toEqual(['bm1'])
+      } finally {
+        run(`UPDATE recordings SET deleted_at = NULL WHERE id = 'br2'`)
+      }
+    })
+
+    it('excluding the corroborating recording instead keeps the project visible via the threshold one', () => {
+      const pid = projectRowsByName(NAME)[0].id
+      // Exclude br1: the bm1 membership goes dead, but the entity survives via
+      // bm2/br2 (and its own source_recording_id).
+      run(`UPDATE recordings SET deleted_at = '2026-05-01T00:00:00Z' WHERE id = 'br1'`)
+      try {
+        expect(filterVisibleEntityIds('project', [pid]).visible.has(pid)).toBe(true)
+        expect(eligibleMeetings(pid)).toEqual(['bm2'])
+      } finally {
+        run(`UPDATE recordings SET deleted_at = NULL WHERE id = 'br1'`)
+      }
+    })
+
+    it('regression: a provenance-less backfill row would hide the project when the threshold recording is excluded', () => {
+      // Force the OLD (buggy) behavior on the corroborating row and confirm the
+      // project disappears when br2 is excluded — the exact failure this fix closes
+      // — then restore the stamped provenance.
+      const pid = projectRowsByName(NAME)[0].id
+      run(
+        `UPDATE meeting_projects SET source = NULL, source_recording_id = NULL WHERE project_id = ? AND meeting_id = 'bm1'`,
+        [pid]
+      )
+      run(`UPDATE recordings SET deleted_at = '2026-05-01T00:00:00Z' WHERE id = 'br2'`)
+      try {
+        // bm1 now legacy/ineligible, bm2 excluded, entity source recording excluded ⇒ hidden.
+        expect(filterVisibleEntityIds('project', [pid]).visible.has(pid)).toBe(false)
+      } finally {
+        run(`UPDATE recordings SET deleted_at = NULL WHERE id = 'br2'`)
+        run(
+          `UPDATE meeting_projects SET source = 'transcript', source_recording_id = 'br1' WHERE project_id = ? AND meeting_id = 'bm1'`,
+          [pid]
+        )
+      }
     })
   })
 })

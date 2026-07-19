@@ -29,7 +29,7 @@ import {
   filterVisibleEntityIds,
   recordProjectDiscoveryObservation,
   clearProjectDiscoveryObservations,
-  getProjectDiscoveryMeetingIds,
+  getProjectDiscoveryCorroborations,
   type RecordingPreassignment
 } from './database'
 import { filterEligibleRecordingIds } from './recording-eligibility'
@@ -670,11 +670,25 @@ export function applyTranscriptEntities(opts: {
           // left the graph permanently missing those associations (the first
           // meeting could only ever be linked by reprocessing its transcript).
           // Runs BEFORE the purge, inside applyTranscriptEntities' transaction.
-          const corroborating = getProjectDiscoveryMeetingIds(projectName)
+          //
+          // ADV-F1 (post-merge review): each backfilled row MUST carry the SAME
+          // per-row provenance the normal link path stamps below —
+          // source='transcript' + the recording that produced THIS corroborating
+          // sighting (from the observation's 'r:<id>' source_key). A provenance-less
+          // (source=NULL) row is legacy/ineligible under filterEligibleMembershipRows,
+          // so if the threshold-crossing recording is later excluded, the still-
+          // eligible corroborating recording could no longer keep the project visible
+          // (filterVisibleEntityIds needs >= 1 ELIGIBLE membership) and the whole
+          // project would vanish. Stamping the true source recording keeps the
+          // corroborating association alive exactly as long as its recording is.
+          const corroborating = getProjectDiscoveryCorroborations(projectName)
           let backfilled = 0
-          for (const mid of corroborating) {
+          for (const { meetingId: mid, recordingId: rid } of corroborating) {
             if (mid === opts.meetingId) continue // linked below by the normal path
-            run(`INSERT OR IGNORE INTO meeting_projects (meeting_id, project_id) VALUES (?, ?)`, [mid, id])
+            run(
+              `INSERT OR IGNORE INTO meeting_projects (meeting_id, project_id, source, source_recording_id) VALUES (?, ?, 'transcript', ?)`,
+              [mid, id, rid]
+            )
             backfilled++
           }
 

@@ -9260,23 +9260,58 @@ export function countProjectDiscoverySources(name: string): number {
   )
 }
 
+/** A corroborating meeting paired with the recording that produced its sighting. */
+export interface ProjectDiscoveryCorroboration {
+  meetingId: string
+  /** The recording from the observation's 'r:<id>' source_key, or NULL for an 'm:' (recording-less) sighting. */
+  recordingId: string | null
+}
+
 /**
- * Every distinct meeting that mentioned this project name.
+ * Every distinct meeting that corroborated this project name, paired with the
+ * RECORDING that produced the corroborating sighting.
  *
  * Read by the reconciler at creation time so the meetings whose corroboration
  * EARNED the project are linked to it. Without this the first sighting's meeting
  * — the evidence itself — was dropped when the ledger was cleared, and the graph
  * permanently omitted a valid association unless that transcript happened to be
  * reprocessed later.
+ *
+ * ADV-F1 (post-merge review): also returns the source recording (parsed from the
+ * observation's 'r:<recordingId>' source_key — the recording id is already stored
+ * there, so no schema change is needed) so the reconciler can stamp each
+ * backfilled meeting_projects row with source='transcript' + that recording id.
+ * A provenance-less (source=NULL) corroborating row is legacy/ineligible under
+ * {@link filterEligibleMembershipRows}; stamping the real recording keeps the
+ * association visible on non-owner surfaces exactly as long as its recording is
+ * eligible, so excluding the threshold-crossing recording no longer erases a
+ * project that a still-eligible corroborating recording continues to support.
+ *
+ * When a meeting has several corroborating sightings we prefer one carrying a
+ * recording (an 'r:' key), most-recent first, so the row is gated by a real
+ * recording rather than left provenance-less.
  */
-export function getProjectDiscoveryMeetingIds(name: string): string[] {
+export function getProjectDiscoveryCorroborations(name: string): ProjectDiscoveryCorroboration[] {
   const norm = normalizeName(name)
   if (!norm) return []
-  return queryAll<{ meeting_id: string }>(
-    `SELECT DISTINCT meeting_id FROM project_discovery_observations
-      WHERE name_norm = ? AND meeting_id IS NOT NULL`,
+  const rows = queryAll<{ meeting_id: string; source_key: string }>(
+    `SELECT meeting_id, source_key FROM project_discovery_observations
+      WHERE name_norm = ? AND meeting_id IS NOT NULL
+      ORDER BY last_seen_at DESC, rowid DESC`,
     [norm]
-  ).map((r) => r.meeting_id)
+  )
+  const byMeeting = new Map<string, string | null>()
+  for (const r of rows) {
+    const rid = r.source_key.startsWith('r:') ? r.source_key.slice(2) : null
+    if (!byMeeting.has(r.meeting_id)) {
+      byMeeting.set(r.meeting_id, rid)
+    } else if (byMeeting.get(r.meeting_id) == null && rid != null) {
+      // Upgrade a recording-less ('m:') provenance to a real recording when a
+      // sibling sighting for the same meeting carries one.
+      byMeeting.set(r.meeting_id, rid)
+    }
+  }
+  return [...byMeeting.entries()].map(([meetingId, recordingId]) => ({ meetingId, recordingId }))
 }
 
 /**
