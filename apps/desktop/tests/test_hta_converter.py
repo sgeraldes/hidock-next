@@ -260,6 +260,13 @@ class TestMPEGFormatParsing:
         mock_segment.channels = 1
         mock_segment.__len__ = Mock(return_value=1000)  # 1000ms
 
+        # pydub's set_sample_width()/set_frame_rate() return a *new* AudioSegment. Model that as
+        # returning this same segment so the converter keeps seeing real numeric frame_rate values
+        # instead of a bare auto-created Mock, which would make _get_compatible_sample_rate() raise
+        # a TypeError and silently divert the test into the fallback branch.
+        mock_segment.set_sample_width.return_value = mock_segment
+        mock_segment.set_frame_rate.return_value = mock_segment
+
         mock_export_data = b"RIFF" + b"\x00" * 100  # Mock WAV data
         mock_segment.export.return_value = None
 
@@ -355,12 +362,14 @@ class TestRawPCMConversion:
 
     def test_try_raw_pcm_conversion_exception(self):
         """Test raw PCM conversion handles exceptions."""
-        # This should not raise an exception in normal circumstances
-        # but let's test the exception handling path exists
-        with patch("builtins.len", side_effect=Exception("Length error")):
+        # Break len() only inside hta_converter's namespace. Patching builtins.len globally also
+        # breaks unittest.mock itself - mock calls len() while recording each call, so the patched
+        # len recurses into mock which calls len again, blowing the stack before the assertion is
+        # ever reached.
+        with patch("hta_converter.len", side_effect=Exception("Length error")):
             result = self.converter._try_raw_pcm_conversion(b"test")
 
-            assert result == (None, 0, 0)
+        assert result == (None, 0, 0)
 
 
 class TestWAVFileCreation:
