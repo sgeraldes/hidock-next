@@ -133,20 +133,25 @@ describe('v43 heal: a database stranded with the pre-meeting_id table shape', ()
          SELECT 'x' AS name_norm, 'x' AS source_key, 'x' AS original_name, 0 AS score,
                 '' AS first_seen_at, '' AS last_seen_at`,
       'DROP VIEW project_discovery_observations',
-      /exists as a view, not a table/
+      /exists as a view, not a table/,
+      null
     ],
     [
       'a same-named INDEX (empty-PRAGMA path)',
       `CREATE TABLE decoy_for_index (col TEXT);
        CREATE INDEX project_discovery_observations ON decoy_for_index(col)`,
       'DROP INDEX project_discovery_observations',
-      /exists as a index, not a table/
+      /exists as a index, not a table/,
+      null
     ],
     [
       'a meeting_id-only table (unrepairable NOT NULL columns)',
       'CREATE TABLE project_discovery_observations (meeting_id TEXT)',
       'DROP TABLE project_discovery_observations',
-      /missing required column\(s\).*name_norm.*cannot be added by ALTER/
+      /missing required column\(s\).*name_norm.*cannot be added by ALTER/,
+      // Preflight refuses BEFORE any ALTER, so the table must be untouched —
+      // no score/first_seen_at/last_seen_at quietly added by a failed boot.
+      ['meeting_id']
     ],
     [
       'a full-column table WITHOUT the composite key (ON CONFLICT has no target)',
@@ -156,9 +161,25 @@ describe('v43 heal: a database stranded with the pre-meeting_id table shape', ()
          first_seen_at TEXT, last_seen_at TEXT
        )`,
       'DROP TABLE project_discovery_observations',
-      /no UNIQUE constraint on \(name_norm, source_key\)/
+      /no UNIQUE constraint on \(name_norm, source_key\)/,
+      null
+    ],
+    [
+      // The shape no metadata check can catch: every required column present, a
+      // matching composite key — and an extra NOT NULL column with no default
+      // that the insert never mentions. Only running the real write finds it.
+      'an extra NOT NULL column the write omits (metadata-invisible)',
+      `CREATE TABLE project_discovery_observations (
+         name_norm TEXT NOT NULL, source_key TEXT NOT NULL, meeting_id TEXT,
+         original_name TEXT NOT NULL, score REAL NOT NULL DEFAULT 0,
+         first_seen_at TEXT, last_seen_at TEXT, blocker TEXT NOT NULL,
+         PRIMARY KEY (name_norm, source_key)
+       )`,
+      'DROP TABLE project_discovery_observations',
+      /rejects the write it must accept.*blocker/,
+      null
     ]
-  ])('fails the boot loudly when %s blocks the repair', async (_label, inject, cleanup, expected) => {
+  ])('fails the boot loudly when %s blocks the repair', async (_label, inject, cleanup, expected, expectedColumns) => {
     const backup = queryAll<{ name_norm: string; source_key: string; original_name: string; score: number }>(
       'SELECT name_norm, source_key, original_name, score FROM project_discovery_observations'
     )
@@ -168,6 +189,11 @@ describe('v43 heal: a database stranded with the pre-meeting_id table shape', ()
 
     try {
       await expect(initializeDatabase()).rejects.toThrow(expected)
+      if (expectedColumns) {
+        // A refused boot must leave the schema byte-identical. The savepoint
+        // rolls back any repair, and preflight refuses before touching anything.
+        expect(observationColumns()).toEqual(expectedColumns)
+      }
     } finally {
       // Always clear the injection, so a failed assertion cannot strand the DB
       // for the remaining cases in this file.
@@ -186,6 +212,32 @@ describe('v43 heal: a database stranded with the pre-meeting_id table shape', ()
         [row.name_norm, row.source_key, row.original_name, row.score]
       )
     }
+  })
+
+  /**
+   * The probe runs on every boot of a HEALTHY database too, so it must be
+   * invisible: its sentinel rows are rolled back inside their own savepoint and
+   * must never reach disk, and it must not disturb existing rows.
+   */
+  it('a healthy boot leaves no probe residue', async () => {
+    const before = queryAll<{ name_norm: string; source_key: string }>(
+      'SELECT name_norm, source_key FROM project_discovery_observations ORDER BY name_norm, source_key'
+    )
+    expect(before.length).toBeGreaterThan(0) // the ledger is not trivially empty
+
+    closeDatabase()
+    await initializeDatabase()
+
+    const after = queryAll<{ name_norm: string; source_key: string }>(
+      'SELECT name_norm, source_key FROM project_discovery_observations ORDER BY name_norm, source_key'
+    )
+    expect(after).toEqual(before)
+    // No sentinel row survived, under any spelling.
+    expect(
+      queryOne<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM project_discovery_observations WHERE name_norm LIKE '%hidock-schema-probe%'`
+      )?.n
+    ).toBe(0)
   })
 
   it('discovery reconciliation works end to end on the healed database', () => {

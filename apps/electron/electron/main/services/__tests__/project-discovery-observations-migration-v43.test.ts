@@ -190,6 +190,52 @@ describe('schema v43: project_discovery_observations (F12 discovery gate)', () =
     expect(body).toContain('hasConflictTarget(')
   })
 
+  /**
+   * Metadata can only catch the ways a schema is wrong that we thought to model,
+   * and that space is open-ended (extra NOT NULL columns, CHECKs, triggers,
+   * generated columns). The authority is a real write, and it must be THE write —
+   * one shared statement, so the probe cannot drift from production.
+   */
+  it('the probe executes the same upsert statement production uses', () => {
+    const upsert = source.match(/const OBSERVATIONS_UPSERT_SQL = `[\s\S]*?`/)
+    expect(upsert).not.toBeNull()
+    expect(upsert![0]).toContain('ON CONFLICT(name_norm, source_key) DO UPDATE SET')
+
+    const probe = source.match(/function probeObservationsWrite\([\s\S]*?\n\}/)![0]
+    // Both the INSERT path and the ON CONFLICT path are exercised.
+    expect((probe.match(/database\.run\(OBSERVATIONS_UPSERT_SQL/g) ?? []).length).toBe(2)
+
+    // And production runs the same constant, not a copy.
+    const record = source.match(/export function recordProjectDiscoveryObservation\([\s\S]*?\n\}/)![0]
+    expect(record).toContain('run(OBSERVATIONS_UPSERT_SQL')
+  })
+
+  it('the probe always rolls back, so a healthy boot leaves no rows', () => {
+    const probe = source.match(/function probeObservationsWrite\([\s\S]*?\n\}/)![0]
+    expect(probe).toContain('SAVEPOINT ${savepoint}')
+    // The undo sits in a finally — it must run on success AND on failure.
+    expect(probe).toMatch(/finally \{[\s\S]*ROLLBACK TO \$\{savepoint\}/)
+  })
+
+  /**
+   * A refused boot must leave the database byte-identical. Repairing first and
+   * refusing after left half-ALTERed tables behind, because repairPhase is not
+   * itself transactional.
+   */
+  it('preflights before mutating and wraps the whole repair in a savepoint', () => {
+    const body = source.match(/function ensureObservationsTableUsable\([\s\S]*?\n\}/)![0]
+    expect(body).toContain('SAVEPOINT ${savepoint}')
+    expect(body).toContain('ROLLBACK TO ${savepoint}')
+    expect(body).toContain('RELEASE ${savepoint}')
+    // The unrepairable-column and conflict-key checks must come BEFORE the ALTER.
+    const preflight = body.indexOf('const unrepairable')
+    const conflictCheck = body.indexOf('hasConflictTarget(')
+    const alter = body.indexOf('ADD COLUMN')
+    expect(preflight).toBeGreaterThan(-1)
+    expect(preflight).toBeLessThan(alter)
+    expect(conflictCheck).toBeLessThan(alter)
+  })
+
   it('migration 43 fails loudly rather than recording v43 over an unusable schema', () => {
     const migration = source.match(/\n {2}43: \(\) => \{[\s\S]*?\n {2}\}/)![0]
     // No swallowing catch: the engine records a version only after the migration

@@ -2387,6 +2387,25 @@ const OBSERVATIONS_REPAIRABLE_COLUMNS: Record<string, string> = {
 /** recordProjectDiscoveryObservation's ON CONFLICT target — needs a real constraint. */
 const OBSERVATIONS_CONFLICT_KEY = ['name_norm', 'source_key']
 
+/**
+ * THE write. Shared verbatim by recordProjectDiscoveryObservation and by the boot
+ * probe, so the statement the probe proves is the statement production runs —
+ * they cannot drift.
+ */
+const OBSERVATIONS_UPSERT_SQL = `
+  INSERT INTO project_discovery_observations
+    (name_norm, source_key, meeting_id, original_name, score, first_seen_at, last_seen_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(name_norm, source_key) DO UPDATE SET
+    meeting_id = COALESCE(excluded.meeting_id, project_discovery_observations.meeting_id),
+    original_name = excluded.original_name,
+    score = MAX(project_discovery_observations.score, excluded.score),
+    last_seen_at = excluded.last_seen_at
+`
+
+/** Sentinel key for the boot probe. Always rolled back — never reaches disk. */
+const OBSERVATIONS_PROBE_KEY = ' hidock-schema-probe'
+
 type PragmaRow = Array<string | number | null | Uint8Array>
 
 function pragmaRows(database: ReturnType<typeof getDatabase>, pragma: string): PragmaRow[] {
@@ -2431,28 +2450,61 @@ function hasConflictTarget(
 }
 
 /**
+ * Execute the REAL upsert (both its INSERT and its ON CONFLICT branch) with
+ * sentinel values inside a savepoint, then roll it back. Returns null on success
+ * or a description of the failure.
+ *
+ * This is the authority. Metadata inspection can only check the ways a schema is
+ * wrong that we thought to model, and that space is open-ended: an extra
+ * `NOT NULL` column with no default, a CHECK constraint, a trigger, a generated
+ * column — each passes every column-and-constraint check and then rejects the
+ * insert at runtime. Rather than chase them, run the actual write.
+ */
+function probeObservationsWrite(database: ReturnType<typeof getDatabase>, savepoint: string): string | null {
+  const now = new Date().toISOString()
+  const params = [OBSERVATIONS_PROBE_KEY, OBSERVATIONS_PROBE_KEY, null, OBSERVATIONS_PROBE_KEY, 0, now, now]
+  let failure: string | null = null
+  database.run(`SAVEPOINT ${savepoint}`)
+  try {
+    database.run(OBSERVATIONS_UPSERT_SQL, params) // the INSERT path
+    database.run(OBSERVATIONS_UPSERT_SQL, params) // the ON CONFLICT DO UPDATE path
+  } catch (e) {
+    failure = `rejects the write it must accept (${(e as Error).message})`
+  } finally {
+    // ALWAYS undo the probe — it must leave no rows behind, success or failure.
+    try {
+      database.run(`ROLLBACK TO ${savepoint}`)
+    } catch { /* transaction already unwound by the error */ }
+    try {
+      database.run(`RELEASE ${savepoint}`)
+    } catch { /* savepoint already gone */ }
+  }
+  return failure
+}
+
+/**
  * Bring project_discovery_observations up to its FULL write contract, or refuse
- * to start. Unconditional, and shared by both heal paths so they cannot drift.
+ * to start — leaving a refused database byte-identical. Unconditional, and shared
+ * by both heal paths so they cannot drift.
  *
- * Checking "is a table and has meeting_id" was not enough. `CREATE TABLE IF NOT
- * EXISTS` is a no-op against ANY existing table, so a malformed one passed:
- *  - a table with meeting_id but missing name_norm/source_key/original_name/score
- *    or the timestamps — every insert fails on the missing column;
- *  - worse, a table with every column but no composite PRIMARY KEY — inserts look
- *    fine until recordProjectDiscoveryObservation's ON CONFLICT(name_norm,
- *    source_key) finds no matching constraint and throws at runtime.
- * Both booted "successfully" while discovery writes were broken, which is exactly
- * the failure mode this guard exists to eliminate.
+ * Three rounds of this guard leaked, each time because it MODELLED the contract
+ * instead of exercising it: "is a table" missed a missing column; "has
+ * meeting_id" missed the other columns; "has every column and a matching unique
+ * key" still missed an extra NOT NULL column the insert omits (and would equally
+ * miss CHECKs, triggers and generated columns). So the final authority is a real
+ * write — see {@link probeObservationsWrite}. The metadata checks are kept
+ * because they produce precise, actionable messages, but they no longer decide.
  *
- * So the whole contract is validated: object exists, is a TABLE (not a view or
- * index), carries every required column, and has a UNIQUE constraint on
- * (name_norm, source_key).
- *
- * REPAIR vs REFUSE: a missing column that can be ALTERed in is repaired silently
- * (this is the real-world v43 case — meeting_id shipped a commit late). Anything
- * ALTER cannot fix throws with a message naming the problem: a NOT NULL column
- * with no constant default, or a missing/mismatched primary key — SQLite cannot
- * add a primary key to an existing table, so that one requires recreating it.
+ * Order matters, and it is the reason for the savepoint:
+ *   1. identity  — exists, and is a TABLE (not a view or index). No mutation.
+ *   2. PREFLIGHT — unrepairable column or missing conflict key? Refuse BEFORE
+ *                  touching anything, so a refused database is left untouched.
+ *                  (Repairing first and refusing after left half-ALTERed tables
+ *                  behind on a failed boot, since repairPhase is not itself
+ *                  transactional.)
+ *   3. repair    — ALTER in the columns ALTER can add.
+ *   4. probe     — run the real write; roll it back always.
+ *   5. commit the repairs, or roll them back too and throw.
  */
 function ensureObservationsTableUsable(database: ReturnType<typeof getDatabase>, context: string): void {
   const table = 'project_discovery_observations'
@@ -2460,43 +2512,64 @@ function ensureObservationsTableUsable(database: ReturnType<typeof getDatabase>,
     throw new Error(`${context}: ${table} ${problem}; refusing to start with a schema that cannot record project discoveries`)
   }
 
+  // --- 1. Identity. Read-only, so it can refuse before opening a savepoint. ---
   const found = database.exec(`SELECT type FROM sqlite_master WHERE name = '${table}'`)
   const type = found[0]?.values?.[0]?.[0]
   if (!type) refuse('does not exist and could not be created')
   if (type !== 'table') refuse(`exists as a ${String(type)}, not a table`)
 
-  // Repair what ALTER can add.
-  const present = new Set(getTableColumns(database, table))
-  for (const column of OBSERVATIONS_REQUIRED_COLUMNS) {
-    if (present.has(column)) continue
-    const definition = OBSERVATIONS_REPAIRABLE_COLUMNS[column]
-    if (!definition) continue // unrepairable — reported below
-    console.log(`[Database] Repairing ${table}: adding ${column}`)
-    try {
-      database.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
-    } catch (e) {
-      // Swallowed only because the verification below is unconditional; a benign
-      // duplicate-column race leaves the column present and passes.
-      console.warn(`[Database] ${table} ALTER ${column} failed:`, (e as Error).message)
-    }
-  }
-
-  // Verify the full contract.
-  const columns = new Set(getTableColumns(database, table))
-  const missing = OBSERVATIONS_REQUIRED_COLUMNS.filter((c) => !columns.has(c))
-  if (missing.length > 0) {
-    refuse(
-      `is missing required column(s) ${missing.join(', ')} which cannot be added by ALTER ` +
-        '(NOT NULL without a constant default); the table must be recreated'
+  const savepoint = 'hidock_observations_repair'
+  let failure: string | null = null
+  database.run(`SAVEPOINT ${savepoint}`)
+  try {
+    // --- 2. Preflight the ORIGINAL shape, before any mutation. ---
+    const original = new Set(getTableColumns(database, table))
+    const unrepairable = OBSERVATIONS_REQUIRED_COLUMNS.filter(
+      (c) => !original.has(c) && !OBSERVATIONS_REPAIRABLE_COLUMNS[c]
     )
-  }
-  if (!hasConflictTarget(database, table, OBSERVATIONS_CONFLICT_KEY)) {
-    refuse(
-      `has no UNIQUE constraint on (${OBSERVATIONS_CONFLICT_KEY.join(', ')}), which ` +
+    if (unrepairable.length > 0) {
+      failure =
+        `is missing required column(s) ${unrepairable.join(', ')} which cannot be added by ALTER ` +
+        '(NOT NULL without a constant default); the table must be recreated'
+    } else if (!hasConflictTarget(database, table, OBSERVATIONS_CONFLICT_KEY)) {
+      failure =
+        `has no UNIQUE constraint on (${OBSERVATIONS_CONFLICT_KEY.join(', ')}), which ` +
         "recordProjectDiscoveryObservation's ON CONFLICT target requires; a primary key cannot be " +
         'added by ALTER, so the table must be recreated'
-    )
+    }
+
+    if (!failure) {
+      // --- 3. Repair what ALTER can add. ---
+      for (const column of OBSERVATIONS_REQUIRED_COLUMNS) {
+        if (original.has(column)) continue
+        console.log(`[Database] Repairing ${table}: adding ${column}`)
+        try {
+          database.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${OBSERVATIONS_REPAIRABLE_COLUMNS[column]}`)
+        } catch (e) {
+          // Swallowed only because the probe below is the real gate; a benign
+          // duplicate-column race leaves the column present and passes.
+          console.warn(`[Database] ${table} ALTER ${column} failed:`, (e as Error).message)
+        }
+      }
+
+      // --- 4. Probe the real write contract. ---
+      failure = probeObservationsWrite(database, 'hidock_observations_probe')
+    }
+  } catch (e) {
+    failure = `could not be validated (${(e as Error).message})`
+  } finally {
+    // --- 5. Discard everything on failure; keep only the repairs on success. ---
+    if (failure) {
+      try {
+        database.run(`ROLLBACK TO ${savepoint}`)
+      } catch { /* transaction already unwound */ }
+    }
+    try {
+      database.run(`RELEASE ${savepoint}`)
+    } catch { /* savepoint already gone */ }
   }
+
+  if (failure) refuse(failure)
 }
 
 /**
@@ -6334,18 +6407,11 @@ export function recordProjectDiscoveryObservation(
   const norm = normalizeName(name)
   if (!norm || !sourceKey) return 0
   const now = new Date().toISOString()
-  run(
-    `INSERT INTO project_discovery_observations
-       (name_norm, source_key, meeting_id, original_name, score, first_seen_at, last_seen_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(name_norm, source_key) DO UPDATE SET
-       -- Late correlation must UPDATE the row's meeting, not mint a new one.
-       meeting_id = COALESCE(excluded.meeting_id, project_discovery_observations.meeting_id),
-       original_name = excluded.original_name,
-       score = MAX(project_discovery_observations.score, excluded.score),
-       last_seen_at = excluded.last_seen_at`,
-    [norm, sourceKey, meetingId ?? null, name, score, now, now]
-  )
+  // OBSERVATIONS_UPSERT_SQL is shared with the boot probe (see
+  // ensureObservationsTableUsable) so the schema check exercises THIS statement.
+  // Its ON CONFLICT branch is what makes late correlation UPDATE the row's
+  // meeting rather than mint a second one.
+  run(OBSERVATIONS_UPSERT_SQL, [norm, sourceKey, meetingId ?? null, name, score, now, now])
   return countProjectDiscoverySources(name)
 }
 
