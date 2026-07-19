@@ -149,7 +149,14 @@ interface AppState {
   loadMeetings: (startDate?: string, endDate?: string) => Promise<void>
   syncCalendar: (trigger?: 'manual' | 'mount') => Promise<CalendarSyncResult>
   setLastCalendarSync: (lastSync: string | null) => void
-  setCalendarSyncing: (syncing: boolean) => void
+  /**
+   * Take/return a slot in the calendar-sync activity count. Every sync path must
+   * pair these (try/finally), including Calendar's clear-and-sync. A raw boolean
+   * setter used to exist beside the count and could drive calendarSyncing to
+   * false while another sync was still running.
+   */
+  acquireCalendarSync: (manual: boolean) => void
+  releaseCalendarSync: (manual: boolean) => void
 
   // Unified recordings actions (persists across page navigation)
   setUnifiedRecordings: (recordings: UnifiedRecording[]) => void
@@ -264,7 +271,22 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Meeting actions
   setMeetings: (meetings) => set({ meetings }),
   setLastCalendarSync: (lastSync) => set({ lastCalendarSync: lastSync }),
-  setCalendarSyncing: (syncing) => set({ calendarSyncing: syncing }),
+  acquireCalendarSync: (manual) =>
+    set((st) => ({
+      calendarSyncActiveCount: st.calendarSyncActiveCount + 1,
+      calendarSyncing: true,
+      ...(manual ? { calendarManualSyncing: true } : {})
+    })),
+
+  releaseCalendarSync: (manual) =>
+    set((st) => {
+      const count = Math.max(0, st.calendarSyncActiveCount - 1)
+      return {
+        calendarSyncActiveCount: count,
+        calendarSyncing: count > 0,
+        ...(manual ? { calendarManualSyncing: false } : {})
+      }
+    }),
 
   loadMeetings: async (startDate, endDate) => {
     set({ meetingsLoading: true })
@@ -291,21 +313,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     const manual = trigger === 'manual'
     // Counted, not boolean: a manual sync finishing must not clear the flag
     // while a mount sync is still in flight.
-    set((s) => ({
-      calendarSyncActiveCount: s.calendarSyncActiveCount + 1,
-      calendarSyncing: true,
-      ...(manual ? { calendarManualSyncing: true } : {})
-    }))
-
-    const release = (): void =>
-      set((s) => {
-        const count = Math.max(0, s.calendarSyncActiveCount - 1)
-        return {
-          calendarSyncActiveCount: count,
-          calendarSyncing: count > 0,
-          ...(manual ? { calendarManualSyncing: false } : {})
-        }
-      })
+    get().acquireCalendarSync(manual)
+    const release = (): void => get().releaseCalendarSync(manual)
 
     try {
       const result = await window.electronAPI.calendar.sync(trigger)
@@ -598,7 +607,8 @@ export const useCalendarView = () => useAppStore((s) => s.calendarView)
 export const useCurrentDate = () => useAppStore((s) => s.currentDate)
 // Calendar action selectors (B-CAL-001: named actions replace raw setState)
 export const useSetLastCalendarSync = () => useAppStore((s) => s.setLastCalendarSync)
-export const useSetCalendarSyncing = () => useAppStore((s) => s.setCalendarSyncing)
+export const useAcquireCalendarSync = () => useAppStore((s) => s.acquireCalendarSync)
+export const useReleaseCalendarSync = () => useAppStore((s) => s.releaseCalendarSync)
 
 // Device state selectors
 export const useDeviceState = () => useAppStore((s) => s.deviceState)

@@ -43,6 +43,8 @@ type PageOwner =
 
 /** Bytes per read while scanning for the frontmatter terminator. */
 const FRONTMATTER_CHUNK_BYTES = 4096
+/** U+FEFF. Written as a code point so no invisible character sits in the source. */
+const BOM_CODE_POINT = 0xfeff
 /**
  * Hard cap on frontmatter scanning. `recording_id` is NOT guaranteed to sit near
  * the head — `title` and `source_file` come first and carry arbitrary user
@@ -78,6 +80,46 @@ function parseRecordingIds(frontmatter: string): string[] {
     found.push(value.startsWith('"') ? unquoteYamlScalar(value) : value)
   }
   return found.filter((id) => id.length > 0)
+}
+
+/**
+ * True when a top-level scalar in the block opens a double quote it never
+ * closes — i.e. the block was cut off INSIDE a value.
+ *
+ * This is the fingerprint of the legacy injection: the old serializer escaped
+ * `"` to `\"`, so a payload smuggled through a title could never emit a real
+ * closing quote. Any `---` it injected therefore terminates the block while the
+ * title's quote is still open. Recognizing that is what keeps such a page from
+ * reading as an innocent "no recording_id here" file.
+ */
+function hasUnterminatedQuotedScalar(block: string): boolean {
+  for (const line of block.split(/\r?\n/)) {
+    if (/^\s/.test(line)) continue
+    const match = line.match(TOP_LEVEL_KEY_RE)
+    if (!match) continue
+    const value = match[2].trim()
+    if (!value.startsWith('"')) continue
+    let i = 1
+    let closed = false
+    while (i < value.length) {
+      if (value[i] === '\\') {
+        i += 2
+        continue
+      }
+      if (value[i] === '"') {
+        closed = true
+        break
+      }
+      i++
+    }
+    if (!closed) return true
+  }
+  return false
+}
+
+/** Does this text declare a recording_id at the start of a line? */
+function declaresRecordingId(text: string): boolean {
+  return /^recording_id:[ \t]*\S/m.test(text)
 }
 
 /** Decode a YAML double-quoted scalar written by `yamlEscape`. */
@@ -127,41 +169,78 @@ function readPageOwner(path: string): PageOwner {
     let consumed = 0
     let atEof = false
 
-    while (consumed < MAX_FRONTMATTER_BYTES) {
-      const bytes = readSync(fd, buf, 0, FRONTMATTER_CHUNK_BYTES, consumed)
+    /** Pull the next chunk in; returns false at EOF or at the byte cap. */
+    const readMore = (): boolean => {
+      if (atEof || consumed >= MAX_FRONTMATTER_BYTES) return false
+      const bytes = readSync(fd as number, buf, 0, FRONTMATTER_CHUNK_BYTES, consumed)
       if (bytes === 0) {
         text += decoder.end()
         atEof = true
-        break
+        return false
       }
       consumed += bytes
       text += decoder.write(buf.subarray(0, bytes))
+      // A UTF-8 BOM is invisible to the eye but breaks a literal `^---` test,
+      // which used to make every BOM-prefixed page read as "not ours".
+      if (consumed === bytes && text.charCodeAt(0) === BOM_CODE_POINT) text = text.slice(1)
+      return true
+    }
 
+    let end = -1
+    while (readMore()) {
       // Not one of our pages at all (no opening delimiter) — leave it alone.
       if (text.length >= 4 && !/^---\r?\n/.test(text)) return { kind: 'unowned' }
-
-      const end = text.search(FRONTMATTER_END_RE)
-      if (end !== -1) {
-        const ids = parseRecordingIds(text.slice(0, end))
-        if (ids.length === 1) return { kind: 'owned', recordingId: ids[0] }
-        if (ids.length === 0) return { kind: 'unowned' }
-        // Two or more ownership claims: the page is not trustworthy to delete on.
-        // Legacy pages written before frontmatter values were escaped can look
-        // like this; re-exporting rewrites them cleanly.
-        return {
-          kind: 'error',
-          reason: `frontmatter declares ${ids.length} recording_id values (${ids.join(', ')})`
-        }
-      }
+      end = text.search(FRONTMATTER_END_RE)
+      if (end !== -1) break
     }
 
     if (text.length < 4 || !/^---\r?\n/.test(text)) return { kind: 'unowned' }
-    return {
-      kind: 'error',
-      reason: atEof
-        ? 'frontmatter is not terminated'
-        : `frontmatter exceeds ${MAX_FRONTMATTER_BYTES} bytes`
+    if (end === -1) {
+      return {
+        kind: 'error',
+        reason: atEof
+          ? 'frontmatter is not terminated'
+          : `frontmatter exceeds ${MAX_FRONTMATTER_BYTES} bytes`
+      }
     }
+
+    const block = text.slice(0, end)
+    const ids = parseRecordingIds(block)
+
+    if (ids.length === 1) return { kind: 'owned', recordingId: ids[0] }
+    if (ids.length > 1) {
+      // Two or more ownership claims: not trustworthy to delete on.
+      return {
+        kind: 'error',
+        reason: `frontmatter declares ${ids.length} recording_id values (${ids.join(', ')})`
+      }
+    }
+
+    // Zero declarations. `unowned` must mean "provably has no recording_id",
+    // never "I stopped parsing early" — a page cut short by an injected `---`
+    // would otherwise be silently retained by the privacy purge with the real
+    // owner's content still in it.
+    if (hasUnterminatedQuotedScalar(block)) {
+      return {
+        kind: 'error',
+        reason: 'frontmatter block ends inside an unterminated quoted value'
+      }
+    }
+
+    // A closed block with a later ownership declaration means the terminator we
+    // honored was not the real one (hand-edited or corrupted page).
+    const AFTER_TERMINATOR_SCAN = 8192
+    while (text.length < end + AFTER_TERMINATOR_SCAN && readMore()) {
+      /* pull a little more of the file to inspect what follows the block */
+    }
+    if (declaresRecordingId(text.slice(end + 1, end + 1 + AFTER_TERMINATOR_SCAN))) {
+      return {
+        kind: 'error',
+        reason: 'a recording_id is declared after the frontmatter block ended'
+      }
+    }
+
+    return { kind: 'unowned' }
   } catch (e) {
     return { kind: 'error', reason: e instanceof Error ? e.message : String(e) }
   } finally {
@@ -563,43 +642,50 @@ function yieldToEventLoop(): Promise<void> {
 }
 
 /**
- * Recordings whose export failed on a previous pass, remembered ACROSS restarts.
+ * Where the backfill resumes, remembered ACROSS restarts.
  *
- * Without this, `maxFailures` traded one starvation for another: the missing-set
- * ordering is rebuilt identically on every boot, so a block of persistently
- * failing recordings at the head is retried — and hits the cutoff — in exactly
- * the same place every time, and the healthy recordings behind them are never
- * reached. Quarantined ids are ordered BEHIND recordings that have never been
- * attempted, so each pass makes progress on new work first and still retries the
- * failures with whatever budget is left.
+ * ## Why a cursor and not a failure list
  *
- * Derived state: losing the file only costs one extra retry round.
+ * A remembered set of failed ids does NOT guarantee progress once it is capped,
+ * and capping is unavoidable for an unbounded set. With more failures than the
+ * cap, each pass drops a different group off the end; the dropped ids read as
+ * "never attempted" again, jump back to the front, and the passes rotate through
+ * groups forever without ever reaching the healthy rows behind them.
+ *
+ * A position is bounded by construction. `missing` is sorted by recording id —
+ * a total order that is stable across passes — and each pass starts at the first
+ * id strictly after `resumeAfterId`, wrapping at the end. Every pass attempts at
+ * least one recording and records the LAST id it attempted, including when it
+ * stops at the failure limit, so the resume point strictly advances past every
+ * group it just tried. Any recording that can be written is therefore reached
+ * within one wrap, no matter how many failures exist or where they sit.
+ *
+ * Derived state: losing the file only costs one extra rotation.
  */
-const QUARANTINE_FILE = 'meeting-wiki-backfill.json'
-const QUARANTINE_LIMIT = 500
+const BACKFILL_STATE_FILE = 'meeting-wiki-backfill.json'
 
-function quarantinePath(): string {
-  return join(getCachePath(), QUARANTINE_FILE)
+function backfillStatePath(): string {
+  return join(getCachePath(), BACKFILL_STATE_FILE)
 }
 
-function loadQuarantine(): Set<string> {
+function loadResumeAfterId(): string | null {
   try {
-    const parsed = JSON.parse(readFileSync(quarantinePath(), 'utf-8')) as { failedIds?: unknown }
-    return new Set(Array.isArray(parsed?.failedIds) ? parsed.failedIds.map(String) : [])
+    const parsed = JSON.parse(readFileSync(backfillStatePath(), 'utf-8')) as {
+      resumeAfterId?: unknown
+    }
+    return typeof parsed?.resumeAfterId === 'string' ? parsed.resumeAfterId : null
   } catch {
-    return new Set() // absent or unreadable — start clean
+    return null // absent or unreadable — start from the top
   }
 }
 
-function saveQuarantine(ids: Set<string>): void {
+function saveResumeAfterId(resumeAfterId: string): void {
   try {
     const dir = getCachePath()
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-    // Keep the most recent entries; the list is a hint, not a ledger.
-    const failedIds = [...ids].slice(-QUARANTINE_LIMIT)
-    writeFileSync(quarantinePath(), JSON.stringify({ failedIds }), 'utf-8')
+    writeFileSync(backfillStatePath(), JSON.stringify({ resumeAfterId }), 'utf-8')
   } catch (e) {
-    console.warn('[MeetingWiki] Could not persist the backfill retry list:', e)
+    console.warn('[MeetingWiki] Could not persist the backfill resume point:', e)
   }
 }
 
@@ -659,20 +745,26 @@ export async function backfillMeetingWiki(
   // ONE directory scan for the whole pass — the fix for the quadratic blowup.
   const index = buildWikiIndex(dir)
 
-  // Ordering, in priority order (see the resumability note above):
-  //   1. missing and never-failed  — new work, always attempted first
-  //   2. missing and previously failed — retried behind new work, so a block of
-  //      persistent failures cannot pin the cutoff at the same place every boot
-  //   3. already has a page — re-verified with whatever budget is left
-  const quarantined = loadQuarantine()
+  // Recordings with no page yet go first, rotated so each pass starts past
+  // whatever the last one attempted (see the resume-cursor note above).
+  // Recordings that already have a page are re-verified afterwards, with
+  // whatever budget is left.
   const havePage = new Set(index.owner.values())
   const isMissing = (id: string): boolean => !havePage.has(id)
-  const missing = [
-    ...rows.filter((r) => isMissing(r.recording_id) && !quarantined.has(r.recording_id)),
-    ...rows.filter((r) => isMissing(r.recording_id) && quarantined.has(r.recording_id))
-  ]
+  const missingSorted = rows
+    .filter((r) => isMissing(r.recording_id))
+    .sort((a, b) => (a.recording_id < b.recording_id ? -1 : a.recording_id > b.recording_id ? 1 : 0))
+
+  const resumeAfterId = loadResumeAfterId()
+  let rotateAt = 0
+  if (resumeAfterId !== null) {
+    const next = missingSorted.findIndex((r) => r.recording_id > resumeAfterId)
+    rotateAt = next === -1 ? 0 : next // past the end -> wrap to the start
+  }
+  const missing = [...missingSorted.slice(rotateAt), ...missingSorted.slice(0, rotateAt)]
   const ordered = [...missing, ...rows.filter((r) => !isMissing(r.recording_id))]
-  const quarantineBefore = quarantined.size
+  /** Last missing recording this pass touched; becomes the next resume point. */
+  let lastAttemptedMissingId: string | null = null
 
   // Recordings from the missing set that ended this pass with a page (or with
   // nothing exportable). This — not `processed` — is what closes out the work.
@@ -686,6 +778,9 @@ export async function backfillMeetingWiki(
 
   for (const { recording_id } of ordered) {
     const startedAt = Date.now()
+    // Recorded BEFORE the attempt, and for failures too: the resume point must
+    // advance past everything this pass tried, or a failing group pins it.
+    if (stillMissing.has(recording_id)) lastAttemptedMissingId = recording_id
     try {
       const result = exportOne(recording_id, dir, index)
       if (result?.changed) written++
@@ -693,10 +788,8 @@ export async function backfillMeetingWiki(
       // A null result means there is nothing exportable for this recording; it is
       // resolved, not pending, or it would be "missing" forever.
       if (stillMissing.has(recording_id)) resolvedMissing.add(recording_id)
-      quarantined.delete(recording_id) // recovered — retry it normally next time
     } catch (e) {
       failed++
-      quarantined.add(recording_id)
       console.error(`[MeetingWiki] Export failed for ${recording_id}:`, e)
       // Refund the failure's time so failures cannot monopolize the head of
       // every pass and starve the recordings behind them.
@@ -722,8 +815,8 @@ export async function backfillMeetingWiki(
   const remaining = ordered.length - processed
   const remainingMissing = missing.length - resolvedMissing.size
 
-  // Only touch the file when the set actually moved.
-  if (quarantined.size !== quarantineBefore) saveQuarantine(quarantined)
+  // Advance the resume point past everything this pass attempted.
+  if (lastAttemptedMissingId !== null) saveResumeAfterId(lastAttemptedMissingId)
 
   if (rows.length > 0) {
     console.log(

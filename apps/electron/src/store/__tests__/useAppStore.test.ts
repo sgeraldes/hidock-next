@@ -1144,13 +1144,54 @@ describe('useAppStore', () => {
   })
 
   describe('Calendar Sync Actions', () => {
-    it('setCalendarSyncing sets syncing flag', () => {
-      const { setCalendarSyncing } = useAppStore.getState()
+    it('acquire/release drive the syncing flag', () => {
+      const { acquireCalendarSync, releaseCalendarSync } = useAppStore.getState()
 
-      setCalendarSyncing(true)
+      acquireCalendarSync(false)
       expect(useAppStore.getState().calendarSyncing).toBe(true)
 
-      setCalendarSyncing(false)
+      releaseCalendarSync(false)
+      expect(useAppStore.getState().calendarSyncing).toBe(false)
+    })
+
+    it('a manual acquire also gates the manual control', () => {
+      const { acquireCalendarSync, releaseCalendarSync } = useAppStore.getState()
+
+      acquireCalendarSync(true)
+      expect(useAppStore.getState().calendarManualSyncing).toBe(true)
+
+      releaseCalendarSync(true)
+      expect(useAppStore.getState().calendarManualSyncing).toBe(false)
+    })
+
+    /**
+     * Re-review #3: a raw boolean setter existed beside the count, and
+     * Calendar's clear-and-sync used it — so that finishing while another sync
+     * was still running set calendarSyncing=false despite a positive count, and
+     * the UI went idle mid-sync. The setter is gone; every path is counted.
+     */
+    it('clear-and-sync finishing does not clear the flag while a mount sync runs', () => {
+      const { acquireCalendarSync, releaseCalendarSync } = useAppStore.getState()
+
+      acquireCalendarSync(false) // the startup mount sync, parked on the boot gate
+      acquireCalendarSync(true) // Calendar's clear-and-sync, overlapping it
+      expect(useAppStore.getState().calendarSyncing).toBe(true)
+
+      releaseCalendarSync(true) // clear-and-sync finishes first
+      expect(useAppStore.getState().calendarManualSyncing).toBe(false)
+      // The mount sync is still running — activity must NOT read as idle.
+      expect(useAppStore.getState().calendarSyncing).toBe(true)
+
+      releaseCalendarSync(false)
+      expect(useAppStore.getState().calendarSyncing).toBe(false)
+    })
+
+    it('release never drives the count below zero', () => {
+      const { releaseCalendarSync } = useAppStore.getState()
+
+      releaseCalendarSync(true)
+      releaseCalendarSync(true)
+      expect(useAppStore.getState().calendarSyncActiveCount).toBe(0)
       expect(useAppStore.getState().calendarSyncing).toBe(false)
     })
 

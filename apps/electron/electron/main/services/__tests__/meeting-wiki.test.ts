@@ -329,6 +329,102 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
     expect(error.mock.calls.map((c) => String(c[0])).join(' ')).toContain('2 recording_id values')
   })
 
+  /**
+   * Re-review #1: every page ALREADY on disk was produced by the old
+   * serializer, which escaped only `\` and `"`. Those pages are the exact
+   * population the legacy handling exists to protect, and they must never read
+   * as a plain "no recording_id here" file — that answer makes the privacy
+   * purge silently retain the real owner's content AND report nothing.
+   */
+  describe('pages written by the OLD serializer', () => {
+    /** Verbatim reproduction of the pre-fix escaper. */
+    const legacyEscape = (v: string): string =>
+      `"${v.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+
+    /** Verbatim reproduction of the pre-fix frontmatter writer. */
+    const legacyPage = (title: string, recordingId: string, opts: { bom?: boolean } = {}): string => {
+      const fm = [
+        '---',
+        `title: ${legacyEscape(title)}`,
+        'date: 2026-07-07',
+        `recording_id: ${recordingId}`,
+        '---'
+      ].join('\n')
+      return `${opts.bom ? '﻿' : ''}${fm}\n\n# ${title}\n\ncontenido\n`
+    }
+
+    const write = (name: string, body: string): void => {
+      mkdirSync(wikiDir(), { recursive: true })
+      writeFileSync(join(wikiDir(), name), body, 'utf-8')
+    }
+
+    it('an embedded --- makes the page unverifiable, not silently unowned', async () => {
+      const { removeMeetingWiki } = await import('../meeting-wiki')
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+      // The hole: the injected terminator cuts the block before the real
+      // recording_id, so the block parses to ZERO ids.
+      write('legacy-term.md', legacyPage('x\n---\nrecording_id: rec-victim', 'rec-owner'))
+
+      // Neither the injected id nor the real one may be acted on...
+      expect(removeMeetingWiki('rec-victim')).toBe(0)
+      expect(removeMeetingWiki('rec-owner')).toBe(0)
+      expect(listWiki()).toEqual(['legacy-term.md'])
+      // ...and the retained content IS reported, rather than passing as a clean purge.
+      const logged = error.mock.calls.map((c) => String(c[0])).join(' ')
+      expect(logged).toContain('could not verify')
+      expect(logged).toContain('legacy-term.md')
+    })
+
+    it('reads a BOM-prefixed page normally instead of writing it off as foreign', async () => {
+      const { removeMeetingWiki } = await import('../meeting-wiki')
+      write('legacy-bom.md', legacyPage('Reunion Normal', 'rec-bom', { bom: true }))
+
+      // A BOM used to fail the opening-delimiter test, so the page read as
+      // unowned and survived its own purge.
+      expect(removeMeetingWiki('rec-bom')).toBe(1)
+      expect(listWiki()).toHaveLength(0)
+    })
+
+    it.each([
+      ['CR', '\r'],
+      ['NEL (U+0085)', ''],
+      ['LS (U+2028)', ' '],
+      ['PS (U+2029)', ' ']
+    ])('a %s in a legacy title cannot redirect the purge', async (_label, sep) => {
+      const { removeMeetingWiki } = await import('../meeting-wiki')
+      write('legacy-sep.md', legacyPage(`x${sep}recording_id: rec-victim${sep}y`, 'rec-owner'))
+
+      // The injected claim is never honored...
+      expect(removeMeetingWiki('rec-victim')).toBe(0)
+      expect(listWiki()).toEqual(['legacy-sep.md'])
+      // ...and the page still resolves to its true owner.
+      expect(removeMeetingWiki('rec-owner')).toBe(1)
+      expect(listWiki()).toHaveLength(0)
+    })
+
+    it('re-exporting a legacy injected page repairs it', async () => {
+      const { exportMeetingWiki, removeMeetingWiki } = await import('../meeting-wiki')
+
+      const title = 'x\n---\nrecording_id: rec-victim'
+      // Same filename the new writer derives from this title, so the repair
+      // lands on the existing page rather than beside it.
+      write('2026-07-07-x-recording-id-rec-victim.md', legacyPage(title, 'rec-owner'))
+
+      currentRow = {
+        recording_id: 'rec-owner',
+        full_text: 'contenido',
+        title_suggestion: title,
+        date_recorded: '2026-07-07T00:00:00.000Z'
+      }
+      exportMeetingWiki('rec-owner')
+
+      // After the rewrite the page is attributable again and purges cleanly.
+      expect(removeMeetingWiki('rec-owner')).toBe(1)
+      expect(listWiki()).toHaveLength(0)
+    })
+  })
+
   it('re-checks ownership at delete time — a page rewritten mid-pass is NOT destroyed', async () => {
     const { backfillMeetingWiki } = await import('../meeting-wiki')
 
@@ -626,7 +722,73 @@ describe('backfillMeetingWiki — bounded, yielding, resumable (F15)', () => {
     expect(listWiki()).toHaveLength(N - 50)
   })
 
-  it('drops a recording from the retry list once it succeeds again', async () => {
+  /**
+   * Re-review #2: a capped set of remembered failures cannot guarantee progress.
+   * Above the cap each pass drops a different group, the dropped ids read as
+   * never-attempted again, and the passes rotate through groups forever without
+   * reaching the healthy rows. The resume cursor is a POSITION, so it advances
+   * past every group it attempts regardless of how many failures exist.
+   */
+  it('healthy rows behind MORE than 500 persistent failures are eventually written', async () => {
+    const { backfillMeetingWiki } = await import('../meeting-wiki')
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    // 550 permanently failing recordings, then 2 healthy ones. Ids are zero
+    // padded so the sort order matches the intended sequence.
+    const total = 552
+    backfillRows = []
+    for (let i = 0; i < total; i++) backfillRows.push({ recording_id: `r-${String(i).padStart(4, '0')}` })
+    const healthy = new Set(['r-0550', 'r-0551'])
+    rowById = (id) => {
+      if (!healthy.has(id)) throw new Error('EACCES: permission denied')
+      return {
+        recording_id: id,
+        full_text: 'contenido',
+        title_suggestion: `Reunion ${id}`,
+        date_recorded: '2026-07-07T00:00:00.000Z'
+      }
+    }
+
+    // Each "boot" stops at the 50-failure cutoff. With a capped failure SET this
+    // never terminates; with a cursor it must reach the healthy tail.
+    let passes = 0
+    while (passes < 20 && listWiki().length < 2) {
+      await backfillMeetingWiki({ maxFailures: 50 })
+      passes++
+    }
+
+    expect(listWiki()).toHaveLength(2)
+    // 550 failures at 50 per pass = 11 passes spent purely on failures before the
+    // healthy tail is reachable. The lower bound proves the scenario really is
+    // the multi-pass one and did not converge by accident.
+    expect(passes).toBeGreaterThanOrEqual(11)
+    expect(passes).toBeLessThanOrEqual(13)
+  })
+
+  it('resumes past the failures it already attempted rather than retrying them first', async () => {
+    const { backfillMeetingWiki } = await import('../meeting-wiki')
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const attempted: string[][] = []
+    const base = rowById!
+    rowById = (id) => {
+      attempted[attempted.length - 1].push(id)
+      throw new Error('EACCES: permission denied')
+    }
+    void base
+
+    attempted.push([])
+    await backfillMeetingWiki({ maxFailures: 5 })
+    attempted.push([])
+    await backfillMeetingWiki({ maxFailures: 5 })
+
+    // The second pass starts where the first stopped — no overlap.
+    expect(attempted[0]).toHaveLength(5)
+    expect(attempted[1]).toHaveLength(5)
+    expect(attempted[1].some((id) => attempted[0].includes(id))).toBe(false)
+  })
+
+  it('a recovered recording is written on the next pass and stops being outstanding', async () => {
     const { backfillMeetingWiki } = await import('../meeting-wiki')
     vi.spyOn(console, 'error').mockImplementation(() => {})
 
