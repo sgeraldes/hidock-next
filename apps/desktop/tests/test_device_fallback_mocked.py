@@ -231,7 +231,7 @@ class TestDeviceFallbackMocked:
         mock_jensen.get_device_info.return_value = {"sn": "H1E123456", "versionCode": "1.2.0"}
 
         # Test with invalid device ID - should use defaults
-        result = await adapter.connect(device_id="invalid:format")
+        await adapter.connect(device_id="invalid:format")
 
         # Should fall back to the configured defaults rather than a hardcoded model.
         mock_jensen.connect.assert_called_once_with(
@@ -252,7 +252,7 @@ class TestDeviceFallbackMocked:
         mock_jensen.get_device_info.return_value = {"sn": "H1E123456", "versionCode": "1.2.0"}
 
         # Test with None device_id
-        result = await adapter.connect(device_id=None)
+        await adapter.connect(device_id=None)
 
         # Should fall back to the configured defaults rather than a hardcoded model.
         mock_jensen.connect.assert_called_once_with(
