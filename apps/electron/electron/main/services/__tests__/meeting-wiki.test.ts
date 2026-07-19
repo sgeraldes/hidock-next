@@ -422,6 +422,40 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
       expect(listWiki()).toHaveLength(0)
     })
 
+    /**
+     * Re-review #1: the old serializer allowed a RAW newline in titles. A title
+     * containing one followed by `recording_id:` — with no injected terminator —
+     * leaves an unterminated `title`, then the injected id, then the writer's
+     * real id. Requiring `entries.length === 1` for the truncated case
+     * classified that genuine legacy page as FOREIGN, and foreign pages with
+     * multiple ids resolve to `unowned`: the file was RETAINED through BOTH
+     * owners' privacy purges with nothing reported at all.
+     */
+    it('a legacy multiline title (no terminator) is reported, never silently retained', async () => {
+      const { removeMeetingWiki } = await import('../meeting-wiki')
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+      write('legacy-multiline.md', legacyPage('x\nrecording_id: rec-victim', 'rec-owner'))
+
+      // Sanity: this really is the three-entry shape, not a truncated block.
+      const body = readFileSync(join(wikiDir(), 'legacy-multiline.md'), 'utf-8')
+      expect(body).toContain('title: "x\nrecording_id: rec-victim"')
+      expect(body).toContain('recording_id: rec-owner')
+
+      // Neither owner's purge may delete it — it is unverifiable...
+      expect(removeMeetingWiki('rec-victim')).toBe(0)
+      expect(removeMeetingWiki('rec-owner')).toBe(0)
+      expect(listWiki()).toEqual(['legacy-multiline.md'])
+
+      // ...and BOTH purges must say so, rather than reporting a clean sweep
+      // while private transcript content stays on disk.
+      const logged = error.mock.calls.map((c) => String(c[0]))
+      const reports = logged.filter((m) => m.includes('could not verify'))
+      expect(reports).toHaveLength(2)
+      expect(reports.every((m) => m.includes('legacy-multiline.md'))).toBe(true)
+      expect(reports[0]).toContain('2 recording_id values')
+    })
+
     it('a NEW page carries the generator marker and round-trips', async () => {
       const { exportMeetingWiki, removeMeetingWiki } = await import('../meeting-wiki')
 
@@ -585,6 +619,75 @@ describe('wiki page ownership — safe for deletion (adversarial review #1)', ()
           '```yaml',
           'recording_id: rec-example',
           '```',
+          ''
+        ].join('\n')
+      )
+      expect(logged).toBe('')
+    })
+
+    /**
+     * Re-review #2: `marked` was returned for ANY top-level generator key,
+     * regardless of position, schema value, or duplicates — so a page that
+     * merely documents this format entered the ours-only corruption analysis.
+     * The contract is "the first two keys are the marker"; these pin it.
+     */
+    it.each([
+      [
+        'marker with no schema key',
+        ['---', 'generator: hidock-meeting-wiki', 'title: "Sin schema"', '---']
+      ],
+      [
+        'reordered identity pair',
+        ['---', 'wiki_schema: 1', 'generator: hidock-meeting-wiki', 'title: "Al reves"', '---']
+      ],
+      [
+        'unsupported schema value',
+        ['---', 'generator: hidock-meeting-wiki', 'wiki_schema: 7', 'title: "Futuro"', '---']
+      ],
+      [
+        'duplicate conflicting generator keys',
+        [
+          '---',
+          'generator: hidock-meeting-wiki',
+          'wiki_schema: 1',
+          'generator: something-else',
+          'title: "Ambiguo"',
+          '---'
+        ]
+      ],
+      [
+        'marker present but not first',
+        [
+          '---',
+          'title: "Primero el titulo"',
+          'generator: hidock-meeting-wiki',
+          'wiki_schema: 1',
+          '---'
+        ]
+      ]
+    ])('is foreign: %s', async (_label, frontmatter) => {
+      // Each of these has zero recording_id declarations, so if it were wrongly
+      // treated as ours it would be flagged as a generated page missing its id.
+      const logged = await foreign('identity.md', `${frontmatter.join('\n')}\n\n# Pagina\n`)
+      expect(logged).toBe('')
+    })
+
+    it('a page that DOCUMENTS the marker format in its body', async () => {
+      const logged = await foreign(
+        'docs-format.md',
+        [
+          '---',
+          'title: "Formato de las paginas wiki"',
+          '---',
+          '',
+          '# Formato',
+          '',
+          'Cada pagina empieza asi:',
+          '',
+          'generator: hidock-meeting-wiki',
+          'wiki_schema: 1',
+          'recording_id: rec-example',
+          '---',
           ''
         ].join('\n')
       )

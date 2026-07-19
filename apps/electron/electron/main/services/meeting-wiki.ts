@@ -78,6 +78,16 @@ const TOP_LEVEL_KEY_RE = /^([A-Za-z_][A-Za-z0-9_-]*):[ \t]*(.*)$/
  */
 const GENERATOR_ID = 'hidock-meeting-wiki'
 const WIKI_SCHEMA_VERSION = 1
+/**
+ * Schema versions this build will still claim as ours. Bumping
+ * WIKI_SCHEMA_VERSION must ADD to this set, never replace it: a page written by
+ * a newer build is still ours, and treating it as foreign would make it inert —
+ * never purged, never reported.
+ */
+const SUPPORTED_WIKI_SCHEMAS = new Set([1])
+
+/** The bare `YYYY-MM-DD` the old writer emitted for `date`. */
+const LEGACY_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
 /** Where a page came from, which decides whether we may reason about it at all. */
 type PageKind = 'marked' | 'legacy' | 'foreign'
@@ -130,9 +140,56 @@ function isClosedQuotedScalar(value: string): boolean {
 function matchesLegacyWriter(entries: FrontmatterEntry[]): boolean {
   const first = entries[0]
   if (!first || first.key !== 'title' || !first.value.startsWith('"')) return false
-  if (!isClosedQuotedScalar(first.value)) return entries.length === 1
-  const second = entries[1]
-  return !!second && second.key === 'date' && /^\d{4}-\d{2}-\d{2}$/.test(second.value)
+
+  // Intact page: the writer always emitted `date` immediately after `title`.
+  if (isClosedQuotedScalar(first.value)) {
+    const second = entries[1]
+    return !!second && second.key === 'date' && LEGACY_DATE_RE.test(second.value)
+  }
+
+  // Unterminated title — the block was cut inside the title value. Two shapes:
+  //
+  //  1. A payload injected a `---`, truncating the block right there, so nothing
+  //     of the writer survives after it.
+  //  2. A payload contained only a raw newline (no terminator). The title spills
+  //     across lines, but the writer's OWN SUBSEQUENT KEYS are still in the
+  //     block — a `date: YYYY-MM-DD` entry after the title is the tail
+  //     fingerprint that identifies this as ours.
+  //
+  // Shape 2 is why `entries.length === 1` alone was not enough: such a page has
+  // an injected id AND the real one, so being misread as foreign made its
+  // multiple claims resolve to `unowned` — retained through BOTH owners' privacy
+  // purges, with nothing reported.
+  if (entries.length === 1) return true
+  return entries.slice(1).some((e) => e.key === 'date' && LEGACY_DATE_RE.test(e.value))
+}
+
+/** Unwrap a scalar that may or may not be double-quoted. */
+function scalarValue(raw: string): string {
+  return raw.startsWith('"') ? unquoteYamlScalar(raw) : raw
+}
+
+/**
+ * Does the block carry our identity header, EXACTLY as the writer emits it?
+ *
+ * The contract is "the first two keys are the marker", so it is enforced as
+ * written rather than as "a generator key appears somewhere". A looser test let
+ * any page that merely mentions the marker — a Jekyll site, or documentation
+ * describing this very format — into the ours-only corruption analysis, which is
+ * both wrong and unsafe under marker collision.
+ *
+ * Duplicate identity keys are rejected outright: if a page declares the marker
+ * twice we cannot tell which claim to trust, and our writer never produces that.
+ */
+function hasIdentityHeader(entries: FrontmatterEntry[]): boolean {
+  if (entries.filter((e) => e.key === 'generator').length !== 1) return false
+  if (entries.filter((e) => e.key === 'wiki_schema').length !== 1) return false
+
+  const [generator, schema] = entries
+  if (!generator || generator.key !== 'generator') return false
+  if (scalarValue(generator.value) !== GENERATOR_ID) return false
+  if (!schema || schema.key !== 'wiki_schema') return false
+  return SUPPORTED_WIKI_SCHEMAS.has(Number(scalarValue(schema.value)))
 }
 
 /**
@@ -140,11 +197,7 @@ function matchesLegacyWriter(entries: FrontmatterEntry[]): boolean {
  * detection, purge reporting — applies only when the answer is yes.
  */
 function classifyPage(entries: FrontmatterEntry[]): PageKind {
-  for (const entry of entries) {
-    if (entry.key !== 'generator') continue
-    const value = entry.value.startsWith('"') ? unquoteYamlScalar(entry.value) : entry.value
-    if (value === GENERATOR_ID) return 'marked'
-  }
+  if (hasIdentityHeader(entries)) return 'marked'
   return matchesLegacyWriter(entries) ? 'legacy' : 'foreign'
 }
 
