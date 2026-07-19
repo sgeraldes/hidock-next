@@ -525,15 +525,23 @@ function FullTimeline({
   // Sentiment polyline points (px-independent: x in [0,1], y in [0,1], 0 = top).
   const sentimentPath = useMemo(() => {
     if (!sentiment || sentiment.length === 0 || duration <= 0) return null
-    const pts = sentiment
-      .filter((s) => s.endSec > s.startSec)
+    const validSegments = sentiment.filter((s) => s.endSec > s.startSec)
+    const pts = validSegments
       .map((s) => {
         const midX = ((s.startSec + s.endSec) / 2 / duration)
         const y = (1 - (Math.max(-1, Math.min(1, s.score)) + 1) / 2)
         return { x: Math.max(0, Math.min(1, midX)), y }
       })
       .sort((a, b) => a.x - b.x)
-    return pts.length >= 2 ? pts : null
+    if (pts.length >= 2) return pts
+    if (pts.length === 1) {
+      const segment = validSegments[0]
+      return [
+        { x: Math.max(0, Math.min(1, segment.startSec / duration)), y: pts[0].y },
+        { x: Math.max(0, Math.min(1, segment.endSec / duration)), y: pts[0].y }
+      ]
+    }
+    return null
   }, [sentiment, duration])
 
   const activateEvent = useCallback(

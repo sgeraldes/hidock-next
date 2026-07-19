@@ -19,8 +19,14 @@ const source = readFileSync(join(__dirname, '..', 'database.ts'), 'utf-8')
 const reconciler = readFileSync(join(__dirname, '..', 'org-reconciler.ts'), 'utf-8')
 
 describe('schema v42: projects.origin (provenance-enforced discovered-project dismissal)', () => {
-  it('bumps SCHEMA_VERSION to 42 (current)', () => {
-    expect(source).toMatch(/const SCHEMA_VERSION = 42\b/)
+  it('bumps SCHEMA_VERSION to at least 42', () => {
+    // Floor, not exact pin (the v40 convention): v43+ must not break the v42
+    // contract. The CURRENT version is pinned dynamically — database.test.ts and
+    // deep-editability.test.ts assert the booted DB matches the SCHEMA_VERSION
+    // parsed from source, so it can no longer drift out of sync with a literal.
+    const m = source.match(/const SCHEMA_VERSION = (\d+)\b/)
+    expect(m).not.toBeNull()
+    expect(Number(m![1])).toBeGreaterThanOrEqual(42)
   })
 
   it('fresh schema creates projects with the origin column (manual | discovered)', () => {
