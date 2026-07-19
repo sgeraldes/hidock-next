@@ -104,17 +104,27 @@ describe('v43 heal: a database stranded with the pre-meeting_id table shape', ()
    * write, recreating the stranded condition for the whole session and, under a
    * persistent failure, indefinitely.
    *
-   * Two injections, because they exercise DIFFERENT code paths:
+   * Four injections, each exercising a DIFFERENT way the schema can be unusable.
+   * `CREATE TABLE IF NOT EXISTS` is a no-op against any existing object, so none
+   * of these self-heal:
    *
-   *   VIEW  — PRAGMA table_info still reports columns, so the repair sees a shape
-   *           missing meeting_id and attempts (and fails) the ALTER.
-   *   INDEX — the nastier one. SQLite shares a namespace across tables, views and
-   *           indexes, so CREATE TABLE fails with "there is already an index
-   *           named …" while PRAGMA table_info returns []. An earlier cut gated
-   *           its verification on PRAGMA returning rows, so an EMPTY column list
-   *           skipped the check entirely and the boot continued.
+   *   VIEW            — PRAGMA table_info still reports columns, so the repair
+   *                     sees a shape missing meeting_id and attempts the ALTER.
+   *   INDEX           — SQLite shares a namespace across tables, views and
+   *                     indexes, so CREATE TABLE fails with "there is already an
+   *                     index named …" while PRAGMA table_info returns []. An
+   *                     earlier cut gated its verification on PRAGMA returning
+   *                     rows, so an EMPTY column list skipped the check entirely.
+   *   MEETING_ID-ONLY — a real table carrying only the column the old check
+   *                     looked for. ALTER can add score and the timestamps, but
+   *                     name_norm/source_key/original_name are NOT NULL without a
+   *                     constant default and cannot be added at all.
+   *   NO COMPOSITE KEY— the subtlest: every column present, so column checks pass,
+   *                     but ON CONFLICT(name_norm, source_key) has no constraint
+   *                     to resolve against and every observation write throws at
+   *                     runtime.
    *
-   * Both must throw, and a later boot with the injection cleared must heal.
+   * All four must throw, and a later boot with the injection cleared must heal.
    */
   it.each([
     [
@@ -131,6 +141,22 @@ describe('v43 heal: a database stranded with the pre-meeting_id table shape', ()
        CREATE INDEX project_discovery_observations ON decoy_for_index(col)`,
       'DROP INDEX project_discovery_observations',
       /exists as a index, not a table/
+    ],
+    [
+      'a meeting_id-only table (unrepairable NOT NULL columns)',
+      'CREATE TABLE project_discovery_observations (meeting_id TEXT)',
+      'DROP TABLE project_discovery_observations',
+      /missing required column\(s\).*name_norm.*cannot be added by ALTER/
+    ],
+    [
+      'a full-column table WITHOUT the composite key (ON CONFLICT has no target)',
+      `CREATE TABLE project_discovery_observations (
+         name_norm TEXT NOT NULL, source_key TEXT NOT NULL, meeting_id TEXT,
+         original_name TEXT NOT NULL, score REAL NOT NULL DEFAULT 0,
+         first_seen_at TEXT, last_seen_at TEXT
+       )`,
+      'DROP TABLE project_discovery_observations',
+      /no UNIQUE constraint on \(name_norm, source_key\)/
     ]
   ])('fails the boot loudly when %s blocks the repair', async (_label, inject, cleanup, expected) => {
     const backup = queryAll<{ name_norm: string; source_key: string; original_name: string; score: number }>(

@@ -2331,17 +2331,13 @@ const MIGRATIONS: Record<number, () => void> = {
     const database = getDatabase()
     database.run(OBSERVATIONS_TABLE_DDL)
     // CREATE TABLE IF NOT EXISTS is a no-op against a table that already exists
-    // with the wrong shape, so add the column explicitly when it is missing.
-    const cols = getTableColumns(database, 'project_discovery_observations')
-    if (cols.length > 0 && !cols.includes('meeting_id')) {
-      database.run('ALTER TABLE project_discovery_observations ADD COLUMN meeting_id TEXT')
-    }
-    // VERIFY (shared, unconditional, type-checked) and let any failure propagate.
-    // The engine records a version only AFTER its migration returns, so throwing
-    // here leaves the DB below 43 and the next boot retries — swallowing would
-    // mark the migration complete over a table that cannot accept an insert,
-    // killing discovery silently. Same fail-loud policy as the v42 re-key.
-    assertObservationsTableUsable(database, '[Migration v43]')
+    // with the wrong shape, so the shared helper repairs what ALTER can add and
+    // validates the FULL write contract (every column + the ON CONFLICT target).
+    // Any failure propagates: the engine records a version only AFTER its
+    // migration returns, so throwing leaves the DB below 43 and the next boot
+    // retries — swallowing would mark the migration complete over a table that
+    // cannot accept an insert. Same fail-loud policy as the v42 re-key.
+    ensureObservationsTableUsable(database, '[Migration v43]')
     console.log('Migration v43 complete')
   }
 
@@ -2361,43 +2357,144 @@ const OBSERVATIONS_TABLE_DDL = `
   )
 `
 
+/** Every column recordProjectDiscoveryObservation writes. */
+const OBSERVATIONS_REQUIRED_COLUMNS = [
+  'name_norm',
+  'source_key',
+  'meeting_id',
+  'original_name',
+  'score',
+  'first_seen_at',
+  'last_seen_at'
+]
+
 /**
- * Verify project_discovery_observations is usable, or refuse to continue.
+ * Columns that can be ALTERed into an existing table: nullable, or NOT NULL with
+ * a CONSTANT default (SQLite rejects a non-constant one, which is why the
+ * timestamps are added bare — every writer passes them explicitly anyway).
  *
- * UNCONDITIONAL, and deliberately not gated on PRAGMA returning rows. An earlier
- * cut only verified when `getTableColumns` returned at least one column, so an
- * ABSENT table sailed through: SQLite shares one namespace across tables, views
- * and indexes, so a same-named INDEX makes CREATE TABLE fail ("there is already
- * an index named …") while PRAGMA table_info returns [] — the guard saw an empty
- * column list, skipped the check, and an already-v43 DB booted "fine" while every
- * observation write failed, silently disabling discovery.
- *
- * So this asks sqlite_master directly: the object must EXIST, be a TABLE (not a
- * view or index), and carry meeting_id. Anything else throws. Called after the
- * create/ALTER attempts in both heal paths, so it is the single decision point
- * and the two paths cannot drift.
+ * The rest (name_norm, source_key, original_name) are NOT NULL without a
+ * constant default and cannot be added at all. They are also the primary-key
+ * columns, so a table missing them is structurally wrong rather than incomplete.
  */
-function assertObservationsTableUsable(database: ReturnType<typeof getDatabase>, context: string): void {
-  const found = database.exec(
-    "SELECT type FROM sqlite_master WHERE name = 'project_discovery_observations'"
-  )
+const OBSERVATIONS_REPAIRABLE_COLUMNS: Record<string, string> = {
+  meeting_id: 'TEXT',
+  score: 'REAL NOT NULL DEFAULT 0',
+  first_seen_at: 'TEXT',
+  last_seen_at: 'TEXT'
+}
+
+/** recordProjectDiscoveryObservation's ON CONFLICT target — needs a real constraint. */
+const OBSERVATIONS_CONFLICT_KEY = ['name_norm', 'source_key']
+
+type PragmaRow = Array<string | number | null | Uint8Array>
+
+function pragmaRows(database: ReturnType<typeof getDatabase>, pragma: string): PragmaRow[] {
+  try {
+    const res = database.exec(`PRAGMA ${pragma}`)
+    return (res[0]?.values as PragmaRow[]) ?? []
+  } catch {
+    return []
+  }
+}
+
+const sameColumnSet = (a: string[], b: string[]): boolean =>
+  a.length === b.length && [...a].sort().join(' ') === [...b].sort().join(' ')
+
+/**
+ * Whether a UNIQUE constraint exists on exactly `target`, which is what SQLite
+ * requires to resolve an `ON CONFLICT(<target>)` clause. Checks the declared
+ * PRIMARY KEY (PRAGMA table_info's pk ordinal) and every non-partial UNIQUE index
+ * (PRAGMA index_list/index_info) — partial indexes cannot be conflict targets.
+ */
+function hasConflictTarget(
+  database: ReturnType<typeof getDatabase>,
+  table: string,
+  target: string[]
+): boolean {
+  // table_info: [cid, name, type, notnull, dflt_value, pk]
+  const pkCols = pragmaRows(database, `table_info(${table})`)
+    .filter((r) => Number(r[5] ?? 0) > 0)
+    .sort((a, b) => Number(a[5]) - Number(b[5]))
+    .map((r) => String(r[1]))
+  if (sameColumnSet(pkCols, target)) return true
+
+  // index_list: [seq, name, unique, origin, partial]
+  for (const idx of pragmaRows(database, `index_list(${table})`)) {
+    if (Number(idx[2] ?? 0) !== 1) continue // not UNIQUE
+    if (Number(idx[4] ?? 0) === 1) continue // partial — not a valid conflict target
+    // index_info: [seqno, cid, name]
+    const cols = pragmaRows(database, `index_info('${String(idx[1])}')`).map((r) => String(r[2]))
+    if (sameColumnSet(cols, target)) return true
+  }
+  return false
+}
+
+/**
+ * Bring project_discovery_observations up to its FULL write contract, or refuse
+ * to start. Unconditional, and shared by both heal paths so they cannot drift.
+ *
+ * Checking "is a table and has meeting_id" was not enough. `CREATE TABLE IF NOT
+ * EXISTS` is a no-op against ANY existing table, so a malformed one passed:
+ *  - a table with meeting_id but missing name_norm/source_key/original_name/score
+ *    or the timestamps — every insert fails on the missing column;
+ *  - worse, a table with every column but no composite PRIMARY KEY — inserts look
+ *    fine until recordProjectDiscoveryObservation's ON CONFLICT(name_norm,
+ *    source_key) finds no matching constraint and throws at runtime.
+ * Both booted "successfully" while discovery writes were broken, which is exactly
+ * the failure mode this guard exists to eliminate.
+ *
+ * So the whole contract is validated: object exists, is a TABLE (not a view or
+ * index), carries every required column, and has a UNIQUE constraint on
+ * (name_norm, source_key).
+ *
+ * REPAIR vs REFUSE: a missing column that can be ALTERed in is repaired silently
+ * (this is the real-world v43 case — meeting_id shipped a commit late). Anything
+ * ALTER cannot fix throws with a message naming the problem: a NOT NULL column
+ * with no constant default, or a missing/mismatched primary key — SQLite cannot
+ * add a primary key to an existing table, so that one requires recreating it.
+ */
+function ensureObservationsTableUsable(database: ReturnType<typeof getDatabase>, context: string): void {
+  const table = 'project_discovery_observations'
+  const refuse = (problem: string): never => {
+    throw new Error(`${context}: ${table} ${problem}; refusing to start with a schema that cannot record project discoveries`)
+  }
+
+  const found = database.exec(`SELECT type FROM sqlite_master WHERE name = '${table}'`)
   const type = found[0]?.values?.[0]?.[0]
-  if (!type) {
-    throw new Error(
-      `${context}: project_discovery_observations does not exist and could not be created; ` +
-        'refusing to start with a schema that cannot record project discoveries'
+  if (!type) refuse('does not exist and could not be created')
+  if (type !== 'table') refuse(`exists as a ${String(type)}, not a table`)
+
+  // Repair what ALTER can add.
+  const present = new Set(getTableColumns(database, table))
+  for (const column of OBSERVATIONS_REQUIRED_COLUMNS) {
+    if (present.has(column)) continue
+    const definition = OBSERVATIONS_REPAIRABLE_COLUMNS[column]
+    if (!definition) continue // unrepairable — reported below
+    console.log(`[Database] Repairing ${table}: adding ${column}`)
+    try {
+      database.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
+    } catch (e) {
+      // Swallowed only because the verification below is unconditional; a benign
+      // duplicate-column race leaves the column present and passes.
+      console.warn(`[Database] ${table} ALTER ${column} failed:`, (e as Error).message)
+    }
+  }
+
+  // Verify the full contract.
+  const columns = new Set(getTableColumns(database, table))
+  const missing = OBSERVATIONS_REQUIRED_COLUMNS.filter((c) => !columns.has(c))
+  if (missing.length > 0) {
+    refuse(
+      `is missing required column(s) ${missing.join(', ')} which cannot be added by ALTER ` +
+        '(NOT NULL without a constant default); the table must be recreated'
     )
   }
-  if (type !== 'table') {
-    throw new Error(
-      `${context}: project_discovery_observations exists as a ${String(type)}, not a table; ` +
-        'refusing to start with a schema that cannot record project discoveries'
-    )
-  }
-  if (!getTableColumns(database, 'project_discovery_observations').includes('meeting_id')) {
-    throw new Error(
-      `${context}: project_discovery_observations is missing meeting_id and could not be repaired; ` +
-        'refusing to start with a table that cannot record project discoveries'
+  if (!hasConflictTarget(database, table, OBSERVATIONS_CONFLICT_KEY)) {
+    refuse(
+      `has no UNIQUE constraint on (${OBSERVATIONS_CONFLICT_KEY.join(', ')}), which ` +
+        "recordProjectDiscoveryObservation's ON CONFLICT target requires; a primary key cannot be " +
+        'added by ALTER, so the table must be recreated'
     )
   }
 }
@@ -2526,21 +2623,10 @@ function repairPhase(): void {
   try {
     database.run(OBSERVATIONS_TABLE_DDL)
   } catch (e) {
-    // May legitimately already exist — the unconditional verify below decides.
+    // May legitimately already exist — the unconditional check below decides.
     console.warn('[Database] project_discovery_observations create skipped:', (e as Error).message)
   }
-  const obsCols = getTableColumns(database, 'project_discovery_observations')
-  if (obsCols.length > 0 && !obsCols.includes('meeting_id')) {
-    console.log('[Database] Repairing project_discovery_observations: adding meeting_id')
-    try {
-      database.run('ALTER TABLE project_discovery_observations ADD COLUMN meeting_id TEXT')
-    } catch (e) {
-      // Swallowed here ONLY because the verify below is unconditional; a benign
-      // duplicate-column race leaves the column present and passes.
-      console.warn('[Database] project_discovery_observations ALTER failed:', (e as Error).message)
-    }
-  }
-  assertObservationsTableUsable(database, '[Database] repairPhase')
+  ensureObservationsTableUsable(database, '[Database] repairPhase')
 
   // Repair transcript_speakers (v25): a new table has no columns to ALTER, but
   // force-create it here so an older on-disk DB that skipped the migration still

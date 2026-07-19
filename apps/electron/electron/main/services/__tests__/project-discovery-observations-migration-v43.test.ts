@@ -122,37 +122,72 @@ describe('schema v43: project_discovery_observations (F12 discovery gate)', () =
    * repairPhase must verify-and-ALTER. (Runtime heal proven against the real
    * engine in project-discovery-observations-heal-v43.test.ts.)
    */
-  it('both heal paths add meeting_id when the table already exists without it', () => {
-    const migration = source.match(/\n {2}43: \(\) => \{[\s\S]*?\n {2}\}/)![0]
-    const repair = source.match(/function repairPhase\(\): void \{[\s\S]*?\n\}/)![0]
-    for (const block of [migration, repair]) {
-      expect(block).toContain('ALTER TABLE project_discovery_observations ADD COLUMN meeting_id TEXT')
-    }
-  })
-
   /**
-   * The verification must be UNCONDITIONAL and type-checked. An earlier cut only
-   * verified when PRAGMA returned at least one column, so an ABSENT table (e.g.
-   * blocked by a same-named index, where PRAGMA returns []) skipped the check and
-   * the boot continued with discovery silently dead.
+   * The verification must be UNCONDITIONAL and validate the FULL write contract.
+   * Two earlier cuts leaked: one only verified when PRAGMA returned at least one
+   * column (so an absent table blocked by a same-named index sailed through), and
+   * one checked only "is a table and has meeting_id" (so a malformed table — or
+   * one lacking the composite key ON CONFLICT needs — booted with writes broken).
    */
-  it('both heal paths end in the shared unconditional verification', () => {
+  it('both heal paths end in the shared unconditional check', () => {
     const migration = source.match(/\n {2}43: \(\) => \{[\s\S]*?\n {2}\}/)![0]
     const repair = source.match(/function repairPhase\(\): void \{[\s\S]*?\n\}/)![0]
     for (const block of [migration, repair]) {
-      expect(block).toContain('assertObservationsTableUsable(database')
+      expect(block).toContain('ensureObservationsTableUsable(database')
     }
   })
 
-  it('the verification asks sqlite_master for the object type, not just PRAGMA columns', () => {
-    const assertFn = source.match(/function assertObservationsTableUsable\([\s\S]*?\n\}/)
-    expect(assertFn).not.toBeNull()
-    const body = assertFn![0]
-    // Existence + type + column, each with its own throw. No PRAGMA-length gate.
-    expect(body).toContain("SELECT type FROM sqlite_master WHERE name = 'project_discovery_observations'")
+  it('declares the complete write contract every insert depends on', () => {
+    const required = source.match(/const OBSERVATIONS_REQUIRED_COLUMNS = \[[\s\S]*?\]/)![0]
+    for (const column of [
+      'name_norm',
+      'source_key',
+      'meeting_id',
+      'original_name',
+      'score',
+      'first_seen_at',
+      'last_seen_at'
+    ]) {
+      expect(required).toContain(`'${column}'`)
+    }
+    // The ON CONFLICT target must be declared, not implied.
+    const key = source.match(/const OBSERVATIONS_CONFLICT_KEY = \[[\s\S]*?\]/)![0]
+    expect(key).toContain("'name_norm'")
+    expect(key).toContain("'source_key'")
+  })
+
+  it('separates repairable columns from ones ALTER cannot add', () => {
+    const repairable = source.match(/const OBSERVATIONS_REPAIRABLE_COLUMNS[\s\S]*?\n\}/)![0]
+    // Nullable / constant-default columns can be added to an existing table…
+    for (const column of ['meeting_id', 'score', 'first_seen_at', 'last_seen_at']) {
+      expect(repairable).toContain(`${column}:`)
+    }
+    // …NOT NULL columns without a constant default cannot, so they must NOT be
+    // listed as repairable or the ALTER would fail and the table stay broken.
+    for (const column of ['name_norm', 'source_key', 'original_name']) {
+      expect(repairable).not.toContain(`${column}:`)
+    }
+  })
+
+  it('resolves the ON CONFLICT target from real constraints, not the DDL text', () => {
+    const fn = source.match(/function hasConflictTarget\([\s\S]*?\n\}/)
+    expect(fn).not.toBeNull()
+    const body = fn![0]
+    // Declared PRIMARY KEY via table_info's pk ordinal, plus UNIQUE indexes.
+    expect(body).toContain('table_info(')
+    expect(body).toContain('index_list(')
+    expect(body).toContain('index_info(')
+    // A partial index cannot serve as an ON CONFLICT target.
+    expect(body).toContain('partial')
+  })
+
+  it('the check asks sqlite_master for the object type, not just PRAGMA columns', () => {
+    const fn = source.match(/function ensureObservationsTableUsable\([\s\S]*?\n\}/)
+    expect(fn).not.toBeNull()
+    const body = fn![0]
+    expect(body).toContain('SELECT type FROM sqlite_master WHERE name =')
     expect(body).toContain("type !== 'table'")
-    expect(body).toContain("includes('meeting_id')")
-    expect((body.match(/throw new Error/g) ?? []).length).toBe(3)
+    expect(body).toContain('hasConflictTarget(')
   })
 
   it('migration 43 fails loudly rather than recording v43 over an unusable schema', () => {
