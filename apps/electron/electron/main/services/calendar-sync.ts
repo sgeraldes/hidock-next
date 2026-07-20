@@ -6,6 +6,8 @@ import { getCachePath } from './file-storage'
 import { upsertMeetingsBatch, Meeting } from './database'
 import { getConfig, updateConfig } from './config'
 import { whenBootTasksSettled, areBootTasksSettled } from './boot-scheduler'
+import { emitActivityLog } from './activity-log'
+import { getEventBus } from './event-bus'
 
 // Re-export package types and correlate for consumers (e.g. recording-watcher)
 export { correlate } from '@hidock/calendar-sync'
@@ -837,8 +839,6 @@ async function runSyncCalendar(
   options: CalendarSyncOptions,
   stillWanted: () => boolean
 ): Promise<CalendarSyncResult> {
-  const { emitActivityLog } = await import('./activity-log')
-
   // F15: never compete with the boot tasks for the main-process event loop.
   const waitForBootMs = options.waitForBootMs ?? BOOT_WAIT_MS
   if (waitForBootMs > 0 && !areBootTasksSettled()) {
@@ -925,7 +925,10 @@ async function runSyncCalendar(
     }
 
     // Tie the new meetings into the rest of the app: auto-link overlapping
-    // recordings and create People from attendees. Non-fatal.
+    // recordings and create People from attendees. Non-fatal. Lazy import:
+    // org-reconciler is a heavy, opportunistically-invoked service kept out of
+    // this module's static import surface (execution deferral, not chunk
+    // splitting — the main process bundles to a single file regardless).
     try {
       const { reconcileOrganization } = await import('./org-reconciler')
       reconcileOrganization()
@@ -950,7 +953,6 @@ async function runSyncCalendar(
     // this, a boot/background sync silently leaves those views showing the
     // pre-sync list. Non-fatal — a failed emit must never fail the sync.
     try {
-      const { getEventBus } = await import('./event-bus')
       getEventBus().emitDomainEvent({
         type: 'calendar:synced',
         timestamp: now,

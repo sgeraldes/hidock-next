@@ -121,6 +121,7 @@ import {
   type Transcript
 } from './database'
 import { BrowserWindow } from 'electron'
+import { emitActivityLog } from './activity-log'
 import { isRecordingEligible } from './recording-eligibility'
 import { getVectorStore } from './vector-store'
 import { ensureKnowledgeCaptureForRecording } from './knowledge-capture-backfill'
@@ -523,7 +524,6 @@ async function processQueue(): Promise<void> {
         updateQueueItem(item.id, 'processing')
         updateQueueProgress(item.id, 0) // spec-014: reset progress
         notifyRenderer('transcription:started', { queueItemId: item.id, recordingId: item.recording_id })
-        const { emitActivityLog } = await import('./activity-log')
         const recording = getRecordingById(item.recording_id)
         const filename = recording?.filename ?? item.recording_id
         emitActivityLog('info', 'Transcribing recording', filename)
@@ -578,9 +578,8 @@ async function processQueue(): Promise<void> {
           updateQueueItem(item.id, 'completed')
           clearQueueHints(item.recording_id) // request satisfied — drop priority hints
           notifyRenderer('transcription:completed', { queueItemId: item.id, recordingId: item.recording_id })
-          const { emitActivityLog: emitDone } = await import('./activity-log')
           const recDone = getRecordingById(item.recording_id)
-          emitDone('success', 'Transcription complete', recDone?.filename ?? item.recording_id)
+          emitActivityLog('success', 'Transcription complete', recDone?.filename ?? item.recording_id)
         }
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error'
@@ -598,9 +597,8 @@ async function processQueue(): Promise<void> {
           recordingId: item.recording_id,
           error: errorMessage
         })
-        const { emitActivityLog: emitFail } = await import('./activity-log')
         const recFail = getRecordingById(item.recording_id)
-        emitFail('error', 'Transcription failed', `${recFail?.filename ?? item.recording_id}: ${errorMessage}`)
+        emitActivityLog('error', 'Transcription failed', `${recFail?.filename ?? item.recording_id}: ${errorMessage}`)
 
         // B-TXN-003: Use typed property access instead of `as any` cast
         const retryCount = item.retry_count ?? 0

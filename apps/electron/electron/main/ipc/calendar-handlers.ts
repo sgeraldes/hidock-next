@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron'
 import { getConfig, updateConfig } from '../services/config'
+import { emitActivityLog } from '../services/activity-log'
 import {
   syncCalendar,
   getLastSyncTime,
@@ -62,7 +63,6 @@ export function registerCalendarHandlers(): void {
           void syncCalendar(config.calendar.icsUrl).catch((e) =>
             console.error('[calendar:sync] queued sync failed:', e)
           )
-          const { emitActivityLog } = await import('../services/activity-log')
           emitActivityLog(
             'info',
             'Calendar sync queued',
@@ -252,13 +252,11 @@ async function runScheduledSync(generation: number, reason: 'startup' | 'periodi
     if (!result.success) {
       // syncCalendar already emits 'error' log, but periodic failures should
       // also be visible so users know background sync is not working
-      const { emitActivityLog } = await import('../services/activity-log')
       emitActivityLog('warning', 'Background calendar sync failed', result.error ?? 'Unknown error')
     }
   } catch (err) {
     console.error('Calendar sync failed:', err)
     if (generation !== autoSyncGeneration) return
-    const { emitActivityLog } = await import('../services/activity-log')
     emitActivityLog('error', 'Background calendar sync crashed', err instanceof Error ? err.message : 'Unknown error')
   }
 }

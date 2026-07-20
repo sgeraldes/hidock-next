@@ -193,6 +193,9 @@ async function processNewRecording(filePath: string): Promise<void> {
 
     correlateWithMeeting(recordingId, new Date(dateRecorded))
 
+    // Lazy import: fire-and-forget queue trigger, mirrors the same pattern in
+    // storage-handlers.ts and download-service.ts (execution deferral, not
+    // chunk splitting).
     import('./transcription').then(({ queueTranscriptionIfEnabled }) => {
       queueTranscriptionIfEnabled(recordingId)
     }).catch(err => {

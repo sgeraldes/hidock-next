@@ -320,7 +320,10 @@ export function registerStorageHandlers(): void {
         }
       }
 
-      // Add to transcription queue only when auto-transcribe is enabled
+      // Add to transcription queue only when auto-transcribe is enabled. Lazy
+      // import: keeps the heavy transcription module out of this handler's
+      // static surface for the common (no-new-recording) path (execution
+      // deferral, not chunk splitting).
       import('../services/transcription').then(({ queueTranscriptionIfEnabled }) => {
         queueTranscriptionIfEnabled(recordingId)
       }).catch(() => {})

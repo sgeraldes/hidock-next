@@ -652,6 +652,9 @@ export class DownloadService {
       this.markDirty()
       this.emitStateUpdate(true) // C-004: immediate emit for completion
 
+      // Lazy import: fire-and-forget queue trigger, mirrors the same pattern in
+      // storage-handlers.ts and recording-watcher.ts (execution deferral, not
+      // chunk splitting).
       import('./transcription').then(({ queueTranscriptionIfEnabled }) => {
         queueTranscriptionIfEnabled(recordingId)
       }).catch(err => {
