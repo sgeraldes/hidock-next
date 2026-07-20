@@ -4,9 +4,18 @@
  */
 
 import { getVectorStore, SearchResult } from './vector-store'
-import { getOllamaService, OllamaChatMessage } from './ollama'
+import type { OllamaChatMessage } from './ollama'
 import { getChatLLMService } from './chat-llm'
 import { getEmbeddingsService } from './embeddings'
+import {
+  buildActionablesContext,
+  buildDigestsContext,
+  dateGroundingPart,
+  detectIntent,
+  inRange,
+  resolveTemporalRange,
+  type TemporalRange,
+} from './retrieval-orchestrator'
 import { getDatabase, queryOne, queryAll, escapeLikePattern } from './database'
 import { filterEligibleRecordingIds, filterEligibleCaptureIds } from './recording-eligibility'
 import {
@@ -71,13 +80,22 @@ Your capabilities:
 - Answer specific questions about what was discussed
 
 Guidelines:
-- Only answer based on the meeting transcripts provided as context
+- Only answer based on the context provided with each question
+- The context has structured sections, in priority order: DATE GROUNDING
+  (resolve relative dates against it FIRST), STRUCTURED ACTION ITEMS
+  (distilled to-dos extracted from meetings — the authoritative source for
+  action/task/commitment questions), MEETING DIGESTS (distilled per-meeting
+  summaries — the authoritative source for topic/overview/report questions),
+  then raw transcript excerpts and graph facts for corroboration and detail.
+- For action or commitment questions, enumerate from the STRUCTURED ACTION
+  ITEMS section — do NOT say "no actions found" while that section is present.
+- For temporal questions, only use items whose dates fall inside the asked
+  range, and say which range you used.
 - If the context doesn't contain relevant information, say so honestly
-- Be concise but thorough
-- Reference specific meetings when relevant
-- If asked about something not in the transcripts, acknowledge the limitation
+- Be concise but thorough; reference specific meetings and dates when relevant
+- If asked about something not in the context, acknowledge the limitation
 
-Context from meeting transcripts will be provided with each question.`
+Context (date grounding, structured sections, and transcript excerpts) will be provided with each question.`
 
 // B-CHAT-006: Token estimation and history trimming utilities
 export function estimateTokens(text: string): number {
@@ -701,25 +719,26 @@ class RAGService {
   }
 
   async initialize(): Promise<boolean> {
-    const ollama = getOllamaService()
     const vectorStore = getVectorStore()
 
-    // Check if Ollama is available
-    const available = await ollama.isAvailable()
-    if (!available) {
-      console.log('Ollama not available, RAG service will be limited')
-      return false
-    }
-
-    // Ensure required models are available
-    const models = await ollama.ensureModels()
-    if (!models.embedding || !models.chat) {
-      console.log('Required Ollama models not available')
-      return false
-    }
-
-    // Initialize vector store
+    // Initialize the vector store regardless of WHICH provider is up — the
+    // provider partition search handles a missing provider at query time.
     await vectorStore.initialize()
+
+    // Report the ACTIVE embed provider instead of hardcoding the Ollama
+    // check (Gemini is the primary; local-onnx-embed needs no network;
+    // Ollama is the last fallback — its absence "limits" nothing when a
+    // cloud or in-process provider serves).
+    const embedProvider = await getEmbeddingsService().activeProviderId()
+    const chatStatus = await getChatLLMService().getStatus()
+    if (!embedProvider) {
+      console.warn('[RAG] No usable embedding provider (no Gemini key, no local model, Ollama unreachable) — semantic search will return empty until one is configured')
+    } else {
+      console.log(`[RAG] Embedding provider: ${embedProvider}`)
+    }
+    if (chatStatus.backend === 'none') {
+      console.warn('[RAG] No chat backend available — answers cannot be generated until a chat brain is configured')
+    }
 
     console.log('RAG service initialized')
     return true
@@ -800,12 +819,28 @@ class RAGService {
       context.meetingId = meetingFilter
     }
 
+    // ── Retrieval orchestration (2026-07) ─────────────────────────────────
+    // Intent routing + temporal grounding BEFORE retrieval: action/commitment
+    // questions pull the distilled actionables table, topic/report questions
+    // pull per-meeting digests and a wider, diversity-capped chunk net; every
+    // question gets DATE GROUNDING (the model's training date is stale).
+    const now = new Date()
+    const intent = detectIntent(message)
+    const temporalRange = resolveTemporalRange(message, now)
+    const topK = intent === 'report' ? 16 : intent === 'topics' ? 10 : 5
+
     // Search for relevant context
     let searchResults: SearchResult[]
+    // Distinguish "no matches" from the two SILENT-FAILURE modes (2026-07):
+    // 'provider-failure' — the active partition HAS chunks but search returned
+    //   [] (the query embedding failed: provider unreachable/misrouted).
+    // 'reindex-pending' — the ACTIVE provider's partition is empty while other
+    //   partitions hold chunks (provider just switched, reindex not done).
+    let retrievalIssue: 'provider-failure' | 'reindex-pending' | null = null
     if (context.meetingId) {
       // Search within specific meeting
       const docs = await vectorStore.searchByMeeting(context.meetingId)
-      const queryEmbedding = await getEmbeddingsService().generateEmbedding(message)
+      const queryEmbedding = await getEmbeddingsService().generateEmbedding(message, { purpose: 'query' })
       if (queryEmbedding) {
         // Re-rank by actual query relevance using cosine similarity
         searchResults = docs.map((doc) => {
@@ -829,8 +864,31 @@ class RAGService {
       }
       searchResults = searchResults.slice(0, 5)
     } else {
-      // Global search
-      searchResults = await vectorStore.search(message, 5)
+      // Global search — over-fetch 3x so the per-recording diversity cap can
+      // drop near-duplicate chunks from one dominant meeting without starving
+      // the excerpt budget.
+      searchResults = await vectorStore.search(message, topK * 3)
+      if (searchResults.length === 0) {
+        const activeProvider = await getEmbeddingsService().activeProviderId()
+        const partitionCount = activeProvider ? vectorStore.getEligibleDocumentCount(activeProvider) : 0
+        const anyEligible = vectorStore.getEligibleDocumentCount()
+        if (partitionCount > 0 || (!activeProvider && anyEligible > 0)) {
+          // search() returns [] ONLY when the query embedding failed or the
+          // active partition is empty — with chunks IN the active partition an
+          // empty result means RETRIEVAL broke, not "no matches".
+          retrievalIssue = 'provider-failure'
+          console.error(
+            '[RAG] Vector search returned no results despite eligible chunks in the active partition — query embedding likely failed (check embedding provider routing/credentials)'
+          )
+        } else if (partitionCount === 0 && anyEligible > 0) {
+          // Provider switched, new partition not yet re-embedded — the honest
+          // answer is "reindex pending", not "no transcripts exist".
+          retrievalIssue = 'reindex-pending'
+          console.warn(
+            `[RAG] Active embedding provider '${activeProvider ?? 'none'}' has 0 indexed chunks while other partitions hold ${anyEligible} — reindex pending`
+          )
+        }
+      }
     }
 
     // --- Added: Fetch explicit conversation context (raw; eligibility applied
@@ -883,12 +941,43 @@ class RAGService {
       part: string
       recordingId?: string
       captureId?: string
+      chunkIndex?: number
       source: RAGResponse['sources'][number]
     }
     const vectorParts: TaggedVectorPart[] = []
 
+    // Per-provider gate (embeddings.RELEVANCE_THRESHOLDS): cosine scales are
+    // model-specific — 0.3 is right for Gemini/nomic but drops every Nemotron
+    // result (real-corpus top ≈ 0.27).
+    const relevanceThreshold = await getEmbeddingsService().relevanceThreshold()
+
+    // Gate on the RAW score, then TEMPORAL BOOST for ordering only: chunks
+    // recorded inside the asked range rank first (age-decay in reverse —
+    // Cerebras KB hybrid lesson). A weak out-of-range chunk can never boost
+    // its way past the gate.
+    const gated: SearchResult[] = []
     for (const result of searchResults) {
-      if (result.score < 0.3) continue // Skip low-relevance results
+      if (result.score < relevanceThreshold) continue
+      gated.push({
+        document: result.document,
+        score: inRange(result.document.metadata.timestamp, temporalRange)
+          ? result.score * 1.25
+          : result.score,
+      })
+    }
+    gated.sort((a, b) => b.score - a.score)
+
+    // Per-recording diversity cap: one long meeting must not eat the whole
+    // excerpt budget (topics/report want CROSS-meeting synthesis).
+    const perRecordingCap = intent === 'report' ? 3 : 2
+    const seenPerRecording = new Map<string, number>()
+    for (const result of gated) {
+      if (vectorParts.length >= topK) break
+      const diversityKey =
+        result.document.metadata.recordingId ?? result.document.metadata.captureId ?? result.document.id
+      const seen = seenPerRecording.get(diversityKey) ?? 0
+      if (seen >= perRecordingCap) continue
+      seenPerRecording.set(diversityKey, seen + 1)
 
       const { document: doc, score } = result
 
@@ -904,6 +993,7 @@ class RAGService {
         vectorParts.push({
           part: `[Screenshot: ${desc}${dateInfo}]\n${doc.content}`,
           captureId: doc.metadata.captureId,
+          chunkIndex: doc.metadata.chunkIndex,
           source: {
             content: doc.content.substring(0, 200) + (doc.content.length > 200 ? '...' : ''),
             subject: doc.metadata.subject,
@@ -927,6 +1017,7 @@ class RAGService {
         // capture-backed chunks set captureId; transcript chunks set recordingId.
         captureId: doc.metadata.captureId,
         recordingId: doc.metadata.captureId ? undefined : doc.metadata.recordingId,
+        chunkIndex: doc.metadata.chunkIndex,
         source: {
           content: doc.content.substring(0, 200) + (doc.content.length > 200 ? '...' : ''),
           meetingId: doc.metadata.meetingId,
@@ -997,6 +1088,29 @@ class RAGService {
       sources.push(v.source)
     }
 
+    // Neighbor re-attachment (Cerebras KB): each selected transcript chunk's
+    // ADJACENT chunks (chunkIndex±1, same recording + partition) ride along so
+    // excerpts carry the surrounding conversation. Read through the SAME
+    // eligibility boundary (getChunkNeighbors → filterEligibleDocs); provenance
+    // is the parent's recording, already folded into the union above.
+    const neighborProvider = await getEmbeddingsService().activeProviderId()
+    let neighborCount = 0
+    const NEIGHBOR_BUDGET = 4
+    for (const v of vectorParts) {
+      if (neighborCount >= NEIGHBOR_BUDGET) break
+      if (!v.recordingId || v.chunkIndex === undefined) continue
+      for (const n of vectorStore.getChunkNeighbors(v.recordingId, [v.chunkIndex], neighborProvider ?? undefined)) {
+        if (neighborCount >= NEIGHBOR_BUDGET) break
+        const alreadySelected = vectorParts.some(
+          (x) => x.recordingId === n.metadata.recordingId && x.chunkIndex === n.metadata.chunkIndex
+        )
+        if (alreadySelected) continue
+        const nDate = n.metadata.timestamp ? ` (${new Date(n.metadata.timestamp).toLocaleDateString()})` : ''
+        contextParts.push(`[Adjacent context: ${n.metadata.subject ?? 'meeting'}${nDate}]\n${n.content}`)
+        neighborCount++
+      }
+    }
+
     // Pinned context (ADV5/INC round-5/6) — revalidated in the SAME post-await pass.
     const pinnedContextParts: string[] = []
     for (const e of pinnedEntries) {
@@ -1032,14 +1146,58 @@ class RAGService {
       for (const id of graphProv.recordingIds) provRecordingIds.add(id)
     }
 
-    // Combine pinned context, graph facts, and search results
-    const allContextParts = [...pinnedContextParts, ...graphParts, ...contextParts]
+    // ── Structured context (retrieval orchestration) ──────────────────────
+    // Built LAST (post-await, synchronous DB reads — no stale-await race) and
+    // eligibility-gated at build time inside the orchestrator. DATE GROUNDING
+    // is always first; action/topic intent routes to the distilled tables.
+    const orchestratedParts: string[] = [dateGroundingPart(now, temporalRange)]
+    let structuredRowCount = 0
+
+    if (intent === 'actions') {
+      // Pending = still open: only a FULLY-PAST range scopes by extraction
+      // date ("commitments I took last month"); "actions this week" lists all
+      // open items (they're still actionable this week).
+      const todayIso = now.toISOString().slice(0, 10)
+      const dateScoped = !!temporalRange && temporalRange.end < todayIso
+      const structured = buildActionablesContext(temporalRange, 15, dateScoped)
+      for (const id of structured.recordingIds) provRecordingIds.add(id)
+      for (const id of structured.captureIds) provCaptureIds.add(id)
+      orchestratedParts.push(...structured.parts)
+      structuredRowCount += structured.rowCount
+    }
+
+    if (intent === 'topics' || intent === 'report') {
+      // No explicit range in the question ⇒ default to recent history
+      // (topics: 14 days; report: 30 days).
+      const DAY_MS = 24 * 60 * 60 * 1000
+      const digestRange: TemporalRange =
+        temporalRange ?? {
+          start: new Date(now.getTime() - (intent === 'report' ? 30 : 14) * DAY_MS).toISOString().slice(0, 10),
+          end: now.toISOString().slice(0, 10),
+          label: intent === 'report' ? 'the last 30 days' : 'the last 14 days',
+        }
+      const digests = buildDigestsContext(digestRange, intent === 'report' ? 20 : 12)
+      for (const id of digests.recordingIds) provRecordingIds.add(id)
+      for (const id of digests.captureIds) provCaptureIds.add(id)
+      orchestratedParts.push(...digests.parts)
+      structuredRowCount += digests.rowCount
+    }
+
+    // Combine: date grounding + structured sections, then pinned, graph, and
+    // transcript excerpts (incl. neighbor context). The retrieval-failure
+    // notes key off CONTENT parts (date grounding alone is not content).
+    const allContextParts = [...orchestratedParts, ...pinnedContextParts, ...graphParts, ...contextParts]
+    const hasContent =
+      structuredRowCount + pinnedContextParts.length + graphParts.length + contextParts.length > 0
 
     // Prepare messages
-    const contextText =
-      allContextParts.length > 0
-        ? `Here are relevant excerpts from meeting transcripts and pinned knowledge base items:\n\n${allContextParts.join('\n\n---\n\n')}`
-        : 'No relevant meeting transcripts found for this query.'
+    const contextText = hasContent
+      ? `Grounded context follows — date grounding, structured meeting intelligence (action items / digests), pinned knowledge base items, graph facts, and relevant transcript excerpts:\n\n${allContextParts.join('\n\n---\n\n')}`
+      : retrievalIssue === 'provider-failure'
+        ? '[System note: semantic search is temporarily unavailable — the embedding provider could not be reached, so NO library lookup was performed for this question. Tell the user retrieval failed (suggest checking the embedding provider / API key in Settings) instead of saying no transcripts exist. Do NOT claim the knowledge base is empty.]'
+        : retrievalIssue === 'reindex-pending'
+          ? '[System note: the library was embedded with a DIFFERENT embedding provider than the currently active one, and re-indexing for the active provider has not completed. Tell the user answers are temporarily limited while the library re-indexes (progress in Settings → Embeddings) instead of saying no transcripts exist. Do NOT claim the knowledge base is empty.]'
+          : `No relevant meeting transcripts found for this query.\n\n${orchestratedParts.join('\n\n')}`
 
     const userMessage = `Context:\n${contextText}\n\nQuestion: ${message}`
 

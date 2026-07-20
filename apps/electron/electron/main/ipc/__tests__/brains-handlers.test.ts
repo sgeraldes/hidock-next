@@ -23,6 +23,12 @@ vi.mock('../../services/brains/brain-credential-store', () => ({
   getBrainCredentialStore: vi.fn(),
 }))
 
+vi.mock('../../services/vector-store', () => ({
+  getVectorStore: vi.fn(() => ({
+    backfillMissingTranscripts: vi.fn(async () => ({ indexed: 0, skipped: 0 })),
+  })),
+}))
+
 /** Minimal fake brain: only the surface brains:list reads. */
 function fakeBrain(
   id: AIBrain['id'],
@@ -75,13 +81,13 @@ describe('Brains IPC Handlers', () => {
     }) as any)
     vi.mocked(getConfig).mockReturnValue({ brains: CONFIG_BRAINS } as any)
     vi.mocked(updateConfig).mockResolvedValue(undefined)
-    vi.mocked(getBrainRegistry).mockReturnValue({ list: () => BRAINS } as any)
+    vi.mocked(getBrainRegistry).mockReturnValue({ list: () => BRAINS, get: () => null } as any)
     vi.mocked(getBrainCredentialStore).mockReturnValue({ setSecret } as any)
     registerBrainsHandlers()
   })
 
-  it('registers all five brains:* channels', () => {
-    for (const ch of ['brains:list', 'brains:setEnabled', 'brains:setDefault', 'brains:setTaskRouting', 'brains:setCredential']) {
+  it('registers all six brains:* channels', () => {
+    for (const ch of ['brains:list', 'brains:getRouting', 'brains:setEnabled', 'brains:setDefault', 'brains:setTaskRouting', 'brains:setCredential']) {
       expect(ipcMain.handle).toHaveBeenCalledWith(ch, expect.any(Function))
     }
   })
@@ -103,6 +109,7 @@ describe('Brains IPC Handlers', () => {
 
   it('brains:list survives a brain whose authStatus throws', async () => {
     vi.mocked(getBrainRegistry).mockReturnValue({
+      get: () => null,
       list: () => [
         BRAINS[0],
         fakeBrain('codex', 'Codex', ['generate', 'agentic'], () => Promise.reject(new Error('boom'))),

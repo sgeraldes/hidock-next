@@ -16,6 +16,7 @@ export {
 } from './brain-credential-store'
 export { GeminiApiBrain, resolveGeminiApiKey } from './gemini-api-brain'
 export { OllamaBrain } from './ollama-brain'
+export { LocalOnnxEmbedBrain } from './local-onnx-embed-brain'
 export { ClaudeCodeBrain, resolveClaudeCommand } from './claude-code-brain'
 export { CodexBrain } from './codex-brain'
 export { GeminiCliBrain, parseGeminiJson } from './gemini-cli-brain'

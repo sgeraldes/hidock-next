@@ -3,7 +3,15 @@
  * Simple in-memory vector store with SQLite persistence for meeting transcript embeddings
  */
 
-import { getDatabase, isRecordingProcessable } from './database'
+import { getDatabase, getDatabasePath, isRecordingProcessable } from './database'
+import { dirname, join } from 'path'
+import {
+  cacheFingerprint,
+  readVectorCache,
+  writeVectorCache,
+  VECTOR_CACHE_FILENAME,
+  type CacheGroupInfo,
+} from './vector-cache'
 import {
   filterEligibleRecordingIds,
   filterEligibleProvenanceRows,
@@ -14,7 +22,9 @@ import { getEmbeddingsService } from './embeddings'
 interface VectorDocument {
   id: string
   content: string
-  embedding: number[]
+  /** Float32Array for DB-loaded docs (zero-copy view, no 338M-value boxing);
+   *  number[] for freshly embedded docs. Both are indexable array-likes. */
+  embedding: number[] | Float32Array
   metadata: {
     meetingId?: string
     recordingId?: string
@@ -29,6 +39,17 @@ interface VectorDocument {
     sourceType?: string
     /** knowledge_capture id backing this chunk, so a citation can link the source. */
     captureId?: string
+    /**
+     * PROVIDER PARTITION — the brain that embedded this chunk ('gemini-api',
+     * 'local-onnx-embed', 'ollama'). Cosine scores are only comparable WITHIN
+     * a partition: search() filters to the ACTIVE provider's partition so a
+     * provider switch can never silently zero retrieval (2026-07 incident:
+     * a dim/provider mismatch made every score 0 with zero user signal).
+     * Undefined ⇒ legacy/unknown provenance ⇒ never served (fail-closed).
+     */
+    embedProvider?: string
+    /** Embedding dimension, stamped at insert (integrity cross-check). */
+    embedDims?: number
   }
 }
 
@@ -38,17 +59,21 @@ interface VectorDocument {
  * this app stores that is a ~3x size reduction and was the fix for the P0 where
  * vector_embeddings alone reached 1.7 GB and crashed the database (schema v36).
  */
-function embeddingToBlob(embedding: number[]): Buffer {
+function embeddingToBlob(embedding: number[] | Float32Array): Buffer {
   return Buffer.from(new Float32Array(embedding).buffer)
 }
 
 /**
- * Decode a stored embedding back to a float array. Accepts the binary Float32
+ * Decode a stored embedding back to a float vector. Accepts the binary Float32
  * BLOB (Buffer/Uint8Array, current format) and legacy JSON text (rows written
  * before the v36 migration, or not yet compacted). Returns [] on anything
  * unparseable so a single bad row can never break RAG load.
+ *
+ * PERF (boot load): the BLOB path returns a Float32Array VIEW over the source
+ * buffer — NOT a boxed JS number[]. At 110k × 3072-dim, Array.from() allocated
+ * ~338M boxed numbers (multi-second GC churn — the dominant boot freeze).
  */
-function blobToEmbedding(value: unknown): number[] {
+function blobToEmbedding(value: unknown): number[] | Float32Array {
   if (value == null) return []
   if (typeof value === 'string') {
     try {
@@ -61,7 +86,8 @@ function blobToEmbedding(value: unknown): number[] {
   const bytes =
     value instanceof Uint8Array ? value : Buffer.isBuffer(value) ? (value as Buffer) : null
   if (!bytes) return []
-  return Array.from(new Float32Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 4)))
+  // Copy into a standalone Float32Array (the sql.js row buffer is transient).
+  return new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + Math.floor(bytes.byteLength / 4) * 4))
 }
 
 interface SearchResult {
@@ -69,8 +95,8 @@ interface SearchResult {
   score: number
 }
 
-// Cosine similarity between two vectors
-function cosineSimilarity(a: number[], b: number[]): number {
+// Cosine similarity between two vectors (any indexable array-like)
+function cosineSimilarity(a: number[] | Float32Array, b: number[] | Float32Array): number {
   if (a.length !== b.length) return 0
 
   let dotProduct = 0
@@ -179,7 +205,7 @@ class VectorStore {
   private documents: Map<string, VectorDocument> = new Map()
   private initialized = false
 
-  async initialize(): Promise<void> {
+  async initialize(onProgress?: (loaded: number, total: number) => void): Promise<void> {
     if (this.initialized) return
 
     const db = getDatabase()
@@ -209,17 +235,192 @@ class VectorStore {
     // references these columns — a swallowed ALTER failure would silently break
     // ALL indexing for the whole process). A throw here leaves `initialized`
     // false, so the next initialize() call retries the repair.
-    this.ensureColumns(db, ['source_type', 'capture_id'])
+    this.ensureColumns(db, ['source_type', 'capture_id', 'embed_provider', { name: 'embed_dims', type: 'INTEGER' }])
+
+    // Backfill partition labels for pre-partition rows (see method docs).
+    this.backfillProviderLabels(db)
 
     // Create index for faster lookups
     db.run(`CREATE INDEX IF NOT EXISTS idx_vector_embeddings_meeting ON vector_embeddings(meeting_id)`)
     db.run(`CREATE INDEX IF NOT EXISTS idx_vector_embeddings_recording ON vector_embeddings(recording_id)`)
 
-    // Load existing embeddings into memory
-    await this.loadFromDatabase()
+    // Load existing embeddings into memory — binary cache first (sub-second),
+    // SQL fallback (batched), then rewrite the cache for the next boot.
+    const t0 = Date.now()
+    if (await this.tryLoadFromCache(onProgress)) {
+      this.initialized = true
+      console.log(
+        `Vector store initialized with ${this.documents.size} documents (binary cache, ${Date.now() - t0}ms)`
+      )
+      return
+    }
+
+    await this.loadFromDatabase(onProgress)
 
     this.initialized = true
     console.log(`Vector store initialized with ${this.documents.size} documents`)
+    this.scheduleCacheWrite()
+  }
+
+  /** Chunk buffers backing the cache-loaded Float32Array views (kept alive). */
+  private cacheBuffers: Buffer[] | null = null
+
+  /** True when this boot's embeddings are zero-copy views over the binary
+   *  cache buffer (diagnostics/tests). */
+  isCacheBacked(): boolean {
+    return this.cacheBuffers !== null
+  }
+
+  private vectorCachePath(): string {
+    return join(dirname(getDatabasePath()), VECTOR_CACHE_FILENAME)
+  }
+
+  /**
+   * Boot accelerator: load metadata from SQL (no blobs) + embeddings as
+   * zero-copy views over the binary cache. Valid ONLY when the live table's
+   * (provider, dims, count) fingerprint matches the cache's AND every row id
+   * resolves positionally — any mutation since the cache was written falls
+   * back to the SQL load (false). Unknown-provider rows are unservable by
+   * design and excluded from BOTH the cache and its fingerprint.
+   */
+  private async tryLoadFromCache(onProgress?: (loaded: number, total: number) => void): Promise<boolean> {
+    const db = getDatabase()
+    const groupRows = db.exec(
+      'SELECT embed_provider, embed_dims, COUNT(*) FROM vector_embeddings WHERE embed_provider IS NOT NULL AND embed_dims IS NOT NULL GROUP BY embed_provider, embed_dims'
+    )
+    if (groupRows.length === 0 || groupRows[0].values.length === 0) return false
+    const liveGroups: CacheGroupInfo[] = groupRows[0].values.map(([p, d, c]) => ({
+      provider: p as string,
+      dims: d as number,
+      count: c as number,
+    }))
+
+    const cache = readVectorCache(this.vectorCachePath())
+    if (!cache || cache.fingerprint !== cacheFingerprint(liveGroups)) return false
+
+    const byId = new Map(cache.rows.map((r) => [r.id, r]))
+    const BATCH = 10000
+    let offset = 0
+    let matched = 0
+    for (;;) {
+      const rows = db.exec(
+        `SELECT id, content, meeting_id, recording_id, chunk_index, timestamp, subject, source_type, capture_id, embed_provider, embed_dims
+         FROM vector_embeddings
+         WHERE embed_provider IS NOT NULL AND embed_dims IS NOT NULL
+         LIMIT ? OFFSET ?`,
+        [BATCH, offset]
+      )
+      if (rows.length === 0 || rows[0].values.length === 0) break
+      for (const row of rows[0].values) {
+        const id = row[0] as string
+        const cached = byId.get(id)
+        if (!cached) {
+          // Table changed between the fingerprint and the row scan — do not
+          // serve a half-fresh store; fall back to the authoritative SQL load.
+          this.documents.clear()
+          return false
+        }
+        this.documents.set(id, {
+          id,
+          content: row[1] as string,
+          embedding: cached.vector,
+          metadata: {
+            meetingId: (row[2] as string | undefined) || undefined,
+            recordingId: (row[3] as string | undefined) || undefined,
+            chunkIndex: row[4] as number,
+            timestamp: (row[5] as string | undefined) || undefined,
+            subject: (row[6] as string | undefined) || undefined,
+            sourceType: (row[7] as string | undefined) || undefined,
+            captureId: (row[8] as string | undefined) || undefined,
+            embedProvider: cached.provider,
+            embedDims: cached.dims,
+          },
+        })
+        matched++
+      }
+      offset += rows[0].values.length
+      onProgress?.(Math.min(offset, cache.rows.length), cache.rows.length)
+      if (rows[0].values.length < BATCH) break
+      await new Promise((resolve) => setImmediate(resolve))
+    }
+    if (matched !== cache.rows.length) {
+      this.documents.clear()
+      return false
+    }
+    this.cacheBuffers = cache.buffers
+    return true
+  }
+
+  /**
+   * Persist the binary cache for the next boot (async, off the critical
+   * path). Unknown-provider rows are excluded (unservable by design).
+   */
+  private scheduleCacheWrite(): void {
+    void (async () => {
+      await new Promise((resolve) => setImmediate(resolve))
+      try {
+        const docs = [...this.documents.values()]
+          .filter((d) => d.metadata.embedProvider && d.metadata.embedDims)
+          .map((d) => ({
+            id: d.id,
+            embedding: d.embedding,
+            provider: d.metadata.embedProvider!,
+            dims: d.metadata.embedDims!,
+          }))
+        const { totalCount } = writeVectorCache(this.vectorCachePath(), docs)
+        console.log(`[VectorStore] Binary vector cache written (${totalCount} rows)`)
+      } catch (e) {
+        console.warn('[VectorStore] Binary vector cache write failed (next boot uses the SQL load):', e)
+      }
+    })()
+  }
+
+  /**
+   * Stamp embed_provider / embed_dims on rows written before the provider
+   * partition existed. Dimension implies provider for every model this app
+   * has ever used: 3072 ⇒ gemini-api (gemini-embedding-001), 2048 ⇒
+   * local-onnx-embed (Nemotron-3), 768 ⇒ ollama (nomic-embed-text). Rows
+   * whose dims match NO known model stay NULL — unknown provenance is never
+   * served (fail-closed, same as pre-partition behaviour where they scored 0
+   * against every query). Legacy JSON-text rows are dimensioned in JS.
+   * Idempotent: only NULL rows are touched.
+   */
+  private backfillProviderLabels(db: ReturnType<typeof getDatabase>): void {
+    // Cheap NULL probe first: after the first post-partition boot these UPDATEs
+    // are no-ops, but an unconditional UPDATE still full-scans every blob
+    // (~1.3 GB at 110k rows) on EVERY boot.
+    const pendingRes = db.exec(
+      'SELECT COUNT(*) FROM vector_embeddings WHERE embed_dims IS NULL OR embed_provider IS NULL'
+    )
+    const pending = pendingRes.length > 0 ? (pendingRes[0].values[0][0] as number) : 0
+    if (pending === 0) return
+    console.log(`[VectorStore] Backfilling provider labels on ${pending} pre-partition rows…`)
+    db.run(
+      "UPDATE vector_embeddings SET embed_dims = LENGTH(embedding) / 4 WHERE embed_dims IS NULL AND typeof(embedding) = 'blob'"
+    )
+    // Legacy JSON-text rows (pre-v36 format) — parse in JS to get the length.
+    const textRows = db.exec(
+      "SELECT id, embedding FROM vector_embeddings WHERE embed_dims IS NULL AND typeof(embedding) = 'text'"
+    )
+    if (textRows.length > 0) {
+      for (const [id, raw] of textRows[0].values) {
+        const dims = blobToEmbedding(raw).length
+        if (dims > 0) {
+          db.run('UPDATE vector_embeddings SET embed_dims = ? WHERE id = ?', [dims, id as string])
+        }
+      }
+    }
+    const PROVIDER_BY_DIMS: Record<number, string> = {
+      3072: 'gemini-api',
+      2048: 'local-onnx-embed',
+      768: 'ollama',
+    }
+    for (const [dims, provider] of Object.entries(PROVIDER_BY_DIMS)) {
+      db.run('UPDATE vector_embeddings SET embed_provider = ? WHERE embed_provider IS NULL AND embed_dims = ?', [
+        provider,
+        Number(dims),
+      ])
+    }
   }
 
   /**
@@ -233,26 +434,27 @@ class VectorStore {
    * a partial upgrade (one of two ALTERs failed) recoverable: the next attempt
    * only adds the column that is still missing.
    */
-  private ensureColumns(db: ReturnType<typeof getDatabase>, columns: string[]): void {
+  private ensureColumns(db: ReturnType<typeof getDatabase>, columns: Array<string | { name: string; type: string }>): void {
     const readColumns = (): string[] => {
       const info = db.exec('PRAGMA table_info(vector_embeddings)')
       return info.length > 0 ? info[0].values.map((row) => row[1] as string) : []
     }
 
+    const specs = columns.map((c) => (typeof c === 'string' ? { name: c, type: 'TEXT' } : c))
     const existing = readColumns()
-    for (const column of columns.filter((c) => !existing.includes(c))) {
+    for (const spec of specs.filter((c) => !existing.includes(c.name))) {
       try {
-        db.run(`ALTER TABLE vector_embeddings ADD COLUMN ${column} TEXT`)
+        db.run(`ALTER TABLE vector_embeddings ADD COLUMN ${spec.name} ${spec.type}`)
       } catch (e) {
         // Logged for diagnosis; the verification below decides pass/fail so a
         // transient error on one column cannot leave a silent partial upgrade.
-        console.error(`[VectorStore] ALTER ADD COLUMN ${column} failed:`, e)
+        console.error(`[VectorStore] ALTER ADD COLUMN ${spec.name} failed:`, e)
       }
     }
 
     // Verification — fail closed if the table still lacks a required column.
     const after = readColumns()
-    const stillMissing = columns.filter((c) => !after.includes(c))
+    const stillMissing = specs.map((c) => c.name).filter((c) => !after.includes(c))
     if (stillMissing.length > 0) {
       throw new Error(
         `[VectorStore] vector_embeddings is missing required column(s) after repair: ${stillMissing.join(', ')}. ` +
@@ -261,14 +463,23 @@ class VectorStore {
     }
   }
 
-  private async loadFromDatabase(): Promise<void> {
+  private async loadFromDatabase(onProgress?: (loaded: number, total: number) => void): Promise<void> {
     const db = getDatabase()
-    const rows = db.exec('SELECT * FROM vector_embeddings')
+    const totalRes = db.exec('SELECT COUNT(*) FROM vector_embeddings')
+    const total = totalRes.length > 0 ? (totalRes[0].values[0][0] as number) : 0
 
-    if (rows.length === 0) return
+    // Batched load with event-loop yields: a single SELECT of 110k+ rows (and
+    // the blob→float parse loop) blocks the main process for seconds at boot
+    // (BootScheduler SLOW-task warnings). 5k-row pages keep the UI responsive
+    // while the store fills.
+    const BATCH = 5000
+    let offset = 0
+    for (;;) {
+      const rows = db.exec('SELECT * FROM vector_embeddings LIMIT ? OFFSET ?', [BATCH, offset])
+      if (rows.length === 0 || rows[0].values.length === 0) break
 
-    const columns = rows[0].columns
-    for (const row of rows[0].values) {
+      const columns = rows[0].columns
+      for (const row of rows[0].values) {
       const doc: Record<string, unknown> = {}
       columns.forEach((col, i) => {
         doc[col] = row[i]
@@ -285,12 +496,35 @@ class VectorStore {
           timestamp: doc['timestamp'] as string | undefined,
           subject: doc['subject'] as string | undefined,
           sourceType: (doc['source_type'] as string | undefined) || undefined,
-          captureId: (doc['capture_id'] as string | undefined) || undefined
+          captureId: (doc['capture_id'] as string | undefined) || undefined,
+          embedProvider: (doc['embed_provider'] as string | undefined) || undefined,
+          embedDims: (doc['embed_dims'] as number | undefined) || undefined
         }
       }
 
-      this.documents.set(vectorDoc.id, vectorDoc)
+        this.documents.set(vectorDoc.id, vectorDoc)
+      }
+
+      offset += rows[0].values.length
+      onProgress?.(Math.min(offset, total), total)
+      if (rows[0].values.length < BATCH) break
+      await new Promise((resolve) => setImmediate(resolve))
     }
+  }
+
+  /**
+   * The partition label stamped on newly embedded chunks: the brain the
+   * router says WOULD serve embeddings now, with a dims-based inference
+   * fallback (the label must never be null for a successfully embedded chunk
+   * or the row becomes unservable). A mid-call provider switch can mislabel
+   * a batch by one row-set — harmless: the chunk is real and searchable
+   * under the partition it is stamped with (scores stay within-model).
+   */
+  private async activePartitionLabel(dims: number): Promise<string | undefined> {
+    const active = await getEmbeddingsService().activeProviderId()
+    if (active) return active
+    const BY_DIMS: Record<number, string> = { 3072: 'gemini-api', 2048: 'local-onnx-embed', 768: 'ollama' }
+    return BY_DIMS[dims]
   }
 
   async addDocument(
@@ -303,13 +537,14 @@ class VectorStore {
       return null
     }
 
-    const id = `${metadata.recordingId || 'doc'}_${metadata.chunkIndex}_${Date.now()}`
+    const partition = await this.activePartitionLabel(embedding.length)
+    const id = `${metadata.recordingId || 'doc'}_${metadata.chunkIndex}_${partition ?? 'unknown'}_${Date.now()}`
 
     const doc: VectorDocument = {
       id,
       content,
       embedding,
-      metadata
+      metadata: { ...metadata, embedProvider: partition, embedDims: embedding.length }
     }
 
     // Store in memory
@@ -319,8 +554,8 @@ class VectorStore {
     const db = getDatabase()
     db.run(
       `INSERT OR REPLACE INTO vector_embeddings
-       (id, content, embedding, meeting_id, recording_id, chunk_index, timestamp, subject, source_type, capture_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, content, embedding, meeting_id, recording_id, chunk_index, timestamp, subject, source_type, capture_id, embed_provider, embed_dims)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         content,
@@ -331,7 +566,9 @@ class VectorStore {
         metadata.timestamp || null,
         metadata.subject || null,
         metadata.sourceType || null,
-        metadata.captureId || null
+        metadata.captureId || null,
+        partition ?? null,
+        embedding.length
       ]
     )
 
@@ -373,13 +610,17 @@ class VectorStore {
   ): Promise<number> {
     // Destructure the gates out so they never land on a stored chunk's metadata.
     const { shouldPersist, shouldGenerate, ...chunkMeta } = metadata
-    // Check if already indexed
-    if (chunkMeta.recordingId) {
+    // Check if already indexed FOR THE ACTIVE PROVIDER'S PARTITION. Chunks
+    // embedded by another provider do NOT count — that is exactly the
+    // provider-switch reindex path (the same recording gets a second set of
+    // chunks under the new partition; the old set stays as the backup).
+    const partitionProvider = await getEmbeddingsService().activeProviderId()
+    if (chunkMeta.recordingId && partitionProvider) {
       const existing = Array.from(this.documents.values()).filter(
-        (d) => d.metadata.recordingId === chunkMeta.recordingId
+        (d) => d.metadata.recordingId === chunkMeta.recordingId && d.metadata.embedProvider === partitionProvider
       )
       if (existing.length > 0) {
-        console.log(`Transcript ${chunkMeta.recordingId} already indexed`)
+        console.log(`Transcript ${chunkMeta.recordingId} already indexed (provider ${partitionProvider})`)
         return 0
       }
     }
@@ -406,7 +647,7 @@ class VectorStore {
     // the moment before entering the router; if Gemini then fails and the router
     // falls back to Ollama, an exclusion committed during that window must not
     // reach the fallback provider either.
-    const embeddings = await getEmbeddingsService().generateEmbeddings(chunks, { shouldGenerate })
+    const embeddings = await getEmbeddingsService().generateEmbeddings(chunks, { shouldGenerate, purpose: 'passage' })
 
     // RE-1 — re-check eligibility ADJACENT to the write, with no await between
     // here and the synchronous INSERT loop below. A hard purge that committed
@@ -417,23 +658,27 @@ class VectorStore {
     }
 
     const db = getDatabase()
+    const partition = partitionProvider ?? (await this.activePartitionLabel(embeddings.find(Boolean)?.length ?? 0))
     let indexed = 0
     for (let i = 0; i < chunks.length; i++) {
       const embedding = embeddings[i]
       if (!embedding) continue
 
-      const id = `${chunkMeta.recordingId || 'doc'}_${i}_${Date.now()}`
+      // The partition is part of the id: the same recording+chunk indexed
+      // under two providers must NEVER collide (INSERT OR REPLACE would
+      // silently overwrite the other partition's row).
+      const id = `${chunkMeta.recordingId || 'doc'}_${i}_${partition ?? 'unknown'}_${Date.now()}`
       const doc: VectorDocument = {
         id,
         content: chunks[i],
         embedding,
-        metadata: { ...chunkMeta, chunkIndex: i }
+        metadata: { ...chunkMeta, chunkIndex: i, embedProvider: partition, embedDims: embedding.length }
       }
       this.documents.set(id, doc)
       db.run(
         `INSERT OR REPLACE INTO vector_embeddings
-         (id, content, embedding, meeting_id, recording_id, chunk_index, timestamp, subject, source_type, capture_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, content, embedding, meeting_id, recording_id, chunk_index, timestamp, subject, source_type, capture_id, embed_provider, embed_dims)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id,
           chunks[i],
@@ -444,7 +689,9 @@ class VectorStore {
           chunkMeta.timestamp || null,
           chunkMeta.subject || null,
           chunkMeta.sourceType || null,
-          chunkMeta.captureId || null
+          chunkMeta.captureId || null,
+          partition ?? null,
+          embedding.length
         ]
       )
       indexed++
@@ -516,15 +763,25 @@ class VectorStore {
   }
 
   async search(query: string, topK = 5): Promise<SearchResult[]> {
-    const queryEmbedding = await getEmbeddingsService().generateEmbedding(query)
+    const queryEmbedding = await getEmbeddingsService().generateEmbedding(query, { purpose: 'query' })
     if (!queryEmbedding) {
       console.error('Failed to generate query embedding')
       return []
     }
 
+    // PROVIDER PARTITION — score only chunks embedded by the ACTIVE provider.
+    // Cosine similarity is meaningless ACROSS models (different dims ⇒ 0 by
+    // construction; same-dims-different-model ⇒ garbage). Pre-partition this
+    // was the silent-dead-RAG failure mode (2026-07: Ollama-embedded queries
+    // vs a Gemini-embedded store). Other partitions stay intact as the
+    // instant backup when the user switches providers back.
+    const activeProvider = await getEmbeddingsService().activeProviderId()
+
     // Calculate similarity scores over ELIGIBLE docs only (RE6-1 boundary).
     const results: SearchResult[] = []
     for (const doc of this.filterEligibleDocs([...this.documents.values()])) {
+      if (doc.metadata.embedProvider !== activeProvider) continue
+      if (doc.embedding.length !== queryEmbedding.length) continue
       const score = cosineSimilarity(queryEmbedding, doc.embedding)
       results.push({ document: doc, score })
     }
@@ -542,6 +799,14 @@ class VectorStore {
    */
   async backfillMissingTranscripts(): Promise<{ indexed: number; skipped: number }> {
     const db = getDatabase()
+    // PROVIDER PARTITION — "missing" means missing FOR THE ACTIVE PROVIDER.
+    // After a provider switch this re-embeds the whole library into the new
+    // partition (the old partition is untouched — the instant backup).
+    const activeProvider = await getEmbeddingsService().activeProviderId()
+    if (!activeProvider) {
+      console.log('[VectorStore] Backfill skipped — no usable embedding provider')
+      return { indexed: 0, skipped: 0 }
+    }
     const stmt = db.prepare(`
       SELECT t.recording_id, t.full_text, r.date_recorded, r.filename
       FROM transcripts t
@@ -550,9 +815,10 @@ class VectorStore {
         AND COALESCE(r.personal, 0) = 0
         AND r.deleted_at IS NULL
         AND NOT EXISTS (
-          SELECT 1 FROM vector_embeddings v WHERE v.recording_id = t.recording_id
+          SELECT 1 FROM vector_embeddings v WHERE v.recording_id = t.recording_id AND v.embed_provider = ?
         )
     `)
+    stmt.bind([activeProvider])
     const rows: Array<{ recording_id: string; full_text: string; date_recorded?: string; filename?: string }> = []
     while (stmt.step()) {
       rows.push(stmt.getAsObject() as never)
@@ -614,11 +880,39 @@ class VectorStore {
     return { indexed, skipped }
   }
 
+  /**
+   * Neighbor re-attachment (Cerebras KB lesson): the chunks ADJACENT to a
+   * matched chunk (chunkIndex±1, same recording) so an excerpt carries its
+   * surrounding conversation. Restricted to the ACTIVE provider's partition
+   * (neighbors must come from the same embedding run as the match) and routed
+   * through the same eligibility boundary as every other read.
+   */
+  getChunkNeighbors(recordingId: string, chunkIndexes: Iterable<number>, providerId?: string): VectorDocument[] {
+    const wanted = new Set<number>()
+    for (const i of chunkIndexes) {
+      wanted.add(i - 1)
+      wanted.add(i + 1)
+    }
+    return this.filterEligibleDocs(
+      Array.from(this.documents.values()).filter(
+        (d) =>
+          d.metadata.recordingId === recordingId &&
+          wanted.has(d.metadata.chunkIndex) &&
+          (!providerId || d.metadata.embedProvider === providerId)
+      )
+    )
+  }
+
   async searchByMeeting(meetingId: string): Promise<VectorDocument[]> {
     // RE6-1 — meeting-scoped reads (meeting chat, summarizeMeeting, meeting-
     // scoped findActionItems) route through the SAME eligibility boundary.
+    // PROVIDER PARTITION (see search()) — the re-ranker's query embedding is
+    // only comparable within the active provider's model.
+    const activeProvider = await getEmbeddingsService().activeProviderId()
     return this.filterEligibleDocs(
-      Array.from(this.documents.values()).filter((d) => d.metadata.meetingId === meetingId)
+      Array.from(this.documents.values()).filter(
+        (d) => d.metadata.meetingId === meetingId && d.metadata.embedProvider === activeProvider
+      )
     ).sort((a, b) => a.metadata.chunkIndex - b.metadata.chunkIndex)
   }
 
@@ -696,8 +990,9 @@ class VectorStore {
    * docs. Route through the SAME fail-closed eligibility boundary search uses
    * ({@link filterEligibleDocs}); a lookup failure yields 0 (fail-closed).
    */
-  getEligibleDocumentCount(): number {
-    return this.filterEligibleDocs([...this.documents.values()]).length
+  getEligibleDocumentCount(providerId?: string): number {
+    const docs = this.filterEligibleDocs([...this.documents.values()])
+    return providerId ? docs.filter((d) => d.metadata.embedProvider === providerId).length : docs.length
   }
 
   /**
@@ -705,9 +1000,11 @@ class VectorStore {
    * {@link getEligibleDocumentCount}). Excluded recordings no longer inflate the
    * displayed meeting count; fail-closed to 0 on any eligibility lookup failure.
    */
-  getEligibleMeetingCount(): number {
+  getEligibleMeetingCount(providerId?: string): number {
     const meetingIds = new Set<string>()
-    for (const doc of this.filterEligibleDocs([...this.documents.values()])) {
+    for (const doc of this.filterEligibleDocs([...this.documents.values()]).filter(
+      (d) => !providerId || d.metadata.embedProvider === providerId
+    )) {
       if (doc.metadata.meetingId) {
         meetingIds.add(doc.metadata.meetingId)
       }

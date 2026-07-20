@@ -1,4 +1,4 @@
-import { parseICS, correlate } from '@hidock/calendar-sync'
+import { parseICS } from '@hidock/calendar-sync'
 import type { CalendarEvent } from '@hidock/calendar-sync'
 import ICAL from 'ical.js'
 import { join } from 'path'
@@ -8,7 +8,7 @@ import { getConfig, updateConfig } from './config'
 import { whenBootTasksSettled, areBootTasksSettled } from './boot-scheduler'
 
 // Re-export package types and correlate for consumers (e.g. recording-watcher)
-export { correlate }
+export { correlate } from '@hidock/calendar-sync'
 export type { CalendarEvent }
 
 // B-CAL-004: Error category for calendar sync failures

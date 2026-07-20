@@ -16,6 +16,20 @@ import { ipcMain } from 'electron'
 import { getConfig, updateConfig } from '../services/config'
 import { getBrainRegistry } from '../services/brains/brain-registry'
 import { getBrainCredentialStore } from '../services/brains/brain-credential-store'
+import { getVectorStore } from '../services/vector-store'
+
+/**
+ * Kick the provider-scoped backfill after the EMBED routing changes so the
+ * newly active provider's partition starts filling immediately (fire-and-
+ * forget; the backfill is idempotent and skips chunks already in the
+ * partition — switching BACK to a previous provider is a cheap no-op scan).
+ */
+function kickEmbedReindex(reason: string): void {
+  void getVectorStore()
+    .backfillMissingTranscripts()
+    .then((r) => console.log(`[brains] embed reindex after ${reason}:`, r))
+    .catch((e) => console.error(`[brains] embed reindex after ${reason} failed:`, e))
+}
 import type { AIBrain, BrainAuthStatus, BrainCapability, BrainId, BrainTask } from '../services/brains/types'
 
 /**
@@ -69,6 +83,10 @@ export function registerBrainsHandlers(): void {
     await updateConfig('brains', {
       enabled: { ...current.enabled, [id]: enabled },
     })
+    // Enabling an embed-capable brain can change the active embed partition.
+    if (enabled && getBrainRegistry().get(id)?.capabilities().has('embed')) {
+      kickEmbedReindex(`enable ${id}`)
+    }
     return { success: true }
   })
 
@@ -77,6 +95,11 @@ export function registerBrainsHandlers(): void {
     const { id } = args ?? ({} as { id: BrainId })
     await updateConfig('brains', { defaultBrain: id })
     return { success: true }
+  })
+
+  // Current per-task routing overrides (renderer pickers initialize from this).
+  ipcMain.handle('brains:getRouting', async (): Promise<Partial<Record<BrainTask, BrainId>>> => {
+    return { ...getConfig().brains?.taskRouting }
   })
 
   // Set (or clear) a per-task routing override → config.brains.taskRouting[task].
@@ -91,6 +114,9 @@ export function registerBrainsHandlers(): void {
       routing[task] = id
     }
     await updateConfig('brains', { taskRouting: routing })
+    // Provider partitions: a new EMBED route means a new active partition —
+    // start filling it in the background right away.
+    if (task === 'embed') kickEmbedReindex(`routing embed→${id ?? 'auto'}`)
     return { success: true }
   })
 

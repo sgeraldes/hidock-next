@@ -73,7 +73,8 @@ vi.mock('@google/generative-ai', () => ({
 vi.mock('../embeddings', () => ({
   getEmbeddingsService: () => ({
     generateEmbedding: async () => [0.1, 0.2, 0.3],
-    generateEmbeddings: async (texts: string[]) => texts.map(() => [0.1, 0.2, 0.3])
+    generateEmbeddings: async (texts: string[]) => texts.map(() => [0.1, 0.2, 0.3]),
+    activeProviderId: async () => 'mock-provider'
   })
 }))
 

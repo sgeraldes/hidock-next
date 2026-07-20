@@ -47,7 +47,9 @@ vi.mock('../chat-llm', () => ({ getChatLLMService: vi.fn(() => mockChatLLMServic
 vi.mock('../embeddings', () => ({
   getEmbeddingsService: vi.fn(() => ({
     generateEmbedding: vi.fn().mockResolvedValue([0.1, 0.2]),
-    generateEmbeddings: vi.fn().mockResolvedValue([[0.1, 0.2]])
+    generateEmbeddings: vi.fn().mockResolvedValue([[0.1, 0.2]]),
+    activeProviderId: vi.fn(async () => 'gemini-api'),
+    relevanceThreshold: vi.fn(async () => 0.3)
   }))
 }))
 
@@ -56,7 +58,8 @@ vi.mock('../vector-store', () => ({
     initialize: vi.fn().mockResolvedValue(true),
     getDocumentCount: vi.fn().mockReturnValue(3),
     getMeetingCount: vi.fn().mockReturnValue(0),
-    search: vi.fn().mockResolvedValue([imageDoc])
+    search: vi.fn().mockResolvedValue([imageDoc]),
+    getChunkNeighbors: vi.fn(() => [])
   }))
 }))
 

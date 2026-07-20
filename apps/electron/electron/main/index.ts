@@ -75,9 +75,15 @@ function createSplashWindow(): BrowserWindow {
   return splash
 }
 
-function updateSplashStatus(status: string, progress?: number): void {
+async function updateSplashStatus(status: string, progress?: number): Promise<void> {
   if (splashWindow && !splashWindow.isDestroyed()) {
     splashWindow.webContents.send('splash:status', status, progress)
+    // Let the IPC flush and the splash PAINT before whatever heavy (often
+    // synchronous) work follows. A fire-and-forget send queues behind a
+    // blocked event loop — that was the blank-splash boot freeze: the
+    // 'Initializing search index…' update only rendered AFTER the vector
+    // store's multi-second sync load had already run.
+    await new Promise((resolve) => setImmediate(resolve))
   }
 }
 
@@ -153,7 +159,7 @@ function createWindow(): void {
 async function initializeServices(): Promise<void> {
   console.log('Initializing services...')
 
-  updateSplashStatus('Loading configuration...', 10)
+  await updateSplashStatus('Loading configuration...', 10)
   await initializeConfig()
   console.log('Config initialized')
 
@@ -164,32 +170,41 @@ async function initializeServices(): Promise<void> {
   // next boot — the USB safety boundary.
   captureBootEffectiveFeatures()
 
-  updateSplashStatus('Setting up storage...', 20)
+  await updateSplashStatus('Setting up storage...', 20)
   await initializeFileStorage()
   console.log('File storage initialized')
 
-  updateSplashStatus('Initializing database...', 30)
+  await updateSplashStatus('Initializing database...', 30)
   await initializeDatabase()
   console.log('Database initialized')
 
-  updateSplashStatus('Checking data integrity...', 40)
+  await updateSplashStatus('Checking data integrity...', 40)
   const integrityService = getIntegrityService()
   const integrityResult = await integrityService.runStartupChecks()
   if (integrityResult.issuesFound > 0) {
     console.log(`Integrity checks: ${integrityResult.issuesFixed}/${integrityResult.issuesFound} issues fixed`)
   }
 
-  updateSplashStatus('Initializing search index...', 60)
+  await updateSplashStatus('Initializing search index...', 60)
   const vectorStore = getVectorStore()
-  await vectorStore.initialize()
+  let lastLoggedQuarter = -1
+  await vectorStore.initialize((loaded, total) => {
+    const fraction = total > 0 ? loaded / total : 1
+    void updateSplashStatus(`Initializing search index… ${Math.round(fraction * 100)}%`, 60 + fraction * 15)
+    const quarter = Math.floor(fraction * 4)
+    if (quarter > lastLoggedQuarter) {
+      lastLoggedQuarter = quarter
+      console.log(`[VectorStore] Loading embeddings: ${Math.round(fraction * 100)}% (${loaded}/${total})`)
+    }
+  })
   console.log('Vector store initialized')
 
-  updateSplashStatus('Starting AI services...', 75)
+  await updateSplashStatus('Starting AI services...', 75)
   const rag = getRAGService()
   await rag.initialize()
   console.log('RAG service initialized')
 
-  updateSplashStatus('Finalizing setup...', 90)
+  await updateSplashStatus('Finalizing setup...', 90)
   getStoragePolicyService()
   console.log('Storage policy service initialized')
 

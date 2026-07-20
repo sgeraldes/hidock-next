@@ -283,6 +283,128 @@ describe('BrainRouter.embed (convenience)', () => {
     expect(gemini.embed).not.toHaveBeenCalled()
     expect(ollama.embed).toHaveBeenCalledTimes(1)
   })
+
+  // Regression (2026-07): a non-Gemini default that CANNOT embed (codex,
+  // claude-code, …) expresses no embedding preference. Previously
+  // defaultBrain=codex made geminiPrimary return null, silently rerouting
+  // embeddings to the Ollama fallback — with Ollama offline every query
+  // embedding was null, vectorStore.search returned [], and the assistant
+  // answered "no transcripts found" against a fully indexed library.
+  it('keeps gemini as embed primary when defaultBrain (codex) cannot embed', async () => {
+    mockBrainsConfig = {
+      defaultBrain: 'codex',
+      enabled: { 'gemini-api': true, ollama: true, codex: true },
+    }
+    const gemini = makeBrain('gemini-api', ['generate', 'chat', 'embed'], true)
+    const ollama = makeBrain('ollama', ['generate', 'chat', 'embed'], true)
+    const codex = makeBrain('codex', ['chat', 'agentic'], true) // no embed capability
+    const router = new BrainRouter(makeRegistry({ 'gemini-api': gemini, ollama, codex }))
+    expect(await router.embed(['a'])).toEqual([[1]])
+    expect(gemini.embed).toHaveBeenCalledTimes(1)
+    expect(ollama.embed).not.toHaveBeenCalled()
+  })
+
+  // Same regression via an explicit per-task route to a non-embed brain: the
+  // capability fallback chain must still refuse it (capability check), and the
+  // embed-capable fallback (ollama) serves instead.
+  it('an explicit taskRouting.embed to a non-embed brain falls to the embed-capable chain', async () => {
+    mockBrainsConfig = {
+      defaultBrain: 'gemini-api',
+      enabled: { 'gemini-api': true, ollama: true, codex: true },
+      taskRouting: { embed: 'codex' },
+    }
+    const gemini = makeBrain('gemini-api', ['generate', 'chat', 'embed'], true)
+    const ollama = makeBrain('ollama', ['generate', 'chat', 'embed'], true)
+    const codex = makeBrain('codex', ['chat', 'agentic'], true)
+    const router = new BrainRouter(makeRegistry({ 'gemini-api': gemini, ollama, codex }))
+    expect(await router.embed(['a'])).toEqual([[1]])
+    expect(ollama.embed).toHaveBeenCalledTimes(1)
+  })
+  // Explicit route to the in-process ONNX embedder must be honoured DIRECTLY,
+  // not delegated to chain position (the router's old fallback-first-match
+  // would have sent embeddings to Ollama instead).
+  it('honours taskRouting.embed=local-onnx-embed directly', async () => {
+    mockBrainsConfig = {
+      defaultBrain: 'gemini-api',
+      enabled: { 'gemini-api': true, ollama: true, 'local-onnx-embed': true },
+      taskRouting: { embed: 'local-onnx-embed' },
+    }
+    const gemini = makeBrain('gemini-api', ['generate', 'chat', 'embed'], true)
+    const ollama = makeBrain('ollama', ['generate', 'chat', 'embed'], true)
+    const local = makeBrain('local-onnx-embed', ['embed'], true)
+    const router = new BrainRouter(makeRegistry({ 'gemini-api': gemini, ollama, 'local-onnx-embed': local }))
+    expect(await router.embed(['a'])).toEqual([[1]])
+    expect(local.embed).toHaveBeenCalledTimes(1)
+    expect(gemini.embed).not.toHaveBeenCalled()
+    expect(ollama.embed).not.toHaveBeenCalled()
+  })
+
+  // The fallback chain ITERATES: a candidate that throws (local model files
+  // absent — a config error) yields to the next candidate.
+  it('embed fallback iterates past a throwing candidate to the next one', async () => {
+    mockBrainsConfig = {
+      defaultBrain: 'gemini-api',
+      enabled: { 'gemini-api': true, ollama: true, 'local-onnx-embed': true },
+    }
+    const gemini = makeBrain('gemini-api', ['generate', 'chat', 'embed'], true)
+    ;(gemini.embed as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('quota'))
+    const local = makeBrain('local-onnx-embed', ['embed'], true)
+    ;(local.embed as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('model files not present'))
+    const ollama = makeBrain('ollama', ['generate', 'chat', 'embed'], true)
+    const router = new BrainRouter(makeRegistry({ 'gemini-api': gemini, ollama, 'local-onnx-embed': local }))
+    expect(await router.embed(['a'])).toEqual([[1]])
+    expect(gemini.embed).toHaveBeenCalledTimes(1)
+    expect(local.embed).toHaveBeenCalledTimes(1)
+    expect(ollama.embed).toHaveBeenCalledTimes(1)
+  })
+
+  // But NULL vectors never fall through (fail-closed abort shape).
+  it('null vectors from a fallback candidate do NOT fall through to the next provider', async () => {
+    mockBrainsConfig = {
+      defaultBrain: 'gemini-api',
+      enabled: { 'gemini-api': true, ollama: true, 'local-onnx-embed': true },
+    }
+    const gemini = makeBrain('gemini-api', ['generate', 'chat', 'embed'], true)
+    ;(gemini.embed as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('quota'))
+    const local = makeBrain('local-onnx-embed', ['embed'], true)
+    ;(local.embed as ReturnType<typeof vi.fn>).mockResolvedValue([null]) // abort/unavailable shape
+    const ollama = makeBrain('ollama', ['generate', 'chat', 'embed'], true)
+    const router = new BrainRouter(makeRegistry({ 'gemini-api': gemini, ollama, 'local-onnx-embed': local }))
+    expect(await router.embed(['a'])).toEqual([null])
+    expect(ollama.embed).not.toHaveBeenCalled()
+  })
+
+  it('activeEmbedBrainId mirrors selection: explicit route > gemini-primary > chain', async () => {
+    mockBrainsConfig = {
+      defaultBrain: 'gemini-api',
+      enabled: { 'gemini-api': true, ollama: true, 'local-onnx-embed': true },
+      taskRouting: { embed: 'local-onnx-embed' },
+    }
+    const gemini = makeBrain('gemini-api', ['generate', 'chat', 'embed'], true)
+    const ollama = makeBrain('ollama', ['generate', 'chat', 'embed'], true)
+    const local = makeBrain('local-onnx-embed', ['embed'], true)
+    const router = new BrainRouter(makeRegistry({ 'gemini-api': gemini, ollama, 'local-onnx-embed': local }))
+    expect(await router.activeEmbedBrainId()).toBe('local-onnx-embed')
+  })
+
+  it('activeEmbedBrainId skips an unconfigured routed brain and follows the chain', async () => {
+    mockBrainsConfig = {
+      defaultBrain: 'gemini-api',
+      enabled: { 'gemini-api': true, ollama: true, 'local-onnx-embed': true },
+      taskRouting: { embed: 'local-onnx-embed' },
+    }
+    const gemini = makeBrain('gemini-api', ['generate', 'chat', 'embed'], true)
+    const ollama = makeBrain('ollama', ['generate', 'chat', 'embed'], true)
+    const local = makeBrain('local-onnx-embed', ['embed'], false) // model not downloaded
+    // An explicit NON-Gemini route takes gemini out of embedding selection
+    // entirely (same contract as embed()), so the chain serves: ollama.
+    const router = new BrainRouter(makeRegistry({ 'gemini-api': gemini, ollama, 'local-onnx-embed': local }))
+    expect(await router.activeEmbedBrainId()).toBe('ollama')
+    // and with no ollama, null (never gemini while the explicit route stands)
+    const router2 = new BrainRouter(makeRegistry({ 'gemini-api': gemini, 'local-onnx-embed': local }))
+    expect(await router2.activeEmbedBrainId()).toBeNull()
+  })
+
 })
 
 describe('BrainRouter shouldGenerate gate (round-44 ADV42-2)', () => {

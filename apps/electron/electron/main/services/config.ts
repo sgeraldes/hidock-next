@@ -225,6 +225,7 @@ const DEFAULT_CONFIG: AppConfig = {
     enabled: {
       'gemini-api': true,
       ollama: true,
+      'local-onnx-embed': false,
       'claude-code': false,
       codex: false,
       'gemini-cli': false,

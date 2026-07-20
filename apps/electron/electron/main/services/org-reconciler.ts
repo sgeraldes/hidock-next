@@ -237,7 +237,7 @@ export function autoLinkRecordingsToMeetings(): number {
   if (!hasWork) {
     if (declinedBridgeCount > 0) {
       console.log(
-        `[OrgReconciler] Left ${declinedBridgeCount} recording(s) unlinked — only ` +
+        `[OrgReconciler] Left ${declinedBridgeCount} recording(s) unlinked - only ` +
         `all-day/long "bridge" meetings overlapped (need user/content corroboration)`
       )
     }

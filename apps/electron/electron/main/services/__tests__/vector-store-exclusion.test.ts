@@ -41,6 +41,7 @@ vi.mock('../database', () => ({
     prepare: (_sql: string) => {
       let i = -1
       return {
+        bind: () => {},
         step: () => {
           i++
           return i < deps.backfillRows.length
@@ -86,7 +87,8 @@ vi.mock('../embeddings', () => ({
     generateEmbeddings: async (texts: string[]) => {
       if (deps.onEmbeddings) deps.onEmbeddings()
       return texts.map(() => [1, 0, 0])
-    }
+    },
+    activeProviderId: async () => 'mock-provider'
   })
 }))
 

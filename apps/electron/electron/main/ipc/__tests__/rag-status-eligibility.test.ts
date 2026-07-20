@@ -37,6 +37,12 @@ vi.mock('../../services/chat-llm', () => ({
   getChatLLMService: vi.fn(() => ({ getStatus: getStatusMock }))
 }))
 
+vi.mock('../../services/embeddings', () => ({
+  getEmbeddingsService: vi.fn(() => ({
+    activeProviderId: vi.fn(async () => 'gemini-api'),
+  })),
+}))
+
 vi.mock('../../services/rag', () => ({
   getRAGService: vi.fn(() => ({ chat: vi.fn(), getStats: vi.fn(), globalSearch: vi.fn() }))
 }))
@@ -70,6 +76,9 @@ describe('rag:status eligibility-filtered counts', () => {
     expect(res.data.documentCount).toBe(3)
     expect(res.data.meetingCount).toBe(2)
     expect(res.data.ready).toBe(true)
+    // provider partitions: the badge numbers come from the ACTIVE partition
+    expect(res.data.embedProvider).toBe('gemini-api')
+    expect(res.data.embedDocumentCount).toBe(3)
     // The raw counters must NOT have been used for the status numbers.
     expect(vectorMock.getDocumentCount).not.toHaveBeenCalled()
     expect(vectorMock.getMeetingCount).not.toHaveBeenCalled()

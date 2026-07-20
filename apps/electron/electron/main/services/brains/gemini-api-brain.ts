@@ -13,7 +13,7 @@
  * keeps working with no migration required, and the one-time migration closes
  * the plaintext-key gap.
  */
-import { GoogleGenerativeAI } from '@google/generative-ai'
+import { GoogleGenerativeAI, TaskType } from '@google/generative-ai'
 import { getConfig } from '../config'
 import { getBrainCredentialStore } from './brain-credential-store'
 import type {
@@ -185,9 +185,14 @@ export class GeminiApiBrain implements AIBrain {
         return out
       }
       const slice = texts.slice(i, i + GEMINI_BATCH_LIMIT)
+      // Asymmetric retrieval: queries and documents embed differently. Absent
+      // purpose ⇒ DOCUMENT (the historical untyped behaviour, which the
+      // gemini-embedding family treats as document-side).
+      const taskType = opts.purpose === 'query' ? TaskType.RETRIEVAL_QUERY : TaskType.RETRIEVAL_DOCUMENT
       const res = await model.batchEmbedContents({
         requests: slice.map((t) => ({
           content: { role: 'user', parts: [{ text: t }] },
+          taskType,
         })),
       })
       for (const emb of res.embeddings) {

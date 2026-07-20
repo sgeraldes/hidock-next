@@ -27,7 +27,8 @@ vi.mock('../file-storage', () => ({ getDatabasePath: () => dbPath }))
 vi.mock('../embeddings', () => ({
   getEmbeddingsService: () => ({
     generateEmbedding: async () => [1, 0, 0],
-    generateEmbeddings: async (texts: string[]) => texts.map(() => [1, 0, 0])
+    generateEmbeddings: async (texts: string[]) => texts.map(() => [1, 0, 0]),
+    activeProviderId: async () => 'mock-provider'
   })
 }))
 

@@ -18,10 +18,10 @@ import { getBrainRegistry, resetBrainRegistry } from '../brain-registry'
 describe('BrainRegistry', () => {
   afterEach(() => resetBrainRegistry())
 
-  it('registers all six brains by id', () => {
+  it('registers all seven brains by id', () => {
     const registry = getBrainRegistry()
     const ids = registry.list().map((b) => b.id).sort()
-    expect(ids).toEqual(['claude-code', 'codex', 'gemini-api', 'gemini-cli', 'kiro', 'ollama'])
+    expect(ids).toEqual(['claude-code', 'codex', 'gemini-api', 'gemini-cli', 'kiro', 'local-onnx-embed', 'ollama'])
   })
 
   it('resolves each new agentic brain and its capabilities', () => {

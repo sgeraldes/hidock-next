@@ -40,7 +40,7 @@ import type {
 const FALLBACK_CHAINS: Record<BrainCapability, BrainId[]> = {
   generate: ['gemini-api', 'ollama'],
   chat: ['gemini-api', 'ollama', 'claude-code', 'codex', 'gemini-cli'],
-  embed: ['gemini-api', 'ollama'],
+  embed: ['gemini-api', 'local-onnx-embed', 'ollama'],
   analyzeAudio: ['gemini-api'],
   agentic: ['claude-code', 'codex', 'gemini-cli'],
 }
@@ -135,29 +135,19 @@ export class BrainRouter {
     // An explicit non-Gemini task route means Gemini is not the primary.
     if (routed && routed !== 'gemini-api') return null
     const target = routed ?? cfg?.defaultBrain ?? DEFAULT_BRAIN
-    if (target !== 'gemini-api') return null
+    if (target !== 'gemini-api') {
+      // A non-Gemini DEFAULT is only a real preference for `need` when that brain
+      // can actually serve it (embed audit: defaultBrain=ollama wins embeddings).
+      // A default that LACKS the capability (codex/claude-code cannot embed)
+      // expresses no preference for this task — Gemini stays the primary.
+      // Fixes: defaultBrain=codex silently rerouting embeddings to the Ollama
+      // fallback — offline ⇒ null vectors ⇒ vectorStore.search always empty ⇒
+      // the assistant answered "no transcripts found" with 110k chunks indexed.
+      const alt = this.registry.get(target)
+      if (alt?.capabilities().has(need)) return null
+    }
     const gemini = this.registry.get('gemini-api')
     return (await this.isUsable(gemini, need)) ? gemini : null
-  }
-
-  /**
-   * Capability-aware fallback (FIX 5): the first registered, ENABLED brain that
-   * ADVERTISES `need`, excluding `exclude` (the failed/primary Gemini). Unlike
-   * resolve(), this does NOT run an availability probe — the brain's own call
-   * determines reachability (returning null when unreachable) and honours the
-   * caller's abort signal. This keeps chat cancellable (FIX 3) and embeddings to
-   * a single probe (FIX 4) while still refusing a disabled or incapable brain.
-   */
-  private capabilityFallback(need: BrainCapability, exclude: BrainId | null): AIBrain | null {
-    for (const id of FALLBACK_CHAINS[need]) {
-      if (id === exclude) continue
-      const brain = this.registry.get(id)
-      if (!brain) continue
-      if (!this.isEnabled(id)) continue
-      if (!brain.capabilities().has(need)) continue
-      return brain
-    }
-    return null
   }
 
   /**
@@ -308,7 +298,7 @@ export class BrainRouter {
    */
   async embed(
     texts: string[],
-    opts: { shouldGenerate?: () => boolean } = {}
+    opts: { shouldGenerate?: () => boolean; purpose?: 'query' | 'passage' } = {}
   ): Promise<(number[] | null)[]> {
     if (texts.length === 0) return []
 
@@ -321,6 +311,25 @@ export class BrainRouter {
     // Recheck before the PRIMARY provider attempt.
     if (!eligibleToGenerate(opts.shouldGenerate)) return ineligible()
 
+    // Explicit per-task route to a NON-Gemini brain: honour it DIRECTLY — the
+    // fallback chain's ordering must not silently override an explicit choice
+    // (previously taskRouting.embed only worked when the routed brain happened
+    // to sit first in the chain). No availability probe — the adapter
+    // self-reports (a throw means "try the next candidate"; null vectors mean
+    // abort/unavailable and are returned as-is).
+    const routed = this.brainsConfig()?.taskRouting?.['embed']
+    if (routed && routed !== 'gemini-api') {
+      const brain = this.registry.get(routed)
+      if (brain && this.isEnabled(routed) && brain.capabilities().has('embed') && brain.embed) {
+        if (!eligibleToGenerate(opts.shouldGenerate)) return ineligible()
+        try {
+          return await brain.embed(texts, opts)
+        } catch (e) {
+          console.error(`[BrainRouter] ${routed} embedding failed, trying fallback:`, e)
+        }
+      }
+    }
+
     const primary = await this.geminiPrimary('embed', 'embed')
     if (primary?.embed) {
       // Recheck AGAIN after the geminiPrimary await, immediately before the call.
@@ -332,21 +341,79 @@ export class BrainRouter {
         // pre-attempt check cannot see an exclusion committed mid-batch.
         return await primary.embed(texts, opts)
       } catch (e) {
-        console.error('[BrainRouter] Gemini embedding failed, trying Ollama fallback:', e)
+        console.error('[BrainRouter] Gemini embedding failed, trying fallback:', e)
       }
     }
 
     // ADV42-2 (round-44) — recheck before the FALLBACK provider attempt: an
     // exclusion committed while the primary embed was pending or failing must
-    // NOT reach the Ollama fallback.
+    // NOT reach the fallback.
     if (!eligibleToGenerate(opts.shouldGenerate)) return ineligible()
 
-    const fallback = this.capabilityFallback('embed', 'gemini-api')
-    // ADV43-2 (round-45) — the Ollama adapter emits one request per text; thread
-    // shouldGenerate so it re-checks before EACH per-text request too.
-    return fallback?.embed ? fallback.embed(texts, opts) : ineligible()
+    // Iterate the capability chain (was: first-match only via
+    // capabilityFallback). A candidate that THROWS (e.g. local-onnx-embed with
+    // model files absent — a CONFIG error, not an abort) yields to the next
+    // candidate. A NULL-vector result is returned as-is: it is either an
+    // eligibility abort (fail-closed — content must NOT reach another
+    // provider) or the provider self-reporting unavailable after its own probe
+    // (Ollama unreachable). gemini-api is skipped here — it was already
+    // considered by the primary logic above. ADV43-2 (round-45) — the Ollama
+    // adapter emits one request per text; shouldGenerate is threaded through
+    // opts so it re-checks before EACH per-text request too.
+    const tried = new Set<BrainId>()
+    if (routed) tried.add(routed)
+    if (primary) tried.add(primary.id)
+    for (const id of FALLBACK_CHAINS.embed) {
+      if (id === 'gemini-api' || tried.has(id)) continue
+      const brain = this.registry.get(id)
+      if (!brain || !this.isEnabled(id) || !brain.capabilities().has('embed') || !brain.embed) continue
+      if (!eligibleToGenerate(opts.shouldGenerate)) return ineligible()
+      try {
+        return await brain.embed(texts, opts)
+      } catch (e) {
+        console.error(`[BrainRouter] ${id} embedding failed, trying next:`, e)
+      }
+    }
+    return ineligible()
   }
 
+  /**
+   * Which brain WOULD serve an embed call right now — the partition label the
+   * vector store stamps on newly indexed chunks and filters searches by.
+   * Mirrors embed()'s selection order (explicit route → gemini-primary logic →
+   * capability chain) but checks `authStatus().configured` so a brain that
+   * would only THROW (local model absent) or return nulls (Ollama down) is
+   * not labelled active. authStatus is contractually cheap/cached; Ollama's
+   * localhost probe is acceptable here (labeling is not a cancellation-
+   * sensitive path). Returns null when no embed provider is usable.
+   */
+  async activeEmbedBrainId(): Promise<BrainId | null> {
+    const cfg = this.brainsConfig()
+    const routed = cfg?.taskRouting?.['embed']
+    if (routed && routed !== 'gemini-api') {
+      const brain = this.registry.get(routed)
+      if (brain && this.isEnabled(routed) && brain.capabilities().has('embed')) {
+        try {
+          if ((await brain.authStatus()).configured) return routed
+        } catch {
+          /* unusable — fall through to the chain */
+        }
+      }
+    }
+    const gemini = await this.geminiPrimary('embed', 'embed')
+    if (gemini) return 'gemini-api'
+    for (const id of FALLBACK_CHAINS.embed) {
+      if (id === 'gemini-api' || id === routed) continue
+      const brain = this.registry.get(id)
+      if (!brain || !this.isEnabled(id) || !brain.capabilities().has('embed')) continue
+      try {
+        if ((await brain.authStatus()).configured) return id
+      } catch {
+        /* next candidate */
+      }
+    }
+    return null
+  }
   /**
    * Native audio → text. Resolves to a brain that advertises analyzeAudio
    * (gemini-api only in Phase 1). Returns null when none is configured — the

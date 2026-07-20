@@ -6,6 +6,14 @@ import { ipcMain } from 'electron'
 import { getRAGService } from '../services/rag'
 import { getVectorStore } from '../services/vector-store'
 import { getChatLLMService } from '../services/chat-llm'
+import { getEmbeddingsService } from '../services/embeddings'
+
+/** Badge-friendly short labels for embedding providers (long brain labels don't fit the chip). */
+const EMBED_PROVIDER_LABELS: Record<string, string> = {
+  'gemini-api': 'Gemini',
+  ollama: 'Ollama',
+  'local-onnx-embed': 'Nemotron Local',
+}
 import { success, error, Result } from '../types/api'
 import { RAGFilterSchema } from '../validation/common'
 import type { RAGFilter, RAGStatus, RAGChatResponse } from '../types/api'
@@ -49,6 +57,12 @@ export function registerRAGHandlers(): void {
       // on the ELIGIBLE document count (fail-closed ⇒ 0 ⇒ not ready).
       const docCount = vectorStore.getEligibleDocumentCount()
       const meetingCount = vectorStore.getEligibleMeetingCount()
+      // PROVIDER PARTITIONS — the badge must show what retrieval can ACTUALLY
+      // search: the active provider's partition, not the whole corpus. After
+      // a provider switch this is 0 until the reindex fills it — honest "not
+      // ready" instead of a green badge over an unservable partition.
+      const embedProvider = await getEmbeddingsService().activeProviderId()
+      const embedDocumentCount = embedProvider ? vectorStore.getEligibleDocumentCount(embedProvider) : 0
 
       return success({
         backend: chatStatus.backend,
@@ -56,7 +70,10 @@ export function registerRAGHandlers(): void {
         ollamaAvailable: chatStatus.ollamaAvailable,
         documentCount: docCount,
         meetingCount: meetingCount,
-        ready: chatStatus.backend !== 'none' && docCount > 0
+        ready: chatStatus.backend !== 'none' && embedDocumentCount > 0,
+        embedProvider,
+        embedProviderLabel: embedProvider ? (EMBED_PROVIDER_LABELS[embedProvider] ?? embedProvider) : null,
+        embedDocumentCount,
       })
     } catch (err) {
       console.error('rag:status error:', err)

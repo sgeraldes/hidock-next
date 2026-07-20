@@ -17,6 +17,7 @@
 export type BrainId =
   | 'gemini-api' // @google/generative-ai (current cloud path)
   | 'ollama' // local (current fallback)
+  | 'local-onnx-embed' // in-process ONNX embeddings (Nemotron-3-Embed, no server)
   | 'claude-code' // @anthropic-ai/claude-agent-sdk   (Phase 2)
   | 'codex' // @openai/codex-sdk                (Phase 3)
   | 'gemini-cli' // @google/gemini-cli               (Phase 4)
@@ -100,6 +101,15 @@ export interface GenerateOptions {
  */
 export interface EmbedOptions {
   shouldGenerate?: () => boolean
+  /**
+   * Asymmetric-retrieval purpose. Embedding models trained for retrieval
+   * (Nemotron-3-Embed, Gemini embedding) embed queries and documents
+   * DIFFERENTLY — Nemotron prepends `query:` / `passage:`, Gemini sets the
+   * RETRIEVAL_QUERY / RETRIEVAL_DOCUMENT task type. Callers that index
+   * content pass 'passage'; callers embedding a search query pass 'query'.
+   * Absent ⇒ 'passage' (the historical behaviour: everything is a document).
+   */
+  purpose?: 'query' | 'passage'
 }
 
 export interface AudioAnalyzeInput {

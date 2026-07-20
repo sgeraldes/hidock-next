@@ -3,6 +3,10 @@ import { existsSync, readFileSync } from 'fs'
 import { join, normalize, resolve as resolvePath } from 'path'
 import { randomUUID } from 'crypto'
 import { getDatabasePath } from './file-storage'
+
+// Re-exported so consumers (e.g. vector-store's binary cache) can locate the
+// DB file without pulling the file-storage module graph into their tests.
+export { getDatabasePath }
 import { DatabaseEngine, getTableColumns, type SqlJsDatabase } from '@hidock/database'
 import { normalizeName, isGenericSpeakerLabel, detectAmbiguousName } from './entity-normalize'
 import { getEventBus } from './event-bus'

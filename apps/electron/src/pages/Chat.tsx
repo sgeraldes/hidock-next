@@ -82,6 +82,10 @@ interface RAGStatus {
   documentCount: number
   meetingCount: number
   ready: boolean
+  /** Active embedding provider partition (main/types/api.ts RAGStatus). */
+  embedProvider?: string | null
+  embedProviderLabel?: string | null
+  embedDocumentCount?: number
 }
 
 interface Source {
@@ -1172,7 +1176,12 @@ export function Chat() {
                 {status.ready ? (
                   <div className="hidden @lg:flex items-center gap-1.5 text-green-600 dark:text-green-400 bg-green-500/10 px-2 py-1 rounded-full border border-green-500/20">
                     <CheckCircle2 className="h-3.5 w-3.5" />
-                    <span>{backendLabel(status.backend)} · {status.documentCount} chunks</span>
+                    <span>
+                      {(status.embedProviderLabel ?? backendLabel(status.backend)) +
+                        ' · ' +
+                        (status.embedDocumentCount ?? status.documentCount) +
+                        ' chunks'}
+                    </span>
                   </div>
                 ) : status.backend === 'none' ? (
                   <div className="hidden @lg:flex items-center gap-1.5 text-yellow-600 dark:text-yellow-400 bg-yellow-500/10 px-2 py-1 rounded-full border border-yellow-500/20">

@@ -29,6 +29,8 @@ vi.mock('@google/generative-ai', () => ({
   GoogleGenerativeAI: vi.fn(function () {
     return { getGenerativeModel: mockGetGenerativeModel }
   }),
+  // The brain maps purpose → Gemini task type; keep the real enum values.
+  TaskType: { RETRIEVAL_QUERY: 'RETRIEVAL_QUERY', RETRIEVAL_DOCUMENT: 'RETRIEVAL_DOCUMENT' },
 }))
 
 import { GeminiApiBrain, resolveGeminiApiKey } from '../gemini-api-brain'

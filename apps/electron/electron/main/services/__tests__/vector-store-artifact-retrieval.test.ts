@@ -90,7 +90,8 @@ vi.mock('../database', () => ({
 vi.mock('../embeddings', () => ({
   getEmbeddingsService: () => ({
     generateEmbedding: async () => [1, 0, 0],
-    generateEmbeddings: async (texts: string[]) => texts.map(() => [1, 0, 0])
+    generateEmbeddings: async (texts: string[]) => texts.map(() => [1, 0, 0]),
+    activeProviderId: async () => 'mock-provider'
   })
 }))
 

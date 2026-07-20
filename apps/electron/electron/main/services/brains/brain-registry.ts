@@ -9,6 +9,7 @@ import { CodexBrain } from './codex-brain'
 import { GeminiApiBrain } from './gemini-api-brain'
 import { GeminiCliBrain } from './gemini-cli-brain'
 import { KiroCliBrain } from './kiro-cli-brain'
+import { LocalOnnxEmbedBrain } from './local-onnx-embed-brain'
 import { OllamaBrain } from './ollama-brain'
 import type { AIBrain, BrainId } from './types'
 
@@ -28,6 +29,7 @@ const CODEX_COMPANION_PATH =
 const REGISTRATIONS: Array<() => AIBrain> = [
   () => new GeminiApiBrain(),
   () => new OllamaBrain(),
+  () => new LocalOnnxEmbedBrain(),
   () => new ClaudeCodeBrain(),
   () => new CodexBrain({ companionPath: CODEX_COMPANION_PATH }),
   () => new GeminiCliBrain(),

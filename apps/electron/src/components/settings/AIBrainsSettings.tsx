@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { toast } from '@/components/ui/toaster'
 import type {
   BrainListItem,
@@ -103,11 +104,14 @@ function BrainRow({
 export function AIBrainsSettings() {
   const [brains, setBrains] = useState<BrainListItem[]>([])
   const [loading, setLoading] = useState(true)
+  const [embedRoute, setEmbedRoute] = useState<string>('auto')
 
   const load = useCallback(async () => {
     try {
       const list = await window.electronAPI?.brains?.list()
       if (list) setBrains(list)
+      const routing = await window.electronAPI?.brains?.getRouting?.()
+      if (routing) setEmbedRoute(routing.embed ?? 'auto')
     } catch {
       /* leave empty — the empty state renders */
     } finally {
@@ -118,6 +122,37 @@ export function AIBrainsSettings() {
   useEffect(() => {
     void load()
   }, [load])
+
+  // Embed-capable brains for the provider picker (semantic search partition).
+  const embedBrains = brains.filter((b) => b.capabilities.includes('embed'))
+
+  const handleEmbedRoute = useCallback(
+    async (value: string) => {
+      const previous = embedRoute
+      setEmbedRoute(value)
+      try {
+        if (value === 'auto') {
+          await window.electronAPI.brains.setTaskRouting({ task: 'embed', id: null })
+        } else {
+          // A routed brain must also be enabled; enabling an embed brain and
+          // routing to it both kick the provider-partition reindex in main.
+          await window.electronAPI.brains.setEnabled({ id: value as BrainId, enabled: true })
+          await window.electronAPI.brains.setTaskRouting({ task: 'embed', id: value as BrainId })
+        }
+        toast.success(
+          value === 'auto'
+            ? 'Embedding provider set to auto.'
+            : 'Embedding provider switched — re-indexing starts in the background; the previous index stays as a backup.'
+        )
+        void load()
+      } catch (e) {
+        setEmbedRoute(previous)
+        toast.error(`Couldn't switch embedding provider: ${e instanceof Error ? e.message : String(e)}`)
+        void load()
+      }
+    },
+    [embedRoute, load]
+  )
 
   const defaultId = brains.find((b) => b.isDefault)?.id ?? ''
 
@@ -171,6 +206,32 @@ export function AIBrainsSettings() {
               <BrainRow key={brain.id} brain={brain} onToggle={handleToggle} />
             ))}
           </RadioGroup>
+        )}
+
+        {!loading && embedBrains.length > 0 && (
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
+            <div className="min-w-0">
+              <p className="text-sm font-medium">Embedding provider</p>
+              <p className="text-xs text-muted-foreground">
+                Which model powers semantic search. Switching re-indexes in the background — the
+                previous provider&apos;s chunks stay as an instant backup.
+              </p>
+            </div>
+            <Select value={embedRoute} onValueChange={handleEmbedRoute}>
+              <SelectTrigger className="w-64" aria-label="Embedding provider">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="auto">Auto (Gemini when configured)</SelectItem>
+                {embedBrains.map((b) => (
+                  <SelectItem key={b.id} value={b.id} disabled={!b.auth.configured}>
+                    {b.label}
+                    {!b.auth.configured ? ' — not ready' : ''}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
         )}
       </CardContent>
     </Card>

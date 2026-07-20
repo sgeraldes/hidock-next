@@ -445,4 +445,16 @@ export interface RAGStatus {
   documentCount: number
   meetingCount: number
   ready: boolean
+  /**
+   * The ACTIVE embedding provider partition (2026-07 provider partitions).
+   * Retrieval searches ONLY this partition — `embedDocumentCount` is the
+   * honest "chunks the assistant can actually search" number, and `ready`
+   * requires it to be > 0 (a just-switched provider with a pending reindex
+   * shows 0 ⇒ not ready, instead of claiming the whole library is searchable).
+   */
+  embedProvider: string | null
+  /** Badge-friendly short label ('Gemini', 'Ollama', 'Nemotron Local'). */
+  embedProviderLabel: string | null
+  /** Eligible chunks in the ACTIVE provider's partition. */
+  embedDocumentCount: number
 }

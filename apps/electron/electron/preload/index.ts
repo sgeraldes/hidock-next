@@ -15,7 +15,14 @@ import type {
  * handler's Node-only transitive imports (fs/os) into the renderer build.
  * The handler's `BrainListItem` is kept structurally identical.
  */
-export type BrainId = 'gemini-api' | 'ollama' | 'claude-code' | 'codex' | 'gemini-cli' | 'kiro'
+export type BrainId =
+  | 'gemini-api'
+  | 'ollama'
+  | 'local-onnx-embed'
+  | 'claude-code'
+  | 'codex'
+  | 'gemini-cli'
+  | 'kiro'
 export type BrainCapability = 'generate' | 'chat' | 'analyzeAudio' | 'embed' | 'agentic'
 export type BrainTask = 'transcribeAnalyze' | 'chat' | 'outputs' | 'handover' | 'embed' | 'suggestions'
 export interface BrainAuthStatus {
@@ -977,6 +984,7 @@ export interface ElectronAPI {
     setEnabled: (args: { id: BrainId; enabled: boolean }) => Promise<{ success: boolean }>
     setDefault: (args: { id: BrainId }) => Promise<{ success: boolean }>
     setTaskRouting: (args: { task: BrainTask; id: BrainId | null }) => Promise<{ success: boolean }>
+    getRouting: () => Promise<Partial<Record<BrainTask, BrainId>>>
     setCredential: (args: { id: BrainId; field: string; value: string | null }) => Promise<{ success: boolean }>
   }
 
@@ -1590,6 +1598,7 @@ const electronAPI: ElectronAPI = {
     setEnabled: (args) => callIPC('brains:setEnabled', args),
     setDefault: (args) => callIPC('brains:setDefault', args),
     setTaskRouting: (args) => callIPC('brains:setTaskRouting', args),
+    getRouting: () => callIPC('brains:getRouting'),
     setCredential: (args) => callIPC('brains:setCredential', args)
   },
 

@@ -45,7 +45,8 @@ vi.mock('../config', () => ({
 vi.mock('../embeddings', () => ({
   getEmbeddingsService: () => ({
     generateEmbedding: async () => null,
-    generateEmbeddings: async (texts: string[]) => texts.map(() => null)
+    generateEmbeddings: async (texts: string[]) => texts.map(() => null),
+    activeProviderId: async () => 'mock-provider'
   })
 }))
 
