@@ -34,7 +34,7 @@
 
 ### BUG-R6: Chromium USB errors still showing — ACCEPTED (cosmetic, documented)
 **Symptom:** 7x SetupDiGetDeviceProperty errors on startup.
-**Root cause:** The `disable-usb-device-event-log` and `device-event-log-level` flags don't fully suppress these in this Electron version.
+**Root cause (CONFIRMED via Chromium source, 2026-07-20):** `usb_service_win.cc` logs these via `USB_PLOG(ERROR)`. In `components/device_event_log/device_event_log_impl.cc`, `AddLogEntry()` unconditionally escalates `LOG_LEVEL_ERROR` entries to `LOG(ERROR)` (stderr) — `if (log_entry.log_level != LOG_LEVEL_ERROR && !VLOG_IS_ON(1)) return;` skips the device-event-log-level gate entirely for ERROR-severity entries. No value of `--device-event-log-level` (nor `--disable-usb-device-event-log`) can suppress an ERROR-level entry; those switches only gate USER/EVENT/DEBUG-level entries. There is no switch-level fix — the `device-event-log-level=3` value was never the bug (it wasn't "backwards"), the entries are simply exempt from the threshold by design.
 **Files:** `electron/main/index.ts`
 **Decision (done):** These are written to stderr by native Chromium code (fd 2), not via `console.log`. A JS-level `process.stderr.write` filter cannot intercept native writes, and raising the global `--log-level` would also hide genuine errors. The existing `disable-usb-device-event-log` / `device-event-log-level=3` switches are the clean mechanism and cover most of the noise; anything residual can only be suppressed by redirecting the Electron child's stderr in the dev launcher (dev-only). We ACCEPT the remaining lines as cosmetic rather than add a risky filter. Rationale documented inline in `index.ts` next to the USB switches.
 

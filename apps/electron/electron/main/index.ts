@@ -310,11 +310,23 @@ if (process.platform === 'win32') {
 // Both are written to stderr by native Chromium/DevTools code (fd 2), NOT via the
 // JS console. A JS-level filter (monkey-patching process.stderr.write) cannot catch
 // native writes, and raising the global Chromium --log-level would also hide genuine
-// errors — so there is no safe in-process suppression. The switches above are the
-// clean mechanism and cover most of the USB noise; anything that still leaks can only
-// be filtered by redirecting the Electron child's stderr in the dev launcher (dev-only
-// concern). We therefore ACCEPT the remaining lines as cosmetic rather than adding a
-// risky filter. See docs/specs/2026-03-25-remaining-bugs.md (BUG-R6, BUG-R7).
+// errors — so there is no safe in-process suppression.
+//
+// R6 root cause CONFIRMED (not just believed) via Chromium source
+// (components/device_event_log/device_event_log_impl.cc): usb_service_win.cc logs
+// these via USB_PLOG(ERROR), and device_event_log's AddLogEntry() unconditionally
+// escalates LOG_LEVEL_ERROR entries to LOG(ERROR) (stderr) regardless of the
+// configured --device-event-log-level threshold —
+// `if (log_entry.log_level != LOG_LEVEL_ERROR && !VLOG_IS_ON(1)) return;` skips the
+// gate entirely for ERROR-severity entries. No value of --device-event-log-level or
+// --disable-usb-device-event-log can suppress an ERROR-level entry; the switches
+// above only affect USER/EVENT/DEBUG-level entries. There is no switch-level fix.
+//
+// The switches above are the clean mechanism and cover most of the USB noise;
+// anything that still leaks can only be filtered by redirecting the Electron child's
+// stderr in the dev launcher (dev-only concern). We therefore ACCEPT the remaining
+// lines as cosmetic rather than adding a risky filter. See
+// docs/specs/2026-03-25-remaining-bugs.md (BUG-R6, BUG-R7).
 
 // Conditionally enable remote debugging (dev mode or explicit opt-in)
 const enableRemoteDebugging = is.dev || process.env.ENABLE_REMOTE_DEBUGGING === 'true'
