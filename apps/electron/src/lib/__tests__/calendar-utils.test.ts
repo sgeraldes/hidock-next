@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, afterEach } from 'vitest'
 import {
   computeVisibleHourRange,
   matchRecordingsToMeetings,
@@ -368,6 +368,39 @@ describe('groupByDay', () => {
 
     const key = '2026-03-02'
     expect(grouped[key]).toEqual([])
+  })
+})
+
+/**
+ * The day key must come from the LOCAL calendar date, matching the local-midnight
+ * view dates addDaysDSTSafe produces. A UTC-derived key (toISOString) silently
+ * shifts a day in every zone with a non-zero offset — and is invisible under the
+ * CI default of UTC, which is how it shipped. So pin the zone explicitly here.
+ */
+describe('groupByDay timezone independence', () => {
+  const ORIGINAL_TZ = process.env.TZ
+
+  afterEach(() => {
+    process.env.TZ = ORIGINAL_TZ
+  })
+
+  it.each(['UTC', 'Asia/Tokyo', 'America/New_York'])('keys items by their local day in %s', (tz) => {
+    process.env.TZ = tz
+
+    // Built after TZ is set, so these are local wall-clock times in that zone.
+    // Both edges of the day: a positive offset (JST) misfiles the early one, a
+    // negative offset (New York) misfiles the late one.
+    const items = [
+      { name: 'early', date: new Date(2026, 2, 2, 0, 30) },
+      { name: 'late', date: new Date(2026, 2, 2, 23, 30) },
+    ]
+    const viewDates = [new Date(2026, 2, 1), new Date(2026, 2, 2), new Date(2026, 2, 3)]
+
+    const grouped = groupByDay(items, (i) => i.date, viewDates)
+
+    expect(grouped['2026-03-02'].map((i) => i.name)).toEqual(['early', 'late'])
+    expect(grouped['2026-03-01']).toEqual([])
+    expect(grouped['2026-03-03']).toEqual([])
   })
 })
 

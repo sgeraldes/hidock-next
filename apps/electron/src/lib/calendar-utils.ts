@@ -569,6 +569,24 @@ export function formatDurationStr(seconds: number): string {
 }
 
 /**
+ * Day key (YYYY-MM-DD) for a Date, read in the LOCAL calendar — the same frame as
+ * the local-midnight dates addDaysDSTSafe produces and as getHours()/isToday()
+ * elsewhere in this module.
+ *
+ * Deliberately NOT `toISOString().split('T')[0]`: that reads the UTC calendar, so
+ * in any zone with a non-zero offset the key drifts a day away from the local date
+ * it is supposed to name. In JST that put every recording from 09:00 onward in the
+ * NEXT day's column and dropped the view's last day entirely — and it is invisible
+ * under a UTC CI, so keep the timezone-pinned test in calendar-utils.test.ts.
+ */
+export function toLocalDayKey(date: Date): string {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+/**
  * Group items by day key (YYYY-MM-DD)
  */
 export function groupByDay<T>(
@@ -579,12 +597,11 @@ export function groupByDay<T>(
   const grouped: Record<string, T[]> = {}
 
   for (const date of viewDates) {
-    const key = date.toISOString().split('T')[0]
-    grouped[key] = []
+    grouped[toLocalDayKey(date)] = []
   }
 
   for (const item of items) {
-    const key = getDate(item).toISOString().split('T')[0]
+    const key = toLocalDayKey(getDate(item))
     if (grouped[key]) {
       grouped[key].push(item)
     }

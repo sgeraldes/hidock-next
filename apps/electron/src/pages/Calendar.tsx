@@ -59,6 +59,7 @@ import {
   buildCalendarRecordings,
   formatDurationStr,
   groupByDay,
+  toLocalDayKey,
   computeVisibleHourRange,
   recordingCategory,
   formatUnmatchedRecordingMeta,
@@ -1168,14 +1169,14 @@ export function Calendar() {
           <div className="flex-1 overflow-auto">
             <div className="grid grid-cols-7 h-full animate-rise-in" style={{ gridAutoRows: 'minmax(100px, 1fr)' }}>
               {monthDates.map((date) => {
-                const key = date.toISOString().split('T')[0]
+                const key = toLocalDayKey(date)
                 const dayMeetings = meetingsByMonth[key] || []
                 const today = isToday(date)
                 const isCurrentMonth = date.getMonth() === currentDate.getMonth()
                 const isWeekend = !isWorkDay(date)
                 // C-CAL-006: Count recordings for this day to show indicator badge
                 const dayRecordingCount = calendarRecordings.filter(r => {
-                  const rKey = r.startTime.toISOString().split('T')[0]
+                  const rKey = toLocalDayKey(r.startTime)
                   return rKey === key
                 }).length
 
@@ -1275,7 +1276,7 @@ export function Calendar() {
           <div className="flex border-b flex-shrink-0 overflow-y-scroll" style={{ scrollbarGutter: 'stable' }}>
             <div className="w-14 flex-shrink-0" />
             {viewDates.map((date) => {
-              const key = date.toISOString().split('T')[0]
+              const key = toLocalDayKey(date)
               const today = isToday(date)
               const isWeekend = !isWorkDay(date)
 
@@ -1327,7 +1328,7 @@ export function Calendar() {
 
               {/* Day Columns */}
               {viewDates.map((date) => {
-                const key = date.toISOString().split('T')[0]
+                const key = toLocalDayKey(date)
                 // dayMeetings variable reserved for future per-day rendering
                 const _dayMeetings = meetingsByDay[key] || []
                 void _dayMeetings
