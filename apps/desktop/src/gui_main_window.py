@@ -661,8 +661,8 @@ class HiDockToolGUI(
         self.visualizer_pinned_var = ctk.BooleanVar(value=get_conf("visualizer_pinned", False))
         self.visualizer_pinned = self.visualizer_pinned_var.get()  # Initialize from config
 
-        # Selection mode (default to single selection)
-        self.single_selection_mode_var = ctk.BooleanVar(value=get_conf("single_selection_mode", True))
+        # Selection mode (default to multi selection — enables batch download/delete)
+        self.single_selection_mode_var = ctk.BooleanVar(value=get_conf("single_selection_mode", False))
 
         # Calendar performance settings
         self.calendar_chunking_period_var = ctk.StringVar(value=get_conf("calendar_chunking_period", "1 Week"))

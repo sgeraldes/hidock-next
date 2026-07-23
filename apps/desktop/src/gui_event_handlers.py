@@ -135,7 +135,7 @@ class EventHandlersMixin:
         )
         return new_dir
 
-    def _on_file_button1_press(self, event):  # Identical to original logic
+    def _on_file_button1_press(self, event):
         """
         Handles the Button-1 press event on the file Treeview.
 
@@ -182,27 +182,41 @@ class EventHandlersMixin:
             )
         ctrl_pressed = (event.state & 0x0004) != 0
         shift_pressed = (event.state & 0x0001) != 0
-        if shift_pressed:
-            logger.debug(
-                "GUI",
-                "_on_file_button1_press",
-                f"Shift+Click on item: {item_iid}. Allowing default range selection.",
-            )
-            return
+
+        # Shift+Click: select the contiguous range from the anchor (last plainly
+        # clicked row) to the clicked row. Implemented manually because this widget
+        # manages its own selection, so Tk's native anchor is unreliable.
+        anchor = getattr(self, "_selection_anchor_iid", None)
+        if shift_pressed and anchor:
+            all_children = self.file_tree.get_children("")
+            try:
+                a_idx = all_children.index(anchor)
+                b_idx = all_children.index(item_iid)
+                lo, hi = min(a_idx, b_idx), max(a_idx, b_idx)
+                self.file_tree.selection_set(all_children[lo : hi + 1])
+                logger.debug(
+                    "GUI",
+                    "_on_file_button1_press",
+                    f"Shift+Click range select: {anchor} -> {item_iid} ({hi - lo + 1} items).",
+                )
+                return "break"
+            except ValueError:
+                # Anchor or target no longer in the tree; fall through to toggle.
+                pass
+
+        # No Shift (plain click, or Ctrl/Cmd): toggle this row, and make it the new
+        # anchor so a following Shift+Click extends from here.
         if is_currently_selected_before_toggle:
             self.file_tree.selection_remove(item_iid)
-            logger.debug(
-                "GUI",
-                "_on_file_button1_press",
-                f"Toggled OFF item: {item_iid} (Modifier: {'Ctrl' if ctrl_pressed else 'None'})",
-            )
         else:
             self.file_tree.selection_add(item_iid)
-            logger.debug(
-                "GUI",
-                "_on_file_button1_press",
-                f"Toggled ON item: {item_iid} (Modifier: {'Ctrl' if ctrl_pressed else 'None'})",
-            )
+        self._selection_anchor_iid = item_iid
+        logger.debug(
+            "GUI",
+            "_on_file_button1_press",
+            f"Toggled {'OFF' if is_currently_selected_before_toggle else 'ON'} item: {item_iid} "
+            f"(Modifier: {'Ctrl' if ctrl_pressed else 'None'}); anchor set.",
+        )
         return "break"
 
     def _on_transcription_column_click(self, file_iid: str):
