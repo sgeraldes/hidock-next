@@ -381,7 +381,13 @@ describe('groupByDay timezone independence', () => {
   const ORIGINAL_TZ = process.env.TZ
 
   afterEach(() => {
-    process.env.TZ = ORIGINAL_TZ
+    // Assigning undefined would coerce to the string "undefined" (an invalid TZ),
+    // leaking a polluted zone into later tests in this worker — delete instead.
+    if (ORIGINAL_TZ === undefined) {
+      delete process.env.TZ
+    } else {
+      process.env.TZ = ORIGINAL_TZ
+    }
   })
 
   it.each(['UTC', 'Asia/Tokyo', 'America/New_York'])('keys items by their local day in %s', (tz) => {
