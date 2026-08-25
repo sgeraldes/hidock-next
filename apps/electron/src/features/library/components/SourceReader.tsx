@@ -316,9 +316,19 @@ export function SourceReader({
   const [isSavingTitle, setIsSavingTitle] = useState(false)
   const [metadataOpen, setMetadataOpen] = useState(false)
 
-  useEffect(() => {
+  // Default the metadata panel open for a device-only source, and re-decide ONLY
+  // when a different source is selected. Expressed as React's documented
+  // "adjust state when a prop changes" pattern rather than an effect: keying an
+  // effect on `recording?.id` while reading `recording` trips
+  // react-hooks/exhaustive-deps, and satisfying that rule by adding `recording`
+  // would re-run on every mutation of the row (a status tick, a download
+  // finishing) and clobber the panel the user just opened or closed. This runs
+  // during render, so it also drops the extra commit the effect cost.
+  const [metadataSourceId, setMetadataSourceId] = useState<string | undefined>(recording?.id)
+  if (recording?.id !== metadataSourceId) {
+    setMetadataSourceId(recording?.id)
     setMetadataOpen(recording ? isDeviceOnly(recording) : false)
-  }, [recording?.id])
+  }
 
   // Split mode keeps a cut point independent from the playback head. Waveform
   // clicks and transcript timestamps both update this same value.
