@@ -6520,6 +6520,66 @@ export function linkRecordingToMeeting(
  * `meeting_id IS NULL` checks kept treating the row as linked). Unlinking
  * means NULL on every correlation column, on BOTH tables.
  */
+/**
+ * Correlation methods written by an automatic correlator. Only these may be
+ * retracted without the user asking; anything else records a human decision.
+ */
+const AUTOMATIC_CORRELATION_METHODS = new Set([
+  'ai_transcript_match',
+  'time_overlap',
+  'calendar',
+  'auto',
+])
+
+/** True when this recording's meeting link was made by a machine, not a person. */
+export function isAutomaticCorrelationMethod(method: string | null | undefined): boolean {
+  return !!method && AUTOMATIC_CORRELATION_METHODS.has(method)
+}
+
+/**
+ * Retract a meeting link that an automatic correlator made and that a later,
+ * stricter evaluation no longer supports. Returns true when a link was cleared.
+ *
+ * Why this exists: auto-linking only ever ADDED a link. When the gate later
+ * declined, the recording kept whatever an older, looser gate had written, and
+ * the candidate rows (which ARE rewritten each pass) ended up contradicting
+ * recordings.meeting_id. That is how a manually split "- Part 1" — a complete
+ * meeting of its own — stayed attached to the NEXT meeting at a confidence
+ * (0.80) below the current threshold (0.85), with no candidate row marking it
+ * selected.
+ *
+ * This is deliberately NOT unlinkRecordingFromMeeting: that one stamps
+ * 'user_preassign_standalone', the marker meaning "the user says this belongs
+ * to no meeting", which permanently blocks the batch auto-linker. A machine
+ * retracting its own guess must leave the recording eligible again, so the
+ * method is cleared to NULL. A user's link (manual / user_override /
+ * user_preassign*) is never touched.
+ */
+export function clearAutomaticMeetingLink(recordingId: string): boolean {
+  const current = queryOne<{ meeting_id: string | null; correlation_method: string | null }>(
+    'SELECT meeting_id, correlation_method FROM recordings WHERE id = ?',
+    [recordingId]
+  )
+  if (!current?.meeting_id) return false
+  if (!isAutomaticCorrelationMethod(current.correlation_method)) return false
+
+  run(
+    `UPDATE recordings SET meeting_id = NULL, correlation_confidence = NULL,
+       correlation_method = NULL WHERE id = ?`,
+    [recordingId]
+  )
+  run(
+    `UPDATE knowledge_captures
+     SET meeting_id = NULL,
+         correlation_confidence = NULL,
+         correlation_method = NULL,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE source_recording_id = ?`,
+    [recordingId]
+  )
+  return true
+}
+
 export function unlinkRecordingFromMeeting(recordingId: string): void {
   // correlation_method = the standalone marker: an EXPLICIT unlink is the user
   // saying "this recording belongs to no meeting" — the batch auto-linker must

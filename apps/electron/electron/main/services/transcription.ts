@@ -103,6 +103,7 @@ import {
   findCandidateMeetingsForRecording,
   addRecordingMeetingCandidate,
   linkRecordingToMeeting,
+  clearAutomaticMeetingLink,
   removeFromQueueByRecordingId,
   cancelPendingTranscriptions,
   run,
@@ -2336,6 +2337,17 @@ Do not create speaker turns outside these intervals except for up to 1.5 seconds
       console.log(
         `AI match retained as candidate (confidence=${confidence}, margin=${winnerMargin.toFixed(2)}, ` +
           `contentEvidence=${hasContentEvidence}, temporalOverlap=${hasTemporalOverlap}): "${selectedMeeting.subject}"`
+      )
+    }
+
+    // The gate declined, so no candidate row is marked selected. A link left
+    // over from an older, looser gate would now contradict that evidence and
+    // survive forever, because auto-linking only ever added links. Retract it
+    // (machine-made links only — a user's decision is never touched).
+    if (!shouldAutoLink && clearAutomaticMeetingLink(recordingId)) {
+      console.log(
+        `Retracted an unsupported automatic meeting link on ${recordingId}; ` +
+          'it no longer meets the auto-link gate'
       )
     }
   }
