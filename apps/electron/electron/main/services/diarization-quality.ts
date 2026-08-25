@@ -35,7 +35,41 @@ export interface DiarizationQualityReport {
   unresolvedSpeakerSegments: number
   /** Turns attributed on weak acoustic overlap; treat their speaker as a guess. */
   lowConfidenceSpeakerSegments: number
+  /**
+   * Seconds of locally detected SPEECH that fall after the last transcribed
+   * turn. Non-zero means the provider stopped early and real conversation is
+   * missing — distinct from trailing silence, which is not a defect.
+   */
+  untranscribedSpeechSeconds: number
   reasons: string[]
+}
+
+/**
+ * A tail this short is boundary noise between VAD and the provider's last
+ * timestamp, not a truncated transcript.
+ */
+const TRUNCATION_TOLERANCE_SECONDS = 30
+
+/**
+ * Seconds of detected speech activity occurring after `lastTurnEnd`.
+ *
+ * This is the honest test for "the transcript stops early". Comparing the last
+ * turn against the FILE duration cannot distinguish a truncated transcript from
+ * a recording that simply ends in quiet; comparing it against locally detected
+ * voice activity can. On the 56-minute interview that lost its last 10.4
+ * minutes, the audio after the final turn is continuous conversation.
+ */
+export function untranscribedSpeechAfter(
+  lastTurnEnd: number,
+  activityIntervals: AudioActivityInterval[] | null | undefined
+): number {
+  if (!activityIntervals || activityIntervals.length === 0) return 0
+  let seconds = 0
+  for (const interval of activityIntervals) {
+    const start = Math.max(interval.start, lastTurnEnd)
+    if (interval.end > start) seconds += interval.end - start
+  }
+  return seconds <= TRUNCATION_TOLERANCE_SECONDS ? 0 : round(seconds)
 }
 
 /** Stable cross-recording voice label minted by speaker-linking. */
@@ -92,6 +126,7 @@ export function assessDiarizationQuality(
       mixedLabelSchemes: false,
       unresolvedSpeakerSegments: 0,
       lowConfidenceSpeakerSegments: 0,
+      untranscribedSpeechSeconds: 0,
       reasons: ['No timestamped speaker segments were returned']
     }
   }
@@ -133,6 +168,7 @@ export function assessDiarizationQuality(
       mixedLabelSchemes: false,
       unresolvedSpeakerSegments: 0,
       lowConfidenceSpeakerSegments: 0,
+      untranscribedSpeechSeconds: 0,
       reasons: ['All diarization segments have invalid timestamps']
     }
   }
@@ -161,6 +197,8 @@ export function assessDiarizationQuality(
   const lowConfidenceSpeakerSegments = valid.filter(
     (segment) => segment.speakerAttribution === 'acoustic-weak'
   ).length
+  const lastTurnEnd = valid.reduce((latest, segment) => Math.max(latest, segment.end), 0)
+  const untranscribedSpeechSeconds = untranscribedSpeechAfter(lastTurnEnd, activityIntervals)
   const duration = durationSeconds && durationSeconds > 0 ? durationSeconds : null
   const boundedCoverage = duration ? Math.min(coveredSeconds, duration) : coveredSeconds
   const coverageRatio = duration ? boundedCoverage / duration : null
@@ -189,6 +227,12 @@ export function assessDiarizationQuality(
   if (lowConfidenceSpeakerSegments > 0) {
     reasons.push(`${lowConfidenceSpeakerSegments} segment(s) have a low-confidence speaker label`)
   }
+  if (untranscribedSpeechSeconds > 0) {
+    reasons.push(
+      `Transcript ends ${Math.round(untranscribedSpeechSeconds)}s of detected speech early ` +
+        '(the recording keeps talking after the last turn)'
+    )
+  }
   if (valid.some((segment) => !segment.speaker)) reasons.push('One or more segments have no speaker label')
   if (coverageRatio !== null && coverageRatio < 0.55) reasons.push('Timestamped speech covers less than 55% of the recording')
   if (duration && sorted[sorted.length - 1].end > duration + 5) reasons.push('Segment timestamps extend beyond the recording duration')
@@ -213,6 +257,7 @@ export function assessDiarizationQuality(
     mixedLabelSchemes,
     unresolvedSpeakerSegments,
     lowConfidenceSpeakerSegments,
+    untranscribedSpeechSeconds,
     reasons
   }
 }
@@ -240,6 +285,7 @@ export function parseAndAssessDiarization(
       mixedLabelSchemes: false,
       unresolvedSpeakerSegments: 0,
       lowConfidenceSpeakerSegments: 0,
+      untranscribedSpeechSeconds: 0,
       reasons: ['Diarization output is not valid JSON']
     }
   }

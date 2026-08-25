@@ -30,6 +30,7 @@ import { BOOT_TASK_DEFS, registerGatedBootTasks } from '../boot-tasks'
 
 const ALL_TASK_NAMES = [
   'database-backup',
+  'stale-auto-link-repair',
   'integrity-check',
   'org-reconcile',
   'knowledge-capture-backfill',
@@ -118,7 +119,7 @@ describe('registerGatedBootTasks', () => {
     })
     // meeting-wiki (meeting-intelligence), transcription tasks and
     // semantic-index-restore (assistant) all drop via the requires:transcription cascade.
-    expect(registered).toEqual(['database-backup', 'integrity-check', 'org-reconcile', 'knowledge-capture-backfill'])
+    expect(registered).toEqual(['database-backup', 'stale-auto-link-repair', 'integrity-check', 'org-reconcile', 'knowledge-capture-backfill'])
   })
 
   it('a disabled task NEVER runs — its run() body is not invoked', async () => {

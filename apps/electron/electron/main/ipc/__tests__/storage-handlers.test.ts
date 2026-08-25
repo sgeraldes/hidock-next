@@ -34,7 +34,8 @@ vi.mock('../../services/database', () => ({
   // ADV45-2 (round-47) — raw-file IPCs resolve the path to a canonical recording
   // row (existence-scoped owner gate). Default: resolves (owner's own file);
   // gate tests override to null for orphan / hard-purged / arbitrary paths.
-  getRecordingIdByFilePath: vi.fn(() => 'rec-owner')
+  getRecordingIdByFilePath: vi.fn(() => 'rec-owner'),
+  enrichRecordingScheduleMetadata: vi.fn()
 }))
 
 vi.mock('../../services/config', () => ({

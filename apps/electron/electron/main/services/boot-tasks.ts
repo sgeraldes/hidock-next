@@ -38,6 +38,28 @@ export const BOOT_TASK_DEFS: GatedBootTask[] = [
     },
   },
   {
+    // Retract automatic meeting links that their OWN candidate evidence
+    // contradicts. Auto-linking only ever ADDED, so a link written by an older,
+    // looser gate outlived the rule that made it — a manually split "- Part 1"
+    // stayed attached to the NEXT meeting at a confidence below the current
+    // threshold, with no candidate row marking it selected. Idempotent, and a
+    // link a person made is never eligible.
+    name: 'stale-auto-link-repair',
+    feature: 'calendar',
+    run: async () => {
+      await import('./database')
+        .then(({ repairContradictedAutomaticLinks }) => {
+          const cleared = repairContradictedAutomaticLinks()
+          if (cleared.length > 0) {
+            for (const row of cleared) {
+              console.log(`[Repair] Unlinked "${row.filename}" (was ${row.correlationMethod} @ ${row.correlationConfidence})`)
+            }
+          }
+        })
+        .catch((e) => console.error('[Repair] stale auto-link repair error:', e))
+    },
+  },
+  {
     // Potentially expensive whole-database checks run only after the renderer
     // has painted; they previously extended the pre-window splash delay.
     name: 'integrity-check',

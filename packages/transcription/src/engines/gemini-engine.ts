@@ -652,6 +652,43 @@ export function parseTurns(
 /** A multi-turn response must carry at least two distinct provider timestamps.
  * Otherwise every line would render at the chunk boundary (0:00, 10:00,
  * 20:00...) and must be retried or rejected rather than persisted as accurate. */
+/**
+ * A range whose transcript stops this far short of its end is treated as
+ * truncated. Generous on purpose: a meeting legitimately ends with some
+ * trailing quiet, and a false positive costs a wasted provider call.
+ */
+export const RANGE_COVERAGE_TOLERANCE_SECONDS = 90
+/** …or this share of the range, whichever is larger. */
+export const RANGE_COVERAGE_TOLERANCE_RATIO = 0.1
+
+/**
+ * True when a range came back covering materially less audio than it was asked
+ * for — the model stopped early rather than transcribing through to the end.
+ *
+ * This is the failure that lost the last 10.4 minutes of a 56-minute interview
+ * (turns ended at 2715s of a 3341s file). Every other reliability check passed:
+ * the timestamps were in range, increasing and well-structured — they simply
+ * stopped. Nothing asked whether the range had actually been COVERED.
+ *
+ * An empty result is not truncation; a genuinely silent range is legitimate and
+ * is handled by the NO_SPEECH path before this.
+ */
+export function isRangeCoverageShort(
+  segments: Array<{ startTime: number }>,
+  startSec: number,
+  endSec: number
+): boolean {
+  if (segments.length === 0) return false
+  const span = endSec - startSec
+  if (span <= 0) return false
+  const lastStart = segments.reduce((latest, s) => Math.max(latest, s.startTime), startSec)
+  const tolerance = Math.max(
+    RANGE_COVERAGE_TOLERANCE_SECONDS,
+    span * RANGE_COVERAGE_TOLERANCE_RATIO
+  )
+  return endSec - lastStart > tolerance
+}
+
 export function hasReliableTurnTiming(text: string): boolean {
   const turns = parseTurns(text, 0, 'you', 'mic')
   if (turns.length < 2) return true
@@ -926,6 +963,35 @@ Calendar and meeting context are spelling hints only; never invent speech from t
         )
       }
       return splitRange()
+    }
+
+    // Structurally valid but STOPPED EARLY. Deliberately softer than the checks
+    // above: ask once more, then keep whatever we have. Escalating to
+    // splitRange() would let a range that legitimately ends in quiet recurse to
+    // the 60-second floor and THROW, turning a usable transcript into a hard
+    // failure — strictly worse than the short tail we are trying to fix.
+    if (isRangeCoverageShort(segments, startSec, endSec)) {
+      const lastStart = segments.reduce((latest, s) => Math.max(latest, s.startTime), startSec)
+      if (!repair) {
+        console.warn(
+          `[GeminiEngine] ${range}: transcript stops at ${formatTimestamp(lastStart)}; re-requesting the interval`
+        )
+        return this.transcribeInteractionRange(
+          genAI,
+          file,
+          startSec,
+          endSec,
+          source,
+          previousInteractionId,
+          context,
+          shouldGenerate,
+          true
+        )
+      }
+      console.warn(
+        `[GeminiEngine] ${range}: still stops at ${formatTimestamp(lastStart)} after a repair pass; ` +
+          'keeping the partial interval (coverageRatio will report the gap)'
+      )
     }
     return { segments, interactionId: interaction.id }
   }

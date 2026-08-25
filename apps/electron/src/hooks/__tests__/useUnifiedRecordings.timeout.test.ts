@@ -28,7 +28,9 @@ vi.mock('@/components/ui/toaster', () => ({
 
 function createMockElectronAPI() {
   return {
-    recordings: { getAll: vi.fn().mockResolvedValue([]) },
+    // getTrash is loaded eagerly alongside getAll so the Trash badge can
+    // render without entering Trash mode.
+    recordings: { getAll: vi.fn().mockResolvedValue([]), getTrash: vi.fn().mockResolvedValue([]) },
     syncedFiles: { getAll: vi.fn().mockResolvedValue([]) },
     deviceCache: { getAll: vi.fn().mockResolvedValue([]), saveAll: vi.fn().mockResolvedValue(undefined) },
     // ROUND-15 RESIDUAL — hook now calls getAllOwner; alias to the same fn.

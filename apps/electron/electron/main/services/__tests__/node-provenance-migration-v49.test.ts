@@ -3,7 +3,7 @@
 /**
  * v49 (F18/round-37, ADV35-1) — NODE-LEVEL graph provenance migration.
  *
- *  1. Boot schema version is 53 (current).
+ *  1. Boot schema version matches SCHEMA_VERSION.
  *  2. A graph_nodes table created lazily by the KnowledgeGraphStore carries the
  *     new origin + source_recording_id columns (from GRAPH_SCHEMA) on a fresh DB.
  *  3. The structural repair (run every boot) force-adds the columns to a LEGACY
@@ -14,6 +14,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { readFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { existsSync, rmSync } from 'fs'
@@ -22,6 +23,7 @@ const dbPath = join(tmpdir(), `hidock-v49-node-provenance-${process.pid}.sqlite`
 vi.mock('../file-storage', () => ({ getDatabasePath: () => dbPath }))
 
 import { initializeDatabase, closeDatabase, run, queryAll, queryOne } from '../database'
+
 
 function graphNodeColumns(): string[] {
   return queryAll<{ name: string }>("SELECT name FROM pragma_table_info('graph_nodes')").map((r) => r.name)
@@ -44,10 +46,16 @@ afterEach(() => {
   if (existsSync(dbPath)) rmSync(dbPath, { force: true })
 })
 
+// Derived from the source, never hardcoded: a hardcoded number turns every
+// legitimate SCHEMA_VERSION bump into a false failure in this file.
+const EXPECTED_SCHEMA_VERSION = Number(
+  readFileSync(join(__dirname, '..', 'database.ts'), 'utf-8').match(/const SCHEMA_VERSION = (\d+)\b/)![1]
+)
+
 describe('v49 schema', () => {
-  it('boot schema version is 53', () => {
+  it('boot schema version matches SCHEMA_VERSION', () => {
     const row = queryOne<{ v: number }>('SELECT MAX(version) AS v FROM schema_version')!
-    expect(row.v).toBe(53)
+    expect(row.v).toBe(EXPECTED_SCHEMA_VERSION)
   })
 
   it('a freshly created graph_nodes table has origin + source_recording_id (GRAPH_SCHEMA)', () => {

@@ -22,6 +22,17 @@ vi.mock('../jensen', () => ({
     downloadFile: vi.fn(),
     deleteFile: vi.fn(),
     setTime: vi.fn(),
+    // Capabilities added to the Jensen client after this mock was written.
+    // A missing method here surfaces as "this.jensen.X is not a function"
+    // from inside hidock-device, not as an obvious mock error.
+    getBatteryStatus: vi.fn(),
+    getBluetoothStatus: vi.fn(),
+    startBluetoothScan: vi.fn(),
+    stopBluetoothScan: vi.fn(),
+    getRealtimeSettings: vi.fn(),
+    getRealtimeData: vi.fn(),
+    startRealtime: vi.fn(),
+    pauseRealtime: vi.fn(),
     onconnect: null,
     ondisconnect: null
   })),
@@ -3784,6 +3795,35 @@ describe('HiDockDeviceService - Realtime/Battery/Bluetooth (not connected)', () 
   beforeEach(async () => {
     vi.clearAllMocks()
     vi.resetModules()
+    // Self-contained mock. Earlier blocks in this file install their own
+    // vi.doMock('../jensen', ...) with a much smaller client, and after
+    // resetModules() that registration is what a bare import picks up — the
+    // realtime/battery/bluetooth methods were missing, so the guarded
+    // not-connected paths blew up instead of returning null/false.
+    vi.doMock('../jensen', () => ({
+      getJensenDevice: vi.fn(() => ({
+        isConnected: vi.fn(() => false),
+        isOpen: vi.fn(() => false),
+        open: vi.fn(),
+        close: vi.fn(),
+        getDeviceInfo: vi.fn(),
+        getCardInfo: vi.fn(),
+        getSettings: vi.fn(),
+        listFiles: vi.fn(() => []),
+        getBatteryStatus: vi.fn(),
+        getBluetoothStatus: vi.fn(),
+        startBluetoothScan: vi.fn(),
+        stopBluetoothScan: vi.fn(),
+        getRealtimeSettings: vi.fn(),
+        getRealtimeData: vi.fn(),
+        startRealtime: vi.fn(),
+        pauseRealtime: vi.fn(),
+        stopRealtime: vi.fn(),
+        onconnect: null,
+        ondisconnect: null
+      })),
+      DeviceModel: { UNKNOWN: 'unknown', H1: 'H1', H1E: 'H1E', P1: 'P1' }
+    }))
     const module = await import('../hidock-device')
     HiDockDeviceService = (module as any).HiDockDeviceService
   })

@@ -6580,6 +6580,61 @@ export function clearAutomaticMeetingLink(recordingId: string): boolean {
   return true
 }
 
+export interface ContradictedAutomaticLink {
+  recordingId: string
+  filename: string
+  meetingId: string
+  correlationMethod: string | null
+  correlationConfidence: number | null
+}
+
+/**
+ * Automatic meeting links that their OWN candidate evidence contradicts.
+ *
+ * Every transcription pass rewrites recording_meeting_candidates and marks a row
+ * selected only when the full auto-link gate passed. So a recording holding a
+ * machine-made link while NO candidate row for that meeting is selected is a
+ * link the current rules would not make — written by an older, looser gate and
+ * never retracted, because auto-linking only ever added.
+ *
+ * Read-only; pair with repairContradictedAutomaticLinks to act on it.
+ */
+export function findContradictedAutomaticLinks(): ContradictedAutomaticLink[] {
+  return queryAll<ContradictedAutomaticLink>(
+    `SELECT r.id AS recordingId, r.filename AS filename, r.meeting_id AS meetingId,
+            r.correlation_method AS correlationMethod,
+            r.correlation_confidence AS correlationConfidence
+     FROM recordings r
+     WHERE r.meeting_id IS NOT NULL
+       AND r.deleted_at IS NULL
+       AND r.correlation_method IN ('ai_transcript_match', 'time_overlap', 'calendar', 'auto')
+       -- Only judge recordings that HAVE been evaluated; no candidate rows at
+       -- all means never analysed, not contradicted.
+       AND EXISTS (SELECT 1 FROM recording_meeting_candidates c WHERE c.recording_id = r.id)
+       AND NOT EXISTS (
+         SELECT 1 FROM recording_meeting_candidates c
+         WHERE c.recording_id = r.id
+           AND c.meeting_id = r.meeting_id
+           AND c.is_selected = 1
+       )
+     ORDER BY r.date_recorded`
+  )
+}
+
+/**
+ * Retract every automatic link contradicted by its own candidate evidence.
+ * Returns what was cleared. A person's link is never eligible (the query only
+ * matches automatic correlation methods).
+ */
+export function repairContradictedAutomaticLinks(): ContradictedAutomaticLink[] {
+  const stale = findContradictedAutomaticLinks()
+  for (const row of stale) clearAutomaticMeetingLink(row.recordingId)
+  if (stale.length > 0) {
+    console.log(`[Repair] Retracted ${stale.length} automatic meeting link(s) contradicted by candidate evidence`)
+  }
+  return stale
+}
+
 export function unlinkRecordingFromMeeting(recordingId: string): void {
   // correlation_method = the standalone marker: an EXPLICIT unlink is the user
   // saying "this recording belongs to no meeting" — the batch auto-linker must

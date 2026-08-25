@@ -113,10 +113,13 @@ export const FEATURES: Record<FeatureId, FeatureDefinition> = {
     id: 'calendar',
     label: 'Calendar',
     description: 'Sync meetings and correlate them with recordings.',
-    backgroundTasks: ['org-reconcile', 'loop:calendar-auto-sync'],
+    backgroundTasks: ['stale-auto-link-repair', 'org-reconcile', 'loop:calendar-auto-sync'],
     routes: ['/calendar', '/meeting'],
     navItems: ['/calendar'],
-    ipcNamespaces: ['calendar:', 'meetings:'],
+    // The stale-link repair only ever touches recording<->meeting correlation,
+    // so it belongs to Calendar even though it lives in the shared
+    // `recordings:` namespace. Channel granularity keeps library reads open.
+    ipcNamespaces: ['calendar:', 'meetings:', 'recordings:repairContradictedLinks'],
     dependsOn: [],
     softDependsOn: [],
     hardwareCost: { cpu: 'light', memory: 'light', network: 'medium' },

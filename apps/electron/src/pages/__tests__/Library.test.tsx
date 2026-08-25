@@ -117,6 +117,32 @@ vi.mock('@tanstack/react-virtual', () => ({
 vi.mock('@/store/useLibraryStore', () => ({
   useLibraryStore: vi.fn((selector) => {
     const state = {
+      // Reader-pane state. Keep in sync with useLibraryStore's initialState —
+      // a missing key here surfaces as "Cannot read properties of undefined"
+      // deep inside a render, not as an obvious mock error.
+      readerSectionModes: {
+        player: 'expanded',
+        metadata: 'expanded',
+        summary: 'expanded',
+        transcript: 'expanded'
+      },
+      setReaderSectionMode: vi.fn(),
+      readerVerticalSizes: [64, 36],
+      setReaderVerticalSizes: vi.fn(),
+      readerMaximizedSection: null,
+      setReaderMaximizedSection: vi.fn(),
+      toggleReaderMaximizedSection: vi.fn(),
+      readerListCollapsedBeforeMaximize: null,
+      listPaneSize: 25,
+      setListPaneSize: vi.fn(),
+      listCollapsed: false,
+      setListCollapsed: vi.fn(),
+      qualityFilter: null,
+      setQualityFilter: vi.fn(),
+      statusFilter: null,
+      setStatusFilter: vi.fn(),
+      searchQuery: '',
+      setSearchQuery: vi.fn(),
       viewMode: 'compact',
       sortBy: 'date',
       sortOrder: 'desc',
@@ -419,7 +445,44 @@ describe('Library', () => {
       })
     })
 
-    it('shows device status when not connected', async () => {
+    // The banner reports a device that WENT AWAY, not one that was never
+    // there — showDisconnectBanner is `wasConnected && !deviceConnected`, so a
+    // session that never saw a device is deliberately left un-nagged. Drive the
+    // real transition rather than asserting on a cold start.
+    it('shows the disconnect banner after a connected device goes away', async () => {
+      const stats = { total: 1, deviceOnly: 0, localOnly: 1, both: 0, synced: 1, unsynced: 0, onSource: 0, locallyAvailable: 1 }
+      vi.mocked(useUnifiedRecordings).mockReturnValue({
+        recordings: [mockRecording],
+        loading: false,
+        error: null,
+        refresh: vi.fn(),
+        deviceConnected: true,
+        stats
+      })
+
+      const { rerender } = renderLibrary()
+      expect(screen.queryByText(/device disconnected/i)).not.toBeInTheDocument()
+
+      vi.mocked(useUnifiedRecordings).mockReturnValue({
+        recordings: [mockRecording],
+        loading: false,
+        error: null,
+        refresh: vi.fn(),
+        deviceConnected: false,
+        stats
+      })
+      rerender(
+        <MemoryRouter>
+          <Library />
+        </MemoryRouter>
+      )
+
+      await waitFor(() => {
+        expect(screen.getByText(/device disconnected/i)).toBeInTheDocument()
+      })
+    })
+
+    it('stays quiet when no device was ever connected', async () => {
       vi.mocked(useUnifiedRecordings).mockReturnValue({
         recordings: [mockRecording],
         loading: false,
@@ -430,10 +493,8 @@ describe('Library', () => {
       })
 
       renderLibrary()
-
-      await waitFor(() => {
-        expect(screen.getByText(/device disconnected/i)).toBeInTheDocument()
-      })
+      await waitFor(() => expect(screen.getByText(/1.*source/i)).toBeInTheDocument())
+      expect(screen.queryByText(/device disconnected/i)).not.toBeInTheDocument()
     })
 
     it('paints compact-row separators without changing measured geometry', async () => {

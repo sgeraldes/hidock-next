@@ -32,7 +32,11 @@ import {
   type SpeakerLinkingResult,
   type VoiceMatch
 } from '../speaker-linking'
-import { countDistinctSpeakers, assessDiarizationQuality } from '../diarization-quality'
+import {
+  countDistinctSpeakers,
+  assessDiarizationQuality,
+  untranscribedSpeechAfter
+} from '../diarization-quality'
 
 function match(local: string, stable: string): VoiceMatch {
   return {
@@ -181,5 +185,51 @@ describe('assessDiarizationQuality — per-segment honesty', () => {
     expect(report.unresolvedSpeakerSegments).toBe(1)
     expect(report.lowConfidenceSpeakerSegments).toBe(1)
     expect(report.status).toBe('degraded')
+  })
+})
+
+describe('untranscribedSpeechAfter — the truncated tail', () => {
+  it('measures real speech left after the last transcribed turn', () => {
+    // Rec91 Part 2: turns stop at 2715s, the audio keeps talking to 3341s.
+    const activity = [
+      { start: 0, end: 2700 },
+      { start: 2720, end: 3040 },
+      { start: 3060, end: 3335 }
+    ]
+    expect(untranscribedSpeechAfter(2715, activity)).toBeCloseTo(595, 0)
+  })
+
+  it('reports nothing when the recording just ends in quiet', () => {
+    // Ten minutes of file left, but no detected voice activity in it.
+    expect(untranscribedSpeechAfter(2715, [{ start: 0, end: 2710 }])).toBe(0)
+  })
+
+  it('tolerates a small VAD/provider boundary disagreement', () => {
+    expect(untranscribedSpeechAfter(2715, [{ start: 2700, end: 2735 }])).toBe(0)
+  })
+
+  it('returns 0 without local activity evidence', () => {
+    expect(untranscribedSpeechAfter(2715, null)).toBe(0)
+    expect(untranscribedSpeechAfter(2715, [])).toBe(0)
+  })
+
+  it('surfaces the truncation as an explicit quality reason', () => {
+    const report = assessDiarizationQuality(
+      [{ start: 0, end: 2715, speaker: 'Voice C5C45B' }],
+      3341,
+      [{ start: 0, end: 2700 }, { start: 2720, end: 3335 }]
+    )
+    expect(report.untranscribedSpeechSeconds).toBeGreaterThan(600)
+    expect(report.reasons.join(' ')).toMatch(/ends .* of detected speech early/i)
+    expect(report.status).toBe('degraded')
+  })
+
+  it('does not flag a complete transcript', () => {
+    const report = assessDiarizationQuality(
+      [{ start: 0, end: 3335, speaker: 'Voice C5C45B', speakerAttribution: 'acoustic' }],
+      3341,
+      [{ start: 0, end: 3335 }]
+    )
+    expect(report.untranscribedSpeechSeconds).toBe(0)
   })
 })

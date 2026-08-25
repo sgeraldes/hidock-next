@@ -70,8 +70,14 @@ vi.mock('@/hooks/useUnifiedRecordings', async (importOriginal) => {
 // device path — its liveRecordings fixtures are all 'local-only' — so this
 // is a safe, file-wide addition, not a behavior change for existing tests).
 const deleteRecordingFromDeviceMock = vi.hoisted(() => vi.fn())
+const removeCachedRecordingMock = vi.hoisted(() => vi.fn())
 vi.mock('@/services/hidock-device', () => ({
-  getHiDockDeviceService: () => ({ deleteRecording: deleteRecordingFromDeviceMock })
+  getHiDockDeviceService: () => ({
+    deleteRecording: deleteRecordingFromDeviceMock,
+    // The main-process erase cannot touch this renderer-owned cache, so the
+    // page evicts the filename itself before rebuilding the local view.
+    removeCachedRecording: removeCachedRecordingMock
+  })
 }))
 
 vi.mock('@/store/useUIStore', () => {
@@ -145,6 +151,26 @@ vi.mock('@tanstack/react-virtual', () => ({
 vi.mock('@/store/useLibraryStore', () => ({
   useLibraryStore: vi.fn((selector) => {
     const state = {
+      // Reader-pane state. Keep in sync with useLibraryStore's initialState —
+      // a missing key here surfaces as "Cannot read properties of undefined"
+      // deep inside a render, not as an obvious mock error.
+      readerSectionModes: {
+        player: 'expanded',
+        metadata: 'expanded',
+        summary: 'expanded',
+        transcript: 'expanded'
+      },
+      setReaderSectionMode: vi.fn(),
+      readerVerticalSizes: [64, 36],
+      setReaderVerticalSizes: vi.fn(),
+      readerMaximizedSection: null,
+      setReaderMaximizedSection: vi.fn(),
+      toggleReaderMaximizedSection: vi.fn(),
+      readerListCollapsedBeforeMaximize: null,
+      listPaneSize: 25,
+      setListPaneSize: vi.fn(),
+      listCollapsed: false,
+      setListCollapsed: vi.fn(),
       viewMode: 'card', // deliberately card — AC#10 must force the list anyway in Trash
       sortBy: 'date',
       sortOrder: 'desc',
@@ -315,6 +341,10 @@ function setElectronAPI() {
         }
       }),
       deleteCascade: vi.fn().mockResolvedValue({ success: true, mode: 'soft' }),
+      // The hardware erase runs in the MAIN process (USB safety): the page
+      // queues it against the purge's journal entry rather than driving
+      // Jensen from the renderer.
+      queueDeviceDelete: vi.fn().mockResolvedValue({ success: true, deletedNow: true }),
       restore: vi.fn().mockResolvedValue({ success: true }),
       getTrash: getTrashMock,
       markNotOnDevice: vi.fn().mockResolvedValue({ success: true }),
@@ -344,7 +374,10 @@ function openRowMenu(index: number) {
 }
 
 function trashToggleButton() {
-  return screen.getByRole('button', { name: /^trash \(\d+\)$/i })
+  // The control is an icon button; its accessible name comes from aria-label
+  // ("View Trash, N items" / "Exit Trash"), not from a visible "Trash (N)"
+  // text label as in the earlier header design.
+  return screen.getByRole('button', { name: /^(view|exit) trash/i })
 }
 
 beforeEach(() => {
@@ -367,7 +400,7 @@ describe('Trash toggle (spec-005/F17 §D1/§D4)', () => {
   it('loads the Trash count eagerly on mount, without entering Trash', async () => {
     renderLibrary()
     await waitFor(() => expect(getTrashMock).toHaveBeenCalled())
-    expect(trashToggleButton()).toHaveTextContent('Trash (2)')
+    expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 2 items`)
     // Still showing the live list — Trash mode was never entered.
     expect(screen.getByText('Live Recording 0')).toBeInTheDocument()
     expect(screen.queryByText('trashed-newer.wav')).not.toBeInTheDocument()
@@ -386,7 +419,7 @@ describe('Trash toggle (spec-005/F17 §D1/§D4)', () => {
 describe('Trash mode swaps the displayed list (AC#3, AC#10)', () => {
   it('shows exactly the 2 tombstoned rows, each with Restore + Delete permanently only', async () => {
     renderLibrary()
-    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    await waitFor(() => expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 2 items`))
     fireEvent.click(trashToggleButton())
 
     // The 3 live rows are gone; the 2 trashed rows are shown instead.
@@ -403,7 +436,7 @@ describe('Trash mode swaps the displayed list (AC#3, AC#10)', () => {
 
   it('forces the SourceRow list even though viewMode is "card" (AC#10) — card-only markers absent', async () => {
     renderLibrary()
-    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    await waitFor(() => expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 2 items`))
     fireEvent.click(trashToggleButton())
     await screen.findByText(/trashed-newer\.wav/i)
     // SourceCard renders a distinctive testid; Trash must never render it.
@@ -412,7 +445,7 @@ describe('Trash mode swaps the displayed list (AC#3, AC#10)', () => {
 
   it('hides the card/compact view toggle while in Trash', async () => {
     renderLibrary()
-    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    await waitFor(() => expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 2 items`))
     expect(screen.getByTestId('grid-view-toggle')).toBeInTheDocument()
     fireEvent.click(trashToggleButton())
     await screen.findByText(/trashed-newer\.wav/i)
@@ -421,7 +454,7 @@ describe('Trash mode swaps the displayed list (AC#3, AC#10)', () => {
 
   it('toggling back out restores the live list', async () => {
     renderLibrary()
-    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    await waitFor(() => expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 2 items`))
     fireEvent.click(trashToggleButton())
     await screen.findByText(/trashed-newer\.wav/i)
     fireEvent.click(trashToggleButton())
@@ -433,12 +466,12 @@ describe('Trash mode swaps the displayed list (AC#3, AC#10)', () => {
 describe('Search + filters hidden in Trash mode (AR3-5)', () => {
   it('hides the list-scoped search input and shows the Trash banner instead', async () => {
     renderLibrary()
-    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
-    expect(screen.getByPlaceholderText(/filter .* captures in this list/i)).toBeInTheDocument()
+    await waitFor(() => expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 2 items`))
+    expect(screen.getByPlaceholderText(/^search \d+ sources?…$/i)).toBeInTheDocument()
 
     fireEvent.click(trashToggleButton())
     await screen.findByText(/trashed-newer\.wav/i)
-    expect(screen.queryByPlaceholderText(/filter .* captures in this list/i)).not.toBeInTheDocument()
+    expect(screen.queryByPlaceholderText(/^search \d+ sources?…$/i)).not.toBeInTheDocument()
     expect(screen.getByText(/hidden and excluded from ai/i)).toBeInTheDocument()
   })
 })
@@ -446,7 +479,7 @@ describe('Search + filters hidden in Trash mode (AR3-5)', () => {
 describe('Restore round-trip (AC#4)', () => {
   it('calls recordings.restore(id), then the row leaves Trash and the live list refreshes', async () => {
     renderLibrary()
-    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    await waitFor(() => expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 2 items`))
     fireEvent.click(trashToggleButton())
     await screen.findByText(/trashed-newer\.wav/i)
 
@@ -469,7 +502,7 @@ describe('Restore round-trip (AC#4)', () => {
 describe('H17 in Trash mode — no horizontal scroll, full-width separators (AC#6)', () => {
   it('the scroller never overflows horizontally and its rows use full-width separators', async () => {
     renderLibrary()
-    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    await waitFor(() => expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 2 items`))
     fireEvent.click(trashToggleButton())
     await screen.findByText(/trashed-newer\.wav/i)
 
@@ -496,7 +529,7 @@ describe('H17 in Trash mode — no horizontal scroll, full-width separators (AC#
 describe('Permanent delete from Trash (AC#9)', () => {
   it('opens DeletePermanentDialog populated by deletionImpact, confirms the hard purge, and leaves the Trash list', async () => {
     renderLibrary()
-    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    await waitFor(() => expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 2 items`))
     fireEvent.click(trashToggleButton())
     await screen.findByText(/trashed-newer\.wav/i)
 
@@ -550,6 +583,10 @@ describe('Permanent delete from Trash (AC#9)', () => {
     window.electronAPI.recordings.deleteCascade = vi.fn().mockResolvedValue({
       success: true,
       mode: 'hard',
+      // The hardware erase is queued against the purge's deletion-journal entry
+      // so a mid-command disconnect still gets retried; without a journalId the
+      // page refuses to queue and reports a partial delete.
+      journalId: 'journal-trash-1',
       removed: { transcripts: 1, embeddings: 0, captures: 0, actionItems: 0, artifacts: 0, speakerBindings: 0, candidates: 0, meetingLinksRemoved: 0, markersRemoved: 0, edgesRemoved: 2, edgeSourceRowsRemoved: 0, meetingNodesRemoved: 0, orphanNodesRemoved: 0 },
       allFilesRemoved: true,
       pendingFileKinds: []
@@ -557,7 +594,7 @@ describe('Permanent delete from Trash (AC#9)', () => {
     deleteRecordingFromDeviceMock.mockResolvedValue(true)
 
     renderLibrary()
-    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    await waitFor(() => expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 2 items`))
     fireEvent.click(trashToggleButton())
     await screen.findByText(/trashed-newer\.wav/i)
 
@@ -573,8 +610,16 @@ describe('Permanent delete from Trash (AC#9)', () => {
     fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
 
     await waitFor(() => expect(window.electronAPI.recordings.deleteCascade).toHaveBeenCalledWith('trash-1', true))
-    // Routed via impact.deviceFilename — trashRowToUnified never sets one.
-    await waitFor(() => expect(deleteRecordingFromDeviceMock).toHaveBeenCalledWith('trashed-newer.hda'))
+    // Routed via impact.deviceFilename — trashRowToUnified never sets one — and
+    // queued in the MAIN process against the purge's journal entry, so a
+    // mid-command disconnect is retried instead of stranding the device copy.
+    await waitFor(() =>
+      expect(window.electronAPI.recordings.queueDeviceDelete).toHaveBeenCalledWith({
+        deviceFilename: 'trashed-newer.hda',
+        journalId: 'journal-trash-1'
+      })
+    )
+    expect(deleteRecordingFromDeviceMock).not.toHaveBeenCalled()
     // CX-T6-1 (fix round): reconciliation carries the device filename too —
     // the hard cascade already deleted the recordings row, so the id alone
     // can no longer reconcile anything in the main process.
@@ -588,7 +633,7 @@ describe('AR3-5 — Trash state boundaries', () => {
   it('entering Trash stops playback when the playing row is trashed', async () => {
     harness.currentlyPlayingId = 'trash-1'
     renderLibrary()
-    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    await waitFor(() => expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 2 items`))
     expect(audioControlsMock.stop).not.toHaveBeenCalled()
 
     fireEvent.click(trashToggleButton())
@@ -599,7 +644,7 @@ describe('AR3-5 — Trash state boundaries', () => {
   it('does NOT stop playback when the playing row is NOT trashed', async () => {
     harness.currentlyPlayingId = 'live-0'
     renderLibrary()
-    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    await waitFor(() => expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 2 items`))
     fireEvent.click(trashToggleButton())
     await screen.findByText(/trashed-newer\.wav/i)
     expect(audioControlsMock.stop).not.toHaveBeenCalled()
@@ -608,7 +653,7 @@ describe('AR3-5 — Trash state boundaries', () => {
   it('entering Trash clears the reader selection when the selected row is not in the trashed corpus', async () => {
     harness.selectedSourceId = 'live-0' // a live id — never part of the trashed corpus
     renderLibrary()
-    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    await waitFor(() => expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 2 items`))
     expect(setSelectedSourceId).not.toHaveBeenCalledWith(null)
 
     fireEvent.click(trashToggleButton())
@@ -619,7 +664,7 @@ describe('AR3-5 — Trash state boundaries', () => {
   it('entering Trash does NOT clear the selection when the selected row IS in the trashed corpus', async () => {
     harness.selectedSourceId = 'trash-1'
     renderLibrary()
-    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    await waitFor(() => expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 2 items`))
     fireEvent.click(trashToggleButton())
     // Scoped to the LIST — the selected trash row now ALSO renders its detail
     // in the middle panel (the 2026-07-23 fix: the reader resolves trash rows).
@@ -630,7 +675,7 @@ describe('AR3-5 — Trash state boundaries', () => {
   it('restoring the selected row clears its own selection once trashedRecordings updates', async () => {
     harness.selectedSourceId = 'trash-1'
     renderLibrary()
-    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    await waitFor(() => expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 2 items`))
     fireEvent.click(trashToggleButton())
     await within(screen.getByTestId('library-list')).findByText(/trashed-newer\.wav/i)
     expect(setSelectedSourceId).not.toHaveBeenCalledWith(null) // still in the corpus so far
@@ -653,7 +698,7 @@ describe('AR3-5 — Trash state boundaries', () => {
     harness.currentlyPlayingId = 'live-0'
     harness.selectedSourceId = 'live-0'
     renderLibrary()
-    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    await waitFor(() => expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 2 items`))
 
     fireEvent.keyDown(screen.getByLabelText(/^more actions$/i), { key: 'Enter' })
     fireEvent.click(await screen.findByRole('menuitem', { name: /move to trash/i }))
@@ -676,7 +721,7 @@ describe('Confirm-dialog copy matches §D2 exactly', () => {
     // SourceRow.test.tsx / SourceReader.deletion.test.tsx; this test only
     // verifies the CONFIRM DIALOG copy Library.tsx itself owns.
     renderLibrary()
-    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    await waitFor(() => expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 2 items`))
     fireEvent.click(screen.getAllByTitle('Move to Trash')[0])
 
     expect(await screen.findByText(/move "live-0\.wav" to trash\?/i)).toBeInTheDocument()
@@ -701,7 +746,7 @@ describe('CX-T5-3 — null-file_path recording stays restorable in Trash', () =>
       file_path: null
     }])
     renderLibrary()
-    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (1)'))
+    await waitFor(() => expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 1 items`))
     fireEvent.click(trashToggleButton())
     await screen.findByText(/null-path\.wav/i)
 
@@ -714,7 +759,7 @@ describe('CX-T5-3 — null-file_path recording stays restorable in Trash', () =>
 describe('2026-07-23 — Trash selection uses live-list explorer semantics', () => {
   it('Space (and Ctrl+A) in Trash select TRASH rows, just like the live list', async () => {
     renderLibrary()
-    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    await waitFor(() => expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 2 items`))
     const list = screen.getByTestId('library-list')
 
     // Control (live list): ArrowDown focuses row 0, Space toggles its selection.
@@ -743,7 +788,7 @@ describe('2026-07-23 — Trash selection uses live-list explorer semantics', () 
     // Trash bar even if a stale one lingered).
     harness.selectedIds = new Set(['live-0'])
     renderLibrary()
-    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    await waitFor(() => expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 2 items`))
     expect(screen.getByRole('toolbar', { name: /^bulk actions$/i })).toBeInTheDocument()
 
     fireEvent.click(trashToggleButton())
@@ -758,7 +803,7 @@ describe('2026-07-23 — Trash selection uses live-list explorer semantics', () 
     harness.selectedIds = new Set(['trash-1', 'trash-2'])
     window.electronAPI.recordings.restore = vi.fn().mockResolvedValue({ success: true })
     renderLibrary()
-    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    await waitFor(() => expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 2 items`))
     fireEvent.click(trashToggleButton())
     await within(screen.getByTestId('library-list')).findByText(/trashed-newer\.wav/i)
 
@@ -773,19 +818,36 @@ describe('2026-07-23 — Trash selection uses live-list explorer semantics', () 
     await waitFor(() => expect(selectionSpies.clearSelection).toHaveBeenCalled())
   })
 
-  it('a plain click on a Trash row selects it (and only it)', async () => {
+  // Explorer semantics as implemented in SourceRow (owner decision, no
+  // checkboxes): a PLAIN click opens the source; Ctrl/Cmd+click is what
+  // selects. An earlier revision selected on plain click.
+  it('a plain click on a Trash row opens it', async () => {
     renderLibrary()
-    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    await waitFor(() => expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 2 items`))
     fireEvent.click(trashToggleButton())
     const rowText = await within(screen.getByTestId('library-list')).findByText(/trashed-newer\.wav/i)
     fireEvent.click(rowText)
-    expect(selectionSpies.selectSingle).toHaveBeenCalledWith('trash-1')
+    expect(setSelectedSourceId).toHaveBeenCalledWith('trash-1')
+    expect(selectionSpies.handleSelectionClick).not.toHaveBeenCalled()
+  })
+
+  it('Ctrl+click on a Trash row selects it', async () => {
+    renderLibrary()
+    await waitFor(() => expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 2 items`))
+    fireEvent.click(trashToggleButton())
+    const rowText = await within(screen.getByTestId('library-list')).findByText(/trashed-newer\.wav/i)
+    fireEvent.click(rowText, { ctrlKey: true })
+    expect(selectionSpies.handleSelectionClick).toHaveBeenCalledWith(
+      'trash-1',
+      false,
+      expect.arrayContaining(['trash-1'])
+    )
   })
 
   it('the selected Trash row renders its detail in the middle panel', async () => {
     harness.selectedSourceId = 'trash-1'
     renderLibrary()
-    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    await waitFor(() => expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 2 items`))
     fireEvent.click(trashToggleButton())
     await within(screen.getByTestId('library-list')).findByText(/trashed-newer\.wav/i)
     // The reader resolves the trash row from the Trash corpus (previously it
@@ -800,7 +862,7 @@ describe('CX-T5-2 + OP-F-LOW-4 — bulk soft-delete refreshes Trash and clears p
     harness.currentlyPlayingId = 'live-0'
     harness.selectedSourceId = 'live-0'
     renderLibrary()
-    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    await waitFor(() => expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 2 items`))
 
     // Bulk bar → Delete → shared confirm dialog → confirm.
     const toolbar = screen.getByRole('toolbar', { name: /bulk actions/i })
@@ -821,7 +883,7 @@ describe('CX-T5-2 + OP-F-LOW-4 — bulk soft-delete refreshes Trash and clears p
     harness.selectedIds = new Set(['live-1'])
     harness.currentlyPlayingId = 'live-0'
     renderLibrary()
-    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    await waitFor(() => expect(trashToggleButton()).toHaveAccessibleName(`View Trash, 2 items`))
 
     const toolbar = screen.getByRole('toolbar', { name: /bulk actions/i })
     fireEvent.click(within(toolbar).getByTitle('Move selected to Trash (hidden, restorable — nothing is erased)'))

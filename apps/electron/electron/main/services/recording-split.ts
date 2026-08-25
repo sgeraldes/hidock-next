@@ -17,10 +17,116 @@ const MIN_SUGGESTED_PART_SECONDS = 30
 export interface RecordingSplitSuggestion {
   timeSec: number
   confidence: number
-  reason: 'silence' | 'transcript-gap' | 'silence-and-transcript-gap'
+  reason:
+    | 'silence'
+    | 'transcript-gap'
+    | 'silence-and-transcript-gap'
+    | 'meeting-boundary'
+    | 'meeting-boundary-and-silence'
   silenceStartSec?: number
   silenceEndSec?: number
   gapSeconds: number
+  /** Subject of the meeting ending at this boundary (meeting-boundary only). */
+  endingMeetingSubject?: string
+  /** Subject of the meeting starting after it (meeting-boundary only). */
+  startingMeetingSubject?: string
+}
+
+/** A calendar meeting reduced to what a split decision needs. */
+export interface SplitMeetingWindow {
+  subject: string
+  startTime: string
+  endTime: string
+  isAllDay?: boolean | null
+}
+
+/**
+ * A meeting-boundary cut may be nudged this far to land on real silence rather
+ * than mid-word. Wider than that and the calendar is no longer the evidence.
+ */
+const BOUNDARY_SILENCE_SNAP_SECONDS = 45
+/** Ignore calendar gaps this large — that is not a back-to-back transition. */
+const MAX_BOUNDARY_GAP_SECONDS = 15 * 60
+
+/**
+ * Propose cuts where the recording crosses from one calendar meeting into the
+ * next.
+ *
+ * Why: the device starts on the microphone opening and jumping straight from
+ * one call into the next never closes it, so the firmware records both as one
+ * session and cannot cut. Silence detection alone does not find that boundary —
+ * a handover between two calls sounds exactly like any other pause, which is
+ * why the transition has had to be found by hand. The calendar knows where the
+ * seam is; this turns that into the top-ranked suggestion, snapped onto nearby
+ * silence so the cut still lands in a gap rather than mid-word.
+ */
+export function suggestMeetingBoundarySplits(
+  recordingStart: string,
+  durationSeconds: number,
+  meetings: SplitMeetingWindow[],
+  silences: SilenceInterval[]
+): RecordingSplitSuggestion[] {
+  const originMs = Date.parse(recordingStart)
+  if (!Number.isFinite(originMs) || !Number.isFinite(durationSeconds) || durationSeconds <= 0) return []
+
+  // Only timed meetings that actually intersect the recording, in order.
+  const covered = meetings
+    .filter((meeting) => !meeting.isAllDay)
+    .map((meeting) => ({
+      subject: meeting.subject,
+      startSec: (Date.parse(meeting.startTime) - originMs) / 1000,
+      endSec: (Date.parse(meeting.endTime) - originMs) / 1000,
+    }))
+    .filter((meeting) =>
+      Number.isFinite(meeting.startSec) &&
+      Number.isFinite(meeting.endSec) &&
+      meeting.endSec > 0 &&
+      meeting.startSec < durationSeconds &&
+      meeting.endSec > meeting.startSec
+    )
+    .sort((a, b) => a.startSec - b.startSec)
+
+  const suggestions: RecordingSplitSuggestion[] = []
+  for (let i = 0; i < covered.length - 1; i++) {
+    const ending = covered[i]
+    const starting = covered[i + 1]
+    // Overlapping calendar entries are double-booking, not a handover.
+    const gapSeconds = starting.startSec - ending.endSec
+    if (gapSeconds < 0 || gapSeconds > MAX_BOUNDARY_GAP_SECONDS) continue
+
+    const boundarySec = (ending.endSec + starting.startSec) / 2
+    if (boundarySec < MIN_SUGGESTED_PART_SECONDS) continue
+    if (durationSeconds - boundarySec < MIN_SUGGESTED_PART_SECONDS) continue
+
+    // Prefer a real silence near the boundary so the cut is not mid-word.
+    let best: SilenceInterval | null = null
+    let bestDistance = Number.POSITIVE_INFINITY
+    for (const silence of silences) {
+      const mid = (silence.startSec + silence.endSec) / 2
+      const distance = Math.abs(mid - boundarySec)
+      if (distance < bestDistance && distance <= BOUNDARY_SILENCE_SNAP_SECONDS) {
+        best = silence
+        bestDistance = distance
+      }
+    }
+
+    const timeSec = best ? (best.startSec + best.endSec) / 2 : boundarySec
+    if (timeSec < MIN_SUGGESTED_PART_SECONDS || durationSeconds - timeSec < MIN_SUGGESTED_PART_SECONDS) continue
+
+    suggestions.push({
+      timeSec: round(timeSec),
+      // Calendar evidence outranks any acoustic guess; snapping to silence
+      // confirms it. Both stay below a user's own explicit choice.
+      confidence: best ? 0.95 : 0.88,
+      reason: best ? 'meeting-boundary-and-silence' : 'meeting-boundary',
+      silenceStartSec: best ? round(best.startSec) : undefined,
+      silenceEndSec: best ? round(best.endSec) : undefined,
+      gapSeconds: best ? round(best.endSec - best.startSec) : round(gapSeconds),
+      endingMeetingSubject: ending.subject,
+      startingMeetingSubject: starting.subject,
+    })
+  }
+  return suggestions
 }
 
 export interface RecordingSplitResult {
@@ -152,16 +258,20 @@ function parseTranscriptGaps(speakersJson?: string | null): Array<{ startSec: nu
 export function rankSplitSuggestions(
   silences: SilenceInterval[],
   durationSeconds: number,
-  speakersJson?: string | null
+  speakersJson?: string | null,
+  boundarySuggestions: RecordingSplitSuggestion[] = []
 ): RecordingSplitSuggestion[] {
   if (!Number.isFinite(durationSeconds) || durationSeconds <= MIN_PART_SECONDS * 2) return []
   const transcriptGaps = parseTranscriptGaps(speakersJson)
-  const raw: RecordingSplitSuggestion[] = []
+  // Calendar boundaries lead. An acoustic candidate at the same instant is the
+  // same cut discovered a weaker way, so it is dropped rather than listed twice.
+  const raw: RecordingSplitSuggestion[] = [...boundarySuggestions]
 
   for (const silence of silences) {
     const gapSeconds = silence.endSec - silence.startSec
     const timeSec = (silence.startSec + silence.endSec) / 2
     if (gapSeconds < MIN_SILENCE_SECONDS || timeSec < MIN_SUGGESTED_PART_SECONDS || durationSeconds - timeSec < MIN_SUGGESTED_PART_SECONDS) continue
+    if (raw.some((candidate) => Math.abs(candidate.timeSec - timeSec) <= 2)) continue
     const transcriptMatch = transcriptGaps.some((gap) => gap.startSec <= silence.endSec && gap.endSec >= silence.startSec)
     raw.push({
       timeSec: round(timeSec),
@@ -186,15 +296,26 @@ export function rankSplitSuggestions(
     })
   }
 
+  // A calendar boundary is a different CLASS of evidence from an acoustic
+  // guess, so it leads on class rather than on a score that can tie with a
+  // merely-long silence. Confidence still orders candidates within a class.
+  const isBoundary = (s: RecordingSplitSuggestion): number =>
+    s.reason === 'meeting-boundary' || s.reason === 'meeting-boundary-and-silence' ? 0 : 1
+
   return raw
-    .sort((a, b) => b.confidence - a.confidence || b.gapSeconds - a.gapSeconds || a.timeSec - b.timeSec)
+    .sort((a, b) =>
+      isBoundary(a) - isBoundary(b) ||
+      b.confidence - a.confidence ||
+      b.gapSeconds - a.gapSeconds ||
+      a.timeSec - b.timeSec)
     .slice(0, 6)
 }
 
 export async function detectRecordingSplitSuggestions(
   recording: Recording,
   speakersJson?: string | null,
-  executor?: ExecFileLike
+  executor?: ExecFileLike,
+  meetings: SplitMeetingWindow[] = []
 ): Promise<RecordingSplitSuggestion[]> {
   if (!recording.file_path || !existsSync(recording.file_path)) throw new Error('The local audio file is unavailable')
 
@@ -212,7 +333,14 @@ export async function detectRecordingSplitSuggestions(
   const durationSeconds = parseMediaDuration(output) ?? recording.duration_seconds ?? 0
   if (durationSeconds <= MIN_PART_SECONDS * 2) return []
 
-  return rankSplitSuggestions(parseSilenceIntervals(output, durationSeconds), durationSeconds, speakersJson)
+  const silences = parseSilenceIntervals(output, durationSeconds)
+  const boundaries = suggestMeetingBoundarySplits(
+    recording.date_recorded,
+    durationSeconds,
+    meetings,
+    silences
+  )
+  return rankSplitSuggestions(silences, durationSeconds, speakersJson, boundaries)
 }
 
 function uniqueOutputPath(parentPath: string, part: 1 | 2): string {

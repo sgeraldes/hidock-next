@@ -6,6 +6,9 @@ import {
   getTrashedRecordings,
   getRecordingsForMeeting,
   getMeetingById,
+  findCandidateMeetingsForRecording,
+  findContradictedAutomaticLinks,
+  repairContradictedAutomaticLinks,
   updateRecordingStatus,
   updateRecordingTranscriptionStatus,
   updateRecordingDuration,
@@ -941,9 +944,24 @@ export function registerRecordingHandlers(): void {
         const recording = resolveRecordingId(recordingId)
         if (!recording || recording.deleted_at) return { success: false, error: 'Recording not found' }
         const transcript = getTranscriptByRecordingId(recording.id)
+        // The device cannot cut when you jump straight from one call into the
+        // next — the microphone never closes, so both meetings land in one
+        // capture. The calendar is the only source that knows where that seam
+        // is, so hand the detector the meetings this recording spans.
+        const spannedMeetings = findCandidateMeetingsForRecording(recording.id).map((meeting) => ({
+          subject: meeting.subject,
+          startTime: meeting.start_time,
+          endTime: meeting.end_time,
+          isAllDay: !!meeting.is_all_day
+        }))
         let detection = splitDetectionInFlight.get(recording.id)
         if (!detection) {
-          detection = detectRecordingSplitSuggestions(recording, transcript?.speakers)
+          detection = detectRecordingSplitSuggestions(
+            recording,
+            transcript?.speakers,
+            undefined,
+            spannedMeetings
+          )
           splitDetectionInFlight.set(recording.id, detection)
           void detection.finally(() => {
             if (splitDetectionInFlight.get(recording.id) === detection) splitDetectionInFlight.delete(recording.id)
@@ -974,6 +992,24 @@ export function registerRecordingHandlers(): void {
       } catch (error) {
         console.error('recordings:split error:', error)
         return { success: false, error: error instanceof Error ? error.message : 'Could not split recording' }
+      }
+    }
+  )
+
+  // One-shot repair for automatic meeting links written by an older, looser
+  // auto-link gate and never retracted, so they now contradict their own
+  // candidate evidence. Read-only in dry-run; a person's link is never touched.
+  ipcMain.handle(
+    'recordings:repairContradictedLinks',
+    async (_, dryRun: unknown): Promise<{ success: boolean; cleared?: unknown[]; error?: string }> => {
+      try {
+        const cleared = dryRun === false
+          ? repairContradictedAutomaticLinks()
+          : findContradictedAutomaticLinks()
+        return { success: true, cleared }
+      } catch (error) {
+        console.error('recordings:repairContradictedLinks error:', error)
+        return { success: false, error: error instanceof Error ? error.message : 'Repair failed' }
       }
     }
   )

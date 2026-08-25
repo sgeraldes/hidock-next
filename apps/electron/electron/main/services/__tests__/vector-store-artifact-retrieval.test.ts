@@ -44,7 +44,24 @@ const deps = vi.hoisted(() => ({
 }))
 
 vi.mock('../database', () => ({
-  getDatabase: () => ({ run: vi.fn(), exec: () => [], prepare: () => ({ step: () => false, free: () => {} }) }),
+  getDatabase: () => ({
+    run: vi.fn(),
+    exec: (sql: string) =>
+      // vector-store verifies its schema with PRAGMA table_info and fails
+      // closed when a required column is missing, so the stub has to model a
+      // table that actually has them.
+      typeof sql === 'string' && sql.includes('table_info')
+        ? [{
+            columns: ['cid', 'name', 'type'],
+            values: [
+              'id', 'content', 'embedding', 'meeting_id', 'recording_id', 'chunk_index',
+              'timestamp', 'subject', 'source_type', 'capture_id', 'created_at',
+              'embed_provider', 'embed_dims'
+            ].map((name, cid) => [cid, name, 'TEXT'])
+          }]
+        : [],
+    prepare: () => ({ step: () => false, free: () => {} })
+  }),
   getExcludedRecordingIds: () =>
     deps.throwOnExclusion ? { ids: new Set<string>(), failClosed: true } : { ids: deps.excluded, failClosed: false },
   // Faithful POSITIVE allowlist (database.ts getEligibleRecordingIds semantics):

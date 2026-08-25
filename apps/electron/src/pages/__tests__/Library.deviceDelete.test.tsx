@@ -81,6 +81,32 @@ vi.mock('@tanstack/react-virtual', () => ({
 vi.mock('@/store/useLibraryStore', () => ({
   useLibraryStore: vi.fn((selector) => {
     const state = {
+      // Reader-pane state. Keep in sync with useLibraryStore's initialState —
+      // a missing key here surfaces as "Cannot read properties of undefined"
+      // deep inside a render, not as an obvious mock error.
+      readerSectionModes: {
+        player: 'expanded',
+        metadata: 'expanded',
+        summary: 'expanded',
+        transcript: 'expanded'
+      },
+      setReaderSectionMode: vi.fn(),
+      readerVerticalSizes: [64, 36],
+      setReaderVerticalSizes: vi.fn(),
+      readerMaximizedSection: null,
+      setReaderMaximizedSection: vi.fn(),
+      toggleReaderMaximizedSection: vi.fn(),
+      readerListCollapsedBeforeMaximize: null,
+      listPaneSize: 25,
+      setListPaneSize: vi.fn(),
+      listCollapsed: false,
+      setListCollapsed: vi.fn(),
+      qualityFilter: null,
+      setQualityFilter: vi.fn(),
+      statusFilter: null,
+      setStatusFilter: vi.fn(),
+      searchQuery: '',
+      setSearchQuery: vi.fn(),
       viewMode: 'compact',
       sortBy: 'date', sortOrder: 'desc', sourceTypeFilter: 'all', durationPreset: 'all',
       assistantDock: 'collapsed', selectedIds: new Set(), recordingErrors: new Map(), scrollOffset: 0,

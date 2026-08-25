@@ -15,6 +15,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
+import { readFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
@@ -34,9 +35,16 @@ import {
 } from '../database'
 import { applyTranscriptEntities } from '../org-reconciler'
 
+
 function observationColumns(): string[] {
   return queryAll<{ name: string }>('PRAGMA table_info(project_discovery_observations)').map((c) => c.name)
 }
+
+// Derived from the source, never hardcoded: a hardcoded number turns every
+// legitimate SCHEMA_VERSION bump into a false failure in this file.
+const EXPECTED_SCHEMA_VERSION = Number(
+  readFileSync(join(__dirname, '..', 'database.ts'), 'utf-8').match(/const SCHEMA_VERSION = (\d+)\b/)![1]
+)
 
 describe('v43 heal: a database stranded with the pre-meeting_id table shape', () => {
   beforeAll(async () => {
@@ -81,7 +89,7 @@ describe('v43 heal: a database stranded with the pre-meeting_id table shape', ()
   })
 
   it('reaches the current schema version; migration 43 is not re-run (repairPhase heals the shape)', () => {
-    expect(queryOne<{ v: number }>('SELECT MAX(version) AS v FROM schema_version')?.v).toBe(53)
+    expect(queryOne<{ v: number }>('SELECT MAX(version) AS v FROM schema_version')?.v).toBe(EXPECTED_SCHEMA_VERSION)
   })
 
   it('repairPhase force-added meeting_id to the existing table', () => {

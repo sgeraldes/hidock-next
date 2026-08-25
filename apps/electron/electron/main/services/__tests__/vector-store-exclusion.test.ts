@@ -37,7 +37,20 @@ vi.mock('../database', () => ({
         deps.indexedRecordingIds.push(params[4]) // recording_id column
       }
     },
-    exec: () => [],
+    exec: (sql: string) =>
+      // vector-store verifies its schema with PRAGMA table_info and fails
+      // closed when a required column is missing, so the stub has to model a
+      // table that actually has them.
+      typeof sql === 'string' && sql.includes('table_info')
+        ? [{
+            columns: ['cid', 'name', 'type'],
+            values: [
+              'id', 'content', 'embedding', 'meeting_id', 'recording_id', 'chunk_index',
+              'timestamp', 'subject', 'source_type', 'capture_id', 'created_at',
+              'embed_provider', 'embed_dims'
+            ].map((name, cid) => [cid, name, 'TEXT'])
+          }]
+        : [],
     prepare: (_sql: string) => {
       let i = -1
       return {

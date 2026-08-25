@@ -40,7 +40,9 @@ import {
   queryOne,
   getRecordingById,
   clearAutomaticMeetingLink,
-  isAutomaticCorrelationMethod
+  isAutomaticCorrelationMethod,
+  findContradictedAutomaticLinks,
+  repairContradictedAutomaticLinks
 } from '../../services/database'
 
 const INTERVIEW = 'm-interview'
@@ -138,5 +140,65 @@ describe('clearAutomaticMeetingLink', () => {
        VALUES ('solo', 'solo.flac', '2026-08-18T17:25:05.000Z', 100)`
     )
     expect(clearAutomaticMeetingLink('solo')).toBe(false)
+  })
+})
+
+describe('repairContradictedAutomaticLinks', () => {
+  function addCandidate(recordingId: string, meetingId: string, selected: 0 | 1): void {
+    run(
+      `INSERT INTO recording_meeting_candidates (id, recording_id, meeting_id, confidence_score,
+         match_reason, is_selected)
+       VALUES (?, ?, ?, 0.53, 'Overlaps 19% of the recording', ?)`,
+      [`cand-${recordingId}-${meetingId}-${selected}`, recordingId, meetingId, selected]
+    )
+  }
+
+  it('finds a link no candidate row supports (the live Part 1 row)', () => {
+    seedRecording('part-1', 'ai_transcript_match', 0.8)
+    addCandidate('part-1', INTERVIEW, 0)
+
+    const found = findContradictedAutomaticLinks()
+    expect(found).toHaveLength(1)
+    expect(found[0].recordingId).toBe('part-1')
+    expect(found[0].correlationConfidence).toBe(0.8)
+  })
+
+  it('leaves a link the candidate evidence DOES support', () => {
+    seedRecording('good', 'ai_transcript_match', 0.95)
+    addCandidate('good', INTERVIEW, 1)
+
+    expect(findContradictedAutomaticLinks()).toEqual([])
+  })
+
+  it('never judges a recording that was never analysed', () => {
+    // No candidate rows at all = not yet evaluated, not contradicted.
+    seedRecording('unanalysed', 'ai_transcript_match', 0.8)
+    expect(findContradictedAutomaticLinks()).toEqual([])
+  })
+
+  it('never touches a link the user made', () => {
+    seedRecording('mine', 'user_override', 1.0)
+    addCandidate('mine', INTERVIEW, 0)
+    expect(findContradictedAutomaticLinks()).toEqual([])
+  })
+
+  it('retracts what it finds and reports it', () => {
+    seedRecording('part-1', 'ai_transcript_match', 0.8)
+    addCandidate('part-1', INTERVIEW, 0)
+
+    const repaired = repairContradictedAutomaticLinks()
+
+    expect(repaired.map((r) => r.recordingId)).toEqual(['part-1'])
+    expect(getRecordingById('part-1')!.meeting_id).toBeNull()
+    expect(getRecordingById('part-1')!.correlation_method).toBeNull()
+    // Idempotent.
+    expect(repairContradictedAutomaticLinks()).toEqual([])
+  })
+
+  it('ignores a soft-deleted recording', () => {
+    seedRecording('trashed', 'ai_transcript_match', 0.8)
+    addCandidate('trashed', INTERVIEW, 0)
+    run("UPDATE recordings SET deleted_at = '2026-08-20' WHERE id = 'trashed'")
+    expect(findContradictedAutomaticLinks()).toEqual([])
   })
 })

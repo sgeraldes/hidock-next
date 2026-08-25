@@ -280,7 +280,12 @@ describe('GeminiEngine', () => {
     mockInteractionsCreate
       .mockResolvedValueOnce(interactionResponse({
         hasSpeech: true,
-        segments: [{ timestamp: '00:00', speaker: 'Speaker 1', content: 'primera parte' }],
+        segments: [
+          { timestamp: '00:00', speaker: 'Speaker 1', content: 'primera parte' },
+          // Reaches the end of the requested range; a range whose turns stop
+          // far short of it is now re-requested as truncated.
+          { timestamp: '19:50', speaker: 'Speaker 2', content: 'cierre de la primera parte' },
+        ],
       }, 'interaction-1'))
       .mockResolvedValueOnce(interactionResponse({
         hasSpeech: true,
@@ -296,8 +301,12 @@ describe('GeminiEngine', () => {
 
     expect(mockGenerateContentStream).not.toHaveBeenCalled()
     expect(mockInteractionsCreate).toHaveBeenCalledTimes(2)
-    expect(segments.map((segment) => segment.text)).toEqual(['primera parte', 'segunda parte'])
-    expect(segments.map((segment) => segment.startTime)).toEqual([0, 1200])
+    expect(segments.map((segment) => segment.text)).toEqual([
+      'primera parte',
+      'cierre de la primera parte',
+      'segunda parte',
+    ])
+    expect(segments.map((segment) => segment.startTime)).toEqual([0, 1190, 1200])
     expect(mockInteractionsCreate.mock.calls[0][0].input[0]).toMatchObject({
       type: 'audio',
       uri: 'https://generativelanguage.googleapis.com/v1beta/files/long-recording',
@@ -330,11 +339,17 @@ describe('GeminiEngine', () => {
       .mockResolvedValueOnce(interactionResponse({}, 'incomplete-range', 'incomplete'))
       .mockResolvedValueOnce(interactionResponse({
         hasSpeech: true,
-        segments: [{ timestamp: '00:00', speaker: 'Speaker 1', content: 'parte uno' }],
+        segments: [
+          { timestamp: '00:00', speaker: 'Speaker 1', content: 'parte uno' },
+          { timestamp: '09:50', speaker: 'Speaker 2', content: 'fin de parte uno' },
+        ],
       }, 'range-a'))
       .mockResolvedValueOnce(interactionResponse({
         hasSpeech: true,
-        segments: [{ timestamp: '10:00', speaker: 'Speaker 2', content: 'parte dos' }],
+        segments: [
+          { timestamp: '10:00', speaker: 'Speaker 2', content: 'parte dos' },
+          { timestamp: '19:50', speaker: 'Speaker 1', content: 'fin de parte dos' },
+        ],
       }, 'range-b'))
       .mockResolvedValueOnce(interactionResponse({
         hasSpeech: true,
@@ -348,8 +363,14 @@ describe('GeminiEngine', () => {
       durationSeconds: 1201,
     }))
 
-    expect(segments.map((segment) => segment.text)).toEqual(['parte uno', 'parte dos', 'final'])
-    expect(segments.map((segment) => segment.startTime)).toEqual([0, 600, 1200])
+    expect(segments.map((segment) => segment.text)).toEqual([
+      'parte uno',
+      'fin de parte uno',
+      'parte dos',
+      'fin de parte dos',
+      'final',
+    ])
+    expect(segments.map((segment) => segment.startTime)).toEqual([0, 590, 600, 1190, 1200])
     expect(mockInteractionsCreate).toHaveBeenCalledTimes(4)
     expect(mockInteractionsCreate.mock.calls[2][0].previous_interaction_id).toBe('range-a')
     expect(mockInteractionsCreate.mock.calls[3][0].previous_interaction_id).toBe('range-b')

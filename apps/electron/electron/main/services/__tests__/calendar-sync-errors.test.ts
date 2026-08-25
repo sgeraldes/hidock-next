@@ -29,6 +29,9 @@ vi.mock('../config', () => ({
 // Mock database
 vi.mock('../database', () => ({
   upsertMeetingsBatch: vi.fn(),
+  // Commits the ICS snapshot so only the latest feed can win an automatic
+  // attribution; calendar-sync calls it on every successful save.
+  activateCalendarSyncToken: vi.fn(),
 }))
 
 // Mock the event bus so we can assert the calendar:synced broadcast.

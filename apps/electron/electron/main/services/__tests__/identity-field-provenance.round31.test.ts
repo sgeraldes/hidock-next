@@ -16,6 +16,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { readFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { existsSync, rmSync } from 'fs'
@@ -48,6 +49,7 @@ import { resolveContact, resolveProject } from '../entity-resolver'
 import { applyTranscriptEntities } from '../org-reconciler'
 import { registerContactsHandlers } from '../../ipc/contacts-handlers'
 import { getTableColumns } from '@hidock/database'
+
 
 function invoke(channel: string, ...args: any[]): Promise<any> {
   const fn = handlers.get(channel)
@@ -109,6 +111,12 @@ afterEach(() => {
 // v46 migration / schema
 // ---------------------------------------------------------------------------
 
+// Derived from the source, never hardcoded: a hardcoded number turns every
+// legitimate SCHEMA_VERSION bump into a false failure in this file.
+const EXPECTED_SCHEMA_VERSION = Number(
+  readFileSync(join(__dirname, '..', 'database.ts'), 'utf-8').match(/const SCHEMA_VERSION = (\d+)\b/)![1]
+)
+
 describe('v48/v50 migration — contacts.role_source_recording_id + role_origin', () => {
   it('columns exist after init and schema version is 53', () => {
     const cols = getTableColumns(getDatabase(), 'contacts')
@@ -118,7 +126,7 @@ describe('v48/v50 migration — contacts.role_source_recording_id + role_origin'
     // current SCHEMA_VERSION on top of beta v42/v43, so a full boot reports 50 here.
     expect(cols).toContain('role_origin')
     const v = queryOne<{ v: number }>('SELECT MAX(version) AS v FROM schema_version')
-    expect(v?.v).toBe(53)
+    expect(v?.v).toBe(EXPECTED_SCHEMA_VERSION)
   })
 
   // ADV49-2 (round-51) FLIP: a role with NULL provenance is NO LONGER implicitly
