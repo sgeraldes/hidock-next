@@ -4,7 +4,7 @@
  * body).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { SourceReader } from '../SourceReader'
 import { useUIStore } from '@/store/useUIStore'
@@ -13,12 +13,24 @@ import type { UnifiedRecording } from '@/types/unified-recording'
 import type { Transcript } from '@/types'
 
 // Capture the props the player + transcript viewer receive.
-const playerRenders: Array<{ mode: string; events?: any[]; speakerRanges?: any[] }> = []
+const playerRenders: Array<{
+  mode: string
+  events?: any[]
+  eventDetails?: Record<string, any>
+  onEventUpdate?: (event: any, patch: any) => Promise<boolean>
+  speakerRanges?: any[]
+}> = []
 const viewerRenders: Array<{ showActionItems?: boolean; actionItems?: string[] }> = []
 
 vi.mock('../WaveformPlayer', () => ({
   WaveformPlayer: (props: any) => {
-    playerRenders.push({ mode: props.mode, events: props.events, speakerRanges: props.speakerRanges })
+    playerRenders.push({
+      mode: props.mode,
+      events: props.events,
+      eventDetails: props.eventDetails,
+      onEventUpdate: props.onEventUpdate,
+      speakerRanges: props.speakerRanges,
+    })
     return <div data-testid={`waveform-player-${props.mode}`} />
   },
 }))
@@ -93,13 +105,14 @@ function makeTranscript(overrides: Partial<Transcript> = {}): Transcript {
 }
 
 const getByRecordingId = vi.fn()
+const updateExtractedItem = vi.fn()
 
 function installElectronAPI() {
   Object.defineProperty(window, 'electronAPI', {
     value: {
       recordings: { reprocessWith: vi.fn().mockResolvedValue({ success: true }) },
       // ADV13: SourceReader detail viewer now uses the owner-management accessor.
-      transcripts: { getByRecordingIdOwner: getByRecordingId },
+      transcripts: { getByRecordingIdOwner: getByRecordingId, updateExtractedItem },
       projects: {
         getForKnowledge: vi.fn().mockResolvedValue({ success: true, data: [] }),
         getAll: vi.fn().mockResolvedValue({ success: true, data: { projects: [], total: 0 } }),
@@ -116,6 +129,7 @@ beforeEach(() => {
   viewerRenders.length = 0
   useUIStore.setState({ waveformLoadedForId: null, waveformLoadingId: null, playbackDuration: 0 })
   useLibraryStore.setState({ waveformPinned: false })
+  updateExtractedItem.mockResolvedValue({ success: true })
   ;(window as any).__audioControls = { loadWaveformOnly: vi.fn() }
   installElectronAPI()
 })
@@ -156,6 +170,32 @@ describe('SourceReader — H3: action items have ONE home (the timeline event-li
     const full = playerRenders.filter((p) => p.mode === 'full').at(-1)
     expect(full?.events?.length).toBe(2)
     expect(full?.events?.map((e) => e.label)).toEqual(['Send the deck', 'Decision: ship QA first'])
+    // Transcript-derived markers retain their array index, making the detail row
+    // editable through transcripts:updateExtractedItem.
+    expect(full?.events?.map((e) => e.refId)).toEqual(['txa_0', 'txa_1'])
+    expect(full?.eventDetails?.txa_0).toMatchObject({
+      kind: 'action',
+      fullText: 'Send the deck',
+      editable: true,
+    })
+
+    let saved = false
+    await act(async () => {
+      saved = await full!.onEventUpdate!(full!.events![0], { content: 'Send the revised deck' })
+    })
+    expect(saved).toBe(true)
+    expect(updateExtractedItem).toHaveBeenCalledWith({
+      recordingId: 'rec-1',
+      kind: 'action',
+      index: 0,
+      content: 'Send the revised deck',
+    })
+    await waitFor(() => {
+      const updated = playerRenders.filter((p) => p.mode === 'full').at(-1)
+      expect(updated?.events?.[0]?.label).toBe('Send the revised deck')
+      expect(updated?.eventDetails?.txa_0?.fullText).toBe('Send the revised deck')
+    })
+
     // Decision hint is classified.
     expect(full?.events?.find((e) => e.label.startsWith('Decision'))?.kind).toBe('decision')
   })

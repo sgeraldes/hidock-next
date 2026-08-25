@@ -13,6 +13,10 @@ export interface TranscribeOptions {
   timeOffset?: number
   vocabulary?: string[]
   diarize?: boolean
+  /** Known recording duration, used to keep provider output below model limits. */
+  durationSeconds?: number
+  /** Reports completion of bounded provider ranges/chunks. */
+  onProgress?: (done: number, total: number) => void
   /** Optional free-text context passed to the engine's prompt (e.g. meeting context for Gemini). */
   context?: string
   /**
@@ -41,6 +45,14 @@ export class TranscriptionCancelledError extends Error {
   constructor(message = 'Transcription cancelled: source is no longer eligible for AI processing') {
     super(message)
     this.name = 'TranscriptionCancelledError'
+  }
+}
+
+/** A terminal content outcome returned when no intelligible speech exists. */
+export class NoSpeechDetectedError extends Error {
+  constructor(message = 'No intelligible speech was detected in the recording') {
+    super(message)
+    this.name = 'NoSpeechDetectedError'
   }
 }
 

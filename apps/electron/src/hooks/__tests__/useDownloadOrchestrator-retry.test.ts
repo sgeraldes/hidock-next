@@ -1,9 +1,6 @@
 /**
- * HIGH-3 (Codex): the reconnect ('ready') retry must re-queue disconnect-INTERRUPTED
- * downloads (status 'failed', or 'cancelled' with a non-user origin) but must NEVER
- * resurrect a USER-cancelled download — a deliberate cancel stays terminal until a
- * manual Retry. The shared origin-aware predicate keeps the reconnect selection and
- * the operations badge consistent with the main-process retryFailed(_, interruptedOnly).
+ * Reconnect may re-queue only disconnect-INTERRUPTED downloads. Genuine failures
+ * and user-cancelled downloads stay terminal until a manual Retry.
  *
  * (Supersedes MEDIUM-4, which treated every 'cancelled' as retryable and therefore
  * resurrected user cancels on reconnect.)
@@ -22,21 +19,26 @@ vi.mock('@/features/library/utils/errorHandling', () => ({
 }))
 vi.mock('@/services/qa-monitor', () => ({ shouldLogQa: vi.fn(() => false) }))
 
-import { isRetryableDownloadItem } from '../useDownloadOrchestrator'
+import {
+  isReconnectRetryableDownloadItem,
+  isRetryableDownloadItem,
+} from '../useDownloadOrchestrator'
 
 type QueueItem = { filename: string; status: string; cancelReason?: 'user' | 'interrupted' }
 
 // Mirrors the reconnect retry-selection predicate in useDownloadOrchestrator's
 // onStatusChange('ready') handler: retry when ANY item is auto-retryable.
 const reconnectShouldRetry = (queue: QueueItem[]): boolean =>
-  queue.some((i) => isRetryableDownloadItem(i))
+  queue.some((i) => isReconnectRetryableDownloadItem(i))
 
 describe('HIGH-3: reconnect retry includes interrupted but NOT user-cancelled downloads', () => {
   it('classifies each status/origin correctly', () => {
     expect(isRetryableDownloadItem({ status: 'failed' })).toBe(true)
+    expect(isReconnectRetryableDownloadItem({ status: 'failed' })).toBe(false)
     // A disconnect/re-sync interruption is retryable (explicit or defaulted origin).
     expect(isRetryableDownloadItem({ status: 'cancelled', cancelReason: 'interrupted' })).toBe(true)
     expect(isRetryableDownloadItem({ status: 'cancelled' })).toBe(true)
+    expect(isReconnectRetryableDownloadItem({ status: 'cancelled', cancelReason: 'interrupted' })).toBe(true)
     // A deliberate user cancel is NOT auto-retryable.
     expect(isRetryableDownloadItem({ status: 'cancelled', cancelReason: 'user' })).toBe(false)
     // Non-terminal / done statuses never retry.
@@ -63,11 +65,11 @@ describe('HIGH-3: reconnect retry includes interrupted but NOT user-cancelled do
     expect(reconnectShouldRetry(queue)).toBe(false)
   })
 
-  it('a mix retries only when an interrupted/failed item is present', () => {
+  it('a genuine failure does not trigger an automatic reconnect loop', () => {
     expect(reconnectShouldRetry([
       { filename: 'a', status: 'cancelled', cancelReason: 'user' },
-      { filename: 'b', status: 'failed' } // failed still forces a retry pass
-    ])).toBe(true)
+      { filename: 'b', status: 'failed' }
+    ])).toBe(false)
 
     expect(reconnectShouldRetry([
       { filename: 'a', status: 'cancelled', cancelReason: 'user' },

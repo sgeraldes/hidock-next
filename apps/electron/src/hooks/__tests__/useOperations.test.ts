@@ -16,7 +16,8 @@ vi.mock('@/hooks/useDownloadOrchestrator', () => ({
   releaseDownloadBookkeeping: vi.fn(),
   clearAllDownloadBookkeeping: vi.fn(),
   markDownloadCancelled: vi.fn(),
-  clearDownloadCancelled: vi.fn()
+  clearDownloadCancelled: vi.fn(),
+  drainDownloadQueue: vi.fn()
 }))
 
 // Mock transcription store
@@ -52,11 +53,13 @@ const mockCancelAllDownloads = vi.fn().mockResolvedValue(undefined)
 const mockCancelDownload = vi.fn().mockResolvedValue({ success: true })
 
 const mockAddToQueueIPC = vi.fn().mockResolvedValue('queue-item-1')
+const mockReprocessWith = vi.fn().mockResolvedValue({ success: true, queueItemId: 'queue-reprocess-1' })
 
 global.window.electronAPI = {
   recordings: {
     updateStatus: mockUpdateStatus,
     addToQueue: mockAddToQueueIPC,
+    reprocessWith: mockReprocessWith,
     cancelTranscription: mockCancelTranscription,
     cancelAllTranscriptions: mockCancelAllTranscriptions
   },
@@ -184,6 +187,31 @@ describe('useOperations', () => {
       expect(mockAddToQueue).toHaveBeenCalledWith('queue-item-1', 'rec-3', 'eligible.wav')
     })
 
+    it('routes the primary Re-transcribe action through an explicit provider reprocess', async () => {
+      const { result } = renderHook(() => useOperations())
+      const completed = {
+        id: 'rec-complete',
+        filename: 'completed.wav',
+        location: 'local-only' as const,
+        localPath: '/path/completed.wav',
+        syncStatus: 'synced' as const,
+        transcriptionStatus: 'complete' as const,
+        size: 1024,
+        duration: 60,
+        dateRecorded: new Date()
+      }
+
+      let success: boolean | undefined
+      await act(async () => {
+        success = await result.current.queueTranscription(completed as any)
+      })
+
+      expect(success).toBe(true)
+      expect(mockReprocessWith).toHaveBeenCalledWith('rec-complete', 'gemini')
+      expect(mockAddToQueueIPC).not.toHaveBeenCalled()
+      expect(mockAddToQueue).toHaveBeenCalledWith('queue-reprocess-1', 'rec-complete', 'completed.wav')
+    })
+
     it('queues local ASR transcription without a Gemini API key', async () => {
       vi.mocked(window.electronAPI.config.get).mockResolvedValue({
         success: true,
@@ -252,6 +280,7 @@ describe('useOperations', () => {
     })
 
     it('queues download for device-only recording', async () => {
+      const { drainDownloadQueue } = await import('@/hooks/useDownloadOrchestrator')
       const { result } = renderHook(() => useOperations())
 
       const deviceOnly = {
@@ -277,6 +306,7 @@ describe('useOperations', () => {
         size: 2048,
         dateCreated: expect.any(String)
       }])
+      expect(drainDownloadQueue).toHaveBeenCalledOnce()
     })
   })
 

@@ -103,6 +103,18 @@ export interface AppConfig {
     localAsrVocabularyFile: string
     localAsrDiarize: boolean
     localAsrNumBeams: number
+    // Persistent acoustic speaker linking. This is not authentication and does
+    // not require a dedicated enrollment recording: validated diarized speech
+    // builds an anonymous voice memory opportunistically across recordings.
+    speakerLinkingEnabled: boolean
+    speakerLinkingPythonPath: string
+    speakerLinkingWorkerPath: string
+    speakerLinkingModel: string
+    speakerLinkingFallbackModel: string
+    speakerLinkingMatchThreshold: number
+    speakerLinkingMatchMargin: number
+    speakerLinkingMinSpeechSeconds: number
+    speakerLinkingTimeoutSeconds: number
     // VibeVoice backend (microsoft/VibeVoice-ASR) — reuses localAsrPath/mcp_runner.py.
     vibevoiceModelId: string
     vibevoiceDevice: string
@@ -191,6 +203,17 @@ const DEFAULT_CONFIG: AppConfig = {
     localAsrVocabularyFile: 'vocabulary.json',
     localAsrDiarize: true,
     localAsrNumBeams: 5,
+    speakerLinkingEnabled: true,
+    speakerLinkingPythonPath: process.env.SPEAKER_LINKING_PYTHON || (process.platform === 'win32' ? 'py' : 'python3'),
+    speakerLinkingWorkerPath: process.env.SPEAKER_LINKING_WORKER || '',
+    speakerLinkingModel: 'pyannote/speaker-diarization-community-1',
+    speakerLinkingFallbackModel: 'pyannote/speaker-diarization-3.1',
+    // Conservative defaults: a match must be both strong and clearly better
+    // than the runner-up. Uncertain voices remain anonymous.
+    speakerLinkingMatchThreshold: 0.72,
+    speakerLinkingMatchMargin: 0.08,
+    speakerLinkingMinSpeechSeconds: 4,
+    speakerLinkingTimeoutSeconds: 600,
     vibevoiceModelId: process.env.VIBEVOICE_MODEL_ID || 'microsoft/VibeVoice-ASR',
     vibevoiceDevice: process.env.ASR_DEVICE || 'cuda:0',
     vibevoiceAttn: process.env.VIBEVOICE_ATTN || 'sdpa', // VibeVoice-ASR supports neither flash_attention_2 (not built on Windows) nor flex_attention (unsupported arch); both silently fall back to sdpa, so use it directly

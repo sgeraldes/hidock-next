@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { NotificationsButton } from '../NotificationsButton'
 import { useDownloadQueue } from '@/store/useAppStore'
 import { useTranscriptionStats, useTranscriptionStore } from '@/store/features/useTranscriptionStore'
@@ -73,6 +73,12 @@ function txItem(over: Record<string, any> = {}) {
 describe('NotificationsButton', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    ;(window as any).electronAPI = {
+      downloadService: {
+        getState: vi.fn().mockReturnValue(new Promise(() => {})),
+        onStateUpdate: vi.fn().mockReturnValue(() => {})
+      }
+    }
   })
 
   it('shows an empty state when there is no activity', () => {
@@ -86,7 +92,7 @@ describe('NotificationsButton', () => {
   it('lists in-flight transcriptions and active downloads', () => {
     setup({
       queue: new Map([['t1', txItem()]]),
-      downloads: new Map([['d1', { filename: '2026-07-10-notes.wav', progress: 42, size: 1000 }]]),
+      downloads: new Map([['d1', { filename: '2026-07-10-notes.wav', progress: 42, size: 1000, status: 'downloading' }]]),
       stats: { total: 1, completed: 0, failed: 0, processing: 1, pending: 0, aggregateProgress: 40 }
     })
     render(<NotificationsButton />)
@@ -111,6 +117,29 @@ describe('NotificationsButton', () => {
     fireEvent.click(screen.getByRole('button', { name: /Notifications/i }))
     fireEvent.click(screen.getByRole('button', { name: /view all in operations/i }))
     expect(mockOpenOverlay).toHaveBeenCalledTimes(1)
+  })
+
+  it('includes durable failed downloads in the same failure count as Operations', async () => {
+    ;(window as any).electronAPI.downloadService.getState.mockResolvedValue({
+      queue: [{
+        filename: 'missing.hda',
+        fileSize: 38_892,
+        progress: 0,
+        status: 'failed',
+        error: 'USB transfer failed'
+      }]
+    })
+    setup({
+      queue: new Map([['t1', txItem({ status: 'failed', error: 'provider failed' })]]),
+      stats: { total: 1, completed: 0, failed: 1, processing: 0, pending: 0, aggregateProgress: 0 }
+    })
+    render(<NotificationsButton />)
+
+    const trigger = await screen.findByRole('button', { name: /2 failed/i })
+    fireEvent.click(trigger)
+    expect(screen.getByText('missing')).toBeInTheDocument()
+    expect(screen.getByText(/Failed · USB transfer failed/)).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText('2 failed')).toBeInTheDocument())
   })
 
   it('offers a per-download Cancel that calls cancelDownload(filename)', () => {

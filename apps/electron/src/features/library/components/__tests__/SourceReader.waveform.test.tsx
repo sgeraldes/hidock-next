@@ -1,11 +1,10 @@
 /**
- * Tests for the reader's SINGLE morphing waveform element (SourceReader).
+ * Tests for the reader's SINGLE explicitly controlled waveform element.
  *
  * The model (never two players at once):
- *  - EXPANDED big rich timeline is the DEFAULT (reader at scrollTop 0).
- *  - Scrolling the body morphs it to a full-width docked bar (pill).
- *  - A narrow reader pane drops the docked bar to the bare scrubber.
- *  - The pin ("keep expanded") overrides the scroll-collapse.
+ *  - EXPANDED big rich timeline is the DEFAULT.
+ *  - Scrolling never changes the selected presentation.
+ *  - Minimized/docked uses a pill, or a scrubber in a narrow pane.
  *  - An already-transcribed recording with empty timeline data triggers a
  *    one-time analyzeTimeline() backfill and shows "Analyzing timeline…".
  *  - When the backfill returns data, markers/sentiment are passed to the player.
@@ -108,7 +107,12 @@ beforeEach(() => {
   vi.clearAllMocks()
   playerRenders.length = 0
   useUIStore.setState({ waveformLoadedForId: null, waveformLoadingId: null, playbackDuration: 0 })
-  useLibraryStore.setState({ waveformPinned: false })
+  useLibraryStore.setState({
+    waveformPinned: false,
+    readerSectionModes: { player: 'expanded', metadata: 'expanded', summary: 'expanded', transcript: 'expanded' },
+    readerVerticalSizes: [64, 36],
+    listCollapsed: false
+  })
   ;(window as any).__audioControls = { loadWaveformOnly: vi.fn() }
   installElectronAPI()
 })
@@ -116,20 +120,18 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 // 1. Exactly one player, expanded by default
 // ---------------------------------------------------------------------------
-describe('SourceReader — single morphing waveform', () => {
-  it('renders EXACTLY ONE waveform element, expanded (full) by default at scrollTop 0', () => {
+describe('SourceReader — single explicitly controlled waveform', () => {
+  it('renders EXACTLY ONE waveform element, expanded (full) by default', () => {
     render(<SourceReader recording={makeRecording()} />)
     const players = screen.getAllByTestId(/^waveform-player-/)
     expect(players).toHaveLength(1)
     expect(screen.getByTestId('waveform-player-full')).toBeInTheDocument()
   })
 
-  it('morphs to the full-width docked pill after the body is scrolled (still ONE element)', () => {
+  it('minimizes to the full-width player pill and still renders ONE element', () => {
     const restore = mockRegionWidth(800) // wide pane → pill, not scrubber
     render(<SourceReader recording={makeRecording()} />)
-    const body = screen.getByTestId('reader-scroll-body')
-    Object.defineProperty(body, 'scrollTop', { value: 120, configurable: true })
-    fireEvent.scroll(body)
+    fireEvent.click(screen.getByRole('button', { name: 'Player' }))
     const players = screen.getAllByTestId(/^waveform-player-/)
     expect(players).toHaveLength(1)
     expect(screen.getByTestId('waveform-player-pill')).toBeInTheDocument()
@@ -137,25 +139,20 @@ describe('SourceReader — single morphing waveform', () => {
     restore()
   })
 
-  it('drops the docked bar to the scrubber when the reader pane is narrow', () => {
+  it('uses the scrubber for a minimized player when the reader pane is narrow', () => {
     const restore = mockRegionWidth(320) // below breakpoint → scrubber
     render(<SourceReader recording={makeRecording()} />)
-    const body = screen.getByTestId('reader-scroll-body')
-    Object.defineProperty(body, 'scrollTop', { value: 120, configurable: true })
-    fireEvent.scroll(body)
+    fireEvent.click(screen.getByRole('button', { name: 'Player' }))
     expect(screen.getAllByTestId(/^waveform-player-/)).toHaveLength(1)
     expect(screen.getByTestId('waveform-player-scrubber')).toBeInTheDocument()
     restore()
   })
 
-  it('re-expands to the big timeline when scrolled back to the top', () => {
+  it('does not change the player presentation when the transcript is scrolled', () => {
     const restore = mockRegionWidth(800)
     render(<SourceReader recording={makeRecording()} />)
     const body = screen.getByTestId('reader-scroll-body')
-    Object.defineProperty(body, 'scrollTop', { value: 120, configurable: true })
-    fireEvent.scroll(body)
-    expect(screen.getByTestId('waveform-player-pill')).toBeInTheDocument()
-    Object.defineProperty(body, 'scrollTop', { value: 0, configurable: true })
+    Object.defineProperty(body, 'scrollTop', { value: 200, configurable: true })
     fireEvent.scroll(body)
     expect(screen.getByTestId('waveform-player-full')).toBeInTheDocument()
     expect(screen.getAllByTestId(/^waveform-player-/)).toHaveLength(1)
@@ -164,21 +161,48 @@ describe('SourceReader — single morphing waveform', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 2. Pin overrides the scroll-collapse
+// 2. Explicit dock state
 // ---------------------------------------------------------------------------
-describe('SourceReader — keep-expanded pin', () => {
-  it('keeps the big timeline while scrolling when pinned, and persists the pin', () => {
+describe('SourceReader — docked small player', () => {
+  it('persists the docked small-player mode and remains compact while scrolling', async () => {
     const restore = mockRegionWidth(800)
     render(<SourceReader recording={makeRecording()} />)
-    fireEvent.click(screen.getByRole('button', { name: /keep timeline expanded/i }))
-    expect(useLibraryStore.getState().waveformPinned).toBe(true)
-    // Now scroll — it must STAY big (full), not collapse.
+    fireEvent.pointerDown(screen.getByRole('button', { name: 'Layout options for Player' }), { button: 0, ctrlKey: false })
+    fireEvent.click(await screen.findByText('Dock small player'))
+    expect(useLibraryStore.getState().readerSectionModes.player).toBe('docked')
+    expect(screen.getByTestId('waveform-player-pill')).toBeInTheDocument()
     const body = screen.getByTestId('reader-scroll-body')
     Object.defineProperty(body, 'scrollTop', { value: 200, configurable: true })
     fireEvent.scroll(body)
-    expect(screen.getByTestId('waveform-player-full')).toBeInTheDocument()
+    expect(screen.getByTestId('waveform-player-pill')).toBeInTheDocument()
     expect(screen.getAllByTestId(/^waveform-player-/)).toHaveLength(1)
     restore()
+  })
+
+  it('hides the player completely and leaves an explicit restore control', async () => {
+    render(<SourceReader recording={makeRecording()} />)
+    fireEvent.pointerDown(screen.getByRole('button', { name: 'Layout options for Player' }), { button: 0, ctrlKey: false })
+    fireEvent.click(await screen.findByText('Hide section'))
+
+    expect(screen.queryByTestId(/^waveform-player-/)).not.toBeInTheDocument()
+    expect(useLibraryStore.getState().readerSectionModes.player).toBe('hidden')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show Player' }))
+    expect(screen.getByTestId('waveform-player-full')).toBeInTheDocument()
+  })
+
+  it('maximizes the player, collapses the source list, and restores the prior list state', async () => {
+    render(<SourceReader recording={makeRecording()} />)
+    fireEvent.pointerDown(screen.getByRole('button', { name: 'Layout options for Player' }), { button: 0, ctrlKey: false })
+    fireEvent.click(await screen.findByText('Maximize section'))
+
+    expect(useLibraryStore.getState().listCollapsed).toBe(true)
+    expect(screen.getByRole('button', { name: 'Return Player to reader' })).toBeInTheDocument()
+    expect(screen.queryByTestId('reader-scroll-body')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Return Player to reader' }))
+    expect(useLibraryStore.getState().listCollapsed).toBe(false)
+    expect(screen.getByTestId('reader-scroll-body')).toBeInTheDocument()
   })
 })
 

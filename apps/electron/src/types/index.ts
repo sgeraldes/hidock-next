@@ -99,6 +99,14 @@ export interface Transcript {
   transcription_model: string | null
   title_suggestion: string | null
   question_suggestions: string | null // JSON string of suggested questions
+  transcription_run_id?: string | null
+  diarization_run_id?: string | null
+  summary_run_id?: string | null
+  title_run_id?: string | null
+  meeting_resolution_run_id?: string | null
+  diarization_quality_status?: 'high' | 'degraded' | 'failed' | 'unavailable' | null
+  diarization_quality?: string | null
+  mentioned_people?: string | null
   created_at: string
 }
 
@@ -190,6 +198,15 @@ export interface AppConfig {
     localAsrVocabularyFile: string
     localAsrDiarize: boolean
     localAsrNumBeams: number
+    speakerLinkingEnabled: boolean
+    speakerLinkingPythonPath: string
+    speakerLinkingWorkerPath: string
+    speakerLinkingModel: string
+    speakerLinkingFallbackModel: string
+    speakerLinkingMatchThreshold: number
+    speakerLinkingMatchMargin: number
+    speakerLinkingMinSpeechSeconds: number
+    speakerLinkingTimeoutSeconds: number
     autoTranscribe: boolean
     language: string
     /** F16/spec-001 kill-switch (main-process config.ts) — mirrored here only

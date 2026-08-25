@@ -91,4 +91,39 @@ describe('useAudioPlayback — H5 disk cache', () => {
 
     expect(useUIStore.getState().waveformLoadedForId).toBe('rec-2')
   })
+
+  it('starts a split preview at the requested timestamp before audio becomes audible', async () => {
+    let heardFrom = -1
+    class FakeAudio extends EventTarget {
+      currentTime = 0
+      duration = 100
+      readyState = 1
+      src = ''
+      playbackRate = 1
+      error = null
+      play = vi.fn(async () => { heardFrom = this.currentTime })
+      pause = vi.fn()
+    }
+    vi.stubGlobal('Audio', FakeAudio)
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:preview')
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
+    getCache.mockResolvedValue({
+      version: 1,
+      recordingId: 'rec-preview',
+      peaks: [0.2, 0.4],
+      sampleCount: 2,
+      duration: 100,
+      fileSize: 100,
+      createdAt: 'now'
+    })
+    readRecording.mockResolvedValue({ success: true, data: btoa('audio-bytes') })
+
+    const { unmount } = renderHook(() => useAudioPlayback())
+    await window.__audioControls!.play('rec-preview', '/x/preview.mp3', 42.3)
+
+    expect(heardFrom).toBe(42.3)
+    expect(useUIStore.getState().playbackCurrentTime).toBe(42.3)
+    unmount()
+    vi.unstubAllGlobals()
+  })
 })

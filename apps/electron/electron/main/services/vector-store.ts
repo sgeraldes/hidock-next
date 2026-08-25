@@ -5,10 +5,19 @@
 
 import { getDatabase, getDatabasePath, isRecordingProcessable } from './database'
 import { dirname, join } from 'path'
+import { existsSync, unlinkSync } from 'fs'
+import {
+  markVectorStartupFailed,
+  markVectorStartupLoading,
+  markVectorStartupReady,
+  updateVectorStartupProgress,
+} from './vector-startup-state'
 import {
   cacheFingerprint,
-  readVectorCache,
-  writeVectorCache,
+  cancelVectorCacheWrites,
+  readVectorCacheAsync,
+  waitForVectorCacheWrites,
+  writeVectorCacheAsync,
   VECTOR_CACHE_FILENAME,
   type CacheGroupInfo,
 } from './vector-cache'
@@ -204,9 +213,66 @@ function diversifyResults(sorted: SearchResult[], topK: number): SearchResult[] 
 class VectorStore {
   private documents: Map<string, VectorDocument> = new Map()
   private initialized = false
+  private schemaReady = false
+  private initialization: Promise<void> | null = null
 
   async initialize(onProgress?: (loaded: number, total: number) => void): Promise<void> {
     if (this.initialized) return
+    if (!this.initialization) {
+      markVectorStartupLoading()
+      const reportProgress = (loaded: number, total: number): void => {
+        updateVectorStartupProgress(loaded, total)
+        onProgress?.(loaded, total)
+      }
+      this.initialization = this.initializeInternal(reportProgress)
+        .then(() => markVectorStartupReady(this.documents.size))
+        .catch((error) => {
+          markVectorStartupFailed(error)
+          throw error
+        })
+        .finally(() => {
+          this.initialization = null
+        })
+    }
+    await this.initialization
+  }
+
+  private async initializeInternal(onProgress?: (loaded: number, total: number) => void): Promise<void> {
+    if (this.initialized) return
+
+    this.ensureSchema()
+
+    const activeProvider = await getEmbeddingsService().activeProviderId()
+    if (!activeProvider) {
+      this.initialized = true
+      console.warn('[VectorStore] No active embedding provider — semantic index remains empty')
+      return
+    }
+
+    const t0 = Date.now()
+    if (await this.tryLoadFromCache(activeProvider, onProgress)) {
+      this.initialized = true
+      console.log(
+        `Vector store initialized with ${this.documents.size} documents (binary cache, ${Date.now() - t0}ms)`
+      )
+      return
+    }
+
+    await this.loadFromDatabase(activeProvider, onProgress)
+
+    this.initialized = true
+    console.log(`Vector store initialized with ${this.documents.size} documents`)
+    this.scheduleCacheWrite()
+  }
+
+  /**
+   * Prepare the vector table without hydrating every embedding into RAM.
+   * Boot-time backfills need schema/query access, not a multi-gigabyte in-memory
+   * search index. Keeping this seam separate prevents 200k+ vectors from being
+   * restored merely to discover there is no missing transcript to index.
+   */
+  ensureSchema(): void {
+    if (this.schemaReady) return
 
     const db = getDatabase()
 
@@ -243,23 +309,8 @@ class VectorStore {
     // Create index for faster lookups
     db.run(`CREATE INDEX IF NOT EXISTS idx_vector_embeddings_meeting ON vector_embeddings(meeting_id)`)
     db.run(`CREATE INDEX IF NOT EXISTS idx_vector_embeddings_recording ON vector_embeddings(recording_id)`)
-
-    // Load existing embeddings into memory — binary cache first (sub-second),
-    // SQL fallback (batched), then rewrite the cache for the next boot.
-    const t0 = Date.now()
-    if (await this.tryLoadFromCache(onProgress)) {
-      this.initialized = true
-      console.log(
-        `Vector store initialized with ${this.documents.size} documents (binary cache, ${Date.now() - t0}ms)`
-      )
-      return
-    }
-
-    await this.loadFromDatabase(onProgress)
-
-    this.initialized = true
-    console.log(`Vector store initialized with ${this.documents.size} documents`)
-    this.scheduleCacheWrite()
+    db.run(`CREATE INDEX IF NOT EXISTS idx_vector_embeddings_provider_id ON vector_embeddings(embed_provider, id)`)
+    this.schemaReady = true
   }
 
   /** Chunk buffers backing the cache-loaded Float32Array views (kept alive). */
@@ -269,6 +320,26 @@ class VectorStore {
    *  cache buffer (diagnostics/tests). */
   isCacheBacked(): boolean {
     return this.cacheBuffers !== null
+  }
+
+  /**
+   * Delete the binary vector cache file. Called on HARD PURGE: the cache
+   * holds deleted recordings' embedding vectors on disk, and "permanent
+   * deletion" must not leave recoverable vectors behind until the next
+   * boot's fingerprint invalidation. The next boot SQL-loads (sans purged
+   * rows) and rewrites the cache clean. In-memory docs are unaffected.
+   */
+  invalidateCache(): void {
+    try {
+      const path = this.vectorCachePath()
+      cancelVectorCacheWrites(path)
+      if (existsSync(path)) {
+        unlinkSync(path)
+        console.log('[VectorStore] Binary vector cache invalidated (hard purge)')
+      }
+    } catch (e) {
+      console.warn('[VectorStore] cache invalidation failed (non-fatal):', e)
+    }
   }
 
   private vectorCachePath(): string {
@@ -283,10 +354,17 @@ class VectorStore {
    * back to the SQL load (false). Unknown-provider rows are unservable by
    * design and excluded from BOTH the cache and its fingerprint.
    */
-  private async tryLoadFromCache(onProgress?: (loaded: number, total: number) => void): Promise<boolean> {
+  private async tryLoadFromCache(
+    activeProvider: string,
+    onProgress?: (loaded: number, total: number) => void
+  ): Promise<boolean> {
     const db = getDatabase()
     const groupRows = db.exec(
-      'SELECT embed_provider, embed_dims, COUNT(*) FROM vector_embeddings WHERE embed_provider IS NOT NULL AND embed_dims IS NOT NULL GROUP BY embed_provider, embed_dims'
+      `SELECT embed_provider, embed_dims, COUNT(*)
+       FROM vector_embeddings
+       WHERE embed_provider = ? AND embed_dims IS NOT NULL
+       GROUP BY embed_provider, embed_dims`,
+      [activeProvider]
     )
     if (groupRows.length === 0 || groupRows[0].values.length === 0) return false
     const liveGroups: CacheGroupInfo[] = groupRows[0].values.map(([p, d, c]) => ({
@@ -295,20 +373,28 @@ class VectorStore {
       count: c as number,
     }))
 
-    const cache = readVectorCache(this.vectorCachePath())
-    if (!cache || cache.fingerprint !== cacheFingerprint(liveGroups)) return false
+    const cachePath = this.vectorCachePath()
+    await waitForVectorCacheWrites(cachePath)
+    const cache = await readVectorCacheAsync(cachePath, activeProvider)
+    if (!cache) return false
+    const cachedActiveGroups = cache.groups
+      .filter((group) => group.provider === activeProvider)
+      .map(({ provider, dims, count }) => ({ provider, dims, count }))
+    if (cacheFingerprint(cachedActiveGroups) !== cacheFingerprint(liveGroups)) return false
 
     const byId = new Map(cache.rows.map((r) => [r.id, r]))
     const BATCH = 10000
-    let offset = 0
+    let loaded = 0
+    let afterId = ''
     let matched = 0
     for (;;) {
       const rows = db.exec(
         `SELECT id, content, meeting_id, recording_id, chunk_index, timestamp, subject, source_type, capture_id, embed_provider, embed_dims
          FROM vector_embeddings
-         WHERE embed_provider IS NOT NULL AND embed_dims IS NOT NULL
-         LIMIT ? OFFSET ?`,
-        [BATCH, offset]
+         WHERE embed_provider = ? AND embed_dims IS NOT NULL AND id > ?
+         ORDER BY id
+         LIMIT ?`,
+        [activeProvider, afterId, BATCH]
       )
       if (rows.length === 0 || rows[0].values.length === 0) break
       for (const row of rows[0].values) {
@@ -338,8 +424,9 @@ class VectorStore {
         })
         matched++
       }
-      offset += rows[0].values.length
-      onProgress?.(Math.min(offset, cache.rows.length), cache.rows.length)
+      loaded += rows[0].values.length
+      afterId = rows[0].values[rows[0].values.length - 1][0] as string
+      onProgress?.(Math.min(loaded, cache.rows.length), cache.rows.length)
       if (rows[0].values.length < BATCH) break
       await new Promise((resolve) => setImmediate(resolve))
     }
@@ -352,22 +439,26 @@ class VectorStore {
   }
 
   /**
-   * Persist the binary cache for the next boot (async, off the critical
-   * path). Unknown-provider rows are excluded (unservable by design).
+   * Persist the binary cache for the next boot without monopolizing Electron's
+   * main event loop. Unknown-provider rows are excluded (unservable by design).
    */
   private scheduleCacheWrite(): void {
     void (async () => {
       await new Promise((resolve) => setImmediate(resolve))
       try {
-        const docs = [...this.documents.values()]
-          .filter((d) => d.metadata.embedProvider && d.metadata.embedDims)
-          .map((d) => ({
-            id: d.id,
-            embedding: d.embedding,
-            provider: d.metadata.embedProvider!,
-            dims: d.metadata.embedDims!,
-          }))
-        const { totalCount } = writeVectorCache(this.vectorCachePath(), docs)
+        const documents = this.documents
+        function* cacheDocuments() {
+          for (const document of documents.values()) {
+            if (!document.metadata.embedProvider || !document.metadata.embedDims) continue
+            yield {
+              id: document.id,
+              embedding: document.embedding,
+              provider: document.metadata.embedProvider,
+              dims: document.metadata.embedDims,
+            }
+          }
+        }
+        const { totalCount } = await writeVectorCacheAsync(this.vectorCachePath(), cacheDocuments())
         console.log(`[VectorStore] Binary vector cache written (${totalCount} rows)`)
       } catch (e) {
         console.warn('[VectorStore] Binary vector cache write failed (next boot uses the SQL load):', e)
@@ -463,9 +554,12 @@ class VectorStore {
     }
   }
 
-  private async loadFromDatabase(onProgress?: (loaded: number, total: number) => void): Promise<void> {
+  private async loadFromDatabase(
+    activeProvider: string,
+    onProgress?: (loaded: number, total: number) => void
+  ): Promise<void> {
     const db = getDatabase()
-    const totalRes = db.exec('SELECT COUNT(*) FROM vector_embeddings')
+    const totalRes = db.exec('SELECT COUNT(*) FROM vector_embeddings WHERE embed_provider = ?', [activeProvider])
     const total = totalRes.length > 0 ? (totalRes[0].values[0][0] as number) : 0
 
     // Batched load with event-loop yields: a single SELECT of 110k+ rows (and
@@ -473,9 +567,16 @@ class VectorStore {
     // (BootScheduler SLOW-task warnings). 5k-row pages keep the UI responsive
     // while the store fills.
     const BATCH = 5000
-    let offset = 0
+    let loaded = 0
+    let afterId = ''
     for (;;) {
-      const rows = db.exec('SELECT * FROM vector_embeddings LIMIT ? OFFSET ?', [BATCH, offset])
+      const rows = db.exec(
+        `SELECT * FROM vector_embeddings
+         WHERE embed_provider = ? AND id > ?
+         ORDER BY id
+         LIMIT ?`,
+        [activeProvider, afterId, BATCH]
+      )
       if (rows.length === 0 || rows[0].values.length === 0) break
 
       const columns = rows[0].columns
@@ -505,8 +606,9 @@ class VectorStore {
         this.documents.set(vectorDoc.id, vectorDoc)
       }
 
-      offset += rows[0].values.length
-      onProgress?.(Math.min(offset, total), total)
+      loaded += rows[0].values.length
+      afterId = rows[0].values[rows[0].values.length - 1][columns.indexOf('id')] as string
+      onProgress?.(Math.min(loaded, total), total)
       if (rows[0].values.length < BATCH) break
       await new Promise((resolve) => setImmediate(resolve))
     }
@@ -608,6 +710,7 @@ class VectorStore {
       shouldGenerate?: () => boolean
     }
   ): Promise<number> {
+    this.ensureSchema()
     // Destructure the gates out so they never land on a stored chunk's metadata.
     const { shouldPersist, shouldGenerate, ...chunkMeta } = metadata
     // Check if already indexed FOR THE ACTIVE PROVIDER'S PARTITION. Chunks
@@ -798,6 +901,7 @@ class VectorStore {
    * knowledge base, not just newly transcribed recordings.
    */
   async backfillMissingTranscripts(): Promise<{ indexed: number; skipped: number }> {
+    this.ensureSchema()
     const db = getDatabase()
     // PROVIDER PARTITION — "missing" means missing FOR THE ACTIVE PROVIDER.
     // After a provider switch this re-embeds the whole library into the new

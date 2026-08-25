@@ -48,6 +48,8 @@ export interface Recording {
   file_path: string | null
   file_size: number | null
   duration_seconds: number | null
+  /** Read projection from the assigned meeting; never persisted on recordings. */
+  meeting_subject?: string | null
   date_recorded: string
   meeting_id: string | null
   correlation_confidence: number | null
@@ -56,7 +58,7 @@ export interface Recording {
   created_at: string
   // Lifecycle fields
   location: 'device-only' | 'local-only' | 'both' | 'deleted'
-  transcription_status: 'none' | 'pending' | 'processing' | 'complete' | 'error'
+  transcription_status: 'none' | 'pending' | 'processing' | 'complete' | 'no_speech' | 'error'
   on_device: number
   device_last_seen?: string
   on_local: number

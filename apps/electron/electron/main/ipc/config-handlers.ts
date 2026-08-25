@@ -1,4 +1,4 @@
-import { ipcMain } from 'electron'
+import { ipcMain, shell } from 'electron'
 import { getConfig, saveConfig, updateConfig, AppConfig, RETIRED_GEMINI_MODELS } from '../services/config'
 import { initializeFileStorage } from '../services/file-storage'
 import { listGeminiTranscriptionModels } from '../services/gemini-models'
@@ -6,6 +6,10 @@ import { success, error as errorResult } from '../types/api'
 import { emitActivityLog } from '../services/activity-log'
 import { getResolvedFeatures } from '../services/feature-gate'
 import { reconcileFeatures } from '../services/feature-lifecycle'
+import {
+  checkSpeakerModelAccess,
+  SPEAKER_MODEL_ACCESS_URL
+} from '../services/speaker-model-access'
 
 export function registerConfigHandlers(): void {
   // Get full config
@@ -81,6 +85,34 @@ export function registerConfigHandlers(): void {
       return errorResult(
         'SERVICE_UNAVAILABLE',
         err instanceof Error ? err.message : 'Failed to list Gemini models',
+        err
+      )
+    }
+  })
+
+  ipcMain.handle('config:checkSpeakerModelAccess', async (_, token?: string) => {
+    try {
+      const savedToken = getConfig().transcription.localAsrHfToken || ''
+      return success(await checkSpeakerModelAccess(typeof token === 'string' ? token : savedToken))
+    } catch (err) {
+      console.error('[config:checkSpeakerModelAccess] Error:', err)
+      return errorResult(
+        'SERVICE_UNAVAILABLE',
+        err instanceof Error ? err.message : 'Failed to check the speaker model access',
+        err
+      )
+    }
+  })
+
+  ipcMain.handle('config:openSpeakerModelAccess', async () => {
+    try {
+      await shell.openExternal(SPEAKER_MODEL_ACCESS_URL)
+      return success({ opened: true })
+    } catch (err) {
+      console.error('[config:openSpeakerModelAccess] Error:', err)
+      return errorResult(
+        'SERVICE_UNAVAILABLE',
+        err instanceof Error ? err.message : 'Failed to open the Community-1 access page',
         err
       )
     }

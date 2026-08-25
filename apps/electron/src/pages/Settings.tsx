@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo, type KeyboardEvent } from 'react'
+import { useEffect, useState, useCallback, useMemo, useRef, type KeyboardEvent } from 'react'
 import {
   Save,
   FolderOpen,
@@ -10,7 +10,12 @@ import {
   MessageSquare,
   PanelRight,
   PanelLeft,
-  PanelRightOpen
+  PanelRightOpen,
+  CheckCircle2,
+  ExternalLink,
+  KeyRound,
+  LoaderCircle,
+  TriangleAlert
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -47,6 +52,14 @@ const STORAGE_LABELS: Record<StorageFolder, string> = {
   recordings: 'Recordings',
   transcripts: 'Transcripts',
   data: 'Data'
+}
+
+type SpeakerModelAccess = {
+  status: 'granted' | 'token-missing' | 'invalid-token' | 'terms-pending' | 'unavailable'
+  model: string
+  fallbackModel: string
+  account?: string
+  message: string
 }
 
 export function Settings() {
@@ -99,6 +112,7 @@ export function Settings() {
   const [savingStorageFolder, setSavingStorageFolder] = useState<StorageFolder | null>(null)
   // C-CHAT: RAG context window — default matches config.ts (10)
   const [ragContextSize, setRagContextSize] = useState<number>(RAG_DEFAULTS.MAX_CONTEXT_CHUNKS)
+  const [showHfToken, setShowHfToken] = useState(false)
 
   // Transcription models are loaded LIVE from the Gemini API (config:listGeminiModels)
   // and filtered to audio-capable models, so the picker never drifts out of sync
@@ -114,6 +128,9 @@ export function Settings() {
   ])
   const [modelsLive, setModelsLive] = useState(false)
   const [modelsLoading, setModelsLoading] = useState(false)
+  const [speakerModelAccess, setSpeakerModelAccess] = useState<SpeakerModelAccess | null>(null)
+  const [speakerModelAccessChecking, setSpeakerModelAccessChecking] = useState(false)
+  const lastAutoCheckedTokenRef = useRef<string | null>(null)
 
   const loadGeminiModels = useCallback(async () => {
     setModelsLoading(true)
@@ -128,6 +145,50 @@ export function Settings() {
       // keep the fallback list (e.g. IPC not yet available before a restart)
     } finally {
       setModelsLoading(false)
+    }
+  }, [])
+
+  const checkSpeakerModelAccess = useCallback(async () => {
+    const token = localAsrHfToken.trim()
+    setSpeakerModelAccessChecking(true)
+    try {
+      const response = await window.electronAPI.config.checkSpeakerModelAccess(token)
+      if (response?.success && response.data) {
+        setSpeakerModelAccess(response.data as SpeakerModelAccess)
+      } else {
+        const message = response?.error?.message || 'The app could not check Community-1 access.'
+        setSpeakerModelAccess({
+          status: 'unavailable',
+          model: 'pyannote/speaker-diarization-community-1',
+          fallbackModel: 'pyannote/speaker-diarization-3.1',
+          message
+        })
+      }
+    } catch (error) {
+      setSpeakerModelAccess({
+        status: 'unavailable',
+        model: 'pyannote/speaker-diarization-community-1',
+        fallbackModel: 'pyannote/speaker-diarization-3.1',
+        message: error instanceof Error
+          ? error.message
+          : 'Restart the app once to activate the Community-1 access check.'
+      })
+    } finally {
+      setSpeakerModelAccessChecking(false)
+    }
+  }, [localAsrHfToken])
+
+  const openSpeakerModelAccess = useCallback(async () => {
+    try {
+      const response = await window.electronAPI.config.openSpeakerModelAccess()
+      if (!response?.success) {
+        throw new Error(response?.error?.message || 'The access page could not be opened.')
+      }
+    } catch (error) {
+      toast.error(
+        'Could not open Hugging Face',
+        error instanceof Error ? error.message : 'Open the Community-1 model page in your browser.'
+      )
     }
   }, [])
 
@@ -229,6 +290,11 @@ export function Settings() {
     )
   }, [config, transcriptionProvider, geminiApiKey, geminiModel, localAsrPath, localAsrHfToken, localAsrVocabularyFile, localAsrDiarize, localAsrNumBeams])
 
+  const isSpeakerTokenDirty = useMemo(
+    () => !!config && localAsrHfToken !== (config.transcription.localAsrHfToken || ''),
+    [config, localAsrHfToken]
+  )
+
   const isChatDirty = useMemo(() => {
     if (!config) return false
     return (
@@ -274,6 +340,13 @@ export function Settings() {
       setRagContextSize(config.chat.maxContextChunks)
     }
   }, [config])
+
+  useEffect(() => {
+    const token = config?.transcription.localAsrHfToken?.trim() || ''
+    if (!token || localAsrHfToken.trim() !== token || lastAutoCheckedTokenRef.current === token) return
+    lastAutoCheckedTokenRef.current = token
+    void checkSpeakerModelAccess()
+  }, [checkSpeakerModelAccess, config, localAsrHfToken])
 
   useEffect(() => {
     if (storageInfo) {
@@ -895,6 +968,133 @@ export function Settings() {
                 )}
               </div>
 
+              <section
+                aria-labelledby="speaker-model-heading"
+                className="rounded-xl bg-muted/45 p-4 shadow-sm"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <h3 id="speaker-model-heading" className="text-sm font-semibold">
+                      Speaker identification model
+                    </h3>
+                    <p className="mt-1 max-w-prose text-xs text-muted-foreground">
+                      Runs locally before transcription to keep the same voice linked across recordings. Community-1
+                      requires a Hugging Face token whose account has accepted the model&apos;s contact-sharing conditions.
+                    </p>
+                  </div>
+                  <div
+                    role="status"
+                    aria-live="polite"
+                    className={cn(
+                      'inline-flex max-w-full items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium',
+                      speakerModelAccess?.status === 'granted'
+                        ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                        : speakerModelAccess?.status === 'invalid-token' || speakerModelAccess?.status === 'terms-pending'
+                          ? 'bg-amber-500/15 text-amber-800 dark:text-amber-300'
+                          : 'bg-background text-muted-foreground'
+                    )}
+                  >
+                    {speakerModelAccessChecking ? (
+                      <LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
+                    ) : speakerModelAccess?.status === 'granted' ? (
+                      <CheckCircle2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                    ) : speakerModelAccess?.status === 'invalid-token' || speakerModelAccess?.status === 'terms-pending' ? (
+                      <TriangleAlert className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                    ) : (
+                      <KeyRound className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                    )}
+                    <span className="truncate">
+                      {speakerModelAccessChecking
+                        ? 'Checking access…'
+                        : speakerModelAccess?.status === 'granted'
+                          ? isSpeakerTokenDirty ? 'Access valid · Save token' : 'Community-1 ready'
+                          : speakerModelAccess?.status === 'terms-pending'
+                            ? 'Acceptance required'
+                            : speakerModelAccess?.status === 'invalid-token'
+                              ? 'Token rejected'
+                              : speakerModelAccess?.status === 'unavailable'
+                                ? 'Check unavailable'
+                                : localAsrHfToken.trim()
+                                  ? 'Not checked'
+                                  : 'Token required'}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="mt-4">
+                  <label htmlFor="localAsrHfToken" className="text-sm font-medium">Hugging Face Token</label>
+                  <div className="relative mt-1">
+                    <Input
+                      id="localAsrHfToken"
+                      type={showHfToken ? 'text' : 'password'}
+                      placeholder="hf_xxxxxxxxxxxxxxxxxxxx"
+                      value={localAsrHfToken}
+                      onChange={(event) => {
+                        setLocalAsrHfToken(event.target.value)
+                        setSpeakerModelAccess(null)
+                        lastAutoCheckedTokenRef.current = null
+                      }}
+                      onKeyDown={(event) => event.key === 'Enter' && handleSaveTranscription()}
+                      disabled={saving}
+                      aria-label="Hugging Face token for speaker identification"
+                      aria-describedby="localAsrHfToken-description speaker-model-access-detail"
+                      className="pr-10"
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="absolute right-1 top-1/2 h-7 w-7 -translate-y-1/2 p-0"
+                      onClick={() => setShowHfToken(!showHfToken)}
+                      aria-label={showHfToken ? 'Hide token' : 'Show token'}
+                      tabIndex={-1}
+                    >
+                      {showHfToken ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    </Button>
+                  </div>
+                  <p id="localAsrHfToken-description" className="mt-1 text-xs text-muted-foreground">
+                    The token is checked only against fixed huggingface.co endpoints and is never shown in status text.
+                  </p>
+                </div>
+
+                <p
+                  id="speaker-model-access-detail"
+                  className={cn(
+                    'mt-3 text-xs',
+                    speakerModelAccess?.status === 'invalid-token' || speakerModelAccess?.status === 'terms-pending'
+                      ? 'text-amber-800 dark:text-amber-300'
+                      : 'text-muted-foreground'
+                  )}
+                >
+                  {speakerModelAccess?.message ||
+                    'Access has not been checked yet. Until Community-1 is available, the app records the actual fallback model in the Tools metadata.'}
+                  {speakerModelAccess?.account ? ` Hugging Face account: ${speakerModelAccess.account}.` : ''}
+                  {speakerModelAccess?.status === 'granted' && isSpeakerTokenDirty
+                    ? ' Save transcription settings to make this the active token.'
+                    : ''}
+                </p>
+
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <Button type="button" variant="outline" size="sm" onClick={openSpeakerModelAccess}>
+                    <ExternalLink className="mr-2 h-4 w-4" aria-hidden="true" />
+                    Review model access
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={checkSpeakerModelAccess}
+                    disabled={speakerModelAccessChecking}
+                  >
+                    <RefreshCw
+                      className={cn('mr-2 h-4 w-4', speakerModelAccessChecking && 'animate-spin')}
+                      aria-hidden="true"
+                    />
+                    Check again
+                  </Button>
+                </div>
+              </section>
+
               {transcriptionProvider === 'gemini' ? (
                 <>
                   <div>
@@ -966,38 +1166,6 @@ export function Settings() {
                 </>
               ) : (
                 <>
-                  <div>
-                    <label htmlFor="localAsrHfToken" className="text-sm font-medium">Hugging Face Token</label>
-                    <div className="relative mt-1">
-                      <Input
-                        id="localAsrHfToken"
-                        type={showApiKey ? 'text' : 'password'}
-                        placeholder="hf_xxxxxxxxxxxxxxxxxxxx"
-                        value={localAsrHfToken}
-                        onChange={(e) => setLocalAsrHfToken(e.target.value)}
-                        onKeyDown={(e) => e.key === 'Enter' && handleSaveTranscription()}
-                        disabled={saving}
-                        aria-label="Hugging Face token for Local ASR"
-                        aria-describedby="localAsrHfToken-description"
-                        className="pr-10"
-                      />
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7 p-0"
-                        onClick={() => setShowApiKey(!showApiKey)}
-                        aria-label={showApiKey ? 'Hide token' : 'Show token'}
-                        tabIndex={-1}
-                      >
-                        {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                      </Button>
-                    </div>
-                    <p id="localAsrHfToken-description" className="text-xs text-muted-foreground mt-1">
-                      Required by the local ASR diarization models. You must accept the model terms in Hugging Face first.
-                    </p>
-                  </div>
-
                   <div>
                     <label htmlFor="localAsrPath" className="text-sm font-medium">ASR MCP Path</label>
                     <Input

@@ -367,13 +367,35 @@ export interface ArtifactSummary {
 export interface ArtifactImportSummary extends ArtifactSummary {
   deduped: boolean
   indexedChunks: number
+  /** Set when THIS file's import failed (batch continues past it). */
+  error?: string
+}
+
+/** Full content of one artifact for in-app preview (text or base64 blob). */
+export interface ArtifactContent {
+  kind: string
+  mime: string | null
+  storagePath: string | null
+  textContent: string | null
+  blobBase64?: string
+}
+
+/** Renderer-safe projection of one code/add-on registered artifact type. */
+export interface ArtifactTypeDescriptor {
+  id: string
+  label: string
+  pluralLabel: string
+  extensions: string[]
+  capabilities: Array<'timed' | 'conversation' | 'rateable' | 'transcribable' | 'device-backed' | 'previewable'>
 }
 
 /** Artifacts namespace for electronAPI */
 export interface ArtifactsAPI {
+  listTypes: () => Promise<Result<ArtifactTypeDescriptor[]>>
   import: (filePaths: string[]) => Promise<Result<ArtifactImportSummary[]>>
   pickAndImport: () => Promise<Result<ArtifactImportSummary[]>>
   getForCapture: (knowledgeCaptureId: string) => Promise<Result<ArtifactSummary[]>>
+  getContent: (id: string) => Promise<Result<ArtifactContent>>
   openInFolder: (id: string) => Promise<Result<void>>
 }
 
@@ -457,4 +479,9 @@ export interface RAGStatus {
   embedProviderLabel: string | null
   /** Eligible chunks in the ACTIVE provider's partition. */
   embedDocumentCount: number
+  /** Explicit lifecycle so queued/loading is never mislabeled as an empty corpus. */
+  indexState: 'idle' | 'queued' | 'loading' | 'ready' | 'failed'
+  indexLoaded: number
+  indexTotal: number
+  indexError: string | null
 }

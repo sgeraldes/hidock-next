@@ -43,7 +43,11 @@ describe('Transcripts IPC Handlers', () => {
 
     expect(result.success).toBe(true)
     expect(result.data.name).toBe('Alice')
-    expect(assignSpeaker).toHaveBeenCalledWith('rec-1', 'Speaker 1', { contactId: undefined, newName: 'Alice' })
+    expect(assignSpeaker).toHaveBeenCalledWith('rec-1', 'Speaker 1', {
+      contactId: undefined,
+      newName: 'Alice',
+      voiceAnchor: { method: 'manual', confidence: 1 }
+    })
   })
 
   it('assignSpeaker rejects when neither contactId nor newName is given', async () => {

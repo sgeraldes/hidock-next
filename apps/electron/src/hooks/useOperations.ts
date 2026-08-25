@@ -9,11 +9,14 @@ import {
   releaseDownloadBookkeeping,
   clearAllDownloadBookkeeping,
   markDownloadCancelled,
-  clearDownloadCancelled
+  clearDownloadCancelled,
+  drainDownloadQueue,
+  isRetryableDownloadItem
 } from '@/hooks/useDownloadOrchestrator'
 import type { UnifiedRecording } from '@/types/unified-recording'
 import { hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import type { AppConfig } from '@/types'
+import { getHiDockDeviceService } from '@/services/hidock-device'
 
 /**
  * Centralized hook for all download and transcription operations.
@@ -84,7 +87,7 @@ export function useOperations() {
       toast({ title: 'Cannot transcribe', description: 'File not available locally. Download first.', variant: 'error' })
       return false
     }
-    if (recording.transcriptionStatus === 'processing' || recording.transcriptionStatus === 'complete') {
+    if (recording.transcriptionStatus === 'processing') {
       return false
     }
 
@@ -93,6 +96,34 @@ export function useOperations() {
     }
 
     try {
+      // The same primary control is labelled "Re-transcribe" for a completed
+      // recording. Route that click through the explicit reprocess IPC so the
+      // queue row records a provider override and the main process can
+      // distinguish corrective user work from an automatic/background retry.
+      // Previously this branch returned false above, making the primary
+      // Re-transcribe button a no-op while the dropdown happened to work.
+      if (recording.transcriptionStatus === 'complete') {
+        const configResult = await window.electronAPI.config.get()
+        const configuredProvider = configResult?.success
+          ? (configResult.data as AppConfig)?.transcription?.provider
+          : undefined
+        const provider = configuredProvider === 'local-asr' || configuredProvider === 'vibevoice'
+          ? configuredProvider
+          : 'gemini'
+        const result = await window.electronAPI.recordings.reprocessWith(recording.id, provider)
+        if (!result?.success || !result.queueItemId) {
+          toast({
+            title: 'Failed to re-transcribe',
+            description: result?.error || 'Could not add corrective transcription to the queue',
+            variant: 'error'
+          })
+          return false
+        }
+        addToQueue(result.queueItemId, recording.id, recording.filename)
+        toast({ title: 'Re-transcription queued', description: recording.filename })
+        return true
+      }
+
       await window.electronAPI.recordings.updateStatus(recording.id, 'pending')
       // Single explicit request → priority: jumps ahead of the recency-ordered backlog.
       const queueItemId = await window.electronAPI.recordings.addToQueue(recording.id, true)
@@ -213,7 +244,12 @@ export function useOperations() {
         size: recording.size,
         dateCreated: recording.dateRecorded.toISOString()
       }])
-      toast({ title: 'Download started', description: recording.filename })
+      // A restored pending row may already exist in the main-process queue while
+      // the renderer's explicit-request scope was lost during restart. Re-registering
+      // above plus an explicit drain makes the visible Download/Start action actually
+      // start that row instead of leaving it in a permanent "pending" state.
+      drainDownloadQueue()
+      toast({ title: 'Download queued', description: recording.filename })
       return true
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Unknown error'
@@ -236,6 +272,7 @@ export function useOperations() {
           dateCreated: r.dateRecorded.toISOString()
         }))
       )
+      drainDownloadQueue()
       toast({ title: `${eligible.length} download${eligible.length > 1 ? 's' : ''} queued` })
       return eligible.length
     } catch (e) {
@@ -296,6 +333,34 @@ export function useOperations() {
     }
   }, [])
 
+  const retryFailedDownloads = useCallback(async (): Promise<number> => {
+    const deviceService = getHiDockDeviceService()
+    if (!deviceService.isConnected()) {
+      toast({ title: 'Connect the HiDock to retry downloads', variant: 'error' })
+      return 0
+    }
+
+    try {
+      const state = await window.electronAPI.downloadService.getState()
+      const failed = state.queue.filter((item) => isRetryableDownloadItem(item))
+      if (failed.length === 0) return 0
+      requestScopedDownloads(failed.map((item) => item.filename))
+      const result = await window.electronAPI.downloadService.retryFailed(true, false)
+      if (result.count === 0) {
+        for (const item of failed) releaseDownloadBookkeeping(item.filename)
+        toast({ title: 'No downloads were retried', description: result.error, variant: 'error' })
+        return 0
+      }
+      drainDownloadQueue()
+      toast({ title: `${result.count} download${result.count === 1 ? '' : 's'} queued for retry` })
+      return result.count
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Unknown error'
+      toast({ title: 'Could not retry downloads', description: message, variant: 'error' })
+      return 0
+    }
+  }, [])
+
   return {
     // Transcription
     queueTranscription,
@@ -307,6 +372,7 @@ export function useOperations() {
     queueDownload,
     queueBulkDownloads,
     cancelDownload,
-    cancelAllDownloads
+    cancelAllDownloads,
+    retryFailedDownloads
   }
 }

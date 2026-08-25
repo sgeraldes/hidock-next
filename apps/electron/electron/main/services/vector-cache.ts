@@ -28,6 +28,7 @@
 
 import { createHash } from 'crypto'
 import { closeSync, existsSync, mkdirSync, openSync, readSync, renameSync, writeSync } from 'fs'
+import { mkdir, open, rename, rm, type FileHandle } from 'fs/promises'
 import { dirname, join } from 'path'
 
 /**
@@ -38,6 +39,11 @@ import { dirname, join } from 'path'
  */
 const WRITE_SLICE_BYTES = 64 * 1024 * 1024 // 64 MB staging buffer per flush
 const READ_CHUNK_BYTES = 512 * 1024 * 1024 // 512 MB per matrix chunk buffer
+const ASYNC_WRITE_SLICE_BYTES = 8 * 1024 * 1024
+const ASYNC_READ_CHUNK_BYTES = 32 * 1024 * 1024
+const cacheWriteQueues = new Map<string, Promise<{ totalCount: number; fingerprint: string }>>()
+const cacheWriteGenerations = new Map<string, number>()
+let asyncWriteSequence = 0
 
 export interface CacheGroupInfo {
   provider: string
@@ -71,6 +77,8 @@ export interface VectorCacheData {
   /** Chunk buffers retained so the Float32Array views stay valid. */
   buffers: Buffer[]
   fingerprint: string
+  /** Complete group manifest from the cache header, including skipped groups. */
+  groups: CacheGroupInfo[]
 }
 
 const CACHE_VERSION = 1
@@ -247,10 +255,299 @@ export function readVectorCache(filePath: string): VectorCacheData | null {
       offset = pos
     }
     if (rows.length !== header.totalCount) return null
-    return { rows, buffers, fingerprint: header.fingerprint }
+    return { rows, buffers, fingerprint: header.fingerprint, groups: header.groups }
   } catch {
     return null
   } finally {
     closeSync(fd)
+  }
+}
+
+type CacheDocument = {
+  id: string
+  embedding: number[] | Float32Array
+  provider: string
+  dims: number
+}
+
+type PreparedGroup = {
+  provider: string
+  dims: number
+  rows: Array<{ id: string; vec: number[] | Float32Array }>
+  idsLen: number
+  matrixLen: number
+}
+
+function prepareGroups(docs: Iterable<CacheDocument>): { groups: PreparedGroup[]; totalCount: number } {
+  const byGroup = new Map<
+    string,
+    { provider: string; dims: number; rows: Array<{ id: string; vec: number[] | Float32Array }> }
+  >()
+  let totalCount = 0
+  for (const doc of docs) {
+    const key = `${doc.provider}:${doc.dims}`
+    let group = byGroup.get(key)
+    if (!group) {
+      group = { provider: doc.provider, dims: doc.dims, rows: [] }
+      byGroup.set(key, group)
+    }
+    group.rows.push({ id: doc.id, vec: doc.embedding })
+    totalCount++
+  }
+
+  const groups = [...byGroup.values()]
+    .sort((a, b) => a.provider.localeCompare(b.provider) || a.dims - b.dims)
+    .map((group): PreparedGroup => {
+      group.rows.sort((a, b) => a.id.localeCompare(b.id))
+      const rawIdsLen = group.rows.reduce((total, row) => total + 4 + Buffer.byteLength(row.id, 'utf-8'), 0)
+      const idsLen = rawIdsLen + ((4 - (rawIdsLen % 4)) % 4)
+      return {
+        ...group,
+        idsLen,
+        matrixLen: group.rows.length * group.dims * 4,
+      }
+    })
+  return { groups, totalCount }
+}
+
+/**
+ * Invalidate every queued/in-flight async writer for this path. A hard purge
+ * calls this before unlinking the final cache, preventing an older snapshot
+ * from being atomically renamed back afterwards.
+ */
+export function cancelVectorCacheWrites(filePath: string): void {
+  cacheWriteGenerations.set(filePath, (cacheWriteGenerations.get(filePath) ?? 0) + 1)
+}
+
+/** Wait until the newest queued snapshot for a path has either landed or failed. */
+export async function waitForVectorCacheWrites(filePath: string): Promise<void> {
+  await cacheWriteQueues.get(filePath)?.catch(() => undefined)
+}
+
+async function writeAll(handle: FileHandle, buffer: Buffer): Promise<void> {
+  let offset = 0
+  while (offset < buffer.length) {
+    const { bytesWritten } = await handle.write(buffer, offset, buffer.length - offset)
+    if (bytesWritten <= 0) throw new Error('Vector cache write made no progress')
+    offset += bytesWritten
+  }
+}
+
+async function readExactly(handle: FileHandle, buffer: Buffer, position: number): Promise<boolean> {
+  let offset = 0
+  while (offset < buffer.length) {
+    const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, position + offset)
+    if (bytesRead <= 0) return false
+    offset += bytesRead
+  }
+  return true
+}
+
+/**
+ * Event-loop-friendly cache writer used by the Electron main process. The
+ * synchronous codec above remains available for tooling and small unit tests,
+ * but a production cache can exceed 2 GB: serializing and writing it on the
+ * main thread made the whole application appear frozen for minutes.
+ */
+export function writeVectorCacheAsync(
+  filePath: string,
+  docs: Iterable<CacheDocument>
+): Promise<{ totalCount: number; fingerprint: string }> {
+  // Freeze the requested snapshot now, then serialize replacements per path.
+  // Once writes became genuinely asynchronous, overlapping initializations
+  // could otherwise race on the same temp file or let an older snapshot win.
+  const prepared = prepareGroups(docs)
+  const generation = cacheWriteGenerations.get(filePath) ?? 0
+  const previous = cacheWriteQueues.get(filePath)
+  const current = (previous ? previous.catch(() => undefined) : Promise.resolve()).then(() =>
+    writePreparedVectorCache(filePath, prepared, generation)
+  )
+  cacheWriteQueues.set(filePath, current)
+  void current.then(
+    () => { if (cacheWriteQueues.get(filePath) === current) cacheWriteQueues.delete(filePath) },
+    () => { if (cacheWriteQueues.get(filePath) === current) cacheWriteQueues.delete(filePath) }
+  )
+  return current
+}
+
+async function writePreparedVectorCache(
+  filePath: string,
+  prepared: ReturnType<typeof prepareGroups>,
+  generation: number
+): Promise<{ totalCount: number; fingerprint: string }> {
+  if ((cacheWriteGenerations.get(filePath) ?? 0) !== generation) {
+    throw new Error('Vector cache write cancelled by invalidation')
+  }
+  const { groups, totalCount } = prepared
+  const groupInfos: CacheGroupPayload[] = groups.map((group) => ({
+    provider: group.provider,
+    dims: group.dims,
+    count: group.rows.length,
+    idsLen: group.idsLen,
+    matrixLen: group.matrixLen,
+  }))
+  const header: CacheHeader = {
+    version: CACHE_VERSION,
+    createdAt: new Date().toISOString(),
+    totalCount,
+    fingerprint: cacheFingerprint(groupInfos),
+    groups: groupInfos,
+  }
+  const headerJson = JSON.stringify(header)
+  const headerBuf = Buffer.concat([
+    Buffer.from(headerJson, 'utf-8'),
+    Buffer.alloc((4 - (Buffer.byteLength(headerJson) % 4)) % 4, 0x20),
+  ])
+
+  await mkdir(dirname(filePath), { recursive: true })
+  const tmpPath = join(dirname(filePath), `.${VECTOR_CACHE_FILENAME}.tmp-${process.pid}-${++asyncWriteSequence}`)
+  const handle = await open(tmpPath, 'w')
+  let writeFailure: unknown
+  try {
+    await writeAll(handle, u32(headerBuf.length))
+    await writeAll(handle, headerBuf)
+    for (const group of groups) {
+      const idsBuf = Buffer.alloc(group.idsLen)
+      let idOffset = 0
+      for (const row of group.rows) {
+        const idBuf = Buffer.from(row.id, 'utf-8')
+        idsBuf.writeUInt32LE(idBuf.length, idOffset)
+        idOffset += 4
+        idBuf.copy(idsBuf, idOffset)
+        idOffset += idBuf.length
+      }
+      await writeAll(handle, idsBuf)
+
+      const rowBytes = group.dims * 4
+      const rowsPerSlice = Math.max(1, Math.floor(ASYNC_WRITE_SLICE_BYTES / rowBytes))
+      for (let start = 0; start < group.rows.length; start += rowsPerSlice) {
+        if ((cacheWriteGenerations.get(filePath) ?? 0) !== generation) {
+          throw new Error('Vector cache write cancelled by invalidation')
+        }
+        const sliceRows = Math.min(rowsPerSlice, group.rows.length - start)
+        let slice = Buffer.allocUnsafe(sliceRows * rowBytes)
+        if (slice.byteOffset % 4 !== 0) slice = Buffer.from(slice)
+        const floats = new Float32Array(slice.buffer, slice.byteOffset, sliceRows * group.dims)
+        for (let i = 0; i < sliceRows; i++) {
+          floats.set(group.rows[start + i].vec, i * group.dims)
+        }
+        await writeAll(handle, slice)
+        await new Promise<void>((resolve) => setImmediate(resolve))
+      }
+    }
+  } catch (error) {
+    writeFailure = error
+  } finally {
+    await handle.close()
+  }
+  if (writeFailure) {
+    await rm(tmpPath, { force: true })
+    throw writeFailure
+  }
+  if ((cacheWriteGenerations.get(filePath) ?? 0) !== generation) {
+    await rm(tmpPath, { force: true })
+    throw new Error('Vector cache write cancelled by invalidation')
+  }
+  try {
+    await rename(tmpPath, filePath)
+    // Close the check→rename race: invalidation may have landed while the
+    // asynchronous rename was pending. In that case remove the just-published
+    // stale snapshot; if invalidation lands later, it removes the final itself.
+    if ((cacheWriteGenerations.get(filePath) ?? 0) !== generation) {
+      await rm(filePath, { force: true })
+      throw new Error('Vector cache write cancelled by invalidation')
+    }
+  } catch (error) {
+    await rm(tmpPath, { force: true })
+    throw error
+  }
+  return { totalCount, fingerprint: header.fingerprint }
+}
+
+/**
+ * Event-loop-friendly reader for the production cache. Disk reads are awaited
+ * in bounded chunks and row-view construction yields between chunks, so the
+ * main process continues serving renderer IPC while a multi-gigabyte index is
+ * restored.
+ */
+export async function readVectorCacheAsync(
+  filePath: string,
+  providerFilter?: string
+): Promise<VectorCacheData | null> {
+  let handle: FileHandle
+  try {
+    handle = await open(filePath, 'r')
+  } catch {
+    return null
+  }
+
+  try {
+    const lenBuf = Buffer.allocUnsafe(4)
+    if (!(await readExactly(handle, lenBuf, 0))) return null
+    const headerLen = lenBuf.readUInt32LE(0)
+    if (headerLen <= 0 || headerLen > 64 * 1024 * 1024) return null
+    const headerBuf = Buffer.allocUnsafe(headerLen)
+    if (!(await readExactly(handle, headerBuf, 4))) return null
+    const header = JSON.parse(headerBuf.toString('utf-8')) as CacheHeader
+    if (header.version !== CACHE_VERSION || !Array.isArray(header.groups)) return null
+
+    const rows: VectorCacheRow[] = []
+    const buffers: Buffer[] = []
+    let offset = 4 + headerLen
+    for (const group of header.groups) {
+      if (group.count < 0 || group.dims <= 0 || group.count * group.dims * 4 !== group.matrixLen) return null
+      if (providerFilter && group.provider !== providerFilter) {
+        // The cache may contain several provider partitions. Retrieval can use
+        // only the active provider, so skip inactive matrices by file offset —
+        // do not read or retain gigabytes of vectors that cannot be searched.
+        offset += group.idsLen + group.matrixLen
+        continue
+      }
+      const idsBuf = Buffer.alloc(group.idsLen)
+      if (!(await readExactly(handle, idsBuf, offset))) return null
+      const ids: string[] = []
+      let p = 0
+      for (let i = 0; i < group.count; i++) {
+        if (p + 4 > group.idsLen) return null
+        const len = idsBuf.readUInt32LE(p)
+        p += 4
+        if (p + len > group.idsLen) return null
+        ids.push(idsBuf.subarray(p, p + len).toString('utf-8'))
+        p += len
+      }
+
+      const rowBytes = group.dims * 4
+      const rowsPerChunk = Math.max(1, Math.floor(ASYNC_READ_CHUNK_BYTES / rowBytes))
+      let rowsDone = 0
+      let position = offset + group.idsLen
+      while (rowsDone < group.count) {
+        const count = Math.min(rowsPerChunk, group.count - rowsDone)
+        let chunk = Buffer.allocUnsafe(count * rowBytes)
+        if (!(await readExactly(handle, chunk, position))) return null
+        if (chunk.byteOffset % 4 !== 0) chunk = Buffer.from(chunk)
+        buffers.push(chunk)
+        for (let i = 0; i < count; i++) {
+          rows.push({
+            id: ids[rowsDone + i],
+            provider: group.provider,
+            dims: group.dims,
+            vector: new Float32Array(chunk.buffer, chunk.byteOffset + i * rowBytes, group.dims),
+          })
+        }
+        rowsDone += count
+        position += chunk.length
+        await new Promise<void>((resolve) => setImmediate(resolve))
+      }
+      offset = position
+    }
+    const expectedRows = providerFilter
+      ? header.groups.filter((group) => group.provider === providerFilter).reduce((sum, group) => sum + group.count, 0)
+      : header.totalCount
+    if (rows.length !== expectedRows) return null
+    return { rows, buffers, fingerprint: header.fingerprint, groups: header.groups }
+  } catch {
+    return null
+  } finally {
+    await handle.close()
   }
 }

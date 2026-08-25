@@ -18,7 +18,7 @@ import { requestScopedDownloads } from '@/hooks/useDownloadOrchestrator'
 import { useOperations } from '@/hooks/useOperations'
 
 import { formatEta, formatBytes } from '@/utils/formatters'
-import { DeviceFileList } from '@/components/DeviceFileList'
+import { DeviceFileList, isFilenamePurged } from '@/components/DeviceFileList'
 import { shouldLogQa } from '@/services/qa-monitor'
 
 const CONNECTION_TIMEOUT_MS = 10000 // 10 second timeout (BUG-006)
@@ -67,6 +67,8 @@ export function Device() {
 
   // Synced files tracking
   const [syncedFilenames, setSyncedFilenames] = useState<Set<string>>(new Set())
+  // v51 — purge-tombstoned files (deleted from Library, still on hardware)
+  const [purgedFilenames, setPurgedFilenames] = useState<Set<string>>(new Set())
 
   // Failed downloads tracking for retry button
   const [failedDownloadCount, setFailedDownloadCount] = useState(0)
@@ -142,6 +144,12 @@ export function Device() {
       if (shouldLogQa()) console.log(`[Device.tsx] Refreshed ${filenames.length} synced filenames`)
     } catch (e) {
       console.error('[Device.tsx] Failed to refresh synced filenames:', e)
+    }
+    try {
+      const purged = await window.electronAPI.downloadService.getPurgedFilenames()
+      setPurgedFilenames(new Set(purged))
+    } catch (e) {
+      console.error('[Device.tsx] Failed to refresh purged filenames:', e)
     }
   }, [])
 
@@ -1079,11 +1087,18 @@ export function Device() {
 
                   {/* Sync button */}
                   {(() => {
-                    // Calculate unsynced count from device-accessible recordings
+                    // Calculate unsynced count from device-accessible recordings.
+                    // v51 — purge-tombstoned files are NOT syncable (anti-resurrection);
+                    // count distinct tombstoned base names (3 variants per file).
+                    const purgedBaseCount = new Set([...purgedFilenames].map((n) => n.replace(/\.(hda|wav|mp3)$/i, ''))).size
                     const deviceAccessibleRecordings = recordings.filter(rec => hasDeviceFile(rec))
                     const unsyncedCount = deviceAccessibleRecordings.length > 0
-                      ? deviceAccessibleRecordings.filter(r => r.syncStatus === 'not-synced').length
-                      : Math.max(0, deviceState.recordingCount - syncedFilenames.size)
+                      ? deviceAccessibleRecordings.filter(
+                          (r) =>
+                            r.syncStatus === 'not-synced' &&
+                            !isFilenamePurged(r.deviceFilename ?? r.filename, purgedFilenames)
+                        ).length
+                      : Math.max(0, deviceState.recordingCount - syncedFilenames.size - purgedBaseCount)
                     const allSynced = unsyncedCount === 0 && (deviceAccessibleRecordings.length > 0 || deviceState.recordingCount > 0)
                     const isLoadingList = loadingRecordings && deviceAccessibleRecordings.length === 0
 
@@ -1150,6 +1165,7 @@ export function Device() {
             <DeviceFileList
               recordings={recordings.filter(rec => hasDeviceFile(rec)) as Array<DeviceOnlyRecording | BothLocationsRecording>}
               syncedFilenames={syncedFilenames}
+              purgedFilenames={purgedFilenames}
               onRefresh={refreshSyncedFilenames}
               onRecordingsRefresh={() => refreshRecordings(true)}
             />

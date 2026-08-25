@@ -23,10 +23,10 @@
  *
  * Runs registered tasks ONE AT A TIME (concurrency cap = 1). Each task is awaited
  * to completion before the next starts, and an idle gap is inserted BETWEEN tasks
- * so the event loop drains the renderer's queued IPC in the meantime. The heavy
- * work still all runs — it is just spread out instead of bursting at once, and it
- * only begins after the window has painted (the caller starts the scheduler on
- * the renderer's first `did-finish-load`).
+ * so the event loop drains the renderer's queued IPC in the meantime.
+ * Provider-backed corpus backfills are not eligible boot tasks: the drain must
+ * reach a terminal state rather than merely hiding an open-ended repair pass
+ * behind the window.
  *
  * The scheduler does NOT change what any task does or the order the user's data
  * is processed in — it only governs WHEN each boot task starts relative to the
@@ -244,7 +244,10 @@ export function startBootScheduler(options: BootSchedulerOptions = {}): Promise<
     }
 
     const totalMs = timings.reduce((sum, t) => sum + t.elapsedMs, 0)
-    log(`all boot tasks complete (${timings.length} tasks, ${totalMs}ms of task time)`)
+    // Completion is operational state, not QA chatter. Keep this visible even
+    // when QA logs are disabled so a startup report can prove that the drain
+    // actually terminated instead of merely moving work behind the window.
+    console.log(`[BootScheduler] Complete (${timings.length} tasks, ${totalMs}ms of task time)`)
 
     // Release anything that deferred itself until boot work finished (e.g. the
     // startup/periodic calendar sync) BEFORE resolving, so a waiter never starts

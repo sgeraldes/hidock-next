@@ -7,13 +7,14 @@
  * non-registration). `feature: null` marks core/library-floor work that always
  * runs regardless of preset.
  *
- * Under the default `full` preset every feature is enabled, so all six tasks
- * register exactly as before modular features existed (zero behavior change).
+ * Under the default `full` preset every feature-owned task is enabled; core
+ * post-paint tasks register for every preset.
  */
 
 import { registerBootTask } from './boot-scheduler'
 import { isFeatureEnabled as defaultIsFeatureEnabled } from './feature-gate'
 import type { FeatureId } from '../../../src/shared/feature-registry'
+import { markVectorStartupQueued } from './vector-startup-state'
 
 export interface GatedBootTask {
   name: string
@@ -23,11 +24,35 @@ export interface GatedBootTask {
 }
 
 /**
- * The six deferred boot tasks, tagged by owning feature. Bodies mirror the
- * original index.ts registrations (dynamic imports, per-task try/catch) so the
- * heavy modules load lazily only when their task actually runs.
+ * Deferred boot tasks tagged by owning feature. Heavy modules load lazily only
+ * when their task actually runs.
  */
 export const BOOT_TASK_DEFS: GatedBootTask[] = [
+  {
+    name: 'database-backup',
+    feature: null,
+    run: async () => {
+      await import('./database')
+        .then(({ runDeferredDatabaseBackup }) => runDeferredDatabaseBackup())
+        .catch((e) => console.error('[Database] deferred backup error:', e))
+    },
+  },
+  {
+    // Potentially expensive whole-database checks run only after the renderer
+    // has painted; they previously extended the pre-window splash delay.
+    name: 'integrity-check',
+    feature: null,
+    run: async () => {
+      await import('./integrity-service')
+        .then(async ({ getIntegrityService }) => {
+          const result = await getIntegrityService().runStartupChecks()
+          if (result.issuesFound > 0) {
+            console.log(`Integrity checks: ${result.issuesFixed}/${result.issuesFound} issues fixed`)
+          }
+        })
+        .catch((e) => console.error('[IntegrityService] startup check error:', e))
+    },
+  },
   {
     // Meeting↔recording links, People from attendees, ICS text repair, status
     // self-heal. Owned by Calendar (People/Projects hard-depends on Calendar).
@@ -68,38 +93,19 @@ export const BOOT_TASK_DEFS: GatedBootTask[] = [
     },
   },
   {
-    name: 'embeddings-backfill',
+    name: 'semantic-index-restore',
     feature: 'assistant',
     run: () =>
       import('./vector-store')
         .then(async ({ getVectorStore }) => {
-          const store = getVectorStore()
-          await store.initialize()
-          await store.backfillMissingTranscripts()
+          // Boot restores existing local state only. It MUST NOT generate new
+          // embeddings or call a provider: that old "backfill" phase could walk
+          // the entire transcript corpus and made startup an open-ended job.
+          // Newly completed transcripts index through the transcription
+          // pipeline; historical repair remains an explicit maintenance action.
+          await getVectorStore().initialize()
         })
-        .catch((e) => console.error('[VectorStore] Backfill error:', e)),
-  },
-  {
-    name: 'reanalyze-failed-transcripts',
-    feature: 'transcription',
-    run: async () => {
-      await import('./transcription')
-        .then(({ reanalyzeFailedTranscripts }) => reanalyzeFailedTranscripts())
-        .catch((e) => console.error('[Reanalyze] Backfill error:', e))
-    },
-  },
-  {
-    // F5 (PixelRAG): index EXISTING image captures (screenshots) that have no
-    // embeddings yet. Bounded per boot tick; degrades silently without a
-    // Gemini/embedding backend. Feeds assistant retrieval, so it is owned by
-    // the assistant feature.
-    name: 'image-capture-backfill',
-    feature: 'assistant',
-    run: () =>
-      import('./artifact-service')
-        .then(({ backfillImageCaptureIndex }) => backfillImageCaptureIndex())
-        .then(() => undefined)
-        .catch((e) => console.error('[ArtifactService] Image-capture backfill error:', e)),
+        .catch((e) => console.error('[VectorStore] Restore error:', e)),
   },
 ]
 
@@ -126,6 +132,7 @@ export function registerGatedBootTasks(opts: RegisterBootTasksOptions = {}): str
     if (def.feature === null || isEnabled(def.feature)) {
       register({ name: def.name, run: def.run })
       registered.push(def.name)
+      if (def.name === 'semantic-index-restore') markVectorStartupQueued()
     }
   }
   return registered

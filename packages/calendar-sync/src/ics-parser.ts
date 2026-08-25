@@ -90,6 +90,93 @@ export const WINDOWS_TIMEZONE_OFFSETS: Record<string, number> = {
 }
 
 /**
+ * Windows/Exchange identifiers whose civil offset changes during the year.
+ * Map them to IANA rules instead of freezing them at the standard-time offset
+ * above. Fixed-offset Windows zones are included where an exact IANA rule is
+ * available, which also keeps Argentina explicitly on UTC-3 with no DST.
+ */
+export const WINDOWS_TIMEZONE_IANA: Record<string, string> = {
+  'Pacific Standard Time': 'America/Los_Angeles',
+  'Mountain Standard Time': 'America/Denver',
+  'Central Standard Time': 'America/Chicago',
+  'Central Standard Time (Mexico)': 'America/Mexico_City',
+  'Central America Standard Time': 'America/Guatemala',
+  'Eastern Standard Time': 'America/New_York',
+  'SA Pacific Standard Time': 'America/Bogota',
+  'Atlantic Standard Time': 'America/Halifax',
+  'Newfoundland Standard Time': 'America/St_Johns',
+  'Pacific SA Standard Time': 'America/Santiago',
+  'Paraguay Standard Time': 'America/Asuncion',
+  'SA Eastern Standard Time': 'America/Sao_Paulo',
+  'Argentina Standard Time': 'America/Argentina/Buenos_Aires',
+  'E. South America Standard Time': 'America/Sao_Paulo',
+  'Montevideo Standard Time': 'America/Montevideo',
+  'GMT Standard Time': 'Europe/London',
+  'W. Europe Standard Time': 'Europe/Berlin',
+  'Central Europe Standard Time': 'Europe/Budapest',
+  'Central European Standard Time': 'Europe/Warsaw',
+  'Romance Standard Time': 'Europe/Paris',
+  'E. Europe Standard Time': 'Europe/Chisinau',
+  'GTB Standard Time': 'Europe/Bucharest',
+  'FLE Standard Time': 'Europe/Helsinki',
+  'Israel Standard Time': 'Asia/Jerusalem',
+  'AUS Central Standard Time': 'Australia/Darwin',
+  'Cen. Australia Standard Time': 'Australia/Adelaide',
+  'AUS Eastern Standard Time': 'Australia/Sydney',
+  'E. Australia Standard Time': 'Australia/Brisbane',
+  'Tasmania Standard Time': 'Australia/Hobart',
+  'New Zealand Standard Time': 'Pacific/Auckland',
+}
+
+const zoneFormatters = new Map<string, Intl.DateTimeFormat>()
+
+function offsetAtInstant(instantMs: number, timeZone: string): number | null {
+  try {
+    let formatter = zoneFormatters.get(timeZone)
+    if (!formatter) {
+      formatter = new Intl.DateTimeFormat('en-US', {
+        timeZone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hourCycle: 'h23',
+      })
+      zoneFormatters.set(timeZone, formatter)
+    }
+    const values: Record<string, number> = {}
+    for (const part of formatter.formatToParts(new Date(instantMs))) {
+      if (part.type !== 'literal') values[part.type] = Number(part.value)
+    }
+    const renderedAsUtc = Date.UTC(
+      values.year,
+      values.month - 1,
+      values.day,
+      values.hour,
+      values.minute,
+      values.second
+    )
+    return renderedAsUtc - instantMs
+  } catch {
+    return null
+  }
+}
+
+function civilTimeInZoneToUtc(localAsUtc: number, timeZone: string): Date | null {
+  let instant = localAsUtc
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const offset = offsetAtInstant(instant, timeZone)
+    if (offset === null) return null
+    const adjusted = localAsUtc - offset
+    if (adjusted === instant) return new Date(adjusted)
+    instant = adjusted
+  }
+  return new Date(instant)
+}
+
+/**
  * Unfold lines per RFC 5545 §3.1: continuation lines begin with a single
  * space or tab character and should be joined to the previous line.
  */
@@ -151,12 +238,19 @@ function parseICSDateTime(value: string): Date | null {
 
   const localAsUtc = Date.UTC(y, m, d, h, min, s)
 
-  // Windows timezone fallback: only when there's a TZID with no explicit Z and
-  // the TZID is a recognized Windows/Exchange zone name. The wall-clock time is
-  // local to that zone, so subtract the offset to obtain true UTC.
-  if (!hasZ && tzid && Object.prototype.hasOwnProperty.call(WINDOWS_TIMEZONE_OFFSETS, tzid)) {
-    const utcOffsetSeconds = WINDOWS_TIMEZONE_OFFSETS[tzid]
-    return new Date(localAsUtc - utcOffsetSeconds * 1000)
+  if (!hasZ && tzid) {
+    const normalizedTzid = tzid.replace(/^"|"$/g, '')
+    const ianaZone = WINDOWS_TIMEZONE_IANA[normalizedTzid] ?? normalizedTzid
+    const zoned = civilTimeInZoneToUtc(localAsUtc, ianaZone)
+    if (zoned) return zoned
+
+    // Last-resort compatibility for a Windows identifier without a known IANA
+    // mapping. This may lack DST rules, but it is preferable to silently
+    // treating the local wall clock as UTC.
+    if (Object.prototype.hasOwnProperty.call(WINDOWS_TIMEZONE_OFFSETS, normalizedTzid)) {
+      const utcOffsetSeconds = WINDOWS_TIMEZONE_OFFSETS[normalizedTzid]
+      return new Date(localAsUtc - utcOffsetSeconds * 1000)
+    }
   }
 
   // Otherwise treat as UTC (explicit Z, no TZID, or unrecognized/IANA TZID).

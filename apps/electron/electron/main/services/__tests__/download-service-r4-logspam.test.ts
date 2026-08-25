@@ -10,10 +10,15 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
+const electronMocks = vi.hoisted(() => ({
+  send: vi.fn(),
+  windows: [] as Array<{ isDestroyed: () => boolean; webContents: { send: (...args: unknown[]) => void } }>
+}))
+
 // Mock electron modules BEFORE importing the service
 vi.mock('electron', () => ({
   app: { getPath: vi.fn(() => '/tmp') },
-  BrowserWindow: { getAllWindows: vi.fn(() => []) },
+  BrowserWindow: { getAllWindows: vi.fn(() => electronMocks.windows) },
   ipcMain: { handle: vi.fn() },
   Notification: vi.fn(() => ({ show: vi.fn() }))
 }))
@@ -21,12 +26,34 @@ vi.mock('electron', () => ({
 const mockIsFileSynced = vi.fn((_filename: string) => false)
 const mockExistsSync = vi.fn((_p: string) => false)
 const mockGetRecordingByFilename = vi.fn((_f: string) => null as null | { file_path: string })
+const mockEnrichRecordingScheduleMetadata = vi.fn()
 
 vi.mock('../database', () => ({
   markRecordingDownloaded: vi.fn(),
   addSyncedFile: vi.fn(),
   isFileSynced: (filename: string) => mockIsFileSynced(filename),
+  isFilePurged: () => false,
   getRecordingByFilename: (filename: string) => mockGetRecordingByFilename(filename),
+  upsertRecordingFromDevice: vi.fn((file: DeviceFile) => ({
+    id: `id:${file.filename}`,
+    filename: file.filename,
+    original_filename: file.filename,
+    file_path: null,
+    file_size: file.size,
+    duration_seconds: file.duration,
+    date_recorded: file.dateCreated.toISOString(),
+    status: 'none',
+    location: 'device-only',
+    transcription_status: 'none',
+    on_device: 1,
+    on_local: 0,
+    source: 'hidock',
+    is_imported: 0,
+    created_at: file.dateCreated.toISOString()
+  })),
+  enrichRecordingScheduleMetadata: (...args: unknown[]) => mockEnrichRecordingScheduleMetadata(...args),
+  createProcessingRun: vi.fn(() => ({ id: 'metadata-run' })),
+  completeProcessingRun: vi.fn(),
   getSyncedFilenames: vi.fn(() => new Set()),
   queryOne: vi.fn(() => null),
   queryAll: vi.fn(() => []),
@@ -75,6 +102,7 @@ describe('BUG-R4: reconciliation emits ONE summary line, not per-file spam', () 
     mockIsFileSynced.mockReturnValue(false)
     mockExistsSync.mockReturnValue(false)
     mockGetRecordingByFilename.mockReturnValue(null)
+    electronMocks.windows = []
     service = getDownloadService()
     logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
   })
@@ -130,5 +158,36 @@ describe('BUG-R4: reconciliation emits ONE summary line, not per-file spam', () 
     const line = logSpy.mock.calls[0][0] as string
     // No parenthetical reconciled note when reconciledCount === 0.
     expect(line).toBe('[DownloadService] Reconciliation: 3 files skipped (already synced), 0 files queued')
+  })
+
+  it('publishes one coalesced discovery event for a snapshot of new files', () => {
+    electronMocks.windows = [{
+      isDestroyed: () => false,
+      webContents: { send: electronMocks.send }
+    }]
+
+    const results = service.getFilesToSync(makeFiles(500))
+
+    expect(results).toHaveLength(500)
+    expect(results.every((result) => !result.skipReason)).toBe(true)
+    expect(electronMocks.send).toHaveBeenCalledTimes(1)
+    expect(electronMocks.send).toHaveBeenCalledWith(
+      'recording:new',
+      expect.objectContaining({ count: 500 })
+    )
+    expect(mockEnrichRecordingScheduleMetadata).toHaveBeenCalledTimes(500)
+  })
+
+  it('does not announce or enrich a historical snapshot that is already synced', () => {
+    mockIsFileSynced.mockReturnValue(true)
+    electronMocks.windows = [{
+      isDestroyed: () => false,
+      webContents: { send: electronMocks.send }
+    }]
+
+    service.getFilesToSync(makeFiles(500))
+
+    expect(electronMocks.send).not.toHaveBeenCalled()
+    expect(mockEnrichRecordingScheduleMetadata).not.toHaveBeenCalled()
   })
 })

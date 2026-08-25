@@ -16,6 +16,7 @@ vi.mock('../database', () => ({
   getMeetingsForContact: vi.fn(),
   getProjectById: vi.fn(),
   getContactById: vi.fn(),
+  getSpeakerMap: vi.fn(() => []),
   queryOne: vi.fn(),
   // RE6-2 (round-6) — output generation routes every resolved recording id
   // through the shared eligibility boundary; default: all eligible.
@@ -70,14 +71,14 @@ describe('OutputGeneratorService', () => {
 
   it('should generate output for a knowledge capture', async () => {
     const generator = getOutputGeneratorService()
-    
+
     vi.mocked(db.queryOne).mockReturnValue({
       id: 'kc-1',
       title: 'Knowledge Capture 1',
       source_recording_id: 'rec-1',
       captured_at: new Date().toISOString()
     })
-    
+
     vi.mocked(db.getTranscriptByRecordingId).mockReturnValue({
       id: 'trans-1',
       recording_id: 'rec-1',
@@ -93,6 +94,86 @@ describe('OutputGeneratorService', () => {
 
     expect(result.content).toBe('Generated Content')
     expect(db.queryOne).toHaveBeenCalledWith(expect.stringContaining('knowledge_captures'), ['kc-1'])
+  })
+
+  // 2026-07-24 — the output header must carry FACTS, not LLM guesses: the linked
+  // meeting's subject/date, the attendee roster (calendar invite or speaker-map
+  // names), and the speaker map so labels render as names.
+  it('injects meeting date, attendee roster, and speaker map into the prompt (no "Not specified", no invented names)', async () => {
+    const generator = getOutputGeneratorService()
+
+    vi.mocked(db.queryOne).mockImplementation((sql: string) => {
+      if (sql.includes('knowledge_captures')) {
+        return { id: 'kc-1', title: 'Itau POC', source_recording_id: 'rec-1', captured_at: '2026-07-24' }
+      }
+      if (sql.includes('recordings')) {
+        return { id: 'rec-1', filename: 'Rec40.wav', date_recorded: '2026-07-24T04:01:58.000Z', meeting_id: 'm-1' }
+      }
+      return undefined
+    })
+    vi.mocked(db.getMeetingById).mockReturnValue({
+      id: 'm-1',
+      subject: 'Itau Real State Tech POC',
+      start_time: '2026-07-24T04:00:00.000Z',
+      end_time: '2026-07-24T05:00:00.000Z',
+      is_recurring: 0,
+      created_at: '',
+      updated_at: ''
+    } as any)
+    vi.mocked(db.getTranscriptByRecordingId).mockReturnValue({
+      id: 'trans-1',
+      recording_id: 'rec-1',
+      full_text: 'Speaker 1: let us ship the POC.',
+      language: 'en',
+      created_at: ''
+    } as any)
+    vi.mocked(db.getSpeakerMap).mockReturnValue([
+      { speaker_label: 'Speaker 1', contact_id: 'c1', name: 'Lucas' },
+      { speaker_label: 'Speaker 2', contact_id: 'c2', name: 'Shardul' }
+    ])
+
+    await generator.generate({ templateId: 'meeting_minutes', knowledgeCaptureId: 'kc-1' })
+
+    const prompt = (mockOllamaGenerate.mock.calls[0] as unknown[])[0] as string
+    expect(prompt).toContain('Itau Real State Tech POC')
+    expect(prompt).toContain('Jul 24, 2026') // the meeting's real date
+    expect(prompt).toContain('Lucas, Shardul') // roster from the speaker map (no calendar invite)
+    expect(prompt).toContain('Speaker 1 = Lucas') // the label→name map
+    expect(prompt).not.toContain('Not specified')
+  })
+
+  it('prefers the calendar invite list over speaker names when present', async () => {
+    const generator = getOutputGeneratorService()
+
+    vi.mocked(db.queryOne).mockImplementation((sql: string) => {
+      if (sql.includes('knowledge_captures')) {
+        return { id: 'kc-1', title: 'X', source_recording_id: 'rec-1', captured_at: '2026-07-24' }
+      }
+      if (sql.includes('recordings')) {
+        return { id: 'rec-1', filename: 'Rec40.wav', date_recorded: '2026-07-24T04:01:58.000Z', meeting_id: 'm-1' }
+      }
+      return undefined
+    })
+    vi.mocked(db.getMeetingById).mockReturnValue({
+      id: 'm-1',
+      subject: 'Itau POC',
+      start_time: '2026-07-24T04:00:00.000Z',
+      end_time: '2026-07-24T05:00:00.000Z',
+      attendees: '[{"name":"Lucas Silva"},"Eduardo Prado"]',
+      is_recurring: 0,
+      created_at: '',
+      updated_at: ''
+    } as any)
+    vi.mocked(db.getTranscriptByRecordingId).mockReturnValue({
+      id: 't', recording_id: 'rec-1', full_text: 'text', language: 'en', created_at: ''
+    } as any)
+    vi.mocked(db.getSpeakerMap).mockReturnValue([{ speaker_label: 'Speaker 1', contact_id: 'c1', name: 'Wrongname' }])
+
+    await generator.generate({ templateId: 'meeting_minutes', knowledgeCaptureId: 'kc-1' })
+
+    const prompt = (mockOllamaGenerate.mock.calls[0] as unknown[])[0] as string
+    expect(prompt).toContain('Lucas Silva, Eduardo Prado')
+    expect(prompt).not.toContain('Wrongname,')
   })
 
   // A Gemini API error must propagate to the caller — the output generator does

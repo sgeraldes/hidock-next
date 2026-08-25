@@ -85,9 +85,9 @@ export function registerDatabaseHandlers(): void {
 
   ipcMain.handle('db:update-recording-status', async (_, id: string, status: string) => {
     // Transcription-related statuses go to transcription_status column
-    // Standard enum: 'none' | 'pending' | 'processing' | 'complete' | 'error'
+    // Standard enum: 'none' | 'pending' | 'processing' | 'complete' | 'no_speech' | 'error'
     // Also accept legacy values for backward compatibility: 'queued', 'transcribing', 'transcribed', 'failed'
-    const transcriptionStatuses = ['none', 'pending', 'processing', 'complete', 'error', 'queued', 'transcribing', 'transcribed', 'failed']
+    const transcriptionStatuses = ['none', 'pending', 'processing', 'complete', 'no_speech', 'error', 'queued', 'transcribing', 'transcribed', 'failed']
     if (transcriptionStatuses.includes(status)) {
       updateRecordingTranscriptionStatus(id, status)
     } else {

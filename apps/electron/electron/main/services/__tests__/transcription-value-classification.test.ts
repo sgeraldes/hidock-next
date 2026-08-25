@@ -25,6 +25,22 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
+vi.mock('../audio-preflight', () => ({
+  analyzeAudioPreflight: vi.fn(async () => ({
+    status: 'speech_present',
+    durationSeconds: 5,
+    silenceSeconds: 0,
+    nonSilentSeconds: 5,
+    nonSilentRatio: 1,
+    meanVolumeDb: -20,
+    maxVolumeDb: -5,
+    silenceThresholdDb: -45,
+    minimumSilenceSeconds: 0.25,
+    activityIntervals: [{ start: 0, end: 5, duration: 5 }],
+    reasonCodes: [],
+  })),
+}))
+
 const mockUpdateRecordingStatus = vi.fn()
 const mockGetRecordingById = vi.fn()
 const mockInsertTranscript = vi.fn()
@@ -145,7 +161,15 @@ vi.mock('../database', () => ({
   // to the same mockQueryAll('FROM transcripts') the existing reanalyze tests
   // configure, so their row setups keep driving it.
   getFailedTranscriptsForReanalysis: (limit: number) =>
-    (mockQueryAll('SELECT ... FROM transcripts backfill', [limit]) as any) ?? []
+    (mockQueryAll('SELECT ... FROM transcripts backfill', [limit]) as any) ?? [],
+  getActiveProcessingRunsForRecording: vi.fn(() => [
+    { stage: 'metadata', status: 'completed' },
+    { stage: 'schedule-match', status: 'completed' }
+  ]),
+  enrichRecordingScheduleMetadata: vi.fn(),
+  createProcessingRun: vi.fn(({ stage }: { stage: string }) => ({ id: `run-${stage}` })),
+  completeProcessingRun: vi.fn(),
+  failProcessingRun: vi.fn()
 }))
 
 // ADV40-1 (round-42) — transcription.ts routes the up-front provider gate
@@ -218,7 +242,8 @@ vi.mock('../brains', () => ({
 }))
 
 vi.mock('../knowledge-capture-backfill', () => ({
-  ensureKnowledgeCaptureForRecording: (...args: any[]) => mockEnsureCapture(...args)
+  ensureKnowledgeCaptureForRecording: (...args: any[]) => mockEnsureCapture(...args),
+  ensureNoSpeechKnowledgeCapture: vi.fn()
 }))
 
 vi.mock('../value-classification', async (importOriginal) => {
@@ -332,9 +357,10 @@ describe('transcription.valueClassificationEnabled — analysis prompt kill-swit
    - Questions should be SPECIFIC to the content (e.g., "What was decided about the Q3 marketing budget?")
    - Avoid generic questions (e.g., "What was discussed?" or "Tell me more")
    - Questions should help users quickly understand key decisions, action items, and outcomes
-7. Participants: people speaking or clearly mentioned as involved (first names are fine).
+7. Mentioned people: people referred to by name in the conversation.
    For each: name, and role if inferable (e.g. "telecom specialist", "PM", "client").
-   Do NOT invent people; only include names actually appearing in the conversation.
+   This is NOT an attendance list. Do not include generic speaker labels. Do NOT
+   invent people; only include names actually appearing in the conversation.
 8. Project: which project/initiative this meeting belongs to.
    No projects exist yet.
    If none fits, propose a short new project name (2-5 words, e.g. "DFX5 Gateway" or client name) and set is_new true.
@@ -355,7 +381,7 @@ Respond in JSON format:
   "title_suggestion": "Brief Descriptive Title (3-8 words)",
   "question_suggestions": ["Specific question about decision 1?", "Specific question about action item 2?", "..."],
   "language": "es" or "en",
-  "participants": [{"name": "...", "role": "..."}],
+  "mentioned_people": [{"name": "...", "role": "..."}],
   "project": {"name": "...", "is_new": false}
 }`
     expect(prompt).toBe(expected)
@@ -661,11 +687,14 @@ describe('transcribeRecording — ARF-3 in-flight trash stops post-analysis deri
     await transcribeManually('rec-trash')
 
     expect(mockInsertTranscript).toHaveBeenCalled() // the transcript itself
-    expect(mockUpdateKnowledgeCaptureTitle).toHaveBeenCalled()
+    // AI title stays on transcripts.title_suggestion; it never becomes a user title.
+    expect(mockUpdateKnowledgeCaptureTitle).not.toHaveBeenCalled()
     expect(actionableInserts().length).toBeGreaterThan(0)
     expect(vi.mocked(analyzeTimeline)).toHaveBeenCalled()
     expect(vi.mocked(applyTranscriptEntities)).toHaveBeenCalled()
-    expect(vi.mocked(runSelfIdentificationForRecording)).toHaveBeenCalled()
+    // This fixture returns no timestamped speaker segments, so the diarization
+    // gate correctly blocks speaker identity instead of guessing attendance.
+    expect(vi.mocked(runSelfIdentificationForRecording)).not.toHaveBeenCalled()
     expect(vi.mocked(exportMeetingWiki)).toHaveBeenCalled()
     expect(mockEmitDomainEvent).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'entity:transcript-ready' })

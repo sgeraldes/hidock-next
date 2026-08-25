@@ -20,6 +20,7 @@ const db = vi.hoisted(() => ({
   recordPendingFileCleanups: vi.fn(),
   getPendingFileCleanups: vi.fn().mockReturnValue([]),
   updatePendingFileCleanups: vi.fn(),
+  removeDeviceFileCacheEntry: vi.fn(),
   // ARF-4 — the deferred graph-cleanup sweep, piggybacked on every hard purge.
   // Defaulted to a benign no-op so existing tests aren't affected.
   retryPendingGraphCleanups: vi.fn().mockReturnValue({ attempted: 0, cleared: 0, clearedJournalIds: [], stillPending: [] })
@@ -29,8 +30,10 @@ const files = vi.hoisted(() => ({
   removeMeetingWiki: vi.fn(),
   existsSync: vi.fn(),
   unlinkSync: vi.fn(),
-  vectorDeleteByRecording: vi.fn()
+  vectorDeleteByRecording: vi.fn(),
+  invalidateCache: vi.fn()
 }))
+const device = vi.hoisted(() => ({ deleteFile: vi.fn() }))
 
 vi.mock('../database', () => db)
 vi.mock('../file-storage', () => ({ deleteRecording: files.deleteRecording }))
@@ -40,26 +43,78 @@ vi.mock('../meeting-wiki', () => ({
   reconcileWikiEligibility: vi.fn()
 }))
 vi.mock('../vector-store', () => ({
-  getVectorStore: () => ({ deleteByRecording: files.vectorDeleteByRecording })
+  getVectorStore: () => ({
+    deleteByRecording: files.vectorDeleteByRecording,
+    invalidateCache: files.invalidateCache
+  })
 }))
 vi.mock('fs', () => ({
   existsSync: (p: string) => files.existsSync(p),
   unlinkSync: (p: string) => files.unlinkSync(p)
 }))
+vi.mock('../jensen', () => ({ getJensenDevice: () => device }))
 
 import {
   markRecordingPersonal,
   deleteRecording,
   restoreDeletedRecording,
   getDeletionImpact,
-  retryPendingFileCleanups
+  retryPendingFileCleanups,
+  queueDeviceDelete
 } from '../recording-deletion-service'
+import { serializeDeviceOperation } from '../device-operation-serializer'
 
 beforeEach(() => {
   vi.clearAllMocks()
   // RE7-P1b (round-8) — removeMeetingWiki now returns a WikiCleanupResult; a
   // benign default so paths that don't set it explicitly still read `.removed`/`.ok`.
   files.removeMeetingWiki.mockReturnValue({ removed: 0, failed: 0, ok: true })
+})
+
+describe('queueDeviceDelete', () => {
+  it('waits behind the shared device-operation chain before erasing', async () => {
+    let releaseBlocker!: () => void
+    let reportBlockerStarted!: () => void
+    const blockerStarted = new Promise<void>((resolve) => { reportBlockerStarted = resolve })
+    const blocker = serializeDeviceOperation(() => new Promise<void>((resolve) => {
+      reportBlockerStarted()
+      releaseBlocker = resolve
+    }))
+    await blockerStarted
+    device.deleteFile.mockResolvedValue({ result: 'success' })
+
+    const deletion = queueDeviceDelete('one.hda', 'journal-1')
+    await Promise.resolve()
+    expect(device.deleteFile).not.toHaveBeenCalled()
+
+    releaseBlocker()
+    await blocker
+    await expect(deletion).resolves.toEqual({ deletedNow: true, queued: false })
+    expect(device.deleteFile).toHaveBeenCalledWith('one.hda')
+  })
+
+  it('journals a rejected erase instead of claiming any non-null response succeeded', async () => {
+    device.deleteFile.mockResolvedValue({ result: 'failure' })
+
+    await expect(queueDeviceDelete('one.hda', 'journal-1')).resolves.toEqual({
+      deletedNow: false,
+      queued: true
+    })
+    expect(db.recordPendingFileCleanups).toHaveBeenCalledWith(
+      'journal-1',
+      [{ kind: 'device', path: 'one.hda' }]
+    )
+  })
+
+  it('treats not-exists as an already-satisfied erase and does not journal it', async () => {
+    device.deleteFile.mockResolvedValue({ result: 'not-exists' })
+
+    await expect(queueDeviceDelete('already-gone.hda', 'journal-1')).resolves.toEqual({
+      deletedNow: true,
+      queued: false
+    })
+    expect(db.recordPendingFileCleanups).not.toHaveBeenCalled()
+  })
 })
 
 describe('markRecordingPersonal', () => {
@@ -124,8 +179,10 @@ describe('deleteRecording (hard)', () => {
     expect(files.unlinkSync).toHaveBeenCalledWith('/data/artifacts/a.pdf')
     expect(files.unlinkSync).toHaveBeenCalledWith('/data/artifacts/b.png')
     expect(res.filesRemoved.artifactBlobs).toBe(2)
-    // In-memory vector store synced.
+    // In-memory vector store synced, and the on-disk binary vector cache
+    // invalidated (v51 — no recoverable vectors left behind).
     expect(files.vectorDeleteByRecording).toHaveBeenCalledWith('r1')
+    expect(files.invalidateCache).toHaveBeenCalled()
   })
 
   it('does not unlink an artifact blob that no longer exists', async () => {
@@ -373,6 +430,50 @@ describe('AR3-2 — partial file-cleanup + retry ledger round-trip', () => {
   })
 
   describe('retryPendingFileCleanups', () => {
+    it('clears a deferred device target when the device reports it is already absent', async () => {
+      db.getPendingFileCleanups.mockReturnValueOnce([
+        {
+          journalId: 'journal-device-absent',
+          recordingId: 'r-device',
+          targets: [{ kind: 'device', path: 'already-gone.hda' }]
+        }
+      ])
+      device.deleteFile.mockResolvedValue({ result: 'not-exists' })
+
+      await expect(retryPendingFileCleanups()).resolves.toMatchObject({ attempted: 1, cleared: 1 })
+      expect(db.removeDeviceFileCacheEntry).toHaveBeenCalledWith('already-gone.hda')
+    })
+
+    it('serializes concurrent sweeps so one device file is not deleted twice', async () => {
+      const pendingRow = {
+        journalId: 'journal-device',
+        recordingId: 'r-device',
+        targets: [{ kind: 'device', path: 'one.hda' }]
+      }
+      db.getPendingFileCleanups
+        .mockReturnValueOnce([pendingRow])
+        .mockReturnValueOnce([])
+
+      let releaseDelete!: () => void
+      let reportDeleteStarted!: () => void
+      const deleteStarted = new Promise<void>((resolve) => { reportDeleteStarted = resolve })
+      device.deleteFile.mockImplementation(() => new Promise((resolve) => {
+        reportDeleteStarted()
+        releaseDelete = () => resolve({ result: 'success' })
+      }))
+
+      const firstSweep = retryPendingFileCleanups()
+      await deleteStarted
+      const overlappingSweep = retryPendingFileCleanups()
+      releaseDelete()
+
+      await expect(firstSweep).resolves.toMatchObject({ attempted: 1, cleared: 1 })
+      await expect(overlappingSweep).resolves.toMatchObject({ attempted: 0, cleared: 0 })
+      expect(device.deleteFile).toHaveBeenCalledTimes(1)
+      expect(db.removeDeviceFileCacheEntry).toHaveBeenCalledWith('one.hda')
+      expect(db.getPendingFileCleanups).toHaveBeenCalledTimes(2)
+    })
+
     it('clears a pending target once the retry succeeds', async () => {
       db.getPendingFileCleanups.mockReturnValueOnce([
         { journalId: 'journal-1', recordingId: 'r1', targets: [{ kind: 'audio', path: '/data/r1.wav' }] }

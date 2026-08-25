@@ -45,7 +45,10 @@ vi.mock('@/components/ui/toaster', () => ({
 
 function createMockElectronAPI(cachedDeviceFiles: Array<Record<string, unknown>>) {
   return {
-    recordings: { getAll: vi.fn().mockResolvedValue([]) },
+    recordings: {
+      getAll: vi.fn().mockResolvedValue([]),
+      getTrash: vi.fn().mockResolvedValue([])
+    },
     syncedFiles: { getAll: vi.fn().mockResolvedValue([]) },
     deviceCache: {
       getAll: vi.fn().mockResolvedValue(cachedDeviceFiles),

@@ -63,67 +63,10 @@ export interface RepairResult {
 // Filename Date Parsing
 // =============================================================================
 
-// Month name mapping for HiDock filename parsing
-const MONTH_NAMES: Record<string, number> = {
-  'Jan': 0, 'Feb': 1, 'Mar': 2, 'Apr': 3, 'May': 4, 'Jun': 5,
-  'Jul': 6, 'Aug': 7, 'Sep': 8, 'Oct': 9, 'Nov': 10, 'Dec': 11
-}
-
-/**
- * Parse recording date from HiDock filename formats.
- * Supports:
- * - 2025Jul08-160405-Rec59.hda (YYYYMonDD-HHMMSS format)
- * - 2025-07-08_1604.wav (YYYY-MM-DD_HHMM format, our saved format)
- * - HDA_20250708_160405.hda (HDA_YYYYMMDD_HHMMSS format)
- */
-function parseHiDockFilenameDate(filename: string): Date | undefined {
-  // Format 1: 2025Jul08-160405-Rec59.hda (YYYYMonDD-HHMMSS) - Device format
-  const monthNameMatch = filename.match(/(\d{4})(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(\d{1,2})-(\d{2})(\d{2})(\d{2})/)
-  if (monthNameMatch) {
-    const [, year, monthName, day, hour, minute, second] = monthNameMatch
-    const month = MONTH_NAMES[monthName]
-    if (month !== undefined) {
-      return new Date(
-        parseInt(year),
-        month,
-        parseInt(day),
-        parseInt(hour),
-        parseInt(minute),
-        parseInt(second)
-      )
-    }
-  }
-
-  // Format 2: 2025-07-08_1604.wav (YYYY-MM-DD_HHMM) - Our saved format
-  const savedMatch = filename.match(/(\d{4})-(\d{2})-(\d{2})_(\d{2})(\d{2})/)
-  if (savedMatch) {
-    const [, year, month, day, hour, minute] = savedMatch
-    return new Date(
-      parseInt(year),
-      parseInt(month) - 1,
-      parseInt(day),
-      parseInt(hour),
-      parseInt(minute),
-      0
-    )
-  }
-
-  // Format 3: HDA_20250708_160405.hda or YYYYMMDDHHMMSS
-  const numericMatch = filename.match(/(\d{4})[-_]?(\d{2})[-_]?(\d{2})[-_]?(\d{2})(\d{2})(\d{2})/)
-  if (numericMatch) {
-    const [, year, month, day, hour, minute, second] = numericMatch
-    return new Date(
-      parseInt(year),
-      parseInt(month) - 1,
-      parseInt(day),
-      parseInt(hour),
-      parseInt(minute),
-      parseInt(second)
-    )
-  }
-
-  return undefined
-}
+// Shared parser (single source of truth) — re-exported here so existing
+// consumers of this module keep working.
+import { parseHiDockFilenameDate } from './hidock-filename'
+export { parseHiDockFilenameDate } from './hidock-filename'
 
 /**
  * Generate a proper filename with date prefix from an original date
@@ -180,15 +123,49 @@ class IntegrityService {
 
     try {
       // 3. Fix file dates that don't match filenames (bug from prior downloads)
-      const dateResult = this.fixFileDates()
+      const dateResult = await this.fixFileDates()
       issuesFound += dateResult.found
       issuesFixed += dateResult.fixed
     } catch (error) {
       console.error('[IntegrityService] Error fixing file dates:', error)
     }
 
+    try {
+      // 4. Repair empty-string meeting links left by the pre-2026-07-24 unlink
+      // bug (meeting_id = '' instead of NULL + standalone marker)
+      const linkResult = this.repairEmptyMeetingLinks()
+      issuesFound += linkResult.found
+      issuesFixed += linkResult.fixed
+    } catch (error) {
+      console.error('[IntegrityService] Error repairing empty meeting links:', error)
+    }
+
     console.log(`[IntegrityService] Startup checks complete: ${issuesFound} issues found, ${issuesFixed} fixed`)
     return { issuesFound, issuesFixed }
+  }
+
+  /**
+   * Repair rows left with `meeting_id = ''` by the old unlink path (it wrote an
+   * empty string instead of NULL — neither a valid link nor a clean unlink).
+   * An empty id was only ever written by a failed UNLINK attempt, so the row's
+   * intent was "standalone": normalize to NULL + the standalone marker.
+   */
+  repairEmptyMeetingLinks(): { found: number; fixed: number } {
+    const stale = queryAll<{ id: string }>(`SELECT id FROM recordings WHERE meeting_id = ''`)
+    if (stale.length === 0) return { found: 0, fixed: 0 }
+    console.log(`[IntegrityService] Repairing ${stale.length} recording(s) with empty-string meeting links`)
+    for (const row of stale) {
+      run(
+        `UPDATE recordings SET meeting_id = NULL, correlation_confidence = NULL, correlation_method = 'user_preassign_standalone' WHERE id = ?`,
+        [row.id]
+      )
+      run(
+        `UPDATE knowledge_captures SET meeting_id = NULL, correlation_confidence = NULL, correlation_method = NULL, updated_at = CURRENT_TIMESTAMP WHERE source_recording_id = ?`,
+        [row.id]
+      )
+    }
+    saveDatabase()
+    return { found: stale.length, fixed: stale.length }
   }
 
   /**
@@ -331,7 +308,7 @@ class IntegrityService {
    * This repairs files downloaded with wrong dates (bug prior to date preservation fix).
    * Updates both file mtime and database date_recorded.
    */
-  fixFileDates(): { found: number; fixed: number } {
+  async fixFileDates(): Promise<{ found: number; fixed: number }> {
     console.log('[IntegrityService] Checking for files with wrong dates...')
     const recordingsPath = getRecordingsPath()
 
@@ -390,6 +367,19 @@ class IntegrityService {
 
     if (fixed > 0) {
       saveDatabase()
+      // A repaired date_recorded changes what a recording overlaps — re-run the
+      // batch auto-linker so rows whose dates were just corrected (e.g. files
+      // that arrived with the copy time) get their meeting link now, not on
+      // some later calendar sync. Lazy import keeps this module cycle-free.
+      try {
+        const { autoLinkRecordingsToMeetings } = await import('./org-reconciler')
+        const linked = autoLinkRecordingsToMeetings()
+        if (linked > 0) {
+          console.log(`[IntegrityService] Auto-linked ${linked} recording(s) after date repairs`)
+        }
+      } catch (linkError) {
+        console.error('[IntegrityService] Auto-link after date repairs failed:', linkError)
+      }
     }
 
     console.log(`[IntegrityService] File dates: ${found} files with wrong dates, ${fixed} fixed`)

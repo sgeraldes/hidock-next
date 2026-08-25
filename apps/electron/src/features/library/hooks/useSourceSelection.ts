@@ -13,6 +13,8 @@ interface UseSourceSelectionResult {
   selectedCount: number
 
   // Actions
+  /** Plain click: select JUST this row AND set the shift-range anchor on it. */
+  selectSingle: (id: string) => void
   toggleSelection: (id: string) => void
   selectAll: (ids: string[]) => void
   clearSelection: () => void
@@ -30,10 +32,23 @@ export function useSourceSelection(): UseSourceSelectionResult {
 
   // Get state and actions from store
   const selectedIds = useLibraryStore((state) => state.selectedIds)
+  const storeSelectSingle = useLibraryStore((state) => state.selectSingle)
   const toggleSelection = useLibraryStore((state) => state.toggleSelection)
   const selectAll = useLibraryStore((state) => state.selectAll)
   const selectRange = useLibraryStore((state) => state.selectRange)
   const clearSelection = useLibraryStore((state) => state.clearSelection)
+
+  // Plain click: select JUST this row AND make it the range anchor. Without
+  // this, the anchor only updates on ctrl+click, so a plain click followed by
+  // a shift+click ranged from a STALE anchor and the in-between rows never got
+  // selected (2026-07-22 report: "shift click is working ackward").
+  const selectSingle = useCallback(
+    (id: string) => {
+      storeSelectSingle(id)
+      lastSelectedRef.current = id
+    },
+    [storeSelectSingle]
+  )
 
   // Handle selection with Shift+Click for range selection
   const handleSelectionClick = useCallback(
@@ -59,6 +74,7 @@ export function useSourceSelection(): UseSourceSelectionResult {
   return {
     selectedIds,
     selectedCount: selectedIds.size,
+    selectSingle,
     toggleSelection,
     selectAll,
     clearSelection: handleClearSelection,

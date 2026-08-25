@@ -13,6 +13,8 @@
 
 import { ipcMain, BrowserWindow } from 'electron'
 import { getJensenDevice } from '../services/jensen'
+import { retryPendingFileCleanups } from '../services/recording-deletion-service'
+import { serializeDeviceOperation } from '../services/device-operation-serializer'
 import { emitActivityLog } from '../services/activity-log'
 import {
   trackActiveTransfer,
@@ -37,7 +39,7 @@ import {
 
 // ---------------------------------------------------------------------------
 // Serialize device operations (connect / tryConnect / disconnect / reset /
-// listFiles / getFileCount). Rapid UI clicks otherwise interleave open/setup/
+// listFiles / getFileCount / deleteFile). Rapid UI clicks otherwise interleave open/setup/
 // read-loop with reset/close, OR start a file-list scan during/after a
 // disconnect — corrupting device state (ACCESS lock, "no recordings"). This runs
 // them one-at-a-time in arrival order; a failed op never breaks the chain.
@@ -46,17 +48,6 @@ import {
 // so they preempt a running (or stalled) scan/download instead of waiting behind
 // it in the chain.
 // ---------------------------------------------------------------------------
-
-let deviceOpChain: Promise<unknown> = Promise.resolve()
-
-function serializeDeviceOp<T>(op: () => Promise<T>): Promise<T> {
-  const run = deviceOpChain.then(op, op)
-  deviceOpChain = run.then(
-    () => undefined,
-    () => undefined
-  )
-  return run
-}
 
 // ---------------------------------------------------------------------------
 // Broadcast helper — sends to the first available window
@@ -91,7 +82,7 @@ function broadcast(channel: string, payload?: unknown): void {
 //     poll is free; a queued one would add latency to the transfer.
 //  3. On a timed-out / failed read it BACKS OFF to 60s so a slow or busy device
 //     isn't hammered; a healthy read restores the 20s cadence.
-// It is still issued through the serializeDeviceOp chain, and the device's own
+// It is still issued through the shared device-operation chain, and the device's own
 // command lock is the final backstop — a poll can never interleave on the bus.
 //
 // Inherent limit: this only works while the app is CONNECTED. A device recording
@@ -124,7 +115,7 @@ async function pollRecordingOnce(): Promise<void> {
 
   let result: { recording: string | null } | null = null
   try {
-    result = await serializeDeviceOp(() => device.getRecordingFile())
+    result = await serializeDeviceOperation(() => device.getRecordingFile())
   } catch {
     return
   }
@@ -219,7 +210,15 @@ export function registerJensenHandlers(): void {
 
   ipcMain.handle('jensen:connect', async () => {
     try {
-      return await serializeDeviceOp(() => getJensenDevice().connect())
+      const result = await serializeDeviceOperation(() => getJensenDevice().connect())
+      // 2026-07-22 — device-connect cleanup sweep: queued 'device' deletions
+      // (from "Also delete from device" while disconnected) complete on any
+      // successful connect, not just on Trash entry / hard purges.
+      // Keep the connection handshake exclusive until the sweep finishes. A
+      // fire-and-forget sweep raced the renderer's first scan/auto-download and
+      // could put DELETE_FILE and TRANSFER_FILE onto the same response stream.
+      if (result) await retryPendingFileCleanups()
+      return result
     } catch {
       return null
     } finally {
@@ -227,15 +226,34 @@ export function registerJensenHandlers(): void {
     }
   })
 
+  // 2026-07-22 — STATE PULL for fresh renderers. The renderer client caches
+  // `_connected=false` until a state-changed broadcast fires; after a reload
+  // (or HMR) that leaves the UI reporting "device not connected" while main
+  // still holds the USB connection. A fresh client pulls the truth once here.
+  ipcMain.handle('jensen:getState', () => ({
+    connected: device.isConnected(),
+    model: device.getModel(),
+    serialNumber: device.serialNumber,
+    versionCode: device.versionCode,
+    versionNumber: device.versionNumber,
+    // Active recording from the CMD-18 poll (null = idle, undefined = never
+    // read). A reloaded renderer missed the change broadcast and needs this
+    // to seed its recording indicator + dirty-mark reconciliation.
+    recording: lastRecordingFilename ?? null,
+  }))
+
   ipcMain.handle('jensen:tryConnect', async () => {
     try {
-      return await serializeDeviceOp(() => getJensenDevice().tryConnect())
+      const result = await serializeDeviceOperation(() => getJensenDevice().tryConnect())
+      if (result) await retryPendingFileCleanups()
+      return result
     } catch {
       return null
     } finally {
       sendState()
     }
   })
+
 
   ipcMain.handle('jensen:disconnect', async () => {
     try {
@@ -257,7 +275,7 @@ export function registerJensenHandlers(): void {
       // serialized) the abort above + the drain in gracefulCloseDevice play the
       // same role. Teardown then runs on an idle device and closes cleanly via
       // stopPoll (no reset).
-      await serializeDeviceOp(() => getJensenDevice().disconnect())
+      await serializeDeviceOperation(() => getJensenDevice().disconnect())
       return null
     } catch {
       return null
@@ -269,7 +287,7 @@ export function registerJensenHandlers(): void {
   ipcMain.handle('jensen:reset', async () => {
     try {
       getJensenDevice().abortInFlight()
-      return await serializeDeviceOp(() => getJensenDevice().reset())
+      return await serializeDeviceOperation(() => getJensenDevice().reset())
     } catch {
       return null
     } finally {
@@ -323,8 +341,21 @@ export function registerJensenHandlers(): void {
 
   ipcMain.handle('jensen:getFileCount', async () => {
     try {
-      if (!getJensenDevice().isConnected()) return null
-      return await serializeDeviceOp(() => getJensenDevice().getFileCount())
+      const device = getJensenDevice()
+      if (!device.isConnected()) return null
+      // A file transfer owns the IN stream until its exact byte boundary has
+      // settled. The renderer's periodic reconciliation probe used to issue
+      // GET_FILE_COUNT in the middle of that stream, consume transfer bytes as
+      // the count response, report a false zero, and disconnect the device.
+      // Skip (do not queue) background probes while a transfer/scan owns the bus.
+      if (device.isOperationInProgress() || getActiveTransferFilename() !== null) return null
+      return await serializeDeviceOperation(async () => {
+        // Re-check after waiting in the serializer: a download is intentionally
+        // not held in deviceOpChain, so it may have started since the first guard.
+        if (!device.isConnected()) return null
+        if (device.isOperationInProgress() || getActiveTransferFilename() !== null) return null
+        return device.getFileCount()
+      })
     } catch {
       return null
     }
@@ -365,18 +396,27 @@ export function registerJensenHandlers(): void {
       // Never scan a device that isn't connected (e.g. a scan requested during or
       // right after a disconnect) — returning null lets the renderer keep its
       // cached list instead of mistaking an interrupted scan for an empty device.
-      if (!getJensenDevice().isConnected()) return null
+      const device = getJensenDevice()
+      if (!device.isConnected()) return null
+      // A list scan cannot share the USB response stream with a file download.
+      // Periodic/recording-triggered reconciliation must stand down and retry on
+      // its next signal instead of corrupting the active transfer.
+      if (device.isOperationInProgress() || getActiveTransferFilename() !== null) return null
       const onProgress = (filesFound: number, expectedFiles: number) => {
         if (!event.sender.isDestroyed()) {
           event.sender.send('jensen:scan-progress', { current: filesFound, total: expectedFiles })
         }
       }
-      const result = await serializeDeviceOp(() => getJensenDevice().listFiles(onProgress))
+      const result = await serializeDeviceOperation(async () => {
+        if (!device.isConnected()) return null
+        if (device.isOperationInProgress() || getActiveTransferFilename() !== null) return null
+        return device.listFiles(onProgress)
+      })
       // Device has now fully initialized (device-info handshake + a completed
       // file-list scan). Only NOW is it safe to start the live-recording poll —
       // starting it during the connect handshake is what desynced the protocol.
       // Idempotent: no-op on subsequent rescans.
-      if (result !== null && getJensenDevice().isConnected()) startRecordingPoll()
+      if (result !== null && device.isConnected()) startRecordingPoll()
       return result
     } catch {
       return null
@@ -421,19 +461,27 @@ export function registerJensenHandlers(): void {
       // Register with the shared controller for the lifetime of the transfer so
       // jensen:cancelDownload and download-service cancel/cancel-all can find and
       // abort it (and await its settlement).
-      const result = await trackActiveTransfer(filename, abortController, async () => {
-        const device = getJensenDevice()
-        const r = await device.downloadFile(filename, fileSize, onChunk, onProgress, abortController.signal)
-        // Phase-2 settlement contract: downloadFile resolves the instant a
-        // user-cancel/stall abort fires — BEFORE its async byte-boundary drain
-        // completes. Await the device's POST-DRAIN settlement so the tracked transfer
-        // (and thus cancelActiveTransfer / cancelActiveTransferByName) stays registered,
-        // and the active pointer stays set, until the device has truly settled. Resolves
-        // immediately on normal completion (no drain) or if the device lacks the
-        // accessor (older build / test stub).
-        await device.getActiveDownloadSettlement?.()
-        return r
-      })
+      // Register the transfer before joining deviceOpChain. This closes both
+      // directions of the old race:
+      //   * a count/list already in flight finishes before TRANSFER_FILE starts;
+      //   * a later count/list sees the active transfer and skips immediately.
+      // Cancellation still works while the transfer waits for the chain because
+      // the AbortController is already registered.
+      const result = await trackActiveTransfer(filename, abortController, () =>
+        serializeDeviceOperation(async () => {
+          const device = getJensenDevice()
+          const r = await device.downloadFile(filename, fileSize, onChunk, onProgress, abortController.signal)
+          // Phase-2 settlement contract: downloadFile resolves the instant a
+          // user-cancel/stall abort fires — BEFORE its async byte-boundary drain
+          // completes. Await the device's POST-DRAIN settlement so the tracked transfer
+          // (and thus cancelActiveTransfer / cancelActiveTransferByName) stays registered,
+          // and the active pointer stays set, until the device has truly settled. Resolves
+          // immediately on normal completion (no drain) or if the device lacks the
+          // accessor (older build / test stub).
+          await device.getActiveDownloadSettlement?.()
+          return r
+        })
+      )
       flushChunks() // flush any remaining buffered chunks
       return result
     } catch {
@@ -457,7 +505,7 @@ export function registerJensenHandlers(): void {
   ipcMain.handle('jensen:deleteFile', async (_event, args) => {
     try {
       const { filename } = JensenDeleteFileSchema.parse(args)
-      return await getJensenDevice().deleteFile(filename)
+      return await serializeDeviceOperation(() => getJensenDevice().deleteFile(filename))
     } catch {
       return null
     }

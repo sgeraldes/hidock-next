@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type {
   ConnectorSummary,
   ConnectorStatus,
@@ -357,6 +357,8 @@ export interface ElectronAPI {
     updateSection: (section: string, values: any) => Promise<any>
     getValue: (key: string) => Promise<any>
     listGeminiModels: () => Promise<any>
+    checkSpeakerModelAccess: (token?: string) => Promise<any>
+    openSpeakerModelAccess: () => Promise<any>
   }
 
   // Database - Meetings
@@ -452,6 +454,7 @@ export interface ElectronAPI {
     // skipGraphCleanup escape hatch — omit it (2-arg call) for the normal
     // path; only pass it after an honest graphUnavailable failure and an
     // explicit second user action.
+    queueDeviceDelete: (args: { deviceFilename: string; journalId: string }) => Promise<{ success: boolean; deletedNow?: boolean; queued?: boolean; error?: string }>
     deleteCascade: (id: string, hard: boolean, opts?: { skipGraphCleanup?: boolean }) => Promise<{
       success: boolean
       mode?: 'soft' | 'hard'
@@ -522,6 +525,34 @@ export interface ElectronAPI {
     // External file import
     addExternal: () => Promise<{ success: boolean; recording?: any; error?: string }>
     addExternalByPath: (filePath: string) => Promise<{ success: boolean; recording?: any; error?: string }>
+    // Non-destructive session splitting. The source is moved to Trash only after
+    // both lossless child files and both child rows have been created.
+    detectSplitPoints: (recordingId: string) => Promise<{
+      success: boolean
+      suggestions?: Array<{
+        timeSec: number
+        confidence: number
+        reason: 'silence' | 'transcript-gap' | 'silence-and-transcript-gap'
+        silenceStartSec?: number
+        silenceEndSec?: number
+        gapSeconds: number
+      }>
+      error?: string
+    }>
+    split: (recordingId: string, splitTimeSec: number) => Promise<{
+      success: boolean
+      result?: {
+        originalRecordingId: string
+        children: Array<{
+          id: string
+          filename: string
+          filePath: string
+          durationSeconds: number
+          dateRecorded: string
+        }>
+      }
+      error?: string
+    }>
     // Transcription
     transcribe: (recordingId: string) => Promise<void>
     addToQueue: (recordingId: string, priority?: boolean) => Promise<string | false>
@@ -548,7 +579,7 @@ export interface ElectronAPI {
     }>
     processQueue: () => Promise<boolean>
     getTranscriptionStatus: () => Promise<{ isProcessing: boolean; pendingCount: number; processingCount: number }>
-    getTranscriptionQueue: () => Promise<any[]>
+    getTranscriptionQueue: (actionableOnly?: boolean) => Promise<any[]>
     cancelTranscription: (recordingId: string) => Promise<{ success: boolean }>
     cancelAllTranscriptions: () => Promise<{ success: boolean; count: number }>
     updateQueueItem: (id: string, status: string, errorMessage?: string) => Promise<boolean>
@@ -579,6 +610,26 @@ export interface ElectronAPI {
     assignSpeaker: (request: { recordingId: string; speakerLabel: string; contactId?: string; newName?: string }) => Promise<Result<Contact>>
     getSpeakerMap: (request: { recordingId: string }) => Promise<Result<Array<{ speaker_label: string; contact_id: string; name: string }>>>
     unassignSpeaker: (request: { recordingId: string; speakerLabel: string }) => Promise<Result<void>>
+    updateExtractedItem: (request: { recordingId: string; kind: 'action' | 'decision'; index: number; content: string }) => Promise<Result<{ kind: 'action' | 'decision'; index: number; content: string }>>
+    getProcessingRuns: (request: { recordingId: string }) => Promise<Result<Array<{
+      id: string
+      recording_id: string
+      transcript_id: string | null
+      stage: 'metadata' | 'schedule-match' | 'vad' | 'diarization' | 'transcription' | 'summary' | 'title' | 'meeting-resolution' | 'speaker-identity' | 'voice-id'
+      provider: string
+      tool: string | null
+      model: string | null
+      version: string | null
+      execution: 'local' | 'cloud' | 'provider-managed' | null
+      status: 'pending' | 'running' | 'completed' | 'degraded' | 'failed' | 'cancelled'
+      started_at: string
+      completed_at: string | null
+      quality_status: string | null
+      quality_json: string | null
+      estimated_cost_amount: number | null
+      estimated_cost_currency: string | null
+      cost_method: string | null
+    }>>>
   }
 
   // Old-transcript triage + text reformat (Library "Upgrade Transcripts")
@@ -593,6 +644,7 @@ export interface ElectronAPI {
   selfId: {
     scan: () => Promise<Result<any>>
     runForRecording: (request: { recordingId: string; force?: boolean }) => Promise<Result<any>>
+    inferSpeakers: (request: { recordingId: string }) => Promise<Result<{ proposed: number; bound: number; skipped: boolean }>>
     backfill: () => Promise<Result<any>>
     getStatus: () => Promise<Result<any>>
     getMergeSuspected: () => Promise<Result<Array<{ label: string; names: string[] }>>>
@@ -654,6 +706,19 @@ export interface ElectronAPI {
   // Action items (first-class action_items table)
   actionItems: {
     setAssignee: (request: { actionItemId: string; contactId: string | null }) => Promise<Result<any>>
+    getForRecording: (recordingId: string) => Promise<Result<{ actionItems: any[]; decisions: any[] }>>
+    update: (request: {
+      actionItemId: string
+      content?: string
+      status?: 'pending' | 'in_progress' | 'completed' | 'cancelled'
+      dueDate?: string | null
+      priority?: 'low' | 'medium' | 'high' | 'urgent'
+    }) => Promise<Result<any>>
+  }
+
+  // Decisions (first-class decisions table)
+  decisions: {
+    update: (request: { decisionId: string; content?: string; context?: string | null }) => Promise<Result<any>>
   }
 
   // Actionables
@@ -675,6 +740,8 @@ export interface ElectronAPI {
     addNotice: (conversationId: string, code: string) => Promise<Message>
     updateConversationTitle: (conversationId: string, title: string) => Promise<{ success: boolean; error?: string }>
     addContext: (conversationId: string, knowledgeCaptureId: string) => Promise<{ success: boolean; error?: string }>
+    /** REPLACE the conversation's pins with this single capture ("Ask about this source" flow). */
+    setContext: (conversationId: string, knowledgeCaptureId: string) => Promise<{ success: boolean; error?: string }>
     removeContext: (conversationId: string, knowledgeCaptureId: string) => Promise<{ success: boolean; error?: string }>
     getContext: (conversationId: string) => Promise<string[]>
   }
@@ -835,6 +902,7 @@ export interface ElectronAPI {
         // being aborted; it settles to 'cancelled'. See DownloadService (Phase-1 cancel).
         status: 'pending' | 'downloading' | 'cancelling' | 'completed' | 'failed' | 'cancelled'
         error?: string
+        cancelReason?: 'user' | 'interrupted'
       }>
       session: {
         id: string
@@ -848,6 +916,7 @@ export interface ElectronAPI {
     }>
     isFileSynced: (filename: string) => Promise<{ synced: boolean; reason: string }>
     getFilesToSync: (files: Array<{ filename: string; size: number; duration: number; dateCreated: Date }>) => Promise<Array<{ filename: string; size: number; duration: number; dateCreated: Date; skipReason?: string }>>
+    getPurgedFilenames: () => Promise<string[]>
     queueDownloads: (files: Array<{ filename: string; size: number; dateCreated?: string }>) => Promise<string[]>
     startSession: (files: Array<{ filename: string; size: number; dateCreated?: string }>) => Promise<{
       id: string
@@ -860,6 +929,7 @@ export interface ElectronAPI {
     updateProgress: (filename: string, bytesReceived: number) => Promise<void>
     markFailed: (filename: string, error: string) => Promise<void>
     clearCompleted: () => Promise<void>
+    dismiss: (filename: string) => Promise<boolean>
     cancel: (filename: string) => Promise<{ success: boolean; error?: string }>
     cancelAll: () => Promise<void>
     retryFailed: (deviceConnected?: boolean, interruptedOnly?: boolean) => Promise<{ count: number; error?: string }>
@@ -956,6 +1026,8 @@ export interface ElectronAPI {
     captureImage: () => Promise<ClipboardCaptureResult>
     setAutoWatch: (enabled: boolean) => Promise<{ active: boolean }>
     isWatchActive: () => Promise<{ active: boolean }>
+    /** Resolve a pasted/dropped File to its absolute path (Electron 39 webUtils). */
+    getPathForFile: (file: File) => string
   }
 
   // Connectors (Layer 2) — Settings → Connectors UI bridge
@@ -1064,6 +1136,7 @@ export interface ElectronAPI {
     stopBluetoothScan: () => Promise<any>
     getBluetoothStatus: () => Promise<any>
     // Push event subscriptions
+    getState: () => Promise<{ connected: boolean; model: string | null; serialNumber: string | null; versionCode: string | null; versionNumber: number | null; recording: string | null }>
     onStateChanged: (callback: (state: { connected: boolean; model: string | null; serialNumber: string | null; versionCode: string | null; versionNumber: number | null }) => void) => () => void
     onConnect: (callback: () => void) => () => void
     onDisconnect: (callback: () => void) => () => void
@@ -1297,12 +1370,13 @@ export interface ElectronAPI {
   onDomainEvent: (callback: (event: any) => void) => () => void
 
   // Recording Watcher Events
-  onRecordingAdded: (callback: (data: { recording: any }) => void) => () => void
+  onRecordingAdded: (callback: (data: { recording: any; count?: number }) => void) => () => void
 
   // Clipboard auto-watch push — emitted when a background clipboard image is auto-added
   onClipboardCaptured: (callback: (result: ClipboardCaptureResult) => void) => () => void
 
   // Transcription Events
+  onTranscriptionQueued: (callback: (data: { queueItemId: string; recordingId: string; filename?: string }) => void) => () => void
   onTranscriptionStarted: (callback: (data: { queueItemId?: string; recordingId: string }) => void) => () => void
   onTranscriptionProgress: (callback: (data: { queueItemId: string; progress: number; stage: string }) => void) => () => void
   onTranscriptionCompleted: (callback: (data: { queueItemId?: string; recordingId: string }) => void) => () => void
@@ -1331,7 +1405,9 @@ const electronAPI: ElectronAPI = {
     set: (config) => callIPC('config:set', config),
     updateSection: (section, values) => callIPC('config:update-section', section, values),
     getValue: (key) => callIPC('config:get-value', key),
-    listGeminiModels: () => callIPC('config:listGeminiModels')
+    listGeminiModels: () => callIPC('config:listGeminiModels'),
+    checkSpeakerModelAccess: (token) => callIPC('config:checkSpeakerModelAccess', token),
+    openSpeakerModelAccess: () => callIPC('config:openSpeakerModelAccess')
   },
 
   meetings: {
@@ -1393,6 +1469,7 @@ const electronAPI: ElectronAPI = {
     markPersonal: (id, personal) => callIPC('recordings:markPersonal', id, personal),
     deletionImpact: (id) => callIPC('recordings:deletionImpact', id),
     deleteCascade: (id, hard, opts) => callIPC('recordings:deleteCascade', id, hard, opts),
+    queueDeviceDelete: (args) => callIPC('recordings:queueDeviceDelete', args),
     restore: (id) => callIPC('recordings:restore', id),
     markNotOnDevice: (id, deviceFilename) => callIPC('recordings:markNotOnDevice', id, deviceFilename),
     retryPendingCleanups: () => callIPC('recordings:retryPendingCleanups'),
@@ -1408,6 +1485,8 @@ const electronAPI: ElectronAPI = {
     // External file import
     addExternal: () => callIPC('recordings:addExternal'),
     addExternalByPath: (filePath: string) => callIPC('recordings:addExternalByPath', filePath),
+    detectSplitPoints: (recordingId: string) => callIPC('recordings:detectSplitPoints', recordingId),
+    split: (recordingId: string, splitTimeSec: number) => callIPC('recordings:split', recordingId, splitTimeSec),
     // Transcription
     transcribe: (recordingId) => callIPC('recordings:transcribe', recordingId),
     addToQueue: (recordingId, priority) => callIPC('recordings:addToQueue', recordingId, priority),
@@ -1417,7 +1496,7 @@ const electronAPI: ElectronAPI = {
     analyzeTimeline: (recordingId) => callIPC('recordings:analyzeTimeline', recordingId),
     processQueue: () => callIPC('recordings:processQueue'),
     getTranscriptionStatus: () => callIPC('recordings:getTranscriptionStatus'),
-    getTranscriptionQueue: () => callIPC('transcription:getQueue'),
+    getTranscriptionQueue: (actionableOnly?: boolean) => callIPC('transcription:getQueue', actionableOnly),
     cancelTranscription: (recordingId: string) => callIPC('transcription:cancel', recordingId),
     cancelAllTranscriptions: () => callIPC('transcription:cancelAll'),
     updateQueueItem: (id: string, status: string, errorMessage?: string) => callIPC('transcription:updateQueueItem', id, status, errorMessage),
@@ -1436,7 +1515,9 @@ const electronAPI: ElectronAPI = {
     getRecurringTopics: () => callIPC('db:get-recurring-topics'),
     assignSpeaker: (request) => callIPC('transcripts:assignSpeaker', request),
     getSpeakerMap: (request) => callIPC('transcripts:getSpeakerMap', request),
-    unassignSpeaker: (request) => callIPC('transcripts:unassignSpeaker', request)
+    unassignSpeaker: (request) => callIPC('transcripts:unassignSpeaker', request),
+    updateExtractedItem: (request) => callIPC('transcripts:updateExtractedItem', request),
+    getProcessingRuns: (request) => callIPC('transcripts:getProcessingRuns', request)
   },
 
   transcriptUpgrade: {
@@ -1449,6 +1530,7 @@ const electronAPI: ElectronAPI = {
   selfId: {
     scan: () => callIPC('self-id:scan'),
     runForRecording: (request) => callIPC('self-id:runForRecording', request),
+    inferSpeakers: (request) => callIPC('self-id:inferSpeakers', request),
     backfill: () => callIPC('self-id:backfill'),
     getStatus: () => callIPC('self-id:getStatus'),
     getMergeSuspected: () => callIPC('self-id:getMergeSuspected')
@@ -1487,7 +1569,13 @@ const electronAPI: ElectronAPI = {
   },
 
   actionItems: {
-    setAssignee: (request) => callIPC('actionItems:setAssignee', request)
+    setAssignee: (request) => callIPC('actionItems:setAssignee', request),
+    getForRecording: (recordingId) => callIPC('actionItems:getForRecording', recordingId),
+    update: (request) => callIPC('actionItems:update', request)
+  },
+
+  decisions: {
+    update: (request) => callIPC('decisions:update', request)
   },
 
   actionables: {
@@ -1506,6 +1594,7 @@ const electronAPI: ElectronAPI = {
     addNotice: (conversationId, code) => callIPC('assistant:addNotice', conversationId, code),
     updateConversationTitle: (conversationId, title) => callIPC('assistant:updateConversationTitle', conversationId, title),
     addContext: (conversationId, knowledgeCaptureId) => callIPC('assistant:addContext', conversationId, knowledgeCaptureId),
+    setContext: (conversationId, knowledgeCaptureId) => callIPC('assistant:setContext', conversationId, knowledgeCaptureId),
     removeContext: (conversationId, knowledgeCaptureId) => callIPC('assistant:removeContext', conversationId, knowledgeCaptureId),
     getContext: (conversationId) => callIPC('assistant:getContext', conversationId)
   },
@@ -1561,16 +1650,25 @@ const electronAPI: ElectronAPI = {
   },
 
   artifacts: {
+    listTypes: () => callIPC('artifacts:listTypes'),
     import: (filePaths) => callIPC('artifacts:import', filePaths),
     pickAndImport: () => callIPC('artifacts:pickAndImport'),
     getForCapture: (knowledgeCaptureId) => callIPC('artifacts:getForCapture', knowledgeCaptureId),
+    getContent: (id) => callIPC('artifacts:getContent', { id }),
     openInFolder: (id) => callIPC('artifacts:openInFolder', id)
   },
 
   clipboardCapture: {
     captureImage: () => callIPC('clipboard:captureImage'),
     setAutoWatch: (enabled: boolean) => callIPC('clipboard:setAutoWatch', enabled),
-    isWatchActive: () => callIPC('clipboard:isWatchActive')
+    isWatchActive: () => callIPC('clipboard:isWatchActive'),
+    /**
+     * Resolve a renderer File (from a paste/drop) to its absolute on-disk path
+     * (Electron 39: File.path is gone — webUtils is the only bridge). Returns
+     * '' for non-file-backed items (e.g. a screenshot bitmap, which the main
+     * process reads from the clipboard directly instead).
+     */
+    getPathForFile: (file: File): string => webUtils.getPathForFile(file)
   },
 
   connectors: {
@@ -1674,12 +1772,14 @@ const electronAPI: ElectronAPI = {
     getState: () => callIPC('download-service:get-state'),
     isFileSynced: (filename) => callIPC('download-service:is-file-synced', filename),
     getFilesToSync: (files) => callIPC('download-service:get-files-to-sync', files),
+    getPurgedFilenames: () => callIPC('download-service:get-purged-filenames'),
     queueDownloads: (files) => callIPC('download-service:queue-downloads', files),
     startSession: (files) => callIPC('download-service:start-session', files),
     processDownload: (filename, data) => callIPC('download-service:process-download', filename, data),
     updateProgress: (filename, bytesReceived) => callIPC('download-service:update-progress', filename, bytesReceived),
     markFailed: (filename, error) => callIPC('download-service:mark-failed', filename, error),
     clearCompleted: () => callIPC('download-service:clear-completed'),
+    dismiss: (filename) => callIPC('download-service:dismiss', filename),
     cancel: (filename) => callIPC('download-service:cancel', filename),
     cancelAll: () => callIPC('download-service:cancel-all'),
     retryFailed: (deviceConnected?: boolean, interruptedOnly?: boolean) => callIPC('download-service:retry-failed', deviceConnected, interruptedOnly),
@@ -1776,6 +1876,7 @@ const electronAPI: ElectronAPI = {
     startBluetoothScan: (duration?: number) => callIPC('jensen:startBluetoothScan', { duration }),
     stopBluetoothScan: () => callIPC('jensen:stopBluetoothScan'),
     getBluetoothStatus: () => callIPC('jensen:getBluetoothStatus'),
+    getState: () => callIPC('jensen:getState'),
     // Push event subscriptions
     onStateChanged: (callback: (state: { connected: boolean; model: string | null; serialNumber: string | null; versionCode: string | null; versionNumber: number | null }) => void) => {
       const handler = (_event: any, state: any) => callback(state)
@@ -1918,8 +2019,8 @@ const electronAPI: ElectronAPI = {
   },
 
   // Recording Watcher Event Listener
-  onRecordingAdded: (callback: (data: { recording: any }) => void) => {
-    const handler = (_event: any, data: { recording: any }) => callback(data)
+  onRecordingAdded: (callback: (data: { recording: any; count?: number }) => void) => {
+    const handler = (_event: any, data: { recording: any; count?: number }) => callback(data)
     ipcRenderer.on('recording:new', handler)
     return () => {
       ipcRenderer.removeListener('recording:new', handler)
@@ -1936,6 +2037,14 @@ const electronAPI: ElectronAPI = {
   },
 
   // Transcription Event Listeners
+  onTranscriptionQueued: (callback: (data: { queueItemId: string; recordingId: string; filename?: string }) => void) => {
+    const handler = (_event: any, data: { queueItemId: string; recordingId: string; filename?: string }) => callback(data)
+    ipcRenderer.on('transcription:queued', handler)
+    return () => {
+      ipcRenderer.removeListener('transcription:queued', handler)
+    }
+  },
+
   onTranscriptionStarted: (callback: (data: { queueItemId?: string; recordingId: string }) => void) => {
     const handler = (_event: any, data: { queueItemId?: string; recordingId: string }) => callback(data)
     ipcRenderer.on('transcription:started', handler)

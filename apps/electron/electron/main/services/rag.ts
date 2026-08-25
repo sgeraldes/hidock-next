@@ -893,7 +893,12 @@ class RAGService {
 
     // --- Added: Fetch explicit conversation context (raw; eligibility applied
     // AFTER the graph-context await below — INC round-5/6 stale-await race). ---
-    const pinnedEntries: Array<{ recordingId: string; part: string }> = []
+    // A pinned capture is either RECORDING-BACKED (source_recording_id set →
+    // transcript text) or an ARTIFACT (pdf/image/note — no recording → the
+    // artifacts table's extracted_text). Previously ONLY the transcript path
+    // existed: a pinned PDF resolved to ZERO pinned parts and the assistant
+    // silently answered from generic vector search (2026-07-21).
+    const pinnedEntries: Array<{ recordingId?: string; captureId: string; part: string }> = []
     try {
       const db = getDatabase()
       if (db) {
@@ -901,17 +906,29 @@ class RAGService {
         if (contextRes && contextRes.length > 0 && contextRes[0].values && contextRes[0].values.length > 0) {
           const kcIds = contextRes[0].values.map(v => v[0] as string)
           for (const id of kcIds) {
-            // Fetch the full transcript + its recording id for each pinned capture.
-            const transcriptRes = db.exec(`
-              SELECT t.full_text, k.title, t.recording_id
-              FROM transcripts t
-              JOIN knowledge_captures k ON k.source_recording_id = t.recording_id
-              WHERE k.id = ?
-            `, [id])
+            const capRes = db.exec('SELECT title, source_recording_id FROM knowledge_captures WHERE id = ?', [id])
+            if (!capRes || capRes.length === 0 || capRes[0].values.length === 0) continue
+            const [title, sourceRecordingId] = capRes[0].values[0] as [string, string | null]
 
-            if (transcriptRes && transcriptRes.length > 0 && transcriptRes[0].values && transcriptRes[0].values.length > 0) {
-              const [text, title, recordingId] = transcriptRes[0].values[0] as [string, string, string]
-              pinnedEntries.push({ recordingId, part: `[PINNED CONTEXT: ${title}]\n${text}` })
+            if (sourceRecordingId) {
+              // Recording-backed: full transcript text.
+              const transcriptRes = db.exec('SELECT full_text FROM transcripts WHERE recording_id = ?', [sourceRecordingId])
+              if (transcriptRes && transcriptRes.length > 0 && transcriptRes[0].values.length > 0) {
+                const text = transcriptRes[0].values[0][0] as string
+                pinnedEntries.push({ recordingId: sourceRecordingId, captureId: id, part: `[PINNED CONTEXT: ${title}]
+${text}` })
+              }
+            } else {
+              // Artifact (pdf/image/note): extracted text from the artifacts table.
+              const artRes = db.exec(
+                'SELECT extracted_text FROM artifacts WHERE knowledge_capture_id = ? AND extracted_text IS NOT NULL ORDER BY created_at DESC LIMIT 1',
+                [id]
+              )
+              if (artRes && artRes.length > 0 && artRes[0].values.length > 0) {
+                const text = artRes[0].values[0][0] as string
+                pinnedEntries.push({ captureId: id, part: `[PINNED CONTEXT: ${title}]
+${text}` })
+              }
             }
           }
         }
@@ -1053,12 +1070,13 @@ class RAGService {
     // excluded/unverifiable ⇒ redacted on the next read.
     const recCheck = filterEligibleRecordingIds([
       ...vectorParts.filter((v) => v.recordingId).map((v) => v.recordingId!),
-      ...pinnedEntries.map((e) => e.recordingId),
+      ...pinnedEntries.filter((e) => e.recordingId).map((e) => e.recordingId!),
       ...graphProv.recordingIds
     ])
-    const capCheck = filterEligibleCaptureIds(
-      vectorParts.filter((v) => v.captureId).map((v) => v.captureId!)
-    )
+    const capCheck = filterEligibleCaptureIds([
+      ...vectorParts.filter((v) => v.captureId).map((v) => v.captureId!),
+      ...pinnedEntries.filter((e) => !e.recordingId).map((e) => e.captureId!)
+    ])
     const recEligible = (id?: string): boolean => !!id && !recCheck.failClosed && recCheck.eligible.has(id)
     const capEligible = (id?: string): boolean => !!id && !capCheck.failClosed && capCheck.eligible.has(id)
 
@@ -1114,9 +1132,16 @@ class RAGService {
     // Pinned context (ADV5/INC round-5/6) — revalidated in the SAME post-await pass.
     const pinnedContextParts: string[] = []
     for (const e of pinnedEntries) {
-      if (!recEligible(e.recordingId)) continue // now-excluded pinned recording ⇒ drop
-      pinnedContextParts.push(e.part)
-      provRecordingIds.add(e.recordingId)
+      if (e.recordingId) {
+        if (!recEligible(e.recordingId)) continue // now-excluded pinned recording ⇒ drop
+        pinnedContextParts.push(e.part)
+        provRecordingIds.add(e.recordingId)
+      } else {
+        // ARTIFACT pin (pdf/image — no recording) ⇒ gate on the capture.
+        if (!capEligible(e.captureId)) continue
+        pinnedContextParts.push(e.part)
+        provCaptureIds.add(e.captureId)
+      }
     }
 
     // Graph facts are a bundle with only AGGREGATE provenance. If ANY graph-backing

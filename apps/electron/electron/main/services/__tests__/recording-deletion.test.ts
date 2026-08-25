@@ -52,6 +52,7 @@ import {
   retryPendingGraphCleanups,
   clearPendingGraphCleanup,
   isRecordingProcessable,
+  isFilePurged,
   markRecordingNotOnDeviceById,
   removeDeviceFileCacheEntry,
   type GraphProvenanceCleanupResult
@@ -82,6 +83,7 @@ const DATA_TABLES = [
   'knowledge_captures',
   'quality_assessments',
   'deletion_journal',
+  'purged_files',
   'device_file_cache',
   'recordings',
   'contacts',
@@ -222,6 +224,14 @@ describe('Privacy source-deletion (v38)', () => {
       seedRecording('r1', { personal: 1 })
       const rows = getRecordings()
       expect(rows.find((r) => r.id === 'r1')?.personal).toBe(1)
+    })
+
+    it('does not return a reconciled-away row as an available Library source', () => {
+      seedRecording('r1')
+      run("UPDATE recordings SET on_device = 0, on_local = 0, location = 'deleted' WHERE id = ?", ['r1'])
+
+      expect(getRecordingById('r1')).toBeTruthy()
+      expect(getRecordings().find((r) => r.id === 'r1')).toBeUndefined()
     })
   })
 
@@ -369,6 +379,23 @@ describe('Privacy source-deletion (v38)', () => {
       expect(queryOne("SELECT id FROM deletion_journal WHERE recording_id = ? AND mode = 'hard'", ['r1'])).toBeTruthy()
     })
 
+    // v51 — purge tombstones: filename-only markers (all name variants the
+    // reconciler checks) so the still-on-device file can never RESURRECT.
+    it('writes purge tombstones for every filename variant (anti-resurrection)', () => {
+      seedMeeting('m1')
+      seedFullRecording('r1', 'm1')
+
+      deleteRecordingCascade('r1', { hard: true })
+
+      // rec.filename = r1.wav, original = r1.hda ⇒ variants: wav, hda, mp3
+      for (const name of ['r1.wav', 'r1.hda', 'r1.mp3']) {
+        expect(isFilePurged(name)).toBe(true)
+      }
+      expect(isFilePurged('unrelated.wav')).toBe(false)
+      // …while the synced_files row itself is still purged as before.
+      expect(queryAll('SELECT id FROM synced_files WHERE original_filename = ?', ['r1.hda']).length).toBe(0)
+    })
+
     it('returns the audio + artifact paths for the caller to unlink', () => {
       seedRecording('r1', { file_path: '/data/r1.wav' })
       run('INSERT INTO knowledge_captures (id, title, captured_at, source_recording_id) VALUES (?, ?, ?, ?)', [
@@ -507,6 +534,19 @@ describe('Privacy source-deletion (v38)', () => {
       expect(getRecordingDeletionImpact('ghost')).toBeUndefined()
     })
 
+    // 2026-07-20 regression: deviceFilename must be the DEVICE-NATIVE name
+    // (original_filename — the .hda on the hardware), not the local .wav —
+    // the device deletes by its own name, so the wrong name made "Also delete
+    // from device" a silent no-op on the hardware.
+    it('deviceFilename is the device-native original_filename (.hda), not the local .wav', () => {
+      seedRecording('r1', { filename: '2026Jul18-215433-Rec07.wav', original_filename: '2026Jul18-215433-Rec07.hda' })
+      run('UPDATE recordings SET on_device = 1 WHERE id = ?', ['r1'])
+
+      const impact = getRecordingDeletionImpact('r1')
+      expect(impact?.onDevice).toBe(true)
+      expect(impact?.deviceFilename).toBe('2026Jul18-215433-Rec07.hda')
+    })
+
     // AC#9 (spec-005/F17 T5) — the Trash-mode "Delete permanently…" path depends
     // on getRecordingById NOT filtering deleted_at (verified anchor), so a
     // soft-deleted (tombstoned) recording must still resolve here.
@@ -524,13 +564,14 @@ describe('Privacy source-deletion (v38)', () => {
 
     // spec-006/F17 T6 D5 + F-INFO-6: onDevice/deviceFilename come straight
     // from the DB row (not the renderer's UnifiedRecording, which loses
-    // deviceFilename entirely for a Trash row).
+    // deviceFilename entirely for a Trash row). 2026-07-20 fix: deviceFilename
+    // is the DEVICE-NATIVE original_filename — the hardware's own name.
     it('reports onDevice:true and deviceFilename when the recording is marked on-device', () => {
-      seedRecording('r1', { filename: 'on-device.wav' })
+      seedRecording('r1', { filename: 'on-device.wav', original_filename: 'on-device.hda' })
       run('UPDATE recordings SET on_device = 1 WHERE id = ?', ['r1'])
       const impact = getRecordingDeletionImpact('r1')
       expect(impact?.onDevice).toBe(true)
-      expect(impact?.deviceFilename).toBe('on-device.wav')
+      expect(impact?.deviceFilename).toBe('on-device.hda')
     })
 
     it('reports onDevice:false and deviceFilename:null when not on device', () => {

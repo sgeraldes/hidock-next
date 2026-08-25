@@ -7,6 +7,9 @@ export type KnowledgeCaptureStatus = 'processing' | 'ready' | 'enriched'
 
 export interface KnowledgeCapture {
   id: string
+  /** Explicit user-authored content title. Independent from filename, meeting subject, and AI title. */
+  userTitle?: string | null
+  /** Legacy/source title retained for compatibility and non-audio artifacts. */
   title: string
   summary: string | null
   category: string | null

@@ -81,7 +81,7 @@ describe('v43 heal: a database stranded with the pre-meeting_id table shape', ()
   })
 
   it('reaches the current schema version; migration 43 is not re-run (repairPhase heals the shape)', () => {
-    expect(queryOne<{ v: number }>('SELECT MAX(version) AS v FROM schema_version')?.v).toBe(50)
+    expect(queryOne<{ v: number }>('SELECT MAX(version) AS v FROM schema_version')?.v).toBe(53)
   })
 
   it('repairPhase force-added meeting_id to the existing table', () => {

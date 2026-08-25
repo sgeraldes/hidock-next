@@ -1,0 +1,4 @@
+# Python 3.11; install CUDA torch from the PyTorch index before this file.
+# The RTX 4090 production path uses CUDA. CPU fallback works but is slower.
+pyannote.audio>=4.0,<5
+huggingface_hub>=0.34

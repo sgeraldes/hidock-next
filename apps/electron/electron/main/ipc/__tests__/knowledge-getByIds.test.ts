@@ -152,6 +152,6 @@ describe('knowledge:getByIds handler (B-CHAT-004)', () => {
     const queryString = vi.mocked(queryAll).mock.calls[0][0]
     expect(queryString).not.toContain('SELECT *')
     // Should use explicit column list
-    expect(queryString).toContain('id, title, summary')
+    expect(queryString).toContain('id, title, user_title, summary')
   })
 })

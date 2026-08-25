@@ -68,6 +68,8 @@ export class JensenIpcClient {
   // Local cache of the connection state pushed from main process
   private _connected: boolean = false
   private _model: string | null = null
+  /** Dedupe for onconnect fires (pull path vs broadcast path can race). */
+  private _lastConnectFireAt: number = 0
 
   // Cleanup functions returned by the preload event subscriptions
   private _cleanupConnect: (() => void) | null = null
@@ -94,9 +96,29 @@ export class JensenIpcClient {
       this.versionNumber = state.versionNumber
     })
 
+    // 2026-07-22 — pull the CURRENT state once on subscribe: broadcasts only
+    // fire on operations, so without this a freshly reloaded renderer reports
+    // "device not connected" while main still holds the USB connection.
+    void window.electronAPI.jensen.getState?.().then((state?: JensenIpcState | null) => {
+      if (!state) return
+      const wasConnected = this._connected
+      this._connected = state.connected
+      this._model = state.model
+      this.serialNumber = state.serialNumber
+      this.versionCode = state.versionCode
+      this.versionNumber = state.versionNumber
+      // Reload-with-live-main adoption: main was ALREADY connected, so no
+      // jensen:connect-event broadcast will ever fire for this renderer — and
+      // without onconnect, hidock-device's handleConnect() never runs, leaving
+      // the service half-initialized (state.connected false, empty cache) even
+      // though tryConnect reports success. Fire the same callback a real
+      // connect transition would.
+      if (state.connected && !wasConnected) this._fireConnect()
+    })
+
     // Connect event → fire onconnect callback
     this._cleanupConnect = window.electronAPI.jensen.onConnect(() => {
-      this.onconnect?.()
+      this._fireConnect()
     })
 
     // Disconnect event → fire ondisconnect callback
@@ -110,6 +132,16 @@ export class JensenIpcClient {
     this._cleanupState?.()
     this._cleanupConnect?.()
     this._cleanupDisconnect?.()
+  }
+
+  /** Fire onconnect at most once per short window — the getState pull and a
+   *  real connect-event broadcast can race, and handleConnect() must not run
+   *  twice concurrently. */
+  private _fireConnect(): void {
+    const now = Date.now()
+    if (now - this._lastConnectFireAt < 2000) return
+    this._lastConnectFireAt = now
+    this.onconnect?.()
   }
 
   // -------------------------------------------------------------------------

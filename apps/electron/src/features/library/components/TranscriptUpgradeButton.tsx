@@ -50,7 +50,7 @@ function getUpgradeApi(): TranscriptUpgradeAPI | null {
   return api?.transcriptUpgrade ?? null
 }
 
-export function TranscriptUpgradeButton() {
+export function TranscriptUpgradeButton({ compact = false }: { compact?: boolean } = {}) {
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [running, setRunning] = useState(false)
@@ -137,13 +137,14 @@ export function TranscriptUpgradeButton() {
   return (
     <>
       <Button
-        variant="outline"
-        size="sm"
+        variant={compact ? 'ghost' : 'outline'}
+        size={compact ? 'icon-sm' : 'sm'}
         onClick={() => onOpenChange(true)}
         title="Triage and reformat old (pre-speaker-turns) transcripts"
+        aria-label={compact ? 'Upgrade transcripts' : undefined}
       >
-        <Sparkles className="h-4 w-4 mr-2" />
-        Upgrade Transcripts
+        <Sparkles className={compact ? 'h-4 w-4' : 'h-4 w-4 mr-2'} aria-hidden="true" />
+        {!compact && 'Upgrade Transcripts'}
       </Button>
 
       <Dialog open={open} onOpenChange={onOpenChange}>

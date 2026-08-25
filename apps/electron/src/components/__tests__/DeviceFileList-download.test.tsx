@@ -8,7 +8,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
-import { DeviceFileList } from '../DeviceFileList'
+import { DeviceFileList, isFilenamePurged } from '../DeviceFileList'
 import { useAppStore } from '@/store/useAppStore'
 import type { DeviceOnlyRecording } from '@/types/unified-recording'
 
@@ -54,6 +54,29 @@ describe('DeviceFileList — DL button download guard', () => {
     expect(screen.queryByRole('button', { name: 'DL' })).toBeNull()
     // Recording is marked downloading in the global store
     expect(useAppStore.getState().downloadQueue.has('rec-1')).toBe(true)
+  })
+
+  // v51 — a purge-tombstoned device file shows the Deleted badge (dimmed),
+  // and the matcher is variant-tolerant (.hda/.wav/.mp3 share a base name).
+  it('shows the Deleted badge for purge-tombstoned files', () => {
+    render(
+      <DeviceFileList
+        recordings={[rec]}
+        syncedFilenames={new Set()}
+        purgedFilenames={new Set(['test.mp3'])}
+        onRefresh={vi.fn()}
+        onRecordingsRefresh={vi.fn()}
+      />
+    )
+    expect(screen.getByText('Deleted')).toBeInTheDocument()
+  })
+
+  it('isFilenamePurged matches across extension variants only', () => {
+    const purged = new Set(['meeting.wav'])
+    expect(isFilenamePurged('meeting.hda', purged)).toBe(true)
+    expect(isFilenamePurged('meeting.mp3', purged)).toBe(true)
+    expect(isFilenamePurged('other.hda', purged)).toBe(false)
+    expect(isFilenamePurged('meeting-notes.hda', purged)).toBe(false)
   })
 
   it('re-enables the DL button after a failed download', async () => {

@@ -375,6 +375,15 @@ export interface AppConfig {
     localAsrVocabularyFile: string
     localAsrDiarize: boolean
     localAsrNumBeams: number
+    speakerLinkingEnabled: boolean
+    speakerLinkingPythonPath: string
+    speakerLinkingWorkerPath: string
+    speakerLinkingModel: string
+    speakerLinkingFallbackModel: string
+    speakerLinkingMatchThreshold: number
+    speakerLinkingMatchMargin: number
+    speakerLinkingMinSpeechSeconds: number
+    speakerLinkingTimeoutSeconds: number
     autoTranscribe: boolean
     language: string
   }

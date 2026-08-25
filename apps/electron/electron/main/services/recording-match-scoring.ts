@@ -103,6 +103,32 @@ export interface ScoredCandidate {
   isBestMatch: boolean
 }
 
+/**
+ * Hard eligibility boundary for automatic meeting assignment.
+ *
+ * The candidate search intentionally has a +/-30 minute discovery buffer so a
+ * nearby event can still appear in the verification UI. That buffer is not
+ * evidence that the recording belonged to the event. Automatic links require
+ * real temporal overlap (and reject weak all-day/long bridge containment), even
+ * when an LLM finds generic topical vocabulary in both texts.
+ */
+export function isAutomaticMeetingLinkTemporallyEligible(
+  recording: MatchRecordingContext,
+  candidate: MatchCandidateInput
+): boolean {
+  return scoreMeetingCandidates(
+    { ...recording, contentText: null },
+    [candidate]
+  )[0]?.hasOverlap === true
+}
+
+/** Calendar feeds often retain cancelled events as ordinary rows and encode
+ * cancellation only in the subject (for example Outlook's `Cancelada:`).
+ * Those events are historical context, never viable recording candidates. */
+export function isCancelledMeetingSubject(subject: string): boolean {
+  return /^\s*(?:cancelled|canceled|cancelad[oa]s?)\s*(?::|[-–—])/i.test(subject)
+}
+
 function stripAccents(value: string): string {
   return value.normalize('NFD').replace(/[̀-ͯ]/g, '')
 }
@@ -148,7 +174,7 @@ export function scoreMeetingCandidates(
   const recValid = Number.isFinite(recStart)
   const recTokens = recording.contentText ? uniqueTokens(recording.contentText) : []
 
-  const scored = candidates.map((candidate) => {
+  const scored = candidates.filter((candidate) => !isCancelledMeetingSubject(candidate.subject)).map((candidate) => {
     const mStart = Date.parse(candidate.startTime)
     const mEnd = Date.parse(candidate.endTime)
 

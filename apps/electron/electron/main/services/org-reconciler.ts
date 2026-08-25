@@ -24,6 +24,7 @@ import {
   recordMentionResolutionNoSave,
   getAmbiguousBuckets,
   getBucketResolution,
+  getActiveCalendarSyncToken,
   healRecordingStatusFromTranscripts,
   isProjectDiscoveryRejected,
   filterVisibleEntityIds,
@@ -161,6 +162,7 @@ export function autoLinkRecordingsToMeetings(): number {
      FROM recordings
      WHERE meeting_id IS NULL AND date_recorded IS NOT NULL
        AND deleted_at IS NULL AND COALESCE(personal, 0) = 0
+       AND COALESCE(transcription_status, 'none') != 'no_speech'
        AND (correlation_method IS NULL OR correlation_method != '${STANDALONE_METHOD}')`
   )
   if (recordings.length === 0) return 0
@@ -175,8 +177,12 @@ export function autoLinkRecordingsToMeetings(): number {
     preassignByBase.set(baseRecordingName(pa.filename).toLowerCase(), pa)
   }
 
+  const activeCalendarToken = getActiveCalendarSyncToken()
   const meetings = queryAll<MeetingRow>(
-    `SELECT id, subject, start_time, end_time, is_all_day FROM meetings`
+    activeCalendarToken
+      ? `SELECT id, subject, start_time, end_time, is_all_day FROM meetings WHERE calendar_sync_token = ?`
+      : `SELECT id, subject, start_time, end_time, is_all_day FROM meetings`,
+    activeCalendarToken ? [activeCalendarToken] : []
   )
   const meetingIds = new Set(meetings.map((m) => m.id))
   const meetingWindows: AutoLinkWindow[] = meetings
@@ -252,6 +258,13 @@ export function autoLinkRecordingsToMeetings(): number {
          WHERE id = ? AND meeting_id IS NULL`,
         [u.meetingId, u.recordingId]
       )
+      run(
+        `UPDATE knowledge_captures
+         SET meeting_id = ?, correlation_confidence = 1.0, correlation_method = 'user_preassign',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE source_recording_id = ?`,
+        [u.meetingId, u.recordingId]
+      )
       linked++
     }
     for (const id of standaloneMarks) {
@@ -260,11 +273,25 @@ export function autoLinkRecordingsToMeetings(): number {
          WHERE id = ? AND meeting_id IS NULL`,
         [id]
       )
+      run(
+        `UPDATE knowledge_captures
+         SET meeting_id = NULL, correlation_confidence = NULL, correlation_method = NULL,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE source_recording_id = ?`,
+        [id]
+      )
     }
     for (const u of overlapUpdates) {
       run(
         `UPDATE recordings SET meeting_id = ?, correlation_confidence = 0.7, correlation_method = 'time_overlap'
          WHERE id = ? AND meeting_id IS NULL`,
+        [u.meetingId, u.recordingId]
+      )
+      run(
+        `UPDATE knowledge_captures
+         SET meeting_id = ?, correlation_confidence = 0.7, correlation_method = 'time_overlap',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE source_recording_id = ?`,
         [u.meetingId, u.recordingId]
       )
       linked++

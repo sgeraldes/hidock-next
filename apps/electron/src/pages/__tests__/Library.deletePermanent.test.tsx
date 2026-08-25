@@ -18,15 +18,23 @@ afterEach(() => {
 })
 
 vi.mock('@/hooks/useUnifiedRecordings', () => ({
-  useUnifiedRecordings: vi.fn()
+  useUnifiedRecordings: vi.fn(),
+  overlayActiveTranscriptionStatuses: (recordings: unknown[]) => recordings,
 }))
 
 const deleteRecordingMock = vi.hoisted(() => vi.fn())
+const removeCachedRecordingMock = vi.hoisted(() => vi.fn())
+const getLastDeleteErrorMock = vi.hoisted(() => vi.fn())
 vi.mock('@/services/hidock-device', () => ({
-  getHiDockDeviceService: () => ({ deleteRecording: deleteRecordingMock })
+  getHiDockDeviceService: () => ({
+    deleteRecording: deleteRecordingMock,
+    removeCachedRecording: removeCachedRecordingMock,
+    getLastDeleteError: getLastDeleteErrorMock
+  })
 }))
 
 const toastMock = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() }))
+const selectionHarness = vi.hoisted(() => ({ selectedIds: new Set<string>(), clearSelection: vi.fn() }))
 vi.mock('@/components/ui/toaster', () => ({
   toast: toastMock
 }))
@@ -115,8 +123,12 @@ vi.mock('@/hooks/useOperations', () => ({
 
 vi.mock('@/features/library/hooks', () => ({
   useSourceSelection: vi.fn(() => ({
-    selectedIds: new Set(), selectedCount: 0, toggleSelection: vi.fn(), selectAll: vi.fn(),
-    clearSelection: vi.fn(), handleSelectionClick: vi.fn()
+    selectedIds: selectionHarness.selectedIds,
+    selectedCount: selectionHarness.selectedIds.size,
+    toggleSelection: vi.fn(),
+    selectAll: vi.fn(),
+    clearSelection: selectionHarness.clearSelection,
+    handleSelectionClick: vi.fn()
   })),
   useKeyboardNavigation: vi.fn(() => ({ handleKeyDown: vi.fn(), focusedIndex: -1, containerRef: { current: null } })),
   useTransitionFilters: vi.fn(() => ({
@@ -198,35 +210,53 @@ function baseElectronAPI(overrides: Partial<Record<string, any>> = {}) {
         mode: 'hard',
         removed: baseRemoved,
         allFilesRemoved: true,
-        pendingFileKinds: []
+        pendingFileKinds: [],
+        journalId: 'journal-1'
       }),
+      queueDeviceDelete: vi.fn().mockResolvedValue({ success: true, deletedNow: true, queued: false }),
       restore: vi.fn().mockResolvedValue({ success: true }),
       getTrash: vi.fn().mockResolvedValue([]),
       markNotOnDevice: vi.fn().mockResolvedValue({ success: true }),
       retryPendingCleanups: vi.fn().mockResolvedValue({ success: true, attempted: 0, cleared: 0, stillPending: {} }),
       ...overrides
     },
-    downloadService: { queueDownloads: vi.fn() },
+    downloadService: {
+      queueDownloads: vi.fn(),
+      getPurgedFilenames: vi.fn().mockResolvedValue([])
+    },
     onTranscriptionCompleted: vi.fn(() => vi.fn()),
     onTranscriptionFailed: vi.fn(() => vi.fn()),
     onTranscriptionCancelled: vi.fn(() => vi.fn())
   }
 }
 
-function mockRecordingState(deviceConnected: boolean) {
+function mockRecordingState(deviceConnected: boolean, hookRecordings: Array<Record<string, any>> = [syncedRecording]) {
+  const deviceOnly = hookRecordings.filter((recording) => recording.location === 'device-only').length
+  const localOnly = hookRecordings.filter((recording) => recording.location === 'local-only').length
+  const both = hookRecordings.filter((recording) => recording.location === 'both').length
+  const synced = hookRecordings.filter((recording) => recording.syncStatus === 'synced').length
   vi.mocked(useUnifiedRecordings).mockReturnValue({
-    recordings: [syncedRecording] as any,
+    recordings: hookRecordings as any,
     loading: false,
     error: null,
     refresh: mockRefresh,
     refreshLocal: mockRefreshLocal,
     deviceConnected,
-    stats: { total: 1, deviceOnly: 0, localOnly: 0, both: 1, synced: 1, unsynced: 0, onSource: 1, locallyAvailable: 1 }
+    stats: {
+      total: hookRecordings.length,
+      deviceOnly,
+      localOnly,
+      both,
+      synced,
+      unsynced: hookRecordings.length - synced,
+      onSource: deviceOnly + both,
+      locallyAvailable: localOnly + both
+    }
   })
 }
 
 async function openPermanentDeleteDialog() {
-  await screen.findByText('Synced Recording')
+  await screen.findByText('synced.wav')
   fireEvent.keyDown(screen.getByLabelText(/^more actions$/i), { key: 'Enter' })
   fireEvent.click(await screen.findByRole('menuitem', { name: /delete permanently/i }))
   await screen.findByRole('heading', { name: /delete permanently/i })
@@ -234,8 +264,91 @@ async function openPermanentDeleteDialog() {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  deleteRecordingMock.mockResolvedValue(true)
+  removeCachedRecordingMock.mockReturnValue(true)
+  getLastDeleteErrorMock.mockReturnValue(null)
+  selectionHarness.selectedIds = new Set()
   global.window.electronAPI = baseElectronAPI() as any
   mockRecordingState(true)
+})
+
+describe('bulk permanent deletion — durable device erase', () => {
+  it('keeps a failed device-only row and offers a real Retry action', async () => {
+    const deviceOnlyRecording = {
+      ...syncedRecording,
+      id: 'device-raw-1',
+      filename: 'raw-device-only.hda',
+      deviceFilename: 'raw-device-only.hda',
+      location: 'device-only' as const,
+      localPath: undefined,
+      syncStatus: 'not-synced' as const,
+      transcriptionStatus: 'not-started' as const
+    }
+    selectionHarness.selectedIds = new Set([deviceOnlyRecording.id])
+    mockRecordingState(true, [deviceOnlyRecording])
+    deleteRecordingMock.mockResolvedValue(false)
+    getLastDeleteErrorMock.mockReturnValue('The HiDock disconnected before the erase could start.')
+
+    renderLibrary()
+    await screen.findByText('raw-device-only.hda')
+    fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
+    await screen.findByText(/no local copy exists/i)
+    expect(screen.queryByRole('checkbox', { name: /also delete/i })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /^erase from device$/i }))
+
+    await waitFor(() => expect(toastMock.warning).toHaveBeenCalledWith(
+      'Device copy remains',
+      expect.stringContaining('disconnected before the erase could start'),
+      expect.objectContaining({ action: expect.objectContaining({ label: 'Retry' }) })
+    ))
+    expect(screen.getByText('raw-device-only.hda')).toBeInTheDocument()
+
+    const retryOptions = toastMock.warning.mock.calls.find(([title]) => title === 'Device copy remains')?.[2]
+    retryOptions.action.onClick()
+    await waitFor(() => expect(deleteRecordingMock).toHaveBeenCalledTimes(2))
+  })
+
+  it('evicts the renderer cache before rebuilding after a confirmed bulk device erase', async () => {
+    selectionHarness.selectedIds = new Set(['synced-1'])
+
+    renderLibrary()
+    await screen.findByText('synced.wav')
+    fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
+    await screen.findByText(/1 copy also exists on the device/i)
+    fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
+
+    await waitFor(() => expect(removeCachedRecordingMock).toHaveBeenCalledWith('synced.hda'))
+    await waitFor(() => expect(mockRefreshLocal).toHaveBeenCalled())
+    const cacheOrder = removeCachedRecordingMock.mock.invocationCallOrder[0]
+    const reconcileOrder = (window.electronAPI.recordings.markNotOnDevice as any).mock.invocationCallOrder[0]
+    const rebuildOrder = mockRefreshLocal.mock.invocationCallOrder[0]
+    expect(cacheOrder).toBeLessThan(reconcileOrder)
+    expect(reconcileOrder).toBeLessThan(rebuildOrder)
+    await waitFor(() => expect(screen.queryByText('synced.wav')).not.toBeInTheDocument())
+  })
+
+  it('journals a selected local recording device copy when the immediate erase cannot run', async () => {
+    selectionHarness.selectedIds = new Set(['synced-1'])
+    global.window.electronAPI = baseElectronAPI({
+      queueDeviceDelete: vi.fn().mockResolvedValue({ success: true, deletedNow: false, queued: true })
+    }) as any
+
+    renderLibrary()
+    await screen.findByText('synced.wav')
+    fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
+    await screen.findByText(/1 copy also exists on the device/i)
+    fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
+
+    await waitFor(() => expect(window.electronAPI.recordings.queueDeviceDelete).toHaveBeenCalledWith({
+      deviceFilename: 'synced.hda',
+      journalId: 'journal-1'
+    }))
+    expect(deleteRecordingMock).not.toHaveBeenCalled()
+    await waitFor(() => expect(toastMock.warning).toHaveBeenCalledWith(
+      'Permanent deletion completed with issues',
+      expect.stringContaining('queued for erase on reconnect')
+    ))
+  })
 })
 
 describe('executeDeletePermanent — device checkbox (D3/AR3-6)', () => {
@@ -253,7 +366,6 @@ describe('executeDeletePermanent — device checkbox (D3/AR3-6)', () => {
   })
 
   it('checked + connected + on-device: local purge THEN exactly one device delete, then immediate reconciliation', async () => {
-    deleteRecordingMock.mockResolvedValue(true)
     renderLibrary()
     await openPermanentDeleteDialog()
 
@@ -261,8 +373,11 @@ describe('executeDeletePermanent — device checkbox (D3/AR3-6)', () => {
     fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
 
     await waitFor(() => expect(window.electronAPI.recordings.deleteCascade).toHaveBeenCalledWith('synced-1', true))
-    await waitFor(() => expect(deleteRecordingMock).toHaveBeenCalledWith('synced.hda'))
-    expect(deleteRecordingMock).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(window.electronAPI.recordings.queueDeviceDelete).toHaveBeenCalledWith({
+      deviceFilename: 'synced.hda',
+      journalId: 'journal-1'
+    }))
+    expect(deleteRecordingMock).not.toHaveBeenCalled()
     // CX-T6-1: reconciliation passes the DEVICE FILENAME too — the hard
     // cascade already deleted the recordings row, so the id alone no longer
     // resolves in the main process; the filename is what reconciles the
@@ -270,12 +385,13 @@ describe('executeDeletePermanent — device checkbox (D3/AR3-6)', () => {
     await waitFor(() =>
       expect(window.electronAPI.recordings.markNotOnDevice).toHaveBeenCalledWith('synced-1', 'synced.hda')
     )
+    expect(removeCachedRecordingMock).toHaveBeenCalledWith('synced.hda')
     await waitFor(() => {
       expect(toastMock.success).toHaveBeenCalledWith('Deleted permanently', expect.stringContaining('and the device copy'))
     })
     // Ordering: the device call only happens once the local purge (deleteCascade) resolved.
     const deleteCascadeOrder = (window.electronAPI.recordings.deleteCascade as any).mock.invocationCallOrder[0]
-    const deviceDeleteOrder = deleteRecordingMock.mock.invocationCallOrder[0]
+    const deviceDeleteOrder = (window.electronAPI.recordings.queueDeviceDelete as any).mock.invocationCallOrder[0]
     expect(deleteCascadeOrder).toBeLessThan(deviceDeleteOrder)
   })
 
@@ -287,23 +403,41 @@ describe('executeDeletePermanent — device checkbox (D3/AR3-6)', () => {
   // refresh(true), whose full list scan (~90s on a loaded device) is exactly
   // what made successful deletions look stuck.
   it('a confirmed device delete rebuilds via refreshLocal (cache-only) after reconciling — never a forced device refresh', async () => {
-    deleteRecordingMock.mockResolvedValue(true)
     renderLibrary()
     await openPermanentDeleteDialog()
 
     fireEvent.click(screen.getByRole('checkbox', { name: /also delete from device/i }))
     fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
 
-    await waitFor(() => expect(deleteRecordingMock).toHaveBeenCalledWith('synced.hda'))
+    await waitFor(() => expect(window.electronAPI.recordings.queueDeviceDelete).toHaveBeenCalledWith({
+      deviceFilename: 'synced.hda',
+      journalId: 'journal-1'
+    }))
     await waitFor(() => expect(mockRefreshLocal).toHaveBeenCalled())
     // NO device fetch is triggered by the post-delete path: the only
     // refresh() call is the post-cascade refresh(false); refresh is never
     // forced.
     expect(mockRefresh).not.toHaveBeenCalledWith(true)
     // Ordering: the local rebuild runs strictly AFTER the device delete confirmed.
-    const deviceDeleteOrder = deleteRecordingMock.mock.invocationCallOrder[0]
+    const deviceDeleteOrder = (window.electronAPI.recordings.queueDeviceDelete as any).mock.invocationCallOrder[0]
+    const rendererCacheOrder = removeCachedRecordingMock.mock.invocationCallOrder[0]
+    const reconcileOrder = (window.electronAPI.recordings.markNotOnDevice as any).mock.invocationCallOrder[0]
     const localRebuildOrder = mockRefreshLocal.mock.invocationCallOrder[0]
+    expect(deviceDeleteOrder).toBeLessThan(rendererCacheOrder)
+    expect(rendererCacheOrder).toBeLessThan(reconcileOrder)
     expect(deviceDeleteOrder).toBeLessThan(localRebuildOrder)
+  })
+
+  it('filters a durable purge tombstone even while the unified hook still projects a stale device row', async () => {
+    const api = baseElectronAPI()
+    api.downloadService.getPurgedFilenames.mockResolvedValue(['SYNCED.HDA'])
+    global.window.electronAPI = api as any
+
+    renderLibrary()
+
+    await waitFor(() => expect(api.downloadService.getPurgedFilenames).toHaveBeenCalled())
+    await waitFor(() => expect(screen.queryByText('synced.wav')).not.toBeInTheDocument())
+    expect(screen.getByText(/no knowledge captured yet/i)).toBeInTheDocument()
   })
 
   it('no local rebuild and no forced refresh when the device branch was not requested (unchecked)', async () => {
@@ -318,7 +452,9 @@ describe('executeDeletePermanent — device checkbox (D3/AR3-6)', () => {
   })
 
   it('no local rebuild on a partial device outcome (nothing was reconciled)', async () => {
-    deleteRecordingMock.mockResolvedValue(false)
+    global.window.electronAPI = baseElectronAPI({
+      queueDeviceDelete: vi.fn().mockResolvedValue({ success: false, error: 'journal write failed' })
+    }) as any
     renderLibrary()
     await openPermanentDeleteDialog()
 
@@ -330,15 +466,18 @@ describe('executeDeletePermanent — device checkbox (D3/AR3-6)', () => {
     expect(mockRefresh).not.toHaveBeenCalledWith(true)
   })
 
-  it('device delete returns false: local purge kept, honest partial toast, no retry', async () => {
-    deleteRecordingMock.mockResolvedValue(false)
+  it('device delete journal returns failure: local purge kept, honest partial toast, no retry', async () => {
+    global.window.electronAPI = baseElectronAPI({
+      queueDeviceDelete: vi.fn().mockResolvedValue({ success: false, error: 'journal write failed' })
+    }) as any
     renderLibrary()
     await openPermanentDeleteDialog()
 
     fireEvent.click(screen.getByRole('checkbox', { name: /also delete from device/i }))
     fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
 
-    await waitFor(() => expect(deleteRecordingMock).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(window.electronAPI.recordings.queueDeviceDelete).toHaveBeenCalledTimes(1))
+    expect(deleteRecordingMock).not.toHaveBeenCalled()
     await waitFor(() => {
       expect(toastMock.warning).toHaveBeenCalledWith(
         'Removed locally — device copy remains',
@@ -349,8 +488,10 @@ describe('executeDeletePermanent — device checkbox (D3/AR3-6)', () => {
     expect(window.electronAPI.recordings.markNotOnDevice).not.toHaveBeenCalled()
   })
 
-  it('device delete throws: local purge kept, honest partial toast', async () => {
-    deleteRecordingMock.mockRejectedValue(new Error('USB error'))
+  it('device delete journal throws: local purge kept, honest partial toast', async () => {
+    global.window.electronAPI = baseElectronAPI({
+      queueDeviceDelete: vi.fn().mockRejectedValue(new Error('IPC error'))
+    }) as any
     renderLibrary()
     await openPermanentDeleteDialog()
 
@@ -366,30 +507,80 @@ describe('executeDeletePermanent — device checkbox (D3/AR3-6)', () => {
     expect(toastMock.success).not.toHaveBeenCalled()
   })
 
-  // AR3-6(a) — TOCTOU: the checkbox was checked while the device was
-  // connected, but the LIVE deviceConnected signal flips false before the
-  // user actually confirms. The dialog's checked state is untouched (it's
-  // local state, only the disabled/hint UI reacts) — execute time must
-  // re-validate and refuse to claim success.
-  it('TOCTOU: device disconnects between check and confirm — partial toast, device service never called', async () => {
+  // A disconnect after selection no longer drops the user's intent. The main
+  // process attempts the hardware delete and durably journals it when USB is
+  // unavailable, so the renderer must distinguish queued, immediate, and
+  // failed outcomes from the IPC response.
+  it('TOCTOU: device disconnects between check and confirm — queues the device erase', async () => {
+    global.window.electronAPI = baseElectronAPI({
+      queueDeviceDelete: vi.fn().mockResolvedValue({ success: true, deletedNow: false, queued: true })
+    }) as any
     const { rerender } = renderLibrary()
     await openPermanentDeleteDialog()
     fireEvent.click(screen.getByRole('checkbox', { name: /also delete from device/i }))
 
-    // Simulate a disconnect right before the user clicks confirm.
     mockRecordingState(false)
     rerender(<MemoryRouter><Library /></MemoryRouter>)
 
     fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
 
-    await waitFor(() => expect(window.electronAPI.recordings.deleteCascade).toHaveBeenCalledWith('synced-1', true))
+    await waitFor(() =>
+      expect(window.electronAPI.recordings.queueDeviceDelete).toHaveBeenCalledWith({
+        deviceFilename: 'synced.hda',
+        journalId: 'journal-1'
+      })
+    )
     expect(deleteRecordingMock).not.toHaveBeenCalled()
+    await waitFor(() => {
+      expect(toastMock.warning).toHaveBeenCalledWith(
+        'Deleted permanently — device erase queued',
+        expect.stringContaining('erased automatically when the device reconnects')
+      )
+    })
+    expect(toastMock.success).not.toHaveBeenCalled()
+  })
+
+  it('disconnected branch reports success when the main process deletes the device copy immediately', async () => {
+    mockRecordingState(false)
+    global.window.electronAPI = baseElectronAPI({
+      queueDeviceDelete: vi.fn().mockResolvedValue({ success: true, deletedNow: true, queued: false })
+    }) as any
+
+    renderLibrary()
+    await openPermanentDeleteDialog()
+    fireEvent.click(screen.getByRole('checkbox', { name: /also delete from device/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
+
+    await waitFor(() => {
+      expect(toastMock.success).toHaveBeenCalledWith(
+        'Deleted permanently',
+        expect.stringContaining('and the device copy')
+      )
+    })
+    expect(toastMock.warning).not.toHaveBeenCalled()
+  })
+
+  it('disconnected branch treats a resolved IPC failure as partial, never queued', async () => {
+    mockRecordingState(false)
+    global.window.electronAPI = baseElectronAPI({
+      queueDeviceDelete: vi.fn().mockResolvedValue({ success: false, error: 'journal write failed' })
+    }) as any
+
+    renderLibrary()
+    await openPermanentDeleteDialog()
+    fireEvent.click(screen.getByRole('checkbox', { name: /also delete from device/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
+
     await waitFor(() => {
       expect(toastMock.warning).toHaveBeenCalledWith(
         'Removed locally — device copy remains',
         expect.stringContaining('synced.wav')
       )
     })
+    expect(toastMock.warning).not.toHaveBeenCalledWith(
+      'Deleted permanently — device erase queued',
+      expect.any(String)
+    )
     expect(toastMock.success).not.toHaveBeenCalled()
   })
 })
@@ -492,7 +683,8 @@ describe('executeDeletePermanent — AR3-2 partial file-cleanup toast', () => {
         pendingFileKinds: ['audio']
       })
     }) as any
-    deleteRecordingMock.mockResolvedValue(false) // device delete fails too
+    const queueDeviceDelete = window.electronAPI.recordings.queueDeviceDelete as ReturnType<typeof vi.fn>
+    queueDeviceDelete.mockResolvedValue({ success: false, error: 'journal write failed' })
 
     renderLibrary()
     await openPermanentDeleteDialog()
@@ -522,7 +714,6 @@ describe('executeDeletePermanent — AR3-2 partial file-cleanup toast', () => {
 // never the plain success toast.
 describe('executeDeletePermanent — reconciliation failure honesty (CX-T6-5)', () => {
   it('markNotOnDevice {success:false} → warning toast with the stale-view note, never plain success', async () => {
-    deleteRecordingMock.mockResolvedValue(true)
     global.window.electronAPI = baseElectronAPI({
       markNotOnDevice: vi.fn().mockResolvedValue({ success: false, error: 'disk I/O error' })
     }) as any
@@ -542,7 +733,6 @@ describe('executeDeletePermanent — reconciliation failure honesty (CX-T6-5)', 
   })
 
   it('a thrown markNotOnDevice IPC is handled the same way', async () => {
-    deleteRecordingMock.mockResolvedValue(true)
     global.window.electronAPI = baseElectronAPI({
       markNotOnDevice: vi.fn().mockRejectedValue(new Error('ipc dead'))
     }) as any
@@ -562,7 +752,6 @@ describe('executeDeletePermanent — reconciliation failure honesty (CX-T6-5)', 
   })
 
   it('a successful reconciliation keeps the plain success toast (no stale note)', async () => {
-    deleteRecordingMock.mockResolvedValue(true)
     mockRefreshLocal.mockResolvedValue(true) // explicit CX-T6-6 success signal
     renderLibrary()
     await openPermanentDeleteDialog()
@@ -583,7 +772,6 @@ describe('executeDeletePermanent — reconciliation failure honesty (CX-T6-5)', 
 // possibly-unchanged list.
 describe('executeDeletePermanent — local rebuild failure honesty (CX-T6-6)', () => {
   it('refreshLocal resolving FALSE → warning toast with the stale-view note, never plain success', async () => {
-    deleteRecordingMock.mockResolvedValue(true)
     mockRefreshLocal.mockResolvedValue(false)
 
     renderLibrary()
@@ -601,7 +789,6 @@ describe('executeDeletePermanent — local rebuild failure honesty (CX-T6-6)', (
   })
 
   it('a THROWING refreshLocal is handled the same way', async () => {
-    deleteRecordingMock.mockResolvedValue(true)
     mockRefreshLocal.mockRejectedValue(new Error('store update failed'))
 
     renderLibrary()
@@ -619,7 +806,6 @@ describe('executeDeletePermanent — local rebuild failure honesty (CX-T6-6)', (
   })
 
   it('refreshLocal resolving TRUE keeps the plain success toast', async () => {
-    deleteRecordingMock.mockResolvedValue(true)
     mockRefreshLocal.mockResolvedValue(true)
 
     renderLibrary()

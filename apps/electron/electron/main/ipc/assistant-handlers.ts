@@ -270,6 +270,41 @@ export function registerAssistantHandlers(): void {
     }
   })
 
+  // REPLACE a conversation's context with a single capture (2026-07-24, owner
+  // report): the source-driven "Ask about this source" flow kept ACCUMULATING
+  // pins, so questions about a new recording carried the full context of every
+  // previously asked one ("context that has nothing to do with the item I am
+  // currently standing at"). Asking FROM a source means "about THIS source" —
+  // pins become exactly that source. Deliberate multi-pin stays available via
+  // the in-chat Add Context (assistant:addContext, unchanged).
+  ipcMain.handle('assistant:setContext', async (_, conversationId: string, knowledgeCaptureId: string) => {
+    try {
+      const conv = queryOne<any>('SELECT id FROM conversations WHERE id = ?', [conversationId])
+      if (!conv) {
+        return { success: false, error: 'Conversation not found' }
+      }
+      const kc = queryOne<any>('SELECT id FROM knowledge_captures WHERE id = ?', [knowledgeCaptureId])
+      if (!kc) {
+        return { success: false, error: 'Knowledge capture not found' }
+      }
+      // Same fail-closed eligibility gate as addContext.
+      const capElig = filterEligibleCaptureIds([knowledgeCaptureId])
+      if (capElig.failClosed || !capElig.eligible.has(knowledgeCaptureId)) {
+        return { success: false, error: 'Knowledge capture not found' }
+      }
+
+      return runInTransaction((): { success: boolean; error?: string } => {
+        run('DELETE FROM conversation_context WHERE conversation_id = ?', [conversationId])
+        run('INSERT OR IGNORE INTO conversation_context (id, conversation_id, knowledge_capture_id) VALUES (?, ?, ?)',
+          [randomUUID(), conversationId, knowledgeCaptureId])
+        return { success: true }
+      })
+    } catch (error) {
+      console.error('Failed to set context:', error)
+      return { success: false, error: (error as Error).message }
+    }
+  })
+
   // Remove context from conversation
   ipcMain.handle('assistant:removeContext', async (_, conversationId: string, knowledgeCaptureId: string) => {
     try {

@@ -1,9 +1,10 @@
 import { parseICS } from '@hidock/calendar-sync'
 import type { CalendarEvent } from '@hidock/calendar-sync'
 import ICAL from 'ical.js'
+import { randomUUID } from 'crypto'
 import { join } from 'path'
 import { getCachePath } from './file-storage'
-import { upsertMeetingsBatch, Meeting } from './database'
+import { activateCalendarSyncToken, upsertMeetingsBatch, Meeting } from './database'
 import { getConfig, updateConfig } from './config'
 import { whenBootTasksSettled, areBootTasksSettled } from './boot-scheduler'
 import { emitActivityLog } from './activity-log'
@@ -912,13 +913,17 @@ async function runSyncCalendar(
     // a mid-sync failure can leave earlier chunks committed, which is acceptable
     // because the next sync re-upserts every meeting idempotently.
     const DB_CHUNK_SIZE = 200
+    const calendarSyncToken = randomUUID()
     try {
       for (let i = 0; i < meetings.length; i += DB_CHUNK_SIZE) {
-        upsertMeetingsBatch(meetings.slice(i, i + DB_CHUNK_SIZE))
+        upsertMeetingsBatch(meetings.slice(i, i + DB_CHUNK_SIZE), calendarSyncToken)
         if (i + DB_CHUNK_SIZE < meetings.length) {
           await yieldToEventLoop()
         }
       }
+      // Publish only after every chunk succeeded. A failed/partial pass leaves
+      // the previous snapshot authoritative for automatic matching.
+      activateCalendarSyncToken(calendarSyncToken)
     } catch (dbError) {
       console.error('Failed to save meetings to database:', dbError)
       throw new Error(`Database error: ${dbError instanceof Error ? dbError.message : 'Unknown database error'}`)

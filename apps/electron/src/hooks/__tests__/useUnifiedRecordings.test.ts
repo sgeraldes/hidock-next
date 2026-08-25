@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { renderHook, waitFor } from '@testing-library/react'
-import { useUnifiedRecordings } from '../useUnifiedRecordings'
+import { renderHook, waitFor, act } from '@testing-library/react'
+import {
+  buildRecordingMap,
+  mapTranscriptionStatus,
+  overlayActiveTranscriptionStatuses,
+  useUnifiedRecordings
+} from '../useUnifiedRecordings'
 import { useAppStore } from '@/store/useAppStore'
 
 // Mock dependencies
@@ -28,10 +33,180 @@ vi.mock('@/components/ui/toaster', () => ({
   }
 }))
 
+describe('mapTranscriptionStatus', () => {
+  it('preserves no_speech even when a stale previous capture is ready', () => {
+    expect(mapTranscriptionStatus('no_speech', 'ready')).toBe('no_speech')
+  })
+
+  it('shows an active re-transcription over a stale ready capture', () => {
+    expect(mapTranscriptionStatus('processing', 'ready')).toBe('processing')
+    expect(mapTranscriptionStatus('pending', 'enriched')).toBe('pending')
+  })
+
+  it('overlays live queue state without cloning unaffected recordings', () => {
+    const stable = { id: 'stable', transcriptionStatus: 'complete' } as any
+    const active = { id: 'active', transcriptionStatus: 'complete' } as any
+    const result = overlayActiveTranscriptionStatuses(
+      [stable, active],
+      new Map([['active', 'processing']])
+    )
+
+    expect(result[0]).toBe(stable)
+    expect(result[1]).toMatchObject({ id: 'active', transcriptionStatus: 'processing' })
+  })
+})
+
+describe('buildRecordingMap location facts', () => {
+  const device = {
+    id: 'device-id',
+    filename: '2026Aug18-120000-Rec01.hda',
+    size: 1024,
+    duration: 60,
+    dateCreated: new Date('2026-08-18T12:00:00')
+  } as any
+
+  it('does not paint a durable device-only metadata row as synced', () => {
+    const [recording] = buildRecordingMap([device], [{
+      id: 'rec-1',
+      filename: device.filename,
+      file_path: '',
+      file_size: 1024,
+      status: 'new',
+      on_local: 0,
+      on_device: 1,
+      location: 'device-only'
+    }], [], [], true)
+
+    expect(recording).toMatchObject({ location: 'device-only', syncStatus: 'not-synced' })
+  })
+
+  it('retains both locations from durable facts while the device is offline', () => {
+    const [recording] = buildRecordingMap([], [{
+      id: 'rec-1',
+      filename: device.filename,
+      file_path: 'F:/recordings/recording.mp3',
+      file_size: 1024,
+      status: 'new',
+      on_local: 1,
+      on_device: 1,
+      location: 'both'
+    }], [], [], false)
+
+    expect(recording).toMatchObject({ location: 'both', syncStatus: 'synced' })
+  })
+
+  it('does not resurrect a reconciled-away recording as device-only', () => {
+    const recordings = buildRecordingMap([], [{
+      id: 'erased-source',
+      filename: '2026Aug18-210520-Rec99.hda',
+      file_path: null,
+      file_size: 38892,
+      status: 'none',
+      on_local: 0,
+      on_device: 0,
+      location: 'deleted'
+    }], [], [], true)
+
+    expect(recordings).toEqual([])
+  })
+
+  it('does not resurrect a soft-deleted split source that remains on the device', () => {
+    const child = {
+      id: 'split-child-1',
+      filename: '2026Aug18-120000-Rec01 - Part 1.flac',
+      file_path: 'F:/recordings/2026Aug18-120000-Rec01 - Part 1.flac',
+      file_size: 512,
+      duration_seconds: 30,
+      date_recorded: '2026-08-18T12:00:00',
+      status: 'new',
+      on_local: 1,
+      on_device: 0,
+      location: 'local-only' as const
+    }
+    const synced = [{
+      id: 'synced-parent',
+      original_filename: device.filename,
+      local_filename: '2026Aug18-120000-Rec01.flac',
+      file_path: 'F:/recordings/2026Aug18-120000-Rec01.flac',
+      synced_at: '2026-08-18T12:01:00'
+    }]
+    const tombstone = [{
+      id: 'split-parent',
+      filename: '2026Aug18-120000-Rec01.flac',
+      file_path: 'F:/recordings/2026Aug18-120000-Rec01.flac',
+      file_size: 1024,
+      status: 'complete',
+      deleted_at: '2026-08-18T13:00:00'
+    }]
+
+    const recordings = buildRecordingMap(
+      [device],
+      [child],
+      synced,
+      [],
+      true,
+      [],
+      tombstone
+    )
+
+    expect(recordings.map((recording) => recording.id)).toEqual(['split-child-1'])
+    expect(recordings.some((recording) => recording.filename === device.filename)).toBe(false)
+  })
+
+  it('keeps nearby device recordings distinct when one has an exact database match', () => {
+    const exactDeviceRecording = {
+      id: 'device-exact',
+      filename: '2026Aug18-184600-Rec95.hda',
+      size: 2048,
+      duration: 2815,
+      dateCreated: new Date('2026-08-18T18:46:00')
+    } as any
+    const nearbyDeviceRecording = {
+      id: 'device-nearby',
+      filename: '2026Aug18-184525-Rec94.hda',
+      size: 128,
+      duration: 30,
+      dateCreated: new Date('2026-08-18T18:45:25')
+    } as any
+    const databaseRecording = {
+      id: 'database-exact',
+      filename: exactDeviceRecording.filename,
+      file_path: 'F:/recordings/2026Aug18-184600-Rec95.wav',
+      file_size: 2048,
+      duration_seconds: 2815,
+      date_recorded: '2026-08-18T18:46:00',
+      status: 'complete',
+      on_local: 1,
+      on_device: 1,
+      location: 'both' as const
+    }
+
+    // Put the nearby recording first to reproduce the device ordering that
+    // previously let it claim database-exact through the 60-second fallback.
+    const recordings = buildRecordingMap(
+      [nearbyDeviceRecording, exactDeviceRecording],
+      [databaseRecording],
+      [],
+      [],
+      true
+    )
+
+    expect(recordings).toHaveLength(2)
+    expect(recordings.find((recording) => recording.filename === exactDeviceRecording.filename)?.id)
+      .toBe('database-exact')
+    expect(recordings.find((recording) => recording.filename === nearbyDeviceRecording.filename)?.id)
+      .toBe('device-nearby')
+    expect(new Set(recordings.map((recording) => recording.id)).size).toBe(recordings.length)
+  })
+})
+
 // Mock Electron API
 function createMockElectronAPI() {
   return {
-    recordings: { getAll: vi.fn().mockResolvedValue([]) },
+    recordings: {
+      getAll: vi.fn().mockResolvedValue([]),
+      getTrash: vi.fn().mockResolvedValue([])
+    },
     syncedFiles: { getAll: vi.fn().mockResolvedValue([]) },
     deviceCache: { getAll: vi.fn().mockResolvedValue([]), saveAll: vi.fn().mockResolvedValue(undefined) },
     // ROUND-15 RESIDUAL — the hook now calls the owner accessor. Alias getAll to
@@ -61,6 +236,7 @@ describe('useUnifiedRecordings', () => {
       unifiedRecordingsLoadingCount: 0,
       unifiedRecordingsError: null,
       unifiedRecordingsLoaded: false,
+      deviceState: { connected: false, model: null },
       setUnifiedRecordings: vi.fn(),
       setUnifiedRecordingsLoading: vi.fn(),
       incrementUnifiedRecordingsLoading: vi.fn(),
@@ -77,6 +253,14 @@ describe('useUnifiedRecordings', () => {
   // ============================================================
 
   describe('data fetching', () => {
+    it('reports the canonical app-store connection state used by the title bar', () => {
+      storeState.deviceState = { connected: true, model: 'hidock-h1e' }
+
+      const { result } = renderHook(() => useUnifiedRecordings())
+
+      expect(result.current.deviceConnected).toBe(true)
+    })
+
     it('fetches knowledge captures and recordings on mount', async () => {
       renderHook(() => useUnifiedRecordings())
 
@@ -602,6 +786,39 @@ describe('useUnifiedRecordings', () => {
 
       // The unsubscribe function should be called on unmount
       expect(unsubscribeFn).toHaveBeenCalled()
+    })
+
+    it('coalesces a burst of discovery events into one cache-only library rebuild', async () => {
+      vi.useFakeTimers()
+      try {
+        storeState.unifiedRecordingsLoaded = true
+        let callback: ((data: { recording: { filename: string }; count?: number }) => void) | undefined
+        // @ts-ignore - electronAPI members are vi.fn mocks in tests
+        window.electronAPI.onRecordingAdded.mockImplementation((next) => {
+          callback = next
+          return vi.fn()
+        })
+
+        renderHook(() => useUnifiedRecordings())
+
+        act(() => {
+          callback?.({ recording: { filename: 'old-1.hda' } })
+          callback?.({ recording: { filename: 'old-2.hda' } })
+          callback?.({ recording: { filename: 'newest.hda' }, count: 18 })
+        })
+        expect(window.electronAPI.recordings.getAll).not.toHaveBeenCalled()
+
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(100)
+        })
+
+        expect(window.electronAPI.recordings.getAll).toHaveBeenCalledTimes(1)
+        expect(window.electronAPI.syncedFiles.getAll).toHaveBeenCalledTimes(1)
+        expect(window.electronAPI.deviceCache.getAll).toHaveBeenCalledTimes(1)
+        expect(window.electronAPI.knowledge.getAllOwner).toHaveBeenCalledTimes(1)
+      } finally {
+        vi.useRealTimers()
+      }
     })
   })
 })

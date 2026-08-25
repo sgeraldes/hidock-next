@@ -45,6 +45,7 @@ vi.mock('../database', () => ({
   runInTransaction: (fn: () => unknown) => fn(),
   mergeContacts: vi.fn(),
   insertIdentitySuggestion: vi.fn(),
+  getActiveCalendarSyncToken: vi.fn(() => null),
   getAllRecordingPreassignments: () => preassignRows
 }))
 
@@ -53,6 +54,10 @@ import { autoLinkRecordingsToMeetings } from '../org-reconciler'
 /** run() calls whose SQL contains `substr`. */
 function runCalls(substr: string): unknown[][] {
   return runSpy.mock.calls.filter((c) => typeof c[0] === 'string' && (c[0] as string).includes(substr))
+}
+
+function recordingRunCalls(substr: string): unknown[][] {
+  return runCalls(substr).filter((c) => /UPDATE recordings/i.test(c[0] as string))
 }
 
 beforeEach(() => {
@@ -79,11 +84,11 @@ describe('autoLinkRecordingsToMeetings — pre-assignment consumption', () => {
     const linked = autoLinkRecordingsToMeetings()
 
     expect(linked).toBe(1)
-    const preassignLinks = runCalls("correlation_method = 'user_preassign'")
+    const preassignLinks = recordingRunCalls("correlation_method = 'user_preassign'")
     expect(preassignLinks).toHaveLength(1)
     expect(preassignLinks[0][1]).toEqual(['m-explicit', 'rec-A'])
     // The overlap link must NOT have fired for this recording.
-    expect(runCalls("correlation_method = 'time_overlap'")).toHaveLength(0)
+    expect(recordingRunCalls("correlation_method = 'time_overlap'")).toHaveLength(0)
     // The preassignment row is consumed by its original (device) filename.
     const deletes = runCalls('DELETE FROM recording_preassignments')
     expect(deletes).toHaveLength(1)
@@ -103,11 +108,11 @@ describe('autoLinkRecordingsToMeetings — pre-assignment consumption', () => {
 
     expect(linked).toBe(0)
     // Marked standalone, not linked to any meeting.
-    const standalone = runCalls("correlation_method = 'user_preassign_standalone'")
+    const standalone = recordingRunCalls("correlation_method = 'user_preassign_standalone'")
     expect(standalone).toHaveLength(1)
     expect(standalone[0][1]).toEqual(['rec-B'])
-    expect(runCalls("correlation_method = 'time_overlap'")).toHaveLength(0)
-    expect(runCalls("correlation_method = 'user_preassign'")).toHaveLength(0)
+    expect(recordingRunCalls("correlation_method = 'time_overlap'")).toHaveLength(0)
+    expect(recordingRunCalls("correlation_method = 'user_preassign'")).toHaveLength(0)
     // Preassignment consumed.
     const deletes = runCalls('DELETE FROM recording_preassignments')
     expect(deletes[0][1]).toEqual(['RecB.hda'])
@@ -125,9 +130,14 @@ describe('autoLinkRecordingsToMeetings — pre-assignment consumption', () => {
     const linked = autoLinkRecordingsToMeetings()
 
     expect(linked).toBe(1)
-    const overlap = runCalls("correlation_method = 'time_overlap'")
+    const overlap = recordingRunCalls("correlation_method = 'time_overlap'")
     expect(overlap).toHaveLength(1)
     expect(overlap[0][1]).toEqual(['m-overlap', 'rec-C'])
+    const captureOverlap = runCalls('UPDATE knowledge_captures').filter((call) =>
+      (call[0] as string).includes("correlation_method = 'time_overlap'")
+    )
+    expect(captureOverlap).toHaveLength(1)
+    expect(captureOverlap[0][1]).toEqual(['m-overlap', 'rec-C'])
     expect(runCalls('DELETE FROM recording_preassignments')).toHaveLength(0)
   })
 })

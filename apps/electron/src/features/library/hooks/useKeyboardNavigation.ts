@@ -70,10 +70,26 @@ export function useKeyboardNavigation({
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
+      const { key, ctrlKey, metaKey } = event
+
+      // Escape is a state-reset command, not list navigation. It must still
+      // clear a retained selection when filtering leaves no visible items and
+      // Library disables ordinary keyboard navigation for the empty corpus.
+      if (key === 'Escape') {
+        if (expandedIds && expandedIds.size > 0 && onCollapseAllRows) {
+          event.preventDefault()
+          onCollapseAllRows()
+        } else if (selectedIds.size > 0) {
+          event.preventDefault()
+          onClearSelection()
+        }
+        return
+      }
+
       if (!isEnabled || items.length === 0) return
 
-      const { key, ctrlKey, metaKey } = event
       const modKey = ctrlKey || metaKey
+
       const currentItemId = focusedIndex >= 0 && focusedIndex < items.length ? items[focusedIndex] : null
 
       switch (key) {
@@ -142,16 +158,6 @@ export function useKeyboardNavigation({
             } else if (onToggleExpand) {
               onToggleExpand(items[focusedIndex])
             }
-          }
-          break
-
-        case 'Escape':
-          event.preventDefault()
-          // Collapse all expanded rows if any exist, otherwise clear selection
-          if (expandedIds && expandedIds.size > 0 && onCollapseAllRows) {
-            onCollapseAllRows()
-          } else if (selectedIds.size > 0) {
-            onClearSelection()
           }
           break
 

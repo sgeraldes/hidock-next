@@ -167,7 +167,6 @@ export function DeletePermanentDialog({
               id="delete-permanent-also-device"
               checked={alsoDeleteFromDevice}
               onCheckedChange={setAlsoDeleteFromDevice}
-              disabled={!deviceConnected}
               className="mt-0.5"
             />
             <div className="flex flex-col">
@@ -176,7 +175,7 @@ export function DeletePermanentDialog({
               </label>
               {!deviceConnected && (
                 <span className="text-xs text-muted-foreground">
-                  Connect the device to remove its copy too.
+                  Device not connected — its copy will be erased automatically when it reconnects.
                 </span>
               )}
             </div>

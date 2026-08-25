@@ -2,6 +2,7 @@ import { watch, existsSync, statSync, readdirSync } from 'fs'
 import { join, extname, basename } from 'path'
 import { randomUUID } from 'crypto'
 import { getRecordingsPath } from './file-storage'
+import { parseHiDockFilenameDateIso } from './hidock-filename'
 import {
   getRecordingByFilenameVariants,
   insertRecording,
@@ -154,18 +155,12 @@ async function processNewRecording(filePath: string): Promise<void> {
       return
     }
 
-    // Parse date from filename if possible (format: YYYY-MM-DD_HHMM-description.ext)
-    const dateMatch = filename.match(/^(\d{4}-\d{2}-\d{2})_(\d{4})/)
-    let dateRecorded: string
-
-    if (dateMatch) {
-      const [, date, time] = dateMatch
-      const hours = time.slice(0, 2)
-      const minutes = time.slice(2, 4)
-      dateRecorded = `${date}T${hours}:${minutes}:00`
-    } else {
-      dateRecorded = stats.mtime.toISOString()
-    }
+    // The HiDock filename carries the AUTHORITATIVE recording start
+    // (2026Jul23-190839-…). mtime is only the ARRIVAL time (copy/download) —
+    // using it silently shifts the recording's timeline and breaks meeting
+    // correlation (the 2026-07-23 Rec39a-d mp3 incident). Fall back to mtime
+    // only for names that carry no date.
+    const dateRecorded = parseHiDockFilenameDateIso(filename) ?? stats.mtime.toISOString()
 
     const recordingId = generateRecordingId(filePath)
 

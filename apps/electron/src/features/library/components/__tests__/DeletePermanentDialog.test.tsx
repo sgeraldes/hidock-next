@@ -140,11 +140,14 @@ describe('DeletePermanentDialog', () => {
       expect(checkbox).toHaveAttribute('aria-checked', 'false')
     })
 
-    it('is disabled when the device is not connected, with an explanatory hint', () => {
+    // 2026-07-22 — behavior changed: the checkbox is ALWAYS enabled; a
+    // disconnected device defers the hardware erase to the reconnect sweep.
+    it('stays enabled when the device is not connected, with a deferral hint', () => {
       renderDialog({ impact: { ...baseImpact, onDevice: true }, deviceConnected: false })
       const checkbox = screen.getByRole('checkbox', { name: /also delete from device/i })
-      expect(checkbox).toBeDisabled()
-      expect(screen.getByText(/connect the device to remove its copy too/i)).toBeInTheDocument()
+      expect(checkbox).not.toBeDisabled()
+      expect(screen.getByText(/device not connected/i)).toBeInTheDocument()
+      expect(screen.getByText(/erased automatically when it reconnects/i)).toBeInTheDocument()
     })
 
     it('is enabled (not disabled) when the device is connected', () => {

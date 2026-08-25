@@ -16,7 +16,7 @@ import { existsSync, mkdirSync, readFileSync, copyFileSync } from 'fs'
 import { join, extname, basename } from 'path'
 import { getDataPath } from './config'
 import { queryOne, queryAll, run, runInTransaction } from './database'
-import { resolveType, getArtifactType, ArtifactExtractionError } from './artifact-types'
+import { resolveType, getArtifactType, listArtifactTypes, ArtifactExtractionError } from './artifact-types'
 import { resolveGeminiApiKey } from './brains'
 import { getVectorStore } from './vector-store'
 import { filterEligibleCaptureIds, isCaptureEligible } from './recording-eligibility'
@@ -206,7 +206,7 @@ export async function importArtifact(
   if (extractedText && extractedText.trim().length > 0) {
     try {
       const store = getVectorStore()
-      await store.initialize()
+      store.ensureSchema()
       indexedChunks = await store.indexTranscript(extractedText, {
         recordingId: id,
         timestamp: now,
@@ -410,7 +410,7 @@ export async function backfillImageCaptureIndex(limit = 10): Promise<ImageCaptur
   if (limit <= 0) return result
 
   const store = getVectorStore()
-  await store.initialize() // ensures vector_embeddings exists for the NOT EXISTS check
+  store.ensureSchema() // query access without hydrating the complete in-memory index
 
   const backfillRows = selectEligibleBackfillRows(limit, Date.now())
   // ADV40 sweep (round-42) — the backfill re-runs Gemini VISION on the image AND
@@ -587,4 +587,4 @@ export async function backfillImageCaptureIndex(limit = 10): Promise<ImageCaptur
 }
 
 /** Re-export so IPC/tests can resolve types without importing the registry directly. */
-export { resolveType, getArtifactType }
+export { resolveType, getArtifactType, listArtifactTypes }

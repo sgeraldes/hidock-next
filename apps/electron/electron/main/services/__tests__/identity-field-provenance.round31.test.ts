@@ -110,7 +110,7 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('v48/v50 migration — contacts.role_source_recording_id + role_origin', () => {
-  it('columns exist after init and schema version is 50', () => {
+  it('columns exist after init and schema version is 53', () => {
     const cols = getTableColumns(getDatabase(), 'contacts')
     expect(cols).toContain('role_source_recording_id')
     // role_source_recording_id is migration 48 (per-field role provenance) and
@@ -118,7 +118,7 @@ describe('v48/v50 migration — contacts.role_source_recording_id + role_origin'
     // current SCHEMA_VERSION on top of beta v42/v43, so a full boot reports 50 here.
     expect(cols).toContain('role_origin')
     const v = queryOne<{ v: number }>('SELECT MAX(version) AS v FROM schema_version')
-    expect(v?.v).toBe(50)
+    expect(v?.v).toBe(53)
   })
 
   // ADV49-2 (round-51) FLIP: a role with NULL provenance is NO LONGER implicitly

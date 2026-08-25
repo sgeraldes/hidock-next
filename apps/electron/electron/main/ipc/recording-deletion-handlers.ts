@@ -45,7 +45,8 @@ import {
   getDeletionImpact,
   deleteRecording as deleteRecordingCascadeService,
   restoreDeletedRecording,
-  retryPendingFileCleanups
+  retryPendingFileCleanups,
+  queueDeviceDelete
 } from '../services/recording-deletion-service'
 import { reconcileWikiEligibility } from '../services/meeting-wiki'
 
@@ -195,6 +196,24 @@ export function registerRecordingDeletionHandlers(): void {
   })
 
   // Undo a soft-delete.
+  // 2026-07-22 — "Also delete from device" while the device is DISCONNECTED:
+  // try the USB delete now; on failure durably journal it as a pending
+  // 'device' cleanup (erased automatically on the next sweep — device connect,
+  // hard purge, or Trash entry).
+  ipcMain.handle('recordings:queueDeviceDelete', async (_, args: unknown) => {
+    try {
+      const parsed = z
+        .object({ deviceFilename: z.string().min(1).max(200), journalId: z.string().min(1).max(64) })
+        .safeParse(args)
+      if (!parsed.success) return { success: false, error: 'Invalid request' }
+      const result = await queueDeviceDelete(parsed.data.deviceFilename, parsed.data.journalId)
+      return { success: true, ...result }
+    } catch (e) {
+      console.error('recordings:queueDeviceDelete error:', e)
+      return { success: false, error: e instanceof Error ? e.message : 'Unknown error' }
+    }
+  })
+
   ipcMain.handle('recordings:restore', async (_, id: unknown) => {
     try {
       const parsed = RecordingIdSchema.safeParse(id)

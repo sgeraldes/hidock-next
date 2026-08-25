@@ -35,7 +35,13 @@
  * imports FROM this module).
  */
 
-import { queryOne, run, getRowsModified } from './database'
+import {
+  queryOne,
+  run,
+  getRowsModified,
+  isValueExcludedRecording,
+  removeRecordingVoiceEvidence
+} from './database'
 import { complete } from '@hidock/ai-providers'
 import { getProviderConfigFromSettings } from './ai-provider-config'
 import { getConfig } from './config'
@@ -174,6 +180,13 @@ export function applyCaptureValueClassification(captureId: string, cls: ValueCla
     )
 
     if (getRowsModified() > 0) {
+      const source = queryOne<{ source_recording_id: string | null }>(
+        'SELECT source_recording_id FROM knowledge_captures WHERE id = ?',
+        [captureId]
+      )
+      if (source?.source_recording_id && isValueExcludedRecording(source.source_recording_id)) {
+        removeRecordingVoiceEvidence(source.source_recording_id)
+      }
       console.log(`[ValueClassification] capture=${captureId} rating=${targetRating}`)
       return { applied: true, rating: targetRating }
     }

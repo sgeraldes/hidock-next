@@ -14,9 +14,60 @@ import {
   getMeetingsForContact,
   getProjectById,
   getContactById,
+  getSpeakerMap,
   queryOne
 } from './database'
 import { filterEligibleRecordingIds } from './recording-eligibility'
+
+/**
+ * The attendee roster + speaker map for a set of recordings (2026-07-24).
+ * Output headers were "Date: Not specified" with HALLUCINATED attendee names
+ * because the prompt carried neither. Roster priority: the linked calendar
+ * meeting's invite list; else the transcript participants (speaker-map names)
+ * — never leave it to the LLM to guess.
+ */
+function buildMeetingContext(
+  meeting: { subject: string; start_time: string; attendees?: string | null } | undefined,
+  recordingIds: string[],
+  fallbackDate?: string | null
+): { meeting_subject: string; meeting_date: string; attendees: string; speaker_map: string } {
+  // Attendees: calendar invite list first (it names who was ASKED); the
+  // transcript speaker-map names who actually SPOKE. Prefer invite, else speakers.
+  const speakerNames = new Set<string>()
+  const speakerMapLines: string[] = []
+  for (const rid of recordingIds) {
+    for (const entry of getSpeakerMap(rid)) {
+      speakerNames.add(entry.name)
+      speakerMapLines.push(`${entry.speaker_label} = ${entry.name}`)
+    }
+  }
+
+  let attendees = ''
+  if (meeting?.attendees) {
+    try {
+      const parsed = JSON.parse(meeting.attendees)
+      if (Array.isArray(parsed)) {
+        attendees = parsed
+          .map((a) => (typeof a === 'string' ? a : (a?.name ?? a?.displayName ?? '')))
+          .filter((n) => typeof n === 'string' && n.trim())
+          .join(', ')
+      }
+    } catch { /* attendees column not JSON */ }
+  }
+  if (!attendees) {
+    attendees = [...speakerNames].join(', ')
+  }
+
+  const dateSource = meeting?.start_time ?? fallbackDate ?? null
+  return {
+    meeting_subject: meeting?.subject ?? '',
+    meeting_date: dateSource
+      ? new Date(dateSource).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })
+      : '',
+    attendees,
+    speaker_map: speakerMapLines.length > 0 ? speakerMapLines.join('; ') : '(no speaker map available)'
+  }
+}
 
 export interface GenerateOutputOptions {
   templateId: OutputTemplateId
@@ -83,11 +134,10 @@ class OutputGeneratorService {
         }
       }
 
-      contextInfo = {
-        meeting_subject: meeting.subject,
-        meeting_date: new Date(meeting.start_time).toLocaleDateString(),
-        attendees: meeting.attendees || ''
-      }
+      contextInfo = buildMeetingContext(
+        meeting,
+        recordings.map((r) => r.id)
+      )
     } else if (projectId) {
       // All meetings for a project
       const project = getProjectById(projectId)
@@ -140,32 +190,23 @@ class OutputGeneratorService {
       // id when captures are absent — resolve both here.
       const kc = queryOne<any>('SELECT * FROM knowledge_captures WHERE id = ?', [options.knowledgeCaptureId])
 
-      if (kc) {
-        const transcript = getTranscriptByRecordingId(kc.source_recording_id)
-        if (transcript?.full_text) {
-          entries.push({ recordingId: kc.source_recording_id, text: transcript.full_text })
-        }
+      const sourceRecordingId: string = kc?.source_recording_id ?? options.knowledgeCaptureId
+      const transcript = getTranscriptByRecordingId(sourceRecordingId)
+      if (!transcript?.full_text) {
+        throw new Error(`Knowledge capture not found: ${options.knowledgeCaptureId}`)
+      }
+      entries.push({ recordingId: sourceRecordingId, text: transcript.full_text })
 
-        contextInfo = {
-          capture_title: kc.title,
-          capture_date: new Date(kc.captured_at).toLocaleDateString(),
-          capture_summary: kc.summary || ''
-        }
-      } else {
-        const transcript = getTranscriptByRecordingId(options.knowledgeCaptureId)
-        if (!transcript?.full_text) {
-          throw new Error(`Knowledge capture not found: ${options.knowledgeCaptureId}`)
-        }
-        entries.push({ recordingId: options.knowledgeCaptureId, text: transcript.full_text })
-
-        const recording = queryOne<any>('SELECT * FROM recordings WHERE id = ?', [options.knowledgeCaptureId])
-        contextInfo = {
-          capture_title: recording?.filename || 'Recording',
-          capture_date: recording?.date_recorded
-            ? new Date(recording.date_recorded).toLocaleDateString()
-            : new Date().toLocaleDateString(),
-          capture_summary: transcript.summary || ''
-        }
+      // 2026-07-24 — the header is only as good as its FACTS: the linked
+      // meeting's subject/date/attendees (+ speaker map), falling back to the
+      // recording's own date. Without this the LLM wrote "Date: Not specified"
+      // and invented attendee names.
+      const recording = queryOne<any>('SELECT * FROM recordings WHERE id = ?', [sourceRecordingId])
+      const meeting = recording?.meeting_id ? getMeetingById(recording.meeting_id) : undefined
+      contextInfo = {
+        ...buildMeetingContext(meeting, [sourceRecordingId], recording?.date_recorded ?? null),
+        capture_title: kc?.title ?? recording?.filename ?? 'Recording',
+        capture_summary: kc?.summary ?? transcript.summary ?? ''
       }
     }
 

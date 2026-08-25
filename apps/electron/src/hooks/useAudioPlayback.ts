@@ -64,7 +64,7 @@ export function useAudioPlayback() {
 
   // ---- Play Audio ----
 
-  const playAudio = useCallback(async (recordingId: string, filePath: string) => {
+  const playAudio = useCallback(async (recordingId: string, filePath: string, startTimeSec = 0) => {
     if (shouldLogQa()) console.log(`[QA-MONITOR][Operation] Playing: ${recordingId}, path: ${filePath}`)
 
     // Wait for any pending operation to complete to prevent race conditions
@@ -221,6 +221,31 @@ export function useAudioPlayback() {
 
         if (shouldLogQa()) console.log(`[QA-MONITOR][Operation] Setting audio src (Blob URL), mime: ${mimeType}, size: ${blob.size} bytes`)
         audioRef.current.src = audioBlobUrlRef.current
+        if (Number.isFinite(startTimeSec) && startTimeSec > 0) {
+          if (audioRef.current.readyState < HTMLMediaElement.HAVE_METADATA) {
+            await new Promise<void>((resolve, reject) => {
+              const audio = audioRef.current
+              if (!audio) return reject(new Error('Audio element was released before preview'))
+              const onLoaded = () => {
+                cleanup()
+                resolve()
+              }
+              const onError = () => {
+                cleanup()
+                reject(new Error('Could not load audio metadata for preview'))
+              }
+              const cleanup = () => {
+                audio.removeEventListener('loadedmetadata', onLoaded)
+                audio.removeEventListener('error', onError)
+              }
+              audio.addEventListener('loadedmetadata', onLoaded, { once: true })
+              audio.addEventListener('error', onError, { once: true })
+            })
+          }
+          const duration = audioRef.current.duration
+          audioRef.current.currentTime = Math.min(Number.isFinite(duration) ? duration : startTimeSec, startTimeSec)
+          setPlaybackProgress(audioRef.current.currentTime, duration)
+        }
         if (shouldLogQa()) console.log('[QA-MONITOR][Operation] Calling audio.play()')
         await audioRef.current.play()
         if (shouldLogQa()) console.log('[QA-MONITOR][Operation] audio.play() resolved successfully')

@@ -34,6 +34,7 @@ vi.mock('../database', () => ({
   markRecordingDownloaded: vi.fn(),
   addSyncedFile: vi.fn(),
   isFileSynced: vi.fn(() => false),
+  isFilePurged: () => false,
   getRecordingByFilename: vi.fn(() => null),
   getSyncedFilenames: vi.fn(() => new Set()),
   // spec-007: Mock new database functions
@@ -65,7 +66,7 @@ vi.mock('fs', async (importOriginal) => {
 
 // Need to import AFTER mocks
 import { getDownloadService, DownloadService, type DownloadQueueItem } from '../download-service'
-import { queryAll, run } from '../database'
+import { isFileSynced, queryAll, run } from '../database'
 
 const mockQueryAll = vi.mocked(queryAll)
 const mockRun = vi.mocked(run)
@@ -195,6 +196,21 @@ describe('DownloadService', () => {
       expect(q.find((i: DownloadQueueItem) => i.filename === 'interrupted.hda')?.status).toBe('pending')
     })
 
+    it('reconnect does not automatically retry a genuine USB failure', () => {
+      service.queueDownloads([{ filename: 'bad-file.hda', size: 38_000 }])
+      service.markFailed('bad-file.hda', 'USB transfer failed')
+
+      const automatic = service.retryFailed(true, true)
+      expect(automatic.count).toBe(0)
+      expect(service.getState().queue.find((i: DownloadQueueItem) => i.filename === 'bad-file.hda')?.status)
+        .toBe('failed')
+
+      const manual = service.retryFailed(true, false)
+      expect(manual.count).toBe(1)
+      expect(service.getState().queue.find((i: DownloadQueueItem) => i.filename === 'bad-file.hda')?.status)
+        .toBe('pending')
+    })
+
     it('re-queueing clears cancelReason so a later re-fail is tagged fresh', () => {
       setupMixedCancels()
       service.retryFailed(true, false)
@@ -287,6 +303,40 @@ describe('DownloadService', () => {
       restarted.destroy() // clean up the interval the fresh instance started
     })
 
+    it('restart: retains a failed download as actionable Operations history', () => {
+      const completedAt = new Date().toISOString()
+      mockQueryAll.mockReturnValueOnce([
+        {
+          id: 'missing.hda',
+          filename: 'missing.hda',
+          file_size: 4096,
+          progress: 0,
+          status: 'failed',
+          error: 'USB transfer failed',
+          started_at: null,
+          completed_at: completedAt,
+          recording_date: null,
+          cancel_reason: null,
+          created_at: completedAt
+        }
+      ])
+
+      const restarted = new DownloadService()
+      const restored = restarted.getState().queue.find((item) => item.filename === 'missing.hda')
+
+      expect(restored).toMatchObject({
+        status: 'failed',
+        progress: 0,
+        error: 'USB transfer failed'
+      })
+      expect(mockQueryAll.mock.calls[0]?.[0]).toContain("status IN ('pending', 'downloading', 'failed')")
+      mockRun.mockClear()
+      expect(restarted.dismissTerminal('missing.hda')).toBe(true)
+      expect(restarted.getState().queue.find((item) => item.filename === 'missing.hda')).toBeUndefined()
+      expect(mockRun).toHaveBeenCalledWith('DELETE FROM download_queue WHERE filename = ?', ['missing.hda'])
+      restarted.destroy()
+    })
+
     it('restart: an interrupted cancel is NOT reloaded (reconciliation re-queues it, correctly)', () => {
       // loadQueueFromDatabase's WHERE clause excludes cancelled rows unless
       // cancel_reason='user' — mirror that here: the mocked query returns nothing.
@@ -298,6 +348,53 @@ describe('DownloadService', () => {
       const queued = restarted.queueDownloads([{ filename: 'comeback.hda', size: 2048 }])
       expect(queued).toEqual(['comeback.hda'])
 
+      restarted.destroy()
+    })
+
+    it('restart: removes a stale pending row when the file is already synced', () => {
+      vi.mocked(isFileSynced).mockImplementation((filename) => filename === 'done.hda')
+      mockQueryAll.mockReturnValueOnce([{
+        id: 'done.hda',
+        filename: 'done.hda',
+        file_size: 4096,
+        progress: 0,
+        status: 'pending',
+        error: null,
+        started_at: null,
+        completed_at: null,
+        recording_date: null,
+        cancel_reason: null,
+        created_at: new Date().toISOString()
+      }])
+
+      const restarted = new DownloadService()
+
+      expect(restarted.getState().queue).toHaveLength(0)
+      expect(mockRun).toHaveBeenCalledWith('DELETE FROM download_queue WHERE filename = ?', ['done.hda'])
+      vi.mocked(isFileSynced).mockReturnValue(false)
+      restarted.destroy()
+    })
+
+    it('restart: recovers an interrupted in-progress row as pending', () => {
+      mockQueryAll.mockReturnValueOnce([{
+        id: 'interrupted.hda',
+        filename: 'interrupted.hda',
+        file_size: 4096,
+        progress: 73,
+        status: 'downloading',
+        error: null,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+        recording_date: null,
+        cancel_reason: null,
+        created_at: new Date().toISOString()
+      }])
+
+      const restarted = new DownloadService()
+      const restored = restarted.getState().queue.find((item) => item.filename === 'interrupted.hda')
+
+      expect(restored).toMatchObject({ status: 'pending', progress: 0 })
+      expect(restored?.startedAt).toBeUndefined()
       restarted.destroy()
     })
   })

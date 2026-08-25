@@ -1,5 +1,26 @@
-import { Plus, FileUp, FolderOpen, Download, Zap, RefreshCw, LayoutGrid, List, Trash2 } from 'lucide-react'
+import {
+  ChevronDown,
+  CloudDownload,
+  Download,
+  FileUp,
+  FolderOpen,
+  LayoutGrid,
+  List,
+  Plus,
+  RefreshCw,
+  Trash2,
+  Zap
+} from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger
+} from '@/components/ui/dropdown-menu'
+import { cn } from '@/lib/utils'
 import { TranscriptUpgradeButton } from './TranscriptUpgradeButton'
 
 interface LibraryHeaderProps {
@@ -10,9 +31,11 @@ interface LibraryHeaderProps {
     unsynced: number
   }
   deviceConnected: boolean
+  deviceOnlyActive: boolean
   loading: boolean
   compactView: boolean
-  downloadQueueSize: number
+  pendingDownloadCount: number
+  activeDownloadCount: number
   bulkCounts: {
     deviceOnly: number
     needsTranscription: number
@@ -25,8 +48,8 @@ interface LibraryHeaderProps {
   onBulkDownload: () => void
   onBulkProcess: () => void
   onRefresh: () => void
+  onShowDeviceOnly: () => void
   onSetCompactView: (compact: boolean) => void
-  /** spec-005/F17 T5 §D1/§D4 — Trash view-mode toggle + its (eagerly-loaded) count. */
   showTrash: boolean
   trashCount: number
   onToggleTrash: () => void
@@ -35,9 +58,11 @@ interface LibraryHeaderProps {
 export function LibraryHeader({
   stats,
   deviceConnected,
+  deviceOnlyActive,
   loading,
   compactView,
-  downloadQueueSize,
+  pendingDownloadCount,
+  activeDownloadCount,
   bulkCounts,
   bulkProcessing,
   bulkProgress,
@@ -47,119 +72,164 @@ export function LibraryHeader({
   onBulkDownload,
   onBulkProcess,
   onRefresh,
+  onShowDeviceOnly,
   onSetCompactView,
   showTrash,
   trashCount,
   onToggleTrash
 }: LibraryHeaderProps) {
-  return (
-    <header className="border-b px-6 py-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">Knowledge Library</h1>
-          <p className="text-sm text-muted-foreground">
-            {stats.total} capture{stats.total !== 1 ? 's' : ''}
-            {stats.unsynced > 0 && (
-              <span className="ml-2 text-orange-600 dark:text-orange-400">
-                ({stats.unsynced} on device only)
-              </span>
-            )}
-            {!deviceConnected && stats.deviceOnly === 0 && (
-              <span className="ml-2 text-muted-foreground">(device not connected)</span>
-            )}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={onAddRecording} title="Import audio file">
-            <Plus className="h-4 w-4 mr-2" />
-            Add Capture
-          </Button>
-          <Button variant="outline" size="sm" onClick={onImportFile} title="Import a document or image (PDF, MD, TXT, JSON, PNG, JPG, SVG, WEBP)">
-            <FileUp className="h-4 w-4 mr-2" />
-            Import File
-          </Button>
-          <Button variant="outline" size="sm" onClick={onOpenFolder}>
-            <FolderOpen className="h-4 w-4 mr-2" />
-            Open Folder
-          </Button>
+  const queuedDownloadCount = pendingDownloadCount + activeDownloadCount
+  const downloadActionLabel = activeDownloadCount > 0
+    ? 'Downloading'
+    : pendingDownloadCount > 0
+      ? 'Start download'
+      : 'Download'
 
-          {/* Bulk Download */}
+  return (
+    <header className="border-b px-4 py-3 lg:px-6">
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+        <div className="min-w-0 shrink-0">
+          <h1 className="whitespace-nowrap text-xl font-bold tracking-tight sm:text-2xl">Knowledge Library</h1>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+            <span className="tabular-nums">
+              {stats.total.toLocaleString()} source{stats.total !== 1 ? 's' : ''}
+            </span>
+            {stats.deviceOnly > 0 && (
+              <button
+                type="button"
+                onClick={onShowDeviceOnly}
+                aria-pressed={deviceOnlyActive}
+                aria-label={`Show ${stats.deviceOnly} source${stats.deviceOnly === 1 ? '' : 's'} that need download`}
+                className={cn(
+                  'inline-flex h-6 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium transition-colors',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
+                  deviceOnlyActive
+                    ? 'border-orange-400/60 bg-orange-500/15 text-orange-700 dark:text-orange-300'
+                    : 'border-orange-400/30 bg-orange-500/5 text-orange-700 hover:border-orange-400/60 hover:bg-orange-500/10 dark:text-orange-300'
+                )}
+                title="Show audio stored only on the HiDock"
+              >
+                <CloudDownload className="h-3.5 w-3.5" aria-hidden="true" />
+                <span className="tabular-nums">{stats.deviceOnly}</span>
+                <span>needs download</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="default" size="sm" title="Add a source to the Library">
+                <Plus className="mr-2 h-4 w-4" aria-hidden="true" />
+                Add source
+                <ChevronDown className="ml-1 h-3.5 w-3.5" aria-hidden="true" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56">
+              <DropdownMenuLabel>Add to Library</DropdownMenuLabel>
+              <DropdownMenuItem onSelect={onAddRecording}>
+                <Plus className="mr-2 h-4 w-4" aria-hidden="true" />
+                Import audio capture
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={onImportFile}>
+                <FileUp className="mr-2 h-4 w-4" aria-hidden="true" />
+                Import document or image
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={onOpenFolder}>
+                <FolderOpen className="mr-2 h-4 w-4" aria-hidden="true" />
+                Open Library folder
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+
           {bulkCounts.deviceOnly > 0 && (
             <Button
               variant="outline"
               size="sm"
               onClick={onBulkDownload}
-              disabled={downloadQueueSize > 0 || !deviceConnected}
-              title={`Download ${bulkCounts.deviceOnly} captures from device`}
+              disabled={activeDownloadCount > 0 || !deviceConnected}
+              aria-label={`${downloadActionLabel} ${bulkCounts.deviceOnly} source${bulkCounts.deviceOnly === 1 ? '' : 's'}`}
+              title={`Download ${bulkCounts.deviceOnly} source${bulkCounts.deviceOnly === 1 ? '' : 's'} from the device`}
             >
-              {downloadQueueSize > 0 ? (
-                <>
-                  <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
-                  Syncing...
-                </>
+              {activeDownloadCount > 0 ? (
+                <RefreshCw className="h-4 w-4 animate-spin xl:mr-2" aria-hidden="true" />
               ) : (
-                <>
-                  <Download className="h-4 w-4 mr-2" />
-                  Download All ({bulkCounts.deviceOnly})
-                </>
+                <Download className="h-4 w-4 xl:mr-2" aria-hidden="true" />
               )}
+              <span className="hidden xl:inline">{downloadActionLabel}</span>
+              <span className="ml-1 tabular-nums">
+                {queuedDownloadCount > 0 ? queuedDownloadCount : bulkCounts.deviceOnly}
+              </span>
             </Button>
           )}
 
-          {/* Bulk Process */}
           {bulkCounts.needsTranscription > 0 && (
             <Button
               variant="outline"
               size="sm"
               onClick={onBulkProcess}
               disabled={bulkProcessing}
-              title={`Queue ${bulkCounts.needsTranscription} captures for transcription`}
+              aria-label={`${bulkProcessing ? 'Processing' : 'Process'} ${bulkCounts.needsTranscription} audio source${bulkCounts.needsTranscription === 1 ? '' : 's'}`}
+              title={`Queue ${bulkCounts.needsTranscription} audio source${bulkCounts.needsTranscription === 1 ? '' : 's'} for transcription`}
             >
               {bulkProcessing ? (
-                <>
-                  <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
-                  {bulkProgress.current}/{bulkProgress.total}
-                </>
+                <RefreshCw className="h-4 w-4 animate-spin xl:mr-2" aria-hidden="true" />
               ) : (
-                <>
-                  <Zap className="h-4 w-4 mr-2" />
-                  Process All ({bulkCounts.needsTranscription})
-                </>
+                <Zap className="h-4 w-4 xl:mr-2" aria-hidden="true" />
               )}
+              <span className="hidden xl:inline">{bulkProcessing ? 'Processing' : 'Process'}</span>
+              <span className="ml-1 tabular-nums">
+                {bulkProcessing ? `${bulkProgress.current}/${bulkProgress.total}` : bulkCounts.needsTranscription}
+              </span>
             </Button>
           )}
 
-          <TranscriptUpgradeButton />
+          <TranscriptUpgradeButton compact />
 
-          <Button variant="outline" size="sm" onClick={onRefresh} disabled={loading}>
-            <RefreshCw className={`h-4 w-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
-            Refresh
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={onRefresh}
+            disabled={loading}
+            title="Refresh Library"
+            aria-label="Refresh Library"
+          >
+            <RefreshCw className={cn('h-4 w-4', loading && 'animate-spin')} aria-hidden="true" />
           </Button>
 
-          {/* Trash toggle (spec-005/F17 T5 §D1/§D4) — a real button with
-              aria-pressed + a visible count, always available so the user can
-              exit Trash even though the filters/view-toggle disappear there. */}
           <Button
             type="button"
-            variant={showTrash ? 'default' : 'outline'}
+            variant={showTrash ? 'secondary' : 'ghost'}
             size="sm"
             onClick={onToggleTrash}
             aria-pressed={showTrash}
+            aria-label={showTrash ? 'Exit Trash' : `View Trash${trashCount > 0 ? `, ${trashCount} items` : ''}`}
             title={showTrash ? 'Exit Trash' : 'View Trash'}
+            className="px-2"
           >
-            <Trash2 className="h-4 w-4 mr-2" aria-hidden="true" />
-            Trash ({trashCount})
+            <Trash2 className="h-4 w-4" aria-hidden="true" />
+            <span className="sr-only">{showTrash ? 'Exit Trash' : 'View Trash'}</span>
+            {trashCount > 0 && (
+              <span className="ml-1.5 min-w-4 rounded-full bg-muted px-1 text-[10px] font-semibold tabular-nums text-muted-foreground">
+                {trashCount}
+              </span>
+            )}
           </Button>
 
-          {/* View Toggle — hidden in Trash mode (§D1: Trash always forces the
-              SourceRow list; the card↔compact toggle has nothing to switch there). */}
           {!showTrash && (
-            <div className="flex items-center border rounded-md overflow-hidden ml-2" role="group" aria-label="View layout" data-testid="grid-view-toggle">
+            <div
+              className="flex items-center overflow-hidden rounded-md border bg-background"
+              role="group"
+              aria-label="View layout"
+              data-testid="grid-view-toggle"
+            >
               <Button
                 variant={compactView ? 'ghost' : 'default'}
-                size="sm"
+                size="icon-sm"
                 onClick={() => onSetCompactView(false)}
-                className="rounded-none border-0 px-2"
+                className="rounded-none border-0"
                 title="Card view"
                 aria-label="Card view"
                 aria-pressed={!compactView}
@@ -168,9 +238,9 @@ export function LibraryHeader({
               </Button>
               <Button
                 variant={compactView ? 'default' : 'ghost'}
-                size="sm"
+                size="icon-sm"
                 onClick={() => onSetCompactView(true)}
-                className="rounded-none border-0 border-l px-2"
+                className="rounded-none border-0 border-l"
                 title="List view"
                 aria-label="List view"
                 aria-pressed={compactView}

@@ -696,8 +696,14 @@ export async function runSelfIdentificationForRecording(
       const res = resolveContact(id.name, meetingId ? { meetingId } : undefined)
       const contact =
         res.id && res.confidence >= AUTO_LINK_THRESHOLD
-          ? assignSpeaker(recordingId, id.label, { contactId: res.id })
-          : assignSpeaker(recordingId, id.label, { newName: id.name })
+          ? assignSpeaker(recordingId, id.label, {
+              contactId: res.id,
+              voiceAnchor: { method: 'self-identification', confidence: 0.97 }
+            })
+          : assignSpeaker(recordingId, id.label, {
+              newName: id.name,
+              voiceAnchor: { method: 'self-identification', confidence: 0.97 }
+            })
       // Record a tiered mention resolution so the signal hierarchy / re-sweeps know
       // this attribution came from a near-certain self-identification.
       try {

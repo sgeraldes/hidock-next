@@ -32,48 +32,25 @@ import {
   stopTranscriptionProcessor,
   setMainWindowForTranscription
 } from './services/transcription'
-import { getVectorStore } from './services/vector-store'
-import { getRAGService } from './services/rag'
 import { setMainWindowForEventBus } from './services/event-bus'
 import { getStoragePolicyService } from './services/storage-policy'
 import { setMainWindowForMigration } from './ipc/migration-handlers'
 import { setMainWindowForValueBackfill } from './services/value-backfill'
-import { getIntegrityService } from './services/integrity-service'
 import { acquireSingleInstanceLock } from './single-instance'
 import { startBootScheduler } from './services/boot-scheduler'
 import { registerGatedBootTasks } from './services/boot-tasks'
 import { isFeatureEnabled, captureBootEffectiveFeatures } from './services/feature-gate'
+import { createSplashWindow } from './splash-screen'
+import { configureEarlyStartup } from './startup-configuration'
+import { getStartupState } from './startup-state'
+import { revealMainWindow, type WindowRevealReason } from './window-reveal'
 
-let mainWindow: BrowserWindow | null = null
-let splashWindow: BrowserWindow | null = null
-
-// Inline splash HTML to avoid build complexity
-const SPLASH_HTML = "<!DOCTYPE html>\n<html><head><meta charset=\"UTF-8\"><title>Meeting Intelligence</title>\n<style>\n*{margin:0;padding:0;box-sizing:border-box}\nbody{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);color:#e8e8e8;height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;-webkit-app-region:drag;user-select:none}\n.logo{font-size:22px;font-weight:600;margin-bottom:24px;color:#fff;text-align:center;max-width:300px}\n.spinner{width:32px;height:32px;border:3px solid rgba(255,255,255,0.1);border-top-color:#4f8cff;border-radius:50%;animation:spin 1s linear infinite;margin-bottom:20px}\n@keyframes spin{to{transform:rotate(360deg)}}\n.status{font-size:13px;color:#a0a0a0;text-align:center;max-width:280px;min-height:40px}\n.progress-container{width:200px;height:4px;background:rgba(255,255,255,0.1);border-radius:2px;margin:16px 0;overflow:hidden}\n.progress-bar{height:100%;background:#4f8cff;border-radius:2px;transition:width 0.3s ease;width:0%}\n.cancel-btn{-webkit-app-region:no-drag;margin-top:24px;padding:8px 20px;background:transparent;border:1px solid rgba(255,255,255,0.2);color:#a0a0a0;border-radius:6px;cursor:pointer;font-size:12px;transition:all 0.2s}\n.cancel-btn:hover{background:rgba(255,255,255,0.05);border-color:rgba(255,255,255,0.3);color:#fff}\n</style></head>\n<body>\n<div class=\"logo\">Meeting Intelligence</div>\n<div class=\"spinner\"></div>\n<div class=\"progress-container\"><div class=\"progress-bar\" id=\"progress\"></div></div>\n<div class=\"status\" id=\"status\">Initializing...</div>\n<button class=\"cancel-btn\" id=\"cancelBtn\">Cancel</button>\n<script>\nconst statusEl=document.getElementById('status');\nconst progressEl=document.getElementById('progress');\nconst cancelBtn=document.getElementById('cancelBtn');\nwindow.electronAPI?.onSplashStatus?.((status,progress)=>{statusEl.textContent=status;if(progress!==undefined)progressEl.style.width=progress+'%';});\ncancelBtn.addEventListener('click',()=>{window.electronAPI?.quitApp?.();});\n</script>\n</body></html>"
-
-function createSplashWindow(): BrowserWindow {
-  console.log('[Splash] Creating splash window...')
-  const splash = new BrowserWindow({
-    width: 340,
-    height: 280,
-    frame: false,
-    transparent: false,
-    resizable: false,
-    center: true,
-    alwaysOnTop: true,
-    skipTaskbar: false,
-    show: true, // Show immediately
-    backgroundColor: '#1a1a2e', // Match splash background to avoid flash
-    webPreferences: {
-      preload: join(__dirname, '../preload/splash.js'),
-      contextIsolation: true,
-      nodeIntegration: false
-    }
-  })
-
-  splash.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(SPLASH_HTML))
-  console.log('[Splash] Window created and loading content')
-  return splash
-}
+const startup = getStartupState()
+configureEarlyStartup() // idempotent fallback when this module is launched directly in tests/tools
+const runtimeDir = startup.runtimeDir ?? __dirname
+let mainWindow: BrowserWindow | null = startup.mainWindow
+let splashWindow: BrowserWindow | null = startup.splashWindow
+let mainWindowReveal: Promise<WindowRevealReason | null> | null = null
 
 async function updateSplashStatus(status: string, progress?: number): Promise<void> {
   if (splashWindow && !splashWindow.isDestroyed()) {
@@ -91,6 +68,7 @@ function closeSplash(): void {
   if (splashWindow && !splashWindow.isDestroyed()) {
     splashWindow.close()
     splashWindow = null
+    startup.splashWindow = null
   }
 }
 
@@ -130,16 +108,17 @@ function createWindow(): void {
           }
         }),
     webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
+      preload: join(runtimeDir, '../preload/index.js'),
       sandbox: false,
       contextIsolation: true,
       nodeIntegration: false
     }
   })
+  startup.mainWindow = mainWindow
 
-  mainWindow.on('ready-to-show', () => {
-    closeSplash()
-    mainWindow?.show()
+  mainWindowReveal = revealMainWindow(mainWindow, {
+    closeSplash,
+    log: (message) => console.log(message),
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
@@ -151,7 +130,7 @@ function createWindow(): void {
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    mainWindow.loadFile(join(runtimeDir, '../renderer/index.html'))
   }
 }
 
@@ -178,33 +157,11 @@ async function initializeServices(): Promise<void> {
   await initializeDatabase()
   console.log('Database initialized')
 
-  await updateSplashStatus('Checking data integrity...', 40)
-  const integrityService = getIntegrityService()
-  const integrityResult = await integrityService.runStartupChecks()
-  if (integrityResult.issuesFound > 0) {
-    console.log(`Integrity checks: ${integrityResult.issuesFixed}/${integrityResult.issuesFound} issues fixed`)
-  }
-
-  await updateSplashStatus('Initializing search index...', 60)
-  const vectorStore = getVectorStore()
-  let lastLoggedQuarter = -1
-  await vectorStore.initialize((loaded, total) => {
-    const fraction = total > 0 ? loaded / total : 1
-    void updateSplashStatus(`Initializing search index… ${Math.round(fraction * 100)}%`, 60 + fraction * 15)
-    const quarter = Math.floor(fraction * 4)
-    if (quarter > lastLoggedQuarter) {
-      lastLoggedQuarter = quarter
-      console.log(`[VectorStore] Loading embeddings: ${Math.round(fraction * 100)}% (${loaded}/${total})`)
-    }
-  })
-  console.log('Vector store initialized')
-
-  await updateSplashStatus('Starting AI services...', 75)
-  const rag = getRAGService()
-  await rag.initialize()
-  console.log('RAG service initialized')
-
-  await updateSplashStatus('Finalizing setup...', 90)
+  // The semantic index can exceed 2 GB. It is restored after the renderer's
+  // first paint by the assistant boot task, so opening the library never waits
+  // minutes for optional search infrastructure. RAG status remains honestly
+  // not-ready until that task has populated the in-memory store.
+  await updateSplashStatus('Finalizing setup...', 60)
   getStoragePolicyService()
   console.log('Storage policy service initialized')
 
@@ -260,18 +217,7 @@ async function initializeServices(): Promise<void> {
     .then(({ initConnectors }) => initConnectors())
     .catch((e) => console.error('[Connectors] startup wiring failed:', e))
 
-  updateSplashStatus('Starting application...', 100)
-}
-
-// Dev/QA isolation override — inert unless HIDOCK_DEV_USERDATA is set. Lets a
-// harness boot a fully isolated instance (own profile → own config/dataPath →
-// own single-instance lock scope) without editing source. MUST run before the
-// single-instance lock below and before anything reads userData. Every prior
-// QA pass had to temp-edit this file for the same effect (see .claude/qa/*).
-const devUserDataOverride = process.env.HIDOCK_DEV_USERDATA
-if (devUserDataOverride) {
-  app.setPath('userData', devUserDataOverride)
-  console.warn(`[DEV] userData overridden to ${devUserDataOverride}`)
+  await updateSplashStatus('Starting application...', 100)
 }
 
 // Single-instance guard — MUST run before any window is created and before the
@@ -282,23 +228,10 @@ if (devUserDataOverride) {
 // another instance already owns the lock, acquireSingleInstanceLock() calls
 // app.quit() and returns false; we then skip all boot so this process never
 // touches the DB.
-const hasSingleInstanceLock = acquireSingleInstanceLock({
+const hasSingleInstanceLock = startup.hasSingleInstanceLock ?? acquireSingleInstanceLock({
   getMainWindow: () => mainWindow,
   getSplashWindow: () => splashWindow
 })
-
-// Disable WebUSB blocklist to allow HiDock device access
-// Required since Electron 37+ which introduced Chromium's WebUSB blocklist
-// Without this, devices on the blocklist get "Access denied" errors
-app.commandLine.appendSwitch('disable-usb-blocklist')
-
-// Suppress Chromium-level USB/device enumeration noise on Windows
-// (usb_service_win.cc SetupDiGetDeviceProperty errors for non-HiDock devices — harmless)
-if (process.platform === 'win32') {
-  app.commandLine.appendSwitch('disable-usb-device-event-log')
-  // Suppress device_event_log severity to FATAL-only (3) to hide USB enumeration errors
-  app.commandLine.appendSwitch('device-event-log-level', '3')
-}
 
 // BUG-R6 / BUG-R7 — accepted cosmetic stderr noise (documented decision, NOT a bug):
 //
@@ -328,16 +261,6 @@ if (process.platform === 'win32') {
 // lines as cosmetic rather than adding a risky filter. See
 // docs/specs/2026-03-25-remaining-bugs.md (BUG-R6, BUG-R7).
 
-// Conditionally enable remote debugging (dev mode or explicit opt-in)
-const enableRemoteDebugging = is.dev || process.env.ENABLE_REMOTE_DEBUGGING === 'true'
-if (enableRemoteDebugging) {
-  // HIDOCK_DEV_CDP_PORT: dev/QA-only override so an isolated instance never
-  // contends with the default 9222 (inert when unset).
-  const cdpPort = process.env.HIDOCK_DEV_CDP_PORT || '9222'
-  app.commandLine.appendSwitch('remote-debugging-port', cdpPort)
-  console.warn(`[SECURITY] Remote debugging enabled on port ${cdpPort}`)
-}
-
 app.whenReady().then(async () => {
   // A non-primary instance already called app.quit() in the single-instance
   // guard above. Bail before creating any window or opening the DB, even if the
@@ -349,7 +272,13 @@ app.whenReady().then(async () => {
   electronApp.setAppUserModelId('com.hidock.meeting-intelligence')
 
   // Show splash screen immediately
-  splashWindow = createSplashWindow()
+  // Do not start service initialization until the splash preload and first DOM
+  // frame exist; otherwise the first progress IPC messages are lost and the
+  // user sees a grey/zero-progress gap.
+  if (!splashWindow || splashWindow.isDestroyed()) {
+    splashWindow = await createSplashWindow(join(runtimeDir, '../preload/splash.js'))
+    startup.splashWindow = splashWindow
+  }
 
   // Default open or close DevTools by F12 in development
   app.on('browser-window-created', (_, window) => {
@@ -428,7 +357,7 @@ app.whenReady().then(async () => {
   console.log('Recording watcher started')
 
   // ---------------------------------------------------------------------------
-  // Deferred heavy boot work — spread out, not bursted.
+  // Deferred bounded boot work.
   //
   // ROOT CAUSE of the post-restart freeze: on a large DB these tasks used to
   // fire together right after the window showed (the transcription backlog drain
@@ -437,34 +366,36 @@ app.whenReady().then(async () => {
   // main-process event loop, so it starved the renderer's IPC → "not responding"
   // with high CPU for a while.
   //
-  // Fix: register them on the boot scheduler, which runs them ONE AT A TIME with
-  // idle gaps in between (concurrency cap = 1) and only AFTER the renderer has
-  // painted. The same work still runs — just spread out so the UI stays live.
-  // Ordered cheapest/most-user-visible DB self-heals first; the sustained
-  // network-bound drains (transcription, embeddings) last so first paint and the
-  // initial library load are not competing for the event loop.
+  // Fix: register bounded local work on the boot scheduler, which runs tasks ONE
+  // AT A TIME with idle gaps (concurrency cap = 1) and only AFTER the renderer is
+  // visible. Provider-backed corpus sweeps are deliberately not boot tasks;
+  // startup must reach a terminal state rather than becoming a hidden
+  // maintenance session.
   // ---------------------------------------------------------------------------
 
   // Register the deferred heavy boot tasks, GATED by feature (Track I): a task
   // whose owning feature is disabled by the active preset is simply never queued.
-  // Under the default `full` preset all six register exactly as before. The
+  // Under the default `full` preset every bounded task registers. The
   // definitions + gating live in services/boot-tasks.ts (unit-tested there):
   //   org-reconcile (calendar), knowledge-capture-backfill (library floor),
   //   meeting-wiki-backfill (meeting-intelligence), start-transcription-processor
-  //   + reanalyze-failed-transcripts (transcription), embeddings-backfill (assistant).
+  //   (transcription), semantic-index-restore (assistant). Provider-backed repair
+  //   sweeps are explicit maintenance actions, not unbounded boot work.
   registerGatedBootTasks()
 
-  // Kick the scheduler once the renderer has painted its first frame, so heavy
-  // work never competes with first paint / the initial library IPC. A fallback
-  // timer covers the rare case where 'did-finish-load' never fires (load error);
-  // startBootScheduler is idempotent, so whichever fires first wins.
-  const kickBootScheduler = (): void => {
-    startBootScheduler().catch((e) => console.error('[BootScheduler] error:', e))
+  // The scheduler may start ONLY after the native main window is visible and
+  // the splash is closed. `did-finish-load` alone is too early: it previously
+  // launched a 52s vector restore while the main window was still hidden, then
+  // starved the `ready-to-show` handler and left the 100% splash up forever.
+  // revealMainWindow() also owns the bounded reveal fallback, so there is no
+  // background-work timer capable of firing behind a stuck splash.
+  const reveal = mainWindowReveal
+  if (reveal) {
+    void reveal.then((reason) => {
+      if (!reason) return
+      startBootScheduler().catch((e) => console.error('[BootScheduler] error:', e))
+    })
   }
-  if (mainWindow) {
-    mainWindow.webContents.once('did-finish-load', kickBootScheduler)
-  }
-  setTimeout(kickBootScheduler, 30000)
 
   console.log('Background services scheduled')
 

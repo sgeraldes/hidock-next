@@ -1,15 +1,15 @@
-import { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue } from 'react'
+import { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback, useDeferredValue } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { RefreshCw, AlertCircle, EyeOff, Trash2 } from 'lucide-react'
 import { toast } from '@/components/ui/toaster'
 import { getHiDockDeviceService } from '@/services/hidock-device'
-import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
+import { scanAndReconcile } from '@/services/device-sync-actions'
+import { overlayActiveTranscriptionStatuses, useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
 import {
   UnifiedRecording,
   hasLocalPath,
   isDeviceOnly,
-  matchesSemanticFilter,
   matchesExclusiveFilter
 } from '@/types/unified-recording'
 import { Transcript, Meeting } from '@/types'
@@ -26,6 +26,7 @@ import {
   EmptyState,
   DeviceDisconnectBanner,
   BulkActionsBar,
+  MultiSelectionSummary,
   LiveRegion,
   useAnnouncement,
   TriPaneLayout,
@@ -36,7 +37,13 @@ import {
 } from '@/features/library/components'
 import { useSourceSelection, useKeyboardNavigation, useTransitionFilters, useValueSuggestionToasts } from '@/features/library/hooks'
 import { buildSearchCorpus } from '@/features/library/utils/buildSearchCorpus'
-import { getSourceType, matchesSourceTypeFilter } from '@/features/library/utils/sourceType'
+import {
+  BUILTIN_ARTIFACT_TYPES,
+  getSourceType,
+  matchesSourceTypeFilter,
+  normalizeArtifactTypeDescriptors,
+  type LibraryArtifactTypeDescriptor
+} from '@/features/library/utils/sourceType'
 import { matchesDurationPreset } from '@/features/library/utils/durationFilter'
 import { trashRowToUnified } from '@/features/library/utils/trashRow'
 import type { DatabaseRecording } from '@/hooks/useUnifiedRecordings'
@@ -55,17 +62,108 @@ import {
   SUCCESS_REMOVED_FROM_DEVICE_TITLE,
   SUCCESS_RESTORED_TITLE,
   PARTIAL_DELETE_TITLE,
-  selectCompletionToast
+  selectCompletionToast,
+  type DeviceDeleteOutcome
 } from '@/features/library/utils/deletionCopy'
 import type { TypeCounts } from '@/features/library/components/LibraryFilters'
 import { useLibraryStore, useLibrarySorting } from '@/store/useLibraryStore'
 import { useOperations } from '@/hooks/useOperations'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
+import { useTranscriptionStore } from '@/store/features/useTranscriptionStore'
+
+const COMPACT_ROW_HEIGHT_PX = 48
+
+type PermanentDeleteStage = 'removing-local' | 'erasing-device'
+
+function purgeFilenameBase(filename?: string | null): string | null {
+  if (!filename) return null
+  return filename.trim().toLowerCase().replace(/\.(hda|wav|mp3)$/i, '')
+}
 
 export function Library() {
   const navigate = useNavigate()
   const location = useLocation()
-  const { recordings, loading, error, refresh, refreshLocal, deviceConnected, stats } = useUnifiedRecordings()
+  const {
+    recordings: durableRecordings,
+    loading,
+    error,
+    refresh,
+    refreshLocal,
+    deviceConnected,
+  } = useUnifiedRecordings()
+
+  // Hard-purged captures are knowledge tombstones, not fresh device sources.
+  // Library owns this projection rule; Device/Sync deliberately keeps showing
+  // a surviving hardware copy with its "Deleted" badge.
+  const [purgedFilenameBases, setPurgedFilenameBases] = useState<Set<string>>(new Set())
+  const [permanentDeleteProgress, setPermanentDeleteProgress] = useState<{
+    recordingId: string
+    filename: string
+    stage: PermanentDeleteStage
+  } | null>(null)
+
+  // Subscribe only to semantic queue changes. Progress updates do not change
+  // this primitive signature, so they cannot re-render/project ~2,000 rows.
+  const activeTranscriptionSignature = useTranscriptionStore((state) => JSON.stringify(
+    Array.from(state.queue.values())
+      .filter((item) => item.status === 'pending' || item.status === 'processing')
+      .map((item) => [item.recordingId, item.status] as const)
+      .sort(([left], [right]) => left.localeCompare(right))
+  ))
+  const recordings = useMemo(() => {
+    const pairs = JSON.parse(activeTranscriptionSignature) as Array<[string, 'pending' | 'processing']>
+    const statuses = new Map<string, 'pending' | 'processing'>()
+    for (const [recordingId, status] of pairs) {
+      if (status === 'processing' || !statuses.has(recordingId)) statuses.set(recordingId, status)
+    }
+    return overlayActiveTranscriptionStatuses(durableRecordings, statuses).filter((recording) => {
+      const deviceFilename = 'deviceFilename' in recording ? recording.deviceFilename : undefined
+      const filenameBase = purgeFilenameBase(deviceFilename ?? recording.filename)
+      return !filenameBase || !purgedFilenameBases.has(filenameBase)
+    })
+  }, [durableRecordings, activeTranscriptionSignature, purgedFilenameBases])
+
+  const stats = useMemo(() => {
+    let deviceOnly = 0
+    let localOnly = 0
+    let both = 0
+    let synced = 0
+    let unsynced = 0
+    for (const recording of recordings) {
+      if (recording.location === 'device-only') deviceOnly++
+      else if (recording.location === 'local-only') localOnly++
+      else both++
+      if (recording.syncStatus === 'synced') synced++
+      else unsynced++
+    }
+    return {
+      total: recordings.length,
+      deviceOnly,
+      localOnly,
+      both,
+      synced,
+      unsynced,
+      onSource: deviceOnly + both,
+      locallyAvailable: localOnly + both
+    }
+  }, [recordings])
+
+  // Built-in and add-on artifact types come from the main-process registry.
+  // A complete built-in fallback keeps the Library usable if IPC is unavailable.
+  const [artifactTypes, setArtifactTypes] = useState<LibraryArtifactTypeDescriptor[]>(BUILTIN_ARTIFACT_TYPES)
+  useEffect(() => {
+    let cancelled = false
+    const listTypes = window.electronAPI?.artifacts?.listTypes
+    // During Electron HMR the renderer can update before preload/main restart.
+    // Treat that version skew as a normal fallback, never a fatal page error.
+    if (typeof listTypes !== 'function') return () => { cancelled = true }
+    void listTypes().then((result) => {
+      if (!cancelled && result.success) setArtifactTypes(normalizeArtifactTypeDescriptors(result.data))
+    }).catch((registryError) => {
+      console.warn('[Library] Artifact type registry unavailable; using built-ins:', registryError)
+    })
+    return () => { cancelled = true }
+  }, [])
 
   // Selected source for center panel
   const selectedSourceId = useLibraryStore((state) => state.selectedSourceId)
@@ -87,10 +185,14 @@ export function Library() {
 
   // SM-03 fix: Use granular selector instead of pulling volatile state
   const downloadQueue = useDownloadQueue()
-
-  // Helper to check if a file is downloading
-  const isDownloading = useCallback((filename: string) => {
-    return downloadQueue.has(filename)
+  const downloadCounts = useMemo(() => {
+    let pending = 0
+    let active = 0
+    for (const entry of downloadQueue.values()) {
+      if (entry.status === 'pending') pending++
+      if (entry.status === 'downloading' || entry.status === 'cancelling') active++
+    }
+    return { pending, active }
   }, [downloadQueue])
 
   // UI state - expandedTranscripts centralized in useLibraryStore (B-LIB-005)
@@ -100,15 +202,11 @@ export function Library() {
   // Filter state - persisted in store across navigation
   // Using useTransitionFilters for non-blocking filter updates
   const {
-    filterMode,
-    semanticFilter,
     exclusiveFilter,
     categoryFilter,
     qualityFilter,
     statusFilter,
     searchQuery,
-    setFilterMode,
-    setSemanticFilter,
     setExclusiveFilter,
     setCategoryFilter,
     setQualityFilter,
@@ -148,7 +246,7 @@ export function Library() {
   useEffect(() => {
     enrichmentAbortController.current.abort()
     enrichmentAbortController.current = new AbortController()
-  }, [filterMode, semanticFilter, exclusiveFilter, categoryFilter, qualityFilter, statusFilter, sourceTypeFilter, durationPreset, searchQuery])
+  }, [exclusiveFilter, categoryFilter, qualityFilter, statusFilter, sourceTypeFilter, durationPreset, searchQuery])
 
   // Drag-and-drop state for file import
   const [isDragOver, setIsDragOver] = useState(false)
@@ -243,7 +341,13 @@ export function Library() {
     description: string
     actionLabel: string
     onConfirm: () => void
+    children?: React.ReactNode
   }>({ open: false, title: '', description: '', actionLabel: 'Delete', onConfirm: () => {} })
+
+  // Bulk permanent-delete flow: the checkbox is rendered inside confirmDialog.children,
+  // which is a stored React element. Keep its mutable value in a ref so the stored
+  // confirm callback reads the user's latest choice instead of its opening snapshot.
+  const bulkPurgeFromDeviceRef = useRef(true)
 
   // spec-005/F17 T5 §D6 — the permanent-delete flow gets its OWN dialog state
   // (impact copy + device checkbox have no slot in the shared confirmDialog above).
@@ -377,6 +481,35 @@ export function Library() {
     loadTrash()
   }, [loadTrash])
 
+  const loadPurgedFilenameBases = useCallback(async () => {
+    const getPurgedFilenames = window.electronAPI?.downloadService?.getPurgedFilenames
+    if (!getPurgedFilenames) return
+    try {
+      const filenames = await getPurgedFilenames()
+      setPurgedFilenameBases(new Set(filenames.map(purgeFilenameBase).filter((base): base is string => !!base)))
+    } catch (e) {
+      console.error('[Library] Failed to load purge tombstones:', e)
+    }
+  }, [])
+
+  const suppressPurgedFilenames = useCallback((...filenames: Array<string | null | undefined>) => {
+    setPurgedFilenameBases((previous) => {
+      const next = new Set(previous)
+      for (const filename of filenames) {
+        const base = purgeFilenameBase(filename)
+        if (base) next.add(base)
+      }
+      return next
+    })
+  }, [])
+
+  useEffect(() => {
+    void loadPurgedFilenameBases()
+    const handleDownloadsCompleted = () => { void loadPurgedFilenameBases() }
+    window.addEventListener('hidock:downloads-completed', handleDownloadsCompleted)
+    return () => window.removeEventListener('hidock:downloads-completed', handleDownloadsCompleted)
+  }, [loadPurgedFilenameBases])
+
   // Toggling Trash mode also clears bulk selection — Trash rows never wire
   // onSelectionChange (D1), so a stale "N selected" bulk bar would otherwise
   // persist from whatever was checked in the live list before the toggle.
@@ -445,7 +578,7 @@ export function Library() {
       .sort()
       .join(',')
     const meetingIds = recordings
-      .filter((rec) => hasLocalPath(rec) && rec.meetingId)
+      .filter((rec) => rec.meetingId)
       .map((rec) => rec.meetingId!)
       .sort()
       .join(',')
@@ -462,7 +595,7 @@ export function Library() {
     const loadEnrichment = async () => {
       const recordingIdsForTranscripts = recordings.filter((rec) => hasLocalPath(rec)).map((rec) => rec.id)
       const meetingIds = recordings
-        .filter((rec) => hasLocalPath(rec) && rec.meetingId)
+        .filter((rec) => rec.meetingId)
         .map((rec) => rec.meetingId!)
 
       try {
@@ -509,32 +642,46 @@ export function Library() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enrichmentKey])
 
-  // Stage 1: base population — location + personal visibility only. This is the
-  // set the source-type segmented control counts describe.
+  // Stage 1: exact availability + personal visibility. Overlapping inclusive
+  // accounting is deliberately not a user-facing Library query model.
   const baseRecordings = useMemo(() => {
     return recordings.filter((rec) => {
-      const locationMatches =
-        filterMode === 'semantic'
-          ? matchesSemanticFilter(rec.location, semanticFilter)
-          : matchesExclusiveFilter(rec.location, exclusiveFilter)
+      const locationMatches = matchesExclusiveFilter(rec.location, exclusiveFilter)
       if (!locationMatches) return false
       if (rec.personal && !showPersonal) return false
       return true
     })
-  }, [recordings, filterMode, semanticFilter, exclusiveFilter, showPersonal])
+  }, [recordings, exclusiveFilter, showPersonal])
 
-  // Per-type counts for the segmented control (over the location-scoped base).
+  // Type facet counts stay stable across availability changes so filtering to
+  // device-only never makes Images/PDFs disappear and strand the user.
   const typeCounts = useMemo<TypeCounts>(() => {
-    const counts: TypeCounts = { all: baseRecordings.length, audio: 0, image: 0, pdf: 0, note: 0 }
-    for (const rec of baseRecordings) {
-      const type = getSourceType(rec)
-      if (type === 'audio') counts.audio++
-      else if (type === 'image') counts.image++
-      else if (type === 'pdf') counts.pdf++
-      else if (type === 'note' || type === 'data') counts.note++
+    const typePopulation = recordings.filter((recording) => !recording.personal || showPersonal)
+    const counts: TypeCounts = { all: typePopulation.length }
+    for (const rec of typePopulation) {
+      const type = getSourceType(rec, artifactTypes)
+      counts[type] = (counts[type] ?? 0) + 1
     }
     return counts
-  }, [baseRecordings])
+  }, [recordings, showPersonal, artifactTypes])
+
+  // Availability counts describe the selected artifact type, not the whole
+  // library. Images/PDFs therefore never advertise impossible device states.
+  const availabilityStats = useMemo(() => {
+    const population = recordings.filter((recording) => {
+      if (recording.personal && !showPersonal) return false
+      return matchesSourceTypeFilter(getSourceType(recording, artifactTypes), sourceTypeFilter)
+    })
+    let deviceOnly = 0
+    let localOnly = 0
+    let both = 0
+    for (const recording of population) {
+      if (recording.location === 'device-only') deviceOnly++
+      else if (recording.location === 'local-only') localOnly++
+      else both++
+    }
+    return { total: population.length, deviceOnly, localOnly, both }
+  }, [recordings, showPersonal, artifactTypes, sourceTypeFilter])
 
   // Whether any capture is actually rated — drives the honest Quality empty state.
   const ratedCount = useMemo(
@@ -546,14 +693,14 @@ export function Library() {
   // (everything EXCEPT the list search). filterableCount = this length.
   const scopedRecordings = useMemo(() => {
     return baseRecordings.filter((rec) => {
-      if (!matchesSourceTypeFilter(getSourceType(rec), sourceTypeFilter)) return false
+      if (!matchesSourceTypeFilter(getSourceType(rec, artifactTypes), sourceTypeFilter)) return false
       if (!matchesDurationPreset(rec, durationPreset)) return false
       if (categoryFilter !== null && rec.category !== categoryFilter) return false
       if (qualityFilter !== null && rec.quality !== qualityFilter) return false
       if (statusFilter !== null && rec.status !== statusFilter) return false
       return true
     })
-  }, [baseRecordings, sourceTypeFilter, durationPreset, categoryFilter, qualityFilter, statusFilter])
+  }, [baseRecordings, artifactTypes, sourceTypeFilter, durationPreset, categoryFilter, qualityFilter, statusFilter])
 
   // Filter recordings based on scoped set + search, then sort.
   const filteredRecordings = useMemo(() => {
@@ -626,11 +773,38 @@ export function Library() {
   // directly — swapping only one of them would desync indices (spec's hazard note).
   const displayedRecordings = showTrash ? trashedRecordings : filteredRecordings
 
-  // Announce filter result changes (after filteredRecordings is declared)
-  useEffect(() => {
-    if (!loading && filteredRecordings.length !== recordings.length) {
-      announce(`Showing ${filteredRecordings.length} of ${recordings.length} captures`)
+  // `id` is the durable identity, but keep the renderer safe if an upstream
+  // reconciliation regression momentarily projects two device rows with the
+  // same database id. A filename-qualified key prevents React from retaining a
+  // stale sibling DOM node on the same virtual track while the local rebuild
+  // corrects the data.
+  const itemRenderKeys = useMemo(() => {
+    const idCounts = new Map<string, number>()
+    for (const recording of displayedRecordings) {
+      idCounts.set(recording.id, (idCounts.get(recording.id) ?? 0) + 1)
     }
+    return displayedRecordings.map((recording) =>
+      (idCounts.get(recording.id) ?? 0) > 1
+        ? `${recording.id}::${recording.filename}`
+        : recording.id
+    )
+  }, [displayedRecordings])
+
+  // Summaries and bulk actions describe the complete selection in the active
+  // corpus, even if a selected live recording is later hidden by a filter.
+  const selectedRecordings = useMemo(
+    () => (showTrash ? trashedRecordings : recordings).filter((recording) => selectedIds.has(recording.id)),
+    [showTrash, trashedRecordings, recordings, selectedIds]
+  )
+
+  // Announce every result transition, including the return to an unfiltered
+  // list. Leaving the prior filtered announcement mounted made assistive-tech
+  // and copied page text claim "Showing 0" while thousands of rows were visible.
+  useEffect(() => {
+    if (loading) return
+    announce(filteredRecordings.length === recordings.length
+      ? `Showing all ${recordings.length} sources`
+      : `Showing ${filteredRecordings.length} of ${recordings.length} sources`)
   }, [filteredRecordings.length, recordings.length, loading, announce])
 
   // Memoize the list of IDs for keyboard navigation
@@ -655,21 +829,25 @@ export function Library() {
   // C-005: Ref to hold the latest openDetail handler, wired to handleRowClick below
   const openDetailRef = useRef<(id: string) => void>(() => {})
 
-  // CX-T5-1 (spec-005 fix round): bulk selection has no meaning in Trash —
-  // trash rows never wire onSelectionChange, and BulkActionsBar's handlers all
-  // operate on filteredRecordings (the LIVE list), so a Space/Ctrl+A selection
-  // made in Trash would show misleading counts over no-op actions. Gate the
-  // selection-mutating keyboard shortcuts on !showTrash (arrow/Home/End/Enter
-  // navigation stays available); the bulk bar itself is hidden below.
+  // Selection works in Trash with the SAME explorer semantics as the live list
+  // (2026-07-23 — the "you cannot select it in Trash" gap): plain click selects
+  // + opens the detail, ctrl/shift build ranges, and the bulk bar offers the
+  // Trash-appropriate actions (Restore / Delete permanently) over THIS corpus.
   const guardedToggleSelection = useCallback((id: string) => {
-    if (showTrash) return
     toggleSelection(id)
-  }, [showTrash, toggleSelection])
+  }, [toggleSelection])
 
   const guardedSelectAll = useCallback((ids: string[]) => {
-    if (showTrash) return
     selectAll(ids)
-  }, [showTrash, selectAll])
+  }, [selectAll])
+
+  // Selection ∩ Trash corpus — drives the Trash bulk bar's visibility/count.
+  // (Entering Trash clears the live selection, but belt-and-braces: a stale id
+  // that isn't in the Trash corpus must never light the bar.)
+  const trashSelectedCount = useMemo(
+    () => trashedRecordings.filter((r) => selectedIds.has(r.id)).length,
+    [trashedRecordings, selectedIds]
+  )
 
   // Keyboard navigation for accessibility - LB-19 fix: Use focusedIndex and containerRef
   const { handleKeyDown, focusedIndex, containerRef } = useKeyboardNavigation({
@@ -678,7 +856,10 @@ export function Library() {
     expandedIds: new Set<string>(), // No expansion - keep for compatibility
     onToggleSelection: guardedToggleSelection,
     onSelectAll: guardedSelectAll,
-    onClearSelection: clearSelection,
+    onClearSelection: useCallback(() => {
+      clearSelection()
+      setSelectedSourceId(null) // Esc also closes the reader panel (owner request)
+    }, [clearSelection, setSelectedSourceId]),
     onOpenDetail: useCallback((id: string) => openDetailRef.current(id), []), // C-005: Enter opens detail panel
     onToggleExpand: () => {}, // No-op - expansion removed
     onExpandRow: () => {}, // No-op - expansion removed
@@ -691,10 +872,11 @@ export function Library() {
   const bulkCounts = useMemo(() => {
     const deviceOnly = filteredRecordings.filter((r) => isDeviceOnly(r)).length
     const needsTranscription = filteredRecordings.filter(
-      (r) => hasLocalPath(r) && (r.transcriptionStatus === 'none' || r.transcriptionStatus === 'error')
+      (r) => getSourceType(r, artifactTypes) === 'audio' && hasLocalPath(r) &&
+        (r.transcriptionStatus === 'none' || r.transcriptionStatus === 'no_speech' || r.transcriptionStatus === 'error')
     ).length
     return { deviceOnly, needsTranscription }
-  }, [filteredRecordings])
+  }, [filteredRecordings, artifactTypes])
 
   // Handlers
   const toggleTranscript = useCallback((id: string) => {
@@ -761,7 +943,8 @@ export function Library() {
 
   const handleBulkProcess = async () => {
     const needsProcessing = filteredRecordings.filter(
-      (r) => hasLocalPath(r) && (r.transcriptionStatus === 'none' || r.transcriptionStatus === 'error')
+      (r) => getSourceType(r, artifactTypes) === 'audio' && hasLocalPath(r) &&
+        (r.transcriptionStatus === 'none' || r.transcriptionStatus === 'no_speech' || r.transcriptionStatus === 'error')
     )
     if (needsProcessing.length === 0) return
 
@@ -787,7 +970,8 @@ export function Library() {
 
   const handleSelectedProcess = useCallback(async () => {
     const selectedRecordings = filteredRecordings.filter(
-      (r) => selectedIds.has(r.id) && hasLocalPath(r) && (r.transcriptionStatus === 'none' || r.transcriptionStatus === 'error')
+      (r) => selectedIds.has(r.id) && getSourceType(r, artifactTypes) === 'audio' && hasLocalPath(r) &&
+        (r.transcriptionStatus === 'none' || r.transcriptionStatus === 'no_speech' || r.transcriptionStatus === 'error')
     )
     if (selectedRecordings.length === 0) return
 
@@ -802,7 +986,7 @@ export function Library() {
       setBulkProcessing(false)
       setBulkProgress({ current: 0, total: 0 })
     }
-  }, [filteredRecordings, selectedIds, refresh, clearSelection, queueBulkTranscriptions])
+  }, [filteredRecordings, selectedIds, artifactTypes, refresh, clearSelection, queueBulkTranscriptions])
 
   // B-LIB-006: Extracted bulk delete execution (called after confirmation)
   const executeBulkDelete = useCallback(async (selectedRecordings: UnifiedRecording[]) => {
@@ -880,23 +1064,303 @@ export function Library() {
     const hasLocalFiles = selectedRecordings.some((r) => hasLocalPath(r))
     const hasDeviceFiles = selectedRecordings.some((r) => isDeviceOnly(r))
 
-    let description = `Delete ${selectedRecordings.length} selected item${selectedRecordings.length > 1 ? 's' : ''}?`
+    // SOFT delete = Move to Trash: hidden + excluded from AI, RESTORABLE.
+    // Nothing is erased from disk and device copies stay (device-only rows
+    // are the exception — those are deleted from the hardware since the row
+    // has no local existence at all).
+    let description = `Move ${selectedRecordings.length} selected item${selectedRecordings.length > 1 ? 's' : ''} to Trash?`
     if (hasLocalFiles && hasDeviceFiles) {
-      description += ' This includes both local files and device recordings.'
-    } else if (hasLocalFiles) {
-      description += ' This will remove local files and any transcripts.'
+      description += ' They will be hidden and restorable — except the device-only ones, which are erased from the device hardware.'
     } else {
-      description += ' This cannot be undone.'
+      description += ' They will be hidden and excluded from AI, and you can restore them from Trash anytime. Nothing is erased from disk.'
     }
 
     setConfirmDialog({
       open: true,
-      title: 'Delete Selected Items',
+      title: 'Move to Trash',
       description,
-      actionLabel: 'Delete',
+      actionLabel: 'Move to Trash',
       onConfirm: () => executeBulkDelete(selectedRecordings)
     })
   }, [filteredRecordings, selectedIds, executeBulkDelete])
+
+  // (b) Bulk HARD purge — the same cascade the single-row "Delete permanently"
+  // flow runs (tombstones + vector-cache invalidation + file unlink + retries),
+  // with an optional "Also delete from device" pass over rows that have a
+  // hardware copy. Honest aggregate outcome, never a blanket success claim.
+  const handleSelectedDeletePermanent = useCallback(async () => {
+    const selectedRecordings = displayedRecordings.filter((r) => selectedIds.has(r.id))
+    if (selectedRecordings.length === 0) return
+
+    // 2026-07-22 — device copies are detected AUTHORITATIVELY (per-row
+    // deletionImpact, the same source the single-row dialog uses), NOT via the
+    // unified `location` field: a row can be 'local-only' in the unified view
+    // while on_device=1 in the DB (its device copy never showed in the bulk
+    // dialog — the "missing checkbox" bug).
+    const impacts = new Map<string, {
+      onDevice?: boolean
+      deviceFilename?: string | null
+      transcripts?: number
+      actionItems?: number
+      embeddings?: number
+      captures?: number
+      artifacts?: number
+      graphEstimate?: number | null
+    }>()
+    await Promise.all(
+      selectedRecordings.map(async (recording) => {
+        if (isDeviceOnly(recording)) {
+          impacts.set(recording.id, { onDevice: true, deviceFilename: recording.deviceFilename })
+          return
+        }
+        try {
+          const impact = await window.electronAPI.recordings.deletionImpact(recording.id)
+          if (impact?.success && impact.data) impacts.set(recording.id, impact.data)
+        } catch {
+          // The purge remains available, but the dialog omits unavailable estimates.
+        }
+      })
+    )
+    const deviceCopyCount = selectedRecordings.filter((recording) => impacts.get(recording.id)?.onDevice).length
+    const allDeviceOnly = selectedRecordings.every(isDeviceOnly)
+    const impactTotals = Array.from(impacts.values()).reduce<{
+      transcripts: number
+      actionItems: number
+      embeddings: number
+      captures: number
+      artifacts: number
+    }>(
+      (totals, impact) => ({
+        transcripts: totals.transcripts + (impact.transcripts ?? 0),
+        actionItems: totals.actionItems + (impact.actionItems ?? 0),
+        embeddings: totals.embeddings + (impact.embeddings ?? 0),
+        captures: totals.captures + (impact.captures ?? 0),
+        artifacts: totals.artifacts + (impact.artifacts ?? 0),
+      }),
+      { transcripts: 0, actionItems: 0, embeddings: 0, captures: 0, artifacts: 0 }
+    )
+    const impactSummary = [
+      impactTotals.transcripts > 0 ? `${impactTotals.transcripts} transcript${impactTotals.transcripts === 1 ? '' : 's'}` : '',
+      impactTotals.actionItems > 0 ? `${impactTotals.actionItems} action item${impactTotals.actionItems === 1 ? '' : 's'}` : '',
+      impactTotals.embeddings > 0 ? `${impactTotals.embeddings} embedding${impactTotals.embeddings === 1 ? '' : 's'}` : '',
+      impactTotals.captures > 0 ? `${impactTotals.captures} capture${impactTotals.captures === 1 ? '' : 's'}` : '',
+      impactTotals.artifacts > 0 ? `${impactTotals.artifacts} artifact${impactTotals.artifacts === 1 ? '' : 's'}` : '',
+    ].filter(Boolean).join(', ')
+
+    const execute = async (alsoDeleteFromDevice: boolean) => {
+      setBulkProcessing(true)
+      setBulkProgress({ current: 0, total: selectedRecordings.length })
+      let localPurged = 0
+      let deviceOnlyDeleted = 0
+      let deviceDeleted = 0
+      let deviceQueued = 0
+      let deviceRemains = 0
+      let cleanupWarnings = 0
+      let deviceCacheChanged = false
+      const failures: string[] = []
+      const deviceService = getHiDockDeviceService()
+      try {
+        for (let i = 0; i < selectedRecordings.length; i++) {
+          const recording = selectedRecordings[i]
+          const impact = impacts.get(recording.id)
+          setBulkProgress({ current: i + 1, total: selectedRecordings.length })
+          const initialStage: PermanentDeleteStage = isDeviceOnly(recording) ? 'erasing-device' : 'removing-local'
+          setPermanentDeleteProgress({ recordingId: recording.id, filename: recording.filename, stage: initialStage })
+          announce(
+            initialStage === 'erasing-device'
+              ? `Erasing device copy ${i + 1} of ${selectedRecordings.length}`
+              : `Removing local data ${i + 1} of ${selectedRecordings.length}`
+          )
+          try {
+            if (isDeviceOnly(recording)) {
+              // Device-only rows have no local data to purge. Permanent deletion
+              // therefore requires deleting their sole copy from the hardware.
+              if (!alsoDeleteFromDevice) {
+                failures.push(`${recording.filename}: device copy was kept`)
+                continue
+              }
+              const ok = await deviceService.deleteRecording(recording.deviceFilename)
+              if (!ok) {
+                throw new Error(deviceService.getLastDeleteError?.() ?? 'The HiDock did not confirm the erase.')
+              }
+              suppressPurgedFilenames(recording.deviceFilename)
+              const reconciled = await window.electronAPI.recordings.markNotOnDevice?.(
+                recording.id,
+                recording.deviceFilename
+              )
+              if (!reconciled?.success) cleanupWarnings++
+              deviceOnlyDeleted++
+              deviceDeleted++
+              deviceCacheChanged = true
+              continue
+            }
+
+            // Hard purge (v51 tombstones + binary-cache invalidation included).
+            const res = await window.electronAPI.recordings.deleteCascade(recording.id, true)
+            if (!res?.success) throw new Error(res?.error || 'Purge failed')
+            suppressPurgedFilenames(
+              recording.filename,
+              impact?.deviceFilename,
+              'deviceFilename' in recording ? recording.deviceFilename : undefined
+            )
+            if (selectedSourceId === recording.id) setSelectedSourceId(null)
+            if (currentlyPlayingId === recording.id) audioControls.stop()
+            localPurged++
+            if (res.allFilesRemoved === false || res.graphCleanupSkipped) cleanupWarnings++
+
+            if (alsoDeleteFromDevice && impact?.onDevice) {
+              // Use the authoritative device-native filename from deletionImpact;
+              // unified location can report local-only while a device copy exists.
+              const targetDeviceFilename = impact.deviceFilename ?? (
+                recording.location === 'both' ? recording.deviceFilename : undefined
+              )
+              if (!targetDeviceFilename) {
+                deviceRemains++
+                continue
+              }
+              try {
+                setPermanentDeleteProgress({
+                  recordingId: recording.id,
+                  filename: targetDeviceFilename,
+                  stage: 'erasing-device'
+                })
+                announce(`Removed from Library. Erasing device copy ${i + 1} of ${selectedRecordings.length}`)
+                // Use the durable main-process path for connected and
+                // disconnected states alike. It attempts exactly once now and,
+                // on any USB failure, journals the device filename against this
+                // hard-purge row for the next clean reconnect sweep.
+                if (!res.journalId) {
+                  deviceRemains++
+                  continue
+                }
+                const queuedDelete = await window.electronAPI.recordings.queueDeviceDelete({
+                  deviceFilename: targetDeviceFilename,
+                  journalId: res.journalId,
+                })
+                if (!queuedDelete?.success) {
+                  deviceRemains++
+                } else if (queuedDelete.deletedNow) {
+                  deviceDeleted++
+                  deviceCacheChanged = true
+                  deviceService.removeCachedRecording(targetDeviceFilename)
+                  const markNotOnDevice = window.electronAPI.recordings.markNotOnDevice
+                  if (markNotOnDevice) {
+                    const reconciled = await markNotOnDevice(recording.id, targetDeviceFilename)
+                    if (!reconciled?.success) cleanupWarnings++
+                  } else {
+                    cleanupWarnings++
+                  }
+                } else if (queuedDelete.queued) {
+                  deviceQueued++
+                } else {
+                  deviceRemains++
+                }
+              } catch {
+                deviceRemains++
+              }
+            }
+          } catch (e) {
+            failures.push(`${recording.filename}: ${e instanceof Error ? e.message : String(e)}`)
+          }
+        }
+
+        await refresh(false)
+        if (deviceCacheChanged) await refreshLocal?.()
+        await loadTrash()
+        clearSelection()
+
+        const removed = localPurged + deviceOnlyDeleted
+        const issues = [
+          failures.length > 0
+            ? `${failures.length} failed: ${failures[0]}${failures.length > 1 ? ` (+${failures.length - 1} more)` : ''}`
+            : '',
+          cleanupWarnings > 0
+            ? `${cleanupWarnings} item${cleanupWarnings === 1 ? '' : 's'} still has pending local cleanup`
+            : '',
+          deviceQueued > 0
+            ? `${deviceQueued} device cop${deviceQueued === 1 ? 'y is' : 'ies are'} queued for erase on reconnect`
+            : '',
+          deviceRemains > 0
+            ? `${deviceRemains} device cop${deviceRemains === 1 ? 'y remains' : 'ies remain'}`
+            : '',
+        ].filter(Boolean)
+        const deviceNote = deviceDeleted > 0
+          ? ` ${deviceDeleted} device cop${deviceDeleted === 1 ? 'y was' : 'ies were'} erased.`
+          : ''
+
+        if (issues.length > 0) {
+          const oneFailedDeviceOnly =
+            selectedRecordings.length === 1 &&
+            isDeviceOnly(selectedRecordings[0]) &&
+            removed === 0 &&
+            failures.length === 1
+          if (oneFailedDeviceOnly) {
+            const failurePrefix = `${selectedRecordings[0].filename}: `
+            const failureReason = failures[0].startsWith(failurePrefix)
+              ? failures[0].slice(failurePrefix.length)
+              : failures[0]
+            toast.warning(
+              'Device copy remains',
+              `${failureReason} ${selectedRecordings[0].filename} is still on the device.`,
+              { action: { label: 'Retry', onClick: () => { void execute(true) } } }
+            )
+          } else {
+            toast.warning(
+              'Permanent deletion completed with issues',
+              `${removed} of ${selectedRecordings.length} item${selectedRecordings.length === 1 ? '' : 's'} permanently deleted. ${issues.join('; ')}.${deviceNote}`
+            )
+          }
+        } else {
+          toast.success(
+            `Permanently deleted ${removed} item${removed === 1 ? '' : 's'}`,
+            `All associated local data was erased.${deviceNote}`
+          )
+        }
+      } finally {
+        setBulkProcessing(false)
+        setBulkProgress({ current: 0, total: 0 })
+        setPermanentDeleteProgress(null)
+      }
+    }
+
+    bulkPurgeFromDeviceRef.current = true
+    setConfirmDialog({
+      open: true,
+      title: allDeviceOnly ? 'Erase from device' : 'Delete permanently',
+      description: allDeviceOnly
+        ? `Permanently erase ${selectedRecordings.length} selected recording${selectedRecordings.length === 1 ? '' : 's'} from the HiDock? ` +
+          `No local cop${selectedRecordings.length === 1 ? 'y exists' : 'ies exist'}. This cannot be undone.`
+        : `Permanently delete ${selectedRecordings.length} selected item${selectedRecordings.length > 1 ? 's' : ''}? ` +
+          `This erases the recordings and all associated local data${impactSummary ? ` (${impactSummary})` : ''}. This cannot be undone.` +
+          (deviceCopyCount > 0 ? ` ${deviceCopyCount} ${deviceCopyCount === 1 ? 'copy also exists' : 'copies also exist'} on the device.` : ''),
+      actionLabel: allDeviceOnly ? 'Erase from device' : 'Delete permanently',
+      children: deviceCopyCount > 0 && !allDeviceOnly ? (
+        <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+          <input
+            type="checkbox"
+            defaultChecked
+            onChange={(event) => { bulkPurgeFromDeviceRef.current = event.target.checked }}
+            className="h-4 w-4 rounded border-border"
+          />
+          Also delete {deviceCopyCount === 1 ? 'the device copy' : `${deviceCopyCount} device copies`}
+        </label>
+      ) : undefined,
+      onConfirm: () => execute(allDeviceOnly ? true : bulkPurgeFromDeviceRef.current)
+    })
+  }, [
+    displayedRecordings,
+    selectedIds,
+    refresh,
+    refreshLocal,
+    loadTrash,
+    clearSelection,
+    suppressPurgedFilenames,
+    announce,
+    selectedSourceId,
+    setSelectedSourceId,
+    currentlyPlayingId,
+    audioControls
+  ])
 
   // Bulk "mark personal" — flags every eligible (non device-only) selected
   // recording as ignored. Reversible per-row afterwards.
@@ -926,26 +1390,44 @@ export function Library() {
   const executeDeleteFromDevice = useCallback(async (recording: UnifiedRecording) => {
     if (!('deviceFilename' in recording)) return
     setDeleting(recording.id)
+    setPermanentDeleteProgress({ recordingId: recording.id, filename: recording.deviceFilename, stage: 'erasing-device' })
+    announce(`Erasing the device copy for ${recording.filename}`)
     try {
-      const ok = await getHiDockDeviceService().deleteRecording(recording.deviceFilename)
-      if (!ok) throw new Error('Device deletion failed')
-      // Local copies are intentionally kept — the next device scan reconciles
-      // the row to local-only via markRecordingsNotOnDevice.
-      await refresh(false)
+      const deviceService = getHiDockDeviceService()
+      const ok = await deviceService.deleteRecording(recording.deviceFilename)
+      if (!ok) throw new Error(deviceService.getLastDeleteError?.() ?? 'The HiDock did not confirm the erase.')
+      // `success` and idempotent `not-exists` both mean the hardware end state
+      // is satisfied. Reconcile both caches immediately; waiting for the next
+      // device scan leaves an already-absent file visible as device-only.
+      const reconciled = await window.electronAPI.recordings.markNotOnDevice?.(
+        recording.id,
+        recording.deviceFilename
+      )
+      const rebuilt = await refreshLocal?.()
+      const viewMayBeStale = !reconciled?.success || rebuilt === false
       // spec-005/F17 T5 §D2 — device delete previously only ever toasted on
       // error; a real removal now confirms success too.
       import('@/components/ui/toaster').then(({ toast }) => {
-        toast.success(SUCCESS_REMOVED_FROM_DEVICE_TITLE, `"${recording.filename}" was erased from the HiDock.`)
+        if (viewMayBeStale) {
+          toast.warning(
+            'Device file is absent — view may be stale',
+            `The HiDock no longer has "${recording.filename}", but the Library could not fully refresh. Use Refresh to reconcile the view.`
+          )
+        } else {
+          toast.success(SUCCESS_REMOVED_FROM_DEVICE_TITLE, `"${recording.filename}" was erased from the HiDock.`)
+        }
       })
     } catch (e) {
       console.error('Failed to delete from device:', e)
       import('@/components/ui/toaster').then(({ toast }) => {
-        toast.error('Delete Failed', `Failed to delete "${recording.filename}" from device. Please try again.`)
+        const reason = e instanceof Error ? e.message : String(e)
+        toast.error('Device copy remains', `${reason} ${recording.filename} is still on the device.`)
       })
     } finally {
       setDeleting(null)
+      setPermanentDeleteProgress(null)
     }
-  }, [refresh])
+  }, [refreshLocal, announce])
 
   // PESSIMISTIC UPDATE: Server-first delete with confirmation dialog
   const handleDeleteFromDevice = useCallback(async (recording: UnifiedRecording) => {
@@ -1036,6 +1518,8 @@ export function Library() {
     impact?: DeletePermanentDialogImpact
   ) => {
     setDeleting(recording.id)
+    setPermanentDeleteProgress({ recordingId: recording.id, filename: recording.filename, stage: 'removing-local' })
+    announce(`Removing local data for ${recording.filename}`)
     try {
       const res = opts?.skipGraphCleanup
         ? await window.electronAPI.recordings.deleteCascade(recording.id, true, { skipGraphCleanup: true })
@@ -1064,6 +1548,14 @@ export function Library() {
         return
       }
 
+      suppressPurgedFilenames(
+        recording.filename,
+        impact?.deviceFilename,
+        'deviceFilename' in recording ? recording.deviceFilename : undefined
+      )
+      if (selectedSourceId === recording.id) setSelectedSourceId(null)
+      if (currentlyPlayingId === recording.id) audioControls.stop()
+
       await refresh(false)
 
       // AR3-2 — the local purge succeeded; determine whether every on-disk
@@ -1073,7 +1565,7 @@ export function Library() {
       const pendingKinds: string[] = res.pendingFileKinds ?? []
 
       // D3/AR3-6 — device branch, only after the local purge committed above.
-      let deviceOutcome: 'not-requested' | 'success' | 'partial' = 'not-requested'
+      let deviceOutcome: DeviceDeleteOutcome = 'not-requested'
       // CX-T6-5/CX-T6-6 (fix rounds 2-3): the device copy was removed but the
       // VIEW may still show the pre-delete row — either because the
       // main-process reconciliation failed (CX-T6-5) or because the local
@@ -1083,73 +1575,75 @@ export function Library() {
       if (opts?.alsoDeleteFromDevice) {
         const targetDeviceFilename =
           impact?.deviceFilename ?? ('deviceFilename' in recording ? recording.deviceFilename : undefined)
-        // AR3-6(a) TOCTOU — re-check live signals at EXECUTE time, not
-        // confirm time: disconnected, or no longer a real device filename.
-        if (!deviceConnected || !targetDeviceFilename) {
+        if (!targetDeviceFilename) {
           deviceOutcome = 'partial'
         } else {
-          try {
-            const ok = await getHiDockDeviceService().deleteRecording(targetDeviceFilename)
-            if (ok) {
-              deviceOutcome = 'success'
-              // AR3-6(b) — reconcile immediately so the UI doesn't show a
-              // stale on-device row before the next authoritative scan.
-              // CX-T6-1 (fix round): the hard cascade already deleted the
-              // recordings row, so the id alone no longer resolves — pass the
-              // device filename too, which reconciles the offline device
-              // cache (the only remaining source that would resurrect this
-              // file as a ghost device-only row).
-              // CX-T6-5 (fix round 2): the IPC now propagates a real cache-
-              // delete failure ({success:false}) instead of swallowing it —
-              // treat that (or a thrown IPC) as stale-view and say so.
-              try {
-                const reconciled = await window.electronAPI.recordings.markNotOnDevice(
-                  recording.id,
-                  targetDeviceFilename
-                )
-                if (!reconciled?.success) {
-                  viewMayBeStale = true
-                  console.error(
-                    '[Library] Device-presence reconciliation failed:',
-                    (reconciled as { error?: string } | undefined)?.error
+          setPermanentDeleteProgress({
+            recordingId: recording.id,
+            filename: targetDeviceFilename,
+            stage: 'erasing-device'
+          })
+          announce(`Removed from Library. Erasing the device copy for ${recording.filename}`)
+          // One main-process operation handles both connected and disconnected
+          // states: attempt the hardware erase exactly once and durably journal
+          // it on failure. The old connected branch bypassed the journal, so a
+          // mid-command disconnect left the copy on the device forever.
+          if (!res.journalId) {
+            console.error('[Library] Cannot queue device delete: purge returned no journalId')
+            deviceOutcome = 'partial'
+          } else {
+            try {
+              const queuedDelete = await window.electronAPI.recordings.queueDeviceDelete({
+                deviceFilename: targetDeviceFilename,
+                journalId: res.journalId,
+              })
+              if (!queuedDelete?.success) {
+                console.error('[Library] Failed to queue device delete:', queuedDelete?.error)
+                deviceOutcome = 'partial'
+              } else if (queuedDelete.deletedNow) {
+                deviceOutcome = 'success'
+                // The main-process Jensen path cannot mutate this renderer-owned
+                // cache. Evict the exact filename before refreshLocal() or the
+                // successful delete is reconstructed as a raw device-only row.
+                getHiDockDeviceService().removeCachedRecording(targetDeviceFilename)
+                // AR3-6(b) — reconcile immediately so the UI doesn't show a
+                // stale on-device row before the next authoritative scan.
+                try {
+                  const reconciled = await window.electronAPI.recordings.markNotOnDevice(
+                    recording.id,
+                    targetDeviceFilename
                   )
-                }
-              } catch (e) {
-                viewMayBeStale = true
-                console.error('[Library] Failed to reconcile device presence after delete:', e)
-              }
-              // CX-T6-4 (fix round 2): rebuild the unified view from the
-              // ALREADY-RECONCILED local state — DB + device_file_cache +
-              // the device service's (just-invalidated) in-memory list —
-              // with NO device fetch. The previous refresh(true) here forced
-              // a FULL device list scan (~90s on a loaded device), awaited
-              // before the toast/`deleting` clear, so successful deletions
-              // looked stuck and the un-cancelled scan kept running.
-              // refreshLocal is also not subject to the hook's 2s load
-              // debounce (which the post-cascade refresh(false) just armed).
-              // Optional-chained only for older hook mocks in tests — the
-              // real hook always provides it.
-              // CX-T6-6 (fix round 3): refreshLocal reports failure
-              // explicitly — false (or a throw) means the pre-delete row may
-              // still be visible, so the honest stale-view warning applies,
-              // never a plain success. `undefined` (an older partial hook
-              // mock without the boolean contract) is no-signal, not failure.
-              try {
-                const rebuilt = await refreshLocal?.()
-                if (rebuilt === false) {
+                  if (!reconciled?.success) {
+                    viewMayBeStale = true
+                    console.error(
+                      '[Library] Device-presence reconciliation failed:',
+                      (reconciled as { error?: string } | undefined)?.error
+                    )
+                  }
+                } catch (e) {
                   viewMayBeStale = true
-                  console.error('[Library] Post-device-delete local rebuild reported failure')
+                  console.error('[Library] Failed to reconcile device presence after delete:', e)
                 }
-              } catch (e) {
-                viewMayBeStale = true
-                console.error('[Library] Post-device-delete local rebuild failed:', e)
+                try {
+                  const rebuilt = await refreshLocal?.()
+                  if (rebuilt === false) {
+                    viewMayBeStale = true
+                    console.error('[Library] Post-device-delete local rebuild reported failure')
+                  }
+                } catch (e) {
+                  viewMayBeStale = true
+                  console.error('[Library] Post-device-delete local rebuild failed:', e)
+                }
+              } else if (queuedDelete.queued) {
+                deviceOutcome = 'queued'
+              } else {
+                console.error('[Library] Device delete returned no terminal outcome')
+                deviceOutcome = 'partial'
               }
-            } else {
+            } catch (e) {
+              console.error('[Library] Failed to queue device delete:', e)
               deviceOutcome = 'partial'
             }
-          } catch (e) {
-            console.error('[Library] Device delete during permanent purge failed:', e)
-            deviceOutcome = 'partial'
           }
         }
       }
@@ -1182,8 +1676,18 @@ export function Library() {
       })
     } finally {
       setDeleting(null)
+      setPermanentDeleteProgress(null)
     }
-  }, [refresh, refreshLocal, deviceConnected])
+  }, [
+    refresh,
+    refreshLocal,
+    suppressPurgedFilenames,
+    announce,
+    selectedSourceId,
+    setSelectedSourceId,
+    currentlyPlayingId,
+    audioControls
+  ])
 
   // spec-005/F17 T5 §D6 — fetches the impact and opens the dedicated
   // DeletePermanentDialog (replaces the shared confirmDialog for this flow;
@@ -1252,6 +1756,39 @@ export function Library() {
       })
     }
   }, [refresh, loadTrash, announce])
+
+  // Bulk "Restore" (Trash): put every selected trashed recording back into the
+  // live Library, then refresh both corpora.
+  const handleSelectedRestore = useCallback(async () => {
+    const targets = trashedRecordings.filter((r) => selectedIds.has(r.id))
+    if (targets.length === 0) return
+    setBulkProcessing(true)
+    try {
+      let restored = 0
+      const failures: string[] = []
+      for (const recording of targets) {
+        try {
+          const res = await window.electronAPI.recordings.restore(recording.id)
+          if (!res?.success) throw new Error('Restore failed')
+          restored++
+        } catch (e) {
+          failures.push(`${recording.filename}: ${e instanceof Error ? e.message : String(e)}`)
+        }
+      }
+      await refresh(false)
+      await loadTrash()
+      clearSelection()
+      import('@/components/ui/toaster').then(({ toast }) => {
+        if (failures.length === 0) {
+          toast.success('Restored', `${restored} recording${restored === 1 ? '' : 's'} back in your Library.`)
+        } else {
+          toast.error('Some restores failed', `${restored} restored, ${failures.length} failed.`)
+        }
+      })
+    } finally {
+      setBulkProcessing(false)
+    }
+  }, [trashedRecordings, selectedIds, refresh, loadTrash, clearSelection])
 
   // Mark / unmark a recording "personal" (ignore) — reversible, non-destructive.
   const handleMarkPersonal = useCallback(async (recording: UnifiedRecording) => {
@@ -1402,32 +1939,41 @@ export function Library() {
     [toggleTranscript]
   )
 
-  // Handle row click for tri-pane layout.
-  // Clicking a row OPENS/VIEWS it — it sets the ACTIVE source only. It must NOT
-  // enter bulk-selection mode. Bulk selection (the checkboxes) is a separate
-  // action toggled by clicking a row's checkbox. Keeping "active/viewing source"
-  // decoupled from "selected for bulk" is what stops a plain view-click from
-  // revealing every row's checkbox (the "annoying selection checkbox" bug).
+  // Opening and bulk selection are separate modes. A plain click opens the
+  // reader and clears bulk selection; modifiers deliberately build selection.
   const handleRowClick = useCallback((recording: UnifiedRecording) => {
-    audioControls.stop()
+    clearSelection()
     setSelectedSourceId(recording.id)
+    audioControls.stop()
 
     const { waveformLoadedForId } = useUIStore.getState()
-    if (hasLocalPath(recording) && waveformLoadedForId !== recording.id) {
+    if (getSourceType(recording, artifactTypes) === 'audio' && hasLocalPath(recording) && waveformLoadedForId !== recording.id) {
       audioControls.loadWaveformOnly(recording.id, recording.localPath)
     }
-  }, [setSelectedSourceId, audioControls])
+  }, [clearSelection, setSelectedSourceId, artifactTypes, audioControls])
 
-  // C-005: Keep openDetailRef in sync with handleRowClick + filteredRecordings
+  // C-005: Keep openDetailRef in sync with handleRowClick + displayedRecordings
   openDetailRef.current = (id: string) => {
-    const recording = filteredRecordings.find((r) => r.id === id)
+    const recording = displayedRecordings.find((r) => r.id === id)
     if (recording) {
       handleRowClick(recording)
     }
   }
 
-  // Get selected recording and its data for SourceReader
-  const selectedRecording = selectedSourceId ? recordings.find((r) => r.id === selectedSourceId) : null
+  // Get selected recording and its data for SourceReader — looked up in the
+  // VISIBLE corpus: a Trash row is not in the live list, so reading from
+  // `recordings` here is what left the panel stuck on "No recording selected".
+  // A deep link from Operations must open the source even when the user's current
+  // Library filters exclude it. Keep those filters intact (so Back preserves the
+  // exact working context), but resolve the reader from the full live corpus.
+  const selectedRecording = selectedSourceId
+    ? (showTrash
+        ? displayedRecordings.find((r) => r.id === selectedSourceId)
+        : recordings.find((r) => r.id === selectedSourceId)) ?? null
+    : null
+  const selectionOutsideCurrentView = Boolean(
+    selectedRecording && !displayedRecordings.some((recording) => recording.id === selectedRecording.id)
+  )
   const selectedTranscript = selectedRecording ? transcripts.get(selectedRecording.id) : undefined
   const selectedMeeting = selectedRecording?.meetingId ? meetings.get(selectedRecording.meetingId) : undefined
 
@@ -1452,22 +1998,101 @@ export function Library() {
 
   // Virtualization setup
   const parentRef = useRef<HTMLDivElement>(null)
+  // A ref alone does not notify TanStack Virtual when the list pane is
+  // collapsed and later remounted. Keep the current scroll element in state so
+  // the virtualizer observes the replacement node instead of rendering an
+  // empty measured range after the source rail is reopened.
+  const [listScrollElement, setListScrollElement] = useState<HTMLDivElement | null>(null)
 
   // B-LIB-008: Simplified estimateSize — complex calculations caused unnecessary
   // virtualizer re-measurements. The virtualizer uses measureElement for actual sizing.
   // Trash mode FORCES the SourceRow list regardless of viewMode (§D1 — SourceCard
   // has no onRestore affordance), so its row height (48) applies whenever showTrash.
   const estimateSize = useCallback(
-    () => (compactView || showTrash) ? 48 : 200,
+    () => (compactView || showTrash) ? COMPACT_ROW_HEIGHT_PX : 200,
     [compactView, showTrash]
+  )
+
+  // Identity, not the current array index, owns every cached measurement. A
+  // split replaces one source with two children at the same position; index
+  // keys otherwise attach the old row's geometry to the wrong recordings.
+  const getVirtualItemKey = useCallback(
+    (index: number) => itemRenderKeys[index] ?? index,
+    [itemRenderKeys]
   )
 
   const rowVirtualizer = useVirtualizer({
     count: displayedRecordings.length,
-    getScrollElement: () => parentRef.current,
+    getScrollElement: () => listScrollElement,
     estimateSize,
+    getItemKey: getVirtualItemKey,
     overscan: 5
   })
+
+  // After a deletion/insert every row shifts one index, and the virtualizer's
+  // index-keyed measurement cache pairs each row with the PREVIOUS occupant's
+  // measured height — taller (two-line-title) rows then overlap their neighbor
+  // and separators "go missing" (2026-07-20). Force a full re-measure whenever
+  // the list CONTENT changes. This runs before paint so replacing the split
+  // source cannot expose one frame of stale/overlapping offsets.
+  const displayedIdSignature = itemRenderKeys.join('|')
+  useLayoutEffect(() => {
+    rowVirtualizer.measure()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displayedIdSignature, compactView, showTrash])
+
+  // Scroll-anchor preservation (2026-07-21/22): a deletion above the viewport
+  // shifts every row up but scrollTop doesn't move — the list then renders a
+  // half-clipped row at the top ("un-alignment when I delete"). ESTIMATED
+  // heights can't fix this (rows are variable-height), so anchor to an ITEM:
+  // track the topmost visible row's id continuously, and after any list change
+  // scroll THAT item back to the top of the viewport. Refresh/surface-change
+  // "fixed" it the same way implicitly — this makes it automatic.
+  const prevItemIdsRef = useRef<string[]>([])
+  const firstVisibleIndexRef = useRef(0)
+
+  // Keep the topmost VISIBLE row's index current. getVirtualItems() includes
+  // overscan rows above the viewport, so items[0] is not a valid scroll anchor.
+  useEffect(() => {
+    const el = parentRef.current
+    if (!el) return
+    const onScroll = () => {
+      const firstVisible = rowVirtualizer.getVirtualItems().find(
+        (item) => item.start + item.size > el.scrollTop
+      )
+      if (firstVisible) firstVisibleIndexRef.current = firstVisible.index
+    }
+    onScroll()
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [rowVirtualizer])
+
+  useEffect(() => {
+    const prevIds = prevItemIdsRef.current
+    const el = parentRef.current
+    if (prevIds.length > 0 && itemIds.length > 0) {
+      const removed = prevIds.some((id) => !itemIds.includes(id))
+      if (removed) {
+        const anchorId = prevIds[firstVisibleIndexRef.current]
+        const newIndex = anchorId ? itemIds.indexOf(anchorId) : -1
+        if (newIndex >= 0) {
+          rowVirtualizer.scrollToIndex(newIndex, { align: 'start' })
+        } else {
+          // The anchor row itself was deleted — land on the nearest surviving row.
+          rowVirtualizer.scrollToIndex(Math.min(firstVisibleIndexRef.current, itemIds.length - 1), {
+            align: 'start',
+          })
+        }
+      }
+      // Clamp past-the-end scrolls (list shrank below the scroll position).
+      if (el) {
+        const max = Math.max(0, rowVirtualizer.getTotalSize() - el.clientHeight)
+        if (el.scrollTop > max) rowVirtualizer.scrollToOffset(max)
+      }
+    }
+    prevItemIdsRef.current = itemIds
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displayedIdSignature])
 
   // Reveal-on-open: when a source becomes the active/opened one (via row click,
   // deep-link navigation, search result, or programmatic open), scroll the
@@ -1542,9 +2167,11 @@ export function Library() {
       <LibraryHeader
         stats={stats}
         deviceConnected={deviceConnected}
+        deviceOnlyActive={!showTrash && sourceTypeFilter === 'audio' && exclusiveFilter === 'source-only'}
         loading={loading}
         compactView={compactView}
-        downloadQueueSize={downloadQueue.size}
+        pendingDownloadCount={downloadCounts.pending}
+        activeDownloadCount={downloadCounts.active}
         bulkCounts={bulkCounts}
         bulkProcessing={bulkProcessing}
         bulkProgress={bulkProgress}
@@ -1553,7 +2180,26 @@ export function Library() {
         onOpenFolder={openRecordingsFolder}
         onBulkDownload={handleBulkDownload}
         onBulkProcess={handleBulkProcess}
-        onRefresh={() => refresh(true)}
+        onShowDeviceOnly={() => {
+          clearSelection()
+          setSelectedSourceId(null)
+          setDurationPreset('all')
+          setCategoryFilter(null)
+          setExclusiveFilter('source-only')
+          setSourceTypeFilter('audio')
+          announce(`Showing ${stats.deviceOnly} audio capture${stats.deviceOnly === 1 ? '' : 's'} on device only`)
+        }}
+        onRefresh={() => {
+          // Manual force-sync (2026-07-22): probe the device count, rescan when
+          // the list moved, reconcile + download new files (an explicit user
+          // request — not subject to the auto-download toggle), THEN rebuild the
+          // view. When the device is disconnected scanAndReconcile no-ops and
+          // this degrades to the old local refresh.
+          void (async () => {
+            await scanAndReconcile('manual')
+            await refresh(true)
+          })()
+        }}
         onSetCompactView={setCompactView}
         showTrash={showTrash}
         trashCount={trashedRecordings.length}
@@ -1586,12 +2232,11 @@ export function Library() {
         ) : (
           <div className={isFilterPending ? 'opacity-70 pointer-events-none transition-opacity' : 'transition-opacity'}>
             <LibraryFilters
-              stats={stats}
+              stats={availabilityStats}
               filterableCount={scopedRecordings.length}
               typeCounts={typeCounts}
+              artifactTypes={artifactTypes}
               hasRatedQuality={ratedCount > 0}
-              filterMode={filterMode}
-              semanticFilter={semanticFilter}
               exclusiveFilter={exclusiveFilter}
               categoryFilter={categoryFilter ?? 'all'}
               qualityFilter={qualityFilter ?? 'all'}
@@ -1601,8 +2246,6 @@ export function Library() {
               searchQuery={searchQuery}
               sortBy={sortBy}
               sortOrder={sortOrder}
-              onFilterModeChange={setFilterMode}
-              onSemanticFilterChange={setSemanticFilter}
               onExclusiveFilterChange={setExclusiveFilter}
               onCategoryFilterChange={(filter) => setCategoryFilter(filter === 'all' ? null : filter)}
               onQualityFilterChange={(filter) => setQualityFilter(filter === 'all' ? null : filter)}
@@ -1641,25 +2284,73 @@ export function Library() {
         )}
       </div>
 
-      {/* Bulk Actions Bar — hidden in Trash mode (CX-T5-1): its handlers all
-          operate on filteredRecordings (the live list), so surfacing it over
-          the Trash corpus would show misleading counts / no-op actions. The
-          keyboard selection shortcuts are equally gated (guardedToggleSelection
-          above), and handleToggleTrash clears any prior selection on entry. */}
-      {!showTrash && (
+      {/* Bulk Actions Bar — live list: full action set. Trash (2026-07-23): a
+          dedicated bar with ONLY the Trash-appropriate actions over the Trash
+          selection (Restore / Delete permanently) — the live-list actions would
+          be no-ops here. */}
+      {!showTrash ? (
         <BulkActionsBar
           selectedCount={selectedCount}
           totalCount={filteredRecordings.length}
           deviceConnected={deviceConnected}
           isProcessing={bulkProcessing}
           progress={bulkProgress.total > 0 ? bulkProgress : undefined}
+          showDownload={selectedRecordings.some((recording) => isDeviceOnly(recording))}
+          showProcess={selectedRecordings.some(
+            (recording) => getSourceType(recording, artifactTypes) === 'audio' && hasLocalPath(recording)
+          )}
           onSelectAll={() => selectAll(filteredRecordings.map((r) => r.id))}
           onDeselectAll={clearSelection}
           onDownload={handleSelectedDownload}
           onProcess={handleSelectedProcess}
           onDelete={handleSelectedDelete}
+          onDeletePermanent={handleSelectedDeletePermanent}
           onMarkPersonal={handleSelectedMarkPersonal}
         />
+      ) : trashSelectedCount > 0 && (
+        <div
+          className="flex items-center gap-3 border-b bg-muted/40 px-6 py-2"
+          data-testid="trash-bulk-bar"
+          role="toolbar"
+          aria-label="Trash bulk actions"
+        >
+          <span className="text-sm font-medium">
+            {trashSelectedCount} of {trashedRecordings.length} selected
+          </span>
+          <button
+            type="button"
+            className="text-xs text-primary hover:underline"
+            onClick={() => selectAll(trashedRecordings.map((r) => r.id))}
+          >
+            Select all
+          </button>
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              type="button"
+              disabled={bulkProcessing}
+              onClick={handleSelectedRestore}
+              className="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium hover:bg-accent disabled:opacity-50"
+            >
+              Restore
+            </button>
+            <button
+              type="button"
+              disabled={bulkProcessing}
+              onClick={handleSelectedDeletePermanent}
+              className="inline-flex items-center gap-1.5 rounded-md border border-destructive/40 px-2.5 py-1 text-xs font-medium text-destructive hover:bg-destructive/10 disabled:opacity-50"
+            >
+              Delete permanently
+            </button>
+            <button
+              type="button"
+              aria-label="Clear selection"
+              onClick={clearSelection}
+              className="rounded-md p-1 text-muted-foreground hover:bg-accent"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
       )}
 
       {/* Error display */}
@@ -1676,6 +2367,7 @@ export function Library() {
       {/* Tri-Pane Layout */}
       <div className="flex-1 overflow-hidden">
         <TriPaneLayout
+          hasSelection={selectedSourceId !== null || selectedRecordings.length > 0}
           leftPanel={
             /* Left Panel: Recording List - LB-19 fix: Add containerRef for keyboard navigation */
             <div
@@ -1684,6 +2376,7 @@ export function Library() {
                 parentRef.current = el
                 // @ts-expect-error - Ref callback pattern for multiple refs
                 containerRef.current = el
+                setListScrollElement((current) => current === el ? current : el)
               }}
               className="h-full overflow-y-auto overflow-x-hidden py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-inset"
               onKeyDown={handleKeyDown}
@@ -1696,6 +2389,28 @@ export function Library() {
             scrolls horizontally — rows truncate instead. The pane itself has a
             sensible minimum (TriPaneLayout) so the title/date can't be starved. */}
         <div className={`w-full min-w-0 transition-opacity ${isFilterPending ? 'opacity-60' : 'opacity-100'}`}>
+          {permanentDeleteProgress && (
+            <div
+              className="mx-3 mb-2 flex items-start gap-2 rounded-md bg-muted/60 px-3 py-2 text-xs"
+              data-testid="permanent-delete-progress"
+              role="status"
+              aria-live="polite"
+            >
+              <RefreshCw className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" aria-hidden="true" />
+              <div className="min-w-0">
+                <p className="font-medium text-foreground">
+                  {permanentDeleteProgress.stage === 'removing-local'
+                    ? 'Removing local data…'
+                    : bulkProgress.total > 1
+                      ? `Erasing device copies… ${bulkProgress.current} of ${bulkProgress.total}`
+                      : 'Erasing device copy…'}
+                </p>
+                <p className="truncate text-muted-foreground" title={permanentDeleteProgress.filename}>
+                  {permanentDeleteProgress.filename}
+                </p>
+              </div>
+            </div>
+          )}
           {displayedRecordings.length === 0 ? (
             showTrash ? (
               // Trash-specific empty state — the quality-filter/EmptyState copy
@@ -1728,6 +2443,11 @@ export function Library() {
                 hasRecordings={recordings.length > 0}
                 onNavigateToDevice={() => navigate('/device')}
                 onAddRecording={handleAddRecording}
+                selectedOutsideFilters={selectionOutsideCurrentView}
+                onRevealSelected={() => {
+                  clearAllFilters()
+                  setSearchQuery('')
+                }}
               />
             )
           ) : (
@@ -1769,7 +2489,10 @@ export function Library() {
                   in card view: SourceCard has no onRestore affordance (AC#10). */}
               {(compactView || showTrash) ? (
                 // Compact List View - LB-19 fix: Add focus indicator support
-                <div key="compact-view">
+                // Include the content identity in the boundary key so a split
+                // replaces the virtual-row subtree atomically. This also clears
+                // any stale DOM left by a previously duplicated React key.
+                <div key={`compact-view:${displayedIdSignature}`}>
                   {rowVirtualizer.getVirtualItems().map((virtualRow) => {
                     const recording = displayedRecordings[virtualRow.index]
                     const meeting = recording.meetingId ? meetings.get(recording.meetingId) : undefined
@@ -1777,31 +2500,61 @@ export function Library() {
 
                     return (
                       <div
-                        key={recording.id}
+                        key={itemRenderKeys[virtualRow.index]}
                         data-index={virtualRow.index}
                         data-focus-index={virtualRow.index}
-                        ref={rowVirtualizer.measureElement}
+                        // Compact rows are a strict 48px contract. Measuring
+                        // them dynamically reintroduces stale index geometry
+                        // during split insertion; the estimate is exact.
                         style={{
                           position: 'absolute',
-                          top: 0,
+                          // Use layout positioning, not a transformed compositor
+                          // layer. Chromium can retain stale glyph pixels on a
+                          // recycled transformed row after split insertion,
+                          // producing the doubled metadata text seen in the app.
+                          top: `${virtualRow.index * COMPACT_ROW_HEIGHT_PX}px`,
                           left: 0,
                           width: '100%',
-                          transform: `translateY(${virtualRow.start}px)`
+                          height: `${COMPACT_ROW_HEIGHT_PX}px`
                         }}
                         className={[
-                          virtualRow.index > 0 ? 'border-t' : '',
+                          // Keep separators out of measured row geometry. A real
+                          // border changes the height whenever selection joins or
+                          // splits a run, leaving cached virtual offsets one pixel
+                          // out of alignment until the next full refresh.
+                          virtualRow.index > 0 &&
+                          !(selectedIds.has(recording.id) &&
+                            selectedIds.has(displayedRecordings[virtualRow.index - 1]?.id))
+                            ? 'before:absolute before:inset-x-0 before:top-0 before:h-px before:bg-border'
+                            : '',
                           isFocused ? 'ring-2 ring-primary ring-inset' : ''
                         ].join(' ')}
                         aria-rowindex={virtualRow.index + 1}
                       >
                         {showTrash ? (
-                          // Trash rows are menu-only (§D1): Library passes ONLY
-                          // onRestore + onDeletePermanent — every other SourceRow
-                          // menu item is onX &&-guarded and simply doesn't render.
+                          // Trash rows: SAME selection semantics as the live list
+                          // (plain click selects + opens detail; ctrl/shift build
+                          // ranges) plus the Trash-only menu actions (§D1):
+                          // Restore + Delete permanently.
                           <SourceRow
                             recording={recording}
                             meeting={meeting}
                             transcript={transcripts.get(recording.id)}
+                            compact
+                            isSelected={selectedIds.has(recording.id)}
+                            anySelected={selectedCount > 0}
+                            isActiveSource={selectedSourceId === recording.id}
+                            isDeleting={deleting === recording.id || permanentDeleteProgress?.recordingId === recording.id}
+                            deletionLabel={
+                              permanentDeleteProgress?.recordingId === recording.id &&
+                              permanentDeleteProgress.stage === 'erasing-device'
+                                ? 'Erasing device copy…'
+                                : 'Removing local data…'
+                            }
+                            onSelectionChange={(id, shiftKey) =>
+                              handleSelectionClick(id, shiftKey, displayedRecordings.map((r) => r.id))
+                            }
+                            onClick={() => handleRowClick(recording)}
                             onRestore={() => handleRestoreCallback(recording)}
                             onDeletePermanent={() => handleDeletePermanentCallback(recording)}
                           />
@@ -1810,12 +2563,20 @@ export function Library() {
                             recording={recording}
                             meeting={meeting}
                             transcript={transcripts.get(recording.id)}
+                            compact
                             isSelected={selectedIds.has(recording.id)}
                             anySelected={selectedCount > 0}
                             isActiveSource={selectedSourceId === recording.id}
+                            isDeleting={deleting === recording.id || permanentDeleteProgress?.recordingId === recording.id}
+                            deletionLabel={
+                              permanentDeleteProgress?.recordingId === recording.id &&
+                              permanentDeleteProgress.stage === 'erasing-device'
+                                ? 'Erasing device copy…'
+                                : 'Removing local data…'
+                            }
                             searchQuery={deferredSearchQuery}
                             onSelectionChange={(id, shiftKey) =>
-                              handleSelectionClick(id, shiftKey, filteredRecordings.map((r) => r.id))
+                              handleSelectionClick(id, shiftKey, displayedRecordings.map((r) => r.id))
                             }
                             onClick={() => handleRowClick(recording)}
                             onDownload={() => handleDownloadCallback(recording)}
@@ -1826,13 +2587,18 @@ export function Library() {
                             }
                             onMarkPersonal={() => handleMarkPersonalCallback(recording)}
                             onSetValueRating={(rating) => handleSetValueRatingCallback(recording, rating)}
-                            onTranscribe={() => queueTranscription(recording)}
-                            onReprocessVibeVoice={() => reprocessWithVibeVoice(recording)}
+                            onTranscribe={getSourceType(recording, artifactTypes) === 'audio' ? () => queueTranscription(recording) : undefined}
+                            onReprocessVibeVoice={getSourceType(recording, artifactTypes) === 'audio' ? () => reprocessWithVibeVoice(recording) : undefined}
                             onAskAssistant={() => handleAskAssistantCallback(recording)}
                             onGenerateOutput={() => handleGenerateOutputCallback(recording)}
-                            isDownloading={isDeviceOnly(recording) && isDownloading(recording.deviceFilename)}
+                            isDownloading={isDeviceOnly(recording) && ['downloading', 'cancelling'].includes(
+                              downloadQueue.get(recording.deviceFilename)?.status ?? ''
+                            )}
                             downloadProgress={
                               isDeviceOnly(recording) ? downloadQueue.get(recording.deviceFilename)?.progress : undefined
+                            }
+                            downloadStatus={
+                              isDeviceOnly(recording) ? downloadQueue.get(recording.deviceFilename)?.status : undefined
                             }
                             deviceConnected={deviceConnected}
                           />
@@ -1852,7 +2618,7 @@ export function Library() {
 
                     return (
                       <div
-                        key={recording.id}
+                        key={itemRenderKeys[virtualRow.index]}
                         data-index={virtualRow.index}
                         data-focus-index={virtualRow.index}
                         ref={rowVirtualizer.measureElement}
@@ -1872,15 +2638,20 @@ export function Library() {
                           meeting={meeting}
                           isPlaying={currentlyPlayingId === recording.id}
                           isTranscriptExpanded={expandedTranscripts.has(recording.id)}
-                          isDownloading={isDeviceOnly(recording) && isDownloading(recording.deviceFilename)}
+                          isDownloading={isDeviceOnly(recording) && ['downloading', 'cancelling'].includes(
+                            downloadQueue.get(recording.deviceFilename)?.status ?? ''
+                          )}
                           downloadProgress={
                             isDeviceOnly(recording) ? downloadQueue.get(recording.deviceFilename)?.progress : undefined
+                          }
+                          downloadStatus={
+                            isDeviceOnly(recording) ? downloadQueue.get(recording.deviceFilename)?.status : undefined
                           }
                           isDeleting={deleting === recording.id}
                           deviceConnected={deviceConnected}
                           isSelected={selectedIds.has(recording.id)}
                           onSelectionChange={(id, shiftKey) =>
-                            handleSelectionClick(id, shiftKey, filteredRecordings.map((r) => r.id))
+                            handleSelectionClick(id, shiftKey, displayedRecordings.map((r) => r.id))
                           }
                           onClick={() => handleRowClick(recording)}
                           onPlay={() => {
@@ -1893,8 +2664,8 @@ export function Library() {
                           onDownload={() => handleDownloadCallback(recording)}
                           onDelete={() => handleDeleteCallback(recording)}
                           onMarkPersonal={() => handleMarkPersonalCallback(recording)}
-                          onTranscribe={() => queueTranscription(recording)}
-                          onReprocessVibeVoice={() => reprocessWithVibeVoice(recording)}
+                          onTranscribe={getSourceType(recording, artifactTypes) === 'audio' ? () => queueTranscription(recording) : undefined}
+                          onReprocessVibeVoice={getSourceType(recording, artifactTypes) === 'audio' ? () => reprocessWithVibeVoice(recording) : undefined}
                           onAskAssistant={() => handleAskAssistantCallback(recording)}
                           onGenerateOutput={() => handleGenerateOutputCallback(recording)}
                           onToggleTranscript={() => handleToggleTranscriptCallback(recording.id)}
@@ -1912,7 +2683,14 @@ export function Library() {
             </div>
           }
           centerPanel={
-            /* Center Panel: Source Reader */
+            /* Center Panel: multi-selection summary (explorer behavior) or the
+               single-recording Source Reader. */
+            selectedRecordings.length > 1 ? (
+              <MultiSelectionSummary
+                recordings={selectedRecordings}
+                mode={showTrash ? 'trash' : 'library'}
+              />
+            ) : (
             <SourceReader
               recording={selectedRecording ?? null}
               transcript={selectedTranscript}
@@ -1931,15 +2709,15 @@ export function Library() {
                 }
               }}
               // Action button callbacks
-              onDownload={() => {
-                if (selectedRecording) handleDownloadCallback(selectedRecording)
-              }}
-              onTranscribe={() => {
-                if (selectedRecording) queueTranscription(selectedRecording)
-              }}
-              onReprocessVibeVoice={() => {
-                if (selectedRecording) reprocessWithVibeVoice(selectedRecording)
-              }}
+              onDownload={selectedRecording && isDeviceOnly(selectedRecording)
+                ? () => handleDownloadCallback(selectedRecording)
+                : undefined}
+              onTranscribe={selectedRecording && getSourceType(selectedRecording, artifactTypes) === 'audio'
+                ? () => queueTranscription(selectedRecording)
+                : undefined}
+              onReprocessVibeVoice={selectedRecording && getSourceType(selectedRecording, artifactTypes) === 'audio'
+                ? () => reprocessWithVibeVoice(selectedRecording)
+                : undefined}
               onDelete={() => {
                 if (selectedRecording) handleDeleteCallback(selectedRecording)
               }}
@@ -1957,16 +2735,28 @@ export function Library() {
               // State for button disabling
               deviceConnected={deviceConnected}
               isDownloading={selectedRecording && isDeviceOnly(selectedRecording)
-                ? isDownloading(selectedRecording.deviceFilename)
+                ? ['downloading', 'cancelling'].includes(downloadQueue.get(selectedRecording.deviceFilename)?.status ?? '')
                 : false}
               downloadProgress={selectedRecording && isDeviceOnly(selectedRecording)
                 ? downloadQueue.get(selectedRecording.deviceFilename)?.progress
+                : undefined}
+              downloadStatus={selectedRecording && isDeviceOnly(selectedRecording)
+                ? downloadQueue.get(selectedRecording.deviceFilename)?.status
                 : undefined}
               isDeleting={selectedRecording ? deleting === selectedRecording.id : false}
               // Navigation
               onNavigateToMeeting={handleNavigateToMeeting}
               // Metadata editing
               onMetadataEdited={() => refresh(false)}
+              onSplitCompleted={(firstChildId) => {
+                audioControls.stop()
+                // The split transaction already updated local DB state. Rebuild
+                // from local/cache data immediately: refresh(false) can debounce,
+                // while a forced refresh could start an unnecessary USB scan.
+                void refreshLocal?.().then((rebuilt) => {
+                  if (rebuilt !== false) setSelectedSourceId(firstChildId)
+                })
+              }}
               // Reveal the assistant: open the floating overlay, or expand the
               // embedded pane if it's collapsed to a rail (honors chat placement).
               onAskAboutSource={() => {
@@ -1975,6 +2765,7 @@ export function Library() {
                 else ui.setChatOpen(true)
               }}
             />
+            )
           }
           rightPanel={
             /* Right Panel: AI Assistant */
@@ -1998,7 +2789,9 @@ export function Library() {
         actionLabel={confirmDialog.actionLabel}
         variant="destructive"
         onConfirm={confirmDialog.onConfirm}
-      />
+      >
+        {confirmDialog.children}
+      </ConfirmDialog>
 
       {/* spec-005/F17 T5 §D6 — dedicated permanent-delete dialog (impact copy +
           device checkbox; ConfirmDialog has no slot for either). */}

@@ -30,6 +30,7 @@ interface TranscriptViewerProps {
   onSeek: (startMs: number, endMs?: number) => void
   showSummary?: boolean
   showActionItems?: boolean
+  showTranscriptHeader?: boolean
   summary?: string
   actionItems?: string[]
   /**
@@ -274,6 +275,7 @@ export function TranscriptViewer({
   onSeek,
   showSummary = true,
   showActionItems = true,
+  showTranscriptHeader = true,
   summary,
   actionItems,
   segments: storedSegments,
@@ -677,7 +679,7 @@ export function TranscriptViewer({
 
       {/* Full Transcript Section */}
       <section className="py-3 first:pt-0 last:pb-0">
-        <div className="flex items-center gap-2">
+        {showTranscriptHeader && <div className="flex items-center gap-2">
           <button
             onClick={() => setTranscriptExpanded(!transcriptExpanded)}
             className="flex items-center justify-between flex-1 text-left hover:text-foreground/70 transition-colors"
@@ -707,7 +709,22 @@ export function TranscriptViewer({
               Follow
             </button>
           )}
-        </div>
+        </div>}
+        {!showTranscriptHeader && hasTimestamps && !autoFollow && (
+          <div className="flex justify-end">
+            <button
+              onClick={() => {
+                setAutoFollow(true)
+                if (isPlaying === false) scrollToTop()
+              }}
+              className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium text-primary transition-colors hover:bg-accent"
+              title={isPlaying === false ? 'Jump to the top of the transcript' : 'Resume auto-scroll to follow playback'}
+            >
+              <ArrowDownToLine className="h-3.5 w-3.5" />
+              Follow
+            </button>
+          </div>
+        )}
         {transcriptExpanded && (
           <div
             ref={containerRef}

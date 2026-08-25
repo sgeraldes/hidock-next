@@ -18,12 +18,19 @@ import {
   markRecordingDownloaded,
   addSyncedFile,
   isFileSynced,
+  isFilePurged,
+  getPurgedFilenames,
   getRecordingByFilename,
   getSyncedFilenames,
   queryOne,
   queryAll,
   run,
-  runInTransaction
+  runInTransaction,
+  upsertRecordingFromDevice,
+  enrichRecordingScheduleMetadata,
+  createProcessingRun,
+  completeProcessingRun,
+  type Recording
 } from './database'
 import { saveRecording, getRecordingsPath } from './file-storage'
 import { emitActivityLog } from './activity-log'
@@ -195,7 +202,8 @@ export class DownloadService {
 
   /**
    * Load queue from database on startup (spec-007: persistence).
-   * HIGH-3 (restart resurrection): ALSO loads user-cancelled rows — they act as
+   * HIGH-3 (restart resurrection): ALSO loads failed and user-cancelled rows.
+   * Failed rows are actionable Operations history; user-cancelled rows act as
    * durable terminal-suppression markers so post-restart reconciliation cannot
    * re-queue a file the user deliberately cancelled. Interrupted cancels are NOT
    * reloaded (they are re-created as pending by reconciliation, which is correct).
@@ -217,12 +225,25 @@ export class DownloadService {
       }>(`
         SELECT id, filename, file_size, progress, status, error, started_at, completed_at, recording_date, cancel_reason, created_at
         FROM download_queue
-        WHERE status IN ('pending', 'downloading')
+        WHERE status IN ('pending', 'downloading', 'failed')
            OR (status = 'cancelled' AND cancel_reason = 'user')
         ORDER BY created_at ASC
       `)
 
+      let alreadySyncedCount = 0
+      let interruptedCount = 0
       for (const item of items) {
+        if (item.status !== 'cancelled') {
+          const { synced } = this.isFileAlreadySynced(item.filename)
+          if (synced) {
+            // The queue row is stale: disk/synced_files/recordings already prove
+            // completion. Never resurrect it in Operations or download it again.
+            this.removeFromDatabase(item.filename)
+            alreadySyncedCount++
+            continue
+          }
+        }
+
         const queueItem: DownloadQueueItem = {
           id: item.id,
           filename: item.filename,
@@ -236,6 +257,17 @@ export class DownloadService {
           cancelReason: item.cancel_reason ?? undefined,
           // Prune age fallback for rows without terminal/start timestamps.
           createdAt: item.created_at ? new Date(item.created_at) : undefined
+        }
+        if (queueItem.status === 'downloading') {
+          // A process restart interrupted this transfer. There is no active USB
+          // request to justify an in-progress state, so recover it as pending.
+          queueItem.status = 'pending'
+          queueItem.progress = 0
+          queueItem.error = undefined
+          queueItem.startedAt = undefined
+          queueItem.completedAt = undefined
+          this.persistQueueItem(queueItem)
+          interruptedCount++
         }
         this.state.queue.set(item.filename, queueItem)
       }
@@ -265,7 +297,10 @@ export class DownloadService {
       }
 
       this.markDirty()
-      console.log(`[DownloadService] Loaded ${items.length - staleKeys.length} items from database (${staleKeys.length} stale cleared)`)
+      console.log(
+        `[DownloadService] Restored ${items.length - staleKeys.length - alreadySyncedCount} queue item(s) ` +
+        `(${alreadySyncedCount} already synced, ${interruptedCount} interrupted reset, ${staleKeys.length} stale cleared)`
+      )
     } catch (e) {
       console.error('[DownloadService] Failed to load queue from database:', e)
     }
@@ -315,6 +350,10 @@ export class DownloadService {
    * C-004: Also checks .mp3 normalized name (B-DWN-003 normalizes .hda->.mp3)
    */
   isFileAlreadySynced(filename: string): { synced: boolean; reason: string } {
+    // v51 — this check is FACTUAL only (synced_files / disk / recordings).
+    // Purge tombstones are consulted by the AUTOMATIC paths (getFilesToSync
+    // reconciliation, auto-retry) — NEVER here: an EXPLICIT user download of a
+    // purged file is a deliberate re-download and must not be blocked.
     // Check 1: Is it in synced_files table?
     if (isFileSynced(filename)) {
       return { synced: true, reason: 'In synced_files table' }
@@ -373,9 +412,76 @@ export class DownloadService {
     let skippedCount = 0
     let queuedCount = 0
     let reconciledCount = 0
+    let enrichmentFailureCount = 0
+    const newlyDiscovered: Recording[] = []
 
     for (const file of deviceFiles) {
+      // v51 — AUTOMATIC reconciliation must never resurrect a hard-purged
+      // recording: tombstoned files are skipped silently (anti-resurrection).
+      // An explicit per-file download (queueDownloads) is still allowed —
+      // re-downloading on purpose is the user's call.
+      const purgeVariants = [
+        file.filename,
+        file.filename.replace(/\.hda$/i, '.wav'),
+        file.filename.replace(/\.wav$/i, '.hda'),
+        file.filename.replace(/\.(hda|wav)$/i, '.mp3'),
+      ]
+      if (purgeVariants.some((v) => isFilePurged(v))) {
+        skippedCount++
+        results.push({ ...file, skipReason: 'Permanently deleted (purge tombstone)' })
+        continue
+      }
+
+      // Resolve factual local/synced state BEFORE the metadata upsert. If this
+      // snapshot is merely rediscovering a historical local file, it must not
+      // be announced as a new recording or launch hundreds of enrichments.
       const { synced, reason } = this.isFileAlreadySynced(file.filename)
+
+      // SPEC-009: discovery itself is a durable ingestion event. Persist all
+      // metadata the device already knows and correlate it with the calendar
+      // before deciding whether a download is required. This makes the filename,
+      // time, duration, and provisional meeting visible immediately—even while
+      // the audio is still device-only.
+      try {
+        const previous = getRecordingByFilename(file.filename)
+        const recording = upsertRecordingFromDevice(file)
+        const isNewUnsyncedRecording = !previous && !synced
+        if (isNewUnsyncedRecording) {
+          const metadataRun = createProcessingRun({
+            recordingId: recording.id,
+            stage: 'metadata',
+            provider: 'hidock-device',
+            tool: 'jensen-file-list',
+            execution: 'local'
+          })
+          completeProcessingRun(metadataRun.id, {
+            outputRefs: {
+              filename: recording.filename,
+              dateRecorded: recording.date_recorded,
+              durationSeconds: recording.duration_seconds,
+              fileSize: recording.file_size
+            }
+          })
+        }
+        const previousDate = previous ? new Date(previous.date_recorded).getTime() : Number.NaN
+        const incomingDate = file.dateCreated.getTime()
+        const metadataChanged = !!previous && !synced && (
+          previous.duration_seconds == null
+          || Math.abs(previous.duration_seconds - file.duration) > 1
+          || !Number.isFinite(previousDate)
+          || Math.abs(previousDate - incomingDate) > 1000
+        )
+        if (isNewUnsyncedRecording || metadataChanged) {
+          enrichRecordingScheduleMetadata(recording.id)
+        }
+        if (isNewUnsyncedRecording) {
+          newlyDiscovered.push(recording)
+        }
+      } catch {
+        // Metadata enrichment is observable but non-blocking: a repair can run
+        // at the auto-transcription gate. Aggregate failures to avoid per-file spam.
+        enrichmentFailureCount++
+      }
       if (synced) {
         skippedCount++
         // BUG-R4: files that were healed into synced_files during this pass
@@ -390,11 +496,31 @@ export class DownloadService {
       results.push({ ...file, skipReason: synced ? reason : undefined })
     }
 
+    // A device list is one snapshot, not N independent arrivals. Publish one
+    // coalesced event after every row is durable so the renderer performs one
+    // local rebuild and one toast instead of a full-library refresh per file.
+    if (newlyDiscovered.length > 0) {
+      const newest = newlyDiscovered.reduce((latest, recording) =>
+        new Date(recording.date_recorded).getTime() > new Date(latest.date_recorded).getTime()
+          ? recording
+          : latest
+      )
+      for (const window of BrowserWindow.getAllWindows()) {
+        window.webContents.send('recording:new', {
+          recording: newest,
+          count: newlyDiscovered.length
+        })
+      }
+    }
+
     // BUG-R4: ONE summary line per reconciliation (was 1300+ per-file lines).
     // reconciled suffix only appears when files were actually healed this pass,
     // so the steady-state line stays "N files skipped (already synced), M files queued".
     const reconciledNote = reconciledCount > 0 ? ` (${reconciledCount} reconciled from disk/recordings)` : ''
     console.log(`[DownloadService] Reconciliation: ${skippedCount} files skipped (already synced)${reconciledNote}, ${queuedCount} files queued`)
+    if (enrichmentFailureCount > 0) {
+      console.warn(`[DownloadService] Metadata enrichment deferred for ${enrichmentFailureCount} file(s)`)
+    }
     return results
   }
 
@@ -829,8 +955,6 @@ export class DownloadService {
 
     const now = Date.now()
     let stalledCount = 0
-    const stalledFilenames: string[] = []
-
     for (const item of this.state.queue.values()) {
       if (item.status === 'downloading' && item.startedAt) {
         // C-004: Use lastProgressAt if available (data flow), fall back to startedAt
@@ -860,26 +984,16 @@ export class DownloadService {
             this.state.currentSession.failedFiles++
           }
 
-          stalledFilenames.push(item.filename)
           stalledCount++
         }
       }
     }
 
-    // B-DWN-001: Clean up stalled items from the queue after marking failed
+    // Keep stalled transfers as actionable history. The user can dismiss them,
+    // and the normal 24h terminal-row prune bounds retention.
     if (stalledCount > 0) {
       this.markDirty()
       this.emitStateUpdate(true) // C-004: immediate emit for stalled detection
-
-      // Delayed cleanup: remove stalled items from queue after renderer sees the failed state
-      setTimeout(() => {
-        for (const filename of stalledFilenames) {
-          this.state.queue.delete(filename)
-          this.removeFromDatabase(filename)
-        }
-        this.markDirty()
-        this.emitStateUpdate()
-      }, 5000)
     }
 
     return stalledCount
@@ -936,10 +1050,18 @@ export class DownloadService {
 
     for (const [key, item] of this.state.queue) {
       if (item.status === 'failed' || item.status === 'cancelled') {
-        // HIGH-3: the automatic reconnect retry passes interruptedOnly — it must
-        // re-queue ONLY disconnect-interrupted work, never a deliberate user cancel
-        // (which stays terminal until a MANUAL retry, where interruptedOnly is false).
-        if (interruptedOnly && item.status === 'cancelled' && item.cancelReason === 'user') {
+        // Automatic reconnect retries ONLY a transfer interrupted by the
+        // disconnect itself. A genuine failure/stall is terminal until the user
+        // explicitly retries; repeatedly re-queuing it caused the same bad file
+        // to disconnect the device on every reconnect.
+        if (interruptedOnly && (item.status !== 'cancelled' || item.cancelReason === 'user')) {
+          continue
+        }
+
+        // v51 — the AUTOMATIC reconnect retry must never resurrect a purged
+        // recording; a MANUAL retry (interruptedOnly=false) stays allowed.
+        if (interruptedOnly && isFilePurged(item.filename)) {
+          console.log(`[DownloadService] Skipping auto-retry for ${item.filename}: permanently deleted (purge tombstone)`)
           continue
         }
 
@@ -1045,6 +1167,18 @@ export class DownloadService {
     }
     this.markDirty()
     this.emitStateUpdate(true) // C-004: immediate emit for clear
+  }
+
+  /** Dismiss one terminal download without affecting its source or other history. */
+  dismissTerminal(filename: string): boolean {
+    const item = this.state.queue.get(filename)
+    if (!item || !['completed', 'failed', 'cancelled'].includes(item.status)) return false
+
+    this.state.queue.delete(filename)
+    this.removeFromDatabase(filename)
+    this.markDirty()
+    this.emitStateUpdate(true)
+    return true
   }
 
   /**
@@ -1266,6 +1400,13 @@ export function registerDownloadServiceHandlers(): void {
     return service.getFilesToSync(files)
   })
 
+  // v51 — purge-tombstoned filenames (all variants), so the device file list
+  // can badge "Deleted — still on device" instead of showing them as ordinary
+  // synced files.
+  ipcMain.handle('download-service:get-purged-filenames', () => {
+    return getPurgedFilenames()
+  })
+
   // Queue downloads (with optional dateCreated for preserving original recording dates)
   // HIGH-3: this channel is only invoked by EXPLICIT user actions (Library "Download"
   // buttons via useOperations) — auto-sync goes through start-session — so it passes
@@ -1308,6 +1449,11 @@ export function registerDownloadServiceHandlers(): void {
   // Clear completed
   ipcMain.handle('download-service:clear-completed', () => {
     service.clearCompleted()
+  })
+
+  ipcMain.handle('download-service:dismiss', (_, filename: unknown) => {
+    if (typeof filename !== 'string' || !filename) return false
+    return service.dismissTerminal(filename)
   })
 
   // Cancel single download (spec-004). Resolves after the in-flight USB transfer for

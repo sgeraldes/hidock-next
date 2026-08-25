@@ -25,12 +25,14 @@ vi.mock('../../services/database', () => ({
   updateRecordingStatus: vi.fn(),
   updateRecordingTranscriptionStatus: vi.fn(),
   linkRecordingToMeeting: vi.fn(),
+  unlinkRecordingFromMeeting: vi.fn(),
   getTranscriptByRecordingId: vi.fn(),
   getCandidatesForRecordingWithDetails: vi.fn(),
   getMeetingsNearDate: vi.fn(),
   insertRecording: vi.fn(),
   resolveRecordingId: vi.fn(),
   getQueueItems: vi.fn(),
+  getActionableQueueItems: vi.fn(),
   addToQueue: vi.fn(),
   updateQueueItem: vi.fn()
 }))
@@ -371,13 +373,14 @@ describe('Recording IPC Handlers', () => {
   })
 
   describe('recordings:unlinkFromMeeting', () => {
-    it('should unlink a recording from its meeting', async () => {
-      const { linkRecordingToMeeting } = await import('../../services/database')
+    it('unlinks via the NULL-based unlink (never an empty-string id, 2026-07-24)', async () => {
+      const { linkRecordingToMeeting, unlinkRecordingFromMeeting } = await import('../../services/database')
       const recId = '550e8400-e29b-41d4-a716-446655440000'
 
       await handlers['recordings:unlinkFromMeeting'](null, recId)
 
-      expect(linkRecordingToMeeting).toHaveBeenCalledWith(recId, '', 0, '')
+      expect(unlinkRecordingFromMeeting).toHaveBeenCalledWith(recId)
+      expect(linkRecordingToMeeting).not.toHaveBeenCalled()
     })
 
     it('should throw on validation error for invalid recording ID', async () => {
@@ -555,6 +558,17 @@ describe('Recording IPC Handlers', () => {
       const result = await handlers['transcription:getQueue'](null)
 
       expect(result).toEqual(mockQueue)
+    })
+
+    it('uses the bounded actionable projection when requested by the renderer sync', async () => {
+      const { getActionableQueueItems } = await import('../../services/database')
+      const active = [{ id: 'q-active', recording_id: 'r-active', status: 'processing' }]
+      vi.mocked(getActionableQueueItems).mockReturnValue(active as any)
+
+      const result = await handlers['transcription:getQueue'](null, true)
+
+      expect(getActionableQueueItems).toHaveBeenCalledOnce()
+      expect(result).toEqual(active)
     })
 
     it('should return empty array on error', async () => {
@@ -769,12 +783,13 @@ describe('Recording IPC Handlers', () => {
       expect(result).toEqual({ success: true })
     })
 
-    it('should unlink recording when meetingId is null', async () => {
-      const { linkRecordingToMeeting } = await import('../../services/database')
+    it('unlinks via the NULL-based unlink when meetingId is null (2026-07-24)', async () => {
+      const { linkRecordingToMeeting, unlinkRecordingFromMeeting } = await import('../../services/database')
 
       const result = await handlers['recordings:selectMeeting'](null, 'rec-1', null)
 
-      expect(linkRecordingToMeeting).toHaveBeenCalledWith('rec-1', '', 0, '')
+      expect(unlinkRecordingFromMeeting).toHaveBeenCalledWith('rec-1')
+      expect(linkRecordingToMeeting).not.toHaveBeenCalled()
       expect(result).toEqual({ success: true })
     })
 
@@ -799,7 +814,8 @@ describe('Recording IPC Handlers', () => {
       const result = await handlers['recordings:addToQueue'](null, 'rec-1')
 
       expect(addToQueue).toHaveBeenCalledWith('rec-1')
-      expect(updateRecordingTranscriptionStatus).toHaveBeenCalledWith('rec-1', 'queued')
+      // Queue insertion owns the durable pending-status transition atomically.
+      expect(updateRecordingTranscriptionStatus).not.toHaveBeenCalled()
       expect(result).toBe('queue-item-id')
     })
 
@@ -813,7 +829,7 @@ describe('Recording IPC Handlers', () => {
 
       expect(resolveRecordingId).toHaveBeenCalledWith('synced-file-id')
       expect(addToQueue).toHaveBeenCalledWith('real-rec-id')
-      expect(updateRecordingTranscriptionStatus).toHaveBeenCalledWith('real-rec-id', 'queued')
+      expect(updateRecordingTranscriptionStatus).not.toHaveBeenCalled()
       expect(result).toBe('queue-item-id')
     })
 

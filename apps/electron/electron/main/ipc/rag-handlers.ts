@@ -7,6 +7,7 @@ import { getRAGService } from '../services/rag'
 import { getVectorStore } from '../services/vector-store'
 import { getChatLLMService } from '../services/chat-llm'
 import { getEmbeddingsService } from '../services/embeddings'
+import { getVectorStartupState } from '../services/vector-startup-state'
 
 /** Badge-friendly short labels for embedding providers (long brain labels don't fit the chip). */
 const EMBED_PROVIDER_LABELS: Record<string, string> = {
@@ -63,6 +64,7 @@ export function registerRAGHandlers(): void {
       // ready" instead of a green badge over an unservable partition.
       const embedProvider = await getEmbeddingsService().activeProviderId()
       const embedDocumentCount = embedProvider ? vectorStore.getEligibleDocumentCount(embedProvider) : 0
+      const index = getVectorStartupState()
 
       return success({
         backend: chatStatus.backend,
@@ -74,6 +76,10 @@ export function registerRAGHandlers(): void {
         embedProvider,
         embedProviderLabel: embedProvider ? (EMBED_PROVIDER_LABELS[embedProvider] ?? embedProvider) : null,
         embedDocumentCount,
+        indexState: index.phase,
+        indexLoaded: index.loaded,
+        indexTotal: index.total,
+        indexError: index.error,
       })
     } catch (err) {
       console.error('rag:status error:', err)

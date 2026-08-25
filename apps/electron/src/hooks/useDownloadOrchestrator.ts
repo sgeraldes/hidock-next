@@ -35,21 +35,24 @@ interface DownloadQueueItem {
 }
 
 /**
- * HIGH-3 (Codex): a download that was INTERRUPTED and should be AUTO-retried on
- * reconnect. Split from status alone because a 'cancelled' status now carries an
- * origin:
- *   'failed'                        — errored (USB/save failure, stall). Always retryable.
- *   'cancelled' + interrupted/none  — disconnect/re-sync aborted it mid-flight. Retryable.
- *   'cancelled' + 'user'            — the user deliberately cancelled. NOT auto-retryable;
- *                                     it stays terminal until a manual Retry.
- * Used consistently by the reconnect retry AND the operations badge so a user cancel
- * never resurrects on reconnect (and never inflates the "needs attention" count).
- * Exported for reuse + unit tests.
+ * A terminal download that needs attention in the Operations UI. This includes
+ * genuine failures plus disconnect-interrupted cancellations, but excludes a
+ * deliberate user cancel.
  */
 export function isRetryableDownloadItem(item: { status: string; cancelReason?: string }): boolean {
   if (item.status === 'failed') return true
   if (item.status === 'cancelled') return item.cancelReason !== 'user'
   return false
+}
+
+/**
+ * A download that may be retried automatically on reconnect. Only a transfer
+ * explicitly interrupted by disconnection is safe to repeat. A genuine USB
+ * failure/stall must remain failed until a manual retry; otherwise one bad file
+ * disconnects the device and restarts forever on every reconnect.
+ */
+export function isReconnectRetryableDownloadItem(item: { status: string; cancelReason?: string }): boolean {
+  return item.status === 'cancelled' && item.cancelReason !== 'user'
 }
 
 // DL-14: Module-level abort controller ref so cancelDownloads can be called from outside the hook
@@ -772,7 +775,9 @@ export function useDownloadOrchestrator() {
         // excludes cancelReason==='user', and retryFailed(_, interruptedOnly=true) skips
         // it too, so a deliberate cancel stays terminal until a manual Retry.
         window.electronAPI.downloadService.getState().then((state) => {
-          const hasRetryable = state.queue.some((item: DownloadQueueItem) => isRetryableDownloadItem(item))
+          const hasRetryable = state.queue.some((item: DownloadQueueItem) =>
+            isReconnectRetryableDownloadItem(item)
+          )
           if (hasRetryable) {
             if (shouldLogQa()) console.log('[useDownloadOrchestrator] Device ready, retrying interrupted downloads')
             window.electronAPI.downloadService.retryFailed(true, true) // deviceConnected, interruptedOnly

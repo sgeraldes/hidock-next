@@ -63,7 +63,18 @@ global.window.electronAPI = {
         embeddings: { ollamaBaseUrl: 'http://localhost:11434' }
       }
     }),
-    updateSection: vi.fn().mockResolvedValue({ success: true })
+    updateSection: vi.fn().mockResolvedValue({ success: true }),
+    listGeminiModels: vi.fn().mockResolvedValue({ success: true, data: { ok: false, models: [] } }),
+    checkSpeakerModelAccess: vi.fn().mockResolvedValue({
+      success: true,
+      data: {
+        status: 'token-missing',
+        model: 'pyannote/speaker-diarization-community-1',
+        fallbackModel: 'pyannote/speaker-diarization-3.1',
+        message: 'Add and save a Hugging Face token.'
+      }
+    }),
+    openSpeakerModelAccess: vi.fn().mockResolvedValue({ success: true, data: { opened: true } })
   },
   storage: {
     getInfo: vi.fn().mockResolvedValue({
@@ -109,6 +120,18 @@ describe('Settings Page', () => {
 
     expect(screen.getByLabelText('Gemini API Key')).toBeInTheDocument()
     expect(screen.getByLabelText('Transcription Model')).toBeInTheDocument()
+    expect(screen.getByLabelText('Hugging Face token for speaker identification')).toBeInTheDocument()
+    expect(screen.getByText('Speaker identification model')).toBeInTheDocument()
+  })
+
+  it('opens and rechecks Community-1 access from the transcription settings', async () => {
+    render(<Settings />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Review model access' }))
+    expect(window.electronAPI.config.openSpeakerModelAccess).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Check again' }))
+    expect(window.electronAPI.config.checkSpeakerModelAccess).toHaveBeenCalledWith('')
   })
 
   it('should render chat provider toggle buttons', async () => {

@@ -6,9 +6,17 @@ interface EmptyStateProps {
   hasRecordings: boolean
   onNavigateToDevice: () => void
   onAddRecording: () => void
+  selectedOutsideFilters?: boolean
+  onRevealSelected?: () => void
 }
 
-export function EmptyState({ hasRecordings, onNavigateToDevice, onAddRecording }: EmptyStateProps) {
+export function EmptyState({
+  hasRecordings,
+  onNavigateToDevice,
+  onAddRecording,
+  selectedOutsideFilters = false,
+  onRevealSelected
+}: EmptyStateProps) {
   return (
     <Card className="animate-rise-in border-border/70 shadow-sm">
       <CardContent className="flex flex-col items-center py-16 text-center">
@@ -29,6 +37,16 @@ export function EmptyState({ hasRecordings, onNavigateToDevice, onAddRecording }
                 Import File
               </Button>
             </div>
+          </>
+        ) : selectedOutsideFilters ? (
+          <>
+            <h3 className="mb-2 text-lg font-semibold text-foreground">Source opened outside current filters</h3>
+            <p className="mb-5 max-w-sm text-sm leading-relaxed text-muted-foreground">
+              Its details are open beside this list. Your filters were preserved so Back returns to the same context.
+            </p>
+            {onRevealSelected && (
+              <Button variant="outline" onClick={onRevealSelected}>Show source in this list</Button>
+            )}
           </>
         ) : (
           <>

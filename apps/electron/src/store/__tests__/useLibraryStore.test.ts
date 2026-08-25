@@ -50,6 +50,7 @@ beforeEach(() => {
   // Reset assistant docking + new filters
   store.setAssistantDock('collapsed')
   store.setWaveformPinned(false)
+  store.resetReaderLayout()
 
   // Reset panel state
   store.setPanelSizes([25, 45, 30])
@@ -81,6 +82,15 @@ describe('useLibraryStore', () => {
       expect(state.panelSizes).toEqual([25, 45, 30])
       expect(state.listPaneSize).toBe(25)
       expect(state.listCollapsed).toBe(false)
+      expect(state.readerSectionModes).toEqual({
+        player: 'expanded',
+        metadata: 'expanded',
+        summary: 'expanded',
+        transcript: 'expanded'
+      })
+      expect(state.readerVerticalSizes).toEqual([64, 36])
+      expect(state.readerMaximizedSection).toBeNull()
+      expect(state.readerListCollapsedBeforeMaximize).toBeNull()
       expect(state.selectedSourceId).toBeNull()
       expect(state.recordingErrors.size).toBe(0)
       expect(state.scrollOffset).toBe(0)
@@ -1029,6 +1039,48 @@ describe('useLibraryStore', () => {
       clearSelection()
 
       expect(useLibraryStore.getState().expandedRowIds.has('row-1')).toBe(true)
+    })
+  })
+
+  describe('Reader workspace layout', () => {
+    it('updates one section without changing the others', () => {
+      useLibraryStore.getState().setReaderSectionMode('player', 'docked')
+
+      expect(useLibraryStore.getState().readerSectionModes).toEqual({
+        player: 'docked',
+        metadata: 'expanded',
+        summary: 'expanded',
+        transcript: 'expanded'
+      })
+    })
+
+    it('stores the vertical split and resets the reader layout', () => {
+      const store = useLibraryStore.getState()
+      store.setReaderVerticalSizes([36, 64])
+      store.setReaderSectionMode('summary', 'hidden')
+
+      expect(useLibraryStore.getState().readerVerticalSizes).toEqual([36, 64])
+      useLibraryStore.getState().resetReaderLayout()
+      expect(useLibraryStore.getState().readerVerticalSizes).toEqual([64, 36])
+      expect(useLibraryStore.getState().readerSectionModes.summary).toBe('expanded')
+    })
+
+    it('keeps maximize state across a reader remount and restores the prior list state', () => {
+      const store = useLibraryStore.getState()
+      store.setListCollapsed(false)
+      store.maximizeReaderSection('metadata')
+
+      expect(useLibraryStore.getState().readerMaximizedSection).toBe('metadata')
+      expect(useLibraryStore.getState().readerListCollapsedBeforeMaximize).toBe(false)
+      expect(useLibraryStore.getState().listCollapsed).toBe(true)
+
+      // Reading the store again models SourceReader mounting under the collapsed
+      // list layout; the maximize intent must remain outside component state.
+      useLibraryStore.getState().restoreReaderSection()
+
+      expect(useLibraryStore.getState().readerMaximizedSection).toBeNull()
+      expect(useLibraryStore.getState().readerListCollapsedBeforeMaximize).toBeNull()
+      expect(useLibraryStore.getState().listCollapsed).toBe(false)
     })
   })
 

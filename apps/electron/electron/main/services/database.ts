@@ -10,9 +10,10 @@ export { getDatabasePath }
 import { DatabaseEngine, getTableColumns, type SqlJsDatabase } from '@hidock/database'
 import { normalizeName, isGenericSpeakerLabel, detectAmbiguousName } from './entity-normalize'
 import { getEventBus } from './event-bus'
+import { isCancelledMeetingSubject, scoreMeetingCandidates } from './recording-match-scoring'
 import type { QualityRating } from '@/types/knowledge'
 
-const SCHEMA_VERSION = 50
+const SCHEMA_VERSION = 54
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -31,8 +32,17 @@ CREATE TABLE IF NOT EXISTS meetings (
     meeting_url TEXT,
     is_all_day INTEGER DEFAULT 0,
     all_day_date TEXT,
+    calendar_sync_token TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- The last fully committed ICS snapshot. Meeting rows are retained for history,
+-- but automatic attribution must only consider rows seen in this snapshot.
+CREATE TABLE IF NOT EXISTS calendar_sync_state (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    active_token TEXT,
+    completed_at TEXT
 );
 
 -- Recordings from HiDock device
@@ -77,6 +87,10 @@ CREATE TABLE IF NOT EXISTS recordings (
 CREATE TABLE IF NOT EXISTS knowledge_captures (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
+    -- User-authored content title. The title column remains the legacy/source label for
+    -- compatibility. AI title suggestions live on transcripts and meeting
+    -- subjects live on meetings. These fields must never overwrite each other.
+    user_title TEXT,
     summary TEXT,
     category TEXT CHECK(category IN ('meeting', 'interview', '1:1', 'brainstorm', 'note', 'other')) DEFAULT 'meeting',
     status TEXT CHECK(status IN ('processing', 'ready', 'enriched')) DEFAULT 'ready',
@@ -272,6 +286,16 @@ CREATE TABLE IF NOT EXISTS transcripts (
     transcription_model TEXT,
     title_suggestion TEXT,
     question_suggestions TEXT,
+    -- Immutable stage-run references (v52). Provider/model labels displayed in
+    -- the UI are resolved through these runs, never guessed from current config.
+    transcription_run_id TEXT,
+    diarization_run_id TEXT,
+    summary_run_id TEXT,
+    title_run_id TEXT,
+    meeting_resolution_run_id TEXT,
+    diarization_quality_status TEXT,
+    diarization_quality TEXT,
+    mentioned_people TEXT,
     -- Meeting-timeline data (v39): windowed sentiment + event markers, both JSON.
     -- sentiment_segments: [{startSec,endSec,score:-1..1}] time-series across the recording.
     -- event_markers: [{id,kind,atSec,label,refId}] action/decision markers with audio offsets.
@@ -280,6 +304,38 @@ CREATE TABLE IF NOT EXISTS transcripts (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (recording_id) REFERENCES recordings(id)
 );
+
+-- Stage-level processing provenance (v52 / SPEC-009). One provider call can
+-- produce several output stages, but every displayed result references the
+-- exact immutable run that produced it.
+CREATE TABLE IF NOT EXISTS processing_runs (
+    id TEXT PRIMARY KEY,
+    recording_id TEXT NOT NULL,
+    transcript_id TEXT,
+    stage TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    tool TEXT,
+    model TEXT,
+    version TEXT,
+    execution TEXT CHECK(execution IN ('local', 'cloud', 'provider-managed')),
+    status TEXT NOT NULL CHECK(status IN ('pending', 'running', 'completed', 'degraded', 'failed', 'cancelled')),
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    parent_run_ids TEXT,
+    output_refs TEXT,
+    usage_json TEXT,
+    estimated_cost_amount REAL,
+    estimated_cost_currency TEXT,
+    cost_method TEXT,
+    quality_status TEXT,
+    quality_json TEXT,
+    error_message TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+    FOREIGN KEY (transcript_id) REFERENCES transcripts(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_processing_runs_recording_stage
+    ON processing_runs(recording_id, stage, created_at DESC);
 
 -- Embeddings for RAG
 CREATE TABLE IF NOT EXISTS embeddings (
@@ -388,6 +444,15 @@ CREATE TABLE IF NOT EXISTS synced_files (
     file_path TEXT NOT NULL,
     file_size INTEGER,
     synced_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- v51 PURGE TOMBSTONES - prevents RESURRECTION of a hard-purged recording:
+-- the cascade deletes synced_files + recordings, so reconciliation would see
+-- the still-on-device file as "new" and re-download it (with transcript,
+-- actionables, embeddings regenerating behind it). Filename-only, no content.
+CREATE TABLE IF NOT EXISTS purged_files (
+    filename TEXT PRIMARY KEY,
+    purged_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Contacts extracted from meeting attendees (renamed to People in UI)
@@ -516,6 +581,55 @@ CREATE TABLE IF NOT EXISTS transcript_speakers (
     FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
 );
 
+-- Persistent acoustic speaker memory (v53). A voice cluster is anonymous until
+-- independently anchored to a contact. Embeddings are model-scoped and never
+-- compared across incompatible model/version/dimension triples.
+CREATE TABLE IF NOT EXISTS voice_clusters (
+    id TEXT PRIMARY KEY,
+    model TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    embedding_dimension INTEGER NOT NULL,
+    centroid_json TEXT NOT NULL,
+    observation_count INTEGER NOT NULL DEFAULT 0,
+    total_speech_seconds REAL NOT NULL DEFAULT 0,
+    contact_id TEXT,
+    contact_link_method TEXT,
+    contact_link_confidence REAL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS voice_cluster_observations (
+    id TEXT PRIMARY KEY,
+    voice_cluster_id TEXT NOT NULL,
+    recording_id TEXT NOT NULL,
+    local_speaker_label TEXT NOT NULL,
+    embedding_json TEXT NOT NULL,
+    speech_seconds REAL NOT NULL,
+    quality_score REAL,
+    similarity REAL,
+    runner_up_margin REAL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(recording_id, local_speaker_label, voice_cluster_id),
+    FOREIGN KEY (voice_cluster_id) REFERENCES voice_clusters(id) ON DELETE CASCADE,
+    FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS recording_voice_clusters (
+    recording_id TEXT NOT NULL,
+    local_speaker_label TEXT NOT NULL,
+    transcript_speaker_label TEXT,
+    voice_cluster_id TEXT NOT NULL,
+    match_status TEXT NOT NULL CHECK(match_status IN ('matched', 'new', 'needs_review')),
+    similarity REAL,
+    runner_up_margin REAL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (recording_id, local_speaker_label),
+    FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+    FOREIGN KEY (voice_cluster_id) REFERENCES voice_clusters(id) ON DELETE CASCADE
+);
+
 -- Mention resolutions: per-recording assignment of an ambiguous bucket name
 -- (a bare first name like "Sergio" that could be several people) to the real
 -- contact it denotes IN THAT recording. source_name is the raw spoken/extracted
@@ -631,6 +745,11 @@ CREATE INDEX IF NOT EXISTS idx_projects_name ON projects(name);
 CREATE INDEX IF NOT EXISTS idx_meeting_contacts_meeting ON meeting_contacts(meeting_id);
 CREATE INDEX IF NOT EXISTS idx_meeting_contacts_contact ON meeting_contacts(contact_id);
 CREATE INDEX IF NOT EXISTS idx_transcript_speakers_recording ON transcript_speakers(recording_id);
+CREATE INDEX IF NOT EXISTS idx_voice_clusters_model ON voice_clusters(model, model_version, embedding_dimension);
+CREATE INDEX IF NOT EXISTS idx_voice_clusters_contact ON voice_clusters(contact_id);
+CREATE INDEX IF NOT EXISTS idx_voice_observations_recording ON voice_cluster_observations(recording_id);
+CREATE INDEX IF NOT EXISTS idx_voice_observations_cluster ON voice_cluster_observations(voice_cluster_id);
+CREATE INDEX IF NOT EXISTS idx_recording_voice_clusters_cluster ON recording_voice_clusters(voice_cluster_id);
 CREATE INDEX IF NOT EXISTS idx_mention_resolutions_recording ON mention_resolutions(recording_id);
 CREATE INDEX IF NOT EXISTS idx_mention_resolutions_contact ON mention_resolutions(resolved_contact_id);
 CREATE INDEX IF NOT EXISTS idx_meeting_projects_meeting ON meeting_projects(meeting_id);
@@ -2689,6 +2808,174 @@ const MIGRATIONS: Record<number, () => void> = {
     console.log('Migration v50 complete')
   },
 
+  51: () => {
+    // v51 — PURGE TOMBSTONES. A hard purge deletes synced_files + recordings,
+    // so download reconciliation would treat the still-on-device file as new
+    // and RESURRECT the deleted recording (re-download → re-transcribe →
+    // re-embed). purged_files records filename-only tombstones; the reconciler
+    // skips them. Idempotent DDL (re-runs on repaired DBs).
+    console.log('Running migration to schema v51: purged_files tombstone table')
+    getDatabase().run(`
+      CREATE TABLE IF NOT EXISTS purged_files (
+        filename TEXT PRIMARY KEY,
+        purged_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `)
+    console.log('Migration v51 complete')
+  },
+
+  52: () => {
+    console.log('Running migration to schema v52: recording enrichment provenance')
+    const database = getDatabase()
+    const addColumn = (table: string, column: string, definition: string): void => {
+      const columns = getTableColumns(database, table)
+      if (columns.length > 0 && !columns.includes(column)) {
+        database.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
+      }
+    }
+
+    addColumn('knowledge_captures', 'user_title', 'TEXT')
+    addColumn('transcripts', 'transcription_run_id', 'TEXT')
+    addColumn('transcripts', 'diarization_run_id', 'TEXT')
+    addColumn('transcripts', 'summary_run_id', 'TEXT')
+    addColumn('transcripts', 'title_run_id', 'TEXT')
+    addColumn('transcripts', 'meeting_resolution_run_id', 'TEXT')
+    addColumn('transcripts', 'diarization_quality_status', 'TEXT')
+    addColumn('transcripts', 'diarization_quality', 'TEXT')
+    addColumn('transcripts', 'mentioned_people', 'TEXT')
+
+    database.run(`
+      CREATE TABLE IF NOT EXISTS processing_runs (
+        id TEXT PRIMARY KEY,
+        recording_id TEXT NOT NULL,
+        transcript_id TEXT,
+        stage TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        tool TEXT,
+        model TEXT,
+        version TEXT,
+        execution TEXT CHECK(execution IN ('local', 'cloud', 'provider-managed')),
+        status TEXT NOT NULL CHECK(status IN ('pending', 'running', 'completed', 'degraded', 'failed', 'cancelled')),
+        started_at TEXT NOT NULL,
+        completed_at TEXT,
+        parent_run_ids TEXT,
+        output_refs TEXT,
+        usage_json TEXT,
+        estimated_cost_amount REAL,
+        estimated_cost_currency TEXT,
+        cost_method TEXT,
+        quality_status TEXT,
+        quality_json TEXT,
+        error_message TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+        FOREIGN KEY (transcript_id) REFERENCES transcripts(id) ON DELETE SET NULL
+      )
+    `)
+    database.run(`CREATE INDEX IF NOT EXISTS idx_processing_runs_recording_stage
+      ON processing_runs(recording_id, stage, created_at DESC)`)
+    console.log('Migration v52 complete')
+  },
+
+  53: () => {
+    console.log('Running migration to schema v53: persistent acoustic speaker memory')
+    const database = getDatabase()
+    database.run(`
+      CREATE TABLE IF NOT EXISTS voice_clusters (
+        id TEXT PRIMARY KEY,
+        model TEXT NOT NULL,
+        model_version TEXT NOT NULL,
+        embedding_dimension INTEGER NOT NULL,
+        centroid_json TEXT NOT NULL,
+        observation_count INTEGER NOT NULL DEFAULT 0,
+        total_speech_seconds REAL NOT NULL DEFAULT 0,
+        contact_id TEXT,
+        contact_link_method TEXT,
+        contact_link_confidence REAL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE SET NULL
+      );
+      CREATE TABLE IF NOT EXISTS voice_cluster_observations (
+        id TEXT PRIMARY KEY,
+        voice_cluster_id TEXT NOT NULL,
+        recording_id TEXT NOT NULL,
+        local_speaker_label TEXT NOT NULL,
+        embedding_json TEXT NOT NULL,
+        speech_seconds REAL NOT NULL,
+        quality_score REAL,
+        similarity REAL,
+        runner_up_margin REAL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(recording_id, local_speaker_label, voice_cluster_id),
+        FOREIGN KEY (voice_cluster_id) REFERENCES voice_clusters(id) ON DELETE CASCADE,
+        FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS recording_voice_clusters (
+        recording_id TEXT NOT NULL,
+        local_speaker_label TEXT NOT NULL,
+        transcript_speaker_label TEXT,
+        voice_cluster_id TEXT NOT NULL,
+        match_status TEXT NOT NULL CHECK(match_status IN ('matched', 'new', 'needs_review')),
+        similarity REAL,
+        runner_up_margin REAL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (recording_id, local_speaker_label),
+        FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+        FOREIGN KEY (voice_cluster_id) REFERENCES voice_clusters(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_voice_clusters_model
+        ON voice_clusters(model, model_version, embedding_dimension);
+      CREATE INDEX IF NOT EXISTS idx_voice_clusters_contact ON voice_clusters(contact_id);
+      CREATE INDEX IF NOT EXISTS idx_voice_observations_recording
+        ON voice_cluster_observations(recording_id);
+      CREATE INDEX IF NOT EXISTS idx_voice_observations_cluster
+        ON voice_cluster_observations(voice_cluster_id);
+      CREATE INDEX IF NOT EXISTS idx_recording_voice_clusters_cluster
+        ON recording_voice_clusters(voice_cluster_id);
+    `)
+    console.log('Migration v53 complete')
+  },
+
+  54: () => {
+    console.log('Running migration to schema v54: current calendar snapshot tracking')
+    const database = getDatabase()
+    const columns = getTableColumns(database, 'meetings')
+    if (!columns.includes('calendar_sync_token')) {
+      database.run('ALTER TABLE meetings ADD COLUMN calendar_sync_token TEXT')
+    }
+    database.run(`
+      CREATE TABLE IF NOT EXISTS calendar_sync_state (
+        id INTEGER PRIMARY KEY CHECK(id = 1),
+        active_token TEXT,
+        completed_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_meetings_calendar_sync_token
+        ON meetings(calendar_sync_token, start_time, end_time);
+    `)
+
+    // Existing databases already carry a reliable last-seen signal: every
+    // event in a successful ICS pass has updated_at refreshed. Seed the active
+    // snapshot from the latest cohort so the first post-migration boot cannot
+    // auto-link against obsolete recurring rows before the next sync finishes.
+    const latestResult = database.exec('SELECT MAX(updated_at) AS value FROM meetings')
+    const latest = latestResult[0]?.values?.[0]?.[0]
+    if (typeof latest === 'string' && latest) {
+      const token = `migration-${randomUUID()}`
+      database.run(
+        `UPDATE meetings SET calendar_sync_token = ?
+         WHERE updated_at >= datetime(?, '-10 minutes')`,
+        [token, latest]
+      )
+      database.run(
+        `INSERT INTO calendar_sync_state (id, active_token, completed_at)
+         VALUES (1, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET active_token = excluded.active_token, completed_at = excluded.completed_at`,
+        [token, latest]
+      )
+    }
+    console.log('Migration v54 complete')
+  },
 }
 
 /** Single source of truth for the v43 ledger DDL — used by repairPhase and migration 43. */
@@ -3028,7 +3315,8 @@ function repairPhase(): void {
   const meetingCols = getTableColumns(database, 'meetings')
   const meetingRepairs = [
     { name: 'is_all_day', def: 'INTEGER DEFAULT 0' },
-    { name: 'all_day_date', def: 'TEXT' }
+    { name: 'all_day_date', def: 'TEXT' },
+    { name: 'calendar_sync_token', def: 'TEXT' }
   ]
   if (meetingCols.length > 0) {
     for (const col of meetingRepairs) {
@@ -3037,6 +3325,13 @@ function repairPhase(): void {
         try { database.run(`ALTER TABLE meetings ADD COLUMN ${col.name} ${col.def}`) } catch {}
       }
     }
+    database.run(`
+      CREATE TABLE IF NOT EXISTS calendar_sync_state (
+        id INTEGER PRIMARY KEY CHECK(id = 1),
+        active_token TEXT,
+        completed_at TEXT
+      )
+    `)
   }
 
   // Repair Recordings
@@ -3475,6 +3770,7 @@ const engine = new DatabaseEngine({
   // runWithMassDeleteAllowed().
   protectedTables: ['knowledge_captures', 'transcripts', 'recordings', 'meetings', 'contacts'],
   backupOnBoot: { keep: 3 },
+  deferBackupOnBoot: true,
 })
 
 /**
@@ -3493,6 +3789,11 @@ export function runWithMassDeleteAllowed<T>(fn: () => T): T {
  */
 export async function initializeDatabase(): Promise<void> {
   await engine.initialize()
+}
+
+/** Invoked by the post-paint boot scheduler; never delays the main window. */
+export async function runDeferredDatabaseBackup(): Promise<void> {
+  await engine.runDeferredBackup()
 }
 
 export function saveDatabase(): void {
@@ -3566,7 +3867,7 @@ export function getRowsModified(): number {
 }
 
 // Internal run that doesn't auto-save (for use within transactions)
-function runNoSave(sql: string, params: any[] = []): void {
+export function runNoSave(sql: string, params: any[] = []): void {
   engine.runNoSave(sql, params)
 }
 
@@ -3618,17 +3919,45 @@ export function remapOccurrenceIdsToExisting<T extends { id: string; start_time:
   // canonical target so this matches the cleanup keeper preference and converges.
   const SEP = ' '
   const canonicalBySlot = new Map<string, string>()
+  const existingByBase = new Map<string, Array<{ id: string; start_time: string }>>()
   for (const e of existing) {
-    const key = meetingBaseUid(e.id) + SEP + e.start_time
+    const baseUid = meetingBaseUid(e.id)
+    const key = baseUid + SEP + e.start_time
     const current = canonicalBySlot.get(key)
     if (current === undefined || (current.includes('::') && !e.id.includes('::'))) {
       canonicalBySlot.set(key, e.id)
     }
+    const family = existingByBase.get(baseUid) ?? []
+    family.push(e)
+    existingByBase.set(baseUid, family)
   }
+  const claimedExistingIds = new Set<string>()
   return incoming.map((m) => {
-    if (existingIds.has(m.id)) return m
+    if (existingIds.has(m.id)) {
+      claimedExistingIds.add(m.id)
+      return m
+    }
     const canonical = canonicalBySlot.get(meetingBaseUid(m.id) + SEP + m.start_time)
-    return canonical && canonical !== m.id ? { ...m, id: canonical } : m
+    if (canonical && canonical !== m.id && !claimedExistingIds.has(canonical)) {
+      claimedExistingIds.add(canonical)
+      return { ...m, id: canonical }
+    }
+
+    // A corrected DST interpretation changes both the occurrence id suffix and
+    // start_time by exactly the timezone error (normally one hour). Reconcile a
+    // UNIQUE nearby row in the same UID family so resync repairs it in place
+    // instead of inserting a duplicate and orphaning its recording links.
+    const incomingMs = Date.parse(m.start_time)
+    const nearby = (existingByBase.get(meetingBaseUid(m.id)) ?? []).filter((candidate) => {
+      if (claimedExistingIds.has(candidate.id)) return false
+      const candidateMs = Date.parse(candidate.start_time)
+      return Number.isFinite(incomingMs) && Number.isFinite(candidateMs) && Math.abs(incomingMs - candidateMs) <= 2 * 60 * 60 * 1000
+    })
+    if (nearby.length === 1) {
+      claimedExistingIds.add(nearby[0].id)
+      return { ...m, id: nearby[0].id }
+    }
+    return m
   })
 }
 
@@ -3637,7 +3966,10 @@ export function remapOccurrenceIdsToExisting<T extends { id: string; start_time:
  * Used by calendar sync to ensure all-or-nothing behavior.
  * If any meeting fails to upsert, the entire batch is rolled back.
  */
-export function upsertMeetingsBatch(meetings: Omit<Meeting, 'created_at' | 'updated_at'>[]): void {
+export function upsertMeetingsBatch(
+  meetings: Omit<Meeting, 'created_at' | 'updated_at'>[],
+  calendarSyncToken?: string
+): void {
   if (meetings.length === 0) return
 
   // Reconcile occurrence ids against existing rows so a recurring occurrence
@@ -3658,7 +3990,8 @@ export function upsertMeetingsBatch(meetings: Omit<Meeting, 'created_at' | 'upda
             organizer_name = ?, organizer_email = ?,
             attendees = COALESCE(?, attendees),
             description = ?, is_recurring = ?, recurrence_rule = ?,
-            meeting_url = ?, is_all_day = ?, all_day_date = ?, updated_at = CURRENT_TIMESTAMP
+            meeting_url = ?, is_all_day = ?, all_day_date = ?,
+            calendar_sync_token = COALESCE(?, calendar_sync_token), updated_at = CURRENT_TIMESTAMP
           WHERE id = ?`,
           [
             meeting.subject,
@@ -3674,6 +4007,7 @@ export function upsertMeetingsBatch(meetings: Omit<Meeting, 'created_at' | 'upda
             meeting.meeting_url ?? null,
             meeting.is_all_day ?? 0,
             meeting.all_day_date ?? null,
+            calendarSyncToken ?? null,
             meeting.id
           ]
         )
@@ -3681,8 +4015,8 @@ export function upsertMeetingsBatch(meetings: Omit<Meeting, 'created_at' | 'upda
         runNoSave(
           `INSERT INTO meetings (id, subject, start_time, end_time, location, organizer_name,
             organizer_email, attendees, description, is_recurring, recurrence_rule, meeting_url,
-            is_all_day, all_day_date)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            is_all_day, all_day_date, calendar_sync_token)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             meeting.id,
             meeting.subject,
@@ -3697,7 +4031,8 @@ export function upsertMeetingsBatch(meetings: Omit<Meeting, 'created_at' | 'upda
             meeting.recurrence_rule ?? null,
             meeting.meeting_url ?? null,
             meeting.is_all_day ?? 0,
-            meeting.all_day_date ?? null
+            meeting.all_day_date ?? null,
+            calendarSyncToken ?? null
           ]
         )
       }
@@ -3705,6 +4040,22 @@ export function upsertMeetingsBatch(meetings: Omit<Meeting, 'created_at' | 'upda
       extractContactsFromMeetingDataInternal(meeting)
     }
   })
+}
+
+/** Publish a fully written ICS snapshot for automatic meeting attribution. */
+export function activateCalendarSyncToken(token: string, completedAt = new Date().toISOString()): void {
+  run(
+    `INSERT INTO calendar_sync_state (id, active_token, completed_at)
+     VALUES (1, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET active_token = excluded.active_token, completed_at = excluded.completed_at`,
+    [token, completedAt]
+  )
+}
+
+export function getActiveCalendarSyncToken(): string | null {
+  return queryOne<{ active_token: string | null }>(
+    'SELECT active_token FROM calendar_sync_state WHERE id = 1'
+  )?.active_token ?? null
 }
 
 // Meeting queries
@@ -3725,6 +4076,8 @@ export interface Meeting {
   is_all_day?: number
   /** Named calendar day (YYYY-MM-DD) for all-day events; null for timed (v32). */
   all_day_date?: string | null
+  /** ICS snapshot in which this row was last observed (v54). */
+  calendar_sync_token?: string | null
   created_at: string
   updated_at: string
 }
@@ -3944,9 +4297,11 @@ export interface Recording {
   original_filename?: string
   file_path: string | null  // NULL if not stored locally
   file_size?: number
-  duration_seconds?: number
+  duration_seconds?: number | null
   date_recorded: string
   meeting_id?: string
+  /** Read projection from the assigned meeting; never persisted on recordings. */
+  meeting_subject?: string | null
   correlation_confidence?: number
   correlation_method?: string
   status: string  // Legacy field for backwards compatibility
@@ -3970,14 +4325,24 @@ export interface Recording {
 }
 
 /**
- * All live recordings for the Library, newest first. Excludes soft-deleted rows
- * (deleted_at set) — those are hidden until restored or hard-purged. Personal
+ * All available recordings for the Library, newest first. Excludes soft-deleted
+ * rows (deleted_at set) and rows whose final device copy was reconciled away
+ * (`location = 'deleted'`). The latter are durable identity/audit rows, not
+ * downloadable sources; surfacing them resurrects an erased device file as a
+ * false "device-only" item. Personal
  * ("ignored") recordings ARE returned so the Library can show them behind a
  * filter chip; every AI pipeline uses getActiveRecordingIdsForProcessing()
  * instead, which excludes both personal and soft-deleted.
  */
 export function getRecordings(): Recording[] {
-  return queryAll<Recording>('SELECT * FROM recordings WHERE deleted_at IS NULL ORDER BY date_recorded DESC')
+  return queryAll<Recording>(
+    `SELECT r.*, m.subject AS meeting_subject
+       FROM recordings r
+       LEFT JOIN meetings m ON m.id = r.meeting_id
+      WHERE r.deleted_at IS NULL
+        AND (r.location IS NULL OR r.location <> 'deleted')
+      ORDER BY r.date_recorded DESC`
+  )
 }
 
 export function getRecordingById(id: string): Recording | undefined {
@@ -4004,9 +4369,11 @@ export function getTrashedRecordings(): Recording[] {
 
 /**
  * Mark / unmark a recording as "personal" (ignored). Non-destructive and fully
- * reversible: the file and all derived rows stay, but the recording is pulled
+ * reversible: the file and content derivatives stay, but the recording is pulled
  * from every AI pipeline (transcription queue, graph ingest, vector indexing,
- * RAG results, Today) and hidden from the Library default view. Returns the new
+ * RAG results, Today) and hidden from the Library default view. Acoustic voice
+ * observations are learned identity state, so they are removed when a recording
+ * becomes personal and can be rebuilt by a later transcription. Returns the new
  * flag state, or undefined if the recording does not exist.
  */
 export function setRecordingPersonal(id: string, personal: boolean): boolean | undefined {
@@ -4015,6 +4382,7 @@ export function setRecordingPersonal(id: string, personal: boolean): boolean | u
   runInTransaction(() => {
     runNoSave('UPDATE recordings SET personal = ? WHERE id = ?', [personal ? 1 : 0, id])
     if (personal) {
+      removeRecordingVoiceEvidenceNoSave(id)
       // Pull it out of the transcription queue immediately (a queued personal
       // recording must not be processed). Leaves completed history intact.
       runNoSave("DELETE FROM transcription_queue WHERE recording_id = ? AND status IN ('pending', 'failed')", [id])
@@ -4430,7 +4798,7 @@ export function getFailedTranscriptsForReanalysis(
 }
 
 /** All knowledge_capture ids owned by a recording (via source link or migration). */
-function getCaptureIdsForRecording(recordingId: string): string[] {
+export function getCaptureIdsForRecording(recordingId: string): string[] {
   const rec = queryOne<{ migrated_to_capture_id?: string | null }>(
     'SELECT migrated_to_capture_id FROM recordings WHERE id = ?',
     [recordingId]
@@ -4475,6 +4843,7 @@ export function setKnowledgeCaptureRatingByRecording(
         [rating, now, now, captureId]
       )
     }
+    if (isValueExcludedRecording(recordingId)) removeRecordingVoiceEvidenceNoSave(recordingId)
   })
 
   return { success: true, rating }
@@ -4622,7 +4991,12 @@ export function getRecordingDeletionImpact(recordingId: string): RecordingDeleti
     // the renderer's UnifiedRecording, which loses deviceFilename entirely
     // once a row is flattened into the Trash view.
     onDevice: !!rec.on_device,
-    deviceFilename: rec.on_device ? rec.filename : null
+    // Device-NATIVE name (original_filename — the .hda on the hardware), NOT
+    // the local normalized .wav: getHiDockDeviceService().deleteRecording()
+    // deletes by the device's own name, so passing rec.filename (.wav) made
+    // every "Also delete from device" call a silent no-op on the hardware
+    // (found 2026-07-20: both Rec07/Rec08 purges left their device copies).
+    deviceFilename: rec.on_device ? (rec.original_filename || rec.filename) : null
   }
 }
 
@@ -4702,6 +5076,60 @@ function recomputeMeetingParticipants(meetingId: string, excludeRecordingId: str
   return removed
 }
 
+/** Remove one recording's acoustic evidence and rebuild every affected centroid. */
+function removeRecordingVoiceEvidenceNoSave(recordingId: string): void {
+  const affected = queryAll<{ voice_cluster_id: string }>(
+    'SELECT DISTINCT voice_cluster_id FROM voice_cluster_observations WHERE recording_id = ?',
+    [recordingId]
+  ).map((row) => row.voice_cluster_id)
+  runNoSave('DELETE FROM recording_voice_clusters WHERE recording_id = ?', [recordingId])
+  runNoSave('DELETE FROM voice_cluster_observations WHERE recording_id = ?', [recordingId])
+  for (const clusterId of affected) {
+    const observations = queryAll<{ embedding_json: string; speech_seconds: number }>(
+      'SELECT embedding_json, speech_seconds FROM voice_cluster_observations WHERE voice_cluster_id = ?',
+      [clusterId]
+    )
+    if (!observations.length) {
+      runNoSave('DELETE FROM voice_clusters WHERE id = ?', [clusterId])
+      continue
+    }
+    let weighted: number[] = []
+    let totalWeight = 0
+    for (const observation of observations) {
+      let embedding: number[]
+      try {
+        const parsed = JSON.parse(observation.embedding_json)
+        embedding = Array.isArray(parsed) ? parsed.map(Number) : []
+      } catch {
+        embedding = []
+      }
+      if (!embedding.length || embedding.some((value) => !Number.isFinite(value))) continue
+      const weight = Math.max(0.001, Number(observation.speech_seconds) || 0)
+      if (!weighted.length) weighted = new Array(embedding.length).fill(0)
+      if (weighted.length !== embedding.length) continue
+      for (let index = 0; index < embedding.length; index++) weighted[index] += embedding[index] * weight
+      totalWeight += weight
+    }
+    if (!weighted.length || totalWeight <= 0) {
+      runNoSave('DELETE FROM voice_clusters WHERE id = ?', [clusterId])
+      continue
+    }
+    const mean = weighted.map((value) => value / totalWeight)
+    const magnitude = Math.sqrt(mean.reduce((sum, value) => sum + value * value, 0)) || 1
+    const centroid = mean.map((value) => value / magnitude)
+    runNoSave(
+      `UPDATE voice_clusters SET centroid_json = ?, observation_count = ?, total_speech_seconds = ?,
+       updated_at = ? WHERE id = ?`,
+      [JSON.stringify(centroid), observations.length, totalWeight, new Date().toISOString(), clusterId]
+    )
+  }
+}
+
+/** Remove one recording's acoustic identity evidence and rebuild affected centroids. */
+export function removeRecordingVoiceEvidence(recordingId: string): void {
+  runInTransaction(() => removeRecordingVoiceEvidenceNoSave(recordingId))
+}
+
 export interface RecordingDeletionResult {
   mode: 'soft' | 'hard'
   recordingId: string
@@ -4746,8 +5174,9 @@ export interface RecordingDeletionResult {
  *
  * Soft ({ hard: false }, the default): set `deleted_at`, snapshot the row into
  * deletion_journal, hide it everywhere. Fully reversible via restoreRecording.
- * No files are touched and no derived rows are removed — read-sites filter on
- * deleted_at, so nothing surfaces.
+ * No files or content derivatives are touched. Acoustic voice observations are
+ * removed immediately so trashed audio cannot keep influencing identity
+ * matches; they can be rebuilt if the restored recording is transcribed again.
  *
  * Hard ({ hard: true }): irreversibly remove ALL derived DB rows (transcripts +
  * their embeddings, vector chunks, knowledge_captures and every child, first-
@@ -4789,6 +5218,7 @@ export function deleteRecordingCascade(
     const now = new Date().toISOString()
     runInTransaction(() => {
       runNoSave('UPDATE recordings SET deleted_at = ? WHERE id = ?', [now, recordingId])
+      removeRecordingVoiceEvidenceNoSave(recordingId)
       // Stop any in-flight/queued transcription for a hidden recording.
       runNoSave("DELETE FROM transcription_queue WHERE recording_id = ? AND status IN ('pending', 'failed')", [recordingId])
       // ARF-3 — tombstone (cancel) a PROCESSING row too: a worker mid-analysis
@@ -4948,6 +5378,7 @@ export function deleteRecordingCascade(
       runNoSave('DELETE FROM turn_speaker_overrides WHERE recording_id = ?', [recordingId])
       runNoSave('DELETE FROM speaker_splits WHERE recording_id = ?', [recordingId])
       runNoSave('DELETE FROM mention_resolutions WHERE recording_id = ?', [recordingId])
+      removeRecordingVoiceEvidenceNoSave(recordingId)
 
       // 5. Meeting candidates + processing/quality rows keyed by recording.
       runNoSave('DELETE FROM recording_meeting_candidates WHERE recording_id = ?', [recordingId])
@@ -4955,6 +5386,23 @@ export function deleteRecordingCascade(
       runNoSave('DELETE FROM quality_assessments WHERE recording_id = ?', [recordingId])
 
       // 6. Pre-assignments (keyed by device filename) + synced_files (by filename).
+      //
+      // v51 — PURGE TOMBSTONES FIRST: the synced_files/recordings cleanup
+      // below erases every "already synced" marker, so download reconciliation
+      // would treat the STILL-ON-DEVICE file as new and RESURRECT the purged
+      // recording (re-download → re-transcribe → re-embed). Record filename-
+      // only tombstones (all name variants the reconciler checks) in the SAME
+      // transaction; isFileAlreadySynced skips these. No content is retained.
+      const purgeTombstones = new Set<string>([rec.filename])
+      if (rec.original_filename) purgeTombstones.add(rec.original_filename)
+      for (const name of [...purgeTombstones]) {
+        if (/\.hda$/i.test(name)) purgeTombstones.add(name.replace(/\.hda$/i, '.wav'))
+        if (/\.wav$/i.test(name)) purgeTombstones.add(name.replace(/\.wav$/i, '.hda'))
+        purgeTombstones.add(name.replace(/\.(hda|wav)$/i, '.mp3'))
+      }
+      for (const name of purgeTombstones) {
+        runNoSave('INSERT OR IGNORE INTO purged_files (filename) VALUES (?)', [name])
+      }
       runNoSave('DELETE FROM recording_preassignments WHERE filename = ?', [rec.filename])
       if (rec.original_filename) {
         runNoSave('DELETE FROM synced_files WHERE original_filename = ?', [rec.original_filename])
@@ -5061,10 +5509,10 @@ export function deleteRecordingCascade(
 // =============================================================================
 
 export interface PendingCleanupTarget {
-  kind: 'audio' | 'wiki' | 'artifact' | 'vector'
-  /** On-disk path, for 'audio' | 'artifact' targets. 'wiki' | 'vector' retry
-   *  by recordingId instead (their cleanup functions operate on the whole
-   *  recording, not a single path). */
+  kind: 'audio' | 'wiki' | 'artifact' | 'vector' | 'device'
+  /** On-disk path for 'audio' | 'artifact'; the DEVICE-NATIVE filename for
+   *  'device'. 'wiki' | 'vector' retry by recordingId instead (their cleanup
+   *  functions operate on the whole recording, not a single path). */
   path?: string
 }
 
@@ -5416,9 +5864,20 @@ export function getRecordingsByIds(ids: string[]): Map<string, Recording> {
 }
 
 
-// Get recording by filename (canonical identifier)
+// Get recording by filename (canonical identifier). Device discovery uses the
+// native .hda name while the durable local row commonly uses .wav/.mp3 and
+// stores the device name in original_filename. Prefer the local canonical row
+// when both exist so a device snapshot cannot create a second shadow row.
 export function getRecordingByFilename(filename: string): Recording | undefined {
-  return queryOne<Recording>('SELECT * FROM recordings WHERE filename = ?', [filename])
+  return queryOne<Recording>(
+    `SELECT * FROM recordings
+      WHERE filename = ? OR original_filename = ?
+      ORDER BY on_local DESC,
+               CASE WHEN filename = ? THEN 0 ELSE 1 END,
+               created_at ASC
+      LIMIT 1`,
+    [filename, filename, filename]
+  )
 }
 
 // Update recording lifecycle state
@@ -5471,21 +5930,30 @@ export function upsertRecordingFromDevice(deviceFile: {
   const now = new Date().toISOString()
 
   if (existing) {
-    // Update device presence and refresh duration from device (may have been calculated incorrectly before)
+    // Update the canonical row rather than creating a device-only .hda shadow
+    // beside an existing local .wav/.mp3 row. The device-native filename is
+    // authoritative for future reconciliation and device deletion.
     const newLocation = existing.on_local ? 'both' : 'device-only'
     run(
-      `UPDATE recordings SET on_device = 1, device_last_seen = ?, location = ?, file_size = ?, duration_seconds = ? WHERE id = ?`,
-      [now, newLocation, deviceFile.size, deviceFile.duration, existing.id]
+      `UPDATE recordings
+          SET on_device = 1,
+              device_last_seen = ?,
+              location = ?,
+              original_filename = ?,
+              file_size = CASE WHEN on_local = 1 THEN file_size ELSE ? END,
+              duration_seconds = ?
+        WHERE id = ?`,
+      [now, newLocation, deviceFile.filename, deviceFile.size, deviceFile.duration, existing.id]
     )
-    return { ...existing, on_device: 1, device_last_seen: now, location: newLocation as Recording['location'], duration_seconds: deviceFile.duration }
+    return getRecordingById(existing.id)!
   } else {
     // Create new recording entry
     const id = crypto.randomUUID()
     run(
-      `INSERT INTO recordings (id, filename, file_path, file_size, duration_seconds, date_recorded,
+      `INSERT INTO recordings (id, filename, original_filename, file_path, file_size, duration_seconds, date_recorded,
         status, location, transcription_status, on_device, device_last_seen, on_local, source, is_imported)
-       VALUES (?, ?, NULL, ?, ?, ?, 'none', 'device-only', 'none', 1, ?, 0, 'hidock', 0)`,
-      [id, deviceFile.filename, deviceFile.size, deviceFile.duration, deviceFile.dateCreated.toISOString(), now]
+       VALUES (?, ?, ?, NULL, ?, ?, ?, 'none', 'device-only', 'none', 1, ?, 0, 'hidock', 0)`,
+      [id, deviceFile.filename, deviceFile.filename, deviceFile.size, deviceFile.duration, deviceFile.dateCreated.toISOString(), now]
     )
     return getRecordingById(id)!
   }
@@ -5495,11 +5963,17 @@ export function upsertRecordingFromDevice(deviceFile: {
 export function markRecordingsNotOnDevice(presentFilenames: string[]): void {
   if (presentFilenames.length === 0) return
 
+  const presentBases = new Set(
+    presentFilenames.map((filename) => filename.replace(/\.(hda|wav|mp3|m4a|aac|ogg|flac)$/i, '').toLowerCase())
+  )
+
   // Get all recordings marked as on_device
   const onDevice = queryAll<Recording>('SELECT * FROM recordings WHERE on_device = 1')
 
   for (const rec of onDevice) {
-    if (!presentFilenames.includes(rec.filename)) {
+    const deviceIdentity = rec.original_filename || rec.filename
+    const base = deviceIdentity.replace(/\.(hda|wav|mp3|m4a|aac|ogg|flac)$/i, '').toLowerCase()
+    if (!presentBases.has(base)) {
       const newLocation = rec.on_local ? 'local-only' : 'deleted'
       updateRecordingLifecycle(rec.id, {
         on_device: 0,
@@ -5628,6 +6102,64 @@ export function deleteRecordingLocal(id: string): void {
   })
 }
 
+/** A locally-created child recording produced by a user-confirmed audio split. */
+export type RecordingSplitChild = Omit<Recording, 'created_at' | 'meeting_id' | 'correlation_confidence' | 'correlation_method'> & {
+  file_path: string
+  file_size: number
+  duration_seconds: number
+}
+
+/**
+ * Atomically register two split children and soft-delete their source recording.
+ * The source row, transcript, and original audio stay intact in Trash, so the
+ * user can recover from a cut without relying on filesystem undo.
+ */
+export function commitRecordingSplit(recordingId: string, children: RecordingSplitChild[]): void {
+  if (children.length !== 2) throw new Error('A recording split must create exactly two children')
+  if (new Set(children.map((child) => child.id)).size !== 2) throw new Error('Split child ids must be unique')
+
+  const parent = getRecordingById(recordingId)
+  if (!parent || parent.deleted_at) throw new Error('The source recording is unavailable')
+  const now = new Date().toISOString()
+
+  runInTransaction(() => {
+    for (const child of children) {
+      runNoSave(
+        `INSERT INTO recordings (id, filename, original_filename, file_path, file_size,
+          duration_seconds, date_recorded, meeting_id, correlation_confidence,
+          correlation_method, status, location, transcription_status, on_device,
+          on_local, source, is_imported)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          child.id,
+          child.filename,
+          child.original_filename ?? null,
+          child.file_path,
+          child.file_size,
+          child.duration_seconds,
+          child.date_recorded,
+          child.status,
+          child.location,
+          child.transcription_status,
+          child.on_device,
+          child.on_local,
+          child.source,
+          child.is_imported,
+        ]
+      )
+    }
+
+    runNoSave('UPDATE recordings SET deleted_at = ? WHERE id = ?', [now, recordingId])
+    runNoSave("DELETE FROM transcription_queue WHERE recording_id = ? AND status IN ('pending', 'failed')", [recordingId])
+    runNoSave("UPDATE transcription_queue SET status = 'cancelled' WHERE recording_id = ? AND status = 'processing'", [recordingId])
+    runNoSave(
+      `INSERT INTO deletion_journal (id, recording_id, mode, recording_snapshot, created_at)
+       VALUES (?, ?, 'soft', ?, ?)`,
+      [randomUUID(), recordingId, JSON.stringify(parent), now]
+    )
+  })
+}
+
 export function insertRecording(recording: Omit<Recording, 'created_at'>): void {
   // Lifecycle columns (location/on_device/on_local/...) must be written explicitly:
   // the DDL defaults are device-oriented ('device-only', on_device=1, on_local=0),
@@ -5666,6 +6198,87 @@ export function updateRecordingStatus(id: string, status: string): void {
 
 export function updateRecordingTranscriptionStatus(id: string, transcriptionStatus: string): void {
   run('UPDATE recordings SET transcription_status = ? WHERE id = ?', [transcriptionStatus, id])
+}
+
+/**
+ * Retire stale AI-derived content when a reprocess conclusively returns
+ * `no_speech`. The original recording and user-authored title survive. An
+ * automatic transcript-based meeting link is removed; manual/user links are
+ * preserved. Processing runs are immutable audit history and are not deleted.
+ */
+export function retireGeneratedContentForNoSpeech(recordingId: string): void {
+  runInTransaction(() => {
+    const recording = queryOne<{
+      filename: string
+      correlation_method: string | null
+    }>('SELECT filename, correlation_method FROM recordings WHERE id = ?', [recordingId])
+    if (!recording) return
+
+    const transcriptIds = queryAll<{ id: string }>(
+      'SELECT id FROM transcripts WHERE recording_id = ?',
+      [recordingId]
+    ).map((row) => row.id)
+    if (transcriptIds.length > 0) {
+      const placeholders = transcriptIds.map(() => '?').join(',')
+      runNoSave(`DELETE FROM embeddings WHERE transcript_id IN (${placeholders})`, transcriptIds)
+    }
+    runNoSave('DELETE FROM transcripts WHERE recording_id = ?', [recordingId])
+    try {
+      runNoSave('DELETE FROM vector_embeddings WHERE recording_id = ?', [recordingId])
+    } catch {
+      // The vector table is created lazily.
+    }
+
+    const captureIds = queryAll<{ id: string }>(
+      'SELECT id FROM knowledge_captures WHERE source_recording_id = ?',
+      [recordingId]
+    ).map((row) => row.id)
+    if (captureIds.length > 0) {
+      const placeholders = captureIds.map(() => '?').join(',')
+      // These tables are generated from transcript analysis for a recording-
+      // backed capture. They cannot remain actionable after no-speech proof.
+      for (const table of ['action_items', 'decisions', 'follow_ups']) {
+        runNoSave(`DELETE FROM ${table} WHERE knowledge_capture_id IN (${placeholders})`, captureIds)
+      }
+      runNoSave(`DELETE FROM actionables WHERE source_knowledge_id IN (${placeholders})`, captureIds)
+      runNoSave(
+        `UPDATE knowledge_captures
+            SET title = CASE WHEN TRIM(COALESCE(user_title, '')) != '' THEN user_title ELSE ? END,
+                summary = NULL,
+                quality_rating = CASE WHEN quality_source = 'ai' THEN 'unrated' ELSE quality_rating END,
+                quality_confidence = CASE WHEN quality_source = 'ai' THEN NULL ELSE quality_confidence END,
+                quality_reasons = CASE WHEN quality_source = 'ai' THEN NULL ELSE quality_reasons END,
+                quality_source = CASE WHEN quality_source = 'ai' THEN NULL ELSE quality_source END,
+                updated_at = ?
+          WHERE id IN (${placeholders})`,
+        [recording.filename, new Date().toISOString(), ...captureIds]
+      )
+    }
+
+    // Remove only transcript-provenance memberships from this recording.
+    runNoSave("DELETE FROM meeting_contacts WHERE source = 'transcript' AND source_recording_id = ?", [recordingId])
+    runNoSave("DELETE FROM meeting_projects WHERE source = 'transcript' AND source_recording_id = ?", [recordingId])
+
+    // A no-speech result invalidates every automatic attribution, including the
+    // provisional schedule/time link created before VAD ran. Explicit user links
+    // remain authoritative. This keeps the UI's "meeting auto-linking was
+    // skipped" statement truthful and prevents startup reconciliation from
+    // resurrecting a meeting for known non-speech audio.
+    const automaticMeetingMethods = new Set(['ai_transcript_match', 'schedule_candidate', 'time_overlap'])
+    if (recording.correlation_method && automaticMeetingMethods.has(recording.correlation_method)) {
+      runNoSave(
+        'UPDATE recordings SET meeting_id = NULL, correlation_confidence = NULL, correlation_method = NULL WHERE id = ?',
+        [recordingId]
+      )
+      runNoSave(
+        `UPDATE knowledge_captures
+            SET meeting_id = NULL, correlation_confidence = NULL, correlation_method = NULL, updated_at = ?
+          WHERE source_recording_id = ?`,
+        [new Date().toISOString(), recordingId]
+      )
+      runNoSave('UPDATE recording_meeting_candidates SET is_selected = 0 WHERE recording_id = ?', [recordingId])
+    }
+  })
 }
 
 /**
@@ -5899,6 +6512,34 @@ export function linkRecordingToMeeting(
   )
 }
 
+/**
+ * Remove a recording's meeting link (2026-07-24). The old unlink wrote
+ * `meeting_id = ''` via linkRecordingToMeeting — an empty string is neither a
+ * valid meetings.id (the recordings.meeting_id FK makes the UPDATE throw,
+ * surfacing as "Failed to unlink recording" / a silent no-op) nor NULL (so
+ * `meeting_id IS NULL` checks kept treating the row as linked). Unlinking
+ * means NULL on every correlation column, on BOTH tables.
+ */
+export function unlinkRecordingFromMeeting(recordingId: string): void {
+  // correlation_method = the standalone marker: an EXPLICIT unlink is the user
+  // saying "this recording belongs to no meeting" — the batch auto-linker must
+  // never silently re-link it (its query excludes this method). A manual link
+  // later still overrides (linkRecordingToMeeting replaces the method).
+  run(
+    `UPDATE recordings SET meeting_id = NULL, correlation_confidence = NULL, correlation_method = 'user_preassign_standalone' WHERE id = ?`,
+    [recordingId]
+  )
+  run(
+    `UPDATE knowledge_captures
+     SET meeting_id = NULL,
+         correlation_confidence = NULL,
+         correlation_method = NULL,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE source_recording_id = ?`,
+    [recordingId]
+  )
+}
+
 // Transcript queries
 export interface Transcript {
   id: string
@@ -5916,7 +6557,155 @@ export interface Transcript {
   transcription_model?: string
   title_suggestion?: string
   question_suggestions?: string
+  transcription_run_id?: string
+  diarization_run_id?: string
+  summary_run_id?: string
+  title_run_id?: string
+  meeting_resolution_run_id?: string
+  diarization_quality_status?: DiarizationQualityStatus
+  diarization_quality?: string
+  mentioned_people?: string
   created_at: string
+}
+
+export type ProcessingStage =
+  | 'metadata'
+  | 'schedule-match'
+  | 'vad'
+  | 'diarization'
+  | 'transcription'
+  | 'summary'
+  | 'title'
+  | 'meeting-resolution'
+  | 'speaker-identity'
+  | 'voice-id'
+
+export type ProcessingRunStatus = 'pending' | 'running' | 'completed' | 'degraded' | 'failed' | 'cancelled'
+export type DiarizationQualityStatus = 'high' | 'degraded' | 'failed' | 'unavailable'
+
+export interface ProcessingRun {
+  id: string
+  recording_id: string
+  transcript_id: string | null
+  stage: ProcessingStage
+  provider: string
+  tool: string | null
+  model: string | null
+  version: string | null
+  execution: 'local' | 'cloud' | 'provider-managed' | null
+  status: ProcessingRunStatus
+  started_at: string
+  completed_at: string | null
+  parent_run_ids: string | null
+  output_refs: string | null
+  usage_json: string | null
+  estimated_cost_amount: number | null
+  estimated_cost_currency: string | null
+  cost_method: string | null
+  quality_status: string | null
+  quality_json: string | null
+  error_message: string | null
+  created_at: string
+}
+
+export interface CreateProcessingRunInput {
+  recordingId: string
+  transcriptId?: string | null
+  stage: ProcessingStage
+  provider: string
+  tool?: string | null
+  model?: string | null
+  version?: string | null
+  execution?: ProcessingRun['execution']
+  parentRunIds?: string[]
+}
+
+export function createProcessingRun(input: CreateProcessingRunInput): ProcessingRun {
+  const id = randomUUID()
+  const startedAt = new Date().toISOString()
+  run(
+    `INSERT INTO processing_runs
+      (id, recording_id, transcript_id, stage, provider, tool, model, version, execution,
+       status, started_at, parent_run_ids)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`,
+    [
+      id,
+      input.recordingId,
+      input.transcriptId ?? null,
+      input.stage,
+      input.provider,
+      input.tool ?? null,
+      input.model ?? null,
+      input.version ?? null,
+      input.execution ?? null,
+      startedAt,
+      input.parentRunIds?.length ? JSON.stringify(input.parentRunIds) : null
+    ]
+  )
+  return queryOne<ProcessingRun>('SELECT * FROM processing_runs WHERE id = ?', [id])!
+}
+
+export interface CompleteProcessingRunInput {
+  status?: Extract<ProcessingRunStatus, 'completed' | 'degraded' | 'cancelled'>
+  transcriptId?: string | null
+  tool?: string | null
+  model?: string | null
+  version?: string | null
+  outputRefs?: Record<string, unknown> | string[]
+  usage?: Record<string, unknown>
+  estimatedCostAmount?: number | null
+  estimatedCostCurrency?: string | null
+  costMethod?: string | null
+  qualityStatus?: string | null
+  quality?: Record<string, unknown> | null
+}
+
+export function completeProcessingRun(id: string, result: CompleteProcessingRunInput = {}): void {
+  run(
+    `UPDATE processing_runs SET status = ?, completed_at = ?, transcript_id = COALESCE(?, transcript_id),
+       tool = COALESCE(?, tool), model = COALESCE(?, model), version = COALESCE(?, version),
+       output_refs = ?, usage_json = ?, estimated_cost_amount = ?, estimated_cost_currency = ?,
+       cost_method = ?, quality_status = ?, quality_json = ?, error_message = NULL
+     WHERE id = ?`,
+    [
+      result.status ?? 'completed',
+      new Date().toISOString(),
+      result.transcriptId ?? null,
+      result.tool ?? null,
+      result.model ?? null,
+      result.version ?? null,
+      result.outputRefs ? JSON.stringify(result.outputRefs) : null,
+      result.usage ? JSON.stringify(result.usage) : null,
+      result.estimatedCostAmount ?? null,
+      result.estimatedCostCurrency ?? null,
+      result.costMethod ?? null,
+      result.qualityStatus ?? null,
+      result.quality ? JSON.stringify(result.quality) : null,
+      id
+    ]
+  )
+}
+
+export function failProcessingRun(id: string, message: string, cancelled = false): void {
+  run(
+    `UPDATE processing_runs SET status = ?, completed_at = ?, error_message = ? WHERE id = ?`,
+    [cancelled ? 'cancelled' : 'failed', new Date().toISOString(), message.slice(0, 2000), id]
+  )
+}
+
+export function getProcessingRunsForRecording(recordingId: string): ProcessingRun[] {
+  return queryAll<ProcessingRun>(
+    `SELECT * FROM processing_runs WHERE recording_id = ? ORDER BY started_at ASC, created_at ASC`,
+    [recordingId]
+  )
+}
+
+/** Latest terminal run per stage, suitable for the compact reader header. */
+export function getActiveProcessingRunsForRecording(recordingId: string): ProcessingRun[] {
+  const runs = getProcessingRunsForRecording(recordingId)
+  const latest = new Map<ProcessingStage, ProcessingRun>()
+  for (const processingRun of runs) latest.set(processingRun.stage, processingRun)
+  return Array.from(latest.values())
 }
 
 export function getTranscriptByRecordingId(recordingId: string): Transcript | undefined {
@@ -5953,8 +6742,9 @@ export function insertTranscript(transcript: Omit<Transcript, 'created_at'>): vo
   run(
     `INSERT OR REPLACE INTO transcripts (id, recording_id, full_text, language, summary, action_items,
       topics, key_points, sentiment, speakers, word_count, transcription_provider, transcription_model,
-      title_suggestion, question_suggestions)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      title_suggestion, question_suggestions, transcription_run_id, diarization_run_id, summary_run_id,
+      title_run_id, meeting_resolution_run_id, diarization_quality_status, diarization_quality, mentioned_people)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       transcript.id,
       transcript.recording_id,
@@ -5970,7 +6760,15 @@ export function insertTranscript(transcript: Omit<Transcript, 'created_at'>): vo
       transcript.transcription_provider ?? null,
       transcript.transcription_model ?? null,
       transcript.title_suggestion ?? null,
-      transcript.question_suggestions ?? null
+      transcript.question_suggestions ?? null,
+      transcript.transcription_run_id ?? null,
+      transcript.diarization_run_id ?? null,
+      transcript.summary_run_id ?? null,
+      transcript.title_run_id ?? null,
+      transcript.meeting_resolution_run_id ?? null,
+      transcript.diarization_quality_status ?? null,
+      transcript.diarization_quality ?? null,
+      transcript.mentioned_people ?? null
     ]
   )
 }
@@ -6132,11 +6930,29 @@ export function addToQueue(recordingId: string, provider?: string): string {
     console.log(`[Transcription] Skipping enqueue of personal/deleted recording ${recordingId}`)
     return ''
   }
+
+  // A recording may be rediscovered by auto-sync while it is already queued
+  // (or the user may click Process All before the renderer has refreshed). A
+  // second active row would duplicate cost and make every UI status ambiguous.
+  const existing = queryOne<{ id: string }>(`
+    SELECT id
+    FROM transcription_queue
+    WHERE recording_id = ? AND status IN ('pending', 'processing')
+    ORDER BY created_at ASC
+    LIMIT 1
+  `, [recordingId])
+  if (existing) return existing.id
+
   const id = crypto.randomUUID()
-  run(
-    'INSERT INTO transcription_queue (id, recording_id, provider) VALUES (?, ?, ?)',
-    [id, recordingId, provider ?? null]
-  )
+  runInTransaction(() => {
+    run(
+      'INSERT INTO transcription_queue (id, recording_id, provider) VALUES (?, ?, ?)',
+      [id, recordingId, provider ?? null]
+    )
+    // Keep the durable recording projection aligned at the enqueue chokepoint.
+    // This covers auto-download, manual, and bulk enqueue paths immediately.
+    updateRecordingTranscriptionStatus(recordingId, 'pending')
+  })
   return id
 }
 
@@ -6158,12 +6974,39 @@ export function getQueueItems(status?: string): (QueueItem & { filename?: string
   return queryAll<QueueItem & { filename?: string; date_recorded?: string }>(sql)
 }
 
+/**
+ * Renderer-facing queue projection. Completed/cancelled history is intentionally
+ * excluded so a periodic UI reconciliation does not serialize and scan years of
+ * terminal rows merely to render the handful of actionable operations.
+ */
+export function getActionableQueueItems(): (QueueItem & { filename?: string; date_recorded?: string })[] {
+  return queryAll<QueueItem & { filename?: string; date_recorded?: string }>(`
+    SELECT tq.*, r.filename, r.date_recorded
+    FROM transcription_queue tq
+    LEFT JOIN recordings r ON tq.recording_id = r.id
+    WHERE tq.status IN ('pending', 'processing', 'failed')
+      AND NOT (
+        tq.status = 'failed'
+        AND EXISTS (
+          SELECT 1
+          FROM transcripts t
+          WHERE t.recording_id = tq.recording_id
+            AND datetime(t.created_at) > datetime(COALESCE(tq.completed_at, tq.started_at, tq.created_at))
+        )
+      )
+    ORDER BY r.date_recorded DESC, tq.created_at ASC
+  `)
+}
+
 export function updateQueueItem(id: string, status: string, errorMessage?: string): void {
   if (status === 'processing') {
-    run('UPDATE transcription_queue SET status = ?, started_at = CURRENT_TIMESTAMP, attempts = attempts + 1 WHERE id = ?', [
-      status,
-      id
-    ])
+    run(
+      `UPDATE transcription_queue
+       SET status = ?, started_at = CURRENT_TIMESTAMP, completed_at = NULL,
+           error_message = NULL, attempts = attempts + 1
+       WHERE id = ?`,
+      [status, id]
+    )
   } else if (status === 'completed' || status === 'failed') {
     run('UPDATE transcription_queue SET status = ?, completed_at = CURRENT_TIMESTAMP, error_message = ? WHERE id = ?', [
       status,
@@ -6244,6 +7087,35 @@ export function isFileSynced(originalFilename: string): boolean {
     originalFilename
   ])
   return (result?.count ?? 0) > 0
+}
+
+/**
+ * v51 — was this filename PERMANENTLY deleted (hard purge tombstone)? The
+ * download reconciler checks this FIRST: a purged recording whose file is
+ * still on the device must never be re-downloaded (resurrection). Tolerates
+ * the table's absence (pre-v51 DB) as "not purged".
+ */
+export function isFilePurged(filename: string): boolean {
+  try {
+    const result = queryOne<{ count: number }>('SELECT COUNT(*) as count FROM purged_files WHERE filename = ?', [
+      filename
+    ])
+    return (result?.count ?? 0) > 0
+  } catch {
+    return false
+  }
+}
+
+/**
+ * v51 — every purge-tombstoned filename (all variants), for renderer surfaces
+ * that badge "Deleted — still on device" (DeviceFileList).
+ */
+export function getPurgedFilenames(): string[] {
+  try {
+    return queryAll<{ filename: string }>('SELECT filename FROM purged_files').map((r) => r.filename)
+  } catch {
+    return []
+  }
 }
 
 export function getSyncedFile(originalFilename: string): SyncedFile | undefined {
@@ -7439,6 +8311,11 @@ export function getContactsForMeetingOwner(meetingId: string): Contact[] {
 export function deleteContact(id: string): void {
   // Remove junction table entries first, then the contact
   run('DELETE FROM meeting_contacts WHERE contact_id = ?', [id])
+  run(
+    `UPDATE voice_clusters SET contact_id = NULL, contact_link_method = NULL,
+     contact_link_confidence = NULL, updated_at = ? WHERE contact_id = ?`,
+    [new Date().toISOString(), id]
+  )
   run('DELETE FROM contacts WHERE id = ?', [id])
 }
 
@@ -7512,6 +8389,7 @@ interface MergeInvalidatedByPurge {
 interface ContactMergeManifest {
   meetingContacts: { repointed: RepointedLink[]; collided: RepointedLink[] }
   transcriptSpeakers: { repointed: string[] } // transcript_speakers.id values moved
+  voiceClusters?: { repointed: string[] } // voice_clusters.id values moved
   createdAliasNorms: string[] // aliases the merge created (loser-name → keeper)
   loserAliases: Array<{ alias_norm: string; source: string | null; confidence: number | null }>
   keeperBefore: { meetingIds: string[]; speakerIds: string[] }
@@ -7655,6 +8533,10 @@ export function mergeContacts(keeperId: string, loserId: string): Contact {
       'SELECT id FROM transcript_speakers WHERE contact_id = ?',
       [loserId]
     ).map((r) => r.id)
+    const loserVoiceClusterIds = queryAll<{ id: string }>(
+      'SELECT id FROM voice_clusters WHERE contact_id = ?',
+      [loserId]
+    ).map((r) => r.id)
     const loserAliases = queryAll<{ alias_norm: string; source: string | null; confidence: number | null }>(
       'SELECT alias_norm, source, confidence FROM contact_aliases WHERE contact_id = ?',
       [loserId]
@@ -7673,6 +8555,11 @@ export function mergeContacts(keeperId: string, loserId: string): Contact {
     // Repoint transcript_speakers. Its UNIQUE is (recording_id, speaker_label),
     // unaffected by contact_id, so a plain update never collides.
     runNoSave('UPDATE transcript_speakers SET contact_id = ? WHERE contact_id = ?', [keeperId, loserId])
+    runNoSave('UPDATE voice_clusters SET contact_id = ?, updated_at = ? WHERE contact_id = ?', [
+      keeperId,
+      new Date().toISOString(),
+      loserId
+    ])
 
     // Fold fields onto the keeper.
     const notEmpty = (v: string | null | undefined) => !!(v && v.trim())
@@ -7723,6 +8610,7 @@ export function mergeContacts(keeperId: string, loserId: string): Contact {
     const manifest: ContactMergeManifest = {
       meetingContacts: { repointed: mcRepointed, collided: mcCollided },
       transcriptSpeakers: { repointed: loserSpeakerIds },
+      voiceClusters: { repointed: loserVoiceClusterIds },
       createdAliasNorms: createdAliasNorm ? [createdAliasNorm] : [],
       loserAliases,
       keeperBefore: { meetingIds: keeperMeetingIds, speakerIds: keeperSpeakerIds }
@@ -8507,6 +9395,18 @@ export function unmergeContacts(journalId: string): UnmergeResult {
       runNoSave('UPDATE transcript_speakers SET contact_id = ? WHERE id = ?', [loser.id, tsId])
       speakerLinks++
     }
+    for (const clusterId of manifest.voiceClusters?.repointed ?? []) {
+      const current = queryOne<{ contact_id: string | null }>('SELECT contact_id FROM voice_clusters WHERE id = ?', [clusterId])
+      if (!current || current.contact_id !== keeperId) {
+        skipped++
+        continue
+      }
+      runNoSave('UPDATE voice_clusters SET contact_id = ?, updated_at = ? WHERE id = ?', [
+        loser.id,
+        new Date().toISOString(),
+        clusterId
+      ])
+    }
 
     // 4. Delete the alias(es) the merge created, restore folded keeper fields.
     for (const norm of manifest.createdAliasNorms ?? []) {
@@ -8662,7 +9562,11 @@ function assertRecordingEligibleForSpeakerMutation(recordingId: string): void {
 export function assignSpeaker(
   recordingId: string,
   speakerLabel: string,
-  opts: { contactId?: string; newName?: string }
+  opts: {
+    contactId?: string
+    newName?: string
+    voiceAnchor?: { method: 'manual' | 'self-identification'; confidence: number }
+  }
 ): Contact {
   return runInTransaction(() => {
     // ADV45-1 (round-47) — RECORDING-axis gate, in-transaction, before any write.
@@ -8703,6 +9607,29 @@ export function assignSpeaker(
       'INSERT OR REPLACE INTO transcript_speakers (id, recording_id, speaker_label, contact_id) VALUES (?, ?, ?, ?)',
       [randomUUID(), recordingId, speakerLabel, contact.id]
     )
+
+    // A manual confirmation or explicit first-person self-identification can
+    // anchor the anonymous acoustic cluster to this contact. Calendar/LLM
+    // inference intentionally does not receive voiceAnchor and therefore can
+    // never turn contextual guessing into persistent acoustic identity.
+    if (opts.voiceAnchor) {
+      runNoSave(
+        `UPDATE voice_clusters SET contact_id = ?, contact_link_method = ?,
+         contact_link_confidence = ?, updated_at = ?
+         WHERE id = (
+           SELECT voice_cluster_id FROM recording_voice_clusters
+           WHERE recording_id = ? AND transcript_speaker_label = ?
+         )`,
+        [
+          contact.id,
+          opts.voiceAnchor.method,
+          Math.max(0, Math.min(1, opts.voiceAnchor.confidence)),
+          new Date().toISOString(),
+          recordingId,
+          speakerLabel
+        ]
+      )
+    }
 
     // Alias memory (v27): a non-generic speaker label ("Javier", not "Speaker 2")
     // is a real name the user just bound — remember it as an alias of the contact.
@@ -10102,6 +11029,100 @@ export function setActionItemAssignee(actionItemId: string, contactId: string | 
   return queryOne<ActionItem>('SELECT * FROM action_items WHERE id = ?', [actionItemId])!
 }
 
+// ---------------------------------------------------------------------------
+// Action-item / decision content editing (2026-07-22, reader event-list detail)
+//
+// Like setActionItemAssignee, these perform NO eligibility gating — the IPC
+// handler MUST gate the row's source capture (filterEligibleCaptureIds) in the
+// SAME synchronous transaction before calling them.
+// ---------------------------------------------------------------------------
+
+export interface ActionItemPatch {
+  content?: string
+  status?: string
+  dueDate?: string | null
+  priority?: string
+}
+
+/** Partially update an action item's user-editable fields. Returns the updated row.
+ *  @throws if the row does not exist or the patch is empty. */
+export function updateActionItem(actionItemId: string, patch: ActionItemPatch): ActionItem {
+  const item = queryOne<ActionItem>('SELECT * FROM action_items WHERE id = ?', [actionItemId])
+  if (!item) throw new Error(`Action item ${actionItemId} not found`)
+  const sets: string[] = []
+  const params: unknown[] = []
+  if (patch.content !== undefined) { sets.push('content = ?'); params.push(patch.content) }
+  if (patch.status !== undefined) { sets.push('status = ?'); params.push(patch.status) }
+  if (patch.dueDate !== undefined) { sets.push('due_date = ?'); params.push(patch.dueDate) }
+  if (patch.priority !== undefined) { sets.push('priority = ?'); params.push(patch.priority) }
+  if (sets.length === 0) throw new Error('updateActionItem: empty patch')
+  sets.push('updated_at = ?')
+  params.push(new Date().toISOString(), actionItemId)
+  run(`UPDATE action_items SET ${sets.join(', ')} WHERE id = ?`, params)
+  return queryOne<ActionItem>('SELECT * FROM action_items WHERE id = ?', [actionItemId])!
+}
+
+export interface DecisionRow {
+  id: string
+  knowledge_capture_id: string
+  content: string
+  context: string | null
+  participants: string | null
+  extracted_from: string | null
+  confidence: number | null
+  decided_at: string | null
+}
+
+export function getDecisionById(decisionId: string): DecisionRow | undefined {
+  return queryOne<DecisionRow>('SELECT * FROM decisions WHERE id = ?', [decisionId])
+}
+
+export interface DecisionPatch {
+  content?: string
+  context?: string | null
+}
+
+/** Partially update a decision's user-editable fields. Returns the updated row.
+ *  @throws if the row does not exist or the patch is empty. */
+export function updateDecision(decisionId: string, patch: DecisionPatch): DecisionRow {
+  const row = queryOne<DecisionRow>('SELECT * FROM decisions WHERE id = ?', [decisionId])
+  if (!row) throw new Error(`Decision ${decisionId} not found`)
+  const sets: string[] = []
+  const params: unknown[] = []
+  if (patch.content !== undefined) { sets.push('content = ?'); params.push(patch.content) }
+  if (patch.context !== undefined) { sets.push('context = ?'); params.push(patch.context) }
+  if (sets.length === 0) throw new Error('updateDecision: empty patch')
+  sets.push('updated_at = ?')
+  params.push(new Date().toISOString(), decisionId)
+  run(`UPDATE decisions SET ${sets.join(', ')} WHERE id = ?`, params)
+  return queryOne<DecisionRow>('SELECT * FROM decisions WHERE id = ?', [decisionId])!
+}
+
+/**
+ * All knowledge-capture ids that belong to a recording: captures whose
+ * source_recording_id matches, plus a migrated-to capture. Mirrors the
+ * resolution timeline-analysis uses so the reader's event list and the
+ * timeline markers join on the same rows. Canonicalize the id first
+ * (getRecordingById ?? resolveRecordingId) when the caller may hold an alias.
+ */
+export function getActionItemsForCaptureIds(captureIds: string[]): ActionItem[] {
+  if (captureIds.length === 0) return []
+  const placeholders = captureIds.map(() => '?').join(', ')
+  return queryAll<ActionItem>(
+    `SELECT * FROM action_items WHERE knowledge_capture_id IN (${placeholders}) ORDER BY created_at ASC`,
+    captureIds
+  )
+}
+
+export function getDecisionsForCaptureIds(captureIds: string[]): DecisionRow[] {
+  if (captureIds.length === 0) return []
+  const placeholders = captureIds.map(() => '?').join(', ')
+  return queryAll<DecisionRow>(
+    `SELECT * FROM decisions WHERE knowledge_capture_id IN (${placeholders}) ORDER BY created_at ASC`,
+    captureIds
+  )
+}
+
 /**
  * Resolve a contact by case-insensitive exact name (v26). Backs graph:resolvePerson
  * so the renderer's name-based resolution has a direct path instead of scanning
@@ -10902,15 +11923,146 @@ export function findCandidateMeetingsForRecording(recordingId: string): Meeting[
   const windowStart = new Date(recStart.getTime() - bufferMs).toISOString()
   const windowEnd = new Date(recEnd.getTime() + bufferMs).toISOString()
 
-  // Find meetings that overlap with this time window
+  // Only the last fully committed ICS snapshot is eligible. Rows absent from
+  // the current feed remain available as history/manual evidence but cannot
+  // win a fresh automatic attribution.
+  const activeToken = getActiveCalendarSyncToken()
+  const tokenClause = activeToken ? 'AND calendar_sync_token = ?' : ''
+  const params = [windowEnd, windowStart, windowStart, windowEnd, windowStart, windowEnd]
+  if (activeToken) params.push(activeToken)
+
   return queryAll<Meeting>(
     `SELECT * FROM meetings
-     WHERE (start_time <= ? AND end_time >= ?)
-        OR (start_time >= ? AND start_time <= ?)
-        OR (end_time >= ? AND end_time <= ?)
+     WHERE ((start_time <= ? AND end_time >= ?)
+         OR (start_time >= ? AND start_time <= ?)
+         OR (end_time >= ? AND end_time <= ?))
+       ${tokenClause}
      ORDER BY start_time`,
-    [windowEnd, windowStart, windowStart, windowEnd, windowStart, windowEnd]
-  )
+    params
+  ).filter((meeting) => !isCancelledMeetingSubject(meeting.subject))
+}
+
+export interface ScheduleEnrichmentResult {
+  recordingId: string
+  candidateCount: number
+  selectedMeetingId: string | null
+  hasConflict: boolean
+  runId: string
+}
+
+/**
+ * Persist deterministic calendar candidates as soon as device metadata exists.
+ * This is deliberately LLM-free and safe to run before the audio is downloaded.
+ * Existing user-confirmed decisions are immutable; refreshed schedule data may
+ * update candidate scores but never silently replace the user's assignment.
+ */
+export function enrichRecordingScheduleMetadata(recordingId: string): ScheduleEnrichmentResult {
+  const recording = getRecordingById(recordingId)
+  if (!recording) throw new Error(`Recording ${recordingId} not found`)
+
+  const processingRun = createProcessingRun({
+    recordingId,
+    stage: 'schedule-match',
+    provider: 'hidock-next',
+    tool: 'calendar-overlap-scorer',
+    version: '1',
+    execution: 'local'
+  })
+
+  try {
+    const meetings = findCandidateMeetingsForRecording(recordingId)
+    const scored = scoreMeetingCandidates(
+      {
+        dateRecorded: recording.date_recorded,
+        durationSeconds: recording.duration_seconds,
+        contentText: null
+      },
+      meetings.map((meeting) => ({
+        meetingId: meeting.id,
+        subject: meeting.subject,
+        startTime: meeting.start_time,
+        endTime: meeting.end_time,
+        isAllDay: !!meeting.is_all_day
+      }))
+    )
+
+    const confirmed = queryOne<{ meeting_id: string }>(
+      `SELECT meeting_id FROM recording_meeting_candidates
+       WHERE recording_id = ? AND is_user_confirmed = 1 LIMIT 1`,
+      [recordingId]
+    )
+    const explicitStandalone = recording.correlation_method === 'user_preassign_standalone'
+      || recording.correlation_method === 'user_standalone'
+    const top = scored[0]
+    const unambiguous = !!top && top.isBestMatch && top.hasOverlap && top.confidenceScore >= 0.75
+    const selectedMeetingId = confirmed?.meeting_id
+      ?? (!explicitStandalone && unambiguous ? top.meetingId : null)
+
+    runInTransaction(() => {
+      // Stale auto candidates may disappear after a calendar refresh. Preserve
+      // user-confirmed evidence even when the source event is temporarily absent.
+      runNoSave(
+        `DELETE FROM recording_meeting_candidates
+         WHERE recording_id = ? AND is_user_confirmed = 0`,
+        [recordingId]
+      )
+      for (const candidate of scored) {
+        const existing = queryOne<{ id: string; is_user_confirmed: number }>(
+          `SELECT id, is_user_confirmed FROM recording_meeting_candidates
+           WHERE recording_id = ? AND meeting_id = ?`,
+          [recordingId, candidate.meetingId]
+        )
+        if (existing?.is_user_confirmed) continue
+        runNoSave(
+          `INSERT INTO recording_meeting_candidates
+            (id, recording_id, meeting_id, confidence_score, match_reason, is_selected, is_ai_selected,
+             is_user_confirmed)
+           VALUES (?, ?, ?, ?, ?, ?, 0, 0)`,
+          [
+            existing?.id ?? randomUUID(),
+            recordingId,
+            candidate.meetingId,
+            candidate.confidenceScore,
+            candidate.matchReason,
+            selectedMeetingId === candidate.meetingId ? 1 : 0
+          ]
+        )
+      }
+      if (!confirmed && selectedMeetingId) {
+        runNoSave(
+          `UPDATE recordings SET meeting_id = ?, correlation_confidence = ?, correlation_method = 'schedule_candidate'
+           WHERE id = ?`,
+          [selectedMeetingId, top.confidenceScore, recordingId]
+        )
+        runNoSave(
+          `UPDATE knowledge_captures SET meeting_id = ?, correlation_confidence = ?,
+             correlation_method = 'schedule_candidate', updated_at = CURRENT_TIMESTAMP
+           WHERE source_recording_id = ?`,
+          [selectedMeetingId, top.confidenceScore, recordingId]
+        )
+      }
+    })
+
+    const credibleOverlaps = scored.filter((candidate) => candidate.hasOverlap && candidate.confidenceScore >= 0.5)
+    const result = {
+      recordingId,
+      candidateCount: scored.length,
+      selectedMeetingId,
+      hasConflict: credibleOverlaps.length > 1,
+      runId: processingRun.id
+    }
+    completeProcessingRun(processingRun.id, {
+      outputRefs: {
+        candidateMeetingIds: scored.map((candidate) => candidate.meetingId),
+        selectedMeetingId,
+        hasConflict: result.hasConflict
+      }
+    })
+    return result
+  } catch (error) {
+    failProcessingRun(processingRun.id, error instanceof Error ? error.message : String(error))
+    throw error
+  }
 }
 
 /**
@@ -10923,18 +12075,34 @@ export function addRecordingMeetingCandidate(
   matchReason: string,
   isAiSelected: boolean = false
 ): string {
-  const id = crypto.randomUUID()
-  run(
-    `INSERT OR REPLACE INTO recording_meeting_candidates
-      (id, recording_id, meeting_id, confidence_score, match_reason, is_selected, is_ai_selected)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [id, recordingId, meetingId, confidenceScore, matchReason, isAiSelected ? 1 : 0, isAiSelected ? 1 : 0]
+  const existing = queryOne<{ id: string; is_user_confirmed: number }>(
+    `SELECT id, is_user_confirmed FROM recording_meeting_candidates
+     WHERE recording_id = ? AND meeting_id = ?`,
+    [recordingId, meetingId]
   )
+  // User confirmation is stronger evidence than any later model run.
+  if (existing?.is_user_confirmed) return existing.id
 
-  // If AI selected, also update the recording's meeting_id
-  if (isAiSelected) {
-    linkRecordingToMeeting(recordingId, meetingId, confidenceScore, 'ai_transcript_match')
+  const id = existing?.id ?? randomUUID()
+  if (existing) {
+    run(
+      `UPDATE recording_meeting_candidates SET confidence_score = ?, match_reason = ?,
+         is_selected = ?, is_ai_selected = ? WHERE id = ?`,
+      [confidenceScore, matchReason, isAiSelected ? 1 : 0, isAiSelected ? 1 : 0, id]
+    )
+  } else {
+    run(
+      `INSERT INTO recording_meeting_candidates
+        (id, recording_id, meeting_id, confidence_score, match_reason, is_selected, is_ai_selected)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [id, recordingId, meetingId, confidenceScore, matchReason, isAiSelected ? 1 : 0, isAiSelected ? 1 : 0]
+    )
   }
+
+  // Candidate persistence and recording assignment are deliberately separate.
+  // The transcription service owns the conservative auto-link gate (temporal
+  // overlap + confidence + winner margin + content evidence). Linking here used
+  // to bypass that gate as soon as Gemini selected any buffered near-time event.
 
   return id
 }
@@ -11095,30 +12263,49 @@ export function getMeetingsNearDate(date: string): Meeting[] {
 }
 
 export function selectMeetingForRecordingByUser(recordingId: string, meetingId: string | null): void {
-  const db = getDatabase()
   if (!recordingId || typeof recordingId !== 'string') throw new Error('Invalid recording ID')
+  if (!getRecordingById(recordingId)) throw new Error(`Recording ${recordingId} no longer exists`)
 
-  try {
-    db.run('BEGIN TRANSACTION')
+  runInTransaction(() => {
     if (meetingId !== null && !getMeetingById(meetingId)) {
       throw new Error(`Meeting ${meetingId} no longer exists`)
     }
-    run('UPDATE recording_meeting_candidates SET is_selected = 0 WHERE recording_id = ?', [recordingId])
+    // Exactly one user decision is authoritative. Leaving an older row marked
+    // confirmed made schedule refreshes select whichever LIMIT 1 returned.
+    runNoSave(
+      `UPDATE recording_meeting_candidates
+       SET is_selected = 0, is_user_confirmed = 0
+       WHERE recording_id = ?`,
+      [recordingId]
+    )
 
     if (meetingId === null) {
-      run(`UPDATE recordings SET meeting_id = NULL, correlation_confidence = NULL,
-           correlation_method = 'user_standalone' WHERE id = ?`, [recordingId])
+      unlinkRecordingFromMeeting(recordingId)
     } else {
-      run(`UPDATE recording_meeting_candidates SET is_selected = 1, is_user_confirmed = 1
-           WHERE recording_id = ? AND meeting_id = ?`, [recordingId, meetingId])
+      const existing = queryOne<{ id: string }>(
+        `SELECT id FROM recording_meeting_candidates WHERE recording_id = ? AND meeting_id = ?`,
+        [recordingId, meetingId]
+      )
+      if (existing) {
+        runNoSave(
+          `UPDATE recording_meeting_candidates
+           SET confidence_score = 1, match_reason = 'Selected by user',
+               is_selected = 1, is_ai_selected = 0, is_user_confirmed = 1
+           WHERE id = ?`,
+          [existing.id]
+        )
+      } else {
+        runNoSave(
+          `INSERT INTO recording_meeting_candidates
+            (id, recording_id, meeting_id, confidence_score, match_reason,
+             is_selected, is_ai_selected, is_user_confirmed)
+           VALUES (?, ?, ?, 1, 'Selected by user', 1, 0, 1)`,
+          [randomUUID(), recordingId, meetingId]
+        )
+      }
       linkRecordingToMeeting(recordingId, meetingId, 1.0, 'user_override')
     }
-    db.run('COMMIT')
-    saveDatabase()
-  } catch (error) {
-    db.run('ROLLBACK')
-    throw error
-  }
+  })
 }
 
 export function resetStuckTranscriptions(): { recordingsReset: number; queueItemsReset: number } {

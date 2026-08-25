@@ -1,8 +1,7 @@
 /**
  * Tests for the SourceReader "People" panel:
- *  - Participants (who actually spoke / was detected) — canonical contacts from
- *    contacts.getForMeeting PLUS distinct transcript speaker labels; canonical
- *    contacts deep-link to /person/:id.
+ *  - Speakers (who actually spoke / was detected) — diarized transcript turns
+ *    only. Calendar contacts never become speakers merely because they were invited.
  *  - Invited (calendar-invited attendees) — parsed from meeting.attendees; a
  *    DISTINCT list from Participants, with an honest empty state when the
  *    calendar event carried no invite list.
@@ -114,8 +113,13 @@ beforeEach(() => {
   Object.defineProperty(window, 'electronAPI', {
     value: {
       contacts: { getForMeeting: mockGetForMeeting, getForMeetingOwner: mockGetForMeeting, getAll: mockGetAllContacts },
-      recordings: { reprocessWith: vi.fn().mockResolvedValue({ success: true }) },
+      recordings: {
+        reprocessWith: vi.fn().mockResolvedValue({ success: true }),
+        getCandidates: vi.fn().mockResolvedValue({ success: true, data: [] })
+      },
       transcripts: {
+        getByRecordingIdOwner: vi.fn().mockResolvedValue(null),
+        getProcessingRuns: vi.fn().mockResolvedValue({ success: true, data: [] }),
         getSpeakerMap: mockGetSpeakerMap,
         assignSpeaker: mockAssignSpeaker,
         unassignSpeaker: vi.fn().mockResolvedValue({ success: true }),
@@ -140,22 +144,17 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 // Participants
 // ---------------------------------------------------------------------------
-describe('SourceReader — Participants list', () => {
-  it('renders canonical meeting contacts as clickable chips → /person/:id', async () => {
+describe('SourceReader — Speakers list', () => {
+  it('does not treat calendar-only contacts as speakers', async () => {
     mockGetForMeeting.mockResolvedValue({
       success: true,
       data: [makeContact({ id: 'c-1', name: 'Alice Smith' }), makeContact({ id: 'c-2', name: 'Bob Jones', email: 'bob@x.com' })],
     })
     renderReader(<SourceReader recording={makeRecording()} meeting={makeMeeting()} />)
 
-    // Loaded from contacts.getForMeeting for the linked meeting.
     await waitFor(() => expect(mockGetForMeeting).toHaveBeenCalledWith('meet-1'))
-    expect(await screen.findByText(/Participants \(2\)/)).toBeInTheDocument()
-    expect(screen.getByText('From transcripts')).toBeInTheDocument()
-
-    const alice = await screen.findByRole('button', { name: 'Alice Smith' })
-    fireEvent.click(alice)
-    expect(mockNavigate).toHaveBeenCalledWith('/person/c-1')
+    expect(screen.queryByText(/^Speakers/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Alice Smith' })).not.toBeInTheDocument()
   })
 
   it('adds transcript speaker labels that have no matching contact', async () => {
@@ -166,8 +165,7 @@ describe('SourceReader — Participants list', () => {
     ])
     renderReader(<SourceReader recording={makeRecording()} meeting={makeMeeting()} transcript={transcript} />)
 
-    // 1 contact + 1 unmatched speaker = 2 participants (Alice not double-counted).
-    expect(await screen.findByText(/Participants \(2\)/)).toBeInTheDocument()
+    expect(await screen.findByText(/Speakers \(2\)/)).toBeInTheDocument()
     expect(screen.getByText('Speaker 2')).toBeInTheDocument()
   })
 
@@ -175,7 +173,7 @@ describe('SourceReader — Participants list', () => {
     const transcript = makeTranscript([{ speaker: 'Speaker 1', start: 0, end: 1, text: 'hi' }])
     renderReader(<SourceReader recording={makeRecording()} transcript={transcript} />)
 
-    expect(await screen.findByText(/Participants \(1\)/)).toBeInTheDocument()
+    expect(await screen.findByText(/Speakers \(1\)/)).toBeInTheDocument()
     expect(screen.getByText('Speaker 1')).toBeInTheDocument()
     // No meeting → no contacts fetch.
     expect(mockGetForMeeting).not.toHaveBeenCalled()
@@ -197,6 +195,21 @@ describe('SourceReader — Participants list', () => {
     expect(screen.queryByText('Speaker 1')).not.toBeInTheDocument()
     fireEvent.click(eduardo)
     expect(mockNavigate).toHaveBeenCalledWith('/person/eduardo')
+  })
+
+  it('keeps mentioned names separate from actual speakers and invitees', async () => {
+    const transcript = {
+      ...makeTranscript([{ speaker: 'Speaker 1', start: 0, end: 1, text: 'Martin will review it' }]),
+      mentioned_people: JSON.stringify([{ name: 'Martin', role: 'reviewer' }])
+    } as Transcript
+    const meeting = makeMeeting([{ name: 'Fernanda', email: 'fernanda@example.com' }])
+    renderReader(<SourceReader recording={makeRecording()} meeting={meeting} transcript={transcript} />)
+
+    expect(await screen.findByText(/Speakers \(1\)/)).toBeInTheDocument()
+    expect(screen.getByText(/Invited \(1\)/)).toBeInTheDocument()
+    const mentioned = screen.getByTestId('mentioned-people-section')
+    expect(mentioned).toHaveTextContent('Martin · reviewer')
+    expect(mentioned).toHaveTextContent('not attendance')
   })
 
   // An unresolved "Speaker N" chip must be actionable: it opens the SAME
@@ -237,9 +250,9 @@ describe('SourceReader — Invited list', () => {
     const meeting = makeMeeting([{ name: 'Alice Smith', email: 'alice@example.com' }])
     renderReader(<SourceReader recording={makeRecording()} meeting={meeting} />)
 
-    // Both Participants and Invited render Alice; click the Invited one (last).
+    // Alice is calendar-only here, so only the Invited chip exists.
     const aliceChips = await screen.findAllByRole('button', { name: 'Alice Smith' })
-    expect(aliceChips.length).toBeGreaterThanOrEqual(2)
+    expect(aliceChips).toHaveLength(1)
     fireEvent.click(aliceChips[aliceChips.length - 1])
     expect(mockNavigate).toHaveBeenCalledWith('/person/c-9')
   })
@@ -255,7 +268,7 @@ describe('SourceReader — Invited list', () => {
     const transcript = makeTranscript([{ speaker: 'Speaker 1', start: 0, end: 1, text: 'hi' }])
     renderReader(<SourceReader recording={makeRecording()} transcript={transcript} />)
 
-    expect(await screen.findByText(/Participants \(1\)/)).toBeInTheDocument()
+    expect(await screen.findByText(/Speakers \(1\)/)).toBeInTheDocument()
     expect(screen.queryByText(/^Invited/)).not.toBeInTheDocument()
   })
 

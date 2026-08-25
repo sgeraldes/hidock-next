@@ -1,16 +1,25 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-// Mock @google/generative-ai BEFORE importing GeminiEngine. The engine uses
-// generateContentStream (streaming), so the mock returns an async `stream`
-// plus a `response` promise carrying the finishReason.
+// Mock @google/genai BEFORE importing GeminiEngine. The current SDK returns
+// an async generator directly from models.generateContentStream().
 const mockGenerateContentStream = vi.fn()
-const mockGetGenerativeModel = vi.fn(() => ({ generateContentStream: mockGenerateContentStream }))
+const mockInteractionsCreate = vi.fn()
+const mockFilesUpload = vi.fn()
+const mockFilesGet = vi.fn()
+const mockFilesDelete = vi.fn()
 
-vi.mock('@google/generative-ai', () => {
-  function GoogleGenerativeAI(_apiKey: string) {
-    return { getGenerativeModel: mockGetGenerativeModel }
+vi.mock('@google/genai', () => {
+  class GoogleGenAI {
+    models = { generateContentStream: mockGenerateContentStream }
+    interactions = { create: mockInteractionsCreate }
+    files = { upload: mockFilesUpload, get: mockFilesGet, delete: mockFilesDelete }
   }
-  return { GoogleGenerativeAI }
+  return {
+    GoogleGenAI,
+    FileState: { PROCESSING: 'PROCESSING', ACTIVE: 'ACTIVE', FAILED: 'FAILED' },
+    ThinkingLevel: { MINIMAL: 'MINIMAL' },
+    Type: { OBJECT: 'OBJECT', ARRAY: 'ARRAY', STRING: 'STRING', BOOLEAN: 'BOOLEAN' },
+  }
 })
 
 import {
@@ -19,18 +28,32 @@ import {
   splitMp3IntoChunks,
   parseTurns,
   detectAudioMimeType,
+  hasReliableTurnTiming,
+  hasReliableTurnStructure,
+  normalizeGeminiTranscriptResponse,
 } from '../src/engines/gemini-engine.js'
-import { TranscriptionCancelledError } from '../src/engines/engine-interface.js'
+import { NoSpeechDetectedError, TranscriptionCancelledError } from '../src/engines/engine-interface.js'
 
 const oneSecond = Buffer.alloc(16000 * 2)
 
 /** Queue a streamed response: text is chunked, finishReason optional. */
 function streamResponse(text: string, finishReason = 'STOP') {
+  return (async function* () {
+    yield { text, candidates: [{ finishReason }] }
+  })()
+}
+
+function interactionResponse(
+  value: unknown,
+  id: string,
+  status: 'completed' | 'incomplete' = 'completed'
+) {
   return {
-    stream: (async function* () {
-      yield { text: () => text }
-    })(),
-    response: Promise.resolve({ candidates: [{ finishReason }] }),
+    id,
+    status,
+    steps: status === 'completed'
+      ? [{ type: 'model_output', content: [{ type: 'text', text: JSON.stringify(value) }] }]
+      : [],
   }
 }
 
@@ -77,6 +100,7 @@ describe('GeminiEngine', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockGenerateContentStream.mockResolvedValue(streamResponse('Hello world'))
+    mockFilesDelete.mockResolvedValue(undefined)
   })
 
   it('isStreaming is false', () => {
@@ -139,6 +163,25 @@ describe('GeminiEngine', () => {
     await expect(collect(engine.transcribe(oneSecond, { source: 'mic' }))).rejects.toThrow(/empty/i)
   })
 
+  it('maps the provider no-speech sentinel to a terminal content outcome', async () => {
+    mockGenerateContentStream.mockResolvedValue(streamResponse('[NO_SPEECH]'))
+    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    await expect(collect(engine.transcribe(oneSecond, { source: 'mic' }))).rejects.toBeInstanceOf(
+      NoSpeechDetectedError,
+    )
+  })
+
+  it('tells Gemini that meeting context is never evidence of speech', async () => {
+    mockGenerateContentStream.mockResolvedValue(streamResponse('[00:00] Speaker 1: Hola'))
+    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    await collect(engine.transcribe(oneSecond, { source: 'mic', context: 'Meeting: Secret project' }))
+
+    const request = mockGenerateContentStream.mock.calls[0][0]
+    const prompt = request.contents[0].parts[1].text
+    expect(prompt).toContain('Never infer or invent speech from that context')
+    expect(prompt).toContain('set hasSpeech to false')
+  })
+
   it('throws when a chunk stays truncated at MAX_TOKENS after retry', async () => {
     mockGenerateContentStream.mockResolvedValue(streamResponse('partial cut off here', 'MAX_TOKENS'))
     const engine = new GeminiEngine({ apiKey: 'test-key' })
@@ -157,7 +200,23 @@ describe('GeminiEngine', () => {
   it('uses the configured model name', async () => {
     const engine = new GeminiEngine({ apiKey: 'test-key', model: 'gemini-3.5-flash' })
     await collect(engine.transcribe(oneSecond, { source: 'mic' }))
-    expect(mockGetGenerativeModel).toHaveBeenCalledWith({ model: 'gemini-3.5-flash' })
+    expect(mockGenerateContentStream.mock.calls[0][0].model).toBe('gemini-3.5-flash')
+  })
+
+  it('requests a schema-constrained transcript with the full Gemini 3.5 output budget', async () => {
+    const engine = new GeminiEngine({ apiKey: 'test-key', model: 'gemini-3.5-flash' })
+    await collect(engine.transcribe(oneSecond, { source: 'mic' }))
+
+    const config = mockGenerateContentStream.mock.calls[0][0].config
+    expect(config).toMatchObject({
+      maxOutputTokens: 65536,
+      responseMimeType: 'application/json',
+      thinkingConfig: { thinkingLevel: 'MINIMAL' },
+      responseSchema: {
+        type: 'OBJECT',
+        required: ['hasSpeech', 'segments']
+      }
+    })
   })
 
   it('includes context in the prompt when options.context is provided', async () => {
@@ -183,6 +242,117 @@ describe('GeminiEngine', () => {
     const inlineDataPart = capturedParts.find((p: any) => p.inlineData)
     expect(inlineDataPart).toBeDefined()
     expect(inlineDataPart.inlineData.data).toBe(audioBuffer.toString('base64'))
+  })
+
+  it('uses the current SDK Files API for recordings above the inline limit', async () => {
+    mockFilesUpload.mockResolvedValue({
+      name: 'files/recording-1',
+      state: 'ACTIVE',
+      mimeType: 'audio/mp3',
+      uri: 'https://generativelanguage.googleapis.com/v1beta/files/recording-1',
+    })
+    mockGenerateContentStream.mockResolvedValue(streamResponse('[00:00] Speaker 1: Hola'))
+    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const audioBuffer = Buffer.alloc(GeminiEngine.INLINE_LIMIT_BYTES + 1)
+
+    await collect(engine.transcribe(audioBuffer, { source: 'mic', filePath: 'recording.hda' }))
+
+    expect(mockFilesUpload).toHaveBeenCalledWith({
+      file: 'recording.hda',
+      config: { mimeType: 'audio/mp3' },
+    })
+    expect(mockGenerateContentStream.mock.calls[0][0].contents[0].parts[0]).toEqual({
+      fileData: {
+        mimeType: 'audio/mp3',
+        fileUri: 'https://generativelanguage.googleapis.com/v1beta/files/recording-1',
+      },
+    })
+  })
+
+  it('chains bounded Interactions ranges for recordings over twenty minutes', async () => {
+    const audioBuffer = buildWav(1201, 1)
+    mockFilesUpload.mockResolvedValue({
+      name: 'files/long-recording',
+      state: 'ACTIVE',
+      mimeType: 'audio/wav',
+      uri: 'https://generativelanguage.googleapis.com/v1beta/files/long-recording',
+    })
+    mockInteractionsCreate
+      .mockResolvedValueOnce(interactionResponse({
+        hasSpeech: true,
+        segments: [{ timestamp: '00:00', speaker: 'Speaker 1', content: 'primera parte' }],
+      }, 'interaction-1'))
+      .mockResolvedValueOnce(interactionResponse({
+        hasSpeech: true,
+        segments: [{ timestamp: '20:00', speaker: 'Speaker 1', content: 'segunda parte' }],
+      }, 'interaction-2'))
+    const engine = new GeminiEngine({ apiKey: 'test-key' })
+
+    const segments = await collect(engine.transcribe(audioBuffer, {
+      source: 'mic',
+      filePath: 'long-recording.wav',
+      durationSeconds: 1201,
+    }))
+
+    expect(mockGenerateContentStream).not.toHaveBeenCalled()
+    expect(mockInteractionsCreate).toHaveBeenCalledTimes(2)
+    expect(segments.map((segment) => segment.text)).toEqual(['primera parte', 'segunda parte'])
+    expect(segments.map((segment) => segment.startTime)).toEqual([0, 1200])
+    expect(mockInteractionsCreate.mock.calls[0][0].input[0]).toMatchObject({
+      type: 'audio',
+      uri: 'https://generativelanguage.googleapis.com/v1beta/files/long-recording',
+    })
+    expect(mockInteractionsCreate.mock.calls[1][0]).toMatchObject({
+      previous_interaction_id: 'interaction-1',
+    })
+    expect(mockInteractionsCreate.mock.calls[1][0].input).toHaveLength(1)
+    expect(mockInteractionsCreate.mock.calls[1][0].input[0].text).toContain('20:00 through 20:01')
+    expect(mockInteractionsCreate).toHaveBeenNthCalledWith(
+      1,
+      expect.any(Object),
+      {
+        timeout: GeminiEngine.INTERACTION_REQUEST_TIMEOUT_MS,
+        maxRetries: 0,
+      },
+    )
+    expect(GeminiEngine.INTERACTION_REQUEST_TIMEOUT_MS).toBe(10 * 60 * 1000)
+    expect(mockFilesDelete).toHaveBeenCalledWith({ name: 'files/long-recording' })
+  })
+
+  it('subdivides an incomplete max-token range instead of saving a cut-off transcript', async () => {
+    mockFilesUpload.mockResolvedValue({
+      name: 'files/long-recording',
+      state: 'ACTIVE',
+      mimeType: 'audio/wav',
+      uri: 'https://generativelanguage.googleapis.com/v1beta/files/long-recording',
+    })
+    mockInteractionsCreate
+      .mockResolvedValueOnce(interactionResponse({}, 'incomplete-range', 'incomplete'))
+      .mockResolvedValueOnce(interactionResponse({
+        hasSpeech: true,
+        segments: [{ timestamp: '00:00', speaker: 'Speaker 1', content: 'parte uno' }],
+      }, 'range-a'))
+      .mockResolvedValueOnce(interactionResponse({
+        hasSpeech: true,
+        segments: [{ timestamp: '10:00', speaker: 'Speaker 2', content: 'parte dos' }],
+      }, 'range-b'))
+      .mockResolvedValueOnce(interactionResponse({
+        hasSpeech: true,
+        segments: [{ timestamp: '20:00', speaker: 'Speaker 1', content: 'final' }],
+      }, 'range-c'))
+    const engine = new GeminiEngine({ apiKey: 'test-key' })
+
+    const segments = await collect(engine.transcribe(buildWav(1201, 1), {
+      source: 'mic',
+      filePath: 'long-recording.wav',
+      durationSeconds: 1201,
+    }))
+
+    expect(segments.map((segment) => segment.text)).toEqual(['parte uno', 'parte dos', 'final'])
+    expect(segments.map((segment) => segment.startTime)).toEqual([0, 600, 1200])
+    expect(mockInteractionsCreate).toHaveBeenCalledTimes(4)
+    expect(mockInteractionsCreate.mock.calls[2][0].previous_interaction_id).toBe('range-a')
+    expect(mockInteractionsCreate.mock.calls[3][0].previous_interaction_id).toBe('range-b')
   })
 
   it('propagates errors thrown by generateContentStream', async () => {
@@ -257,7 +427,9 @@ describe('GeminiEngine shouldGenerate gate (round-45 ADV43-1)', () => {
       excluded = true // exclude while chunk 0's response is in flight
       return streamResponse('[00:00] Speaker 1: primer segmento')
     })
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    // Legacy configured models retain the old chunked request path. Gemini 3.5
+    // keeps ordinary recordings whole for cross-recording speaker context.
+    const engine = new GeminiEngine({ apiKey: 'test-key', model: 'gemini-2.5-flash' })
     await expect(
       collect(engine.transcribe(mp3, { source: 'mic', shouldGenerate: () => !excluded }))
     ).rejects.toThrow(TranscriptionCancelledError)
@@ -463,6 +635,83 @@ describe('parseTurns', () => {
     expect(segs.every((s) => s.startTime === 600)).toBe(true)
   })
 
+  it('recovers Gemini trailing timestamps without creating a bogus default-speaker turn', () => {
+    const malformed = [
+      '00:00',
+      'Speaker 1: Hello. 00:09',
+      'Speaker 1: Hello, ¿me escuchás? 00:11',
+      'Speaker 2: Yo no te escucho, ¿me escuchás? 00:13',
+      'Speaker 1: Ahí sí, ¿cómo va? 00:15'
+    ].join('\n')
+    const segs = parseTurns(malformed, 0, 'you', 'mic')
+
+    expect(segs).toHaveLength(4)
+    expect(segs.map((s) => s.speaker)).toEqual(['Speaker 1', 'Speaker 1', 'Speaker 2', 'Speaker 1'])
+    expect(segs.map((s) => s.startTime)).toEqual([0, 9, 11, 13])
+    expect(segs.map((s) => s.endTime)).toEqual([9, 11, 13, 15])
+    expect(segs.map((s) => s.text)).toEqual([
+      'Hello.',
+      'Hello, ¿me escuchás?',
+      'Yo no te escucho, ¿me escuchás?',
+      'Ahí sí, ¿cómo va?'
+    ])
+    expect(segs.some((s) => s.speaker === 'you')).toBe(false)
+  })
+
+  it('offsets recovered trailing timestamps by the audio chunk start', () => {
+    const segs = parseTurns('00:00 Speaker 1: uno 00:05 Speaker 2: dos 00:08', 1200, 'you', 'mic')
+    expect(segs.map((s) => s.startTime)).toEqual([1200, 1205])
+    expect(segs.map((s) => s.endTime)).toEqual([1205, 1208])
+  })
+
+  it('does not mistake a single spoken clock reference for timestamp metadata', () => {
+    const segs = parseTurns('Speaker 1: nos vemos a las 10:00 Speaker 2: perfecto', 0, 'you', 'mic')
+    expect(segs.map((s) => s.text)).toEqual(['nos vemos a las 10:00', 'perfecto'])
+  })
+
+  it('rejects a multi-turn response whose timestamps all collapse to the chunk boundary', () => {
+    expect(hasReliableTurnTiming('Speaker 1: uno Speaker 2: dos Speaker 1: tres')).toBe(false)
+    expect(hasReliableTurnTiming('[00:01] Speaker 1: uno [00:04] Speaker 2: dos')).toBe(true)
+  })
+
+  it('rejects an oversized speaker wall even when its timestamp is valid', () => {
+    const collapsedConversation = `[00:22] Speaker 1: ${Array.from({ length: 1130 }, () => 'palabra').join(' ')}`
+    expect(hasReliableTurnTiming(collapsedConversation)).toBe(true)
+    expect(hasReliableTurnStructure(collapsedConversation)).toBe(false)
+    expect(hasReliableTurnStructure('[00:22] Speaker 1: una respuesta breve')).toBe(true)
+  })
+
+  it('normalizes schema-constrained JSON into canonical timed speaker turns', () => {
+    const normalized = normalizeGeminiTranscriptResponse(JSON.stringify({
+      hasSpeech: true,
+      segments: [
+        { timestamp: '00:03', speaker: 'Speaker 1', content: 'Hola' },
+        { timestamp: '00:07', speaker: 'Speaker 2', content: 'Qué tal' }
+      ]
+    }))
+
+    expect(normalized).toBe('[00:03] Speaker 1: Hola\n[00:07] Speaker 2: Qué tal')
+    expect(parseTurns(normalized, 0, 'you', 'mic')).toHaveLength(2)
+    expect(normalizeGeminiTranscriptResponse('{"hasSpeech":false,"segments":[]}')).toBe('[NO_SPEECH]')
+  })
+
+  it('uses the start clock when Gemini returns timestamp ranges', () => {
+    const normalized = normalizeGeminiTranscriptResponse(JSON.stringify({
+      hasSpeech: true,
+      segments: [
+        { timestamp: '00:00 - 00:01', speaker: 'Speaker 1', content: 'Hola' },
+        { timestamp: '00:01 - 00:07', speaker: 'Speaker 2', content: 'Buenos días' },
+        { timestamp: '00:07–00:13', speaker: 'Speaker 1', content: 'Comencemos' }
+      ]
+    }))
+
+    expect(normalized).toBe(
+      '[00:00] Speaker 1: Hola\n[00:01] Speaker 2: Buenos días\n[00:07] Speaker 1: Comencemos'
+    )
+    expect(hasReliableTurnTiming(normalized)).toBe(true)
+    expect(parseTurns(normalized, 0, 'you', 'mic').map((turn) => turn.startTime)).toEqual([0, 1, 7])
+  })
+
   it('does NOT over-split a single-speaker wall (one bare marker stays one turn)', () => {
     const segs = parseTurns('Speaker 1: this is a long single-speaker monologue with no other voices', 0, 'you', 'mic')
     expect(segs).toHaveLength(1)
@@ -520,17 +769,48 @@ describe('GeminiEngine diarization prompt + end-to-end recovery', () => {
     const engine = new GeminiEngine({ apiKey: 'test-key' })
     await collect(engine.transcribe(oneSecond, { source: 'mic' }))
     expect(capturedPrompt.toLowerCase()).toContain('distinct')
-    expect(capturedPrompt).toContain('[MM:SS] Speaker N:')
-    expect(capturedPrompt).toContain('NEVER return the whole recording as one line or one speaker block')
+    expect(capturedPrompt).toContain('formatted MM:SS')
+    expect(capturedPrompt).toContain('NEVER return the whole recording as one item or one speaker block')
   })
 
-  it('yields multiple distinct speakers when the model returns a no-timestamp diarized blob', async () => {
-    mockGenerateContentStream.mockResolvedValue(
-      streamResponse('Speaker 1: buenos días a todos Speaker 2: gracias, empecemos Speaker 1: perfecto'),
-    )
+  it('retries a no-timestamp diarized blob and yields only the repaired timed turns', async () => {
+    mockGenerateContentStream
+      .mockResolvedValueOnce(
+        streamResponse('Speaker 1: buenos días a todos Speaker 2: gracias, empecemos Speaker 1: perfecto')
+      )
+      .mockResolvedValueOnce(
+        streamResponse('[00:00] Speaker 1: buenos días a todos [00:02] Speaker 2: gracias, empecemos [00:04] Speaker 1: perfecto')
+      )
     const engine = new GeminiEngine({ apiKey: 'test-key' })
     const segments = await collect(engine.transcribe(oneSecond, { source: 'mic' }))
     expect(segments).toHaveLength(3)
     expect(segments.map((s) => s.speaker)).toEqual(['Speaker 1', 'Speaker 2', 'Speaker 1'])
+    expect(segments.map((s) => s.startTime)).toEqual([0, 2, 4])
+    expect(mockGenerateContentStream).toHaveBeenCalledTimes(2)
+  })
+
+  it('fails closed when the format retry still has no reliable timestamps', async () => {
+    mockGenerateContentStream.mockResolvedValue(
+      streamResponse('Speaker 1: uno Speaker 2: dos Speaker 1: tres')
+    )
+    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    await expect(collect(engine.transcribe(oneSecond, { source: 'mic' })))
+      .rejects.toThrow(/without reliable speaker-turn timing and structure/)
+  })
+
+  it('retries an oversized speaker wall and keeps only the repaired diarized turns', async () => {
+    const wall = `[00:22] Speaker 1: ${Array.from({ length: 1130 }, () => 'palabra').join(' ')}`
+    mockGenerateContentStream
+      .mockResolvedValueOnce(streamResponse(wall))
+      .mockResolvedValueOnce(streamResponse(
+        '[00:22] Speaker 1: primera intervención [00:28] Speaker 2: respuesta [00:32] Speaker 1: seguimiento'
+      ))
+
+    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const segments = await collect(engine.transcribe(oneSecond, { source: 'mic' }))
+
+    expect(mockGenerateContentStream).toHaveBeenCalledTimes(2)
+    expect(segments.map((segment) => segment.speaker)).toEqual(['Speaker 1', 'Speaker 2', 'Speaker 1'])
+    expect(segments.map((segment) => segment.startTime)).toEqual([22, 28, 32])
   })
 })

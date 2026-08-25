@@ -12,6 +12,7 @@ import { useAppStore } from '@/store/useAppStore'
 import { shouldLogQa } from '@/services/qa-monitor'
 import { checkAutoSyncAllowed, waitForConfig, waitForDeviceReady } from '@/utils/autoSyncGuard'
 import { requestScopedDownloads, drainDownloadQueue } from '@/hooks/useDownloadOrchestrator'
+import { handleRecordingStart, handleRecordingStop, periodicCountCheck } from '@/services/device-sync-actions'
 
 /**
  * Defect B (auto-download not triggering on connect): decide whether the auto-sync
@@ -189,6 +190,11 @@ export function useDeviceSubscriptions() {
                 deviceSyncProgress: { total: toSync.length, current: 0 },
                 deviceFileDownloading: toSync[0]?.filename ?? null
               })
+              // Explicit execution handoff. The state-update listener is still
+              // the normal trigger, but it can observe a transient non-ready
+              // store state after a long file-list reconciliation. Drain again
+              // now that scan + enqueue are complete; its mutex makes this safe.
+              drainDownloadQueue()
             } else {
               deviceService.log('success', 'All files synced', 'No new recordings to download')
             }
@@ -268,6 +274,15 @@ export function useDeviceSubscriptions() {
       if (shouldLogQa()) console.log('[useDeviceSubscriptions] Recording-changed:', filename)
       setDeviceRecording(!!filename)
       setActiveRecordingFilename(filename)
+      // Recording-aware re-sync (2026-07-22): the recording-state poll is the
+      // authoritative dirty signal. Start marks the list dirty once per session
+      // (and syncs any backlog mid-record); stop reconciles after a finalize
+      // delay — even when the file count appears unchanged.
+      if (filename) {
+        void handleRecordingStart()
+      } else {
+        handleRecordingStop()
+      }
     })
 
     const unsubDisc = onDisconnect?.(() => {
@@ -275,9 +290,28 @@ export function useDeviceSubscriptions() {
       setActiveRecordingFilename(null)
     })
 
+    // Reload/HMR mid-record: the start broadcast fired before this subscription
+    // existed, and the store re-initializes empty on a fresh renderer. Pull the
+    // main-process truth once: if a recording is active, seed the indicator and
+    // establish the dirty mark so the coming stop still reconciles.
+    void window.electronAPI?.jensen?.getState?.().then((s) => {
+      const active = s?.recording ?? null
+      if (active) {
+        setDeviceRecording(true)
+        setActiveRecordingFilename(active)
+        void handleRecordingStart()
+      }
+    }).catch(() => { /* pull is best-effort; change broadcasts still apply */ })
+
+    // Safety net: slow count probe picks up files that appeared without a seen
+    // recording session (recorded while disconnected, missed poll). Debounced
+    // to one scan per 90s inside scanAndReconcile.
+    const syncProbeInterval = setInterval(periodicCountCheck, 60_000)
+
     return () => {
       unsubRecording()
       unsubDisc?.()
+      clearInterval(syncProbeInterval)
     }
   }, [setDeviceRecording, setActiveRecordingFilename])
 
@@ -368,6 +402,7 @@ export function useDeviceSubscriptions() {
             deviceSyncProgress: { total: toSync.length, current: 0 },
             deviceFileDownloading: toSync[0]?.filename ?? null
           })
+          drainDownloadQueue()
         } else {
           deviceService.log('success', 'All files synced', 'No new recordings to download')
         }

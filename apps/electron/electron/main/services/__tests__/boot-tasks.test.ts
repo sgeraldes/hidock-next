@@ -14,20 +14,28 @@ import {
 
 // feature-gate transitively imports config → electron; keep it hermetic.
 let featuresConfig: FeaturesConfig | undefined
+const initializeVectorStore = vi.fn(async () => undefined)
+const backfillMissingTranscripts = vi.fn(async () => ({ indexed: 0, skipped: 0 }))
 vi.mock('../config', () => ({
   getConfig: () => ({ features: featuresConfig }),
+}))
+vi.mock('../vector-store', () => ({
+  getVectorStore: () => ({
+    initialize: initializeVectorStore,
+    backfillMissingTranscripts,
+  }),
 }))
 
 import { BOOT_TASK_DEFS, registerGatedBootTasks } from '../boot-tasks'
 
 const ALL_TASK_NAMES = [
+  'database-backup',
+  'integrity-check',
   'org-reconcile',
   'knowledge-capture-backfill',
   'meeting-wiki-backfill',
   'start-transcription-processor',
-  'embeddings-backfill',
-  'reanalyze-failed-transcripts',
-  'image-capture-backfill',
+  'semantic-index-restore',
 ]
 
 /** Resolver-backed enable check for a given preset. */
@@ -38,10 +46,12 @@ function enabledUnder(features: FeaturesConfig): (id: FeatureId) => boolean {
 
 beforeEach(() => {
   featuresConfig = undefined
+  initializeVectorStore.mockClear()
+  backfillMissingTranscripts.mockClear()
 })
 
 describe('BOOT_TASK_DEFS', () => {
-  it('covers all six deferred boot tasks in the original order', () => {
+  it('covers every deferred boot task in execution order', () => {
     expect(BOOT_TASK_DEFS.map((t) => t.name)).toEqual(ALL_TASK_NAMES)
   })
 
@@ -54,10 +64,20 @@ describe('BOOT_TASK_DEFS', () => {
       ).toContain(def.name)
     }
   })
+
+  it('restores the existing semantic index without starting an embedding backfill', async () => {
+    const task = BOOT_TASK_DEFS.find((candidate) => candidate.name === 'semantic-index-restore')
+    expect(task).toBeDefined()
+
+    await task!.run()
+
+    expect(initializeVectorStore).toHaveBeenCalledOnce()
+    expect(backfillMissingTranscripts).not.toHaveBeenCalled()
+  })
 })
 
 describe('registerGatedBootTasks', () => {
-  it('registers ALL six tasks under the default full preset (zero behavior change)', () => {
+  it('registers every task under the default full preset', () => {
     const registered: string[] = []
     const names = registerGatedBootTasks({
       isFeatureEnabled: enabledUnder({ preset: 'full', flags: {} }),
@@ -73,7 +93,7 @@ describe('registerGatedBootTasks', () => {
       isFeatureEnabled: enabledUnder({ preset: 'library-only', flags: {} }),
       register: (t) => registered.push(t.name),
     })
-    expect(registered).toEqual(['knowledge-capture-backfill'])
+    expect(registered).toEqual(['database-backup', 'integrity-check', 'knowledge-capture-backfill'])
   })
 
   it('library-transcription adds exactly the two transcription tasks', () => {
@@ -83,21 +103,22 @@ describe('registerGatedBootTasks', () => {
       register: (t) => registered.push(t.name),
     })
     expect(registered).toEqual([
+      'database-backup',
+      'integrity-check',
       'knowledge-capture-backfill',
       'start-transcription-processor',
-      'reanalyze-failed-transcripts',
     ])
   })
 
-  it('cascade gating: transcription off under full also stops the assistant embeddings backfill', () => {
+  it('cascade gating: transcription off under full also stops the assistant semantic-index restore', () => {
     const registered: string[] = []
     registerGatedBootTasks({
       isFeatureEnabled: enabledUnder({ preset: 'full', flags: { transcription: false } }),
       register: (t) => registered.push(t.name),
     })
     // meeting-wiki (meeting-intelligence), transcription tasks and
-    // embeddings-backfill (assistant) all drop via the requires:transcription cascade.
-    expect(registered).toEqual(['org-reconcile', 'knowledge-capture-backfill'])
+    // semantic-index-restore (assistant) all drop via the requires:transcription cascade.
+    expect(registered).toEqual(['database-backup', 'integrity-check', 'org-reconcile', 'knowledge-capture-backfill'])
   })
 
   it('a disabled task NEVER runs — its run() body is not invoked', async () => {
@@ -115,13 +136,13 @@ describe('registerGatedBootTasks', () => {
       defs,
     })
     for (const t of captured) await t.run()
-    expect(ran).toEqual(['knowledge-capture-backfill'])
+    expect(ran).toEqual(['database-backup', 'integrity-check', 'knowledge-capture-backfill'])
   })
 
   it('uses the live config-backed gate by default (mocked config here)', () => {
     featuresConfig = { preset: 'library-only', flags: {} }
     const registered: string[] = []
     registerGatedBootTasks({ register: (t) => registered.push(t.name) })
-    expect(registered).toEqual(['knowledge-capture-backfill'])
+    expect(registered).toEqual(['database-backup', 'integrity-check', 'knowledge-capture-backfill'])
   })
 })

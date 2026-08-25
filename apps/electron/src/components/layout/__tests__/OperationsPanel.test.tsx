@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { OperationsPanel } from '../OperationsPanel'
 
 // Mock stores
@@ -31,19 +31,24 @@ vi.mock('@/store/features/useTranscriptionStore', async (orig) => ({
 
 const mockPrioritize = vi.fn()
 const mockDeprioritize = vi.fn()
-const mockRetry = vi.fn()
+const mockRetry = vi.fn().mockResolvedValue(true)
+const mockDismiss = vi.fn().mockResolvedValue(true)
+const mockDismissFailed = vi.fn().mockResolvedValue(1)
 const mockPauseQueue = vi.fn()
 const mockResumeQueue = vi.fn()
 const mockApplyQueueState = vi.fn()
+const mockClipboardWrite = vi.fn().mockResolvedValue(undefined)
 
 const mockCancelDownload = vi.fn()
 const mockCancelAllDownloads = vi.fn()
+const mockRetryFailedDownloads = vi.fn().mockResolvedValue(1)
 vi.mock('@/hooks/useOperations', () => ({
   useOperations: () => ({
     cancelAllDownloads: mockCancelAllDownloads,
     cancelAllTranscriptions: vi.fn(),
     cancelTranscription: vi.fn(),
-    cancelDownload: mockCancelDownload
+    cancelDownload: mockCancelDownload,
+    retryFailedDownloads: mockRetryFailedDownloads
   })
 }))
 
@@ -53,6 +58,8 @@ function makeTranscriptionState(queue: Map<string, unknown>) {
     prioritize: mockPrioritize,
     deprioritize: mockDeprioritize,
     retry: mockRetry,
+    dismiss: mockDismiss,
+    dismissFailed: mockDismissFailed,
     pauseQueue: mockPauseQueue,
     resumeQueue: mockResumeQueue,
     applyQueueState: mockApplyQueueState
@@ -94,9 +101,42 @@ function setupOverlayWithPending(recording?: Record<string, unknown>) {
   useUIStore.setState({ operationsOverlayOpen: true })
 }
 
+function setupOverlayWithFailed() {
+  vi.mocked(useTranscriptionStats).mockReturnValue({
+    total: 1, completed: 0, failed: 1, processing: 0, pending: 0, aggregateProgress: 90
+  })
+  const queue = new Map<string, unknown>([[
+    't-failed',
+    {
+      id: 't-failed',
+      recordingId: 'rec-failed',
+      filename: '2026Aug19-150011-Rec02.hda',
+      status: 'failed',
+      progress: 90,
+      error: 'Gemini could not produce a complete, reliable transcript for 00:00–00:37',
+      retryCount: 2,
+      attempts: 4,
+      createdAt: new Date('2026-08-19T18:47:30Z'),
+      startedAt: new Date('2026-08-19T18:59:15Z'),
+      completedAt: new Date('2026-08-19T19:02:31Z'),
+      priority: 0
+    }
+  ]])
+  vi.mocked(useTranscriptionStore).mockImplementation((selector: any) => {
+    const state = makeTranscriptionState(queue)
+    return typeof selector === 'function' ? selector(state) : state
+  })
+  useUIStore.setState({ operationsOverlayOpen: true })
+}
+
 describe('OperationsPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    delete (window as { electronAPI?: unknown }).electronAPI
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: mockClipboardWrite }
+    })
     setupDefaultMocks()
     useUIStore.setState({ operationsOverlayOpen: false })
   })
@@ -107,7 +147,7 @@ describe('OperationsPanel', () => {
   })
 
   it('shows a compact download badge (not a list) when downloads are active', () => {
-    const downloadQueue = new Map([['dl-1', { filename: 'REC0001.WAV', progress: 50 }]])
+    const downloadQueue = new Map([['dl-1', { filename: 'REC0001.WAV', progress: 50, size: 1000, status: 'downloading' }]])
     vi.mocked(useDownloadQueue).mockReturnValue(downloadQueue as any)
     render(<OperationsPanel sidebarOpen={true} />)
     // Compact badge: a single "N downloading" summary that opens the overlay.
@@ -120,13 +160,15 @@ describe('OperationsPanel', () => {
       total: 2, completed: 0, failed: 0, processing: 1, pending: 1, aggregateProgress: 25
     })
     render(<OperationsPanel sidebarOpen={true} />)
-    expect(screen.getByText(/transcribing/i)).toBeInTheDocument()
+    expect(screen.getByText('2 transcribing')).toBeInTheDocument()
+    expect(screen.getByText('Transcribing · progress unavailable')).toBeInTheDocument()
+    expect(screen.queryByText('25%')).not.toBeInTheDocument()
     // The full list does NOT render in the sidebar — only the badge.
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
   it('renders a tiny badge (no list) when the sidebar is collapsed', () => {
-    const downloadQueue = new Map([['dl-1', { filename: 'REC0001.WAV', progress: 50 }]])
+    const downloadQueue = new Map([['dl-1', { filename: 'REC0001.WAV', progress: 50, size: 1000, status: 'downloading' }]])
     vi.mocked(useDownloadQueue).mockReturnValue(downloadQueue as any)
     render(<OperationsPanel sidebarOpen={false} />)
     expect(screen.queryByText(/Cancel all downloads/)).not.toBeInTheDocument()
@@ -145,19 +187,19 @@ describe('OperationsPanel', () => {
   })
 
   describe('overlay per-item affordances', () => {
-    it('go-to navigates to the linked meeting when the recording has a meetingId', () => {
+    it('View source always opens the Library reader even when a meeting is linked', () => {
       setupOverlayWithPending({ id: 'rec-1', location: 'local-only', meetingId: 'm-99' })
       render(<OperationsPanel sidebarOpen={true} />)
 
-      fireEvent.click(screen.getAllByLabelText('Go to source')[0])
-      expect(mockNavigate).toHaveBeenCalledWith('/meeting/m-99')
+      fireEvent.click(screen.getByRole('button', { name: /View source/i }))
+      expect(mockNavigate).toHaveBeenCalledWith('/library', { state: { selectedId: 'rec-1' } })
     })
 
     it('go-to falls back to the library when there is no linked meeting', () => {
       setupOverlayWithPending({ id: 'rec-1', location: 'device-only' })
       render(<OperationsPanel sidebarOpen={true} />)
 
-      fireEvent.click(screen.getAllByLabelText('Go to source')[0])
+      fireEvent.click(screen.getByRole('button', { name: /View source/i }))
       expect(mockNavigate).toHaveBeenCalledWith('/library', { state: { selectedId: 'rec-1' } })
     })
 
@@ -167,6 +209,65 @@ describe('OperationsPanel', () => {
 
       fireEvent.click(screen.getByLabelText('Prioritize'))
       expect(mockPrioritize).toHaveBeenCalledWith('t1')
+    })
+
+    it('shows complete, selectable failure history and copies the full error', async () => {
+      setupOverlayWithFailed()
+      render(<OperationsPanel sidebarOpen={true} />)
+
+      expect(screen.getByText(/4 attempts/)).toBeInTheDocument()
+      fireEvent.click(screen.getByText('Failure details'))
+
+      const fullError = 'Gemini could not produce a complete, reliable transcript for 00:00–00:37'
+      expect(screen.getByText(fullError)).toHaveClass('select-text')
+      expect(screen.getByText('Attempts:').parentElement).toHaveTextContent('Attempts: 4')
+      expect(screen.getByText('Retries:').parentElement).toHaveTextContent('Retries: 2')
+      expect(screen.getByText('First queued:').parentElement).not.toHaveTextContent('Unknown')
+      expect(screen.getByText('Last started:').parentElement).not.toHaveTextContent('Unknown')
+
+      fireEvent.click(screen.getByLabelText('Copy error for 2026Aug19-150011-Rec02'))
+      expect(mockClipboardWrite).toHaveBeenCalledWith(fullError)
+    })
+
+    it('dismisses a failed item through the durable queue action', async () => {
+      setupOverlayWithFailed()
+      render(<OperationsPanel sidebarOpen={true} />)
+
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }))
+      expect(mockDismiss).toHaveBeenCalledWith('t-failed')
+    })
+
+    it('restores and individually dismisses a durable failed download', async () => {
+      useUIStore.setState({ operationsOverlayOpen: true })
+      const dismissDownload = vi.fn().mockResolvedValue(true)
+      Object.defineProperty(window, 'electronAPI', {
+        configurable: true,
+        value: {
+          downloadService: {
+            getState: vi.fn().mockResolvedValue({
+              queue: [{
+                id: 'missing.hda',
+                filename: 'missing.hda',
+                fileSize: 4096,
+                progress: 0,
+                status: 'failed',
+                error: 'USB transfer failed'
+              }],
+              session: null,
+              isProcessing: false,
+              isPaused: false
+            }),
+            onStateUpdate: vi.fn().mockReturnValue(() => {}),
+            dismiss: dismissDownload
+          }
+        }
+      })
+
+      render(<OperationsPanel sidebarOpen={true} />)
+
+      expect(await screen.findByText('Source unavailable')).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss download failure missing' }))
+      await waitFor(() => expect(dismissDownload).toHaveBeenCalledWith('missing.hda'))
     })
   })
 

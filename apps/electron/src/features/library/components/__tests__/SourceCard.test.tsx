@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, fireEvent } from '@testing-library/react'
 import { SourceCard } from '../SourceCard'
 import type { UnifiedRecording } from '@/types/unified-recording'
 
@@ -45,6 +45,57 @@ function makeProps(overrides: Partial<React.ComponentProps<typeof SourceCard>> =
     ...overrides
   }
 }
+
+describe('SourceCard Explorer-style selection', () => {
+  it('plain click opens the card without invoking modifier selection', () => {
+    const onClick = vi.fn()
+    const onSelectionChange = vi.fn()
+    render(<SourceCard {...makeProps({ onClick, onSelectionChange })} />)
+
+    fireEvent.click(screen.getByTestId('source-card'))
+
+    expect(onClick).toHaveBeenCalledTimes(1)
+    expect(onSelectionChange).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['Ctrl', { ctrlKey: true }],
+    ['Meta', { metaKey: true }]
+  ])('%s+click toggles the card without opening it', (_label, modifier) => {
+    const onClick = vi.fn()
+    const onSelectionChange = vi.fn()
+    render(<SourceCard {...makeProps({ onClick, onSelectionChange })} />)
+
+    fireEvent.click(screen.getByTestId('source-card'), modifier)
+
+    expect(onSelectionChange).toHaveBeenCalledWith('r1', false)
+    expect(onClick).not.toHaveBeenCalled()
+  })
+
+  it('Shift+click requests range selection without opening the card', () => {
+    const onClick = vi.fn()
+    const onSelectionChange = vi.fn()
+    render(<SourceCard {...makeProps({ onClick, onSelectionChange })} />)
+
+    fireEvent.click(screen.getByTestId('source-card'), { shiftKey: true })
+
+    expect(onSelectionChange).toHaveBeenCalledWith('r1', true)
+    expect(onClick).not.toHaveBeenCalled()
+  })
+
+  it('interactive child clicks do not change the card selection', () => {
+    const onClick = vi.fn()
+    const onSelectionChange = vi.fn()
+    const onAskAssistant = vi.fn()
+    render(<SourceCard {...makeProps({ onClick, onSelectionChange, onAskAssistant })} />)
+
+    fireEvent.click(screen.getByTitle('Ask Assistant about this capture'), { ctrlKey: true })
+
+    expect(onAskAssistant).toHaveBeenCalledTimes(1)
+    expect(onClick).not.toHaveBeenCalled()
+    expect(onSelectionChange).not.toHaveBeenCalled()
+  })
+})
 
 describe('SourceCard delete button — honest title (spec-005/F17 §D3b)', () => {
   it('local-only: title reads "Move to Trash" (never "Delete local file")', () => {

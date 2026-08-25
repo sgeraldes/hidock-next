@@ -48,12 +48,14 @@ import {
   getRecordingById,
   resolveRecordingId,
   insertRecording,
+  commitRecordingSplit,
   markRecordingDownloaded,
   updateRecordingStatus,
   updateRecordingTranscriptionStatus,
   insertTranscript,
   addToQueue,
   getQueueItems,
+  getActionableQueueItems,
   updateQueueItem,
   removeFromQueueByRecordingId,
   cancelPendingTranscriptions,
@@ -64,7 +66,19 @@ import {
   deleteProjectNote,
   getActionablesForProject,
   getMeetingById,
-  upsertMeetingsBatch
+  upsertMeetingsBatch,
+  activateCalendarSyncToken,
+  createProcessingRun,
+  completeProcessingRun,
+  retireGeneratedContentForNoSpeech,
+  getActiveProcessingRunsForRecording,
+  enrichRecordingScheduleMetadata,
+  getCandidatesForRecording,
+  addRecordingMeetingCandidate,
+  selectMeetingForRecordingByUser,
+  getRecordingByFilename,
+  upsertRecordingFromDevice,
+  markRecordingsNotOnDevice
 } from '../database'
 
 // ---------------------------------------------------------------------------
@@ -80,8 +94,11 @@ function cleanupDbFiles(base: string): void {
 // Tables seeded/asserted by the suite, in child→parent order so the wipe
 // respects foreign keys (some FKs are RESTRICT, not CASCADE).
 const DATA_TABLES = [
+  'deletion_journal',
   'transcription_queue',
+  'processing_runs',
   'transcripts',
+  'recording_meeting_candidates',
   'synced_files',
   'actionables',
   'project_notes',
@@ -92,6 +109,7 @@ const DATA_TABLES = [
   'recording_preassignments',
   'recordings',
   'projects',
+  'calendar_sync_state',
   'meetings'
 ]
 
@@ -332,6 +350,60 @@ describe('Database Service', () => {
     it('returns an empty array when no queue items exist', () => {
       expect(getQueueItems()).toEqual([])
     })
+
+    it('returns only actionable rows for the renderer projection', () => {
+      seedRecording('rec-pending')
+      seedRecording('rec-processing')
+      seedRecording('rec-completed')
+      seedRecording('rec-cancelled')
+      addToQueue('rec-pending')
+      const processing = addToQueue('rec-processing')
+      const completed = addToQueue('rec-completed')
+      const cancelled = addToQueue('rec-cancelled')
+      updateQueueItem(processing, 'processing')
+      updateQueueItem(completed, 'completed')
+      updateQueueItem(cancelled, 'cancelled')
+
+      expect(getActionableQueueItems().map((item) => item.recording_id).sort()).toEqual([
+        'rec-pending',
+        'rec-processing'
+      ])
+    })
+
+    it('hides a failed attempt after a newer transcript succeeds but keeps a newer failure actionable', () => {
+      seedRecording('rec-resolved')
+      seedRecording('rec-still-failed')
+      const resolved = addToQueue('rec-resolved')
+      const stillFailed = addToQueue('rec-still-failed')
+      updateQueueItem(resolved, 'failed', 'old failure')
+      updateQueueItem(stillFailed, 'failed', 'new failure')
+      run("UPDATE transcription_queue SET completed_at = '2026-08-21 19:35:03' WHERE id = ?", [resolved])
+      run("UPDATE transcription_queue SET completed_at = '2026-08-23 19:35:03' WHERE id = ?", [stillFailed])
+      run(
+        "INSERT INTO transcripts (id, recording_id, full_text, created_at) VALUES (?, ?, ?, '2026-08-22 01:30:33')",
+        ['tx-resolved', 'rec-resolved', 'Later successful transcript']
+      )
+      run(
+        "INSERT INTO transcripts (id, recording_id, full_text, created_at) VALUES (?, ?, ?, '2026-08-22 01:30:33')",
+        ['tx-before-failure', 'rec-still-failed', 'Earlier transcript']
+      )
+
+      expect(getActionableQueueItems().map((item) => item.recording_id)).toEqual(['rec-still-failed'])
+      expect(getQueueItems('failed').map((item) => item.recording_id).sort()).toEqual([
+        'rec-resolved',
+        'rec-still-failed'
+      ])
+    })
+
+    it('deduplicates active work for the same recording and marks it pending once', () => {
+      seedRecording('rec-1')
+      const first = addToQueue('rec-1')
+      const second = addToQueue('rec-1')
+
+      expect(second).toBe(first)
+      expect(getQueueItems()).toHaveLength(1)
+      expect(getRecordingById('rec-1')?.transcription_status).toBe('pending')
+    })
   })
 
   // =========================================================================
@@ -349,6 +421,20 @@ describe('Database Service', () => {
       const row = queueRow(id)
       expect(row?.status).toBe('processing')
       expect(row?.started_at).not.toBeNull()
+      expect(row?.attempts).toBe(1)
+    })
+
+    it('clears the prior failure timestamp and error when a new attempt starts', () => {
+      seedRecording('rec-1')
+      const id = addToQueue('rec-1')
+      updateQueueItem(id, 'failed', 'Previous provider failure')
+      updateQueueItem(id, 'pending')
+      updateQueueItem(id, 'processing')
+
+      const row = queueRow(id)
+      expect(row?.status).toBe('processing')
+      expect(row?.completed_at).toBeNull()
+      expect(row?.error_message).toBeNull()
       expect(row?.attempts).toBe(1)
     })
 
@@ -392,6 +478,152 @@ describe('Database Service', () => {
       updateRecordingTranscriptionStatus('rec-123', 'processing')
       expect(getRecordingById('rec-123')?.transcription_status).toBe('processing')
     })
+  })
+
+  describe('device snapshot recording identity', () => {
+    it('updates the existing local row instead of inserting an .hda shadow row', () => {
+      seedRecording('rec-local', {
+        filename: '2026Aug18-142505-Rec91.wav',
+        file_path: 'F:/audio/2026Aug18-142505-Rec91.wav',
+        location: 'local-only',
+        on_device: 0,
+        on_local: 1
+      })
+      run(
+        'UPDATE recordings SET original_filename = ?, file_size = ? WHERE id = ?',
+        ['2026Aug18-142505-Rec91.hda', 9999, 'rec-local']
+      )
+
+      const result = upsertRecordingFromDevice({
+        filename: '2026Aug18-142505-Rec91.hda',
+        size: 1234,
+        duration: 90,
+        dateCreated: new Date('2026-08-18T14:25:05.000Z')
+      })
+
+      expect(result).toMatchObject({
+        id: 'rec-local',
+        filename: '2026Aug18-142505-Rec91.wav',
+        original_filename: '2026Aug18-142505-Rec91.hda',
+        location: 'both',
+        on_device: 1,
+        on_local: 1,
+        file_size: 9999,
+        duration_seconds: 90
+      })
+      expect(queryOne<{ n: number }>('SELECT COUNT(*) AS n FROM recordings')?.n).toBe(1)
+      expect(getRecordingByFilename('2026Aug18-142505-Rec91.hda')?.id).toBe('rec-local')
+    })
+
+    it('uses the device-native original filename when reconciling device presence', () => {
+      seedRecording('rec-both', {
+        filename: '2026Aug18-142505-Rec91.wav',
+        file_path: 'F:/audio/2026Aug18-142505-Rec91.wav',
+        location: 'both',
+        on_device: 1,
+        on_local: 1
+      })
+      run(
+        'UPDATE recordings SET original_filename = ? WHERE id = ?',
+        ['2026Aug18-142505-Rec91.hda', 'rec-both']
+      )
+
+      markRecordingsNotOnDevice(['2026Aug18-142505-Rec91.hda'])
+      expect(getRecordingById('rec-both')).toMatchObject({ on_device: 1, location: 'both' })
+
+      markRecordingsNotOnDevice(['another-recording.hda'])
+      expect(getRecordingById('rec-both')).toMatchObject({ on_device: 0, location: 'local-only' })
+    })
+  })
+
+  describe('retireGeneratedContentForNoSpeech()', () => {
+    it('removes stale AI content and automatic meeting links while preserving the user title and audit runs', () => {
+      seedMeeting('meeting-auto', 'Cancelled lobby meeting')
+      seedRecording('rec-no-speech', { filename: 'Rec73.wav', meeting_id: 'meeting-auto' })
+      run(
+        "UPDATE recordings SET correlation_confidence = 0.85, correlation_method = 'ai_transcript_match' WHERE id = ?",
+        ['rec-no-speech']
+      )
+      run(
+        `INSERT INTO transcripts (id, recording_id, full_text, summary, title_suggestion)
+         VALUES ('trans-no-speech', 'rec-no-speech', 'Invented dialogue', 'Invented summary', 'Invented title')`
+      )
+      seedKnowledgeCapture('capture-no-speech', 'rec-no-speech')
+      run(
+        `UPDATE knowledge_captures
+            SET title = 'Invented title', user_title = 'My preserved title', summary = 'Invented summary',
+                quality_rating = 'valuable', quality_source = 'ai'
+          WHERE id = 'capture-no-speech'`
+      )
+      seedActionable('actionable-no-speech', 'capture-no-speech')
+      createProcessingRun({
+        recordingId: 'rec-no-speech',
+        stage: 'transcription',
+        provider: 'gemini',
+        tool: 'gemini',
+        execution: 'cloud'
+      })
+
+      retireGeneratedContentForNoSpeech('rec-no-speech')
+
+      expect(queryOne('SELECT id FROM transcripts WHERE recording_id = ?', ['rec-no-speech'])).toBeUndefined()
+      expect(queryOne('SELECT id FROM actionables WHERE id = ?', ['actionable-no-speech'])).toBeUndefined()
+      expect(queryOne<{ title: string; user_title: string; summary: string | null }>(
+        'SELECT title, user_title, summary FROM knowledge_captures WHERE id = ?',
+        ['capture-no-speech']
+      )).toMatchObject({ title: 'My preserved title', user_title: 'My preserved title', summary: null })
+      expect(getRecordingById('rec-no-speech')).toMatchObject({
+        meeting_id: null,
+        correlation_confidence: null,
+        correlation_method: null
+      })
+      expect(queryOne<{ n: number }>(
+        'SELECT COUNT(*) AS n FROM processing_runs WHERE recording_id = ?',
+        ['rec-no-speech']
+      )?.n).toBe(1)
+    })
+
+    it('preserves an explicitly linked meeting', () => {
+      seedMeeting('meeting-manual', 'Chosen by user')
+      seedRecording('rec-manual-link', { meeting_id: 'meeting-manual' })
+      run("UPDATE recordings SET correlation_method = 'manual' WHERE id = ?", ['rec-manual-link'])
+
+      retireGeneratedContentForNoSpeech('rec-manual-link')
+
+      expect(getRecordingById('rec-manual-link')).toMatchObject({
+        meeting_id: 'meeting-manual',
+        correlation_method: 'manual'
+      })
+    })
+
+    it.each(['time_overlap', 'schedule_candidate'])(
+      'removes a provisional %s meeting link after no-speech proof',
+      (method) => {
+        seedMeeting('meeting-provisional', 'Provisional calendar match')
+        seedRecording('rec-provisional', { meeting_id: 'meeting-provisional' })
+        seedKnowledgeCapture('capture-provisional', 'rec-provisional')
+        run(
+          'UPDATE recordings SET correlation_confidence = 0.7, correlation_method = ? WHERE id = ?',
+          [method, 'rec-provisional']
+        )
+        run(
+          'UPDATE knowledge_captures SET meeting_id = ?, correlation_confidence = 0.7, correlation_method = ? WHERE id = ?',
+          ['meeting-provisional', method, 'capture-provisional']
+        )
+
+        retireGeneratedContentForNoSpeech('rec-provisional')
+
+        expect(getRecordingById('rec-provisional')).toMatchObject({
+          meeting_id: null,
+          correlation_confidence: null,
+          correlation_method: null
+        })
+        expect(queryOne<{ meeting_id: string | null }>(
+          'SELECT meeting_id FROM knowledge_captures WHERE id = ?',
+          ['capture-provisional']
+        )?.meeting_id).toBeNull()
+      }
+    )
   })
 
   // =========================================================================
@@ -481,6 +713,164 @@ describe('Database Service', () => {
       expect(cols).toContain('folder_path')
       expect(cols).toContain('url')
       expect(tableColumns('project_notes').length).toBeGreaterThan(0)
+    })
+
+    it('keeps title ownership and stage provenance independent (v52)', () => {
+      expect(tableColumns('knowledge_captures')).toContain('user_title')
+      const transcriptColumns = tableColumns('transcripts')
+      for (const column of ['transcription_run_id', 'diarization_run_id', 'summary_run_id', 'title_run_id']) {
+        expect(transcriptColumns).toContain(column)
+      }
+      expect(tableColumns('processing_runs')).toContain('provider')
+    })
+  })
+
+  describe('Processing provenance (v52)', () => {
+    it('persists immutable stage/tool/model facts and terminal quality', () => {
+      seedRecording('rec-runs')
+      const processingRun = createProcessingRun({
+        recordingId: 'rec-runs',
+        stage: 'diarization',
+        provider: 'local-asr',
+        tool: 'pyannote',
+        model: 'speaker-diarization',
+        execution: 'local'
+      })
+      completeProcessingRun(processingRun.id, {
+        status: 'degraded',
+        qualityStatus: 'degraded',
+        quality: { coverageRatio: 0.42 }
+      })
+
+      const saved = getActiveProcessingRunsForRecording('rec-runs')
+      expect(saved).toHaveLength(1)
+      expect(saved[0]).toMatchObject({
+        stage: 'diarization', provider: 'local-asr', tool: 'pyannote',
+        model: 'speaker-diarization', execution: 'local', status: 'degraded',
+        quality_status: 'degraded'
+      })
+      expect(JSON.parse(saved[0].quality_json!)).toEqual({ coverageRatio: 0.42 })
+    })
+
+    it('persists every temporal meeting candidate before transcription', () => {
+      seedRecording('rec-candidates', { date_recorded: '2026-01-01T10:00:00.000Z' })
+      run('UPDATE recordings SET duration_seconds = 1800 WHERE id = ?', ['rec-candidates'])
+      seedMeeting('meeting-a', 'Primary sync')
+      run(
+        'INSERT INTO meetings (id, subject, start_time, end_time) VALUES (?, ?, ?, ?)',
+        ['meeting-b', 'Overlapping workshop', '2026-01-01T10:05:00.000Z', '2026-01-01T10:35:00.000Z']
+      )
+
+      const result = enrichRecordingScheduleMetadata('rec-candidates')
+      const candidates = getCandidatesForRecording('rec-candidates')
+
+      expect(result.candidateCount).toBe(2)
+      expect(result.hasConflict).toBe(true)
+      expect(candidates.map((candidate) => candidate.meeting_id).sort()).toEqual(['meeting-a', 'meeting-b'])
+      expect(getActiveProcessingRunsForRecording('rec-candidates').some((run) => run.stage === 'schedule-match')).toBe(true)
+    })
+
+    it('assigns the only viable overlap before transcription and ignores a cancelled overlap', () => {
+      seedRecording('rec-deterministic', { date_recorded: '2026-08-18T20:07:09.000Z' })
+      run('UPDATE recordings SET duration_seconds = 2145 WHERE id = ?', ['rec-deterministic'])
+      run(
+        'INSERT INTO meetings (id, subject, start_time, end_time) VALUES (?, ?, ?, ?)',
+        ['meeting-sync', 'Sync Arturo-Seba', '2026-08-18T20:00:00.000Z', '2026-08-18T20:30:00.000Z']
+      )
+      run(
+        'INSERT INTO meetings (id, subject, start_time, end_time) VALUES (?, ?, ?, ?)',
+        ['meeting-cancelled', 'Cancelada: Seguros Bolívar', '2026-08-18T20:00:00.000Z', '2026-08-18T21:00:00.000Z']
+      )
+
+      const result = enrichRecordingScheduleMetadata('rec-deterministic')
+
+      expect(result).toMatchObject({ candidateCount: 1, selectedMeetingId: 'meeting-sync', hasConflict: false })
+      expect(getRecordingById('rec-deterministic')?.meeting_id).toBe('meeting-sync')
+      expect(getCandidatesForRecording('rec-deterministic').map((candidate) => candidate.meeting_id))
+        .toEqual(['meeting-sync'])
+    })
+
+    it('ignores an obsolete recurring occurrence that was absent from the latest calendar snapshot', () => {
+      seedRecording('rec-first-time', { date_recorded: '2026-08-24T17:17:10.000Z' })
+      run('UPDATE recordings SET duration_seconds = 1241 WHERE id = ?', ['rec-first-time'])
+      upsertMeetingsBatch([
+        {
+          id: 'stale-intranet',
+          subject: 'DFX5 Intranet',
+          start_time: '2026-08-24T17:30:00.000Z',
+          end_time: '2026-08-24T18:00:00.000Z',
+          is_recurring: 1
+        }
+      ], 'snapshot-old')
+      upsertMeetingsBatch([
+        {
+          id: 'current-interview',
+          subject: 'DFX5 Interview is scheduled',
+          start_time: '2026-08-24T17:15:00.000Z',
+          end_time: '2026-08-24T18:15:00.000Z',
+          is_recurring: 0
+        }
+      ], 'snapshot-current')
+      activateCalendarSyncToken('snapshot-current')
+
+      const result = enrichRecordingScheduleMetadata('rec-first-time')
+
+      expect(result).toMatchObject({
+        candidateCount: 1,
+        selectedMeetingId: null,
+        hasConflict: false
+      })
+      expect(getCandidatesForRecording('rec-first-time').map((candidate) => candidate.meeting_id))
+        .toEqual(['current-interview'])
+      expect(getRecordingById('rec-first-time')?.meeting_id).toBeNull()
+    })
+
+    it('persisting an AI candidate cannot bypass the transcription auto-link gate', () => {
+      seedRecording('rec-ai-candidate', { date_recorded: '2026-08-19T00:05:30.000Z' })
+      run(
+        'INSERT INTO meetings (id, subject, start_time, end_time) VALUES (?, ?, ?, ?)',
+        ['meeting-ended', 'SIP Gateway WAR', '2026-08-18T22:45:00.000Z', '2026-08-18T23:45:00.000Z']
+      )
+
+      addRecordingMeetingCandidate(
+        'rec-ai-candidate',
+        'meeting-ended',
+        0.99,
+        'AI found generic networking vocabulary',
+        true
+      )
+
+      expect(getRecordingById('rec-ai-candidate')?.meeting_id).toBeFalsy()
+      expect(getCandidatesForRecording('rec-ai-candidate')[0]).toMatchObject({
+        meeting_id: 'meeting-ended',
+        is_ai_selected: true
+      })
+    })
+
+    it('upserts and preserves a manual meeting choice across schedule enrichment', () => {
+      seedRecording('rec-manual', { date_recorded: '2026-01-01T10:00:00.000Z' })
+      run('UPDATE recordings SET duration_seconds = 1800 WHERE id = ?', ['rec-manual'])
+      seedMeeting('meeting-auto', 'Automatic overlap')
+      run(
+        'INSERT INTO meetings (id, subject, start_time, end_time) VALUES (?, ?, ?, ?)',
+        ['meeting-manual', 'SEMU', '2026-01-01T12:00:00.000Z', '2026-01-01T13:00:00.000Z']
+      )
+
+      // The manually chosen meeting was not previously a scored candidate.
+      selectMeetingForRecordingByUser('rec-manual', 'meeting-manual')
+      enrichRecordingScheduleMetadata('rec-manual')
+
+      expect(getRecordingById('rec-manual')).toMatchObject({
+        meeting_id: 'meeting-manual',
+        correlation_method: 'user_override'
+      })
+      const candidates = getCandidatesForRecording('rec-manual')
+      expect(candidates.find((candidate) => candidate.meeting_id === 'meeting-manual')).toMatchObject({
+        is_selected: true,
+        is_user_confirmed: true,
+        is_ai_selected: false
+      })
+      expect(candidates.filter((candidate) => candidate.is_user_confirmed)).toHaveLength(1)
     })
   })
 
@@ -616,6 +1006,54 @@ describe('Database Service', () => {
       expect(row?.on_local).toBe(1)
       expect(row?.on_device).toBe(0)
       expect(row?.file_path).toBe('/recordings/file.wav')
+    })
+  })
+
+  describe('commitRecordingSplit()', () => {
+    it('atomically creates two local children and tombstones the recoverable parent', () => {
+      seedRecording('split-parent', {
+        filename: 'session.hda',
+        file_path: '/recordings/session.hda',
+        transcription_status: 'complete',
+        on_local: 1,
+      })
+      insertTranscript({
+        id: 'split-transcript',
+        recording_id: 'split-parent',
+        full_text: 'Original transcript remains recoverable',
+        language: 'en',
+      })
+
+      const child = (id: string, part: number, duration: number) => ({
+        id,
+        filename: `session - Part ${part}.flac`,
+        original_filename: 'session.hda',
+        file_path: `/recordings/session - Part ${part}.flac`,
+        file_size: 1000,
+        duration_seconds: duration,
+        date_recorded: `2026-08-18T1${part}:00:00.000Z`,
+        status: 'ready',
+        location: 'local-only' as const,
+        transcription_status: 'none' as const,
+        on_device: 0,
+        on_local: 1,
+        source: 'hidock' as const,
+        is_imported: 0,
+      })
+
+      commitRecordingSplit('split-parent', [child('split-a', 1, 1200), child('split-b', 2, 3600)])
+
+      expect(queryOne<{ deleted_at: string | null }>('SELECT deleted_at FROM recordings WHERE id = ?', ['split-parent'])?.deleted_at).toBeTruthy()
+      expect(queryAll<{ id: string; meeting_id: string | null }>(
+        "SELECT id, meeting_id FROM recordings WHERE id IN ('split-a', 'split-b') ORDER BY id"
+      )).toEqual([
+        { id: 'split-a', meeting_id: null },
+        { id: 'split-b', meeting_id: null },
+      ])
+      expect(queryOne<{ full_text: string }>('SELECT full_text FROM transcripts WHERE recording_id = ?', ['split-parent'])?.full_text)
+        .toBe('Original transcript remains recoverable')
+      expect(queryOne<{ mode: string }>('SELECT mode FROM deletion_journal WHERE recording_id = ?', ['split-parent'])?.mode)
+        .toBe('soft')
     })
   })
 

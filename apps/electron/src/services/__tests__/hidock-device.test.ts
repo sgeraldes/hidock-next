@@ -2665,6 +2665,29 @@ describe('HiDockDeviceService - Get Recording Count', () => {
     expect(result).toBe(0)
   })
 
+  it('preserves the last factual count when the main process skips a busy-bus probe', async () => {
+    const service = new HiDockDeviceService()
+    const serviceAny = service as any
+
+    serviceAny.state.connected = true
+    serviceAny.state.recordingCount = 330
+    mockJensen.isConnected.mockReturnValue(true)
+    mockJensen.getFileCount.mockResolvedValue(null)
+
+    const listener = vi.fn()
+    service.onStateChange(listener)
+    const initialCallCount = listener.mock.calls.length
+
+    const result = await service.getRecordingCount()
+
+    expect(result).toBe(330)
+    expect(service.getState().recordingCount).toBe(330)
+    expect(listener).toHaveBeenCalledTimes(initialCallCount)
+    expect(service.getActivityLog()).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ message: 'File Count Received' })])
+    )
+  })
+
   it('should log activity when getting recording count', async () => {
     const service = new HiDockDeviceService()
     const serviceAny = service as any
@@ -3080,6 +3103,7 @@ describe('HiDockDeviceService - Delete Recording', () => {
     const result = await service.deleteRecording('test.wav')
 
     expect(result).toBe(false)
+    expect(service.getLastDeleteError()).toBe('The HiDock disconnected before the erase could start.')
     expect(mockJensen.deleteFile).not.toHaveBeenCalled()
   })
 
@@ -3111,6 +3135,23 @@ describe('HiDockDeviceService - Delete Recording', () => {
     expect(result).toBe(true)
   })
 
+  it('treats not-exists as an idempotent success and evicts the stale cache row', async () => {
+    const service = new HiDockDeviceService()
+    const serviceAny = service as any
+    serviceAny.state.connected = true
+    serviceAny.cachedRecordings = [{ id: '1', filename: 'already-gone.hda' }]
+    serviceAny.cachedRecordingCount = 1
+    mockJensen.isConnected.mockReturnValue(true)
+    mockJensen.deleteFile.mockResolvedValue({ result: 'not-exists' })
+
+    await expect(service.deleteRecording('already-gone.hda')).resolves.toBe(true)
+    expect(service.getCachedRecordings()).toEqual([])
+    expect(service.getLastDeleteError()).toBeNull()
+    expect(service.getActivityLog()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ message: 'File already absent' })])
+    )
+  })
+
   it('should return false on failed delete', async () => {
     const service = new HiDockDeviceService()
     const serviceAny = service as any
@@ -3123,6 +3164,7 @@ describe('HiDockDeviceService - Delete Recording', () => {
     const result = await service.deleteRecording('recording.wav')
 
     expect(result).toBe(false)
+    expect(service.getLastDeleteError()).toContain('rejected the erase command')
   })
 
   it('should log success on successful delete', async () => {
@@ -3143,7 +3185,7 @@ describe('HiDockDeviceService - Delete Recording', () => {
     expect(successLog!.details).toBe('test.wav')
   })
 
-  it('should invalidate cache on successful delete', async () => {
+  it('should remove the deleted row from cache on successful delete', async () => {
     const service = new HiDockDeviceService()
     const serviceAny = service as any
 
@@ -3158,8 +3200,30 @@ describe('HiDockDeviceService - Delete Recording', () => {
 
     await service.deleteRecording('test.wav')
 
-    expect(serviceAny.cachedRecordings).toBeNull()
-    expect(serviceAny.cachedRecordingCount).toBe(-1)
+    expect(serviceAny.cachedRecordings).toEqual([])
+    expect(serviceAny.cachedRecordingCount).toBe(0)
+    expect(serviceAny.state.recordingCount).toBe(0)
+  })
+
+  it('removes one confirmed filename from renderer cache without touching Jensen or siblings', () => {
+    const service = new HiDockDeviceService()
+    const serviceAny = service as any
+    serviceAny.cachedRecordings = [
+      { id: '1', filename: 'DELETE-ME.hda' },
+      { id: '2', filename: 'keep-me.hda' }
+    ]
+    serviceAny.cachedRecordingCount = 2
+    serviceAny.state.recordingCount = 2
+    serviceAny.persistCacheToStorage = vi.fn()
+
+    expect(service.removeCachedRecording('delete-me.HDA')).toBe(true)
+
+    expect(service.getCachedRecordings()).toEqual([{ id: '2', filename: 'keep-me.hda' }])
+    expect(serviceAny.cachedRecordingCount).toBe(1)
+    expect(serviceAny.state.recordingCount).toBe(1)
+    expect(serviceAny.persistCacheToStorage).toHaveBeenCalledTimes(1)
+    expect(mockJensen.deleteFile).not.toHaveBeenCalled()
+    expect(mockJensen.listFiles).not.toHaveBeenCalled()
   })
 
   it('should log error on failed delete', async () => {

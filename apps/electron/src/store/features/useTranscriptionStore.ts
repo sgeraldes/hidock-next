@@ -21,6 +21,7 @@ export interface TranscriptionItem {
   error?: string
   retryCount: number
   attempts: number
+  createdAt?: Date
   startedAt?: Date
   completedAt?: Date
   provider?: string // 'gemini', etc.
@@ -44,6 +45,31 @@ export interface QueueProcessorState {
   processingCount: number
 }
 
+export interface TranscriptionQueueSnapshotItem {
+  id: string
+  recording_id: string
+  filename?: string
+  status: TranscriptionStatus
+  progress?: number
+  error_message?: string
+  retry_count?: number
+  attempts?: number
+  created_at?: string
+  started_at?: string
+  completed_at?: string
+  provider?: string
+}
+
+/** SQLite CURRENT_TIMESTAMP is UTC but omits the `Z` suffix. Parse it as UTC so
+ * operation history renders the actual attempt time in the user's locale. */
+function parseQueueTimestamp(value?: string): Date | undefined {
+  if (!value) return undefined
+  const hasZone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)
+  const normalized = hasZone ? value : `${value.replace(' ', 'T')}Z`
+  const parsed = new Date(normalized)
+  return Number.isNaN(parsed.getTime()) ? undefined : parsed
+}
+
 export interface TranscriptionQueueStore {
   // State
   queue: Map<string, TranscriptionItem>
@@ -60,10 +86,16 @@ export interface TranscriptionQueueStore {
 
   // Actions
   addToQueue: (id: string, recordingId: string, filename: string) => void
+  /** Replace the renderer projection from one bounded main-process snapshot. */
+  reconcileQueue: (items: TranscriptionQueueSnapshotItem[]) => void
   updateProgress: (id: string, progress: number) => void
   markCompleted: (id: string, provider: string) => void
   markFailed: (id: string, error: string) => void
-  retry: (id: string) => void
+  retry: (id: string) => Promise<boolean>
+  /** Dismiss one terminal failure from the actionable Operations history. */
+  dismiss: (id: string) => Promise<boolean>
+  /** Dismiss every terminal failure and return the number removed. */
+  dismissFailed: () => Promise<number>
   /**
    * Bump a pending item sooner. Updates the local view optimistically AND sends
    * the reorder intent to main (which owns the authoritative processing order).
@@ -106,9 +138,44 @@ export const useTranscriptionStore = create<TranscriptionQueueStore>()(
           progress: 0,
           retryCount: 0,
           attempts: 0,
+          createdAt: new Date(),
           priority: 0
         })
         return { queue }
+      })
+    },
+
+    reconcileQueue: (items) => {
+      set((state) => {
+        const queue = new Map<string, TranscriptionItem>()
+        const processing = new Set<string>()
+
+        for (const snapshot of items) {
+          if (snapshot.status !== 'pending' && snapshot.status !== 'processing' && snapshot.status !== 'failed') {
+            continue
+          }
+          const previous = state.queue.get(snapshot.id)
+          const item: TranscriptionItem = {
+            id: snapshot.id,
+            recordingId: snapshot.recording_id,
+            filename: snapshot.filename || previous?.filename || 'Unknown',
+            status: snapshot.status,
+            progress: snapshot.progress ?? previous?.progress ?? 0,
+            error: snapshot.error_message,
+            retryCount: snapshot.retry_count ?? previous?.retryCount ?? 0,
+            attempts: snapshot.attempts ?? previous?.attempts ?? 0,
+            createdAt: parseQueueTimestamp(snapshot.created_at) ?? previous?.createdAt,
+            startedAt: parseQueueTimestamp(snapshot.started_at) ?? previous?.startedAt,
+            completedAt:
+              snapshot.status === 'failed' ? parseQueueTimestamp(snapshot.completed_at) : undefined,
+            provider: snapshot.provider ?? previous?.provider,
+            priority: previous?.priority ?? 0
+          }
+          queue.set(item.id, item)
+          if (item.status === 'processing') processing.add(item.recordingId)
+        }
+
+        return { queue, processing }
       })
     },
 
@@ -163,7 +230,8 @@ export const useTranscriptionStore = create<TranscriptionQueueStore>()(
         queue.set(id, {
           ...item,
           status: 'failed',
-          error
+          error,
+          completedAt: new Date()
         })
 
         const processing = new Set(state.processing)
@@ -173,23 +241,17 @@ export const useTranscriptionStore = create<TranscriptionQueueStore>()(
       })
     },
 
-    retry: (id) => {
+    retry: async (id) => {
       const item = get().queue.get(id)
-      if (!item || item.status !== 'failed') return
-
-      // C-005: Enforce max retry limit on frontend to prevent unlimited retries
-      const MAX_FRONTEND_RETRIES = 3
-      if (item.retryCount >= MAX_FRONTEND_RETRIES) {
-        console.warn(`[TranscriptionStore] Max retries (${MAX_FRONTEND_RETRIES}) reached for ${id}, not retrying`)
-        return
-      }
+      if (!item || item.status !== 'failed') return false
 
       // B-TXN-004: Make store retry contingent on IPC success
       // Only update local store state AFTER the IPC call succeeds
-      window.electronAPI?.recordings?.updateQueueItem?.(id, 'pending').then((success) => {
+      try {
+        const success = await window.electronAPI?.recordings?.updateQueueItem?.(id, 'pending')
         if (!success) {
           console.error('IPC updateQueueItem returned failure for retry:', id)
-          return
+          return false
         }
 
         // IPC succeeded - now update local store state
@@ -205,19 +267,48 @@ export const useTranscriptionStore = create<TranscriptionQueueStore>()(
             error: undefined,
             retryCount: currentItem.retryCount + 1,
             // C-005: Reset startedAt so next updateProgress sets a fresh timestamp
-            startedAt: undefined
+            startedAt: undefined,
+            completedAt: undefined
           })
 
           return { queue }
         })
 
         // Ensure transcription processor is running after retry
-        window.electronAPI?.recordings?.processQueue?.().catch((e) => {
-          console.error('Failed to start transcription processor after retry:', e)
-        })
-      }).catch((e) => {
+        await window.electronAPI?.recordings?.processQueue?.()
+        return true
+      } catch (e) {
         console.error('Failed to update queue item in DB for retry:', e)
-      })
+        return false
+      }
+    },
+
+    dismiss: async (id) => {
+      const item = get().queue.get(id)
+      if (!item || item.status !== 'failed') return false
+      try {
+        // `cancelled` is a terminal, non-actionable queue state already supported
+        // by the durable schema. Dismissal removes only the operation notice; it
+        // does not erase the source or falsify its transcription result.
+        const success = await window.electronAPI?.recordings?.updateQueueItem?.(id, 'cancelled')
+        if (!success) return false
+        get().remove(id)
+        return true
+      } catch (e) {
+        console.error('Failed to dismiss transcription failure:', e)
+        return false
+      }
+    },
+
+    dismissFailed: async () => {
+      const failedIds = Array.from(get().queue.values())
+        .filter((item) => item.status === 'failed')
+        .map((item) => item.id)
+      let removed = 0
+      for (const id of failedIds) {
+        if (await get().dismiss(id)) removed++
+      }
+      return removed
     },
 
     prioritize: (id) => {

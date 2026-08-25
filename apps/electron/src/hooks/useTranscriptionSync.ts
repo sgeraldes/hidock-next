@@ -2,12 +2,41 @@
  * useTranscriptionSync - Hydrates and polls the transcription queue from the main process.
  *
  * Extracted from OperationController Phase 2+3A decomposition.
- * Runs a 5-second polling interval to reconcile the renderer-side
- * useTranscriptionStore with the database queue state.
+ * Real-time events drive progress; a bounded 30-second reconciliation repairs
+ * missed events without transporting the terminal queue history to the renderer.
  */
 
 import { useEffect, useRef } from 'react'
 import { useTranscriptionStore } from '@/store/features/useTranscriptionStore'
+
+export const TRANSCRIPTION_RECONCILE_INTERVAL_MS = 30_000
+
+function sqliteUtcMs(value?: string): number {
+  if (!value) return Number.NaN
+  const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)
+    ? value
+    : `${value.replace(' ', 'T')}Z`
+  return new Date(normalized).getTime()
+}
+
+/**
+ * A failed attempt stops being actionable once a transcript created after that
+ * failure exists. An older transcript does not hide a newer re-transcription
+ * failure. This defensive renderer reconciliation also works while a dev main
+ * process is still serving the pre-fix queue projection.
+ */
+export function omitFailuresSupersededByTranscript(
+  items: any[],
+  transcriptsByRecordingId: Record<string, any>
+): any[] {
+  return items.filter((item) => {
+    if (item.status !== 'failed') return true
+    const transcript = transcriptsByRecordingId[item.recording_id]
+    const transcriptCreatedAt = sqliteUtcMs(transcript?.created_at ?? transcript?.createdAt)
+    const failedAt = sqliteUtcMs(item.completed_at ?? item.started_at ?? item.created_at)
+    return !Number.isFinite(transcriptCreatedAt) || !Number.isFinite(failedAt) || transcriptCreatedAt <= failedAt
+  })
+}
 
 export function useTranscriptionSync() {
   const initializedRef = useRef(false)
@@ -18,19 +47,28 @@ export function useTranscriptionSync() {
 
     const isElectron = !!window.electronAPI?.recordings?.getTranscriptionQueue
 
+    const reconcile = async (items: any[]) => {
+      let actionable = items
+      const failedRecordingIds = Array.from(new Set(
+        items.filter((item) => item.status === 'failed').map((item) => item.recording_id)
+      )) as string[]
+      const getTranscripts = window.electronAPI?.transcripts?.getByRecordingIdsOwner
+      if (failedRecordingIds.length > 0 && getTranscripts) {
+        try {
+          const transcripts = await getTranscripts(failedRecordingIds)
+          actionable = omitFailuresSupersededByTranscript(items, transcripts)
+        } catch {
+          // Queue visibility must survive transcript lookup failure. The main
+          // process projection will reconcile it on a later successful poll.
+        }
+      }
+      useTranscriptionStore.getState().reconcileQueue(actionable)
+    }
+
     // Hydrate transcription queue from database on mount
     if (isElectron) {
-      window.electronAPI.recordings.getTranscriptionQueue().then((items: any[]) => {
-        const store = useTranscriptionStore.getState()
-        store.clear()
-        for (const item of items) {
-          if (item.status === 'pending' || item.status === 'processing') {
-            store.addToQueue(item.id, item.recording_id, item.filename || 'Unknown')
-            if (item.status === 'processing') {
-              store.updateProgress(item.id, item.progress ?? 0)
-            }
-          }
-        }
+      window.electronAPI.recordings.getTranscriptionQueue(true).then((items: any[]) => {
+        void reconcile(items)
       }).catch(e => console.error('Failed to hydrate transcription queue:', e))
     }
 
@@ -38,12 +76,26 @@ export function useTranscriptionSync() {
     const unsubscribers: (() => void)[] = []
 
     if (isElectron && window.electronAPI) {
+      if (window.electronAPI.onTranscriptionQueued) {
+        unsubscribers.push(
+          window.electronAPI.onTranscriptionQueued((data) => {
+            const store = useTranscriptionStore.getState()
+            if (!store.queue.has(data.queueItemId)) {
+              store.addToQueue(data.queueItemId, data.recordingId, data.filename || 'Unknown')
+            }
+          })
+        )
+      }
+
       // Listen for transcription started
       if (window.electronAPI.onTranscriptionStarted) {
         unsubscribers.push(
           window.electronAPI.onTranscriptionStarted((data) => {
             const store = useTranscriptionStore.getState()
             if (data.queueItemId) {
+              if (!store.queue.has(data.queueItemId)) {
+                store.addToQueue(data.queueItemId, data.recordingId, 'Unknown')
+              }
               store.updateProgress(data.queueItemId, 0)
             }
           })
@@ -80,6 +132,9 @@ export function useTranscriptionSync() {
           window.electronAPI.onTranscriptionFailed((data) => {
             const store = useTranscriptionStore.getState()
             if (data.queueItemId) {
+              if (!store.queue.has(data.queueItemId)) {
+                store.addToQueue(data.queueItemId, data.recordingId, 'Unknown')
+              }
               store.markFailed(data.queueItemId, data.error || 'Unknown error')
             }
           })
@@ -112,52 +167,19 @@ export function useTranscriptionSync() {
       }
     }
 
-    // Poll transcription queue and sync to store (5s interval)
+    // Low-frequency safety reconciliation. Live events above remain the primary
+    // path, and main returns only pending/processing/failed rows for this call.
     const transcriptionInterval = isElectron
       ? setInterval(async () => {
           try {
             if (!window.electronAPI.recordings.getTranscriptionQueue) return
-            const items = await window.electronAPI.recordings.getTranscriptionQueue()
+            const items = await window.electronAPI.recordings.getTranscriptionQueue(true)
             if (!items) return
-
-            const store = useTranscriptionStore.getState()
-            const currentIds = new Set<string>()
-
-            for (const item of items) {
-              currentIds.add(item.id)
-
-              if (item.status === 'completed') {
-                if (store.queue.has(item.id)) {
-                  store.markCompleted(item.id, item.provider || 'gemini')
-                }
-              } else if (item.status === 'failed') {
-                if (store.queue.has(item.id)) {
-                  store.markFailed(item.id, item.error_message || 'Unknown error')
-                }
-              } else if (item.status === 'processing') {
-                if (!store.queue.has(item.id)) {
-                  store.addToQueue(item.id, item.recording_id, item.filename || 'Unknown')
-                }
-                if (item.progress != null) {
-                  store.updateProgress(item.id, item.progress)
-                }
-              } else if (item.status === 'pending') {
-                if (!store.queue.has(item.id)) {
-                  store.addToQueue(item.id, item.recording_id, item.filename || 'Unknown')
-                }
-              }
-            }
-
-            // Remove items from store that are no longer in the DB queue
-            store.queue.forEach((_, id) => {
-              if (!currentIds.has(id)) {
-                store.remove(id)
-              }
-            })
+            await reconcile(items)
           } catch {
             // Ignore polling errors
           }
-        }, 5000)
+        }, TRANSCRIPTION_RECONCILE_INTERVAL_MS)
       : null
 
     return () => {

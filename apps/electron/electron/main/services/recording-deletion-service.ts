@@ -33,6 +33,7 @@ import {
   recordPendingFileCleanups,
   getPendingFileCleanups,
   updatePendingFileCleanups,
+  removeDeviceFileCacheEntry,
   retryPendingGraphCleanups,
   type RecordingDeletionResult,
   type RecordingDeletionImpact,
@@ -41,6 +42,8 @@ import {
 import { deleteRecording as deleteRecordingFile } from './file-storage'
 import { removeMeetingWiki, reconcileWikiEligibility } from './meeting-wiki'
 import { getVectorStore } from './vector-store'
+import { getJensenDevice } from './jensen'
+import { serializeDeviceOperation } from './device-operation-serializer'
 
 export interface DeleteRecordingOutcome extends RecordingDeletionResult {
   success: true
@@ -161,6 +164,11 @@ export async function deleteRecording(
     // Sync the in-memory vector store (its DB rows are already gone).
     try {
       await getVectorStore().deleteByRecording(recordingId)
+      // The binary vector cache holds this recording's vectors ON DISK —
+      // "permanent deletion" must not leave them recoverable until the next
+      // boot's fingerprint invalidation. Delete the cache file now; the next
+      // boot SQL-loads (sans purged rows) and rewrites it clean.
+      getVectorStore().invalidateCache()
     } catch (e) {
       console.warn('[RecordingDeletion] vector store sync failed:', e)
       pendingTargets.push({ kind: 'vector' })
@@ -301,7 +309,7 @@ export async function deleteRecording(
  * Never throws — a failure here must never block or fail the caller's own
  * action.
  */
-export async function retryPendingFileCleanups(
+export function retryPendingFileCleanups(
   limit = 25
 ): Promise<{
   attempted: number
@@ -309,6 +317,22 @@ export async function retryPendingFileCleanups(
   /** OP-LOW-2: journal ids the sweep fully cleared, so a same-call caller can
    *  distinguish "swept clean" from "not swept at all" (both used to be an
    *  absent stillPending key). */
+  clearedJournalIds: string[]
+  stillPending: Record<string, string[]>
+}> {
+  // All entry points share the same Jensen command chain. In particular, the
+  // renderer's startup/Trash sweep can arrive while the connect sweep is still
+  // running; serializing the complete read-delete-write pass prevents both
+  // callers from reading the same pending rows and issuing duplicate DELETE_FILE
+  // commands, and prevents scans/downloads from interleaving between deletes.
+  return serializeDeviceOperation(() => retryPendingFileCleanupsExclusive(limit))
+}
+
+async function retryPendingFileCleanupsExclusive(
+  limit: number
+): Promise<{
+  attempted: number
+  cleared: number
   clearedJournalIds: string[]
   stillPending: Record<string, string[]>
 }> {
@@ -365,7 +389,23 @@ async function retryOneCleanupTarget(recordingId: string, target: PendingCleanup
         return removeMeetingWiki(recordingId).ok
       case 'vector':
         await getVectorStore().deleteByRecording(recordingId)
+        getVectorStore().invalidateCache()
         return true
+      case 'device': {
+        // Deferred hardware erase (2026-07-22): the user checked "Also delete
+        // from device" while the device was DISCONNECTED. Attempt the USB
+        // delete; on any failure (still disconnected / device error) keep the
+        // target pending for the next sweep (device-connect or hard purge).
+        if (!target.path) return true
+        const result = await getJensenDevice().deleteFile(target.path)
+        if (result?.result !== 'success' && result?.result !== 'not-exists') return false
+        // The hard purge already removed the recording row, but the renderer's
+        // offline device cache can still resurrect it as a ghost device-only
+        // item. A successful deferred erase must reconcile that cache just like
+        // the immediate permanent-delete path does.
+        removeDeviceFileCacheEntry(target.path)
+        return true
+      }
       default:
         return true
     }
@@ -373,6 +413,28 @@ async function retryOneCleanupTarget(recordingId: string, target: PendingCleanup
     console.warn(`[RecordingDeletion] retry failed for ${target.kind}:`, e)
     return false
   }
+}
+
+/**
+ * "Also delete from device" while the device may be disconnected: attempt the
+ * USB delete NOW; on failure durably journal it as a pending 'device' cleanup
+ * so the next sweep (device connect, hard purge, or Trash entry) erases it.
+ */
+export async function queueDeviceDelete(
+  deviceFilename: string,
+  journalId: string
+): Promise<{ deletedNow: boolean; queued: boolean }> {
+  try {
+    const result = await serializeDeviceOperation(() => getJensenDevice().deleteFile(deviceFilename))
+    if (result?.result === 'success' || result?.result === 'not-exists') {
+      return { deletedNow: true, queued: false }
+    }
+  } catch {
+    /* fall through to journaling */
+  }
+  recordPendingFileCleanups(journalId, [{ kind: 'device', path: deviceFilename }])
+  console.log(`[RecordingDeletion] device copy of ${deviceFilename} queued for deletion on next sweep`)
+  return { deletedNow: false, queued: true }
 }
 
 /**

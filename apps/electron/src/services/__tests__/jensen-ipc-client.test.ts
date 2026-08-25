@@ -47,6 +47,7 @@ type JensenApiMock = {
   onDownloadProgress: ReturnType<typeof vi.fn>
   onDownloadChunk: ReturnType<typeof vi.fn>
   onScanProgress: ReturnType<typeof vi.fn>
+  getState: ReturnType<typeof vi.fn>
 }
 
 function createJensenApiMock(): JensenApiMock {
@@ -85,6 +86,8 @@ function createJensenApiMock(): JensenApiMock {
     onDownloadProgress: vi.fn().mockReturnValue(() => {}),
     onDownloadChunk: vi.fn().mockReturnValue(() => {}),
     onScanProgress: vi.fn().mockReturnValue(() => {}),
+    // Default: main reports disconnected (existing tests' behavior unchanged).
+    getState: vi.fn().mockResolvedValue({ connected: false, model: null, serialNumber: null, versionCode: null, versionNumber: null, recording: null }),
   }
 }
 
@@ -165,6 +168,49 @@ describe('JensenIpcClient', () => {
       client.ondisconnect = null
       const [[handler]] = jensenMock.onDisconnect.mock.calls
       expect(() => handler()).not.toThrow()
+    })
+  })
+
+  // ─── Reload-with-live-main adoption (getState pull) ──────────────────────
+  // A reloaded renderer misses the connect-event broadcast; without the pull
+  // firing onconnect, hidock-device's handleConnect() never runs and the
+  // service sits half-initialized while main holds the USB connection.
+
+  describe('getState pull — reload adoption', () => {
+    it('fires onconnect when the pull finds main already connected', async () => {
+      jensenMock.getState.mockResolvedValue({ connected: true, model: 'hidock-h1e', serialNumber: 'SN1', versionCode: '1.0', versionNumber: 1, recording: null })
+      const fresh = new JensenIpcClient()
+      const connectSpy = vi.fn()
+      fresh.onconnect = connectSpy // assigned before the pull's microtask resolves
+
+      await vi.waitFor(() => expect(connectSpy).toHaveBeenCalledTimes(1))
+      expect(fresh.isConnected()).toBe(true)
+      fresh.destroy()
+    })
+
+    it('dedupes the pull-fire against a simultaneous connect-event broadcast', async () => {
+      jensenMock.getState.mockResolvedValue({ connected: true, model: 'hidock-h1e', serialNumber: 'SN1', versionCode: '1.0', versionNumber: 1, recording: null })
+      const fresh = new JensenIpcClient()
+      const connectSpy = vi.fn()
+      fresh.onconnect = connectSpy
+
+      const [[handler]] = jensenMock.onConnect.mock.calls
+      handler() // broadcast wins the race
+      await vi.waitFor(() => expect(connectSpy).toHaveBeenCalledTimes(1))
+      await new Promise((r) => setTimeout(r, 10)) // let the pull resolve too
+      expect(connectSpy).toHaveBeenCalledTimes(1) // still exactly once
+      fresh.destroy()
+    })
+
+    it('does NOT fire onconnect when the pull finds the device disconnected', async () => {
+      jensenMock.getState.mockResolvedValue({ connected: false, model: null, serialNumber: null, versionCode: null, versionNumber: null, recording: null })
+      const fresh = new JensenIpcClient()
+      const connectSpy = vi.fn()
+      fresh.onconnect = connectSpy
+
+      await new Promise((r) => setTimeout(r, 10))
+      expect(connectSpy).not.toHaveBeenCalled()
+      fresh.destroy()
     })
   })
 

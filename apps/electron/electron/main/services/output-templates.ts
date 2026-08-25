@@ -12,11 +12,15 @@ export const OUTPUT_TEMPLATES = {
     description: 'Formal meeting minutes with attendees, agenda, discussion, decisions, and action items',
     prompt: `Generate formal meeting minutes from this transcript.
 
-Structure the output as:
-## Meeting Minutes
-**Date:** [date]
-**Attendees:** [list]
+The header MUST use these exact values (do NOT invent dates or names — if a value is empty, omit that line):
+**Meeting:** {meeting_subject}
+**Date:** {meeting_date}
+**Attendees:** {attendees}
 
+When the transcript references a speaker label (e.g. "Speaker 1"), render the person's NAME using this speaker map when a label is listed; keep the label only when unlisted:
+{speaker_map}
+
+Structure the output as:
 ### Agenda
 [inferred from discussion]
 

@@ -385,7 +385,8 @@ describe('runSelfIdentificationForRecording — binding', () => {
 
     expect(result).toMatchObject({ bound: 1, mergeSuspected: 0, skipped: false })
     expect(mockAssignSpeaker).toHaveBeenCalledWith('rec-1', 'Speaker 7', {
-      newName: 'Santiago de la Colina'
+      newName: 'Santiago de la Colina',
+      voiceAnchor: { method: 'self-identification', confidence: 0.97 }
     })
     // Tiered mention-resolution recorded with the self-identification method.
     expect(mockResolveMention).toHaveBeenCalledWith(
@@ -476,7 +477,10 @@ describe('runSelfIdentificationForRecording — binding', () => {
 
     await runSelfIdentificationForRecording('rec-2', { llm })
 
-    expect(mockAssignSpeaker).toHaveBeenCalledWith('rec-2', 'Speaker 7', { contactId: 'existing-9' })
+    expect(mockAssignSpeaker).toHaveBeenCalledWith('rec-2', 'Speaker 7', {
+      contactId: 'existing-9',
+      voiceAnchor: { method: 'self-identification', confidence: 0.97 }
+    })
   })
 
   it('does NOT name a turn when the LLM contradicts the spoken self-name (the Mariana bug)', async () => {
@@ -503,7 +507,10 @@ describe('runSelfIdentificationForRecording — binding', () => {
     const result = await runSelfIdentificationForRecording('rec-ok', { llm: goodLlm })
 
     expect(result.bound).toBe(1)
-    expect(mockAssignSpeaker).toHaveBeenCalledWith('rec-ok', 'Speaker 5', { newName: 'Mariana' })
+    expect(mockAssignSpeaker).toHaveBeenCalledWith('rec-ok', 'Speaker 5', {
+      newName: 'Mariana',
+      voiceAnchor: { method: 'self-identification', confidence: 0.97 }
+    })
   })
 
   it('NEVER overwrites an existing (manual) speaker binding', async () => {

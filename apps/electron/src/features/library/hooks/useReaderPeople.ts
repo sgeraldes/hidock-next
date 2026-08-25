@@ -3,8 +3,8 @@
  *
  * Loads and derives the two DISTINCT people lists the reader shows:
  *
- *  - Participants (who actually spoke): the linked meeting's canonical contacts
- *    PLUS the transcript's speakers, each resolved through the SAME speaker map
+ *  - Speakers (who actually spoke): transcript diarization turns only, resolved
+ *    through the SAME speaker map
  *    the transcript viewer uses (label→contact bindings, per-turn overrides,
  *    splits). Because the resolution is shared, renaming a speaker — in the
  *    transcript OR in a Participants chip — updates this list.
@@ -196,35 +196,26 @@ export function useReaderPeople({ meetingId, attendees, recordingId, segments }:
     return { ids, names }
   }, [contacts])
 
-  const participants = useMemo<ParticipantChip[]>(() => {
-    // 1) Meeting contacts — always shown, clickable to their page.
-    const contactChips: ParticipantChip[] = contacts.map((c) => ({
-      key: `mc:${c.id}`,
-      name: c.name || c.email || 'Unknown',
-      contactId: c.id,
-      effectiveLabel: c.name || c.email || 'Unknown',
-      firstTurnIndex: 0,
-      turnCount: 0,
-      mergeSuspected: false,
-    }))
-    // 2) Resolved transcript speakers not already represented by a meeting contact.
-    const speakerChips: ParticipantChip[] = resolved
-      .filter((r) => {
-        if (r.contactId && contactKeys.ids.has(r.contactId)) return false
-        if (contactKeys.names.has(r.name.trim().toLowerCase())) return false
-        return true
-      })
-      .map((r) => ({
-        key: r.key,
-        name: r.name,
-        contactId: r.contactId,
-        effectiveLabel: r.effectiveLabel,
-        firstTurnIndex: r.firstTurnIndex,
-        turnCount: r.turnCount,
-        mergeSuspected: r.mergeSuspected,
-      }))
-    return [...contactChips, ...speakerChips]
-  }, [contacts, resolved, contactKeys])
+  const participants = useMemo<ParticipantChip[]>(() => resolved.map((speaker) => {
+    // A resolved diarization identity may also be a calendar contact. Fold its
+    // key for consistent navigation/color, but never add calendar-only contacts
+    // to this list: invited/organizer is not proof that someone spoke.
+    const matchingContact = speaker.contactId
+      ? contacts.find((contact) => contact.id === speaker.contactId)
+      : contacts.find((contact) => {
+          const key = speaker.name.trim().toLowerCase()
+          return contact.name?.trim().toLowerCase() === key || contact.email?.trim().toLowerCase() === key
+        })
+    return {
+      key: matchingContact ? `mc:${matchingContact.id}` : speaker.key,
+      name: matchingContact?.name || matchingContact?.email || speaker.name,
+      contactId: matchingContact?.id ?? speaker.contactId,
+      effectiveLabel: speaker.effectiveLabel,
+      firstTurnIndex: speaker.firstTurnIndex,
+      turnCount: speaker.turnCount,
+      mergeSuspected: speaker.mergeSuspected,
+    }
+  }), [contacts, resolved])
 
   // Precomputed lookup structures for the per-turn range-key resolver, built
   // ONCE per splits/contacts change (not per turn): split boundaries grouped by

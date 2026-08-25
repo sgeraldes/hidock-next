@@ -14,7 +14,7 @@ function openMenu() {
 const baseRecording: UnifiedRecording = {
   id: 'r1',
   filename: '2026Jul08-190246-Rec49.hda',
-  title: 'Quarterly planning',
+  userTitle: 'Quarterly planning',
   dateRecorded: new Date('2026-07-08T19:02:46'),
   duration: 2680, // 44m 40s
   size: 1000,
@@ -38,14 +38,21 @@ describe('SourceRow second line', () => {
     expect(line.textContent).not.toContain('.hda')
   })
 
-  it('keeps the raw filename discoverable as the second-line tooltip', () => {
-    render(<SourceRow {...defaultProps} />)
+  it('keeps the raw filename discoverable when the official meeting subject is the title', () => {
+    const meeting = {
+      id: 'm-tooltip', subject: 'Quarterly planning',
+      start_time: '2026-07-08T18:30:00', end_time: '2026-07-08T19:30:00',
+      location: null, organizer_name: null, organizer_email: null, attendees: null,
+      description: null, is_recurring: 0, recurrence_rule: null, meeting_url: null,
+      created_at: '', updated_at: ''
+    } as Meeting
+    render(<SourceRow {...defaultProps} meeting={meeting} />)
     const line = screen.getByText((content) => /44m/.test(content))
     expect(line).toHaveAttribute('title', '2026Jul08-190246-Rec49.hda')
   })
 
   it('does not attach a filename tooltip when the filename IS the title', () => {
-    const rec = { ...baseRecording, title: undefined }
+    const rec = { ...baseRecording, userTitle: undefined }
     render(<SourceRow {...defaultProps} recording={rec} />)
     const line = screen.getByText((content) => /44m/.test(content))
     expect(line).not.toHaveAttribute('title')
@@ -85,7 +92,7 @@ describe('SourceRow never renders blank (title + dated second line always presen
   it('shows a human title AND a date carrying the year AND the duration', () => {
     render(<SourceRow {...defaultProps} />)
     // Title is visible (regression guard for the "blank rows" bug).
-    expect(screen.getByText('Quarterly planning')).toBeInTheDocument()
+    expect(screen.getByText('2026Jul08-190246-Rec49.hda')).toBeInTheDocument()
     // Second line shows the YEAR (a year-old capture must not read like this week's)
     // + the real duration, not blank / "Unknown".
     const line = screen.getByText((c) => /2026/.test(c) && /Jul 8/.test(c) && /44m/.test(c))
@@ -94,7 +101,7 @@ describe('SourceRow never renders blank (title + dated second line always presen
   })
 
   it('falls back to the filename as the title when nothing better exists', () => {
-    const rec = { ...baseRecording, title: undefined, meetingSubject: undefined }
+    const rec = { ...baseRecording, userTitle: undefined, meetingSubject: undefined }
     render(<SourceRow {...defaultProps} recording={rec} />)
     // Title <p> is never empty — the filename is the guaranteed fallback.
     expect(screen.getByText('2026Jul08-190246-Rec49.hda')).toBeInTheDocument()
@@ -115,6 +122,103 @@ describe('SourceRow has no per-row Play/Stop button', () => {
   it('still exposes the overflow "More actions" menu', () => {
     render(<SourceRow {...defaultProps} onSelectionChange={vi.fn()} />)
     expect(screen.getByLabelText(/More actions/i)).toBeInTheDocument()
+  })
+})
+
+describe('SourceRow download state truthfulness', () => {
+  const deviceOnly = {
+    ...baseRecording,
+    location: 'device-only' as const,
+    localPath: undefined,
+    deviceFilename: '2026Jul08-190246-Rec49.hda',
+    syncStatus: 'not-synced' as const,
+    transcriptionStatus: 'none' as const
+  }
+
+  it('shows a restored pending item as queued, never as zero-percent downloading', () => {
+    render(
+      <SourceRow
+        recording={deviceOnly}
+        downloadStatus="pending"
+        downloadProgress={0}
+        isDownloading={false}
+        deviceConnected
+      />
+    )
+
+    expect(screen.getByText('Queued')).toBeInTheDocument()
+    expect(screen.queryByText('0%')).not.toBeInTheDocument()
+  })
+
+  it('uses a starting state until the first real progress byte arrives', () => {
+    render(
+      <SourceRow
+        recording={deviceOnly}
+        downloadStatus="downloading"
+        downloadProgress={0}
+        isDownloading
+        deviceConnected
+      />
+    )
+
+    expect(screen.getByText('Starting')).toBeInTheDocument()
+    expect(screen.queryByText('0%')).not.toBeInTheDocument()
+  })
+})
+
+describe('SourceRow permanent deletion state', () => {
+  it('announces progress, disables activation, and removes the action menu without changing compact height', () => {
+    const onClick = vi.fn()
+    render(
+      <SourceRow
+        {...defaultProps}
+        compact
+        isDeleting
+        deletionLabel="Erasing device copy…"
+        onClick={onClick}
+        onDeletePermanent={vi.fn()}
+      />
+    )
+
+    const row = screen.getByRole('option')
+    expect(screen.getByRole('status')).toHaveTextContent('Erasing device copy…')
+    expect(row).toHaveAttribute('aria-disabled', 'true')
+    expect(row).toHaveAttribute('tabindex', '-1')
+    expect(row).toHaveClass('h-12')
+    expect(screen.queryByLabelText(/more actions/i)).not.toBeInTheDocument()
+
+    fireEvent.click(row)
+    fireEvent.contextMenu(row)
+    expect(onClick).not.toHaveBeenCalled()
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+  })
+})
+
+describe('SourceRow row context menu', () => {
+  it('opens the overflow actions at the pointer without opening the row', async () => {
+    const onClick = vi.fn()
+    const onAskAssistant = vi.fn()
+    render(
+      <SourceRow
+        {...defaultProps}
+        onClick={onClick}
+        onAskAssistant={onAskAssistant}
+      />
+    )
+
+    fireEvent.contextMenu(screen.getByRole('option'), { clientX: 128, clientY: 96 })
+
+    const item = await screen.findByRole('menuitem', { name: /ask assistant/i })
+    const trigger = screen.getByLabelText(/more actions/i)
+    expect(item).toBeInTheDocument()
+    expect(trigger).toHaveStyle({ position: 'fixed', left: '128px', top: '96px' })
+    // Virtual rows are transformed for positioning. The fixed trigger must live at
+    // the document root or its pointer coordinates become relative to that row.
+    expect(trigger.parentElement).toBe(document.body)
+    expect(onClick).not.toHaveBeenCalled()
+
+    fireEvent.click(item)
+    expect(onAskAssistant).toHaveBeenCalledTimes(1)
   })
 })
 

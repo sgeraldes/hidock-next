@@ -24,12 +24,15 @@ interface RecordingBase {
   size: number
   duration: number
   dateRecorded: Date
-  transcriptionStatus: 'none' | 'pending' | 'processing' | 'complete' | 'error'
+  transcriptionStatus: 'none' | 'pending' | 'processing' | 'complete' | 'no_speech' | 'error'
   meetingId?: string
   meetingSubject?: string
   transcript?: TranscriptSummary
   // Knowledge Capture integration
   knowledgeCaptureId?: string
+  /** User-authored content title. Never populated from a meeting or AI output. */
+  userTitle?: string
+  /** Legacy capture title; retained for compatibility with non-audio artifacts. */
   title?: string
   quality?: QualityRating
   /** F16/spec-001: fixed tags explaining an AI content-based value classification

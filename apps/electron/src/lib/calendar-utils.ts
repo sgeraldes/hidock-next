@@ -31,7 +31,7 @@ export interface CalendarRecording {
   endTime: Date
   durationSeconds: number
   location: 'device-only' | 'local-only' | 'both'
-  transcriptionStatus: 'none' | 'pending' | 'processing' | 'complete' | 'error'
+  transcriptionStatus: 'none' | 'pending' | 'processing' | 'complete' | 'no_speech' | 'error'
   // Transcript-derived identity (present once analyzed) — what the recording IS,
   // so the calendar can show it instead of a machine filename.
   title?: string

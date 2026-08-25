@@ -31,9 +31,26 @@ type SortDirection = 'asc' | 'desc'
 interface DeviceFileListProps {
   recordings: Array<DeviceOnlyRecording | BothLocationsRecording>
   syncedFilenames: Set<string>
+  /** v51 — purge-tombstoned filenames (all variants); rows show a Deleted badge. */
+  purgedFilenames?: Set<string>
   onRefresh?: () => void
   // B-DEV-002: Callback to refresh the full recordings list after delete/download
   onRecordingsRefresh?: () => void
+}
+
+const baseName = (name: string): string => name.replace(/\.(hda|wav|mp3)$/i, '')
+
+/**
+ * v51: is this device file PERMANENTLY DELETED (purge tombstone)? Matches on
+ * the extension-less base name so any of the .hda/.wav/.mp3 variants hits.
+ * Exported for testing.
+ */
+export function isFilenamePurged(filename: string, purgedFilenames: Set<string>): boolean {
+  const base = baseName(filename)
+  for (const p of purgedFilenames) {
+    if (baseName(p) === base) return true
+  }
+  return false
 }
 
 /**
@@ -55,6 +72,7 @@ interface DeviceFileRowProps {
   currentlyPlayingId: string | null
   isPlaying: boolean
   selected: boolean
+  purged: boolean
   onToggleSelect: (id: string) => void
   onDownload: (filename: string, fileSize: number) => void
   onDeleteClick: (filename: string) => void
@@ -66,6 +84,7 @@ function DeviceFileRow({
   currentlyPlayingId,
   isPlaying,
   selected,
+  purged,
   onToggleSelect,
   onDownload,
   onDeleteClick,
@@ -81,10 +100,12 @@ function DeviceFileRow({
 
   const hasError = downloadErrors.has(recording.id) && !isDownloading
   const isCurrentlyPlaying = currentlyPlayingId === recording.id && isPlaying
+  // v51 — manual re-download of a purged file IS allowed (explicit user
+  // intent; only AUTOMATIC sync paths skip tombstones).
   const showDownloadButton = recording.location === 'device-only' && !isDownloading
 
   return (
-    <div className="grid items-center gap-2 px-2 py-2 border-b last:border-0 hover:bg-muted/30 transition-colors"
+    <div className={`grid items-center gap-2 px-2 py-2 border-b last:border-0 hover:bg-muted/30 transition-colors ${purged ? 'opacity-60' : ''}`}
       style={{ gridTemplateColumns: '2rem 1fr 6rem 6rem 9rem 7rem' }}>
 
       {/* Checkbox */}
@@ -100,6 +121,15 @@ function DeviceFileRow({
       <div className="min-w-0">
         <p className="font-medium text-sm truncate">{filename}</p>
         <div className="flex items-center gap-1.5 mt-0.5">
+          {purged && (
+            <span
+              className="flex items-center gap-1 text-xs text-destructive"
+              title="Permanently deleted from the Library — the hardware copy is all that remains. Re-download brings it back as a new recording; the trash button erases it from the device."
+            >
+              <Trash2 className="h-3 w-3" />
+              Deleted
+            </span>
+          )}
           {isDownloading ? (
             <span className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
               <Download className="h-3 w-3" />
@@ -166,7 +196,7 @@ function DeviceFileRow({
   )
 }
 
-export function DeviceFileList({ recordings, onRefresh, onRecordingsRefresh }: DeviceFileListProps) {
+export function DeviceFileList({ recordings, syncedFilenames: _syncedFilenames, purgedFilenames, onRefresh, onRecordingsRefresh }: DeviceFileListProps) {
   const deviceService = getHiDockDeviceService()
   const [downloadErrors, setDownloadErrors] = useState<Map<string, string>>(new Map())
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
@@ -400,6 +430,7 @@ export function DeviceFileList({ recordings, onRefresh, onRecordingsRefresh }: D
                 currentlyPlayingId={currentlyPlayingId}
                 isPlaying={isPlaying}
                 selected={selectedIds.has(recording.id)}
+                purged={purgedFilenames ? isFilenamePurged(recording.deviceFilename, purgedFilenames) : false}
                 onToggleSelect={toggleSelection}
                 onDownload={handleDownloadFile}
                 onDeleteClick={handleDeleteClick}

@@ -28,6 +28,7 @@
   "dependencies": {
     "@azure/msal-node": "^5.4.0",
     "@electron-toolkit/preload": "^3.0.1",
+    "@google/genai": "^2.0.0",
     "@google/generative-ai": "^0.21.0",
     "@hidock/ai-providers": "file:../../packages/ai-providers",
     "@hidock/calendar-sync": "file:../../packages/calendar-sync",
@@ -58,6 +59,7 @@
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
+    "ffmpeg-static": "^5.3.0",
     "ical.js": "^2.1.0",
     "lucide-react": "^0.460.0",
     "ollama": "^0.5.11",
@@ -118,5 +120,8 @@
   },
   "overrides": {
     "onnxruntime-node": "1.24.3"
+  },
+  "allowScripts": {
+    "ffmpeg-static@5.3.0": true
   }
 }

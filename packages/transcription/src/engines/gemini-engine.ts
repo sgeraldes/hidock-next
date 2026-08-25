@@ -1,8 +1,14 @@
-import { GoogleGenerativeAI, type Part } from '@google/generative-ai'
-import { GoogleAIFileManager, FileState } from '@google/generative-ai/server'
+import {
+  FileState,
+  GoogleGenAI,
+  ThinkingLevel,
+  Type,
+  type GenerateContentConfig,
+  type Part,
+} from '@google/genai'
 import { extname } from 'node:path'
 import type { TranscriptionEngine, TranscriptSegment, TranscribeOptions } from './engine-interface.js'
-import { TranscriptionCancelledError } from './engine-interface.js'
+import { NoSpeechDetectedError, TranscriptionCancelledError } from './engine-interface.js'
 
 /**
  * ADV43-1 (round-45) — FAIL-CLOSED evaluation of a `shouldGenerate` gate,
@@ -352,6 +358,130 @@ function parseInlineTurns(
  * won't fire on the word "speaker" appearing in ordinary prose. */
 const INLINE_SPEAKER_RE = /(Speaker\s*\d+)\s*:/g
 
+/** A clock token returned by Gemini without the requested square brackets.
+ * The model occasionally puts the timestamp at the END of each turn instead
+ * of the beginning (`Speaker 1: Hello. 00:09`). */
+const BARE_CLOCK_RE = /^(\d{1,3}):([0-5]\d)(?::([0-5]\d))?$/
+const TRAILING_CLOCK_RE = /(?:^|\s)(\d{1,3}):([0-5]\d)(?::([0-5]\d))?\s*$/
+
+function clockMatchToSeconds(match: RegExpMatchArray): number {
+  const first = Number(match[1])
+  const second = Number(match[2])
+  return match[3] == null ? first * 60 + second : first * 3600 + second * 60 + Number(match[3])
+}
+
+function formatTimestamp(seconds: number): string {
+  const whole = Math.max(0, Math.floor(seconds))
+  const hours = Math.floor(whole / 3600)
+  const minutes = Math.floor((whole % 3600) / 60)
+  const secs = whole % 60
+  return hours > 0
+    ? `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+    : `${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+}
+
+const TRANSCRIPT_RESPONSE_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    hasSpeech: {
+      type: Type.BOOLEAN,
+      description: 'True only when the audio contains intelligible spoken words.'
+    },
+    segments: {
+      type: Type.ARRAY,
+      description: 'Chronological speaker turns. Each item covers at most about 30 seconds of speech.',
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          timestamp: {
+            type: Type.STRING,
+            description: 'Turn start relative to this audio input, formatted MM:SS or HH:MM:SS.'
+          },
+          speaker: {
+            type: Type.STRING,
+            description: 'Stable anonymous voice label such as Speaker 1 or Speaker 2.'
+          },
+          content: {
+            type: Type.STRING,
+            description: 'Verbatim speech from this speaker turn only.'
+          }
+        },
+        required: ['timestamp', 'speaker', 'content']
+      }
+    }
+  },
+  required: ['hasSpeech', 'segments']
+}
+
+// Interactions uses ordinary JSON Schema wire values (lower-case), unlike the
+// GenerateContent `Type` enum used above.
+const INTERACTIONS_TRANSCRIPT_SCHEMA = {
+  type: 'object',
+  properties: {
+    hasSpeech: { type: 'boolean' },
+    segments: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          timestamp: { type: 'string' },
+          speaker: { type: 'string' },
+          content: { type: 'string' },
+        },
+        required: ['timestamp', 'speaker', 'content'],
+      },
+    },
+  },
+  required: ['hasSpeech', 'segments'],
+}
+
+interface StructuredTranscriptResponse {
+  hasSpeech?: boolean
+  segments?: Array<{ timestamp?: unknown; speaker?: unknown; content?: unknown }>
+}
+
+/** Gemini may return the documented timestamp field as either a start clock
+ * (`00:07`) or a bounded interval (`00:07 - 00:13`). The transcript model only
+ * needs the turn's start time, so preserve the first provider-supplied clock
+ * instead of rejecting an otherwise valid diarized response. */
+function timestampStartClock(timestamp: string): string {
+  return timestamp.match(/\d{1,3}:[0-5]\d(?::[0-5]\d)?/)?.[0] ?? timestamp.replace(/^\[|\]$/g, '')
+}
+
+/** Convert schema-constrained Gemini JSON into the canonical text consumed by
+ * the existing turn parser. Plain text remains accepted for compatibility with
+ * legacy models and tests, but Gemini 3.5 is requested with the schema above. */
+export function normalizeGeminiTranscriptResponse(text: string): string {
+  const trimmed = text.trim()
+  if (!trimmed.startsWith('{')) return trimmed
+
+  try {
+    const parsed = JSON.parse(trimmed) as StructuredTranscriptResponse
+    if (parsed.hasSpeech === false) return '[NO_SPEECH]'
+    if (!Array.isArray(parsed.segments)) return trimmed
+
+    const lines = parsed.segments.flatMap((segment) => {
+      const timestamp = typeof segment.timestamp === 'string' ? segment.timestamp.trim() : ''
+      const speaker = typeof segment.speaker === 'string' ? segment.speaker.trim() : ''
+      const content = typeof segment.content === 'string' ? segment.content.trim() : ''
+      if (!timestamp || !speaker || !content) return []
+      return [`[${timestampStartClock(timestamp)}] ${speaker}: ${content}`]
+    })
+    return lines.length > 0 ? lines.join('\n') : trimmed
+  } catch {
+    return trimmed
+  }
+}
+
+function trailingClock(raw: string): { body: string; seconds: number } | null {
+  const match = raw.trim().match(TRAILING_CLOCK_RE)
+  if (!match) return null
+  return {
+    body: raw.slice(0, raw.trimEnd().length - match[0].length).replace(/\s+/g, ' ').trim(),
+    seconds: clockMatchToSeconds(match)
+  }
+}
+
 /**
  * Fallback splitter for when Gemini diarized the audio (it labelled the turns
  * "Speaker 1", "Speaker 2", …) but dropped the `[MM:SS]` prefix the prompt asks
@@ -381,6 +511,45 @@ function parseInlineSpeakerTurns(
     })
   }
   if (markers.length < 2) return null
+
+  const leadingRaw = text.slice(0, markers[0].markerStart).trim()
+  const leadingClockMatch = leadingRaw.match(BARE_CLOCK_RE)
+  const trailing = markers.map((marker, index) => {
+    const contentEnd = index + 1 < markers.length ? markers[index + 1].markerStart : text.length
+    return trailingClock(text.slice(marker.contentStart, contentEnd))
+  })
+  const timedTurnCount = trailing.filter((value) => value !== null).length
+
+  // Gemini's observed malformed format is a standalone initial boundary followed
+  // by trailing turn boundaries. Recover those provider-supplied times instead of
+  // creating a bogus default-speaker `00:00` turn and anchoring every real turn at
+  // the chunk start. Require at least two timed turns so ordinary spoken clock
+  // references at the end of one sentence are never stripped as metadata.
+  if (timedTurnCount >= 2 && (leadingClockMatch !== null || timedTurnCount === markers.length)) {
+    const segments: TranscriptSegment[] = []
+    let nextStart = chunkStartSec + (leadingClockMatch ? clockMatchToSeconds(leadingClockMatch) : 0)
+    for (let i = 0; i < markers.length; i++) {
+      const value = trailing[i]
+      const contentEnd = i + 1 < markers.length ? markers[i + 1].markerStart : text.length
+      const raw = text.slice(markers[i].contentStart, contentEnd)
+      const body = (value?.body ?? raw.replace(/\s+/g, ' ').trim()).trim()
+      if (!body) continue
+      const suppliedEnd = value ? chunkStartSec + value.seconds : nextStart
+      // A malformed/decreasing provider boundary remains visibly invalid and is
+      // caught by the quality gate; never fabricate a plausible timestamp.
+      const endTime = suppliedEnd >= nextStart ? suppliedEnd : nextStart
+      segments.push({
+        speaker: markers[i].speaker,
+        text: body,
+        startTime: nextStart,
+        endTime,
+        confidence: 1,
+        source
+      })
+      if (value && suppliedEnd >= nextStart) nextStart = suppliedEnd
+    }
+    return segments.length > 0 ? segments : null
+  }
 
   const segments: TranscriptSegment[] = []
   const push = (speaker: string, raw: string) => {
@@ -479,6 +648,32 @@ export function parseTurns(
   return segments
 }
 
+/** A multi-turn response must carry at least two distinct provider timestamps.
+ * Otherwise every line would render at the chunk boundary (0:00, 10:00,
+ * 20:00...) and must be retried or rejected rather than persisted as accurate. */
+export function hasReliableTurnTiming(text: string): boolean {
+  const turns = parseTurns(text, 0, 'you', 'mic')
+  if (turns.length < 2) return true
+  if (new Set(turns.map((turn) => turn.startTime)).size < 2) return false
+  return turns.every((turn, index) => index === 0 || turn.startTime >= turns[index - 1].startTime)
+}
+
+/** Gemini occasionally emits valid-looking timing for a handful of turns and
+ * then collapses several minutes of a two-person conversation into one giant
+ * speaker block. The prompt requires a boundary on every speaker change and at
+ * least every ~30 seconds; allow generous model variance, but never accept the
+ * 1,130-word / 578-second wall observed in the live Sync Arturo-Seba result. */
+export function hasReliableTurnStructure(text: string): boolean {
+  const turns = parseTurns(text, 0, 'you', 'mic')
+  if (turns.length === 0) return false
+
+  return turns.every((turn) => {
+    const body = turn.text.trim()
+    const words = body ? body.split(/\s+/u).length : 0
+    return words <= 180 && body.length <= 1600
+  })
+}
+
 /**
  * GeminiEngine transcribes audio using Google Gemini's multimodal API.
  *
@@ -502,6 +697,17 @@ export class GeminiEngine implements TranscriptionEngine {
   /** Raw-audio size above which the Files API is used instead of inline base64. */
   static readonly INLINE_LIMIT_BYTES = 14 * 1024 * 1024
 
+  /** The Interactions client defaults to 60 seconds, which is too short for a
+   * twenty-minute audio range and surfaces only `Request timed out.`. Bound each
+   * range generously, while leaving retries to the app queue so a timed-out
+   * interaction POST is not silently duplicated by the SDK. */
+  static readonly INTERACTION_REQUEST_TIMEOUT_MS = 10 * 60 * 1000
+
+  /** Rolling request size for stored recordings. Twenty minutes leaves a very
+   * wide margin below Gemini's output ceiling, while recent timestamped turns
+   * are carried forward to preserve speaker-label and conversational context. */
+  static readonly ROLLING_CHUNK_SECONDS = 20 * 60
+
   private readonly apiKey: string
   private readonly model: string
   private readonly language: string
@@ -518,62 +724,260 @@ export class GeminiEngine implements TranscriptionEngine {
     return this.apiKey.length > 0
   }
 
-  /**
-   * Upload a large audio file via the Gemini Files API and wait for it to
-   * finish server-side processing, returning a fileData Part for
-   * generateContent. Required for audio above INLINE_LIMIT_BYTES.
-   */
-  private async uploadViaFilesApi(
+  private async uploadAudioFile(
+    genAI: GoogleGenAI,
     filePath: string,
     mimeType: string,
     shouldGenerate?: () => boolean
-  ): Promise<Part> {
-    // Recheck IMMEDIATELY before the upload (the concrete provider call).
+  ): Promise<{ name: string; uri: string; mimeType: string }> {
     assertStillEligible(shouldGenerate)
-    const fileManager = new GoogleAIFileManager(this.apiKey)
-    const upload = await fileManager.uploadFile(filePath, { mimeType })
-
-    let file = upload.file
+    let file = await genAI.files.upload({ file: filePath, config: { mimeType } })
     const deadline = Date.now() + 5 * 60 * 1000
     while (file.state === FileState.PROCESSING) {
       if (Date.now() > deadline) {
         throw new Error('Gemini Files API: timed out waiting for file processing')
       }
       await new Promise((resolve) => setTimeout(resolve, 2000))
-      // Recheck before EACH poll — an exclusion committed while the file is
-      // still processing server-side must stop us before generateContent.
       assertStillEligible(shouldGenerate)
-      file = await fileManager.getFile(file.name)
+      if (!file.name) throw new Error('Gemini Files API: uploaded file has no resource name')
+      file = await genAI.files.get({ name: file.name })
     }
-
     if (file.state === FileState.FAILED) {
       throw new Error('Gemini Files API: file processing failed')
     }
+    if (!file.name || !file.uri) {
+      throw new Error('Gemini Files API: processed file is missing its resource name or URI')
+    }
+    return { name: file.name, uri: file.uri, mimeType: file.mimeType ?? mimeType }
+  }
 
+  /**
+   * Upload a large audio file via the Gemini Files API and wait for it to
+   * finish server-side processing, returning a fileData Part for
+   * generateContent. Required for audio above INLINE_LIMIT_BYTES.
+   */
+  private async uploadViaFilesApi(
+    genAI: GoogleGenAI,
+    filePath: string,
+    mimeType: string,
+    shouldGenerate?: () => boolean
+  ): Promise<Part> {
+    const file = await this.uploadAudioFile(genAI, filePath, mimeType, shouldGenerate)
     return { fileData: { mimeType: file.mimeType, fileUri: file.uri } }
   }
 
   /**
-   * Build the list of chunks to transcribe. Prefers real splitting (WAV or
-   * MP3) so hour-long recordings become many small requests; falls back to a
-   * single inline / Files-API part when the audio can't be split.
+   * Build rolling audio requests. Parseable WAV/MP3 recordings longer than
+   * twenty minutes are split at valid sample/frame boundaries. Each response is
+   * therefore far below the provider output ceiling; the caller carries recent
+   * timestamped turns into the following request as rolling context.
    */
   private async buildChunks(
+    genAI: GoogleGenAI,
     audio: Buffer,
     filePath: string,
     mimeType: string,
+    _durationSeconds?: number,
     shouldGenerate?: () => boolean
   ): Promise<AudioChunk[]> {
-    const split = splitWavIntoChunks(audio) ?? splitMp3IntoChunks(audio)
-    if (split && split.length > 1) return split
+    const supportsWholeRecording = /^gemini-(?:3(?:\.|$)|[4-9])/i.test(this.model)
+    if (supportsWholeRecording) {
+      const rolling =
+        splitWavIntoChunks(audio, GeminiEngine.ROLLING_CHUNK_SECONDS) ??
+        splitMp3IntoChunks(audio, GeminiEngine.ROLLING_CHUNK_SECONDS)
+      if (rolling && rolling.length > 1) return rolling
+    } else {
+      const split = splitWavIntoChunks(audio) ?? splitMp3IntoChunks(audio)
+      if (split && split.length > 1) return split
+    }
 
     // Single call: inline when small, Files API when large (needs a filePath).
     const part =
       audio.length > GeminiEngine.INLINE_LIMIT_BYTES && filePath
-        ? await this.uploadViaFilesApi(filePath, mimeType, shouldGenerate)
+        ? await this.uploadViaFilesApi(genAI, filePath, mimeType, shouldGenerate)
         : { inlineData: { mimeType, data: audio.toString('base64') } }
     // startSec/durationSec unknown for a single whole-file part.
     return [{ data: audio, mimeType, startSec: 0, durationSec: 0, part } as AudioChunk & { part: Part }]
+  }
+
+  private async transcribeInteractionRange(
+    genAI: GoogleGenAI,
+    file: { uri: string; mimeType: string },
+    startSec: number,
+    endSec: number,
+    source: 'mic' | 'system',
+    previousInteractionId: string | undefined,
+    context: string,
+    shouldGenerate?: () => boolean,
+    repair = false
+  ): Promise<{ segments: TranscriptSegment[]; interactionId: string }> {
+    const splitRange = async (): Promise<{ segments: TranscriptSegment[]; interactionId: string }> => {
+      if (endSec - startSec <= 60) {
+        throw new Error(
+          `Gemini could not produce a complete, reliable transcript for ${formatTimestamp(startSec)}–${formatTimestamp(endSec)}`
+        )
+      }
+      const midpoint = Math.floor((startSec + endSec) / 2)
+      const left = await this.transcribeInteractionRange(
+        genAI,
+        file,
+        startSec,
+        midpoint,
+        source,
+        previousInteractionId,
+        context,
+        shouldGenerate
+      )
+      const right = await this.transcribeInteractionRange(
+        genAI,
+        file,
+        midpoint,
+        endSec,
+        source,
+        left.interactionId,
+        context,
+        shouldGenerate
+      )
+      return { segments: [...left.segments, ...right.segments], interactionId: right.interactionId }
+    }
+
+    assertStillEligible(shouldGenerate)
+    const range = `${formatTimestamp(startSec)} through ${formatTimestamp(endSec)}`
+    const prompt = `Transcribe ONLY the ${range} interval of the audio in the original language.
+Use absolute timestamps from the start of the full recording, not timestamps relative to this interval.
+Identify distinct speakers by voice and keep the same Speaker N labels established earlier in this interaction chain.
+Return one segment for every speaker change and at least every 30 seconds. Each content value must contain one speaker only and stay under 120 words.
+Do not repeat speech before ${formatTimestamp(startSec)} or include speech after ${formatTimestamp(endSec)}.
+If this interval has no intelligible speech, set hasSpeech to false and return an empty segments array.
+Calendar and meeting context are spelling hints only; never invent speech from them.${context ? `\n${context}` : ''}${
+      repair
+        ? '\nREPAIR: The prior result for this interval was incomplete or structurally invalid. Re-listen and return truthful, increasing, absolute timestamps with separate speaker turns.'
+        : ''
+    }`
+
+    const input: Array<Record<string, unknown>> = []
+    if (!previousInteractionId) {
+      input.push({ type: 'audio', uri: file.uri, mime_type: file.mimeType })
+    }
+    input.push({ type: 'text', text: prompt })
+
+    // The Interactions wire contract intentionally uses snake_case. @google/genai
+    // 2.0.0's TextResponseFormat type incorrectly spells mime_type as mimeType;
+    // the live Developer API rejects that spelling, so keep the documented wire
+    // name and isolate the SDK typing mismatch at this boundary.
+    const interaction = await genAI.interactions.create({
+      model: this.model,
+      input,
+      previous_interaction_id: previousInteractionId,
+      response_format: {
+        type: 'text',
+        mime_type: 'application/json',
+        schema: INTERACTIONS_TRANSCRIPT_SCHEMA,
+      },
+      generation_config: {
+        max_output_tokens: 16384,
+        thinking_level: 'minimal',
+      },
+    } as never, {
+      timeout: GeminiEngine.INTERACTION_REQUEST_TIMEOUT_MS,
+      maxRetries: 0,
+    }) as unknown as {
+      id: string
+      status: 'in_progress' | 'requires_action' | 'completed' | 'failed' | 'cancelled' | 'incomplete'
+      steps?: Array<{ type: string; content?: Array<{ type: string; text?: string }> }>
+    }
+
+    if (interaction.status === 'incomplete') return splitRange()
+    if (interaction.status !== 'completed') {
+      throw new Error(`Gemini interaction ${interaction.status} for ${range}`)
+    }
+
+    const raw = (interaction.steps ?? [])
+      .filter((step) => step.type === 'model_output')
+      .flatMap((step) => step.content ?? [])
+      .filter((content) => content.type === 'text')
+      .map((content) => content.text ?? '')
+      .join('')
+    const normalized = normalizeGeminiTranscriptResponse(raw)
+    if (/^\[?NO[_ ]SPEECH\]?\.?$/i.test(normalized.trim())) {
+      return { segments: [], interactionId: interaction.id }
+    }
+
+    const defaultSpeaker = source === 'mic' ? 'you' : 'them'
+    const segments = parseTurns(normalized, 0, defaultSpeaker, source)
+    const reliable =
+      raw.length > 0 &&
+      hasReliableTurnTiming(normalized) &&
+      hasReliableTurnStructure(normalized) &&
+      segments.every((segment) => segment.startTime >= startSec && segment.startTime <= endSec)
+    if (!reliable) {
+      if (!repair) {
+        return this.transcribeInteractionRange(
+          genAI,
+          file,
+          startSec,
+          endSec,
+          source,
+          previousInteractionId,
+          context,
+          shouldGenerate,
+          true
+        )
+      }
+      return splitRange()
+    }
+    return { segments, interactionId: interaction.id }
+  }
+
+  private async transcribeLongRecordingWithInteractions(
+    genAI: GoogleGenAI,
+    filePath: string,
+    mimeType: string,
+    durationSeconds: number,
+    options: TranscribeOptions
+  ): Promise<TranscriptSegment[]> {
+    const shouldGenerate = options.shouldGenerate
+    const uploaded = await this.uploadAudioFile(genAI, filePath, mimeType, shouldGenerate)
+    const totalRanges = Math.ceil(durationSeconds / GeminiEngine.ROLLING_CHUNK_SECONDS)
+    const allSegments: TranscriptSegment[] = []
+    let previousInteractionId: string | undefined
+    try {
+      for (let index = 0; index < totalRanges; index++) {
+        const startSec = index * GeminiEngine.ROLLING_CHUNK_SECONDS
+        const endSec = Math.min(durationSeconds, startSec + GeminiEngine.ROLLING_CHUNK_SECONDS)
+        const result = await this.transcribeInteractionRange(
+          genAI,
+          uploaded,
+          startSec,
+          endSec,
+          options.source,
+          previousInteractionId,
+          options.context ?? '',
+          shouldGenerate
+        )
+        previousInteractionId = result.interactionId
+        for (const segment of result.segments) {
+          const previous = allSegments[allSegments.length - 1]
+          if (
+            previous &&
+            previous.startTime === segment.startTime &&
+            previous.speaker === segment.speaker &&
+            previous.text === segment.text
+          ) continue
+          allSegments.push(segment)
+        }
+        options.onProgress?.(index + 1, totalRanges)
+      }
+    } finally {
+      try {
+        await genAI.files.delete({ name: uploaded.name })
+      } catch {
+        // Uploaded Gemini files expire automatically; cleanup failure must not
+        // turn a successfully validated transcript into an application failure.
+      }
+    }
+    if (allSegments.length === 0) throw new NoSpeechDetectedError()
+    return allSegments
   }
 
   /**
@@ -608,20 +1012,51 @@ export class GeminiEngine implements TranscriptionEngine {
     // input (and thus diarization). See detectAudioMimeType.
     const mimeType = detectAudioMimeType(audio, ext)
 
-    const genAI = new GoogleGenerativeAI(this.apiKey)
-    const modelInstance = genAI.getGenerativeModel({ model: this.model })
+    const genAI = new GoogleGenAI({ apiKey: this.apiKey })
 
-    const chunks = await this.buildChunks(audio, filePath, mimeType, shouldGenerate)
+    if (
+      /^gemini-(?:3(?:\.|$)|[4-9])/i.test(this.model) &&
+      filePath &&
+      options.durationSeconds &&
+      options.durationSeconds > GeminiEngine.ROLLING_CHUNK_SECONDS
+    ) {
+      const segments = await this.transcribeLongRecordingWithInteractions(
+        genAI,
+        filePath,
+        mimeType,
+        options.durationSeconds,
+        options
+      )
+      for (const segment of segments) yield segment
+      return
+    }
+
+    const chunks = await this.buildChunks(
+      genAI,
+      audio,
+      filePath,
+      mimeType,
+      options.durationSeconds,
+      shouldGenerate
+    )
     const defaultSpeaker = options.source === 'mic' ? 'you' : 'them'
     const contextSection = options.context ? `\n${options.context}` : ''
 
-    // thinkingBudget 0: transcription needs no reasoning, and letting the
-    // thinking model reason consumes the output budget (observed: 62k thought
-    // tokens, 1 output token).
-    const baseConfig = {
-      maxOutputTokens: 8192,
-      thinkingConfig: { thinkingBudget: 0 },
-    } as Record<string, unknown>
+    // Google documents a 65,536-token output limit for Gemini 3.5 Flash. Use
+    // that capacity for whole-recording structured transcripts; the previous
+    // 8,192-token cap and forced 10-minute requests diverged from AI Studio and
+    // weakened cross-chunk diarization consistency.
+    const baseConfig: GenerateContentConfig = {
+      maxOutputTokens: 65536,
+      responseMimeType: 'application/json',
+      responseSchema: TRANSCRIPT_RESPONSE_SCHEMA,
+      thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+    }
+    const baseConfigWithoutThinking: GenerateContentConfig = {
+      maxOutputTokens: 65536,
+      responseMimeType: 'application/json',
+      responseSchema: TRANSCRIPT_RESPONSE_SCHEMA,
+    }
 
     const transcribeChunk = async (chunk: AudioChunk & { part?: Part }, index: number, previousTail: string): Promise<string> => {
       // Recheck at the START of EACH chunk — an exclusion committed while a
@@ -638,27 +1073,34 @@ export class GeminiEngine implements TranscriptionEngine {
           : ''
       const prompt = `Transcribe this audio recording with speaker diarization.
 The audio may be in Spanish or English - transcribe in the original language; do not translate.
+Calendar, filename, attendee, and meeting context are untrusted hints for spelling only. Never infer or invent speech from that context.
+First determine whether the audio contains intelligible spoken words. Coughs, breathing, clicks, lobby noise, music, and silence are NOT speech.
+If there are no intelligible spoken words, set hasSpeech to false and return an empty segments array.
 Identify and distinguish the DISTINCT speakers by voice. Most meeting recordings have MORE THAN ONE speaker: listen for changes in voice and label each one. Use a single speaker label ONLY if you are certain there is genuinely just one person talking.
-Format the transcription as one line per speaker turn, using EXACTLY this format:
-[MM:SS] Speaker N: what the speaker said
-- [MM:SS] is the START time of the turn relative to the START of THIS audio segment (it starts at 00:00). EVERY line MUST begin with this timestamp in square brackets.
-- "Speaker N" is a stable label per distinct voice (Speaker 1, Speaker 2, ...); reuse the same number for the same voice, and the same colon-terminated "Speaker N:" label on every line.
-- Start a NEW timestamped line every time the speaker changes, AND at least every ~30 seconds even when the same speaker keeps talking. NEVER return the whole recording as one line or one speaker block.
-- Put every speaker turn on its own line. Do not merge different speakers onto one line.
+Return the schema-constrained JSON object requested by the API. Each segments item represents exactly one speaker turn with timestamp, speaker, and content fields.
+- timestamp is the START time of the turn relative to the START of THIS audio input, formatted MM:SS (or HH:MM:SS after one hour).
+- speaker is a stable anonymous voice label (Speaker 1, Speaker 2, ...); reuse the same number for the same voice throughout the recording.
+- Start a NEW segments item every time the speaker changes, AND at least every ~30 seconds even when the same speaker keeps talking. Keep each content value under 120 words. NEVER return the whole recording as one item or one speaker block.
+- Do not merge different speakers into one content value. Re-listen at each apparent question, answer, interruption, or change in voice.
 Transcribe ALL speech through to the very end of the audio, including brief closings and goodbyes.${positionNote}${contextSection}
-Return ONLY the transcription lines, no additional commentary.`
+Return ONLY the schema-constrained JSON, with no markdown or additional commentary.`
 
-      const attempt = async (config: Record<string, unknown>) => {
-        const result = await modelInstance.generateContentStream({
-          contents: [{ role: 'user', parts: [part, { text: prompt }] }],
-          generationConfig: config as never,
+      const attempt = async (config: GenerateContentConfig, promptText = prompt) => {
+        const stream = await genAI.models.generateContentStream({
+          model: this.model,
+          contents: [{ role: 'user', parts: [part, { text: promptText }] }],
+          config,
         })
         let out = ''
-        for await (const streamChunk of result.stream) {
-          out += streamChunk.text()
+        let finishReason: string | undefined
+        for await (const streamChunk of stream) {
+          out += streamChunk.text ?? ''
+          finishReason = streamChunk.candidates?.[0]?.finishReason ?? finishReason
         }
-        const response = await result.response
-        return { text: out.trim(), finishReason: response.candidates?.[0]?.finishReason as string | undefined }
+        return {
+          text: normalizeGeminiTranscriptResponse(out),
+          finishReason,
+        }
       }
 
       let res
@@ -672,29 +1114,60 @@ Return ONLY the transcription lines, no additional commentary.`
         if (String(err).includes('INVALID_ARGUMENT') || String(err).includes('thinking')) {
           // Recheck before the plain-config RETRY (a fresh provider call).
           assertStillEligible(shouldGenerate)
-          res = await attempt({})
+          res = await attempt(baseConfigWithoutThinking)
         } else {
           throw err
         }
       }
 
-      // MAX_TOKENS on a ~10-minute chunk is unexpected (a chunk can't hold 8k
-      // tokens of real speech). Retry once with a larger cap, KEEPING
-      // thinkingBudget 0 (the previous code dropped it, which re-enabled
-      // thinking and returned ~1 token). If the retry is clean and longer, use it.
+      // MAX_TOKENS is unexpected at the model's documented 65k output limit.
+      // Retry once while keeping minimal thinking so reasoning does not consume
+      // the transcription output budget. If the retry is clean and longer, use it.
       if (res.finishReason === 'MAX_TOKENS') {
         // Recheck before the MAX_TOKENS RETRY (another fresh provider call).
         assertStillEligible(shouldGenerate)
         try {
-          const retry = await attempt({ maxOutputTokens: 16384, thinkingConfig: { thinkingBudget: 0 } })
+          const retry = await attempt(baseConfig)
           if (retry.text && retry.finishReason !== 'MAX_TOKENS') res = retry
         } catch {
           // Ignore retry failure; the truncation check below surfaces it.
         }
       }
 
+
+      // Repeated timestamps and oversized speaker walls are both unusable.
+      // Retry once with an explicit acoustic/format repair, then fail closed
+      // instead of saving a confidently wrong transcript as "Transcribed".
+      const hasSpeech = res.text && !/^\[?NO[_ ]SPEECH\]?\.?$/i.test(res.text.trim())
+      const hasReliableShape = res.text
+        ? hasReliableTurnTiming(res.text) && hasReliableTurnStructure(res.text)
+        : false
+      if (hasSpeech && !hasReliableShape) {
+        assertStillEligible(shouldGenerate)
+        const repairPrompt = `${prompt}
+IMPORTANT TRANSCRIPT REPAIR: Your previous response had missing/repeated timing or collapsed minutes of conversation into an oversized speaker item. Re-listen to the audio. Return truthful increasing timestamps, split every voice change into its own segments item, and split a continuing speaker at least every 30 seconds. No content value may exceed 120 words.`
+        const retry = await attempt(
+          baseConfig,
+          repairPrompt
+        )
+        if (
+          !retry.text ||
+          retry.finishReason === 'MAX_TOKENS' ||
+          !hasReliableTurnTiming(retry.text) ||
+          !hasReliableTurnStructure(retry.text)
+        ) {
+          throw new Error(
+            `Gemini returned audio ${index + 1}/${chunks.length} without reliable speaker-turn timing and structure`
+          )
+        }
+        res = retry
+      }
+
       if (!res.text) {
         throw new Error(`Gemini returned an empty transcription for segment ${index + 1}/${chunks.length}`)
+      }
+      if (/^\[?NO[_ ]SPEECH\]?\.?$/i.test(res.text.trim())) {
+        throw new NoSpeechDetectedError()
       }
       // A still-truncated chunk must NOT be silently stored as complete.
       if (res.finishReason === 'MAX_TOKENS') {
@@ -715,7 +1188,13 @@ Return ONLY the transcription lines, no additional commentary.`
         producedAny = true
         yield turn
       }
-      previousTail = turns.length > 0 ? turns[turns.length - 1].text.slice(-300) : previousTail
+      if (turns.length > 0) {
+        previousTail = turns
+          .slice(-6)
+          .map((turn) => `[${formatTimestamp(turn.startTime)}] ${turn.speaker}: ${turn.text}`)
+          .join('\n')
+          .slice(-2000)
+      }
       onProgress?.(i + 1, chunks.length)
     }
 

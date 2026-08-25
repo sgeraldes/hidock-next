@@ -3,7 +3,7 @@
 /**
  * v49 (F18/round-37, ADV35-1) — NODE-LEVEL graph provenance migration.
  *
- *  1. Boot schema version is 50 (current).
+ *  1. Boot schema version is 53 (current).
  *  2. A graph_nodes table created lazily by the KnowledgeGraphStore carries the
  *     new origin + source_recording_id columns (from GRAPH_SCHEMA) on a fresh DB.
  *  3. The structural repair (run every boot) force-adds the columns to a LEGACY
@@ -45,9 +45,9 @@ afterEach(() => {
 })
 
 describe('v49 schema', () => {
-  it('boot schema version is 50', () => {
+  it('boot schema version is 53', () => {
     const row = queryOne<{ v: number }>('SELECT MAX(version) AS v FROM schema_version')!
-    expect(row.v).toBe(50)
+    expect(row.v).toBe(53)
   })
 
   it('a freshly created graph_nodes table has origin + source_recording_id (GRAPH_SCHEMA)', () => {

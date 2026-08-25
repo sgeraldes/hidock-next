@@ -5,7 +5,7 @@
  *
  *  1. The schema exposes source + source_recording_id on meeting_contacts /
  *     meeting_projects and source_recording_ids on identity_suggestions, and the
- *     boot schema version is 50 (current).
+ *     boot schema version is 53 (current).
  *  2. backfillMembershipProvenanceV44 classifies pre-v46 NULL-provenance rows
  *     conservatively: a calendar-attendee/organizer row ⇒ 'calendar'; a
  *     recording-backed row ⇒ 'transcript' + that recording id; an unassociable
@@ -83,12 +83,12 @@ afterEach(() => {
 })
 
 describe('v46 schema', () => {
-  it('boot schema version is 50', () => {
+  it('boot schema version is 53', () => {
     // On top of beta's v42 (projects.origin) / v43 (project_discovery_observations),
     // F18's provenance chain runs 46 (membership) -> 47 (entity) -> 48 (per-field
     // role) -> 49 (node) -> 50 (role provenance-trust marker, current SCHEMA_VERSION).
     const row = queryOne<{ v: number }>('SELECT MAX(version) AS v FROM schema_version')!
-    expect(row.v).toBe(50)
+    expect(row.v).toBe(53)
   })
 
   it('adds the per-row provenance columns (idempotent — table already has them)', () => {

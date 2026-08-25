@@ -154,6 +154,7 @@ describe('useDeviceSubscriptions — dual auto-sync initiator latch (C5 Phase 0 
     })
 
     expect(window.electronAPI!.downloadService!.startSession).toHaveBeenCalledTimes(1)
+    expect(drainDownloadQueueMock).toHaveBeenCalledTimes(1)
 
     // Second 'ready' for the SAME connection — latch is already set by the first attempt,
     // so this must be a no-op: no new debounce timer, no second sync.
@@ -165,6 +166,7 @@ describe('useDeviceSubscriptions — dual auto-sync initiator latch (C5 Phase 0 
     })
 
     expect(window.electronAPI!.downloadService!.startSession).toHaveBeenCalledTimes(1)
+    expect(drainDownloadQueueMock).toHaveBeenCalledTimes(1)
   })
 
   it('2. 2-SECOND DEBOUNCE (spec-007): rapid repeated "ready" events collapse to one attempt', async () => {

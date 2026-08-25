@@ -14,7 +14,8 @@ afterEach(() => {
 })
 
 vi.mock('@/hooks/useUnifiedRecordings', () => ({
-  useUnifiedRecordings: vi.fn()
+  useUnifiedRecordings: vi.fn(),
+  overlayActiveTranscriptionStatuses: (recordings: unknown[]) => recordings
 }))
 
 const deleteRecordingMock = vi.hoisted(() => vi.fn())
@@ -126,6 +127,7 @@ vi.mock('@/features/library/hooks', () => ({
 }))
 
 const mockRefresh = vi.fn()
+const mockRefreshLocal = vi.fn()
 const syncedRecording = {
   id: 'synced-1',
   filename: 'synced.wav',
@@ -160,7 +162,8 @@ beforeEach(() => {
       deletionImpact: vi.fn().mockResolvedValue({ success: true, data: { transcripts: 0, actionItems: 0, embeddings: 0, artifacts: 0, hasAudioFile: true } }),
       deleteCascade: vi.fn().mockResolvedValue({ success: true, mode: 'soft' }),
       restore: vi.fn().mockResolvedValue({ success: true }),
-      getTrash: vi.fn().mockResolvedValue([])
+      getTrash: vi.fn().mockResolvedValue([]),
+      markNotOnDevice: vi.fn().mockResolvedValue({ success: true })
     },
     downloadService: { queueDownloads: vi.fn() },
     onTranscriptionCompleted: vi.fn(() => vi.fn()),
@@ -172,6 +175,7 @@ beforeEach(() => {
     loading: false,
     error: null,
     refresh: mockRefresh,
+    refreshLocal: mockRefreshLocal,
     deviceConnected: true,
     stats: { total: 1, deviceOnly: 0, localOnly: 0, both: 1, synced: 1, unsynced: 0, onSource: 1, locallyAvailable: 1 }
   })
@@ -181,13 +185,16 @@ describe('Synced-row "Delete from device" (spec-005/F17 T5 §D3/AC#2)', () => {
   it('invokes getHiDockDeviceService().deleteRecording, never deleteCascade, and toasts success (AC#8)', async () => {
     deleteRecordingMock.mockResolvedValue(true)
     renderLibrary()
-    await screen.findByText('Synced Recording')
+    await screen.findByText('synced.wav')
 
     fireEvent.keyDown(screen.getByLabelText(/^more actions$/i), { key: 'Enter' })
     fireEvent.click(await screen.findByRole('menuitem', { name: /delete from device/i }))
     fireEvent.click(await screen.findByRole('button', { name: /^delete from device$/i }))
 
     await waitFor(() => expect(deleteRecordingMock).toHaveBeenCalledWith('synced.hda'))
+    await waitFor(() => expect(window.electronAPI.recordings.markNotOnDevice).toHaveBeenCalledWith('synced-1', 'synced.hda'))
+    expect(mockRefreshLocal).toHaveBeenCalled()
+    expect(mockRefresh).not.toHaveBeenCalledWith(true)
     expect(window.electronAPI.recordings.deleteCascade).not.toHaveBeenCalled()
     await waitFor(() => {
       expect(toastMock.success).toHaveBeenCalledWith('Removed from device', expect.stringContaining('synced.wav'))
@@ -196,7 +203,7 @@ describe('Synced-row "Delete from device" (spec-005/F17 T5 §D3/AC#2)', () => {
 
   it('device-delete confirm dialog copy matches §D2 exactly', async () => {
     renderLibrary()
-    await screen.findByText('Synced Recording')
+    await screen.findByText('synced.wav')
     fireEvent.keyDown(screen.getByLabelText(/^more actions$/i), { key: 'Enter' })
     fireEvent.click(await screen.findByRole('menuitem', { name: /delete from device/i }))
 

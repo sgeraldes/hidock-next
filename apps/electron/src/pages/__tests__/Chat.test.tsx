@@ -53,6 +53,7 @@ global.window.electronAPI = {
     deleteConversation: vi.fn().mockResolvedValue({ success: true }),
     getContext: vi.fn().mockResolvedValue([]),
     addContext: vi.fn().mockResolvedValue({ success: true }),
+    setContext: vi.fn().mockResolvedValue({ success: true }),
     removeContext: vi.fn().mockResolvedValue({ success: true })
   },
   knowledge: {

@@ -88,6 +88,34 @@ vi.mock('../database', () => ({
     }
   }),
   escapeLikePattern: vi.fn((pattern: string) => pattern.replace(/[%_\\]/g, '\\$&')),
+  // Real capture-eligibility rows (recording-eligibility.ts reads these) —
+  // needed for ARTIFACT (capture-backed) pins.
+  getCaptureEligibilityRows: vi.fn((ids: Iterable<string>) => {
+    if (!dbInstance) return { rows: [], failClosed: false }
+    const out: any[] = []
+    for (const id of ids) {
+      try {
+        const res = dbInstance.exec('SELECT id, source_recording_id, quality_rating, deleted_at FROM knowledge_captures WHERE id = ?', [id])
+        if (res.length > 0 && res[0].values.length > 0) {
+          const [rid, src, qr, del] = res[0].values[0]
+          out.push({ id: rid, source_recording_id: src, quality_rating: qr, deleted_at: del })
+        }
+      } catch { /* absent */ }
+    }
+    return { rows: out, failClosed: false }
+  }),
+  getExistingCaptureIds: (ids: Iterable<string>) => {
+    const existing = new Set<string>()
+    if (dbInstance) {
+      for (const id of ids) {
+        try {
+          const res = dbInstance.exec('SELECT id FROM knowledge_captures WHERE id = ?', [id])
+          if (res.length > 0 && res[0].values.length > 0) existing.add(id)
+        } catch { /* absent */ }
+      }
+    }
+    return { ids: existing, failClosed: false }
+  },
   // ADV5 (round-5) / round-6 — the pinned-context path revalidates each pinned
   // recording through the shared boundary (recording-eligibility.ts), which
   // reads this. Round-6 shape { ids, failClosed }; the real function surfaces
@@ -118,9 +146,10 @@ describe('RAGService Context Injection', () => {
     dbInstance.run(`
       CREATE TABLE conversations (id TEXT PRIMARY KEY);
       CREATE TABLE conversation_context (id TEXT, conversation_id TEXT, knowledge_capture_id TEXT);
-      CREATE TABLE knowledge_captures (id TEXT, title TEXT, source_recording_id TEXT);
+      CREATE TABLE knowledge_captures (id TEXT, title TEXT, source_recording_id TEXT, deleted_at TEXT, quality_rating TEXT);
       CREATE TABLE transcripts (recording_id TEXT, full_text TEXT);
       CREATE TABLE actionables (id TEXT, type TEXT, title TEXT, description TEXT, status TEXT, created_at TEXT, source_knowledge_id TEXT);
+      CREATE TABLE artifacts (id TEXT, knowledge_capture_id TEXT, kind TEXT, extracted_text TEXT, created_at TEXT);
       CREATE TABLE recordings (id TEXT, date_recorded TEXT);
 
       INSERT INTO conversations (id) VALUES ('session-1');
@@ -201,6 +230,26 @@ describe('RAGService Context Injection', () => {
     // and the retrieval-failure notes must NOT fire — structured content exists
     expect(userMessage).not.toContain('No relevant meeting transcripts found')
     expect(userMessage).not.toContain('semantic search is temporarily unavailable')
+  })
+
+  // 2026-07-21 regression: a pinned ARTIFACT capture (pdf/image — no
+  // source_recording_id) must inject its extracted_text. Previously the pinned
+  // fetch was transcripts-only, so a pinned PDF silently contributed NOTHING.
+  it('injects a pinned ARTIFACT capture (pdf) extracted text', async () => {
+    dbInstance.run(`
+      INSERT INTO knowledge_captures (id, title, source_recording_id) VALUES ('kc-pdf', 'Product_Brief.pdf', NULL);
+      INSERT INTO artifacts (id, knowledge_capture_id, kind, extracted_text, created_at) VALUES ('art-1', 'kc-pdf', 'pdf', 'DFX5 Intranet Product Owner Brief — vision and roadmap', '2026-07-20');
+      INSERT INTO conversation_context (id, conversation_id, knowledge_capture_id) VALUES ('ctx-pdf', 'session-no-pins', 'kc-pdf');
+    `)
+    const rag = getRAGService()
+
+    await rag.chat('session-no-pins', 'what is this document about?')
+
+    const lastCall = vi.mocked(mockChatLLMService.generate).mock.calls[0]
+    const messages = lastCall[0]
+    const userMessage = messages[messages.length - 1].content
+    expect(userMessage).toContain('PINNED CONTEXT: Product_Brief.pdf')
+    expect(userMessage).toContain('DFX5 Intranet Product Owner Brief')
   })
 
   it('keeps the legacy "no transcripts" fallback when nothing is indexed', async () => {

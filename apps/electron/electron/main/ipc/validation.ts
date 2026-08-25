@@ -148,7 +148,9 @@ export const RecordingStatusSchema = z.enum(['ready', 'processing', 'deleted', '
 /**
  * Transcription status enum
  */
-export const TranscriptionStatusSchema = z.enum(['none', 'pending', 'queued', 'transcribing', 'transcribed', 'failed', 'complete', 'processing'])
+export const TranscriptionStatusSchema = z.enum([
+  'none', 'pending', 'queued', 'transcribing', 'transcribed', 'failed', 'complete', 'processing', 'no_speech', 'error'
+])
 
 /**
  * Update recording status request

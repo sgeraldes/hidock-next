@@ -17,7 +17,7 @@ const SetKnowledgeProjectsRequestSchema = z.object({
 })
 
 // B-CHAT-007: Explicit column list instead of SELECT *
-const KNOWLEDGE_CAPTURE_COLUMNS = `id, title, summary, category, status, quality_rating, quality_confidence, quality_assessed_at, quality_reasons, quality_source, storage_tier, retention_days, expires_at, meeting_id, correlation_confidence, correlation_method, source_recording_id, captured_at, created_at, updated_at, deleted_at`
+const KNOWLEDGE_CAPTURE_COLUMNS = `id, title, user_title, summary, category, status, quality_rating, quality_confidence, quality_assessed_at, quality_reasons, quality_source, storage_tier, retention_days, expires_at, meeting_id, correlation_confidence, correlation_method, source_recording_id, captured_at, created_at, updated_at, deleted_at`
 
 // =============================================================================
 // ROUND-15 RESIDUAL (ADV14 follow-up) — knowledge-capture DISPLAY-tier gating.
@@ -212,6 +212,11 @@ export function registerKnowledgeHandlers(): void {
       const values: any[] = []
 
       // Map camelCase updates to snake_case DB columns
+      if (updates.userTitle !== undefined) {
+        const normalized = updates.userTitle?.trim() || null
+        fields.push('user_title = ?')
+        values.push(normalized)
+      }
       if (updates.title !== undefined) { fields.push('title = ?'); values.push(updates.title); }
       if (updates.summary !== undefined) { fields.push('summary = ?'); values.push(updates.summary); }
       if (updates.category !== undefined) { fields.push('category = ?'); values.push(updates.category); }
@@ -311,6 +316,7 @@ function safeParseReasons(raw: string | null): string[] | null {
 function mapToKnowledgeCapture(row: any): KnowledgeCapture {
   return {
     id: row.id,
+    userTitle: row.user_title,
     title: row.title,
     summary: row.summary,
     category: row.category,

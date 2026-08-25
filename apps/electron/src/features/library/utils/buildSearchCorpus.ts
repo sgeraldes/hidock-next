@@ -37,6 +37,11 @@ export function buildSearchCorpus(
 ): string {
   const parts: string[] = []
   parts.push(getDisplayTitle(recording, meeting, transcript).primaryText)
+  if (recording.userTitle) parts.push(recording.userTitle)
+  // Keep the legacy capture label searchable during the v52 ownership
+  // transition even though it is no longer trusted as the displayed title.
+  if (recording.title) parts.push(recording.title)
+  if (transcript?.title_suggestion) parts.push(transcript.title_suggestion)
   parts.push(recording.filename)
   if (meeting?.subject)    parts.push(meeting.subject)
   if (recording.summary)   parts.push(recording.summary)

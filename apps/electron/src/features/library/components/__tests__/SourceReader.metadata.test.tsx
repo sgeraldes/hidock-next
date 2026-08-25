@@ -73,16 +73,23 @@ vi.mock('@/components/ConfirmDialog', () => ({
     open,
     onConfirm,
     onOpenChange,
+    title,
+    actionLabel,
+    cancelLabel,
   }: {
     open: boolean
     onConfirm: () => void
     onOpenChange: (open: boolean) => void
+    title: string
+    actionLabel?: string
+    cancelLabel?: string
   }) => {
     if (!open) return null
     return (
       <div data-testid="confirm-dialog">
-        <button onClick={onConfirm}>Confirm Transcribe</button>
-        <button onClick={() => onOpenChange(false)}>Cancel Transcribe</button>
+        <h2>{title}</h2>
+        <button onClick={onConfirm}>{actionLabel || 'Continue'}</button>
+        <button onClick={() => onOpenChange(false)}>{cancelLabel || 'Cancel'}</button>
       </div>
     )
   },
@@ -167,6 +174,16 @@ beforeEach(() => {
         getForMeeting: vi.fn().mockResolvedValue({ success: true, data: [] }),
         getForMeetingOwner: vi.fn().mockResolvedValue({ success: true, data: [] }),
       },
+      transcripts: {
+        getByRecordingIdOwner: vi.fn().mockResolvedValue(null),
+        getProcessingRuns: vi.fn().mockResolvedValue({ success: true, data: [] }),
+        getSpeakerMap: vi.fn().mockResolvedValue({ success: true, data: [] }),
+      },
+      turnSpeakers: {
+        getOverrides: vi.fn().mockResolvedValue({ success: true, data: [] }),
+        getSplits: vi.fn().mockResolvedValue({ success: true, data: [] }),
+        getMergeHints: vi.fn().mockResolvedValue({ success: true, data: [] }),
+      },
     },
     writable: true,
     configurable: true,
@@ -180,7 +197,7 @@ describe('SourceReader — metadata editing', () => {
 
   // 1. Title shows as static text by default
   it('shows title as static text when not editing', () => {
-    const rec = makeRecording({ title: 'My Recording Title', knowledgeCaptureId: 'kc-1' })
+    const rec = makeRecording({ userTitle: 'My Recording Title', knowledgeCaptureId: 'kc-1' })
     render(<SourceReader recording={rec} />)
 
     expect(screen.getByText('My Recording Title')).toBeInTheDocument()
@@ -203,9 +220,56 @@ describe('SourceReader — metadata editing', () => {
     expect(screen.queryByRole('button', { name: /edit title/i })).not.toBeInTheDocument()
   })
 
+  it('keeps filename and content title distinct while the meeting subject owns the heading', () => {
+    const rec = makeRecording({ knowledgeCaptureId: 'kc-1', userTitle: 'My content title' })
+    render(<SourceReader recording={rec} meeting={makeMeeting()} transcript={{
+      id: 'tx-fields', recording_id: rec.id, full_text: 'hello', title_suggestion: 'AI short title'
+    } as any} />)
+
+    const fields = screen.getByTestId('source-identity-fields')
+    expect(fields).toHaveTextContent('meeting-2024.wav')
+    expect(fields).toHaveTextContent('My content title')
+    expect(screen.getByRole('heading', { name: 'Team Standup' })).toBeInTheDocument()
+  })
+
+  it('renders stage-specific provider/tool provenance chips', async () => {
+    vi.mocked(window.electronAPI.transcripts.getProcessingRuns).mockResolvedValueOnce({
+      success: true,
+      data: [
+        { id: 'run-tx', stage: 'transcription', provider: 'gemini', tool: 'gemini', model: 'gemini-3.5-flash', execution: 'cloud', status: 'completed' },
+        { id: 'run-dia', stage: 'diarization', provider: 'local-asr', tool: 'pyannote', model: null, execution: 'local', status: 'degraded', quality_status: 'degraded' },
+        { id: 'run-sum', stage: 'summary', provider: 'gemini', tool: 'gemini-analysis', model: 'gemini-3.5-flash', execution: 'cloud', status: 'completed' },
+      ]
+    } as any)
+    const rec = makeRecording({ transcriptionStatus: 'complete' })
+    render(<SourceReader recording={rec} transcript={{ id: 'tx-runs', recording_id: rec.id, full_text: 'hello' } as any} />)
+
+    const provenance = await screen.findByTestId('processing-provenance')
+    expect(provenance).toHaveTextContent('Transcription · Gemini')
+    expect(provenance).toHaveTextContent('Diarization · pyannote')
+    expect(provenance).toHaveTextContent('Summary · Gemini')
+  })
+
+  it('shows blocked speaker identity as blocked instead of claiming successful resolution', async () => {
+    vi.mocked(window.electronAPI.transcripts.getProcessingRuns).mockResolvedValueOnce({
+      success: true,
+      data: [{
+        id: 'run-identity', stage: 'speaker-identity', provider: 'hidock-next',
+        tool: 'self-id+trusted-roster', model: null, execution: 'local',
+        status: 'degraded', quality_status: 'blocked'
+      }]
+    } as any)
+    const rec = makeRecording({ transcriptionStatus: 'complete' })
+    render(<SourceReader recording={rec} transcript={{ id: 'tx-blocked', recording_id: rec.id, full_text: 'hello' } as any} />)
+
+    const provenance = await screen.findByTestId('processing-provenance')
+    expect(provenance).toHaveTextContent('Speaker identity · blocked')
+    expect(provenance).not.toHaveTextContent('Speaker identity · self-id+trusted-roster')
+  })
+
   // 4. Clicking pencil enters edit mode
   it('clicking pencil button enters title edit mode', () => {
-    const rec = makeRecording({ knowledgeCaptureId: 'kc-1', title: 'Current Title' })
+    const rec = makeRecording({ knowledgeCaptureId: 'kc-1', userTitle: 'Current Title' })
     render(<SourceReader recording={rec} />)
 
     fireEvent.click(screen.getByRole('button', { name: /edit title/i }))
@@ -216,7 +280,7 @@ describe('SourceReader — metadata editing', () => {
 
   // 5. Enter saves title (calls knowledge.update)
   it('pressing Enter saves title via knowledge.update IPC', async () => {
-    const rec = makeRecording({ knowledgeCaptureId: 'kc-1', title: 'Old Title' })
+    const rec = makeRecording({ knowledgeCaptureId: 'kc-1', userTitle: 'Old Title' })
     render(<SourceReader recording={rec} />)
 
     fireEvent.click(screen.getByRole('button', { name: /edit title/i }))
@@ -225,13 +289,13 @@ describe('SourceReader — metadata editing', () => {
     fireEvent.keyDown(input, { key: 'Enter' })
 
     await waitFor(() => {
-      expect(mockKnowledgeUpdate).toHaveBeenCalledWith('kc-1', { title: 'New Title' })
+      expect(mockKnowledgeUpdate).toHaveBeenCalledWith('kc-1', { userTitle: 'New Title' })
     })
   })
 
   // 6. Escape cancels (no IPC call)
   it('pressing Escape cancels title editing without calling IPC', () => {
-    const rec = makeRecording({ knowledgeCaptureId: 'kc-1', title: 'Old Title' })
+    const rec = makeRecording({ knowledgeCaptureId: 'kc-1', userTitle: 'Old Title' })
     render(<SourceReader recording={rec} />)
 
     fireEvent.click(screen.getByRole('button', { name: /edit title/i }))
@@ -246,7 +310,7 @@ describe('SourceReader — metadata editing', () => {
   // 7. Empty title rejected
   it('empty title triggers error toast and does not call IPC', async () => {
     const { toast } = await import('@/components/ui/toaster')
-    const rec = makeRecording({ knowledgeCaptureId: 'kc-1', title: 'Old Title' })
+    const rec = makeRecording({ knowledgeCaptureId: 'kc-1', userTitle: 'Old Title' })
     render(<SourceReader recording={rec} />)
 
     fireEvent.click(screen.getByRole('button', { name: /edit title/i }))
@@ -266,7 +330,7 @@ describe('SourceReader — metadata editing', () => {
     render(<SourceReader recording={rec} />)
 
     // The SelectTrigger button has the current value text
-    expect(screen.getByText('Meeting')).toBeInTheDocument()
+    expect(screen.getByTestId('category-select')).toHaveValue('meeting')
   })
 
   // 9. Category change calls knowledge.update
@@ -296,7 +360,7 @@ describe('SourceReader — metadata editing', () => {
   // 10. onMetadataEdited fires on successful title save
   it('onMetadataEdited callback fires after successful title save', async () => {
     const onMetadataEdited = vi.fn()
-    const rec = makeRecording({ knowledgeCaptureId: 'kc-1', title: 'Old Title' })
+    const rec = makeRecording({ knowledgeCaptureId: 'kc-1', userTitle: 'Old Title' })
     render(<SourceReader recording={rec} onMetadataEdited={onMetadataEdited} />)
 
     fireEvent.click(screen.getByRole('button', { name: /edit title/i }))
@@ -311,8 +375,8 @@ describe('SourceReader — metadata editing', () => {
 
   // 11. Edit state resets when recording.id changes
   it('editing state resets when recording changes', () => {
-    const rec1 = makeRecording({ id: 'rec-1', knowledgeCaptureId: 'kc-1', title: 'Title 1' })
-    const rec2 = makeRecording({ id: 'rec-2', knowledgeCaptureId: 'kc-2', title: 'Title 2' })
+    const rec1 = makeRecording({ id: 'rec-1', knowledgeCaptureId: 'kc-1', userTitle: 'Title 1' })
+    const rec2 = makeRecording({ id: 'rec-2', knowledgeCaptureId: 'kc-2', userTitle: 'Title 2' })
 
     const { rerender } = render(<SourceReader recording={rec1} />)
 
@@ -337,15 +401,29 @@ describe('SourceReader — metadata editing', () => {
     expect(screen.getByTitle(/remove meeting link/i)).toBeInTheDocument()
   })
 
-  // 13. "Link Meeting" action shows in the overflow menu when no meeting linked
-  it('shows Link Meeting action in the overflow menu when no meeting is linked', async () => {
+  it('renders linked meeting controls before Speakers in the dock', async () => {
+    vi.mocked(window.electronAPI.contacts.getForMeetingOwner).mockResolvedValueOnce({
+      success: true,
+      data: [{ id: 'contact-1', name: 'Alex Participant', email: 'alex@example.com' }],
+    } as any)
+    const rec = makeRecording({ knowledgeCaptureId: 'kc-1' })
+
+    render(<SourceReader recording={rec} meeting={makeMeeting()} transcript={{
+      id: 'tx-1', recording_id: rec.id, full_text: 'hola',
+      speakers: JSON.stringify([{ speaker: 'Speaker 1', start: 0, end: 1, text: 'hola' }])
+    } as any} />)
+
+    const meetingCard = screen.getByTestId('linked-meeting-card')
+    const participants = await screen.findByTestId('participants-section')
+    expect(meetingCard.compareDocumentPosition(participants) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  // 13. "Link Meeting" is a visible header action when no meeting is linked
+  it('shows a visible Link Meeting action when no meeting is linked', () => {
     const rec = makeRecording({ knowledgeCaptureId: 'kc-1' })
     render(<SourceReader recording={rec} />)
 
-    // Link Meeting moved into the "More actions" overflow menu (audit #4).
-    // Radix opens its menu on keydown (Enter/Space/ArrowDown), not click.
-    fireEvent.keyDown(screen.getByRole('button', { name: /more actions/i }), { key: 'Enter' })
-    expect(await screen.findByRole('menuitem', { name: /link meeting/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /link this recording to a meeting/i })).toBeInTheDocument()
   })
 
   // 14. Remove calls selectMeeting(id, null)
@@ -354,11 +432,32 @@ describe('SourceReader — metadata editing', () => {
     const meeting = makeMeeting()
     render(<SourceReader recording={rec} meeting={meeting} />)
 
-    fireEvent.click(screen.getByTitle(/remove meeting link/i))
+    fireEvent.click(screen.getByRole('button', { name: /^remove meeting link$/i }))
+    expect(screen.getByText(/remove this meeting link/i)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /^remove link$/i }))
 
     await waitFor(() => {
       expect(mockSelectMeeting).toHaveBeenCalledWith('rec-42', null)
     })
+  })
+
+  it('reports an unlink failure without marking metadata edited', async () => {
+    const { toast } = await import('@/components/ui/toaster')
+    const onMetadataEdited = vi.fn()
+    mockSelectMeeting.mockResolvedValueOnce({ success: false, error: 'Database unavailable' })
+    const rec = makeRecording({ id: 'rec-42', knowledgeCaptureId: 'kc-1' })
+
+    render(<SourceReader recording={rec} meeting={makeMeeting()} onMetadataEdited={onMetadataEdited} />)
+    fireEvent.click(screen.getByRole('button', { name: /^remove meeting link$/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^remove link$/i }))
+
+    await waitFor(() => {
+      expect((toast as any).error).toHaveBeenCalledWith(
+        'Failed to remove meeting link',
+        'Database unavailable'
+      )
+    })
+    expect(onMetadataEdited).not.toHaveBeenCalled()
   })
 
   // 15. Transcribe without edits → no dialog, onTranscribe called directly
@@ -376,7 +475,7 @@ describe('SourceReader — metadata editing', () => {
   // 16. Transcribe after title edit → warning dialog shown
   it('clicking Transcribe after editing title shows confirm dialog', async () => {
     const onTranscribe = vi.fn()
-    const rec = makeRecording({ knowledgeCaptureId: 'kc-1', title: 'Old', transcriptionStatus: 'none' })
+    const rec = makeRecording({ knowledgeCaptureId: 'kc-1', userTitle: 'Old', transcriptionStatus: 'none' })
     render(<SourceReader recording={rec} onTranscribe={onTranscribe} />)
 
     // Edit title to trigger metadataEdited flag
@@ -398,7 +497,7 @@ describe('SourceReader — metadata editing', () => {
   // 17. Confirm dialog → onTranscribe called, state reset
   it('confirming transcription warning calls onTranscribe and dismisses dialog', async () => {
     const onTranscribe = vi.fn()
-    const rec = makeRecording({ knowledgeCaptureId: 'kc-1', title: 'Old', transcriptionStatus: 'none' })
+    const rec = makeRecording({ knowledgeCaptureId: 'kc-1', userTitle: 'Old', transcriptionStatus: 'none' })
     render(<SourceReader recording={rec} onTranscribe={onTranscribe} />)
 
     // Edit title
@@ -413,7 +512,7 @@ describe('SourceReader — metadata editing', () => {
     expect(screen.getByTestId('confirm-dialog')).toBeInTheDocument()
 
     // Confirm
-    fireEvent.click(screen.getByRole('button', { name: /confirm transcribe/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^continue$/i }))
 
     expect(onTranscribe).toHaveBeenCalledOnce()
     expect(screen.queryByTestId('confirm-dialog')).not.toBeInTheDocument()
@@ -422,7 +521,7 @@ describe('SourceReader — metadata editing', () => {
   // 18. Cancel dialog → onTranscribe NOT called
   it('cancelling transcription warning does not call onTranscribe', async () => {
     const onTranscribe = vi.fn()
-    const rec = makeRecording({ knowledgeCaptureId: 'kc-1', title: 'Old', transcriptionStatus: 'none' })
+    const rec = makeRecording({ knowledgeCaptureId: 'kc-1', userTitle: 'Old', transcriptionStatus: 'none' })
     render(<SourceReader recording={rec} onTranscribe={onTranscribe} />)
 
     // Edit title
@@ -437,7 +536,7 @@ describe('SourceReader — metadata editing', () => {
     expect(screen.getByTestId('confirm-dialog')).toBeInTheDocument()
 
     // Cancel
-    fireEvent.click(screen.getByRole('button', { name: /cancel transcribe/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
 
     expect(onTranscribe).not.toHaveBeenCalled()
     expect(screen.queryByTestId('confirm-dialog')).not.toBeInTheDocument()
@@ -505,7 +604,7 @@ describe('SourceReader — hook order stability (regression)', () => {
 
   it('does not throw a hooks-order error when switching from no recording to a selected one', () => {
     const { rerender } = render(<SourceReader recording={null} />)
-    expect(screen.getByText(/no recording selected/i)).toBeInTheDocument()
+    expect(screen.getByText(/no source selected/i)).toBeInTheDocument()
 
     // Selecting a recording that carries a transcript with `speakers` exercises
     // the transcriptSegments memo — this is the exact transition that crashed.
@@ -525,6 +624,6 @@ describe('SourceReader — hook order stability (regression)', () => {
     expect(screen.getByTestId('transcript-viewer')).toBeInTheDocument()
 
     expect(() => rerender(<SourceReader recording={null} />)).not.toThrow()
-    expect(screen.getByText(/no recording selected/i)).toBeInTheDocument()
+    expect(screen.getByText(/no source selected/i)).toBeInTheDocument()
   })
 })

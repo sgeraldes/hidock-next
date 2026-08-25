@@ -43,6 +43,11 @@ vi.mock('../database', () => ({
   releaseTranscriptionLock: vi.fn(),
   clearStaleTranscriptionLock: vi.fn(),
   resetStuckTranscriptions: vi.fn()
+  ,getActiveProcessingRunsForRecording: vi.fn(() => [])
+  ,enrichRecordingScheduleMetadata: vi.fn()
+  ,createProcessingRun: vi.fn(({ stage }: { stage: string }) => ({ id: `run-${stage}` }))
+  ,completeProcessingRun: vi.fn()
+  ,failProcessingRun: vi.fn()
 }))
 
 vi.mock('electron', () => ({ BrowserWindow: { getAllWindows: () => [] } }))
@@ -51,7 +56,10 @@ vi.mock('../config', () => ({ getConfig: vi.fn(() => ({ transcription: { provide
 vi.mock('@google/generative-ai', () => ({ GoogleGenerativeAI: class {} }))
 vi.mock('@hidock/transcription', () => ({ GeminiEngine: class {} }))
 vi.mock('../vector-store', () => ({ getVectorStore: vi.fn(() => null) }))
-vi.mock('../knowledge-capture-backfill', () => ({ ensureKnowledgeCaptureForRecording: vi.fn() }))
+vi.mock('../knowledge-capture-backfill', () => ({
+  ensureKnowledgeCaptureForRecording: vi.fn(),
+  ensureNoSpeechKnowledgeCapture: vi.fn()
+}))
 
 const qItem = (recording_id: string, date_recorded: string | null, created_at: string) =>
   ({ id: `q_${recording_id}`, recording_id, date_recorded, created_at, status: 'pending' })

@@ -1,11 +1,10 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useEffect, useCallback, useMemo, useRef } from 'react'
 import { getHiDockDeviceService, HiDockRecording } from '@/services/hidock-device'
 import { useAppStore } from '@/store/useAppStore'
 import {
   UnifiedRecording,
   DeviceOnlyRecording,
-  LocalOnlyRecording,
-  BothLocationsRecording
+  LocalOnlyRecording
 } from '@/types/unified-recording'
 import type { KnowledgeCapture } from '@/types/knowledge'
 import { UNKNOWN_DATE, isUnknownDate } from '@/lib/unknownDate'
@@ -21,16 +20,23 @@ export { UNKNOWN_DATE, isUnknownDate }
 export interface DatabaseRecording {
   id: string
   filename: string
-  file_path: string
+  file_path: string | null
   file_size: number
   duration_seconds?: number
   date_recorded?: string
   meeting_id?: string
+  meeting_subject?: string
   // FL-001: transcription_status is the authoritative column; status is the legacy fallback
   transcription_status?: string
   status: string
   // v38: personal ("ignored") flag — 1 = kept but excluded from AI + default surfaces
   personal?: number
+  /** Soft-delete tombstone. Present on rows returned by recordings.getTrash(). */
+  deleted_at?: string | null
+  /** Durable location facts maintained by the main process. */
+  on_local?: number
+  on_device?: number
+  location?: 'device-only' | 'local-only' | 'both' | 'deleted'
 }
 
 interface SyncedFile {
@@ -117,6 +123,7 @@ function findMatchByDateTime(
   dbRecs: DatabaseRecording[],
   syncedFiles: SyncedFile[],
   matchedBaseNames: Set<string>,
+  exactDeviceBaseNames: ReadonlySet<string>,
   toleranceSeconds: number = 60
 ): { dbRec?: DatabaseRecording; synced?: SyncedFile; localBaseName?: string } | null {
   // Parse device file date from filename
@@ -127,6 +134,14 @@ function findMatchByDateTime(
   for (const dbRec of dbRecs) {
     const baseName = getBaseFilename(dbRec.filename)
     if (matchedBaseNames.has(baseName)) continue // Already matched
+
+    // Never let a nearby device recording steal a database row from the device
+    // file that matches it exactly. HiDock can create consecutive recordings
+    // less than a minute apart; whichever one happens to be iterated first used
+    // to claim the other's DB row through this fallback. The later exact match
+    // then emitted a second UnifiedRecording with the same id, giving React two
+    // identical keys and leaving both rows painted on the same virtual track.
+    if (exactDeviceBaseNames.has(baseName)) continue
 
     // Try to parse date from local filename or use db date_recorded
     const localDate = parseDateFromFilename(dbRec.filename) ||
@@ -155,17 +170,39 @@ export function buildRecordingMap(
   syncedFiles: SyncedFile[],
   cachedDeviceFiles: CachedDeviceFile[],
   isConnected: boolean,
-  knowledgeCaptures: KnowledgeCapture[] = []
+  knowledgeCaptures: KnowledgeCapture[] = [],
+  tombstonedRecordings: DatabaseRecording[] = []
 ): UnifiedRecording[] {
+  // Reserve every exact device filename before doing proximity fallback. Device
+  // iteration order is not guaranteed, so this must be computed up front.
+  const exactDeviceBaseNames = new Set(deviceRecs.map((recording) => getBaseFilename(recording.filename)))
+
   // Create lookup maps using BASE filename (without extension)
   // This allows matching .hda (device) with .wav (downloaded) files
   const syncedMapByBase = new Map<string, SyncedFile>()
   const syncedMapByOriginal = new Map<string, SyncedFile>()
   const syncedMapByLocal = new Map<string, SyncedFile>()
+  const syncedMapByLocalBase = new Map<string, SyncedFile>()
   for (const sf of syncedFiles) {
     syncedMapByBase.set(getBaseFilename(sf.original_filename), sf)
     syncedMapByOriginal.set(sf.original_filename, sf)
     syncedMapByLocal.set(sf.local_filename, sf)
+    syncedMapByLocalBase.set(getBaseFilename(sf.local_filename), sf)
+  }
+
+  // A split retires its source with a restorable soft-delete while the original
+  // can legitimately remain on the HiDock. The live DB query omits that row, so
+  // without carrying the tombstone into this projection the device/synced-file
+  // branches reconstruct it as a brand-new live source. Match both the stored
+  // filename and its synced original name so .flac/.wav <-> .hda pairs stay
+  // hidden until the user explicitly restores the source from Trash.
+  const tombstonedBaseNames = new Set<string>()
+  for (const recording of tombstonedRecordings) {
+    const recordingBase = getBaseFilename(recording.filename)
+    tombstonedBaseNames.add(recordingBase)
+    const synced = syncedMapByLocal.get(recording.filename)
+      ?? syncedMapByLocalBase.get(recordingBase)
+    if (synced) tombstonedBaseNames.add(getBaseFilename(synced.original_filename))
   }
 
   const dbMapByBase = new Map<string, DatabaseRecording>()
@@ -190,6 +227,10 @@ export function buildRecordingMap(
   // Process device recordings first
   for (const deviceRec of deviceRecs) {
     const baseName = getBaseFilename(deviceRec.filename)
+    if (tombstonedBaseNames.has(baseName)) {
+      processedBaseNames.add(baseName)
+      continue
+    }
 
     // Look up by base filename to match .hda with .wav
     let synced = syncedMapByOriginal.get(deviceRec.filename) || syncedMapByBase.get(baseName)
@@ -198,7 +239,13 @@ export function buildRecordingMap(
     // NEW: If no exact match, try date/time matching (fallback for wrongly-named files)
     let localBaseName: string | undefined
     if (!synced && !dbRec) {
-      const dateMatch = findMatchByDateTime(deviceRec, dbRecs, syncedFiles, processedBaseNames)
+      const dateMatch = findMatchByDateTime(
+        deviceRec,
+        dbRecs,
+        syncedFiles,
+        processedBaseNames,
+        exactDeviceBaseNames
+      )
       if (dateMatch) {
         dbRec = dateMatch.dbRec
         synced = dateMatch.synced
@@ -212,8 +259,11 @@ export function buildRecordingMap(
     if (synced || dbRec) {
       const dbId = dbRec?.id || synced!.id
       const capture = captureMapBySourceId.get(dbId)
-
-      const recording: BothLocationsRecording = {
+      const localPath = synced?.file_path || dbRec?.file_path || ''
+      const locallyAvailable = Boolean(synced?.file_path)
+        || dbRec?.on_local === 1
+        || (dbRec?.on_local == null && Boolean(dbRec?.file_path))
+      const shared = {
         id: dbId,
         filename: deviceRec.filename,
         size: deviceRec.size,
@@ -221,12 +271,10 @@ export function buildRecordingMap(
         dateRecorded,
         transcriptionStatus: mapTranscriptionStatus(dbRec?.transcription_status ?? dbRec?.status, capture?.status ?? undefined),
         meetingId: dbRec?.meeting_id,
+        meetingSubject: dbRec?.meeting_subject,
         sourceKind: 'recording',
-        location: 'both',
-        deviceFilename: deviceRec.filename,
-        localPath: synced?.file_path || dbRec?.file_path || '',
-        syncStatus: 'synced',
         knowledgeCaptureId: capture?.id,
+        userTitle: capture?.userTitle || undefined,
         title: capture?.title,
         quality: capture?.quality,
         qualityReasons: capture?.qualityReasons ?? undefined,
@@ -235,7 +283,21 @@ export function buildRecordingMap(
         status: capture?.status ?? undefined,
         summary: capture?.summary ?? undefined,
         personal: !!dbRec?.personal
-      }
+      } as const
+      const recording: UnifiedRecording = locallyAvailable
+        ? {
+            ...shared,
+            location: 'both',
+            deviceFilename: deviceRec.filename,
+            localPath,
+            syncStatus: 'synced'
+          }
+        : {
+            ...shared,
+            location: 'device-only',
+            deviceFilename: deviceRec.filename,
+            syncStatus: 'not-synced'
+          }
       recordingMap.set(baseName, recording)
       processedBaseNames.add(baseName)
       // IMPORTANT: If matched by date, also track the local file's baseName to prevent duplicate processing
@@ -273,7 +335,23 @@ export function buildRecordingMap(
       const dateRecorded = getBestDate(filenameForDate, dbDate, UNKNOWN_DATE)
       const capture = captureMapBySourceId.get(dbRec.id)
 
-      const recording: LocalOnlyRecording = {
+      const localPath = synced?.file_path || dbRec.file_path || ''
+      const locallyAvailable = Boolean(synced?.file_path)
+        || dbRec.on_local === 1
+        || (dbRec.on_local == null && Boolean(dbRec.file_path))
+      const knownOnDevice = dbRec.on_device === 1
+        || dbRec.location === 'device-only'
+        || dbRec.location === 'both'
+
+      // Defense in depth for callers/tests that provide raw DB rows rather than
+      // getRecordings(): `location = 'deleted'` means reconciliation proved the
+      // last physical copy is gone. It is a durable identity/audit row, not a
+      // device-only source. Never manufacture Download controls for it.
+      if (dbRec.location === 'deleted' && !locallyAvailable && !knownOnDevice) {
+        processedBaseNames.add(baseName)
+        continue
+      }
+      const shared = {
         id: dbRec.id,
         filename: dbRec.filename,
         size: dbRec.file_size,
@@ -283,15 +361,13 @@ export function buildRecordingMap(
         // to the legacy status only when it's absent (matches the 'both' branch).
         transcriptionStatus: mapTranscriptionStatus(dbRec.transcription_status ?? dbRec.status, capture?.status ?? undefined),
         meetingId: dbRec.meeting_id,
+        meetingSubject: dbRec.meeting_subject,
         // CX-T5-3: explicit — this is a REAL recordings-table row even when its
         // nullable file_path is empty (the old path inference misread that as
         // capture-only and stripped its deletion/restore affordances).
         sourceKind: 'recording',
-        location: 'local-only',
-        localPath: dbRec.file_path,
-        syncStatus: 'synced',
-        isImported: !synced,
         knowledgeCaptureId: capture?.id,
+        userTitle: capture?.userTitle || undefined,
         title: capture?.title,
         quality: capture?.quality,
         qualityReasons: capture?.qualityReasons ?? undefined,
@@ -300,7 +376,29 @@ export function buildRecordingMap(
         status: capture?.status ?? undefined,
         summary: capture?.summary ?? undefined,
         personal: !!dbRec?.personal
-      }
+      } as const
+      const recording: UnifiedRecording = locallyAvailable && knownOnDevice
+        ? {
+            ...shared,
+            location: 'both',
+            deviceFilename: synced?.original_filename || dbRec.filename,
+            localPath,
+            syncStatus: 'synced'
+          }
+        : locallyAvailable
+          ? {
+              ...shared,
+              location: 'local-only',
+              localPath,
+              syncStatus: 'synced',
+              isImported: !synced
+            }
+          : {
+              ...shared,
+              location: 'device-only',
+              deviceFilename: synced?.original_filename || dbRec.filename,
+              syncStatus: 'not-synced'
+            }
       recordingMap.set(baseName, recording)
       processedBaseNames.add(baseName)
     }
@@ -314,6 +412,10 @@ export function buildRecordingMap(
   if (shouldUseCachedFiles) {
     for (const cached of cachedDeviceFiles) {
       const baseName = getBaseFilename(cached.filename)
+      if (tombstonedBaseNames.has(baseName)) {
+        processedBaseNames.add(baseName)
+        continue
+      }
       if (!processedBaseNames.has(baseName)) {
         const cachedDate = new Date(cached.date_recorded)
         const dateRecorded = getBestDate(cached.filename, cachedDate, cachedDate)
@@ -361,6 +463,7 @@ export function buildRecordingMap(
       isImported: true,
       knowledgeCaptureId: capture.id,
       title: capture.title,
+      userTitle: capture.userTitle || undefined,
       quality: capture.quality,
       qualityReasons: capture.qualityReasons ?? undefined,
       qualitySource: capture.qualitySource ?? undefined,
@@ -437,12 +540,20 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
   const setError = useAppStore((state) => state.setUnifiedRecordingsError)
   const markLoaded = useAppStore((state) => state.markUnifiedRecordingsLoaded)
 
-  const [deviceConnected, setDeviceConnected] = useState(false)
+  // The title bar, Device Sync page, and OperationController all publish/read
+  // connection state through this store. Library must use that same reactive
+  // source: its previous private boolean could remain false after the initial
+  // load unsubscribed from device events, leaving real Download/Delete actions
+  // disabled while the title bar correctly showed a connected H1E.
+  const deviceConnected = useAppStore((state) => state.deviceState?.connected ?? false)
   const loadingRef = useRef(false) // Prevent concurrent loads
   const pendingForceRefreshRef = useRef(false)
   const deviceReadyRefreshDoneRef = useRef(false) // Track if we've done a device-ready refresh
   const lastLoadTimestampRef = useRef(0) // FL-02: Track last load to prevent triple-fire
   const connectionEventCooldownRef = useRef(0) // AUD5-014: Suppress polling right after connection events
+  const recordingRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pendingRecordingNoticeCountRef = useRef(0)
+  const latestRecordingFilenameRef = useRef('')
 
   const deviceService = getHiDockDeviceService()
 
@@ -491,7 +602,6 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
       if (!window.electronAPI?.recordings) {
         console.log('[useUnifiedRecordings] Not in Electron - returning empty data')
         setRecordings([])
-        setDeviceConnected(false)
         decrementLoading()
         decremented = true
         loadingRef.current = false
@@ -500,12 +610,12 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
 
       // Check device connection
       const isConnected = deviceService.isConnected()
-      setDeviceConnected(isConnected)
       console.log('[useUnifiedRecordings] Device connected:', isConnected)
 
       // PHASE 1: Load local data + cache FIRST (fast) for instant display
-      const [dbRecs, syncedFiles, cachedDeviceFiles, knowledgeCaptures] = await Promise.all([
+      const [dbRecs, tombstonedRecordings, syncedFiles, cachedDeviceFiles, knowledgeCaptures] = await Promise.all([
         window.electronAPI.recordings.getAll() as Promise<DatabaseRecording[]>,
+        window.electronAPI.recordings.getTrash() as Promise<DatabaseRecording[]>,
         window.electronAPI.syncedFiles.getAll() as Promise<SyncedFile[]>,
         window.electronAPI.deviceCache.getAll() as Promise<CachedDeviceFile[]>,
         // ROUND-15 RESIDUAL — owner Library uses the existence-scoped OWNER
@@ -534,7 +644,15 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
       // Show cached/local data immediately and mark as loaded
       // If we have in-memory cache from device service, use that for immediate display
       // This fixes the issue where navigating to Library shows stale data
-      const initialRecordings = buildRecordingMap(memoryCachedDeviceRecs, dbRecs, syncedFiles, cachedDeviceFiles, isConnected, knowledgeCaptures)
+      const initialRecordings = buildRecordingMap(
+        memoryCachedDeviceRecs,
+        dbRecs,
+        syncedFiles,
+        cachedDeviceFiles,
+        isConnected,
+        knowledgeCaptures,
+        tombstonedRecordings
+      )
       console.log('[useUnifiedRecordings] Built', initialRecordings.length, 'recordings')
 
       // Debug: Show sample dates
@@ -605,7 +723,15 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
       }
 
       // PHASE 3: Build final recording list with all data (silent update)
-      const finalRecordings = buildRecordingMap(deviceRecs, dbRecs, syncedFiles, cachedDeviceFiles, isConnected, knowledgeCaptures)
+      const finalRecordings = buildRecordingMap(
+        deviceRecs,
+        dbRecs,
+        syncedFiles,
+        cachedDeviceFiles,
+        isConnected,
+        knowledgeCaptures,
+        tombstonedRecordings
+      )
       console.log('[useUnifiedRecordings] Final recordings count:', finalRecordings.length)
       setRecordings(finalRecordings)
       // Decrement loading after final update (covers Phase 2 path only — Phase 1-only already decremented)
@@ -652,9 +778,9 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
     try {
       if (!window.electronAPI?.recordings) return false
       const isConnected = deviceService.isConnected()
-      setDeviceConnected(isConnected)
-      const [dbRecs, syncedFiles, cachedDeviceFiles, knowledgeCaptures] = await Promise.all([
+      const [dbRecs, tombstonedRecordings, syncedFiles, cachedDeviceFiles, knowledgeCaptures] = await Promise.all([
         window.electronAPI.recordings.getAll() as Promise<DatabaseRecording[]>,
+        window.electronAPI.recordings.getTrash() as Promise<DatabaseRecording[]>,
         window.electronAPI.syncedFiles.getAll() as Promise<SyncedFile[]>,
         window.electronAPI.deviceCache.getAll() as Promise<CachedDeviceFile[]>,
         // ROUND-15 RESIDUAL — owner Library uses the existence-scoped OWNER
@@ -672,7 +798,8 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
         syncedFiles,
         cachedDeviceFiles,
         isConnected,
-        knowledgeCaptures
+        knowledgeCaptures,
+        tombstonedRecordings
       )
       setRecordings(rebuilt)
       return true
@@ -694,7 +821,7 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
   // TODO: FL-10: React StrictMode double-mount is expected in dev mode. Subscriptions
   // are properly cleaned up on unmount so this does not cause leaks in production.
 
-  // Initial load (only if not already loaded) and device connection subscription
+  // Initial load (only if not already loaded).
   const initialLoadDoneRef = useRef(false)
 
   useEffect(() => {
@@ -706,15 +833,18 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
       loadRecordings()
     }
 
-    // Check device connection on mount
-    setDeviceConnected(deviceService.isConnected())
+  }, [loaded, loadRecordings])
 
+  // Keep Library refresh behavior subscribed for the full mount lifetime. This
+  // must be separate from the one-shot load effect: when `loaded` changed, the
+  // old combined effect ran its cleanup and then returned early because
+  // initialLoadDoneRef was already true, permanently dropping both listeners.
+  useEffect(() => {
     // Subscribe to device connection changes
     // AUD5-014: Use forceRefresh=false here - the connection event fires before the device
     // is fully ready. The onStatusChange('ready') handler below is the real "ready" signal
     // and uses forceRefresh=true. This prevents triple-refresh on connect.
     const unsubConnection = deviceService.onConnectionChange((connected) => {
-      setDeviceConnected(connected)
       // Reset the device-ready refresh flag when disconnecting
       if (!connected) {
         deviceReadyRefreshDoneRef.current = false
@@ -743,7 +873,7 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
       unsubConnection()
       unsubStatus()
     }
-  }, [loaded, loadRecordings, deviceService])
+  }, [loadRecordings, deviceService])
 
   // B-DEV-007: Listen for download completion events to refresh recordings
   // DL-USB-CONCURRENCY: Use forceRefresh=false — the DB is already updated when downloads complete
@@ -751,31 +881,52 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
   // new downloads may be starting, causing USB concurrency conflicts and stalls.
   useEffect(() => {
     const handleDownloadsCompleted = () => {
-      console.log('[useUnifiedRecordings] Downloads completed - refreshing from DB')
-      loadRecordings(false)
+      void refreshLocal()
     }
     window.addEventListener('hidock:downloads-completed', handleDownloadsCompleted)
     return () => window.removeEventListener('hidock:downloads-completed', handleDownloadsCompleted)
-  }, [loadRecordings])
+  }, [refreshLocal])
 
   // Subscribe to recording watcher events for auto-refresh
   useEffect(() => {
     if (!window.electronAPI?.onRecordingAdded) return
 
     const unsubscribe = window.electronAPI.onRecordingAdded((data) => {
-      console.log('[useUnifiedRecordings] New recording detected:', data.recording.filename)
+      pendingRecordingNoticeCountRef.current += Math.max(1, data.count ?? 1)
+      latestRecordingFilenameRef.current = data.recording.filename
 
-      // Import toast at runtime to avoid circular dependencies
-      import('@/components/ui/toaster').then(({ toast }) => {
-        toast.success('New Recording Detected', data.recording.filename)
-      })
+      // Main normally publishes one event per completed device snapshot. Keep a
+      // small renderer-side coalescer as a compatibility guard for older main
+      // builds and for bursts from the local file watcher.
+      if (recordingRefreshTimerRef.current) clearTimeout(recordingRefreshTimerRef.current)
+      recordingRefreshTimerRef.current = setTimeout(() => {
+        const count = pendingRecordingNoticeCountRef.current
+        const filename = latestRecordingFilenameRef.current
+        pendingRecordingNoticeCountRef.current = 0
+        latestRecordingFilenameRef.current = ''
+        recordingRefreshTimerRef.current = null
 
-      // Auto-refresh without forcing device fetch (use cached data for speed)
-      loadRecordings(false)
+        import('@/components/ui/toaster').then(({ toast }) => {
+          toast.success(
+            count === 1 ? 'New recording detected' : `${count} new recordings detected`,
+            count === 1 ? filename : 'The library has been updated.'
+          )
+        })
+
+        // The event is emitted only after the main-process database write. A
+        // cache-only rebuild is sufficient and cannot start another USB scan.
+        void refreshLocal()
+      }, 100)
     })
 
-    return unsubscribe
-  }, [loadRecordings])
+    return () => {
+      unsubscribe()
+      if (recordingRefreshTimerRef.current) {
+        clearTimeout(recordingRefreshTimerRef.current)
+        recordingRefreshTimerRef.current = null
+      }
+    }
+  }, [refreshLocal])
 
   // Poll device for file count changes (detect new recordings on device)
   useEffect(() => {
@@ -893,6 +1044,17 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
 // Exported (spec-005/F17 T5 §D5) so the Trash-row mapper can reuse the exact
 // same status mapping instead of duplicating it.
 export function mapTranscriptionStatus(status?: string, captureStatus?: string): UnifiedRecording['transcriptionStatus'] {
+  // A durable no-speech outcome must not be hidden by an old capture left by a
+  // previous incorrect transcription/reprocess attempt.
+  if (status === 'no_speech') return 'no_speech'
+
+  // A current queue/run state outranks an older successful capture. During a
+  // re-transcription the prior transcript remains readable, but the row must
+  // still say that new work is pending/processing (or failed).
+  if (status === 'transcribing' || status === 'processing') return 'processing'
+  if (status === 'pending' || status === 'queued') return 'pending'
+  if (status === 'error' || status === 'failed') return 'error'
+
   if (captureStatus) {
     if (captureStatus === 'ready' || captureStatus === 'enriched') return 'complete'
     if (captureStatus === 'processing') return 'processing'
@@ -902,16 +1064,23 @@ export function mapTranscriptionStatus(status?: string, captureStatus?: string):
     case 'transcribed':
     case 'complete':
       return 'complete'
-    case 'transcribing':
-    case 'processing':
-      return 'processing'
-    case 'pending':
-    case 'queued':
-      return 'pending'
-    case 'error':
-    case 'failed':
-      return 'error'
     default:
       return 'none'
   }
+}
+
+/** Apply the live operation queue over the durable recording projection. */
+export function overlayActiveTranscriptionStatuses(
+  recordings: UnifiedRecording[],
+  activeStatuses: ReadonlyMap<string, 'pending' | 'processing'>
+): UnifiedRecording[] {
+  if (activeStatuses.size === 0) return recordings
+  let changed = false
+  const projected = recordings.map((recording) => {
+    const status = activeStatuses.get(recording.id)
+    if (!status || recording.transcriptionStatus === status) return recording
+    changed = true
+    return { ...recording, transcriptionStatus: status }
+  })
+  return changed ? projected : recordings
 }

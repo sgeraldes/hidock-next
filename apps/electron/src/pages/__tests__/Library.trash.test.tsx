@@ -45,6 +45,7 @@ const audioControlsMock = vi.hoisted(() => ({
 // Stable selection spies (fix round, CX-T5-1/CX-T5-2): assertable across renders,
 // read live by the mocked useSourceSelection below.
 const selectionSpies = vi.hoisted(() => ({
+  selectSingle: vi.fn(),
   toggleSelection: vi.fn(),
   selectAll: vi.fn(),
   clearSelection: vi.fn(),
@@ -212,6 +213,7 @@ vi.mock('@/features/library/hooks', async (importOriginal) => {
     useSourceSelection: vi.fn(() => ({
       selectedIds: harness.selectedIds,
       selectedCount: harness.selectedIds.size,
+      selectSingle: selectionSpies.selectSingle,
       toggleSelection: selectionSpies.toggleSelection,
       selectAll: selectionSpies.selectAll,
       clearSelection: selectionSpies.clearSelection,
@@ -478,13 +480,16 @@ describe('H17 in Trash mode — no horizontal scroll, full-width separators (AC#
     expect(scroller.scrollWidth - scroller.clientWidth).toBe(0)
 
     // Structural guarantee that PRODUCES the invariant: each row wrapper spans
-    // 100% width, and every row after the first carries the border-t separator.
+    // 100% width, and every row after the first draws a full-width separator
+    // outside measured geometry so virtual offsets remain stable.
     const rowEls = scroller.querySelectorAll('[data-index]')
     expect(rowEls.length).toBeGreaterThan(0)
     rowEls.forEach((el) => {
       expect((el as HTMLElement).style.width).toBe('100%')
     })
-    expect(rowEls[1]?.className).toContain('border-t')
+    expect(rowEls[1]?.className).toContain('before:inset-x-0')
+    expect(rowEls[1]?.className).toContain('before:h-px')
+    expect(rowEls[1]?.className).toContain('before:bg-border')
   })
 })
 
@@ -616,7 +621,9 @@ describe('AR3-5 — Trash state boundaries', () => {
     renderLibrary()
     await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
     fireEvent.click(trashToggleButton())
-    await screen.findByText(/trashed-newer\.wav/i)
+    // Scoped to the LIST — the selected trash row now ALSO renders its detail
+    // in the middle panel (the 2026-07-23 fix: the reader resolves trash rows).
+    await within(screen.getByTestId('library-list')).findByText(/trashed-newer\.wav/i)
     expect(setSelectedSourceId).not.toHaveBeenCalledWith(null)
   })
 
@@ -625,7 +632,7 @@ describe('AR3-5 — Trash state boundaries', () => {
     renderLibrary()
     await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
     fireEvent.click(trashToggleButton())
-    await screen.findByText(/trashed-newer\.wav/i)
+    await within(screen.getByTestId('library-list')).findByText(/trashed-newer\.wav/i)
     expect(setSelectedSourceId).not.toHaveBeenCalledWith(null) // still in the corpus so far
 
     getTrashMock.mockResolvedValueOnce([trashRow2]) // trash-1 leaves Trash after restore
@@ -704,8 +711,8 @@ describe('CX-T5-3 — null-file_path recording stays restorable in Trash', () =>
   })
 })
 
-describe('CX-T5-1 — Trash mode disables bulk selection', () => {
-  it('Space (and Ctrl+A) in Trash select nothing; the same keys select in the live list', async () => {
+describe('2026-07-23 — Trash selection uses live-list explorer semantics', () => {
+  it('Space (and Ctrl+A) in Trash select TRASH rows, just like the live list', async () => {
     renderLibrary()
     await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
     const list = screen.getByTestId('library-list')
@@ -717,30 +724,73 @@ describe('CX-T5-1 — Trash mode disables bulk selection', () => {
     selectionSpies.toggleSelection.mockClear()
     selectionSpies.selectAll.mockClear()
 
-    // Trash mode: the same shortcuts are inert (guarded in Library.tsx).
+    // Trash mode: the SAME shortcuts work over the Trash corpus (the
+    // "you cannot select it in Trash" gap is closed). Focus carries over from
+    // the live list, so ArrowDown then ArrowUp pins focus on trash row 0.
     fireEvent.click(trashToggleButton())
-    await screen.findByText(/trashed-newer\.wav/i)
+    await within(list).findByText(/trashed-newer\.wav/i)
     fireEvent.keyDown(list, { key: 'ArrowDown' })
+    fireEvent.keyDown(list, { key: 'ArrowUp' })
     fireEvent.keyDown(list, { key: ' ' })
+    expect(selectionSpies.toggleSelection).toHaveBeenCalledWith('trash-1')
     fireEvent.keyDown(list, { key: 'a', ctrlKey: true })
-    expect(selectionSpies.toggleSelection).not.toHaveBeenCalled()
-    expect(selectionSpies.selectAll).not.toHaveBeenCalled()
-    expect(screen.queryByRole('toolbar', { name: /bulk actions/i })).not.toBeInTheDocument()
+    expect(selectionSpies.selectAll).toHaveBeenCalledWith(['trash-1', 'trash-2'])
   })
 
-  it('the BulkActionsBar never renders in Trash, even with a staged selection', async () => {
-    // Defensive render gate: even if a selection somehow existed while in
-    // Trash, the bar (whose handlers all operate on the LIVE list) must not show.
+  it('the live BulkActionsBar never renders in Trash; the Trash bulk bar needs a TRASH-corpus selection', async () => {
+    // Staged LIVE-list selection: the live bar shows; in Trash neither bar may
+    // show (entering clears the selection — and a non-corpus id can't light the
+    // Trash bar even if a stale one lingered).
     harness.selectedIds = new Set(['live-0'])
     renderLibrary()
     await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
-    expect(screen.getByRole('toolbar', { name: /bulk actions/i })).toBeInTheDocument()
+    expect(screen.getByRole('toolbar', { name: /^bulk actions$/i })).toBeInTheDocument()
 
     fireEvent.click(trashToggleButton())
-    await screen.findByText(/trashed-newer\.wav/i)
-    expect(screen.queryByRole('toolbar', { name: /bulk actions/i })).not.toBeInTheDocument()
+    await within(screen.getByTestId('library-list')).findByText(/trashed-newer\.wav/i)
+    expect(screen.queryByRole('toolbar', { name: /^bulk actions$/i })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('trash-bulk-bar')).not.toBeInTheDocument()
     // Entering Trash also clears whatever selection existed (handleToggleTrash).
     expect(selectionSpies.clearSelection).toHaveBeenCalled()
+  })
+
+  it('the Trash bulk bar restores the selected trash rows', async () => {
+    harness.selectedIds = new Set(['trash-1', 'trash-2'])
+    window.electronAPI.recordings.restore = vi.fn().mockResolvedValue({ success: true })
+    renderLibrary()
+    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    fireEvent.click(trashToggleButton())
+    await within(screen.getByTestId('library-list')).findByText(/trashed-newer\.wav/i)
+
+    const bar = await screen.findByTestId('trash-bulk-bar')
+    expect(bar).toHaveTextContent('2 of 2 selected')
+    fireEvent.click(within(bar).getByRole('button', { name: /^restore$/i }))
+
+    await waitFor(() => {
+      expect(window.electronAPI.recordings.restore).toHaveBeenCalledWith('trash-1')
+      expect(window.electronAPI.recordings.restore).toHaveBeenCalledWith('trash-2')
+    })
+    await waitFor(() => expect(selectionSpies.clearSelection).toHaveBeenCalled())
+  })
+
+  it('a plain click on a Trash row selects it (and only it)', async () => {
+    renderLibrary()
+    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    fireEvent.click(trashToggleButton())
+    const rowText = await within(screen.getByTestId('library-list')).findByText(/trashed-newer\.wav/i)
+    fireEvent.click(rowText)
+    expect(selectionSpies.selectSingle).toHaveBeenCalledWith('trash-1')
+  })
+
+  it('the selected Trash row renders its detail in the middle panel', async () => {
+    harness.selectedSourceId = 'trash-1'
+    renderLibrary()
+    await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
+    fireEvent.click(trashToggleButton())
+    await within(screen.getByTestId('library-list')).findByText(/trashed-newer\.wav/i)
+    // The reader resolves the trash row from the Trash corpus (previously it
+    // read only the LIVE list and stayed stuck on "No recording selected").
+    expect(screen.queryByText(/no recording selected/i)).not.toBeInTheDocument()
   })
 })
 
@@ -754,10 +804,10 @@ describe('CX-T5-2 + OP-F-LOW-4 — bulk soft-delete refreshes Trash and clears p
 
     // Bulk bar → Delete → shared confirm dialog → confirm.
     const toolbar = screen.getByRole('toolbar', { name: /bulk actions/i })
-    fireEvent.click(within(toolbar).getByTitle('Delete selected'))
+    fireEvent.click(within(toolbar).getByTitle('Move selected to Trash (hidden, restorable — nothing is erased)'))
     const dialog = await screen.findByRole('alertdialog')
-    expect(within(dialog).getByText(/delete selected items/i)).toBeInTheDocument()
-    fireEvent.click(within(dialog).getByRole('button', { name: /^delete$/i }))
+    expect(within(dialog).getByRole('heading', { name: /move to trash/i })).toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('button', { name: /^move to trash$/i }))
 
     await waitFor(() => expect(window.electronAPI.recordings.deleteCascade).toHaveBeenCalledWith('live-0', false))
     // CX-T5-2: the Trash badge/list reloads (mount + post-bulk-delete).
@@ -774,9 +824,9 @@ describe('CX-T5-2 + OP-F-LOW-4 — bulk soft-delete refreshes Trash and clears p
     await waitFor(() => expect(trashToggleButton()).toHaveTextContent('Trash (2)'))
 
     const toolbar = screen.getByRole('toolbar', { name: /bulk actions/i })
-    fireEvent.click(within(toolbar).getByTitle('Delete selected'))
+    fireEvent.click(within(toolbar).getByTitle('Move selected to Trash (hidden, restorable — nothing is erased)'))
     const dialog = await screen.findByRole('alertdialog')
-    fireEvent.click(within(dialog).getByRole('button', { name: /^delete$/i }))
+    fireEvent.click(within(dialog).getByRole('button', { name: /^move to trash$/i }))
 
     await waitFor(() => expect(window.electronAPI.recordings.deleteCascade).toHaveBeenCalledWith('live-1', false))
     await waitFor(() => expect(getTrashMock).toHaveBeenCalledTimes(2))

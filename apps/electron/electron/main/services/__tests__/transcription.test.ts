@@ -37,6 +37,28 @@ const mockUpdateQueueProgress = vi.fn()
 const mockGenerateContent = vi.fn(async (..._args: unknown[]) => {
   throw new Error('API rate limit exceeded')
 })
+const mockGeminiTranscribeCall = vi.fn()
+const mockAnalyzeAudioPreflight = vi.fn(async (
+  _filePath?: string,
+  _durationSeconds?: number | null
+): Promise<any> => ({
+  status: 'speech_present' as const,
+  durationSeconds: 60,
+  silenceSeconds: 5,
+  nonSilentSeconds: 55,
+  nonSilentRatio: 0.917,
+  meanVolumeDb: -24,
+  maxVolumeDb: -3,
+  silenceThresholdDb: -45,
+  minimumSilenceSeconds: 0.25,
+  activityIntervals: [{ start: 0, end: 60, duration: 60 }],
+  reasonCodes: []
+}))
+const mockRemoveRecordingFromGraph = vi.fn((_recordingId?: string) => ({
+  ok: true,
+  recordingId: 'test',
+  dryRun: false
+}))
 
 // spawnStreaming uses `spawn`, not `execFile`. We create a helper that manufactures
 // a fake ChildProcess whose stdout/stderr are minimal EventEmitters so spawnStreaming
@@ -97,6 +119,7 @@ vi.mock('../database', () => ({
   getRecordingById: (...args: any[]) => mockGetRecordingById(...args),
   updateRecordingStatus: (...args: any[]) => mockUpdateRecordingStatus(...args),
   updateRecordingTranscriptionStatus: (...args: any[]) => mockUpdateRecordingStatus(...args),
+  retireGeneratedContentForNoSpeech: vi.fn(),
   insertTranscript: (...args: any[]) => mockInsertTranscript(...args),
   getQueueItems: (...args: any[]) => mockGetQueueItems(...args),
   updateQueueItem: (...args: any[]) => mockUpdateQueueItem(...args),
@@ -112,6 +135,14 @@ vi.mock('../database', () => ({
   releaseTranscriptionLock: vi.fn().mockReturnValue(true),
   clearStaleTranscriptionLock: vi.fn(), // Called on startTranscriptionProcessor()
   resetStuckTranscriptions: vi.fn().mockReturnValue({ recordingsReset: 0, queueItemsReset: 0 }), // Called on startTranscriptionProcessor()
+  getActiveProcessingRunsForRecording: vi.fn(() => [
+    { stage: 'metadata', status: 'completed' },
+    { stage: 'schedule-match', status: 'completed' }
+  ]),
+  enrichRecordingScheduleMetadata: vi.fn(),
+  createProcessingRun: vi.fn(({ stage }: { stage: string }) => ({ id: `run-${stage}` })),
+  completeProcessingRun: vi.fn(),
+  failProcessingRun: vi.fn(),
   run: vi.fn(),
   queryOne: vi.fn(),
   // F16/spec-002 (T2): the inline actionable-detection block gates on this.
@@ -129,6 +160,15 @@ vi.mock('../database', () => ({
 // recording-eligibility boundary. Default eligible; flipped in the ADV40-1 test.
 vi.mock('../recording-eligibility', () => ({
   isRecordingEligible: (...args: any[]) => mockIsRecordingEligible(...args)
+}))
+
+vi.mock('../audio-preflight', () => ({
+  analyzeAudioPreflight: (filePath: string, durationSeconds?: number | null) =>
+    mockAnalyzeAudioPreflight(filePath, durationSeconds)
+}))
+
+vi.mock('../knowledge-graph-service', () => ({
+  removeRecordingFromGraph: (...args: [string]) => mockRemoveRecordingFromGraph(...args)
 }))
 
 // Mock electron
@@ -161,6 +201,7 @@ vi.mock('@google/generative-ai', () => ({
 vi.mock('@hidock/transcription', () => {
   // eslint-disable-next-line require-yield -- intentional: async generator that throws before yielding
   const mockGeminiTranscribe = async function* () {
+    mockGeminiTranscribeCall()
     throw new Error('API rate limit exceeded')
   }
   function GeminiEngine(_options: { apiKey: string; model?: string; language?: string }) {
@@ -180,7 +221,13 @@ vi.mock('@hidock/transcription', () => {
       this.name = 'TranscriptionCancelledError'
     }
   }
-  return { GeminiEngine, TranscriptionCancelledError }
+  class NoSpeechDetectedError extends Error {
+    constructor(message = 'No intelligible speech was detected in the recording') {
+      super(message)
+      this.name = 'NoSpeechDetectedError'
+    }
+  }
+  return { GeminiEngine, NoSpeechDetectedError, TranscriptionCancelledError }
 })
 
 // Mock fs - simple approach that works in jsdom environment
@@ -215,6 +262,20 @@ describe('Transcription Service', () => {
     mockIsRecordingEligible.mockReturnValue(true)
     mockGenerateContent.mockRejectedValue(new Error('API rate limit exceeded'))
     mockGetVectorStore.mockReturnValue(null as any)
+    mockAddToQueue.mockReturnValue('queue-auto')
+    mockAnalyzeAudioPreflight.mockResolvedValue({
+      status: 'speech_present',
+      durationSeconds: 60,
+      silenceSeconds: 5,
+      nonSilentSeconds: 55,
+      nonSilentRatio: 0.917,
+      meanVolumeDb: -24,
+      maxVolumeDb: -3,
+      silenceThresholdDb: -45,
+      minimumSilenceSeconds: 0.25,
+      activityIntervals: [{ start: 0, end: 60, duration: 60 }],
+      reasonCodes: []
+    })
     mockConfig = {
       transcription: {
         provider: 'gemini',
@@ -231,6 +292,118 @@ describe('Transcription Service', () => {
   })
 
   describe('BUG-TX-001: recordings.status stuck at transcribing after failure', () => {
+    it('CHANGE-2026-08-14-001 — cough-only audio terminates before every provider and downstream stage', async () => {
+      const queueItem = {
+        id: 'queue-no-speech',
+        recording_id: 'rec-no-speech',
+        filename: '2026Aug14-170410-Rec73.wav',
+        status: 'pending',
+        attempts: 0
+      }
+      mockGetQueueItems.mockImplementation((status?: string) => status === 'pending' ? [queueItem] : [])
+      mockGetRecordingById.mockReturnValue({
+        id: 'rec-no-speech',
+        filename: queueItem.filename,
+        file_path: 'F:\\HiDock-Next-Audios\\2026Aug14-170410-Rec73.wav',
+        duration_seconds: 174.8535,
+        date_recorded: '2026-08-14T17:04:10.000Z',
+        status: 'none'
+      })
+      mockAnalyzeAudioPreflight.mockResolvedValue({
+        status: 'no_speech',
+        durationSeconds: 174.854,
+        silenceSeconds: 173.384,
+        nonSilentSeconds: 1.47,
+        nonSilentRatio: 0.008,
+        meanVolumeDb: -44.6,
+        maxVolumeDb: -5.7,
+        silenceThresholdDb: -45,
+        minimumSilenceSeconds: 0.25,
+        activityIntervals: [{ start: 0.7, end: 1.5, duration: 0.8 }],
+        reasonCodes: ['insufficient_sustained_audio_activity']
+      })
+
+      const database = await import('../database')
+      const { startTranscriptionProcessor, stopTranscriptionProcessor } = await import('../transcription')
+      startTranscriptionProcessor()
+      try {
+        await vi.waitFor(() => {
+          expect(mockUpdateQueueItem).toHaveBeenCalledWith('queue-no-speech', 'completed')
+        })
+      } finally {
+        stopTranscriptionProcessor()
+      }
+
+      expect(mockGeminiTranscribeCall).not.toHaveBeenCalled()
+      expect(mockGenerateContent).not.toHaveBeenCalled()
+      expect(mockExecFile).not.toHaveBeenCalled()
+      expect(mockInsertTranscript).not.toHaveBeenCalled()
+      expect(mockUpdateRecordingStatus).toHaveBeenCalledWith('rec-no-speech', 'no_speech')
+      expect(vi.mocked(database.retireGeneratedContentForNoSpeech)).toHaveBeenCalledWith('rec-no-speech')
+      expect(mockRemoveRecordingFromGraph).toHaveBeenCalledWith('rec-no-speech')
+      expect(vi.mocked(database.createProcessingRun)).toHaveBeenCalledTimes(1)
+      expect(vi.mocked(database.createProcessingRun)).toHaveBeenCalledWith(
+        expect.objectContaining({ stage: 'vad', tool: 'ffmpeg-silencedetect', execution: 'local' })
+      )
+    })
+
+    it('allows explicit re-transcription to retire an existing AI-garbage transcript after local no-speech proof', async () => {
+      const queueItem = {
+        id: 'queue-correct-bad-ai',
+        recording_id: 'rec-bad-ai',
+        filename: '2026Aug14-170410-Rec73.wav',
+        status: 'pending',
+        attempts: 0,
+        // A provider on the queue row identifies the explicit reprocess path.
+        provider: 'gemini'
+      }
+      mockGetQueueItems.mockImplementation((status?: string) => status === 'pending' ? [queueItem] : [])
+      mockGetRecordingById.mockReturnValue({
+        id: 'rec-bad-ai',
+        filename: queueItem.filename,
+        file_path: 'F:\\HiDock-Next-Audios\\2026Aug14-170410-Rec73.wav',
+        duration_seconds: 174.8535,
+        date_recorded: '2026-08-14T17:04:10.000Z',
+        status: 'complete'
+      })
+      // The previous AI transcript marked the capture garbage, so the normal
+      // surfacing/automatic-processing boundary rejects it. It remains a live,
+      // non-personal recording that the user may explicitly correct.
+      mockIsRecordingEligible.mockReturnValue(false)
+      mockIsRecordingProcessable.mockReturnValue(true)
+      mockAnalyzeAudioPreflight.mockResolvedValue({
+        status: 'no_speech',
+        durationSeconds: 174.854,
+        silenceSeconds: 172.428,
+        nonSilentSeconds: 2.426,
+        nonSilentRatio: 0.0139,
+        meanVolumeDb: -44.6,
+        maxVolumeDb: -5.7,
+        silenceThresholdDb: -45,
+        minimumSilenceSeconds: 0.25,
+        activityIntervals: [{ start: 0.6, end: 1.7, duration: 1.1 }],
+        reasonCodes: ['insufficient_sustained_audio_activity']
+      })
+
+      const database = await import('../database')
+      const { startTranscriptionProcessor, stopTranscriptionProcessor } = await import('../transcription')
+      startTranscriptionProcessor()
+      try {
+        await vi.waitFor(() => {
+          expect(mockUpdateQueueItem).toHaveBeenCalledWith('queue-correct-bad-ai', 'completed')
+        })
+      } finally {
+        stopTranscriptionProcessor()
+      }
+
+      expect(mockAnalyzeAudioPreflight).toHaveBeenCalled()
+      expect(vi.mocked(database.retireGeneratedContentForNoSpeech)).toHaveBeenCalledWith('rec-bad-ai')
+      expect(mockGeminiTranscribeCall).not.toHaveBeenCalled()
+      expect(mockGenerateContent).not.toHaveBeenCalled()
+      expect(mockInsertTranscript).not.toHaveBeenCalled()
+      expect(mockUpdateRecordingStatus).toHaveBeenCalledWith('rec-bad-ai', 'no_speech')
+    })
+
     it('should update recordings.status to failed when transcription fails', { timeout: 20000 }, async () => {
       const mockQueueItem = {
         id: 'queue-1',
@@ -292,7 +465,8 @@ describe('Transcription Service', () => {
 
       expect(result).toBe(true)
       expect(mockAddToQueue).toHaveBeenCalledTimes(1)
-      expect(mockAddToQueue).toHaveBeenCalledWith('rec-funnel')
+      // The prerequisite gate canonicalizes stale/foreign ids before enqueue.
+      expect(mockAddToQueue).toHaveBeenCalledWith('rec-123')
     })
 
     it('does not queue and returns false when autoTranscribe is disabled', async () => {

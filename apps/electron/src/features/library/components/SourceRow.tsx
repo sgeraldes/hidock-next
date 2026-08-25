@@ -1,4 +1,5 @@
-import { memo } from 'react'
+import { memo, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { AlertCircle, Download, Trash2, Wand2, Sparkles, FileText, RefreshCw, AudioLines, MoreHorizontal, Calendar, EyeOff, Eye, TrendingDown, Ban, RotateCcw, ArchiveRestore } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -13,6 +14,7 @@ import { formatDateTime } from '@/lib/utils'
 import { Meeting, Transcript } from '@/types'
 import type { QualityRating } from '@/types/knowledge'
 import { UnifiedRecording, hasLocalPath, isRecordingBacked } from '@/types/unified-recording'
+import type { DownloadStatus } from '@/store/useAppStore'
 import { StatusIcon } from './StatusIcon'
 import { TranscriptionStatusBadge } from './TranscriptionStatusBadge'
 import { useLibraryStore } from '@/store/useLibraryStore'
@@ -79,6 +81,17 @@ interface SourceRowProps {
   transcript?: Transcript
   isSelected?: boolean
   isActiveSource?: boolean
+  /** Permanent-delete feedback. Keeps the fixed row in place until the local
+   *  purge commits, while disabling every interaction. */
+  isDeleting?: boolean
+  deletionLabel?: string
+  /**
+   * FIXED-HEIGHT row (48px, title truncated to one line). The compact list
+   * uses this so virtualized offsets are ALWAYS exact (48 × index) — variable
+   * heights (line-clamp-2 titles at ~74px) made every measurement/scroll/
+   * alignment bug possible (2026-07-22).
+   */
+  compact?: boolean
   /** Bulk-selection checkbox was removed from the row (owner request). Retained so
       existing callers keep type-checking; no longer drives any UI. */
   anySelected?: boolean
@@ -105,6 +118,7 @@ interface SourceRowProps {
   // Download state for device-only recordings
   isDownloading?: boolean
   downloadProgress?: number
+  downloadStatus?: DownloadStatus
   deviceConnected?: boolean
 }
 
@@ -114,7 +128,11 @@ export const SourceRow = memo(function SourceRow({
   transcript,
   isSelected = false,
   isActiveSource = false,
+  isDeleting = false,
+  deletionLabel = 'Removing local data…',
+  compact = false,
   searchQuery = '',
+  onSelectionChange,
   onClick,
   onDownload,
   onDelete,
@@ -129,9 +147,12 @@ export const SourceRow = memo(function SourceRow({
   onGenerateOutput,
   isDownloading = false,
   downloadProgress,
+  downloadStatus,
   deviceConnected = false
 }: SourceRowProps) {
   const error = useLibraryStore((state) => state.recordingErrors.get(recording.id))
+  const [actionMenuOpen, setActionMenuOpen] = useState(false)
+  const [contextMenuAnchor, setContextMenuAnchor] = useState<{ x: number; y: number } | null>(null)
 
   // Smart title
   const { primaryText, source: titleSource } = getDisplayTitle(recording, meeting, transcript)
@@ -140,9 +161,23 @@ export const SourceRow = memo(function SourceRow({
   const titleIsFilename = titleSource === 'filename'
 
   const handleRowClick = (e: React.MouseEvent) => {
+    if (isDeleting) return
     // Don't trigger onClick when the click lands on an action button.
     const target = e.target as HTMLElement
     if (target.closest('button')) {
+      return
+    }
+    // Explorer-style multi-select (no checkboxes, per owner): Ctrl/Cmd+click
+    // toggles this row, Shift+click range-selects from the last-clicked row,
+    // plain click opens the source. Selection shows the BulkActionsBar.
+    if ((e.ctrlKey || e.metaKey) && onSelectionChange) {
+      e.preventDefault()
+      onSelectionChange(recording.id, false)
+      return
+    }
+    if (e.shiftKey && onSelectionChange) {
+      e.preventDefault()
+      onSelectionChange(recording.id, true)
       return
     }
     onClick?.()
@@ -162,30 +197,45 @@ export const SourceRow = memo(function SourceRow({
     <TooltipProvider>
       <div
         className={[
-          '@container flex items-start justify-between gap-2 py-2.5 px-3 cursor-pointer',
+          // select-none: shift+click (range select) must not start the browser's
+          // native TEXT selection — the list behaves like a file explorer, not
+          // a text document (2026-07-21 report).
+          `@container flex ${compact ? 'h-12 items-center' : 'items-start'} justify-between gap-2 ${compact ? 'py-1.5' : 'py-2.5'} px-3 ${isDeleting ? 'cursor-wait' : 'cursor-pointer'} select-none`,
           'transition-[background-color,box-shadow] duration-150',
-          // Hover reads as a gentle elevation (bg + inner ring — the row list is
-          // overflow-clipped, so an inset ring conveys lift where a drop shadow can't).
-          'hover:bg-muted/60 hover:ring-1 hover:ring-inset hover:ring-border',
-          // Selection/active state shown via background tint + inset accent ring
-          // (no side-stripe border, per the design rules).
+          // ONE visual system, ONE box (2026-07-22): background tints ONLY —
+          // no outline rings. The wrapper owns separators (border-t); outline
+          // rings on this div lived on a DIFFERENT box than those separators
+          // and visibly misaligned on hover/selection (especially after a
+          // deletion shifted measurements).
+          isDeleting ? 'bg-muted/50' : 'hover:bg-muted/60',
+          // Selection/active state shown via background tint (no side-stripe,
+          // no outline ring, per the design rules).
+          // ACTIVE (open in reader) must never be confusable with SELECTED
+          // (bulk): a clearly stronger tint — no ring anywhere.
           isActiveSource
-            ? 'bg-primary/15 ring-1 ring-inset ring-primary/30'
+            ? 'bg-primary/25'
             : isSelected
-              ? 'bg-primary/10 ring-1 ring-inset ring-primary/20'
+              ? 'bg-primary/10'
               : ''
         ].filter(Boolean).join(' ')}
         role="option"
         onClick={handleRowClick}
+        onContextMenu={(event) => {
+          if (isDeleting) return
+          event.preventDefault()
+          setContextMenuAnchor({ x: event.clientX, y: event.clientY })
+          setActionMenuOpen(true)
+        }}
         aria-selected={isSelected}
-        tabIndex={0}
+        aria-disabled={isDeleting || undefined}
+        tabIndex={isDeleting ? -1 : 0}
       >
         <div className="flex items-start gap-2 min-w-0 flex-1">
           {/* Content area — flex-1 to fill remaining space. Status icons moved to the
               right cluster so the title starts flush-left with no wasted gutter. */}
           <div className="flex-1 min-w-0">
             <div className="flex items-start gap-1.5 min-w-0">
-              <p className="font-medium text-sm line-clamp-2 text-foreground leading-tight min-w-0" title={primaryText}>
+              <p className={`font-medium text-sm ${compact ? 'truncate' : 'line-clamp-2'} text-foreground leading-tight min-w-0`} title={primaryText}>
                 {searchQuery ? highlightText(primaryText, searchQuery) : primaryText}
               </p>
               {/* Personal ("ignored") badge — this recording is kept but pulled out of
@@ -218,13 +268,23 @@ export const SourceRow = memo(function SourceRow({
             the row's top line. The two status icons live here (not a left column) so
             the title starts flush-left. Playback lives in the mid-panel player. */}
         <div className="flex items-center gap-1.5 shrink-0">
+          {isDeleting && (
+            <div
+              className="flex max-w-44 items-center gap-1.5 text-xs font-medium text-muted-foreground"
+              role="status"
+              aria-live="polite"
+            >
+              <RefreshCw className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
+              <span className="truncate">{deletionLabel}</span>
+            </div>
+          )}
           {/* Value badge (F16/spec-003) — icon-only, low-value/garbage only. Sits
               before the meeting chip so the two provenance/quality glyphs read
               left-to-right in the same tight cluster. */}
-          <ValueBadge recording={recording} />
+          {!isDeleting && <ValueBadge recording={recording} />}
           {/* Meeting-link (calendar) provenance — the system knows this row maps to a
               calendar event; the status icons align with it. */}
-          {meeting && (
+          {!isDeleting && meeting && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <span
@@ -241,10 +301,10 @@ export const SourceRow = memo(function SourceRow({
               </TooltipContent>
             </Tooltip>
           )}
-          <StatusIcon recording={recording} />
-          <TranscriptionStatusBadge status={recording.transcriptionStatus} compact />
+          {!isDeleting && <StatusIcon recording={recording} />}
+          {!isDeleting && <TranscriptionStatusBadge status={recording.transcriptionStatus} compact />}
           {/* Error indicator */}
-          {error && (
+          {!isDeleting && error && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <AlertCircle className="h-3.5 w-3.5 text-destructive shrink-0" aria-label="Processing error" />
@@ -257,26 +317,72 @@ export const SourceRow = memo(function SourceRow({
           )}
 
           {/* Download progress (device-only, in flight) */}
-          {recording.location === 'device-only' && isDownloading && (
+          {!isDeleting && recording.location === 'device-only' && downloadStatus && (
             <div className="flex items-center gap-1 text-xs text-muted-foreground px-2" aria-live="polite">
-              <RefreshCw className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-              <span>{downloadProgress ?? 0}%</span>
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${downloadStatus === 'downloading' || downloadStatus === 'cancelling' ? 'animate-spin' : ''}`}
+                aria-hidden="true"
+              />
+              <span>
+                {downloadStatus === 'pending'
+                  ? 'Queued'
+                  : downloadStatus === 'cancelling'
+                    ? 'Cancelling'
+                    : (downloadProgress ?? 0) > 0
+                      ? `${downloadProgress}%`
+                      : 'Starting'}
+              </span>
             </div>
           )}
 
-          {/* Secondary actions: overflow menu (labeled, keeps the row uncluttered) */}
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                onClick={(e) => e.stopPropagation()}
-                aria-label="More actions"
-              >
-                <MoreHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-56">
+          {/* Secondary actions: overflow menu (labeled, keeps the row uncluttered).
+              Right-click reuses this exact menu. The invisible context trigger is
+              portaled out of the virtual row because its transform would otherwise
+              make fixed pointer coordinates relative to the row, not the viewport. */}
+          {!isDeleting && <DropdownMenu
+            open={actionMenuOpen}
+            onOpenChange={(open) => {
+              setActionMenuOpen(open)
+              if (!open) setContextMenuAnchor(null)
+            }}
+          >
+            {contextMenuAnchor
+              ? createPortal(
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      style={{
+                        position: 'fixed',
+                        left: contextMenuAnchor.x,
+                        top: contextMenuAnchor.y,
+                        width: 1,
+                        height: 1,
+                        opacity: 0,
+                        pointerEvents: 'none'
+                      }}
+                      onClick={(e) => e.stopPropagation()}
+                      aria-label="More actions"
+                    >
+                      <MoreHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
+                    </Button>
+                  </DropdownMenuTrigger>,
+                  document.body
+                )
+              : (
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => e.stopPropagation()}
+                      aria-label="More actions"
+                    >
+                      <MoreHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                )}
+            <DropdownMenuContent align={contextMenuAnchor ? 'start' : 'end'} className="w-56">
               {onAskAssistant && (
                 <DropdownMenuItem onClick={(e) => { e.stopPropagation(); onAskAssistant(); }}>
                   <Sparkles className="h-4 w-4" aria-hidden="true" />
@@ -317,7 +423,9 @@ export const SourceRow = memo(function SourceRow({
                   disabled={!deviceConnected}
                 >
                   <Download className="h-4 w-4" aria-hidden="true" />
-                  {deviceConnected ? 'Download to computer' : 'Device not connected'}
+                  {deviceConnected
+                    ? (downloadStatus === 'pending' ? 'Start queued download' : 'Download to computer')
+                    : 'Device not connected'}
                 </DropdownMenuItem>
               )}
               {onMarkPersonal && recording.location !== 'device-only' && (
@@ -444,7 +552,7 @@ export const SourceRow = memo(function SourceRow({
                 </>
               )}
             </DropdownMenuContent>
-          </DropdownMenu>
+          </DropdownMenu>}
         </div>
       </div>
     </TooltipProvider>
@@ -467,6 +575,8 @@ export const SourceRow = memo(function SourceRow({
     prevProps.recording.size === nextProps.recording.size &&
     prevProps.isSelected === nextProps.isSelected &&
     prevProps.isActiveSource === nextProps.isActiveSource &&
+    prevProps.isDeleting === nextProps.isDeleting &&
+    prevProps.deletionLabel === nextProps.deletionLabel &&
     prevProps.transcript?.id === nextProps.transcript?.id &&
     prevProps.transcript?.title_suggestion === nextProps.transcript?.title_suggestion &&
     prevProps.meeting?.id === nextProps.meeting?.id &&

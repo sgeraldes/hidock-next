@@ -108,6 +108,46 @@ describe('useTranscriptionStore', () => {
     })
   })
 
+  describe('reconcileQueue', () => {
+    it('replaces the active projection in one state transition', () => {
+      const listener = vi.fn()
+      const unsubscribe = useTranscriptionStore.subscribe(listener)
+
+      useTranscriptionStore.getState().reconcileQueue([
+        { id: 'q-1', recording_id: 'rec-1', filename: 'one.hda', status: 'pending', progress: 0 },
+        { id: 'q-2', recording_id: 'rec-2', filename: 'two.hda', status: 'processing', progress: 42 },
+        { id: 'q-old', recording_id: 'rec-old', filename: 'old.hda', status: 'completed', progress: 100 }
+      ])
+
+      const state = useTranscriptionStore.getState()
+      expect(listener).toHaveBeenCalledTimes(1)
+      expect(state.queue.size).toBe(2)
+      expect(state.queue.get('q-2')).toMatchObject({ status: 'processing', progress: 42 })
+      expect(state.processing.has('rec-2')).toBe(true)
+      unsubscribe()
+    })
+
+    it('parses SQLite queue timestamps as UTC and hides stale completion time while processing', () => {
+      useTranscriptionStore.getState().reconcileQueue([{
+        id: 'q-1',
+        recording_id: 'rec-1',
+        filename: 'one.hda',
+        status: 'processing',
+        progress: 90,
+        created_at: '2026-08-19 18:47:30',
+        started_at: '2026-08-19 18:59:15',
+        completed_at: '2026-08-19 18:58:11',
+        attempts: 4,
+        retry_count: 2
+      }])
+
+      const item = useTranscriptionStore.getState().queue.get('q-1')!
+      expect(item.createdAt?.toISOString()).toBe('2026-08-19T18:47:30.000Z')
+      expect(item.startedAt?.toISOString()).toBe('2026-08-19T18:59:15.000Z')
+      expect(item.completedAt).toBeUndefined()
+    })
+  })
+
   describe('updateProgress', () => {
     it('updates progress and sets status to processing', () => {
       const { addToQueue, updateProgress } = useTranscriptionStore.getState()
@@ -216,6 +256,7 @@ describe('useTranscriptionStore', () => {
       const item = useTranscriptionStore.getState().queue.get('q-1')
       expect(item!.status).toBe('failed')
       expect(item!.error).toBe('API rate limit exceeded')
+      expect(item!.completedAt).toBeInstanceOf(Date)
     })
 
     it('removes recordingId from processing set', () => {
@@ -277,6 +318,27 @@ describe('useTranscriptionStore', () => {
 
       const item = useTranscriptionStore.getState().queue.get('q-1')
       expect(item!.retryCount).toBe(2)
+    })
+
+    it('allows an explicit user retry after automatic retries are exhausted', async () => {
+      useTranscriptionStore.getState().reconcileQueue([{
+        id: 'q-1',
+        recording_id: 'rec-1',
+        filename: 'meeting.wav',
+        status: 'failed',
+        progress: 90,
+        error_message: 'Provider failure',
+        attempts: 4,
+        retry_count: 3
+      }])
+
+      useTranscriptionStore.getState().retry('q-1')
+      await flushPromises()
+
+      const item = useTranscriptionStore.getState().queue.get('q-1')
+      expect(window.electronAPI.recordings.updateQueueItem).toHaveBeenCalledWith('q-1', 'pending')
+      expect(item?.status).toBe('pending')
+      expect(item?.retryCount).toBe(4)
     })
 
     it('calls electronAPI to update DB queue item', () => {

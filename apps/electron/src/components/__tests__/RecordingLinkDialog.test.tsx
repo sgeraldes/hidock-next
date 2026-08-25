@@ -92,4 +92,30 @@ describe('RecordingLinkDialog — decidable match', () => {
     })
     expect(screen.queryByText('Best match')).not.toBeInTheDocument()
   })
+
+  it('does NOT refetch when re-rendered with a NEW recording object of the SAME id (inline-prop parents)', async () => {
+    // 2026-07-23 — SourceReader builds the recording prop inline per render;
+    // with an identity dep every ~3s background poll re-fired the fetch and the
+    // dialog cycled list → Loading forever ("keeps close/opening every 3s").
+    const { rerender } = render(<RecordingLinkDialog recording={{ ...RECORDING }} open onClose={vi.fn()} onResolved={vi.fn()} />)
+    await waitFor(() => expect(window.electronAPI.recordings.getCandidates).toHaveBeenCalledTimes(1))
+
+    // Five re-renders with fresh object identities, same scalar content.
+    for (let i = 0; i < 5; i++) {
+      rerender(<RecordingLinkDialog recording={{ ...RECORDING }} open onClose={vi.fn()} onResolved={vi.fn()} />)
+    }
+    expect(window.electronAPI.recordings.getCandidates).toHaveBeenCalledTimes(1)
+    // The candidate list stays up (no Loading flicker).
+    expect(screen.getByText('Retro Belcorp')).toBeInTheDocument()
+    expect(screen.queryByText(/loading/i)).not.toBeInTheDocument()
+  })
+
+  it('refetches when the recording id actually changes', async () => {
+    const { rerender } = render(<RecordingLinkDialog recording={{ ...RECORDING }} open onClose={vi.fn()} onResolved={vi.fn()} />)
+    await waitFor(() => expect(window.electronAPI.recordings.getCandidates).toHaveBeenCalledTimes(1))
+
+    rerender(<RecordingLinkDialog recording={{ ...RECORDING, id: 'rec-99' }} open onClose={vi.fn()} onResolved={vi.fn()} />)
+    await waitFor(() => expect(window.electronAPI.recordings.getCandidates).toHaveBeenCalledTimes(2))
+    expect(window.electronAPI.recordings.getCandidates).toHaveBeenLastCalledWith('rec-99')
+  })
 })

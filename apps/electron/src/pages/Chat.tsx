@@ -86,6 +86,10 @@ interface RAGStatus {
   embedProvider?: string | null
   embedProviderLabel?: string | null
   embedDocumentCount?: number
+  indexState?: 'idle' | 'queued' | 'loading' | 'ready' | 'failed'
+  indexLoaded?: number
+  indexTotal?: number
+  indexError?: string | null
 }
 
 interface Source {
@@ -295,11 +299,13 @@ export function Chat() {
         setConversations(prev => [newConv, ...prev])
         setActiveConversation(newConv)
 
-        // ADV39: respect the addContext write result. The main-process gate refuses
-        // to pin a capture that became personal/deleted/value-excluded between fetch
-        // and write; only install/display the capture when the write SUCCEEDED, and
-        // re-fetch its metadata only AFTER a successful write.
-        const result = await window.electronAPI.assistant.addContext(newConv.id, contextId)
+        // ADV39: respect the write result. The main-process gate refuses to pin
+        // a capture that became personal/deleted/value-excluded between fetch
+        // and write; only install/display the capture when the write SUCCEEDED.
+        // setContext (not addContext): "Ask about this source" means "about
+        // THIS source" — the conversation's pins become exactly this capture
+        // instead of accumulating every previously asked one (2026-07-24).
+        const result = await window.electronAPI.assistant.setContext(newConv.id, contextId)
         if (!result?.success) {
           setContextError('That item is no longer available')
           return
@@ -310,8 +316,9 @@ export function Chat() {
         setContextIds([contextId])
         setContextItems([installed])
       } else if (!contextIds.includes(contextId)) {
-        // Attach to existing conversation — only install/display on a successful write.
-        const result = await window.electronAPI.assistant.addContext(activeConversation.id, contextId)
+        // Attach to existing conversation — REPLACE its pins with this source
+        // (same "about THIS source" model), only install/display on success.
+        const result = await window.electronAPI.assistant.setContext(activeConversation.id, contextId)
         if (!result?.success) {
           setContextError('That item is no longer available')
           return
@@ -319,8 +326,8 @@ export function Chat() {
         const fresh = await window.electronAPI.knowledge.getById(contextId)
         const installed = fresh ?? capture
         setContextRecording(installed)
-        setContextIds(prev => [...prev, contextId])
-        setContextItems(prev => [...prev, installed])
+        setContextIds([contextId])
+        setContextItems([installed])
       } else {
         // Already attached — surface it in the banner without re-writing.
         setContextRecording(capture)
@@ -1183,6 +1190,23 @@ export function Chat() {
                         ' chunks'}
                     </span>
                   </div>
+                ) : status.indexState === 'queued' || status.indexState === 'loading' ? (
+                  <div className="hidden @lg:flex items-center gap-1.5 text-blue-600 dark:text-blue-400 bg-blue-500/10 px-2 py-1 rounded-full border border-blue-500/20">
+                    <Database className="h-3.5 w-3.5" />
+                    <span>
+                      {status.indexTotal
+                        ? `Loading knowledge · ${Math.round(((status.indexLoaded ?? 0) / status.indexTotal) * 100)}%`
+                        : 'Knowledge index queued'}
+                    </span>
+                  </div>
+                ) : status.indexState === 'failed' ? (
+                  <div
+                    className="hidden @lg:flex items-center gap-1.5 text-red-600 dark:text-red-400 bg-red-500/10 px-2 py-1 rounded-full border border-red-500/20"
+                    title={status.indexError ?? 'Knowledge index failed'}
+                  >
+                    <AlertCircle className="h-3.5 w-3.5" />
+                    <span>Index failed</span>
+                  </div>
                 ) : status.backend === 'none' ? (
                   <div className="hidden @lg:flex items-center gap-1.5 text-yellow-600 dark:text-yellow-400 bg-yellow-500/10 px-2 py-1 rounded-full border border-yellow-500/20">
                     <AlertCircle className="h-3.5 w-3.5" />
@@ -1591,6 +1615,8 @@ export function Chat() {
                 placeholder={
                   status?.ready
                     ? 'Ask me anything about your knowledge base...'
+                    : status?.indexState === 'queued' || status?.indexState === 'loading'
+                      ? 'Knowledge index is loading...'
                     : status?.backend === 'none'
                       ? 'Add a Gemini API key in Settings to enable AI chat'
                       : 'Index meetings to enable AI conversations'

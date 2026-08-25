@@ -35,6 +35,7 @@ vi.mock('../database', () => ({
   markRecordingDownloaded: vi.fn(),
   addSyncedFile: vi.fn(),
   isFileSynced: (filename: string) => mockIsFileSynced(filename),
+  isFilePurged: () => false,
   getRecordingByFilename: vi.fn(() => null),
   getSyncedFilenames: vi.fn(() => new Set()),
   queryOne: vi.fn(() => null),
@@ -233,8 +234,8 @@ describe('DownloadService B-007 Fixes', () => {
     })
   })
 
-  describe('B-DWN-001: Stall detection cleanup', () => {
-    it('should schedule cleanup after detecting stalled downloads', () => {
+  describe('B-DWN-001: Stall detection history', () => {
+    it('retains a stalled failure until explicit dismissal or the terminal-row prune', () => {
       vi.useFakeTimers()
 
       service.queueDownloads([{ filename: 'stalled.wav', size: 10000 }])
@@ -257,10 +258,11 @@ describe('DownloadService B-007 Fixes', () => {
       const failedItem = state.queue.find((i: DownloadQueueItem) => i.filename === 'stalled.wav')
       expect(failedItem?.status).toBe('failed')
 
-      // After 5s cleanup delay, item should be removed
+      // It must remain actionable after the old five-second cleanup window.
       vi.advanceTimersByTime(5000)
       state = service.getState()
-      expect(state.queue).toHaveLength(0)
+      expect(state.queue).toHaveLength(1)
+      expect(state.queue[0]?.status).toBe('failed')
 
       vi.useRealTimers()
     })

@@ -15,7 +15,7 @@
  * the SAME source rather than a second, independent counter.
  */
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Bell, Download, AlertCircle, RefreshCw, ArrowRight, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useDownloadQueue } from '@/store/useAppStore'
@@ -24,6 +24,7 @@ import { useTranscriptionStats, useTranscriptionStore } from '@/store/features/u
 import type { TranscriptionItem, TranscriptionStatus } from '@/store/features/useTranscriptionStore'
 import { useUIStore } from '@/store/ui/useUIStore'
 import { useOperations } from '@/hooks/useOperations'
+import { isRetryableDownloadItem } from '@/hooks/useDownloadOrchestrator'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 
 /** Strip the recording extension for a cleaner display name (keeps the date stamp). */
@@ -52,8 +53,12 @@ function downloadStatusLabel(dl: DownloadQueueEntry): string {
       return 'Cancelling…'
     case 'cancelled':
       return 'Cancelled'
+    case 'failed':
+      return 'Failed'
+    case 'completed':
+      return 'Done'
     default:
-      return `Downloading… ${Math.round(dl.progress)}%`
+      return dl.progress > 0 ? `Downloading… ${Math.round(dl.progress)}%` : 'Starting download…'
   }
 }
 
@@ -69,6 +74,28 @@ export function NotificationsButton() {
   const openOperationsOverlay = useUIStore((s) => s.openOperationsOverlay)
   const { cancelDownload, cancelAllDownloads } = useOperations()
   const [open, setOpen] = useState(false)
+  const [persistedDownloads, setPersistedDownloads] = useState<DownloadQueueEntry[]>([])
+
+  // The renderer queue intentionally drops terminal download failures so a
+  // failed item cannot disable a fresh Download action forever. Notifications
+  // still needs the same durable failure projection as the Operations panel;
+  // otherwise the two badges disagree (for example, 3 versus 4 failures).
+  useEffect(() => {
+    const api = window.electronAPI?.downloadService
+    if (!api) return
+    const project = (state: { queue: Array<{ filename: string; fileSize: number; progress: number; status: DownloadQueueEntry['status']; error?: string; cancelReason?: 'user' | 'interrupted' }> }) => {
+      setPersistedDownloads(state.queue.map((item) => ({
+        filename: item.filename,
+        size: item.fileSize,
+        progress: item.progress,
+        status: item.status,
+        error: item.error,
+        cancelReason: item.cancelReason
+      })))
+    }
+    api.getState().then((state) => project(state)).catch(() => {})
+    return api.onStateUpdate(project)
+  }, [])
 
   // Derive the popover list from the same Maps that feed the badge. Computed in a
   // memo keyed on the Map refs so we don't hand Zustand a fresh array selector.
@@ -79,17 +106,25 @@ export function NotificationsButton() {
         .sort((a, b) => statusRank(a.status) - statusRank(b.status)),
     [txQueue]
   )
-  const downloads = useMemo(() => Array.from(downloadQueue.values()), [downloadQueue])
-  // Only pending/downloading/cancelling count as "in progress"; a briefly-shown
-  // 'cancelled' row is winding down, not active.
+  const downloads = useMemo(() => {
+    const merged = new Map(persistedDownloads.map((item) => [item.filename, item]))
+    for (const item of downloadQueue.values()) merged.set(item.filename, item)
+    return Array.from(merged.values()).filter((item) => item.status !== 'completed')
+  }, [downloadQueue, persistedDownloads])
+  // Only pending/downloading/cancelling count as in progress. Failed downloads
+  // remain actionable history and belong in the error count instead.
   const activeDownloadCount = useMemo(
-    () => downloads.filter((d) => d.status !== 'cancelled').length,
+    () => downloads.filter((d) => ['pending', 'downloading', 'cancelling'].includes(d.status)).length,
+    [downloads]
+  )
+  const failedDownloadCount = useMemo(
+    () => downloads.filter(isRetryableDownloadItem).length,
     [downloads]
   )
   const canCancelAllDownloads = useMemo(() => downloads.some(isCancelableDownload), [downloads])
 
   const active = txStats.processing + txStats.pending + activeDownloadCount
-  const errors = txStats.failed
+  const errors = txStats.failed + failedDownloadCount
   const total = active + errors
   // Keep the popover populated while a cancelled row flashes, even if the badge count
   // has already dropped to zero.
@@ -134,7 +169,7 @@ export function NotificationsButton() {
           <h2 className="text-sm font-semibold">Notifications</h2>
           {total > 0 && (
             <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-              {total} active
+              {active > 0 && errors > 0 ? `${active} active · ${errors} failed` : active > 0 ? `${active} active` : `${errors} failed`}
             </span>
           )}
         </div>
@@ -162,7 +197,9 @@ export function NotificationsButton() {
               ))}
               {downloads.map((dl) => (
                 <li key={`dl-${dl.filename}`} className="flex items-center gap-2.5 rounded-md px-2 py-1.5">
-                  {dl.status === 'cancelling' ? (
+                  {dl.status === 'failed' ? (
+                    <AlertCircle className="h-4 w-4 shrink-0 text-red-500" />
+                  ) : dl.status === 'cancelling' ? (
                     <RefreshCw className="h-4 w-4 shrink-0 animate-spin text-amber-500 motion-reduce:animate-none" />
                   ) : (
                     <Download
@@ -174,7 +211,9 @@ export function NotificationsButton() {
                   )}
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm text-foreground">{displayName(dl.filename)}</div>
-                    <div className="truncate text-[11px] text-muted-foreground">{downloadStatusLabel(dl)}</div>
+                    <div className="truncate text-[11px] text-muted-foreground">
+                      {downloadStatusLabel(dl)}{dl.error ? ` · ${dl.error}` : ''}
+                    </div>
                   </div>
                   {(isCancelableDownload(dl) || dl.status === 'cancelling') && (
                     <button

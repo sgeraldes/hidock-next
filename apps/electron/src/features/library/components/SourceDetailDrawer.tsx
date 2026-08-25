@@ -106,7 +106,8 @@ export function SourceDetailDrawer({
   const canPlay = hasLocalPath(source)
   const needsDownload = isDeviceOnly(source)
   const needsTranscription =
-    hasLocalPath(source) && (source.transcriptionStatus === 'none' || source.transcriptionStatus === 'error')
+    hasLocalPath(source) &&
+    (source.transcriptionStatus === 'none' || source.transcriptionStatus === 'no_speech' || source.transcriptionStatus === 'error')
 
   const handleRetry = () => {
     if (!source) return

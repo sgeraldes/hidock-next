@@ -23,6 +23,7 @@ import {
   type SelfIdRunResult,
   type MergeSuspected
 } from '../services/self-identification'
+import { runSpeakerInference, type InferenceRunResult } from '../services/speaker-inference'
 
 const RunForRecordingSchema = z.object({
   recordingId: z.string().min(1).max(200),
@@ -50,6 +51,24 @@ export function registerSelfIdentificationHandlers(): void {
     } catch (err) {
       console.error('self-id:runForRecording error:', err)
       return error('DATABASE_ERROR', 'Failed to run self-identification', err)
+    }
+  })
+
+  /**
+   * Speaker inference (2026-07-24) — name the labels self-ID could not, using
+   * attendee/roster-corroborated LLM proposals. Idempotent; writes only
+   * high-confidence, roster-corroborated names, never overwrites bindings.
+   */
+  ipcMain.handle('self-id:inferSpeakers', async (_, request: unknown): Promise<Result<InferenceRunResult>> => {
+    try {
+      const parsed = RunForRecordingSchema.safeParse(request)
+      if (!parsed.success) {
+        return error('VALIDATION_ERROR', 'Invalid inferSpeakers request', parsed.error.format())
+      }
+      return success(await runSpeakerInference(parsed.data.recordingId))
+    } catch (err) {
+      console.error('self-id:inferSpeakers error:', err)
+      return error('DATABASE_ERROR', 'Failed to run speaker inference', err)
     }
   })
 

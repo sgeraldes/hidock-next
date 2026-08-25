@@ -42,6 +42,7 @@ vi.mock('electron', () => ({ BrowserWindow: { getAllWindows: () => [] } }))
 vi.mock('../vector-store', () => ({ getVectorStore: vi.fn() }))
 vi.mock('../knowledge-capture-backfill', () => ({
   ensureKnowledgeCaptureForRecording: vi.fn(),
+  ensureNoSpeechKnowledgeCapture: vi.fn(),
 }))
 vi.mock('../activity-log', () => ({ emitActivityLog: vi.fn() }))
 
@@ -76,6 +77,11 @@ const dbSpies = vi.hoisted(() => {
     'releaseTranscriptionLock',
     'clearStaleTranscriptionLock',
     'resetStuckTranscriptions',
+    'getActiveProcessingRunsForRecording',
+    'enrichRecordingScheduleMetadata',
+    'createProcessingRun',
+    'completeProcessingRun',
+    'failProcessingRun',
   ]
   const spies: Record<string, ReturnType<typeof import('vitest').vi.fn>> = {}
   return { names, spies }
@@ -92,6 +98,12 @@ import { queueTranscriptionIfEnabled, processQueueManually } from '../transcript
 
 beforeEach(() => {
   for (const spy of Object.values(dbSpies.spies)) spy.mockClear()
+  dbSpies.spies['addToQueue'].mockReturnValue('queue-item')
+  dbSpies.spies['getRecordingById'].mockImplementation((id: string) => ({ id }))
+  dbSpies.spies['getActiveProcessingRunsForRecording'].mockReturnValue([
+    { stage: 'metadata', status: 'completed' },
+    { stage: 'schedule-match', status: 'completed' }
+  ])
   featuresConfig = undefined
   autoTranscribe = true
 })

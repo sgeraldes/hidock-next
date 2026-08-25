@@ -231,8 +231,10 @@ export function graphCleanupDeferredBody(filename: string, alsoDeviceRemoved: bo
   )
 }
 
-/** The three device-branch outcomes `executeDeletePermanent` can reach. */
-export type DeviceDeleteOutcome = 'not-requested' | 'success' | 'partial'
+/** The device-branch outcomes `executeDeletePermanent` can reach. 'queued'
+ *  means the device was disconnected and the hardware erase is durably
+ *  journaled for the next sweep (2026-07-22). */
+export type DeviceDeleteOutcome = 'not-requested' | 'success' | 'partial' | 'queued'
 
 export interface CompletionToastInputs {
   filename: string
@@ -304,6 +306,15 @@ export function selectCompletionToast(inputs: CompletionToastInputs): Completion
   }
   if (deviceOutcome === 'partial') {
     return { variant: 'warning', title: DEVICE_COPY_REMAINS_TITLE, body: deviceCopyRemainsBody(filename) + graphNote }
+  }
+  if (deviceOutcome === 'queued') {
+    // 2026-07-22 — the hardware erase is durably journaled; honest "will
+    // happen", never a silent partial nor a full success.
+    return {
+      variant: 'warning',
+      title: 'Deleted permanently — device erase queued',
+      body: `Removed "${filename}" and its data from this computer. The device copy will be erased automatically when the device reconnects.` + graphNote,
+    }
   }
   if (filesPending) {
     return {

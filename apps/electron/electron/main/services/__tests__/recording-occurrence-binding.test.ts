@@ -67,6 +67,7 @@ vi.mock('../database', () => ({
   mergeContacts: vi.fn(),
   insertIdentitySuggestion: vi.fn(),
   meetingBaseUid: (id: string) => (id.includes('::') ? id.slice(0, id.indexOf('::')) : id),
+  getActiveCalendarSyncToken: vi.fn(() => null),
   getAllRecordingPreassignments: () => preassignRows
 }))
 
@@ -75,6 +76,10 @@ import { autoLinkRecordingsToMeetings, mergeDuplicateMeetingOccurrences } from '
 /** run() calls whose SQL contains `substr`. */
 function runCalls(substr: string): unknown[][] {
   return runSpy.mock.calls.filter((c) => typeof c[0] === 'string' && (c[0] as string).includes(substr))
+}
+
+function recordingRunCalls(substr: string): unknown[][] {
+  return runCalls(substr).filter((c) => /UPDATE recordings/i.test(c[0] as string))
 }
 
 // "Engineering EDF team 1" recurring series.
@@ -113,7 +118,7 @@ describe('BUG A — recurring-series occurrence binding', () => {
     const linked = autoLinkRecordingsToMeetings()
 
     expect(linked).toBe(1)
-    const overlapLinks = runCalls('correlation_method = \'time_overlap\'')
+    const overlapLinks = recordingRunCalls('correlation_method = \'time_overlap\'')
     expect(overlapLinks).toHaveLength(1)
     // meeting_id bound = the July-1 occurrence, recording id second.
     expect(overlapLinks[0][1]).toEqual([OCC_JUL01, REC.id])
