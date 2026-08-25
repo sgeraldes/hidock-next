@@ -417,10 +417,31 @@ function overlapSeconds(a: AcousticSegment, b: AcousticSegment): number {
   return Math.max(0, Math.min(a.end, b.end) - Math.max(a.start, b.start))
 }
 
+/** Overlap fraction at/above which an acoustic voice confidently owns a turn. */
+export const STRONG_SPEAKER_OVERLAP = 0.35
+/** Below this, the acoustic evidence is too thin to name a voice at all. */
+export const WEAK_SPEAKER_OVERLAP = 0.05
+
+/** How a turn's final speaker label was decided (persisted per turn). */
+export type SpeakerAttribution = 'acoustic' | 'acoustic-weak' | 'unresolved'
+
+/** Label used when no acoustic voice can be attributed to a turn. */
+export const UNRESOLVED_SPEAKER_LABEL = 'Unknown speaker'
+
 /**
  * Re-label provider turns by maximum overlap with the independent local
  * acoustic segmentation. Provider text/timestamps stay intact; only the
- * anonymous speaker label is reconciled. Unmatched turns remain unchanged.
+ * anonymous speaker label is reconciled.
+ *
+ * Every turn ends up on the SAME label scheme. Previously a turn that missed
+ * the overlap gate kept whatever the provider had called it, and the provider
+ * had been shown the raw SPEAKER_NN local labels (see
+ * buildSpeakerLinkingContext) - so one 1:1 call came out carrying
+ * "Voice C5C45B", "Voice 72D115", "SPEAKER_00" AND "SPEAKER_01", which reads
+ * downstream as four people and makes one speaker appear to change identity
+ * mid-answer. Turns that cannot be attributed are now labelled explicitly as
+ * unknown and carry speakerAttribution / speakerConfidence so a consumer can
+ * drop exactly those turns instead of distrusting the whole file.
  */
 export function reconcileProviderSpeakers(
   speakersJson: string | undefined,
@@ -431,10 +452,19 @@ export function reconcileProviderSpeakers(
     const turns = JSON.parse(speakersJson) as Array<Record<string, unknown>>
     if (!Array.isArray(turns)) return speakersJson
     const stableByLocal = new Map(linking.matches.map((match) => [match.localSpeakerLabel, match.stableLabel]))
+    const knownStable = new Set(stableByLocal.values())
     const rewritten = turns.map((turn) => {
       const start = Number(turn.start)
       const end = Number(turn.end)
-      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return turn
+      const unresolved = (): Record<string, unknown> => ({
+        ...turn,
+        // Keep an already-stable label if the provider happened to echo one;
+        // otherwise never leave a foreign scheme in place.
+        speaker: knownStable.has(String(turn.speaker)) ? turn.speaker : UNRESOLVED_SPEAKER_LABEL,
+        speakerAttribution: 'unresolved',
+        speakerConfidence: 0
+      })
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return unresolved()
       const target = { start, end, speaker: '' }
       const overlapByLocal = new Map<string, number>()
       for (const segment of linking.segments) {
@@ -442,9 +472,16 @@ export function reconcileProviderSpeakers(
         if (overlap > 0) overlapByLocal.set(segment.speaker, (overlapByLocal.get(segment.speaker) ?? 0) + overlap)
       }
       const best = [...overlapByLocal.entries()].sort((a, b) => b[1] - a[1])[0]
-      if (!best || best[1] / (end - start) < 0.35) return turn
+      if (!best) return unresolved()
+      const ratio = best[1] / (end - start)
       const stable = stableByLocal.get(best[0])
-      return stable ? { ...turn, speaker: stable } : turn
+      if (!stable || ratio < WEAK_SPEAKER_OVERLAP) return unresolved()
+      return {
+        ...turn,
+        speaker: stable,
+        speakerAttribution: ratio >= STRONG_SPEAKER_OVERLAP ? 'acoustic' : 'acoustic-weak',
+        speakerConfidence: Math.round(Math.min(1, ratio) * 100) / 100
+      }
     })
     return JSON.stringify(rewritten)
   } catch {
@@ -455,14 +492,19 @@ export function reconcileProviderSpeakers(
 export function buildSpeakerLinkingContext(linking: SpeakerLinkingResult): string {
   if (!linking.available) return `LOCAL SPEAKER LINKING: unavailable (${linking.reason ?? 'unknown reason'})`
   const identities = linking.matches.map((match) =>
-    `${match.localSpeakerLabel} -> ${match.stableLabel}` +
+    match.stableLabel +
     (match.contactName ? ` (known contact: ${match.contactName})` : ' (identity unknown)')
   )
+  // Emit ONLY stable labels. Listing the raw SPEAKER_NN local labels here
+  // taught the provider a second naming scheme, which it then mixed into
+  // its own output alongside the stable one.
+  const stableByLocal = new Map(linking.matches.map((match) => [match.localSpeakerLabel, match.stableLabel]))
   return `LOCAL ACOUSTIC SPEAKER EVIDENCE (authoritative for speaker boundaries; names remain evidence-bound):
 Model: ${linking.model}@${linking.modelVersion}; device: ${linking.device ?? 'unknown'}
 Voices: ${identities.join('; ') || 'none with enough speech'}
+Use EXACTLY these voice labels; never invent a different speaker naming scheme.
 Segments: ${linking.segments.map((segment) =>
-    `${segment.start.toFixed(2)}-${segment.end.toFixed(2)}s ${segment.speaker}`
+    `${segment.start.toFixed(2)}-${segment.end.toFixed(2)}s ${stableByLocal.get(segment.speaker) ?? segment.speaker}`
   ).join(', ')}`
 }
 

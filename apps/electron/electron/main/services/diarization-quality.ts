@@ -3,6 +3,10 @@ export interface DiarizationSegment {
   start?: number
   end?: number
   text?: string
+  /** How this turn's speaker was decided (see reconcileProviderSpeakers). */
+  speakerAttribution?: string
+  /** 0..1 acoustic overlap backing the speaker label. */
+  speakerConfidence?: number
 }
 
 export interface AudioActivityInterval {
@@ -20,7 +24,43 @@ export interface DiarizationQualityReport {
   malformedSegments: number
   groundedSegments: number
   groundingRatio: number | null
+  /**
+   * True when the turns carry MORE THAN ONE speaker-label scheme (e.g. stable
+   * "Voice C5C45B" alongside raw "SPEAKER_00"). That inflates a naive distinct
+   * label count - a 1:1 call read as 4 speakers - and makes one person appear
+   * under two tags. speakerCount below reports the authoritative scheme only.
+   */
+  mixedLabelSchemes: boolean
+  /** Turns whose speaker could not be attributed to any acoustic voice. */
+  unresolvedSpeakerSegments: number
+  /** Turns attributed on weak acoustic overlap; treat their speaker as a guess. */
+  lowConfidenceSpeakerSegments: number
   reasons: string[]
+}
+
+/** Stable cross-recording voice label minted by speaker-linking. */
+const STABLE_VOICE_LABEL = /^Voice [0-9A-F]{6}$/
+/** Raw diarizer / provider label (SPEAKER_00, Speaker 1, ...). */
+const PROVIDER_SPEAKER_LABEL = /^speaker[\s_]*\d+$/i
+
+/**
+ * Distinct speakers, counted on ONE scheme. When both a stable scheme and a raw
+ * provider scheme are present the stable one wins: the raw labels are residue
+ * from turns the reconciler could not attribute, not extra people.
+ */
+export function countDistinctSpeakers(labels: Iterable<string>): {
+  speakerCount: number
+  mixedLabelSchemes: boolean
+} {
+  const all = new Set<string>()
+  for (const label of labels) if (label) all.add(label)
+  const stable = [...all].filter((label) => STABLE_VOICE_LABEL.test(label))
+  const provider = [...all].filter((label) => PROVIDER_SPEAKER_LABEL.test(label))
+  const mixedLabelSchemes = stable.length > 0 && provider.length > 0
+  return {
+    speakerCount: mixedLabelSchemes ? stable.length : all.size,
+    mixedLabelSchemes
+  }
 }
 
 function round(value: number): number {
@@ -49,11 +89,19 @@ export function assessDiarizationQuality(
       malformedSegments: 0,
       groundedSegments: 0,
       groundingRatio: activityIntervals ? 0 : null,
+      mixedLabelSchemes: false,
+      unresolvedSpeakerSegments: 0,
+      lowConfidenceSpeakerSegments: 0,
       reasons: ['No timestamped speaker segments were returned']
     }
   }
 
-  const valid: Array<{ start: number; end: number; speaker: string }> = []
+  const valid: Array<{
+    start: number
+    end: number
+    speaker: string
+    speakerAttribution?: string
+  }> = []
   let malformedSegments = 0
   for (const segment of segments) {
     const start = segment.start
@@ -63,7 +111,12 @@ export function assessDiarizationQuality(
       malformedSegments++
       continue
     }
-    valid.push({ start: start as number, end: end as number, speaker })
+    valid.push({
+      start: start as number,
+      end: end as number,
+      speaker,
+      speakerAttribution: segment.speakerAttribution
+    })
   }
 
   if (valid.length === 0) {
@@ -77,6 +130,9 @@ export function assessDiarizationQuality(
       malformedSegments,
       groundedSegments: 0,
       groundingRatio: activityIntervals ? 0 : null,
+      mixedLabelSchemes: false,
+      unresolvedSpeakerSegments: 0,
+      lowConfidenceSpeakerSegments: 0,
       reasons: ['All diarization segments have invalid timestamps']
     }
   }
@@ -96,7 +152,15 @@ export function assessDiarizationQuality(
   }
   coveredSeconds += rangeEnd - rangeStart
 
-  const speakers = new Set(valid.map((segment) => segment.speaker).filter(Boolean))
+  const { speakerCount, mixedLabelSchemes } = countDistinctSpeakers(
+    valid.map((segment) => segment.speaker).filter(Boolean) as string[]
+  )
+  const unresolvedSpeakerSegments = valid.filter(
+    (segment) => segment.speakerAttribution === 'unresolved'
+  ).length
+  const lowConfidenceSpeakerSegments = valid.filter(
+    (segment) => segment.speakerAttribution === 'acoustic-weak'
+  ).length
   const duration = durationSeconds && durationSeconds > 0 ? durationSeconds : null
   const boundedCoverage = duration ? Math.min(coveredSeconds, duration) : coveredSeconds
   const coverageRatio = duration ? boundedCoverage / duration : null
@@ -116,6 +180,15 @@ export function assessDiarizationQuality(
   const groundingRatio = activityIntervals ? groundedSegments / valid.length : null
 
   if (malformedSegments > 0) reasons.push(`${malformedSegments} segment(s) have invalid timestamps`)
+  if (mixedLabelSchemes) {
+    reasons.push('Speaker labels mix more than one naming scheme; some turns were never attributed to a voice')
+  }
+  if (unresolvedSpeakerSegments > 0) {
+    reasons.push(`${unresolvedSpeakerSegments} segment(s) have an unattributed speaker`)
+  }
+  if (lowConfidenceSpeakerSegments > 0) {
+    reasons.push(`${lowConfidenceSpeakerSegments} segment(s) have a low-confidence speaker label`)
+  }
   if (valid.some((segment) => !segment.speaker)) reasons.push('One or more segments have no speaker label')
   if (coverageRatio !== null && coverageRatio < 0.55) reasons.push('Timestamped speech covers less than 55% of the recording')
   if (duration && sorted[sorted.length - 1].end > duration + 5) reasons.push('Segment timestamps extend beyond the recording duration')
@@ -130,13 +203,16 @@ export function assessDiarizationQuality(
   return {
     status: failed ? 'failed' : degraded ? 'degraded' : 'high',
     segmentCount: segments.length,
-    speakerCount: speakers.size,
+    speakerCount,
     coveredSeconds: round(coveredSeconds),
     coverageRatio: coverageRatio === null ? null : round(coverageRatio),
     unattributedSeconds: unattributedSeconds === null ? null : round(unattributedSeconds),
     malformedSegments,
     groundedSegments,
     groundingRatio: groundingRatio === null ? null : round(groundingRatio),
+    mixedLabelSchemes,
+    unresolvedSpeakerSegments,
+    lowConfidenceSpeakerSegments,
     reasons
   }
 }
@@ -161,6 +237,9 @@ export function parseAndAssessDiarization(
       malformedSegments: 0,
       groundedSegments: 0,
       groundingRatio: activityIntervals ? 0 : null,
+      mixedLabelSchemes: false,
+      unresolvedSpeakerSegments: 0,
+      lowConfidenceSpeakerSegments: 0,
       reasons: ['Diarization output is not valid JSON']
     }
   }

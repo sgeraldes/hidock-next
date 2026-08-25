@@ -8,6 +8,7 @@ import {
 } from '@google/genai'
 import { extname } from 'node:path'
 import type { TranscriptionEngine, TranscriptSegment, TranscribeOptions } from './engine-interface.js'
+import { TurnDeduper } from './dedupe-turns.js'
 import { NoSpeechDetectedError, TranscriptionCancelledError } from './engine-interface.js'
 
 /**
@@ -940,6 +941,7 @@ Calendar and meeting context are spelling hints only; never invent speech from t
     const uploaded = await this.uploadAudioFile(genAI, filePath, mimeType, shouldGenerate)
     const totalRanges = Math.ceil(durationSeconds / GeminiEngine.ROLLING_CHUNK_SECONDS)
     const allSegments: TranscriptSegment[] = []
+    const deduper = new TurnDeduper()
     let previousInteractionId: string | undefined
     try {
       for (let index = 0; index < totalRanges; index++) {
@@ -956,16 +958,17 @@ Calendar and meeting context are spelling hints only; never invent speech from t
           shouldGenerate
         )
         previousInteractionId = result.interactionId
-        for (const segment of result.segments) {
-          const previous = allSegments[allSegments.length - 1]
-          if (
-            previous &&
-            previous.startTime === segment.startTime &&
-            previous.speaker === segment.speaker &&
-            previous.text === segment.text
-          ) continue
-          allSegments.push(segment)
+        // Ranges share one conversation (previousInteractionId), so the model
+        // can replay an ENTIRE earlier range. The previous guard compared only
+        // against the single preceding segment, which a replayed block walks
+        // straight past - measured live at one full chunk length of repeats.
+        const kept = deduper.push(result.segments)
+        if (kept.length < result.segments.length) {
+          console.warn(
+            `[GeminiEngine] range ${index + 1}/${totalRanges}: dropped ${result.segments.length - kept.length} replayed turn(s)`
+          )
         }
+        for (const segment of kept) allSegments.push(segment)
         options.onProgress?.(index + 1, totalRanges)
       }
     } finally {
@@ -1181,15 +1184,26 @@ IMPORTANT TRANSCRIPT REPAIR: Your previous response had missing/repeated timing 
     const onProgress = (options as { onProgress?: (done: number, total: number) => void }).onProgress
     let previousTail = ''
     let producedAny = false
+    // Chunk N+1's prompt carries chunk N's tail, which the model sometimes
+    // answers by replaying chunk N wholesale. Drop replayed blocks here so the
+    // duplication never reaches full_text. See dedupe-turns.ts.
+    const deduper = new TurnDeduper()
     for (let i = 0; i < chunks.length; i++) {
       const text = await transcribeChunk(chunks[i], i, previousTail)
-      const turns = parseTurns(text, chunks[i].startSec, defaultSpeaker, options.source)
+      const parsed = parseTurns(text, chunks[i].startSec, defaultSpeaker, options.source)
+      const turns = deduper.push(parsed)
+      if (parsed.length > turns.length) {
+        console.warn(
+          `[GeminiEngine] segment ${i + 1}/${chunks.length}: dropped ${parsed.length - turns.length} replayed turn(s)`
+        )
+      }
       for (const turn of turns) {
         producedAny = true
         yield turn
       }
-      if (turns.length > 0) {
-        previousTail = turns
+      const tailSource = turns.length > 0 ? turns : parsed
+      if (tailSource.length > 0) {
+        previousTail = tailSource
           .slice(-6)
           .map((turn) => `[${formatTimestamp(turn.startTime)}] ${turn.speaker}: ${turn.text}`)
           .join('\n')

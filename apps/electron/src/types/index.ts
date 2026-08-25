@@ -112,6 +112,22 @@ export interface Transcript {
 
 export interface RecordingWithTranscript extends Recording {
   transcript?: Transcript
+
+  // Present when fetched for a specific meeting (recordings:getForMeeting).
+  // A capture spanning back-to-back meetings is split into "<base> - Part N",
+  // and every overlapping part stays linked — the meeting really does span
+  // them. These fields say WHICH part holds the conversation, and the results
+  // are ordered by meetingCoverage descending so [0] is that part.
+  /** Share of the MEETING window this recording covers (0..1). */
+  meetingCoverage?: number
+  /** Share of THIS recording that falls inside the meeting (0..1). */
+  recordingCoverage?: number
+  /** Seconds of overlap with the meeting window. */
+  overlapSeconds?: number
+  /** Part number when the filename is `<base> - Part N`, else null. */
+  partNumber?: number | null
+  /** Base name shared with sibling parts, else null. */
+  partBaseName?: string | null
 }
 
 export interface MeetingDetails {

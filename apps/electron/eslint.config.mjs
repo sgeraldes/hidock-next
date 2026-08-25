@@ -93,6 +93,8 @@ export default config(
       "out/**",
       "coverage/**",
       "resources/**",
+      // Python virtualenvs (speaker-linking worker) ship vendored JS bundles.
+      "**/.venv*/**",
       "**/*.config.js",
       "**/*.config.cjs",
       "**/*.config.mjs",

@@ -26,6 +26,9 @@ export function revealMainWindow(
 
   return new Promise((resolve) => {
     let settled = false
+    // Assigned at the end of this scope but read earlier through the settle()
+    // closure, so it cannot be const.
+    // eslint-disable-next-line prefer-const
     let timer: ReturnType<typeof setTimeout> | undefined
 
     const settle = (reason: WindowRevealReason | null): void => {

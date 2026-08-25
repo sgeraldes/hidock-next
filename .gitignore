@@ -177,6 +177,7 @@ startup_log.txt
 apps/web/.vite/
 .venv.nix/
 .venv.win/
+.venv-speaker-linking/
 NUL
 
 # ===================================================================

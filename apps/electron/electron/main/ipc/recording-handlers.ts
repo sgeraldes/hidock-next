@@ -1,9 +1,11 @@
 import { ipcMain, dialog, BrowserWindow } from 'electron'
+import { rankRecordingsByMeetingCoverage } from '../services/recording-match-scoring'
 import {
   getRecordings,
   getRecordingById,
   getTrashedRecordings,
   getRecordingsForMeeting,
+  getMeetingById,
   updateRecordingStatus,
   updateRecordingTranscriptionStatus,
   updateRecordingDuration,
@@ -125,10 +127,30 @@ export function registerRecordingHandlers(): void {
         }
 
         const recordings = getRecordingsForMeeting(result.data.id)
-        return recordings.map((recording) => ({
+        const withTranscripts = recordings.map((recording) => ({
           ...recording,
           transcript: getTranscriptByRecordingId(recording.id)
         }))
+
+        // A capture that ran across back-to-back meetings is split into
+        // "<base> - Part N", and EVERY part that overlaps the event stays
+        // linked - the meeting really does span them. Order by how much of the
+        // MEETING each part covers so [0] is the part that actually holds the
+        // conversation, and publish the fraction so a consumer can see the
+        // split instead of being handed one arbitrary part. Previously this
+        // returned insertion order, so [0] was Part 1: the tail of the PREVIOUS
+        // meeting, clipping only the first few minutes of this one.
+        const meeting = getMeetingById(result.data.id)
+        if (!meeting?.start_time || !meeting?.end_time) return withTranscripts
+
+        return rankRecordingsByMeetingCoverage(
+          withTranscripts.map((recording) => ({
+            ...recording,
+            dateRecorded: recording.date_recorded,
+            durationSeconds: recording.duration_seconds
+          })),
+          { startTime: meeting.start_time, endTime: meeting.end_time }
+        )
       } catch (error) {
         console.error('recordings:getForMeeting error:', error)
         return []

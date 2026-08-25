@@ -10,6 +10,7 @@ export type { Chirp3Options } from './engines/chirp3-engine.js'
 export { VibeVoiceEngine } from './engines/vibevoice-engine.js'
 export type { VibeVoiceEngineOptions } from './engines/vibevoice-engine.js'
 export { GeminiEngine, splitWavIntoChunks, splitMp3IntoChunks, parseTurns } from './engines/gemini-engine.js'
+export { TurnDeduper, dedupeTurns, normalizeTurnText } from './engines/dedupe-turns.js'
 export type { GeminiEngineOptions, AudioChunk } from './engines/gemini-engine.js'
 
 // Pipeline

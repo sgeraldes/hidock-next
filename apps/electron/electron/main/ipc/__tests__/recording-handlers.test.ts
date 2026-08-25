@@ -22,6 +22,14 @@ vi.mock('../../services/database', () => ({
   getRecordingById: vi.fn(),
   getTrashedRecordings: vi.fn(),
   getRecordingsForMeeting: vi.fn(),
+  getMeetingById: vi.fn(),
+  updateRecordingDuration: vi.fn(),
+  backfillRecordingDurations: vi.fn(),
+  classifyLowValueCaptures: vi.fn(),
+  selectMeetingForRecordingByUser: vi.fn(),
+  setRecordingPreassignment: vi.fn(),
+  getRecordingPreassignment: vi.fn(),
+  clearRecordingPreassignment: vi.fn(),
   updateRecordingStatus: vi.fn(),
   updateRecordingTranscriptionStatus: vi.fn(),
   linkRecordingToMeeting: vi.fn(),
@@ -774,28 +782,28 @@ describe('Recording IPC Handlers', () => {
   })
 
   describe('recordings:selectMeeting', () => {
-    it('should link recording to meeting when meetingId is provided', async () => {
-      const { linkRecordingToMeeting } = await import('../../services/database')
+    it('delegates a user meeting pick to the database layer', async () => {
+      const { selectMeetingForRecordingByUser } = await import('../../services/database')
 
       const result = await handlers['recordings:selectMeeting'](null, 'rec-1', 'meet-1')
 
-      expect(linkRecordingToMeeting).toHaveBeenCalledWith('rec-1', 'meet-1', 1.0, 'manual')
+      expect(selectMeetingForRecordingByUser).toHaveBeenCalledWith('rec-1', 'meet-1')
       expect(result).toEqual({ success: true })
     })
 
-    it('unlinks via the NULL-based unlink when meetingId is null (2026-07-24)', async () => {
-      const { linkRecordingToMeeting, unlinkRecordingFromMeeting } = await import('../../services/database')
+    it('passes a null meeting through as an unlink (2026-07-24)', async () => {
+      const { selectMeetingForRecordingByUser, linkRecordingToMeeting } = await import('../../services/database')
 
       const result = await handlers['recordings:selectMeeting'](null, 'rec-1', null)
 
-      expect(unlinkRecordingFromMeeting).toHaveBeenCalledWith('rec-1')
+      expect(selectMeetingForRecordingByUser).toHaveBeenCalledWith('rec-1', null)
       expect(linkRecordingToMeeting).not.toHaveBeenCalled()
       expect(result).toEqual({ success: true })
     })
 
     it('should return error on failure', async () => {
-      const { linkRecordingToMeeting } = await import('../../services/database')
-      vi.mocked(linkRecordingToMeeting).mockImplementation(() => {
+      const { selectMeetingForRecordingByUser } = await import('../../services/database')
+      vi.mocked(selectMeetingForRecordingByUser).mockImplementation(() => {
         throw new Error('Link failed')
       })
 

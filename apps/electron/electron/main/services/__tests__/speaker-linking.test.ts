@@ -79,7 +79,7 @@ describe('persistent acoustic speaker linking', () => {
     expect(centroid[0]).toBeGreaterThan(centroid[1])
   })
 
-  it('reconciles provider labels by temporal overlap and leaves uncertain turns unchanged', () => {
+  it('reconciles provider labels by temporal overlap and never leaves a foreign label', () => {
     const linking: SpeakerLinkingResult = {
       available: true,
       model: 'community-1',
@@ -105,8 +105,14 @@ describe('persistent acoustic speaker linking', () => {
       { start: 6, end: 9, speaker: 'Speaker 1', text: 'reply' },
       { start: 20, end: 21, speaker: 'Speaker 3', text: 'unmatched' }
     ]), linking)!)
+    // A turn with no acoustic overlap is now labelled explicitly unknown rather
+    // than keeping the provider's own scheme — leaving "Speaker 3" in place is
+    // what made a 1:1 call read as four speakers downstream.
     expect(rewritten.map((turn: { speaker: string }) => turn.speaker)).toEqual([
-      'Voice AAAAAA', 'Voice BBBBBB', 'Speaker 3'
+      'Voice AAAAAA', 'Voice BBBBBB', 'Unknown speaker'
+    ])
+    expect(rewritten.map((turn: { speakerAttribution: string }) => turn.speakerAttribution)).toEqual([
+      'acoustic', 'acoustic', 'unresolved'
     ])
   })
 

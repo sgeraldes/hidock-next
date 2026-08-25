@@ -118,7 +118,9 @@ describe('recordings:selectMeeting with null meetingId', () => {
     expect(res.success).toBe(true)
     const rec = getRecordingById('rec-1')!
     expect(rec.meeting_id).toBe(MEETING_ID)
-    expect(rec.correlation_method).toBe('manual')
+    // selectMeetingForRecordingByUser records the more specific 'user_override'
+    // rather than the older generic 'manual'.
+    expect(rec.correlation_method).toBe('user_override')
   })
 })
 
