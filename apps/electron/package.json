@@ -27,7 +27,6 @@
   },
   "dependencies": {
     "@azure/msal-node": "^5.4.0",
-    "@electron-toolkit/preload": "^3.0.1",
     "@google/genai": "^2.0.0",
     "@google/generative-ai": "^0.21.0",
     "@hidock/ai-providers": "file:../../packages/ai-providers",
