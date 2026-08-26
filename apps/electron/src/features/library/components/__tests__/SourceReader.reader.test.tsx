@@ -53,6 +53,10 @@ vi.mock('../TranscriptViewer', () => ({
   TranscriptViewer: () => <div data-testid="transcript-viewer" />,
 }))
 
+vi.mock('../ArtifactReader', () => ({
+  ArtifactReader: () => <div data-testid="artifact-reader" />,
+}))
+
 vi.mock('@/components/ui/select', () => ({
   Select: ({ children }: any) => <div>{children}</div>,
   SelectTrigger: () => null,
@@ -153,10 +157,40 @@ describe('SourceReader — header date', () => {
   })
 })
 
+describe('SourceReader — artifact capabilities', () => {
+  it('does not present image files as transcribed meetings or preload an audio waveform', () => {
+    render(
+      <SourceReader
+        recording={makeRecording({
+          filename: 'diagram.png',
+          localPath: '/imports/diagram.png',
+          transcriptionStatus: 'complete',
+          duration: 125,
+        })}
+      />
+    )
+
+    expect(screen.getByText('image')).toBeInTheDocument()
+    expect(screen.getByTestId('artifact-reader')).toBeInTheDocument()
+    expect(screen.queryByText('2m 5s')).not.toBeInTheDocument()
+    expect(screen.queryByText('Transcribed')).not.toBeInTheDocument()
+    expect(screen.queryByText('Meeting')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /transcribe/i })).not.toBeInTheDocument()
+    expect(mockLoadWaveformOnly).not.toHaveBeenCalled()
+  })
+})
+
 // ---------------------------------------------------------------------------
 // 5. Transcribe ▾ split/dropdown
 // ---------------------------------------------------------------------------
 describe('SourceReader — Transcribe split/dropdown', () => {
+  it('shows a visible no-speech explanation and keeps retry available', () => {
+    render(<SourceReader recording={makeRecording({ transcriptionStatus: 'no_speech' })} onTranscribe={vi.fn()} />)
+    expect(screen.getByText('No intelligible speech detected')).toBeInTheDocument()
+    expect(screen.getByText(/summary, participant inference, and meeting auto-linking were skipped/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^transcribe$/i })).toBeInTheDocument()
+  })
+
   it('renders a primary Transcribe button and a method picker (no raw "VibeVoice")', () => {
     render(<SourceReader recording={makeRecording()} onTranscribe={vi.fn()} />)
     expect(screen.getByRole('button', { name: /^transcribe$/i })).toBeInTheDocument()
@@ -186,10 +220,13 @@ describe('SourceReader — Transcribe split/dropdown', () => {
     await waitFor(() => expect(mockReprocessWith).toHaveBeenCalledWith('rec-1', 'local-asr'))
   })
 
-  it('a completed recording offers "Re-transcribe" with the same method menu', async () => {
-    render(<SourceReader recording={makeRecording({ transcriptionStatus: 'complete' })} onTranscribe={vi.fn()} />)
-    const trigger = screen.getByRole('button', { name: /re-transcribe/i })
-    expect(trigger).toBeInTheDocument()
+  it('a completed recording has a real primary Re-transcribe action and a separate method menu', async () => {
+    const onTranscribe = vi.fn()
+    render(<SourceReader recording={makeRecording({ transcriptionStatus: 'complete' })} onTranscribe={onTranscribe} />)
+    fireEvent.click(screen.getByRole('button', { name: /^re-transcribe$/i }))
+    expect(onTranscribe).toHaveBeenCalledOnce()
+
+    const trigger = screen.getByRole('button', { name: /choose re-transcription method/i })
     fireEvent.keyDown(trigger, { key: 'Enter' })
     fireEvent.click(await screen.findByRole('menuitem', { name: /gemini/i }))
     await waitFor(() => expect(mockReprocessWith).toHaveBeenCalledWith('rec-1', 'gemini'))
@@ -202,7 +239,7 @@ describe('SourceReader — Transcribe split/dropdown', () => {
 describe('SourceReader — Re-diarize', () => {
   it('exposes "Re-diarize this recording" in the Re-transcribe menu for a completed recording and calls the IPC', async () => {
     render(<SourceReader recording={makeRecording({ transcriptionStatus: 'complete' })} onTranscribe={vi.fn()} />)
-    fireEvent.keyDown(screen.getByRole('button', { name: /re-transcribe/i }), { key: 'Enter' })
+    fireEvent.keyDown(screen.getByRole('button', { name: /choose re-transcription method/i }), { key: 'Enter' })
     fireEvent.click(await screen.findByRole('menuitem', { name: /re-diarize this recording/i }))
     await waitFor(() => expect(mockReDiarize).toHaveBeenCalledWith('rec-1'))
   })
@@ -219,7 +256,7 @@ describe('SourceReader — Re-diarize', () => {
     // Remove reDiarize from the API surface for this test.
     ;(window.electronAPI.recordings as any).reDiarize = undefined
     render(<SourceReader recording={makeRecording({ transcriptionStatus: 'complete' })} onTranscribe={vi.fn()} />)
-    fireEvent.keyDown(screen.getByRole('button', { name: /re-transcribe/i }), { key: 'Enter' })
+    fireEvent.keyDown(screen.getByRole('button', { name: /choose re-transcription method/i }), { key: 'Enter' })
     fireEvent.click(await screen.findByRole('menuitem', { name: /re-diarize this recording/i }))
     await waitFor(() => expect((toast as any).error).toHaveBeenCalledWith('Re-diarize unavailable', expect.any(String)))
   })

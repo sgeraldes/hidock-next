@@ -31,7 +31,12 @@ export function isSameLocalDay(a: Date, b: Date): boolean {
   )
 }
 
-/** A recording is "captured today" when its recorded/added date is the current local day. */
+/**
+ * A recording is "captured today" when its recorded/added date is the current
+ * local day. Undated recordings (the UNKNOWN_DATE epoch sentinel) are naturally
+ * excluded — 1970 is never today, so the same-day check drops them (#58); no
+ * explicit isUnknownDate guard is needed here.
+ */
 function capturedToday(rec: UnifiedRecording, today: Date): boolean {
   const d = rec.dateRecorded
   return d instanceof Date && !isNaN(d.getTime()) && isSameLocalDay(d, today)

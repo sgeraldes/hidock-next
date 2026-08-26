@@ -6,11 +6,14 @@ import { SecurityWarningBanner } from '@/components/SecurityWarningBanner'
 import { LoadingSpinner } from '@/components/LoadingSpinner'
 import { ToastProvider } from '@/components/ui/toaster'
 import { FloatingAssistant } from '@/components/assistant/FloatingAssistant'
+import { FeatureRoute } from '@/components/FeatureDisabledPage'
+import { useFeatureEnabled } from '@/store/useFeatureStore'
 import { getHiDockDeviceService } from '@/services/hidock-device'
 import { NavigationLogger, initInteractionLogger, initErrorLogger, cleanupQAMonitor } from '@/services/qa-monitor'
 import { lazyWithRetry } from '@/lib/lazyWithRetry'
 import { useTheme } from '@/hooks/useTheme'
 import { ClipboardCapture } from '@/hooks/useClipboardCapture'
+import { persistRoute, getInitialRoute } from '@/lib/routePersistence'
 
 // Lazy load all page components for code splitting
 // Each page becomes a separate chunk, reducing initial bundle size
@@ -44,15 +47,57 @@ const ContextGraph = lazyWithRetry(() => import('@/pages/ContextGraph'))
  */
 export function GlobalAssistant(): React.ReactElement | null {
   const location = useLocation()
-  // Library owns its assistant (TriPaneLayout) in both placement modes.
-  if (location.pathname === '/library') return null
+  // Library owns its assistant (TriPaneLayout) in both placement modes, and the
+  // dedicated /assistant page IS the assistant — a floating bubble there could
+  // open a second overlay assistant over the full one (audit F11). Normalize the
+  // trailing slash so `/assistant/` (which the router still matches) is also
+  // suppressed — exact string equality alone misses it.
+  const path = location.pathname.replace(/\/+$/, '') || '/'
+  if (path === '/library' || path === '/assistant') return null
   return (
-    <FloatingAssistant title="Assistant">
-      <Suspense fallback={<LoadingSpinner message="Loading assistant..." />}>
-        <Chat />
-      </Suspense>
-    </FloatingAssistant>
+    <AssistantGate>
+      <FloatingAssistant title="Assistant">
+        <Suspense fallback={<LoadingSpinner message="Loading assistant..." />}>
+          <Chat />
+        </Suspense>
+      </FloatingAssistant>
+    </AssistantGate>
   )
+}
+
+/**
+ * Track I: the floating assistant respects the Assistant feature flag. When the
+ * feature is disabled the global bubble simply doesn't mount (the /assistant
+ * route itself is separately guarded by FeatureRoute).
+ */
+function AssistantGate({ children }: { children: React.ReactElement }): React.ReactElement | null {
+  const assistantEnabled = useFeatureEnabled('assistant')
+  if (!assistantEnabled) return null
+  return children
+}
+
+/**
+ * H8 FIX: Preserve the user's current route across background-triggered reloads.
+ * Records the active route to sessionStorage on every change so `RootRedirect`
+ * can restore it after a reload instead of snapping back to the default page.
+ * See src/lib/routePersistence.ts for the root-cause rationale.
+ */
+function RoutePersistence(): null {
+  const location = useLocation()
+
+  useEffect(() => {
+    persistRoute(location.pathname + location.search)
+  }, [location.pathname, location.search])
+
+  return null
+}
+
+/**
+ * H8 FIX: Redirect the root path to the last active route (if any) rather than
+ * always forcing the default page. Falls back to the default on a fresh session.
+ */
+function RootRedirect(): React.ReactElement {
+  return <Navigate to={getInitialRoute()} replace />
 }
 
 function App(): React.ReactElement {
@@ -111,15 +156,18 @@ function App(): React.ReactElement {
       <SecurityWarningBanner />
       <Layout>
         <NavigationLogger />
+        <RoutePersistence />
         <Routes>
-          <Route path="/" element={<Navigate to="/today" replace />} />
+          <Route path="/" element={<RootRedirect />} />
           <Route
             path="/today"
             element={
               <ErrorBoundary>
-                <Suspense fallback={<LoadingSpinner message="Loading your day..." />}>
-                  <Today />
-                </Suspense>
+                <FeatureRoute feature="today">
+                  <Suspense fallback={<LoadingSpinner message="Loading your day..." />}>
+                    <Today />
+                  </Suspense>
+                </FeatureRoute>
               </ErrorBoundary>
             }
           />
@@ -127,9 +175,11 @@ function App(): React.ReactElement {
             path="/calendar"
             element={
               <ErrorBoundary>
-                <Suspense fallback={<LoadingSpinner message="Loading calendar..." />}>
-                  <Calendar />
-                </Suspense>
+                <FeatureRoute feature="calendar">
+                  <Suspense fallback={<LoadingSpinner message="Loading calendar..." />}>
+                    <Calendar />
+                  </Suspense>
+                </FeatureRoute>
               </ErrorBoundary>
             }
           />
@@ -137,9 +187,11 @@ function App(): React.ReactElement {
             path="/meeting/:id"
             element={
               <ErrorBoundary>
-                <Suspense fallback={<LoadingSpinner message="Loading meeting..." />}>
-                  <MeetingDetail />
-                </Suspense>
+                <FeatureRoute feature="calendar">
+                  <Suspense fallback={<LoadingSpinner message="Loading meeting..." />}>
+                    <MeetingDetail />
+                  </Suspense>
+                </FeatureRoute>
               </ErrorBoundary>
             }
           />
@@ -147,9 +199,11 @@ function App(): React.ReactElement {
             path="/assistant"
             element={
               <ErrorBoundary>
-                <Suspense fallback={<LoadingSpinner message="Loading assistant..." />}>
-                  <Chat />
-                </Suspense>
+                <FeatureRoute feature="assistant">
+                  <Suspense fallback={<LoadingSpinner message="Loading assistant..." />}>
+                    <Chat />
+                  </Suspense>
+                </FeatureRoute>
               </ErrorBoundary>
             }
           />
@@ -157,9 +211,11 @@ function App(): React.ReactElement {
             path="/explore"
             element={
               <ErrorBoundary>
-                <Suspense fallback={<LoadingSpinner message="Loading explore..." />}>
-                  <Explore />
-                </Suspense>
+                <FeatureRoute feature="explore">
+                  <Suspense fallback={<LoadingSpinner message="Loading explore..." />}>
+                    <Explore />
+                  </Suspense>
+                </FeatureRoute>
               </ErrorBoundary>
             }
           />
@@ -167,9 +223,11 @@ function App(): React.ReactElement {
             path="/sync"
             element={
               <ErrorBoundary>
-                <Suspense fallback={<LoadingSpinner message="Loading device sync..." />}>
-                  <Device />
-                </Suspense>
+                <FeatureRoute feature="device-sync">
+                  <Suspense fallback={<LoadingSpinner message="Loading device sync..." />}>
+                    <Device />
+                  </Suspense>
+                </FeatureRoute>
               </ErrorBoundary>
             }
           />
@@ -187,9 +245,11 @@ function App(): React.ReactElement {
             path="/people"
             element={
               <ErrorBoundary>
-                <Suspense fallback={<LoadingSpinner message="Loading people..." />}>
-                  <People />
-                </Suspense>
+                <FeatureRoute feature="people-projects">
+                  <Suspense fallback={<LoadingSpinner message="Loading people..." />}>
+                    <People />
+                  </Suspense>
+                </FeatureRoute>
               </ErrorBoundary>
             }
           />
@@ -197,9 +257,11 @@ function App(): React.ReactElement {
             path="/person/:id"
             element={
               <ErrorBoundary>
-                <Suspense fallback={<LoadingSpinner message="Loading person details..." />}>
-                  <PersonDetail />
-                </Suspense>
+                <FeatureRoute feature="people-projects">
+                  <Suspense fallback={<LoadingSpinner message="Loading person details..." />}>
+                    <PersonDetail />
+                  </Suspense>
+                </FeatureRoute>
               </ErrorBoundary>
             }
           />
@@ -207,9 +269,11 @@ function App(): React.ReactElement {
             path="/projects"
             element={
               <ErrorBoundary>
-                <Suspense fallback={<LoadingSpinner message="Loading projects..." />}>
-                  <Projects />
-                </Suspense>
+                <FeatureRoute feature="people-projects">
+                  <Suspense fallback={<LoadingSpinner message="Loading projects..." />}>
+                    <Projects />
+                  </Suspense>
+                </FeatureRoute>
               </ErrorBoundary>
             }
           />
@@ -217,9 +281,11 @@ function App(): React.ReactElement {
             path="/actionables"
             element={
               <ErrorBoundary>
-                <Suspense fallback={<LoadingSpinner message="Loading actionables..." />}>
-                  <Actionables />
-                </Suspense>
+                <FeatureRoute feature="meeting-intelligence">
+                  <Suspense fallback={<LoadingSpinner message="Loading actionables..." />}>
+                    <Actionables />
+                  </Suspense>
+                </FeatureRoute>
               </ErrorBoundary>
             }
           />
@@ -237,9 +303,11 @@ function App(): React.ReactElement {
             path="/context-graph"
             element={
               <ErrorBoundary>
-                <Suspense fallback={<LoadingSpinner message="Loading context graph..." />}>
-                  <ContextGraph />
-                </Suspense>
+                <FeatureRoute feature="context-graph">
+                  <Suspense fallback={<LoadingSpinner message="Loading context graph..." />}>
+                    <ContextGraph />
+                  </Suspense>
+                </FeatureRoute>
               </ErrorBoundary>
             }
           />

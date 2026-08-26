@@ -358,7 +358,7 @@ export function HealthCheck() {
               <div>
                 <div className="text-sm font-medium mb-2 text-red-600 dark:text-red-400">Purge Orphaned Records</div>
                 <p className="text-xs text-muted-foreground mb-3">
-                  Delete ALL database records where the audio file doesn't exist on disk.
+                  Delete ALL database records where the audio file doesn&apos;t exist on disk.
                   Use this if Health Check finds no issues but the Library still shows deleted files.
                 </p>
                 <Button

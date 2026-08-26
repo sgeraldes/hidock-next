@@ -34,6 +34,11 @@ vi.mock('../database', () => ({
   releaseTranscriptionLock: vi.fn(),
   clearStaleTranscriptionLock: vi.fn(),
   resetStuckTranscriptions: vi.fn()
+  ,getActiveProcessingRunsForRecording: vi.fn(() => [])
+  ,enrichRecordingScheduleMetadata: vi.fn()
+  ,createProcessingRun: vi.fn(({ stage }: { stage: string }) => ({ id: `run-${stage}` }))
+  ,completeProcessingRun: vi.fn()
+  ,failProcessingRun: vi.fn()
 }))
 
 vi.mock('electron', () => ({ BrowserWindow: class {} }))

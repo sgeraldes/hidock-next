@@ -10,6 +10,7 @@ import tempfile
 from unittest.mock import Mock, patch
 
 import pytest
+
 import transcription_module
 from transcription_module import (
     TRANSCRIPTION_FAILED_DEFAULT_MSG,
@@ -21,6 +22,19 @@ from transcription_module import (
     process_audio_file_for_insights,
     transcribe_audio,
 )
+
+
+def _force_two_step(mock_ai_service):
+    """Configure a mocked ``ai_service`` so processing takes the documented two-step fallback.
+
+    ``process_audio_file_for_insights`` prefers ``GeminiProvider.transcribe_and_analyze_audio``
+    (a single combined API call) whenever the configured provider exposes it. Handing back a
+    provider without that attribute exercises the ``transcribe_audio`` -> ``extract_meeting_insights``
+    fallback and keeps the real google-genai client (and its file uploads) out of the tests.
+    """
+    mock_ai_service.configure_provider.return_value = True
+    mock_ai_service.get_provider.return_value = Mock(spec=[])
+    return mock_ai_service
 
 
 class TestConstants:
@@ -77,42 +91,64 @@ class TestCallGeminiApi:
 
     @patch("transcription_module.genai")
     def test_call_gemini_api_success(self, mock_genai):
-        """Test successful _call_gemini_api call"""
+        """Test successful _call_gemini_api call through the google-genai client"""
         payload = {"contents": "test content", "generationConfig": {"temperature": 0.5}}
-        mock_model = Mock()
+        mock_client = Mock()
         mock_response = Mock()
         mock_response.to_dict.return_value = {"response": "success"}
-        mock_model.generate_content.return_value = mock_response
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_client.models.generate_content.return_value = mock_response
+        mock_genai.Client.return_value = mock_client
 
         result = _call_gemini_api(payload, "test_key")
 
         assert result == {"response": "success"}
-        mock_genai.configure.assert_called_once_with(api_key="test_key")
-        mock_genai.GenerativeModel.assert_called_once_with("gemini-1.5-flash")
-        mock_model.generate_content.assert_called_once_with("test content", generation_config={"temperature": 0.5})
+        mock_genai.Client.assert_called_once_with(api_key="test_key")
+        mock_client.models.generate_content.assert_called_once_with(
+            model="gemini-2.0-flash-exp", contents="test content", config={"temperature": 0.5}
+        )
 
     @patch("transcription_module.genai")
-    def test_call_gemini_api_exception(self, mock_genai):
-        """Test _call_gemini_api with exception"""
+    def test_call_gemini_api_uses_model_from_payload(self, mock_genai):
+        """Test _call_gemini_api honours an explicit model override supplied in the payload"""
+        payload = {"contents": "test content", "model": "gemini-2.5-pro"}
+        mock_client = Mock()
+        mock_client.models.generate_content.return_value.to_dict.return_value = {"response": "ok"}
+        mock_genai.Client.return_value = mock_client
+
+        result = _call_gemini_api(payload, "test_key")
+
+        assert result == {"response": "ok"}
+        mock_client.models.generate_content.assert_called_once_with(
+            model="gemini-2.5-pro", contents="test content", config=None
+        )
+
+    @patch("transcription_module.logger")
+    @patch("transcription_module.genai")
+    def test_call_gemini_api_exception(self, mock_genai, mock_logger):
+        """Test _call_gemini_api returns None and logs when the client cannot be created"""
         payload = {"contents": "test content"}
-        mock_genai.configure.side_effect = Exception("API error")
+        mock_genai.Client.side_effect = Exception("API error")
 
         result = _call_gemini_api(payload, "test_key")
 
         assert result is None
+        mock_logger.error.assert_called_once()
+        assert "API error" in mock_logger.error.call_args[0][2]
 
+    @patch("transcription_module.logger")
     @patch("transcription_module.genai")
-    def test_call_gemini_api_model_exception(self, mock_genai):
-        """Test _call_gemini_api with model generation exception"""
+    def test_call_gemini_api_model_exception(self, mock_genai, mock_logger):
+        """Test _call_gemini_api returns None and logs when content generation raises"""
         payload = {"contents": "test content"}
-        mock_model = Mock()
-        mock_model.generate_content.side_effect = Exception("Model error")
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_client = Mock()
+        mock_client.models.generate_content.side_effect = Exception("Model error")
+        mock_genai.Client.return_value = mock_client
 
         result = _call_gemini_api(payload, "test_key")
 
         assert result is None
+        mock_logger.error.assert_called_once()
+        assert "Model error" in mock_logger.error.call_args[0][2]
 
 
 class TestTranscribeAudio:
@@ -353,12 +389,16 @@ class TestProcessAudioFileForInsights:
     """Test process_audio_file_for_insights function"""
 
     @pytest.mark.asyncio
+    @patch("transcription_module.ai_service")
     @patch("transcription_module.os.path.exists")
     @patch("transcription_module.transcribe_audio")
     @patch("transcription_module.extract_meeting_insights")
-    async def test_process_audio_file_success(self, mock_extract_insights, mock_transcribe, mock_exists):
-        """Test successful audio file processing for insights"""
+    async def test_process_audio_file_success(
+        self, mock_extract_insights, mock_transcribe, mock_exists, mock_ai_service
+    ):
+        """Test successful audio file processing for insights via the two-step fallback"""
         mock_exists.return_value = True
+        _force_two_step(mock_ai_service)
         mock_transcribe.return_value = {"transcription": "Meeting transcription text"}
         mock_extract_insights.return_value = {
             "summary": "Project meeting summary",
@@ -378,12 +418,16 @@ class TestProcessAudioFileForInsights:
         mock_extract_insights.assert_called_once_with("Meeting transcription text", "gemini", "test_key", None)
 
     @pytest.mark.asyncio
+    @patch("transcription_module.ai_service")
     @patch("transcription_module.os.path.exists")
     @patch("transcription_module.transcribe_audio")
     @patch("transcription_module.extract_meeting_insights")
-    async def test_process_audio_file_transcription_failure(self, mock_extract_insights, mock_transcribe, mock_exists):
+    async def test_process_audio_file_transcription_failure(
+        self, mock_extract_insights, mock_transcribe, mock_exists, mock_ai_service
+    ):
         """Test process_audio_file_for_insights when transcription fails"""
         mock_exists.return_value = True
+        _force_two_step(mock_ai_service)
         mock_transcribe.return_value = {"transcription": TRANSCRIPTION_FAILED_DEFAULT_MSG}
 
         result = await process_audio_file_for_insights("/test/audio.wav", "gemini", "test_key")
@@ -429,15 +473,17 @@ class TestProcessAudioFileForInsights:
         mock_extract_insights.assert_called_once_with("Transcribed text", "openai", "test_key", config)
 
     @pytest.mark.asyncio
+    @patch("transcription_module.ai_service")
     @patch("transcription_module.os.path.exists")
     @patch("transcription_module.transcribe_audio")
     @patch("transcription_module.extract_meeting_insights")
     @patch("transcription_module._get_audio_duration")
     async def test_process_audio_file_with_duration_calculation(
-        self, mock_get_duration, mock_extract_insights, mock_transcribe, mock_exists
+        self, mock_get_duration, mock_extract_insights, mock_transcribe, mock_exists, mock_ai_service
     ):
         """Test process_audio_file_for_insights with duration calculation for WAV files"""
         mock_exists.return_value = True
+        _force_two_step(mock_ai_service)
         mock_get_duration.return_value = 2  # 2 minutes
         mock_transcribe.return_value = {"transcription": "Short transcription"}
         mock_extract_insights.return_value = {
@@ -454,42 +500,55 @@ class TestProcessAudioFileForInsights:
         assert result["insights"]["meeting_details"]["duration_minutes"] == 2
 
     @pytest.mark.asyncio
+    @patch("transcription_module.ai_service")
     @patch("transcription_module.os.path.exists")
     @patch("transcription_module.transcribe_audio")
-    async def test_process_audio_file_transcription_exception(self, mock_transcribe, mock_exists):
-        """Test process_audio_file_for_insights when transcription raises exception"""
+    async def test_process_audio_file_transcription_exception(self, mock_transcribe, mock_exists, mock_ai_service):
+        """Test process_audio_file_for_insights surfaces an exception raised while transcribing"""
         mock_exists.return_value = True
+        _force_two_step(mock_ai_service)
         mock_transcribe.side_effect = Exception("Transcription error")
 
         result = await process_audio_file_for_insights("/test/audio.wav", "gemini", "test_key")
 
         assert "error" in result
-        assert "Error preparing audio file: Transcription error" in result["error"]
+        assert "Error during processing: Transcription error" in result["error"]
 
     @pytest.mark.asyncio
+    @patch("transcription_module.ai_service")
     @patch("transcription_module.os.path.exists")
     @patch("transcription_module.transcribe_audio")
     @patch("transcription_module.extract_meeting_insights")
-    async def test_process_audio_file_insights_exception(self, mock_extract_insights, mock_transcribe, mock_exists):
-        """Test process_audio_file_for_insights when insights extraction raises exception"""
+    async def test_process_audio_file_insights_exception(
+        self, mock_extract_insights, mock_transcribe, mock_exists, mock_ai_service
+    ):
+        """Test process_audio_file_for_insights surfaces an exception raised while extracting insights"""
         mock_exists.return_value = True
+        _force_two_step(mock_ai_service)
         mock_transcribe.return_value = {"transcription": "Valid transcription"}
         mock_extract_insights.side_effect = Exception("Insights error")
 
         result = await process_audio_file_for_insights("/test/audio.wav", "gemini", "test_key")
 
         assert "error" in result
-        assert "Error preparing audio file: Insights error" in result["error"]
+        assert "Error during processing: Insights error" in result["error"]
 
     @pytest.mark.asyncio
+    @patch("transcription_module.ai_service")
     @patch("transcription_module.os.path.exists")
-    @patch("hta_converter.convert_hta_to_wav")
-    async def test_process_audio_file_hta_conversion_success(self, mock_convert_hta, mock_exists):
-        """Test process_audio_file_for_insights with HTA file conversion"""
+    async def test_process_audio_file_hta_conversion_success(self, mock_exists, mock_ai_service):
+        """Test HTA/HDA input is copied to a temporary .wav, transcribed from there, then cleaned up.
+
+        HDA files are WAV payloads with a different extension, so the module copies rather than
+        transcodes them (see the HDA handling in process_audio_file_for_insights).
+        """
         mock_exists.return_value = True
-        mock_convert_hta.return_value = "/temp/converted.wav"
+        _force_two_step(mock_ai_service)
 
         with (
+            patch("tempfile.mkstemp", return_value=(99, "/temp/hda_abc.wav")) as mock_mkstemp,
+            patch("transcription_module.os.close") as mock_close,
+            patch("shutil.copy2") as mock_copy2,
             patch("transcription_module.transcribe_audio") as mock_transcribe,
             patch("transcription_module.extract_meeting_insights") as mock_extract_insights,
             patch("transcription_module.os.remove") as mock_remove,
@@ -501,22 +560,109 @@ class TestProcessAudioFileForInsights:
 
             assert result["transcription"] == "HTA transcription"
             assert result["insights"]["summary"] == "HTA summary"
-            mock_convert_hta.assert_called_once_with("/test/audio.hta")
-            mock_transcribe.assert_called_once_with("/temp/converted.wav", "gemini", "test_key", None, "auto")
-            mock_remove.assert_called_once_with("/temp/converted.wav")
+            mock_mkstemp.assert_called_once_with(suffix=".wav", prefix="hda_")
+            mock_close.assert_called_once_with(99)
+            mock_copy2.assert_called_once_with("/test/audio.hta", "/temp/hda_abc.wav")
+            # Transcription must run against the temporary .wav copy, not the original .hta
+            mock_transcribe.assert_called_once_with("/temp/hda_abc.wav", "gemini", "test_key", None, "auto")
+            mock_remove.assert_called_once_with("/temp/hda_abc.wav")
 
     @pytest.mark.asyncio
+    @patch("transcription_module.ai_service")
     @patch("transcription_module.os.path.exists")
-    @patch("hta_converter.convert_hta_to_wav")
-    async def test_process_audio_file_hta_conversion_failure(self, mock_convert_hta, mock_exists):
-        """Test process_audio_file_for_insights when HTA conversion fails"""
+    async def test_process_audio_file_hta_conversion_failure(self, mock_exists, mock_ai_service):
+        """Test a failed HTA/HDA copy aborts processing, cleans up, and reports the failure"""
         mock_exists.return_value = True
-        mock_convert_hta.return_value = None  # Conversion failed
+        _force_two_step(mock_ai_service)
 
-        result = await process_audio_file_for_insights("/test/audio.hta", "gemini", "test_key")
+        with (
+            patch("tempfile.mkstemp", return_value=(99, "/temp/hda_abc.wav")),
+            patch("transcription_module.os.close"),
+            patch("shutil.copy2", side_effect=OSError("disk full")),
+            patch("transcription_module.os.remove") as mock_remove,
+            patch("transcription_module.transcribe_audio") as mock_transcribe,
+        ):
+            result = await process_audio_file_for_insights("/test/audio.hta", "gemini", "test_key")
 
-        assert "error" in result
-        assert "Failed to convert HTA file to WAV format" in result["error"]
+            assert "error" in result
+            assert "Failed to prepare HDA file: disk full" in result["error"]
+            # The stub temp file is removed and no transcription is attempted
+            mock_remove.assert_called_once_with("/temp/hda_abc.wav")
+            mock_transcribe.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.ai_service")
+    @patch("transcription_module.os.path.exists")
+    @patch("transcription_module.transcribe_audio")
+    @patch("transcription_module.extract_meeting_insights")
+    async def test_process_audio_file_gemini_combined_path(
+        self, mock_extract_insights, mock_transcribe, mock_exists, mock_ai_service
+    ):
+        """Test Gemini uses the single-call combined path and maps its analysis onto insights"""
+        mock_exists.return_value = True
+        mock_ai_service.configure_provider.return_value = True
+        gemini_provider = Mock()
+        gemini_provider.transcribe_and_analyze_audio.return_value = {
+            "success": True,
+            "transcription": "[00:00] Ana: Hello team.",
+            "analysis": {
+                "summary": "Sprint planning for the release.",
+                "topics": ["Sprint", "Release"],
+                "sentiment": "Positive",
+                "action_items": ["Ship the beta"],
+                "participants": ["Ana", "Bruno"],
+                "conversation_segments": [{"segment_number": 1, "topic": "Sprint"}],
+            },
+        }
+        mock_ai_service.get_provider.return_value = gemini_provider
+
+        result = await process_audio_file_for_insights("/test/audio.wav", "gemini", "test_key", None, "en")
+
+        mock_ai_service.get_provider.assert_called_once_with("gemini")
+        gemini_provider.transcribe_and_analyze_audio.assert_called_once_with("/test/audio.wav", "en")
+        assert result["transcription"] == "[00:00] Ana: Hello team."
+        insights = result["insights"]
+        assert insights["summary"] == "Sprint planning for the release."
+        assert insights["category"] == "Meeting"
+        assert insights["overall_sentiment_meeting"] == "Positive"
+        assert insights["action_items"] == ["Ship the beta"]
+        assert insights["project_context"] == "Sprint, Release"
+        assert insights["participants"] == ["Ana", "Bruno"]
+        assert insights["conversation_segments"] == [{"segment_number": 1, "topic": "Sprint"}]
+        # The combined call replaces the two-step fallback entirely
+        mock_transcribe.assert_not_called()
+        mock_extract_insights.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.ai_service")
+    @patch("transcription_module.os.path.exists")
+    async def test_process_audio_file_gemini_combined_path_failure(self, mock_exists, mock_ai_service):
+        """Test a failed combined Gemini call is surfaced as an error instead of partial insights"""
+        mock_exists.return_value = True
+        mock_ai_service.configure_provider.return_value = True
+        gemini_provider = Mock()
+        gemini_provider.transcribe_and_analyze_audio.return_value = {
+            "success": False,
+            "error": "quota exceeded",
+        }
+        mock_ai_service.get_provider.return_value = gemini_provider
+
+        result = await process_audio_file_for_insights("/test/audio.wav", "gemini", "test_key")
+
+        assert result == {"error": "quota exceeded"}
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.ai_service")
+    @patch("transcription_module.os.path.exists")
+    async def test_process_audio_file_provider_configuration_failure(self, mock_exists, mock_ai_service):
+        """Test process_audio_file_for_insights reports an unconfigurable provider"""
+        mock_exists.return_value = True
+        mock_ai_service.configure_provider.return_value = False
+
+        result = await process_audio_file_for_insights("/test/audio.wav", "gemini", "bad_key")
+
+        assert result == {"error": "Failed to configure provider: gemini"}
+        mock_ai_service.get_provider.assert_not_called()
 
 
 class TestModuleIntegration:
@@ -587,39 +733,43 @@ class TestExceptionHandling:
             assert "File preparation error" in error_call[0][2]
 
     @pytest.mark.asyncio
+    @patch("transcription_module.ai_service")
     @patch("transcription_module.os.path.exists")
-    @patch("transcription_module.os.path.splitext", return_value=("/test/audio", ".hta"))
     @patch("transcription_module.transcribe_audio")
     @patch("transcription_module.extract_meeting_insights")
     @patch("transcription_module.os.remove")
     async def test_temp_file_cleanup_exception(
-        self, mock_remove, mock_insights, mock_transcribe, mock_splitext, mock_exists
+        self, mock_remove, mock_insights, mock_transcribe, mock_exists, mock_ai_service
     ):
         """Test temporary file cleanup exception handling"""
         # Setup file existence checks
         mock_exists.return_value = True
+        _force_two_step(mock_ai_service)
 
         # Setup successful transcription and insights
         mock_transcribe.return_value = {"transcription": "Test transcription"}
         mock_insights.return_value = {"summary": "Test summary"}
 
-        # Make os.remove raise an exception during cleanup
+        # Make os.remove raise an exception during cleanup of the temporary .wav copy
         mock_remove.side_effect = Exception("Permission denied")
 
         with (
             patch("transcription_module.logger") as mock_logger,
-            patch("hta_converter.convert_hta_to_wav", return_value="/temp/test_speed_adjusted.wav"),
+            patch("tempfile.mkstemp", return_value=(99, "/temp/hda_cleanup.wav")),
+            patch("transcription_module.os.close"),
+            patch("shutil.copy2"),
         ):
             result = await process_audio_file_for_insights("/test/audio.hta", "gemini", "test_key")
 
             # Should still return successful result despite cleanup failure
             assert "transcription" in result
             assert result["transcription"] == "Test transcription"
+            mock_remove.assert_called_once_with("/temp/hda_cleanup.wav")
 
             # Should log warning about cleanup failure
             mock_logger.warning.assert_called()
-            warning_call = mock_logger.warning.call_args
-            assert "Could not clean up temporary file" in warning_call[0][2]
+            warnings = [call[0][2] for call in mock_logger.warning.call_args_list]
+            assert any("Could not clean up temporary file" in message for message in warnings)
 
 
 class TestTranscriptionModuleUtilities:
@@ -695,13 +845,15 @@ class TestTranscriptionModuleUtilities:
 
     @pytest.mark.asyncio
     async def test_process_audio_file_with_mp3_extension(self):
-        """Test process_audio_file_for_insights with non-HTA extension."""
+        """Test process_audio_file_for_insights fills in duration for MP3 (a duration-capable format)."""
         with (
+            patch("transcription_module.ai_service") as mock_ai_service,
             patch("transcription_module.os.path.exists", return_value=True),
             patch("transcription_module.transcribe_audio") as mock_transcribe,
             patch("transcription_module.extract_meeting_insights") as mock_extract_insights,
-            patch("transcription_module._get_audio_duration", return_value=3),
+            patch("transcription_module._get_audio_duration", return_value=3) as mock_get_duration,
         ):
+            _force_two_step(mock_ai_service)
             mock_transcribe.return_value = {"transcription": "MP3 transcription"}
             mock_extract_insights.return_value = {
                 "summary": "MP3 summary",
@@ -712,21 +864,48 @@ class TestTranscriptionModuleUtilities:
 
             assert result["transcription"] == "MP3 transcription"
             assert result["insights"]["summary"] == "MP3 summary"
-            # Duration should NOT be calculated for non-WAV files
+            # .mp3 is a duration-capable format, so a zero duration is backfilled locally
+            mock_get_duration.assert_called_once_with("/test/audio.mp3")
+            assert result["insights"]["meeting_details"]["duration_minutes"] == 3
+
+    @pytest.mark.asyncio
+    async def test_process_audio_file_duration_skipped_for_unsupported_extension(self):
+        """Test duration backfill is skipped for formats the local duration probe does not support."""
+        with (
+            patch("transcription_module.ai_service") as mock_ai_service,
+            patch("transcription_module.os.path.exists", return_value=True),
+            patch("transcription_module.transcribe_audio") as mock_transcribe,
+            patch("transcription_module.extract_meeting_insights") as mock_extract_insights,
+            patch("transcription_module._get_audio_duration", return_value=3) as mock_get_duration,
+        ):
+            _force_two_step(mock_ai_service)
+            mock_transcribe.return_value = {"transcription": "M4A transcription"}
+            mock_extract_insights.return_value = {
+                "summary": "M4A summary",
+                "meeting_details": {"duration_minutes": 0},
+            }
+
+            result = await process_audio_file_for_insights("/test/audio.m4a", "gemini", "test_key")
+
+            assert result["transcription"] == "M4A transcription"
+            mock_get_duration.assert_not_called()
             assert result["insights"]["meeting_details"]["duration_minutes"] == 0
 
     @pytest.mark.asyncio
     async def test_process_audio_file_hta_cleanup_error_but_success(self):
         """Test process_audio_file_for_insights with HTA cleanup error but successful processing."""
         with (
+            patch("transcription_module.ai_service") as mock_ai_service,
             patch("transcription_module.os.path.exists", return_value=True),
-            patch("transcription_module.os.path.splitext", return_value=("/test/audio", ".hta")),
-            patch("hta_converter.convert_hta_to_wav", return_value="/temp/converted.wav"),
+            patch("tempfile.mkstemp", return_value=(99, "/temp/hda_converted.wav")),
+            patch("transcription_module.os.close"),
+            patch("shutil.copy2"),
             patch("transcription_module.transcribe_audio") as mock_transcribe,
             patch("transcription_module.extract_meeting_insights") as mock_extract_insights,
-            patch("transcription_module.os.remove", side_effect=Exception("Cleanup failed")),
+            patch("transcription_module.os.remove", side_effect=Exception("Cleanup failed")) as mock_remove,
             patch("transcription_module.logger") as mock_logger,
         ):
+            _force_two_step(mock_ai_service)
             mock_transcribe.return_value = {"transcription": "HTA transcription"}
             mock_extract_insights.return_value = {"summary": "HTA summary"}
 
@@ -735,9 +914,12 @@ class TestTranscriptionModuleUtilities:
             # Should still return successful result despite cleanup failure
             assert result["transcription"] == "HTA transcription"
             assert result["insights"]["summary"] == "HTA summary"
+            mock_remove.assert_called_once_with("/temp/hda_converted.wav")
 
             # Should log warning about cleanup failure
             mock_logger.warning.assert_called()
+            warnings = [call[0][2] for call in mock_logger.warning.call_args_list]
+            assert any("Could not clean up temporary file" in message for message in warnings)
 
     @pytest.mark.asyncio
     async def test_process_audio_file_file_exists_check_error(self):
@@ -858,10 +1040,12 @@ class TestTranscriptionModuleUtilities:
     async def test_process_audio_file_transcription_starts_with_failed(self):
         """Test process_audio_file when transcription result starts with 'Transcription failed'."""
         with (
+            patch("transcription_module.ai_service") as mock_ai_service,
             patch("transcription_module.os.path.exists", return_value=True),
             patch("transcription_module.transcribe_audio") as mock_transcribe,
             patch("transcription_module.extract_meeting_insights") as mock_extract_insights,
         ):
+            _force_two_step(mock_ai_service)
             mock_transcribe.return_value = {"transcription": "Transcription failed: some error"}
 
             result = await process_audio_file_for_insights("/test/audio.wav", "gemini", "test_key")

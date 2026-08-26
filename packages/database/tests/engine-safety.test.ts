@@ -154,14 +154,15 @@ describe('rotating on-boot backup', () => {
       .map((f) => join(dir, f))
   }
 
-  function makeEngine(path: string, keep: number) {
+  function makeEngine(path: string, keep: number, deferBackupOnBoot = false) {
     return new DatabaseEngine({
       betterSqlite3: Database,
       dbPathProvider: () => path,
       schemaVersion: 1,
       schema: SCHEMA,
       migrations: {},
-      backupOnBoot: { keep }
+      backupOnBoot: { keep },
+      deferBackupOnBoot
     })
   }
 
@@ -193,6 +194,7 @@ describe('rotating on-boot backup', () => {
     for (const day of ['2020-01-01', '2020-01-02', '2020-01-03']) {
       writeFileSync(`${path}.bak-${day}`, 'old')
     }
+    writeFileSync(`${path}.bak-2020-01-04.partial`, 'interrupted')
 
     // Second boot adds today's backup, then prunes to keep the newest 2.
     const e2 = makeEngine(path, 2)
@@ -208,5 +210,22 @@ describe('rotating on-boot backup', () => {
     expect(baks.some((f) => f.endsWith('.bak-2020-01-01'))).toBe(false)
     expect(baks.some((f) => f.endsWith('.bak-2020-01-02'))).toBe(false)
     expect(baks.some((f) => f.endsWith('.bak-2020-01-03'))).toBe(true)
+    expect(siblingFiles(path).some((f) => f.endsWith('.partial'))).toBe(false)
+  })
+
+  it('returns from a schema-current boot before a deferred routine backup', async () => {
+    const path = tempDbPath('backup-deferred')
+    paths.push(path)
+    const first = makeEngine(path, 3)
+    await first.initialize()
+    first.closeDatabase()
+
+    const second = makeEngine(path, 3, true)
+    await second.initialize()
+    expect(siblingFiles(path).some((file) => file.includes('.bak-'))).toBe(false)
+
+    await second.runDeferredBackup()
+    expect(siblingFiles(path).filter((file) => /\.bak-\d{4}-\d{2}-\d{2}$/.test(file))).toHaveLength(1)
+    second.closeDatabase()
   })
 })

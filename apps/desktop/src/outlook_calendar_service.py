@@ -158,24 +158,41 @@ class OutlookCalendarService:
             # Set up scopes for calendar access
             scopes = ["https://graph.microsoft.com/Calendars.Read"]
 
-            self.account = Account(credentials, auth_flow_type="authorization", tenant_id=tenant_id)
+            # Build the account locally and only publish it onto self once authentication has
+            # actually succeeded. Assigning self.account up front would leave an unauthenticated
+            # account (and a stale schedule from a previous session) behind on failure, which made
+            # is_authenticated() keep returning True after a failed re-authentication.
+            account = Account(credentials, auth_flow_type="authorization", tenant_id=tenant_id)
 
             # Authenticate
-            if self.account.authenticate(scopes=scopes):
-                self.schedule = self.account.schedule()
+            if account.authenticate(scopes=scopes):
+                self.account = account
+                self.schedule = account.schedule()
                 self._is_authenticated = True
                 logger.info("OutlookService", "authenticate", "Successfully authenticated with Outlook")
 
                 # Save credentials securely (encrypted)
                 self._save_credentials(client_id, client_secret, tenant_id)
                 return True
-            else:
-                logger.error("OutlookService", "authenticate", "Failed to authenticate with Outlook")
-                return False
+
+            logger.error("OutlookService", "authenticate", "Failed to authenticate with Outlook")
+            self._clear_authentication_state()
+            return False
 
         except Exception as e:
             logger.error("OutlookService", "authenticate", f"Authentication error: {e}")
+            self._clear_authentication_state()
             return False
+
+    def _clear_authentication_state(self):
+        """Drop every trace of an authenticated session.
+
+        Called whenever authentication fails so that is_authenticated() can never keep reporting
+        True off the back of an earlier successful sign-in.
+        """
+        self.account = None
+        self.schedule = None
+        self._is_authenticated = False
 
     def _save_credentials(self, client_id: str, client_secret: str, tenant_id: str):
         """Save credentials to config (Note: For now, credentials are managed via settings UI)."""

@@ -19,7 +19,7 @@ export function registerDeviceCacheHandlers(): void {
         'SELECT * FROM device_file_cache ORDER BY dateCreated DESC'
       )
       return files
-    } catch (error) {
+    } catch {
       // Table might not exist yet
       console.log('[DeviceCache] Cache table not initialized, returning empty array')
       return []
@@ -66,7 +66,7 @@ export function registerDeviceCacheHandlers(): void {
     try {
       run('DELETE FROM device_file_cache')
       console.log('[DeviceCache] Cache cleared')
-    } catch (error) {
+    } catch {
       // Table might not exist
       console.log('[DeviceCache] Cache already empty or not initialized')
     }

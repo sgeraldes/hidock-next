@@ -1,6 +1,6 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { Projects } from '../Projects'
 import { MemoryRouter } from 'react-router-dom'
 import { toast } from '@/components/ui/toaster'
@@ -62,6 +62,7 @@ global.window.electronAPI = {
     getById: mockGetById,
     create: mockCreate,
     delete: vi.fn().mockResolvedValue({ success: true }),
+    dismissDiscovered: vi.fn().mockResolvedValue({ success: true }),
     update: vi.fn().mockResolvedValue({ success: true, data: {} }),
     getNotes: vi.fn().mockResolvedValue({ success: true, data: [] }),
     getActionables: vi.fn().mockResolvedValue({ success: true, data: [] })
@@ -444,6 +445,128 @@ describe('Projects Page', () => {
     fireEvent.click(backBtn)
     expect(await screen.findByRole('button', { name: /Review 1 project name suggestion/i })).toBeInTheDocument()
     expect(screen.queryByText(/ProjectCandidate/)).not.toBeInTheDocument()
+  })
+
+  // F9(a): a project carries a link back to the meeting(s) it was discovered from.
+  it('shows a "Discovered from" provenance chip linking to the source meeting', async () => {
+    ;(global.window.electronAPI as any).projects.getById = vi.fn().mockResolvedValue({
+      success: true,
+      data: {
+        project: {
+          id: 'pr1',
+          name: 'Project Alpha',
+          status: 'active',
+          createdAt: new Date().toISOString(),
+          description: 'First project',
+          origin: 'discovered',
+          knowledgeIds: ['k1', 'k2'],
+          personIds: ['p1']
+        },
+        meetings: [{ id: 'm1', subject: 'Weekly Sync' }],
+        topics: []
+      }
+    })
+
+    render(
+      <MemoryRouter>
+        <Projects />
+      </MemoryRouter>
+    )
+
+    await screen.findByText('Project Alpha')
+    fireEvent.click(screen.getByText('Project Alpha'))
+
+    expect(await screen.findByText('Discovered from')).toBeInTheDocument()
+    const chip = await screen.findByText('Weekly Sync')
+    fireEvent.click(chip)
+    expect(mockNavigate).toHaveBeenCalledWith('/meeting/m1')
+  })
+
+  // F9(b): a zero-items / zero-people discovery is an honest review state, not a
+  // bare "0 Items / 0 Involved" dead end — with source, merge, and dismiss actions.
+  it('renders an honest review state for an empty discovered project', async () => {
+    ;(global.window.electronAPI as any).projects.getById = vi.fn().mockResolvedValue({
+      success: true,
+      data: {
+        project: {
+          id: 'pr1',
+          name: 'Project Alpha',
+          status: 'active',
+          createdAt: new Date().toISOString(),
+          description: null,
+          origin: 'discovered',
+          knowledgeIds: [],
+          personIds: []
+        },
+        meetings: [{ id: 'm1', subject: 'Weekly Sync' }],
+        topics: []
+      }
+    })
+
+    render(
+      <MemoryRouter>
+        <Projects />
+      </MemoryRouter>
+    )
+
+    await screen.findByText('Project Alpha')
+    fireEvent.click(screen.getByText('Project Alpha'))
+
+    // Honest state + source link back to the meeting it was inferred from.
+    expect(await screen.findByText('Discovered automatically')).toBeInTheDocument()
+    expect(screen.getByText('Weekly Sync')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Merge into another project/i })).toBeInTheDocument()
+
+    // Dismiss opens its own confirm (durable-rejection copy, not plain delete)…
+    fireEvent.click(screen.getByRole('button', { name: /^Dismiss$/i }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent(/Dismiss Discovered Project/i)
+    expect(dialog).toHaveTextContent(/won't re-create it/i)
+
+    // …and confirming routes through dismissDiscovered (tombstone + delete),
+    // NOT the plain delete path — that's what makes the dismissal durable.
+    fireEvent.click(within(dialog).getByRole('button', { name: /^Dismiss$/i }))
+    await waitFor(() =>
+      expect((global.window.electronAPI as any).projects.dismissDiscovered).toHaveBeenCalledWith('pr1')
+    )
+    expect((global.window.electronAPI as any).projects.delete).not.toHaveBeenCalled()
+  })
+
+  // MEDIUM-4 / v42: a hand-created project is NOT "discovered" even when it has
+  // meetings tagged — the review card is gated on the durable origin column
+  // ('manual'), not on linked meetings. Manual projects get a neutral state.
+  it('renders a neutral empty state (not "Discovered automatically") for a manual project with tagged meetings', async () => {
+    ;(global.window.electronAPI as any).projects.getById = vi.fn().mockResolvedValue({
+      success: true,
+      data: {
+        project: {
+          id: 'pr1',
+          name: 'Project Alpha',
+          status: 'active',
+          createdAt: new Date().toISOString(),
+          description: null,
+          origin: 'manual',
+          knowledgeIds: [],
+          personIds: []
+        },
+        meetings: [{ id: 'm1', subject: 'Weekly Sync' }], // tagged, but origin='manual'
+        topics: []
+      }
+    })
+
+    render(
+      <MemoryRouter>
+        <Projects />
+      </MemoryRouter>
+    )
+
+    await screen.findByText('Project Alpha')
+    fireEvent.click(screen.getByText('Project Alpha'))
+
+    expect(await screen.findByText('No items yet')).toBeInTheDocument()
+    expect(screen.getByText(/Add knowledge or link meetings/i)).toBeInTheDocument()
+    expect(screen.queryByText('Discovered automatically')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Dismiss$/i })).not.toBeInTheDocument()
   })
 
   it('offers a "View all in Library" affordance on the knowledge card', async () => {

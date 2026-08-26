@@ -1,14 +1,37 @@
 #!/usr/bin/env python3
 """
-CI Skip Configuration for Device Tests
+Opt-in gate for device tests that require real HiDock hardware.
 
-This module provides utilities to skip device tests when running in CI environments
-while allowing them to run locally.
+Device tests drive a physical HiDock over USB (backend init, connect, reset). Running
+them unattended is unsafe: repeated connect/reset cycles are the known cause of the
+device's USB interface getting stuck in the "active" state, after which every program
+is refused with LIBUSB_ERROR_ACCESS until the device is drained or power-cycled. They
+also cannot pass in CI, where no device exists.
+
+So they are skipped unless BOTH hold:
+  * not running in CI, and
+  * ``HIDOCK_HARDWARE_TESTS`` is set to a truthy value ("1"/"true"/"yes").
+
+Run them deliberately, with a device attached:
+    HIDOCK_HARDWARE_TESTS=1 pytest -m device
 """
 
 import os
 
 import pytest
+
+#: Environment variable that opts in to running real-hardware device tests.
+HARDWARE_TESTS_ENV_VAR = "HIDOCK_HARDWARE_TESTS"
+
+
+def hardware_tests_enabled():
+    """
+    Check whether real-hardware device tests were explicitly requested.
+
+    Returns:
+        bool: True only if HIDOCK_HARDWARE_TESTS is set to a truthy value.
+    """
+    return os.getenv(HARDWARE_TESTS_ENV_VAR, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def is_ci_environment():
@@ -56,7 +79,12 @@ def skip_device_test_if_ci():
     return skip_if_ci("Device tests require physical HiDock hardware")
 
 
-# Pytest marker for device tests that should be skipped in CI
+# Pytest marker for device tests. These drive real USB hardware, so they are opt-in:
+# skipped in CI (no device) and skipped locally unless HIDOCK_HARDWARE_TESTS is set.
 device_test_ci_skip = pytest.mark.skipif(
-    is_ci_environment(), reason="Device tests require physical hardware not available in CI"
+    is_ci_environment() or not hardware_tests_enabled(),
+    reason=(
+        "Device tests drive real HiDock USB hardware; "
+        f"set {HARDWARE_TESTS_ENV_VAR}=1 (with a device attached) to run them"
+    ),
 )

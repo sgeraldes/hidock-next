@@ -12,7 +12,9 @@ import {
   ListTodo,
   Settings,
   Network,
-  Sun
+  Sun,
+  PanelLeftClose,
+  PanelLeftOpen
 } from 'lucide-react'
 import { TitleBar } from '@/components/layout/TitleBar'
 import { showBrandHorizontalDivider } from '@/components/layout/Brand'
@@ -29,9 +31,9 @@ type LucideIcon = typeof FileText
 import { toast } from '@/components/ui/toaster'
 import { OperationController } from '@/components/OperationController'
 import { OperationsPanel } from '@/components/layout/OperationsPanel'
-import { ActivityLogPanel } from '@/components/layout/ActivityLogPanel'
 import { useUIStore } from '@/store/ui/useUIStore'
 import { useActionablesPendingCount, useActionablesStore } from '@/store'
+import { useFeatureStore, describeDisableReason, featureForPath } from '@/store/useFeatureStore'
 
 interface LayoutProps {
   children: ReactNode
@@ -117,8 +119,44 @@ export function NavCountBadge({ href, count, collapsed, active }: { href: string
   )
 }
 
+/**
+ * Track I (Gate 4): per-item nav visibility from the resolved feature state.
+ *  - 'visible'  — feature enabled (or the item is floor/unowned, e.g. Library).
+ *  - 'grayed'   — feature soft-disabled by a hard-dependency cascade
+ *                 (`requires:X`): shown grayed + non-navigating with a
+ *                 "Requires X" hint, per the owner's "cascade must surface,
+ *                 not silently remove" rule.
+ *  - 'hidden'   — feature disabled directly (user flag or preset): removed.
+ */
+export type NavItemVisibility = 'visible' | 'grayed' | 'hidden'
+
+export function navItemVisibility(
+  resolved: ReturnType<typeof useFeatureStore.getState>['resolved'],
+  href: string,
+  pendingRestart: readonly string[] = []
+): { visibility: NavItemVisibility; hint: string | null } {
+  const feature = featureForPath(href)
+  if (!feature) return { visibility: 'visible', hint: null } // floor (Library, Settings)
+  const state = resolved[feature]
+  if (!state || state.enabled) return { visibility: 'visible', hint: null }
+  // Round-3 pending-DISABLE: desired-off but active at boot (restart pending).
+  // Main keeps the feature's teardown/status IPC open, so the surface stays
+  // VISIBLE — hiding e.g. Sync here would orphan disconnect/cancel controls
+  // while USB work may still be in flight.
+  if (pendingRestart.includes(feature)) {
+    return { visibility: 'visible', hint: 'Off after restart' }
+  }
+  if (state.reason?.startsWith('requires:')) {
+    return { visibility: 'grayed', hint: describeDisableReason(state.reason) }
+  }
+  return { visibility: 'hidden', hint: null }
+}
+
 export function Layout({ children }: LayoutProps) {
   const location = useLocation()
+  // Track I: resolved feature state drives nav filtering/graying below.
+  const resolvedFeatures = useFeatureStore((s) => s.resolved)
+  const pendingRestart = useFeatureStore((s) => s.pendingRestart)
   // SM-02 fix: Use granular selectors instead of destructuring entire store
   const loadMeetings = useAppStore((s) => s.loadMeetings)
   const syncCalendar = useAppStore((s) => s.syncCalendar)
@@ -154,6 +192,17 @@ export function Layout({ children }: LayoutProps) {
     '/sync': unsyncedCount
   }
 
+  // Track I (Gate 4): apply feature visibility — drop 'hidden' items, keep
+  // 'grayed' (cascade) items with their "Requires X" hint, drop empty sections.
+  const visibleSections = navigationSections
+    .map((section) => ({
+      title: section.title,
+      items: section.items
+        .map((item) => ({ ...item, ...navItemVisibility(resolvedFeatures, item.href, pendingRestart) }))
+        .filter((item) => item.visibility !== 'hidden')
+    }))
+    .filter((section) => section.items.length > 0)
+
   // Track previous state for toast notifications
   const prevConnectedRef = useRef<boolean | null>(null)
   const prevStatusStepRef = useRef<string | null>(null)
@@ -164,6 +213,7 @@ export function Layout({ children }: LayoutProps) {
     loadConfig()
     loadMeetings()
     // loadRecordings() // Redundant: Pages load their own data via useUnifiedRecordings
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on mount to initialize app data
   }, [])
 
   // Toast notifications for device state changes (read from store)
@@ -201,6 +251,7 @@ export function Layout({ children }: LayoutProps) {
     }
 
     prevConnectedRef.current = isNowConnected
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- connectionStatus.step only read in the null-init guard; effect is intentionally keyed on device connection state
   }, [deviceState.connected, deviceState.model])
 
   // Toast notifications for connection errors (read from store)
@@ -228,8 +279,10 @@ export function Layout({ children }: LayoutProps) {
   // Initial calendar sync if URL is configured
   useEffect(() => {
     if (config?.calendar.icsUrl && !lastCalendarSync) {
-      syncCalendar()
+      // App-initiated startup sync (not a user click) — keeps the full boot gate.
+      syncCalendar('mount')
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- initial sync only; keyed on icsUrl so it does not re-run when lastCalendarSync updates
   }, [config?.calendar.icsUrl])
 
   return (
@@ -238,8 +291,8 @@ export function Layout({ children }: LayoutProps) {
       <OperationController />
 
       {/* Office-365-style unified titlebar (window chrome merged with the app). The
-          edge-handle on the brand/content divider drives the sidebar collapse. */}
-      <TitleBar sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+          sidebar-collapse handle lives on the sidebar's right edge (below), not here. */}
+      <TitleBar sidebarOpen={sidebarOpen} />
 
       {/* Divider row under the titlebar. Rendered as its own row BELOW the 40px
           titlebar band so the Windows native-controls overlay can't paint over its
@@ -247,6 +300,11 @@ export function Layout({ children }: LayoutProps) {
           below the brand" can be dropped ('sidebar' mode) while the line under the
           titlebar CONTENT stays — letting the brand flow straight into the nav rail.
           The left segment tracks the brand-cell width (w-56 / w-16). */}
+      {/* The line now runs the FULL width — including under the Windows native
+          window controls — so ONE continuous divider separates the whole bar from
+          the app below. Safe because the native-controls overlay only covers the
+          bar band ABOVE this row (height synced to the h-14 titlebar), so it never
+          paints over the line. */}
       <div className="flex h-px w-full shrink-0">
         <div
           className={cn(
@@ -260,20 +318,36 @@ export function Layout({ children }: LayoutProps) {
 
       {/* Sidebar + content row (sits below the titlebar) */}
       <div className="flex min-h-0 flex-1">
-      {/* Dark Sidebar */}
+      {/* Dark Sidebar — `relative` so the collapse edge-handle can anchor to its
+          right border at mid-height. */}
       <aside
         className={cn(
-          'flex flex-col border-r border-slate-700 bg-slate-900 text-slate-100 transition-all duration-300',
+          'relative flex flex-col border-r border-slate-700 bg-slate-900 text-slate-100 transition-all duration-300',
           sidebarOpen ? 'w-56' : 'w-16'
         )}
       >
+        {/* SIDEBAR-COLLAPSE EDGE-HANDLE — straddles the sidebar's RIGHT border,
+            vertically centred at MID-HEIGHT (per owner: "mid-right position, in the
+            middle of the sidebar, not the top corner"). A tight SQUARE only a couple
+            px larger than the icon (owner: "no circle, square, barely bigger than the
+            icon"). z-50 so it sits above the main content it overlaps. */}
+        <button
+          type="button"
+          onClick={toggleSidebar}
+          aria-label={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
+          aria-pressed={sidebarOpen}
+          title={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
+          className="absolute right-0 top-1/2 z-50 flex h-5 w-5 -translate-y-1/2 translate-x-1/2 items-center justify-center rounded-[3px] border border-slate-600 bg-slate-800 text-slate-300 shadow-sm transition-colors hover:bg-slate-700 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+        >
+          {sidebarOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeftOpen className="h-4 w-4" />}
+        </button>
         {/* Navigation — nav px-2.5 (10px) + item px-3 (12px) + half-icon (10px)
             lands every icon centre on the shared 32px rail axis (see TitleBar). */}
         <nav className="flex-1 px-2.5 pt-3 pb-2 space-y-4 overflow-y-auto">
           {/* The sidebar-collapse control now lives as an edge-handle on the
               brand/content divider in the titlebar (see TitleBar), so the nav rail
               starts directly with the KNOWLEDGE section in both states. */}
-          {navigationSections.map((section, sectionIdx) => (
+          {visibleSections.map((section, sectionIdx) => (
             <div key={section.title}>
               {/* Section Header. */}
               {sidebarOpen && (
@@ -284,6 +358,33 @@ export function Layout({ children }: LayoutProps) {
               {/* Section Items */}
               <div className="space-y-1">
                 {section.items.map((item) => {
+                  // Track I: cascade-disabled items render grayed + non-navigating
+                  // with a "Requires X" hint (the cascade must SURFACE, not vanish).
+                  if (item.visibility === 'grayed') {
+                    return (
+                      <div
+                        key={item.href}
+                        role="link"
+                        aria-disabled="true"
+                        title={item.hint ?? undefined}
+                        data-testid={`nav-grayed-${item.href.replace(/\//g, '')}`}
+                        className={cn(
+                          'relative flex items-center gap-3 rounded-lg px-3 py-2 text-sm cursor-not-allowed select-none text-slate-600',
+                          !sidebarOpen && 'justify-center'
+                        )}
+                      >
+                        <item.icon className="h-5 w-5 flex-shrink-0" />
+                        {sidebarOpen && (
+                          <span className="flex min-w-0 flex-col leading-tight">
+                            <span>{item.name}</span>
+                            {item.hint && (
+                              <span className="truncate text-[10px] text-slate-600">{item.hint}</span>
+                            )}
+                          </span>
+                        )}
+                      </div>
+                    )
+                  }
                   const isActive = location.pathname.startsWith(item.href)
                   return (
                     <Link
@@ -311,7 +412,7 @@ export function Layout({ children }: LayoutProps) {
                 })}
               </div>
               {/* Section Divider (except for last section) */}
-              {sectionIdx < navigationSections.length - 1 && (
+              {sectionIdx < visibleSections.length - 1 && (
                 <div className="mt-3 border-t border-slate-800" />
               )}
             </div>
@@ -339,9 +440,9 @@ export function Layout({ children }: LayoutProps) {
         {/* Operations Panel - Downloads + Transcriptions */}
         <OperationsPanel sidebarOpen={sidebarOpen} />
 
-        {/* Activity Log — sidebar shows only a compact badge; the full log opens
-            in a dedicated overlay (see ActivityLogPanel), never inline here. */}
-        <ActivityLogPanel sidebarOpen={sidebarOpen} />
+        {/* Activity Log is NOT in the sidebar — it lives ONLY in the titlebar (the
+            ⚡ ActivityLogButton owns the single overlay). Removed from here to kill
+            the duplicate entry point (owner request). Do NOT re-add it. */}
 
         {/* Restart moved OUT of the sidebar into the device pill's dropdown menu
             (see TitleBar.tsx) — it lives with the device connection controls now

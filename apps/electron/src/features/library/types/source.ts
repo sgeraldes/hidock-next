@@ -54,7 +54,7 @@ export interface AudioSource extends SourceBase {
   deviceFilename?: string
 
   // Transcription
-  transcriptionStatus: 'none' | 'pending' | 'processing' | 'complete' | 'error'
+  transcriptionStatus: 'none' | 'pending' | 'processing' | 'complete' | 'no_speech' | 'error'
   transcript?: {
     fullText: string
     language: string

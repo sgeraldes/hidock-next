@@ -416,10 +416,9 @@ describe('JensenDevice', () => {
       device.onconnect = onconnectSpy
 
       await device.connect()
-      // onconnect is deferred via setTimeout(300) to give the device firmware
-      // time to stabilize after USB interface is claimed before sending commands.
-      await new Promise(resolve => setTimeout(resolve, 350))
-      expect(onconnectSpy).toHaveBeenCalledTimes(1)
+      // onconnect fires from a setTimeout(0) deferral after connect() resolves,
+      // so poll for the callback instead of racing it with a fixed sleep.
+      await vi.waitFor(() => expect(onconnectSpy).toHaveBeenCalledTimes(1), { timeout: 15000, interval: 25 })
     })
 
     it('resets sequence ID on connect', async () => {

@@ -197,7 +197,7 @@ export function useOptimisticMutation<TData = unknown, TVariables = unknown, TCo
     async (variables: TVariables): Promise<void> => {
       try {
         await mutateAsync(variables)
-      } catch (err) {
+      } catch {
         // Error already handled in mutateAsync
         // Swallow here to make mutate() fire-and-forget
       }

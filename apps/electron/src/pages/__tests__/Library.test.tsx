@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 import { Library } from '../Library'
@@ -10,10 +10,27 @@ const scrollHarness = vi.hoisted(() => ({
   scrollToIndex: vi.fn(),
   selectedSourceId: null as string | null
 }))
+const virtualizerHarness = vi.hoisted(() => ({
+  measure: vi.fn(),
+  measureElement: vi.fn(),
+  options: null as null | {
+    count: number
+    estimateSize: () => number
+    getItemKey?: (index: number) => string | number
+  }
+}))
+const deviceSyncHarness = vi.hoisted(() => ({
+  scanAndReconcile: vi.fn().mockResolvedValue(undefined)
+}))
+
+vi.mock('@/services/device-sync-actions', () => ({
+  scanAndReconcile: deviceSyncHarness.scanAndReconcile
+}))
 
 // Mock hooks
 vi.mock('@/hooks/useUnifiedRecordings', () => ({
-  useUnifiedRecordings: vi.fn()
+  useUnifiedRecordings: vi.fn(),
+  overlayActiveTranscriptionStatuses: (recordings: unknown[]) => recordings
 }))
 
 vi.mock('@/store/useUIStore', () => {
@@ -75,24 +92,58 @@ declare global {
 globalThis.__mockVirtualizerCount = 0
 
 vi.mock('@tanstack/react-virtual', () => ({
-  useVirtualizer: ({ count }: { count: number }) => ({
-    getVirtualItems: () => Array.from({ length: count }, (_, index) => ({
+  useVirtualizer: (options: {
+    count: number
+    estimateSize: () => number
+    getItemKey?: (index: number) => string | number
+  }) => {
+    virtualizerHarness.options = options
+    const size = options.estimateSize()
+    return {
+    getVirtualItems: () => Array.from({ length: options.count }, (_, index) => ({
       index,
-      size: 64,
-      start: index * 64,
-      key: String(index)
+      size,
+      start: index * size,
+      key: options.getItemKey?.(index) ?? String(index)
     })),
-    getTotalSize: () => count * 64,
+    getTotalSize: () => options.count * size,
     scrollToIndex: scrollHarness.scrollToIndex,
-    measureElement: vi.fn(),
-    measure: vi.fn()
-  })
+    measureElement: virtualizerHarness.measureElement,
+    measure: virtualizerHarness.measure
+  }
+  }
 }))
 
 vi.mock('@/store/useLibraryStore', () => ({
   useLibraryStore: vi.fn((selector) => {
     const state = {
-      viewMode: 'card',
+      // Reader-pane state. Keep in sync with useLibraryStore's initialState —
+      // a missing key here surfaces as "Cannot read properties of undefined"
+      // deep inside a render, not as an obvious mock error.
+      readerSectionModes: {
+        player: 'expanded',
+        metadata: 'expanded',
+        summary: 'expanded',
+        transcript: 'expanded'
+      },
+      setReaderSectionMode: vi.fn(),
+      readerVerticalSizes: [64, 36],
+      setReaderVerticalSizes: vi.fn(),
+      readerMaximizedSection: null,
+      setReaderMaximizedSection: vi.fn(),
+      toggleReaderMaximizedSection: vi.fn(),
+      readerListCollapsedBeforeMaximize: null,
+      listPaneSize: 25,
+      setListPaneSize: vi.fn(),
+      listCollapsed: false,
+      setListCollapsed: vi.fn(),
+      qualityFilter: null,
+      setQualityFilter: vi.fn(),
+      statusFilter: null,
+      setStatusFilter: vi.fn(),
+      searchQuery: '',
+      setSearchQuery: vi.fn(),
+      viewMode: 'compact',
       sortBy: 'date',
       sortOrder: 'desc',
       sourceTypeFilter: 'all',
@@ -176,7 +227,11 @@ vi.mock('@/features/library/hooks', () => ({
     setStatusFilter: vi.fn(),
     setSearchQuery: vi.fn(),
     isPending: false
-  }))
+  })),
+  // F16/spec-003 Part F — mounted once on the Library page; no-op here since
+  // this suite doesn't exercise the suggestion-toast behavior (see
+  // useValueSuggestionToasts.test.tsx for that coverage).
+  useValueSuggestionToasts: vi.fn()
 }))
 
 const mockRefresh = vi.fn()
@@ -186,7 +241,8 @@ const transcriptionCancelledListeners: Array<() => void> = []
 
 // Mock electronAPI
 global.window.electronAPI = {
-  transcripts: { getByRecordingIds: vi.fn().mockResolvedValue({}) },
+  // ADV13: Library uses the owner-management batch accessor.
+  transcripts: { getByRecordingIds: vi.fn().mockResolvedValue({}), getByRecordingIdsOwner: vi.fn().mockResolvedValue({}) },
   meetings: { getByIds: vi.fn().mockResolvedValue({}) },
   storage: { openFolder: vi.fn() },
   recordings: {
@@ -196,7 +252,9 @@ global.window.electronAPI = {
     markPersonal: vi.fn().mockResolvedValue({ success: true, personal: true }),
     deletionImpact: vi.fn().mockResolvedValue({ success: true, data: { transcripts: 0, actionItems: 0, embeddings: 0, artifacts: 0, hasAudioFile: true } }),
     deleteCascade: vi.fn().mockResolvedValue({ success: true, mode: 'soft' }),
-    restore: vi.fn().mockResolvedValue({ success: true })
+    restore: vi.fn().mockResolvedValue({ success: true }),
+    // spec-005/F17 T5 — loaded eagerly on mount (for the Trash toggle's count).
+    getTrash: vi.fn().mockResolvedValue([])
   },
   downloadService: {
     queueDownloads: vi.fn()
@@ -236,11 +294,16 @@ describe('Library', () => {
     vi.clearAllMocks()
     scrollHarness.scrollToIndex.mockClear()
     scrollHarness.selectedSourceId = null
+    virtualizerHarness.measure.mockClear()
+    virtualizerHarness.measureElement.mockClear()
+    virtualizerHarness.options = null
     mockRefresh.mockReset()
+    deviceSyncHarness.scanAndReconcile.mockReset().mockResolvedValue(undefined)
     transcriptionCompletedListeners.length = 0
     transcriptionFailedListeners.length = 0
     transcriptionCancelledListeners.length = 0
     vi.mocked(window.electronAPI.transcripts.getByRecordingIds).mockResolvedValue({})
+    vi.mocked(window.electronAPI.transcripts.getByRecordingIdsOwner).mockResolvedValue({})
     vi.mocked(window.electronAPI.meetings.getByIds).mockResolvedValue({})
     vi.mocked(useUnifiedRecordings).mockReturnValue({
       recordings: [],
@@ -259,6 +322,27 @@ describe('Library', () => {
       </MemoryRouter>
     )
   }
+
+  describe('Manual refresh', () => {
+    it('forces device reconciliation before rebuilding the Library view', async () => {
+      const calls: string[] = []
+      deviceSyncHarness.scanAndReconcile.mockImplementation(async () => {
+        calls.push('sync')
+      })
+      mockRefresh.mockImplementation(async () => {
+        calls.push('refresh')
+      })
+
+      renderLibrary()
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh Library' }))
+
+      await waitFor(() => {
+        expect(deviceSyncHarness.scanAndReconcile).toHaveBeenCalledWith('manual')
+        expect(mockRefresh).toHaveBeenCalledWith(true)
+      })
+      expect(calls).toEqual(['sync', 'refresh'])
+    })
+  })
 
   describe('Reveal opened source (select + scroll into view)', () => {
     const makeRecs = (n: number) =>
@@ -303,7 +387,7 @@ describe('Library', () => {
 
       renderLibrary()
 
-      await waitFor(() => expect(screen.getByText('Recording 0')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByText('rec-0.wav')).toBeInTheDocument())
       expect(scrollHarness.scrollToIndex).not.toHaveBeenCalled()
     })
   })
@@ -355,13 +439,50 @@ describe('Library', () => {
 
       renderLibrary()
 
-      // Header shows recording count (text is split across elements)
+      // Header shows the universal source count.
       await waitFor(() => {
-        expect(screen.getByText(/1.*capture/i)).toBeInTheDocument()
+        expect(screen.getByText(/1.*source/i)).toBeInTheDocument()
       })
     })
 
-    it('shows device status when not connected', async () => {
+    // The banner reports a device that WENT AWAY, not one that was never
+    // there — showDisconnectBanner is `wasConnected && !deviceConnected`, so a
+    // session that never saw a device is deliberately left un-nagged. Drive the
+    // real transition rather than asserting on a cold start.
+    it('shows the disconnect banner after a connected device goes away', async () => {
+      const stats = { total: 1, deviceOnly: 0, localOnly: 1, both: 0, synced: 1, unsynced: 0, onSource: 0, locallyAvailable: 1 }
+      vi.mocked(useUnifiedRecordings).mockReturnValue({
+        recordings: [mockRecording],
+        loading: false,
+        error: null,
+        refresh: vi.fn(),
+        deviceConnected: true,
+        stats
+      })
+
+      const { rerender } = renderLibrary()
+      expect(screen.queryByText(/device disconnected/i)).not.toBeInTheDocument()
+
+      vi.mocked(useUnifiedRecordings).mockReturnValue({
+        recordings: [mockRecording],
+        loading: false,
+        error: null,
+        refresh: vi.fn(),
+        deviceConnected: false,
+        stats
+      })
+      rerender(
+        <MemoryRouter>
+          <Library />
+        </MemoryRouter>
+      )
+
+      await waitFor(() => {
+        expect(screen.getByText(/device disconnected/i)).toBeInTheDocument()
+      })
+    })
+
+    it('stays quiet when no device was ever connected', async () => {
       vi.mocked(useUnifiedRecordings).mockReturnValue({
         recordings: [mockRecording],
         loading: false,
@@ -372,10 +493,99 @@ describe('Library', () => {
       })
 
       renderLibrary()
+      await waitFor(() => expect(screen.getByText(/1.*source/i)).toBeInTheDocument())
+      expect(screen.queryByText(/device disconnected/i)).not.toBeInTheDocument()
+    })
+
+    it('paints compact-row separators without changing measured geometry', async () => {
+      vi.mocked(useUnifiedRecordings).mockReturnValue({
+        recordings: [
+          mockRecording,
+          { ...mockRecording, id: 'test-456', filename: 'second.wav', title: 'Second Recording' }
+        ],
+        loading: false,
+        error: null,
+        refresh: vi.fn(),
+        deviceConnected: false,
+        stats: { total: 2, deviceOnly: 0, localOnly: 2, both: 0, synced: 2, unsynced: 0, onSource: 0, locallyAvailable: 2 }
+      })
+
+      renderLibrary()
+
+      const secondVirtualRow = await waitFor(() => {
+        const row = document.querySelector<HTMLElement>('[data-index="1"]')
+        expect(row).not.toBeNull()
+        return row as HTMLElement
+      })
+
+      expect(secondVirtualRow.className).toContain('before:absolute')
+      expect(secondVirtualRow.classList.contains('border-t')).toBe(false)
+    })
+
+    it('keeps same-title rows on distinct fixed tracks after a split insertion', async () => {
+      vi.mocked(useUnifiedRecordings).mockReturnValue({
+        recordings: [
+          mockRecording,
+          { ...mockRecording, id: 'after-parent', filename: 'after.wav', title: 'After parent' }
+        ],
+        loading: false,
+        error: null,
+        refresh: vi.fn(),
+        deviceConnected: false,
+        stats: { total: 2, deviceOnly: 0, localOnly: 2, both: 0, synced: 2, unsynced: 0, onSource: 0, locallyAvailable: 2 }
+      })
+      const view = renderLibrary()
+
+      vi.mocked(useUnifiedRecordings).mockReturnValue({
+        recordings: [
+          {
+            ...mockRecording,
+            id: 'duplicate-parent-id',
+            filename: 'part-1.flac',
+            meetingSubject: 'RE: [EXTERNAL] DFX5 SIP Gateway WAR',
+            dateRecorded: new Date('2026-08-18T18:46:00'),
+            duration: 2815
+          },
+          {
+            ...mockRecording,
+            id: 'duplicate-parent-id',
+            filename: 'part-2.flac',
+            meetingSubject: 'RE: [EXTERNAL] DFX5 SIP Gateway WAR',
+            dateRecorded: new Date('2026-08-18T18:45:00'),
+            duration: 2819
+          },
+          {
+            ...mockRecording,
+            id: 'after-parent',
+            filename: 'after.wav',
+            dateRecorded: new Date('2026-08-18T18:44:00')
+          }
+        ],
+        loading: false,
+        error: null,
+        refresh: vi.fn(),
+        deviceConnected: false,
+        stats: { total: 3, deviceOnly: 0, localOnly: 3, both: 0, synced: 3, unsynced: 0, onSource: 0, locallyAvailable: 3 }
+      })
+      view.rerender(
+        <MemoryRouter>
+          <Library />
+        </MemoryRouter>
+      )
 
       await waitFor(() => {
-        expect(screen.getByText(/device not connected/i)).toBeInTheDocument()
+        expect(screen.getAllByText('RE: [EXTERNAL] DFX5 SIP Gateway WAR')).toHaveLength(2)
       })
+      expect(virtualizerHarness.options?.getItemKey?.(0)).toBe('duplicate-parent-id::part-1.flac')
+      expect(virtualizerHarness.options?.getItemKey?.(1)).toBe('duplicate-parent-id::part-2.flac')
+      expect(virtualizerHarness.options?.getItemKey?.(2)).toBe('after-parent')
+      expect(virtualizerHarness.measureElement).not.toHaveBeenCalled()
+      const rows = [0, 1, 2].map((index) => document.querySelector<HTMLElement>(`[data-index="${index}"]`))
+      expect(rows[0]).toHaveStyle({ height: '48px', top: '0px' })
+      expect(rows[1]).toHaveStyle({ height: '48px', top: '48px' })
+      expect(rows[2]).toHaveStyle({ height: '48px', top: '96px' })
+      expect(rows.every((row) => row?.style.transform === '')).toBe(true)
+      expect(new Set(rows.map((row) => row?.style.top)).size).toBe(3)
     })
   })
 
@@ -421,10 +631,7 @@ describe('Library', () => {
   describe('Filters', () => {
     it('renders filter controls', () => {
       renderLibrary()
-      // The list-scoped filter input should be present in LibraryFilters. It is
-      // deliberately labelled "Filter … captures in this list" (not "Search") to
-      // distinguish it from the global top-bar search.
-      const searchInput = screen.getByPlaceholderText(/filter .* captures in this list/i)
+      const searchInput = screen.getByPlaceholderText(/search .* sources/i)
       expect(searchInput).toBeInTheDocument()
     })
   })
@@ -443,10 +650,9 @@ describe('Library', () => {
       renderLibrary()
 
       await waitFor(() => {
-        // Header action buttons should be present
-        expect(screen.getByText(/add capture/i)).toBeInTheDocument()
-        expect(screen.getByText(/open folder/i)).toBeInTheDocument()
-        expect(screen.getByText(/refresh/i)).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /add source/i })).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /refresh library/i })).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /view trash/i })).toBeInTheDocument()
       })
     })
   })
@@ -461,7 +667,7 @@ describe('Library', () => {
         deviceConnected: false,
         stats: { total: 1, deviceOnly: 0, localOnly: 1, both: 0, synced: 1, unsynced: 0, onSource: 0, locallyAvailable: 1 }
       })
-      vi.mocked(window.electronAPI.transcripts.getByRecordingIds).mockResolvedValue({
+      vi.mocked(window.electronAPI.transcripts.getByRecordingIdsOwner).mockResolvedValue({
         'test-123': {
           id: 'transcript-1',
           recordingId: 'test-123',
@@ -486,7 +692,7 @@ describe('Library', () => {
 
       await waitFor(() => {
         expect(mockRefresh).toHaveBeenCalledWith(false)
-        expect(window.electronAPI.transcripts.getByRecordingIds).toHaveBeenCalledWith(['test-123'])
+        expect(window.electronAPI.transcripts.getByRecordingIdsOwner).toHaveBeenCalledWith(['test-123'])
       })
     })
   })

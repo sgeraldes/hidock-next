@@ -14,6 +14,8 @@ describe('Knowledge Domain Types', () => {
       quality: 'valuable',
       qualityConfidence: null,
       qualityAssessedAt: null,
+      qualityReasons: null,
+      qualitySource: null,
       storageTier: 'hot',
       retentionDays: null,
       expiresAt: null,

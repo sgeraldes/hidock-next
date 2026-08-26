@@ -3,8 +3,8 @@
  *
  * Loads and derives the two DISTINCT people lists the reader shows:
  *
- *  - Participants (who actually spoke): the linked meeting's canonical contacts
- *    PLUS the transcript's speakers, each resolved through the SAME speaker map
+ *  - Speakers (who actually spoke): transcript diarization turns only, resolved
+ *    through the SAME speaker map
  *    the transcript viewer uses (label→contact bindings, per-turn overrides,
  *    splits). Because the resolution is shared, renaming a speaker — in the
  *    transcript OR in a Participants chip — updates this list.
@@ -65,6 +65,17 @@ interface UseReaderPeopleArgs {
 interface ReaderPeople {
   participants: ParticipantChip[]
   invited: MeetingAttendee[]
+  /**
+   * Resolves a raw diarization label AT A SPECIFIC TURN to the participant chip
+   * key that represents it — replaying the SAME split/override/label-binding
+   * logic resolveParticipants uses. Per-turn (not a flat label map) so a base
+   * label split into multiple people yields DIFFERENT keys on each side of the
+   * split boundary. A label resolved to a linked meeting contact maps to that
+   * contact's `mc:` chip key, so its chip swatch and waveform bars share one
+   * color. Feeds `deriveSpeakerRanges` (whose turn indices are computed over the
+   * same expanded, text-filtered turn list).
+   */
+  resolveRangeKey: (baseLabel: string, turnIndex: number) => { key: string; name: string } | undefined
   /** All contacts, for the assign popover's picker (loaded lazily). */
   allContacts: Person[]
   /** Resolve a calendar attendee to a linked meeting contact, if known. */
@@ -97,6 +108,10 @@ export function useReaderPeople({ meetingId, attendees, recordingId, segments }:
 
   // Canonical contacts for the linked meeting (the meeting_contacts join). Same
   // IPC MeetingDetail uses; no new read path.
+  // R28-RES-1 (round-29): SourceReader is the OWNER's transcript reader — use the
+  // existence-scoped owner accessor so the owner sees every participant of their own
+  // meeting. The gated default (contacts.getForMeeting) feeds only the
+  // assistant/hover/Today surfaces.
   useEffect(() => {
     let cancelled = false
     if (!meetingId) {
@@ -105,7 +120,7 @@ export function useReaderPeople({ meetingId, attendees, recordingId, segments }:
     }
     ;(async () => {
       try {
-        const res = await window.electronAPI.contacts.getForMeeting(meetingId)
+        const res = await window.electronAPI.contacts.getForMeetingOwner(meetingId)
         if (!cancelled) setContacts(res.success ? res.data : [])
       } catch (err) {
         console.error('Failed to load meeting contacts:', err)
@@ -181,35 +196,103 @@ export function useReaderPeople({ meetingId, attendees, recordingId, segments }:
     return { ids, names }
   }, [contacts])
 
-  const participants = useMemo<ParticipantChip[]>(() => {
-    // 1) Meeting contacts — always shown, clickable to their page.
-    const contactChips: ParticipantChip[] = contacts.map((c) => ({
-      key: `mc:${c.id}`,
-      name: c.name || c.email || 'Unknown',
-      contactId: c.id,
-      effectiveLabel: c.name || c.email || 'Unknown',
-      firstTurnIndex: 0,
-      turnCount: 0,
-      mergeSuspected: false,
-    }))
-    // 2) Resolved transcript speakers not already represented by a meeting contact.
-    const speakerChips: ParticipantChip[] = resolved
-      .filter((r) => {
-        if (r.contactId && contactKeys.ids.has(r.contactId)) return false
-        if (contactKeys.names.has(r.name.trim().toLowerCase())) return false
-        return true
-      })
-      .map((r) => ({
-        key: r.key,
-        name: r.name,
-        contactId: r.contactId,
-        effectiveLabel: r.effectiveLabel,
-        firstTurnIndex: r.firstTurnIndex,
-        turnCount: r.turnCount,
-        mergeSuspected: r.mergeSuspected,
-      }))
-    return [...contactChips, ...speakerChips]
-  }, [contacts, resolved, contactKeys])
+  const participants = useMemo<ParticipantChip[]>(() => resolved.map((speaker) => {
+    // A resolved diarization identity may also be a calendar contact. Fold its
+    // key for consistent navigation/color, but never add calendar-only contacts
+    // to this list: invited/organizer is not proof that someone spoke.
+    const matchingContact = speaker.contactId
+      ? contacts.find((contact) => contact.id === speaker.contactId)
+      : contacts.find((contact) => {
+          const key = speaker.name.trim().toLowerCase()
+          return contact.name?.trim().toLowerCase() === key || contact.email?.trim().toLowerCase() === key
+        })
+    return {
+      key: matchingContact ? `mc:${matchingContact.id}` : speaker.key,
+      name: matchingContact?.name || matchingContact?.email || speaker.name,
+      contactId: matchingContact?.id ?? speaker.contactId,
+      effectiveLabel: speaker.effectiveLabel,
+      firstTurnIndex: speaker.firstTurnIndex,
+      turnCount: speaker.turnCount,
+      mergeSuspected: speaker.mergeSuspected,
+    }
+  }), [contacts, resolved])
+
+  // Precomputed lookup structures for the per-turn range-key resolver, built
+  // ONCE per splits/contacts change (not per turn): split boundaries grouped by
+  // base label and sorted by fromIndex (→ binary search per turn), and a
+  // name/email → contact map (→ O(1) meeting-contact fold instead of a linear
+  // scan over contacts for every turn).
+  const rangeKeyIndex = useMemo(() => {
+    const splitsByBase = new Map<string, SpeakerSplit[]>()
+    for (const s of splits) {
+      const arr = splitsByBase.get(s.baseLabel)
+      if (arr) arr.push(s)
+      else splitsByBase.set(s.baseLabel, [s])
+    }
+    for (const arr of splitsByBase.values()) arr.sort((a, b) => a.fromIndex - b.fromIndex)
+
+    const contactByNameKey = new Map<string, Contact>()
+    for (const c of contacts) {
+      const n = (c.name || '').trim().toLowerCase()
+      if (n && !contactByNameKey.has(n)) contactByNameKey.set(n, c)
+      const e = (c.email || '').trim().toLowerCase()
+      if (e && !contactByNameKey.has(e)) contactByNameKey.set(e, c)
+    }
+    return { splitsByBase, contactByNameKey }
+  }, [splits, contacts])
+
+  // Per-TURN color-key resolver for the waveform ranges. It replays the exact
+  // identity resolution resolveParticipants applies to each turn — effective
+  // (possibly split-derived) label, then per-turn override ?? label binding —
+  // and then the `participants` fold: an identity that is (or matches by
+  // name/email) a linked meeting contact keys as that contact's `mc:` chip.
+  // Being per-turn (not a flat label map) is what keeps a split base label from
+  // collapsing: "Speaker 1" before the split and "Speaker 1 · B" after it hit
+  // DIFFERENT bindings and therefore different keys/colors — matching their
+  // distinct chips. deriveSpeakerRanges passes turn indices computed over the
+  // SAME expanded, text-filtered turn list, so boundaries line up exactly.
+  // Per-turn cost is O(log splits) + O(1) map lookups via rangeKeyIndex, so a
+  // 1000+-turn transcript resolves all its ranges in a few milliseconds.
+  const resolveRangeKey = useCallback(
+    (baseLabel: string, turnIndex: number): { key: string; name: string } | undefined => {
+      const base = baseLabel.trim()
+      if (!base) return undefined
+
+      // Effective label: the latest split boundary at/before this turn, via
+      // binary search over this base's sorted boundaries (same result as
+      // resolveParticipants' effectiveLabelFor, without the per-turn scan).
+      let effective = base
+      const bounds = rangeKeyIndex.splitsByBase.get(base)
+      if (bounds && bounds.length > 0) {
+        let lo = 0
+        let hi = bounds.length - 1
+        let found = -1
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1
+          if (bounds[mid].fromIndex <= turnIndex) {
+            found = mid
+            lo = mid + 1
+          } else {
+            hi = mid - 1
+          }
+        }
+        if (found >= 0) effective = bounds[found].derivedLabel
+      }
+
+      const assigned = turnOverrides.get(turnIndex) ?? speakerMap.get(effective)
+      const contactId = assigned?.contactId
+      const name = assigned?.name ?? effective
+
+      // Fold into a linked meeting contact where the participants list does.
+      if (contactId && contactKeys.ids.has(contactId)) {
+        return { key: `mc:${contactId}`, name }
+      }
+      const byName = rangeKeyIndex.contactByNameKey.get(name.trim().toLowerCase())
+      if (byName) return { key: `mc:${byName.id}`, name: byName.name || byName.email || name }
+      return { key: contactId ? `c:${contactId}` : `l:${effective}`, name }
+    },
+    [rangeKeyIndex, turnOverrides, speakerMap, contactKeys]
+  )
 
   // Keys of people who actually spoke — to flag invited attendees who spoke.
   const spoke = useMemo(() => {
@@ -337,6 +420,7 @@ export function useReaderPeople({ meetingId, attendees, recordingId, segments }:
   return {
     participants,
     invited,
+    resolveRangeKey,
     allContacts,
     resolveAttendee,
     attendeeSpoke,

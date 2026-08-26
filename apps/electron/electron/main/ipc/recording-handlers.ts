@@ -1,17 +1,25 @@
 import { ipcMain, dialog, BrowserWindow } from 'electron'
+import { rankRecordingsByMeetingCoverage } from '../services/recording-match-scoring'
 import {
   getRecordings,
   getRecordingById,
+  getTrashedRecordings,
   getRecordingsForMeeting,
+  getMeetingById,
+  findCandidateMeetingsForRecording,
+  findContradictedAutomaticLinks,
+  repairContradictedAutomaticLinks,
   updateRecordingStatus,
   updateRecordingTranscriptionStatus,
   updateRecordingDuration,
   backfillRecordingDurations,
   classifyLowValueCaptures,
   linkRecordingToMeeting,
+  unlinkRecordingFromMeeting,
   getTranscriptByRecordingId,
   getCandidatesForRecordingWithDetails,
   getMeetingsNearDate,
+  selectMeetingForRecordingByUser,
   insertRecording,
   resolveRecordingId,
   setRecordingPreassignment,
@@ -21,9 +29,13 @@ import {
   type Transcript,
   type RecordingPreassignment
 } from '../services/database'
-import { getRecordingFiles, deleteRecording as deleteRecordingFile, getRecordingsPath } from '../services/file-storage'
+import { getRecordingFiles, getRecordingsPath } from '../services/file-storage'
+import { parseHiDockFilenameDateIso } from '../services/hidock-filename'
+import { disambiguateOverlappingCandidates } from '../services/meeting-disambiguation'
+import { filterEligibleRecordingIds } from '../services/recording-eligibility'
 import {
   scoreMeetingCandidates,
+  isCancelledMeetingSubject,
   deriveTranscriptTitle,
   deriveTranscriptSummary,
   countTranscriptSpeakers,
@@ -45,14 +57,19 @@ import {
   cancelTranscription,
   cancelAllTranscriptions,
   processQueueManually,
-  markUserPriority
+  markUserPriority,
+  queueTranscriptionIfEnabled
 } from '../services/transcription'
-import { getQueueItems, addToQueue, updateQueueItem } from '../services/database'
+import {
+  detectRecordingSplitSuggestions,
+  splitRecording,
+  type RecordingSplitResult,
+  type RecordingSplitSuggestion
+} from '../services/recording-split'
+import { getQueueItems, getActionableQueueItems, addToQueue, updateQueueItem } from '../services/database'
 import { getConfig } from '../services/config'
 import {
   GetRecordingByIdSchema,
-  DeleteRecordingSchema,
-  DeleteBatchRecordingsSchema,
   LinkRecordingToMeetingSchema,
   UnlinkRecordingFromMeetingSchema,
   TranscribeRecordingSchema,
@@ -71,6 +88,16 @@ export function registerRecordingHandlers(): void {
       return getRecordings()
     } catch (error) {
       console.error('recordings:getAll error:', error)
+      return []
+    }
+  })
+
+  // Get all soft-deleted (tombstoned) recordings — feeds the Trash UI (spec-005/F17 T5).
+  ipcMain.handle('recordings:getTrash', async (): Promise<Recording[]> => {
+    try {
+      return getTrashedRecordings()
+    } catch (error) {
+      console.error('recordings:getTrash error:', error)
       return []
     }
   })
@@ -103,10 +130,30 @@ export function registerRecordingHandlers(): void {
         }
 
         const recordings = getRecordingsForMeeting(result.data.id)
-        return recordings.map((recording) => ({
+        const withTranscripts = recordings.map((recording) => ({
           ...recording,
           transcript: getTranscriptByRecordingId(recording.id)
         }))
+
+        // A capture that ran across back-to-back meetings is split into
+        // "<base> - Part N", and EVERY part that overlaps the event stays
+        // linked - the meeting really does span them. Order by how much of the
+        // MEETING each part covers so [0] is the part that actually holds the
+        // conversation, and publish the fraction so a consumer can see the
+        // split instead of being handed one arbitrary part. Previously this
+        // returned insertion order, so [0] was Part 1: the tail of the PREVIOUS
+        // meeting, clipping only the first few minutes of this one.
+        const meeting = getMeetingById(result.data.id)
+        if (!meeting?.start_time || !meeting?.end_time) return withTranscripts
+
+        return rankRecordingsByMeetingCoverage(
+          withTranscripts.map((recording) => ({
+            ...recording,
+            dateRecorded: recording.date_recorded,
+            durationSeconds: recording.duration_seconds
+          })),
+          { startTime: meeting.start_time, endTime: meeting.end_time }
+        )
       } catch (error) {
         console.error('recordings:getForMeeting error:', error)
         return []
@@ -125,77 +172,6 @@ export function registerRecordingHandlers(): void {
     } catch (error) {
       console.error('recordings:getAllWithTranscripts error:', error)
       return []
-    }
-  })
-
-  // Delete a recording
-  ipcMain.handle('recordings:delete', async (_, id: unknown): Promise<boolean> => {
-    try {
-      const result = DeleteRecordingSchema.safeParse({ id })
-      if (!result.success) {
-        console.error('recordings:delete validation error:', result.error)
-        return false
-      }
-
-      const recording = getRecordingById(result.data.id)
-      if (recording && recording.file_path) {
-        const deleted = deleteRecordingFile(recording.file_path)
-        if (deleted) {
-          updateRecordingStatus(result.data.id, 'deleted')
-        }
-        return deleted
-      }
-      return false
-    } catch (error) {
-      console.error('recordings:delete error:', error)
-      return false
-    }
-  })
-
-  // Batch delete recordings (B-LIB-007)
-  ipcMain.handle('recordings:deleteBatch', async (_, ids: unknown): Promise<{
-    success: boolean
-    deleted: number
-    failed: number
-    errors: Array<{ id: string; error: string }>
-  }> => {
-    try {
-      const result = DeleteBatchRecordingsSchema.safeParse({ ids })
-      if (!result.success) {
-        console.error('recordings:deleteBatch validation error:', result.error)
-        return { success: false, deleted: 0, failed: 0, errors: [{ id: '', error: result.error.issues[0]?.message || 'Invalid request' }] }
-      }
-
-      let deleted = 0
-      let failed = 0
-      const errors: Array<{ id: string; error: string }> = []
-
-      for (const id of result.data.ids) {
-        try {
-          const recording = getRecordingById(id)
-          if (recording && recording.file_path) {
-            const wasDeleted = deleteRecordingFile(recording.file_path)
-            if (wasDeleted) {
-              updateRecordingStatus(id, 'deleted')
-              deleted++
-            } else {
-              failed++
-              errors.push({ id, error: 'File deletion failed' })
-            }
-          } else {
-            failed++
-            errors.push({ id, error: 'Recording not found or no file path' })
-          }
-        } catch (e) {
-          failed++
-          errors.push({ id, error: e instanceof Error ? e.message : 'Unknown error' })
-        }
-      }
-
-      return { success: failed === 0, deleted, failed, errors }
-    } catch (error) {
-      console.error('recordings:deleteBatch error:', error)
-      return { success: false, deleted: 0, failed: 0, errors: [{ id: '', error: error instanceof Error ? error.message : 'Unknown error' }] }
     }
   })
 
@@ -227,7 +203,7 @@ export function registerRecordingHandlers(): void {
         throw new Error(result.error.issues[0]?.message || 'Invalid request')
       }
 
-      linkRecordingToMeeting(result.data.recordingId, '', 0, '')
+      unlinkRecordingFromMeeting(result.data.recordingId)
     } catch (error) {
       console.error('recordings:unlinkFromMeeting error:', error)
       throw error
@@ -340,9 +316,9 @@ export function registerRecordingHandlers(): void {
     }
   })
 
-  ipcMain.handle('transcription:getQueue', async (): Promise<any[]> => {
+  ipcMain.handle('transcription:getQueue', async (_, actionableOnly = false): Promise<any[]> => {
     try {
-      return getQueueItems()
+      return actionableOnly ? getActionableQueueItems() : getQueueItems()
     } catch (error) {
       console.error('transcription:getQueue error:', error)
       return []
@@ -386,6 +362,18 @@ export function registerRecordingHandlers(): void {
         return { success: true, data: [], recordingContext: null }
       }
 
+      // ADV40-2 (round-42, MED) — gate the canonical recording id through THE
+      // shared fail-closed eligibility boundary BEFORE reading its transcript or
+      // deriving any candidate metadata. Without this, a stale selection of a
+      // now soft-deleted / personal / value-excluded / hard-purged recording
+      // returns its transcript-derived title / summary / speaker-count / scoring
+      // to the renderer. Fail-closed: on exclusion OR any lookup failure return
+      // the same empty/null shape as an unresolved (device-only) id.
+      const { eligible, failClosed } = filterEligibleRecordingIds([recording.id])
+      if (failClosed || !eligible.has(recording.id)) {
+        return { success: true, data: [], recordingContext: null }
+      }
+
       const transcript = getTranscriptByRecordingId(recording.id)
       const recordingContext = {
         title: deriveTranscriptTitle(transcript),
@@ -425,6 +413,7 @@ export function registerRecordingHandlers(): void {
       }
 
       const candidates = Array.from(byMeeting.values())
+        .filter((candidate) => !isCancelledMeetingSubject(candidate.subject))
       const scored = scoreMeetingCandidates(
         {
           dateRecorded: recording.date_recorded,
@@ -441,18 +430,50 @@ export function registerRecordingHandlers(): void {
       )
       const scoreByMeeting = new Map(scored.map((s) => [s.meetingId, s]))
 
+      // 2026-07-24 (owner design): with MULTIPLE overlapping meetings the
+      // deterministic score can't always tell which one the recording belongs
+      // to — a cheap LLM pass reads the transcript title/summary against the
+      // candidates. A single overlap never triggers this (the time match IS
+      // the answer). Any failure keeps the deterministic order.
+      const confirmedMeetingId = candidates.find((candidate) => candidate.isUserConfirmed)?.meetingId
+        ?? (recording.correlation_method === 'user_override' ? recording.meeting_id : undefined)
+      const overlapping = scored.filter((s) => s.hasOverlap)
+      let llmPick: { meetingId: string; reason: string } | null = null
+      if (!confirmedMeetingId && recordingContext.hasTranscript && overlapping.length >= 2) {
+        const byId = new Map(candidates.map((c) => [c.meetingId, c]))
+        llmPick = await disambiguateOverlappingCandidates(
+          recording.id,
+          {
+            title: recordingContext.title,
+            summary: recordingContext.summary,
+            dateLabel: new Date(recording.date_recorded).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })
+          },
+          overlapping.map((s) => {
+            const c = byId.get(s.meetingId)
+            return { meetingId: s.meetingId, subject: c?.subject ?? '', startTime: c?.startTime ?? '', endTime: c?.endTime ?? '' }
+          })
+        )
+      }
+
       const data = candidates
         .map((candidate) => {
           const score = scoreByMeeting.get(candidate.meetingId)
           if (!score) return candidate
+          const isLlmPick = llmPick?.meetingId === candidate.meetingId
           return {
             ...candidate,
             confidenceScore: score.confidenceScore,
-            matchReason: score.matchReason,
-            isAiSelected: score.isBestMatch
+            matchReason: isLlmPick ? `${llmPick!.reason} · ${score.matchReason}` : score.matchReason,
+            isAiSelected: confirmedMeetingId ? false : isLlmPick ? true : llmPick ? false : score.isBestMatch
           }
         })
         .sort((a, b) => {
+          // The LLM pick leads the overlap tier when present.
+          if (llmPick) {
+            const aPick = a.meetingId === llmPick.meetingId ? 1 : 0
+            const bPick = b.meetingId === llmPick.meetingId ? 1 : 0
+            if (aPick !== bPick) return bPick - aPick
+          }
           const sa = scoreByMeeting.get(a.meetingId)
           const sb = scoreByMeeting.get(b.meetingId)
           const overlapDelta = (sb?.hasOverlap ? 1 : 0) - (sa?.hasOverlap ? 1 : 0)
@@ -522,7 +543,8 @@ export function registerRecordingHandlers(): void {
       // Copy the file to the recordings folder
       copyFileSync(sourcePath, destinationPath)
 
-      // Create database entry
+      // Create database entry. A HiDock-named file's date is authoritative over
+      // the source file's mtime (a copy stamps the arrival time).
       const recordingId = randomUUID()
 
       const recording: Omit<Recording, 'created_at'> = {
@@ -532,7 +554,7 @@ export function registerRecordingHandlers(): void {
         file_path: destinationPath,
         file_size: stats.size,
         duration_seconds: undefined, // Will be populated later if needed
-        date_recorded: stats.mtime.toISOString(),
+        date_recorded: parseHiDockFilenameDateIso(originalFilename) ?? stats.mtime.toISOString(),
         meeting_id: undefined,
         correlation_confidence: undefined,
         correlation_method: undefined,
@@ -603,7 +625,7 @@ export function registerRecordingHandlers(): void {
         file_path: destinationPath,
         file_size: stats.size,
         duration_seconds: undefined,
-        date_recorded: stats.mtime.toISOString(),
+        date_recorded: parseHiDockFilenameDateIso(originalFilename) ?? stats.mtime.toISOString(),
         meeting_id: undefined,
         correlation_confidence: undefined,
         correlation_method: undefined,
@@ -637,11 +659,7 @@ export function registerRecordingHandlers(): void {
   // Select a meeting for a recording (manual linking from dialog)
   ipcMain.handle('recordings:selectMeeting', async (_, recordingId: string, meetingId: string | null) => {
     try {
-      if (meetingId) {
-        linkRecordingToMeeting(recordingId, meetingId, 1.0, 'manual')
-      } else {
-        linkRecordingToMeeting(recordingId, '', 0, '')
-      }
+      selectMeetingForRecordingByUser(recordingId, meetingId)
       return { success: true }
     } catch (error) {
       console.error('recordings:selectMeeting error:', error)
@@ -684,8 +702,8 @@ export function registerRecordingHandlers(): void {
       }
 
       const queueItemId = addToQueue(recording.id)
+      if (!queueItemId) return false
       if (priority) markUserPriority(recording.id)
-      updateRecordingTranscriptionStatus(recording.id, 'queued')
       // spec-005: Trigger immediate queue processing after adding
       processQueueManually()
       return queueItemId
@@ -733,8 +751,8 @@ export function registerRecordingHandlers(): void {
         }
 
         const queueItemId = addToQueue(recording.id, provider)
+        if (!queueItemId) return { success: false, error: 'Recording is not eligible for transcription' }
         markUserPriority(recording.id) // explicit single-recording reprocess
-        updateRecordingTranscriptionStatus(recording.id, 'queued')
         processQueueManually()
         return { success: true, queueItemId }
       } catch (error) {
@@ -910,6 +928,88 @@ export function registerRecordingHandlers(): void {
       } catch (error) {
         console.error('recordings:clearPreassignment error:', error)
         return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
+      }
+    }
+  )
+
+  const splitDetectionInFlight = new Map<string, Promise<RecordingSplitSuggestion[]>>()
+
+  // Analyze the local audio + timestamped transcript for likely session boundaries.
+  // This is read-only and never changes either the source file or its metadata.
+  ipcMain.handle(
+    'recordings:detectSplitPoints',
+    async (_, recordingId: unknown): Promise<{ success: boolean; suggestions?: RecordingSplitSuggestion[]; error?: string }> => {
+      try {
+        if (typeof recordingId !== 'string' || !recordingId) return { success: false, error: 'Invalid recording id' }
+        const recording = resolveRecordingId(recordingId)
+        if (!recording || recording.deleted_at) return { success: false, error: 'Recording not found' }
+        const transcript = getTranscriptByRecordingId(recording.id)
+        // The device cannot cut when you jump straight from one call into the
+        // next — the microphone never closes, so both meetings land in one
+        // capture. The calendar is the only source that knows where that seam
+        // is, so hand the detector the meetings this recording spans.
+        const spannedMeetings = findCandidateMeetingsForRecording(recording.id).map((meeting) => ({
+          subject: meeting.subject,
+          startTime: meeting.start_time,
+          endTime: meeting.end_time,
+          isAllDay: !!meeting.is_all_day
+        }))
+        let detection = splitDetectionInFlight.get(recording.id)
+        if (!detection) {
+          detection = detectRecordingSplitSuggestions(
+            recording,
+            transcript?.speakers,
+            undefined,
+            spannedMeetings
+          )
+          splitDetectionInFlight.set(recording.id, detection)
+          void detection.finally(() => {
+            if (splitDetectionInFlight.get(recording.id) === detection) splitDetectionInFlight.delete(recording.id)
+          }).catch(() => undefined)
+        }
+        const suggestions = await detection
+        return { success: true, suggestions }
+      } catch (error) {
+        console.error('recordings:detectSplitPoints error:', error)
+        return { success: false, error: error instanceof Error ? error.message : 'Could not analyze split points' }
+      }
+    }
+  )
+
+  // Create two sample-accurate, lossless child files and retire the original to
+  // Trash in one user-confirmed operation. No USB/device path is involved.
+  ipcMain.handle(
+    'recordings:split',
+    async (_, recordingId: unknown, splitTimeSec: unknown): Promise<{ success: boolean; result?: RecordingSplitResult; error?: string }> => {
+      try {
+        if (typeof recordingId !== 'string' || !recordingId) return { success: false, error: 'Invalid recording id' }
+        if (typeof splitTimeSec !== 'number' || !Number.isFinite(splitTimeSec)) return { success: false, error: 'Invalid split time' }
+        const recording = resolveRecordingId(recordingId)
+        if (!recording || recording.deleted_at) return { success: false, error: 'Recording not found' }
+        const result = await splitRecording(recording, splitTimeSec)
+        for (const child of result.children) queueTranscriptionIfEnabled(child.id)
+        return { success: true, result }
+      } catch (error) {
+        console.error('recordings:split error:', error)
+        return { success: false, error: error instanceof Error ? error.message : 'Could not split recording' }
+      }
+    }
+  )
+
+  // One-shot repair for automatic meeting links written by an older, looser
+  // auto-link gate and never retracted, so they now contradict their own
+  // candidate evidence. Read-only in dry-run; a person's link is never touched.
+  ipcMain.handle(
+    'recordings:repairContradictedLinks',
+    async (_, dryRun: unknown): Promise<{ success: boolean; cleared?: unknown[]; error?: string }> => {
+      try {
+        const cleared = dryRun === false
+          ? repairContradictedAutomaticLinks()
+          : findContradictedAutomaticLinks()
+        return { success: true, cleared }
+      } catch (error) {
+        console.error('recordings:repairContradictedLinks error:', error)
+        return { success: false, error: error instanceof Error ? error.message : 'Repair failed' }
       }
     }
   )

@@ -1,8 +1,8 @@
-import { Circle, Clock, Loader2, CheckCircle2, AlertCircle, type LucideIcon } from 'lucide-react'
+import { Circle, Clock, Loader2, CheckCircle2, AlertCircle, MicOff, type LucideIcon } from 'lucide-react'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 
 interface TranscriptionStatusBadgeProps {
-  status: 'none' | 'pending' | 'processing' | 'complete' | 'error'
+  status: 'none' | 'pending' | 'processing' | 'complete' | 'no_speech' | 'error'
   compact?: boolean
   className?: string
 }
@@ -13,6 +13,7 @@ const STATUS_LABELS: Record<string, string> = {
   pending: 'Queued',
   processing: 'In Progress',
   complete: 'Transcribed',
+  no_speech: 'No speech',
   error: 'Failed'
 }
 
@@ -24,6 +25,7 @@ const STATUS_ICONS: Record<string, LucideIcon> = {
   pending: Clock,
   processing: Loader2,
   complete: CheckCircle2,
+  no_speech: MicOff,
   error: AlertCircle
 }
 
@@ -33,6 +35,7 @@ const ICON_COLORS: Record<string, string> = {
   pending: 'text-yellow-600 dark:text-yellow-400',
   processing: 'text-yellow-600 dark:text-yellow-400',
   complete: 'text-green-600 dark:text-green-400',
+  no_speech: 'text-slate-500 dark:text-slate-400',
   error: 'text-destructive'
 }
 
@@ -42,6 +45,7 @@ const STATUS_STYLES: Record<string, string> = {
   pending: 'bg-yellow-100 dark:bg-yellow-900 text-yellow-700 dark:text-yellow-300',
   processing: 'bg-yellow-100 dark:bg-yellow-900 text-yellow-700 dark:text-yellow-300',
   complete: 'bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300',
+  no_speech: 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300',
   error: 'bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300'
 }
 

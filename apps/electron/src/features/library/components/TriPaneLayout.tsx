@@ -51,6 +51,8 @@ interface TriPaneLayoutProps {
   leftPanel: React.ReactNode
   centerPanel: React.ReactNode
   rightPanel: React.ReactNode
+  /** The reader only claims space after a source (or multi-selection) exists. */
+  hasSelection?: boolean
 }
 
 type Side = 'left' | 'right'
@@ -97,7 +99,7 @@ function clampListSize(size: number, max: number): number {
   return Math.max(18, Math.min(max, size))
 }
 
-export function TriPaneLayout({ leftPanel, centerPanel, rightPanel }: TriPaneLayoutProps) {
+export function TriPaneLayout({ leftPanel, centerPanel, rightPanel, hasSelection = true }: TriPaneLayoutProps) {
   const panelSizes = useLibraryStore((state) => state.panelSizes)
   const setPanelSizes = useLibraryStore((state) => state.setPanelSizes)
   // Persisted list-column width + collapse state (remembered across nav/restart).
@@ -209,6 +211,23 @@ export function TriPaneLayout({ leftPanel, centerPanel, rightPanel }: TriPaneLay
       {centerPanel}
     </div>
   )
+
+  // The Library is list-first. Until the user selects a source there is no reader
+  // task, so an empty center pane must not permanently consume most of the canvas.
+  if (!hasSelection) {
+    return (
+      <div className="relative flex h-full overflow-hidden">
+        <div role="region" aria-label="Recording list" className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          <div className="flex shrink-0 items-center gap-2 border-b border-border bg-muted/40 px-3 py-1.5">
+            <List className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+            <h3 className="text-sm font-semibold text-foreground">Sources</h3>
+          </div>
+          <div className="min-h-0 flex-1 overflow-auto">{leftPanel}</div>
+        </div>
+        <FloatingAssistant title="Assistant">{rightPanel}</FloatingAssistant>
+      </div>
+    )
+  }
 
   // Mobile Layout: Single pane with tab navigation
   if (isMobile) {

@@ -30,6 +30,10 @@ export type SortOrder = 'asc' | 'desc'
  */
 export type AssistantDock = 'pinned' | 'floating' | 'collapsed'
 
+export type ReaderSectionId = 'player' | 'metadata' | 'summary' | 'transcript'
+export type ReaderSectionMode = 'expanded' | 'compact' | 'docked' | 'hidden'
+export type ReaderSectionModes = Record<ReaderSectionId, ReaderSectionMode>
+
 interface LibraryState {
   // View preferences (persisted)
   viewMode: 'compact' | 'card'
@@ -50,11 +54,19 @@ interface LibraryState {
   // Source-scoped AI assistant docking (persisted)
   assistantDock: AssistantDock
 
-  // Whether the reader's full-mode waveform timeline is PINNED open (persisted).
-  // A pin keeps the rich meeting timeline (colored bars, markers, sentiment)
-  // expanded across recordings and restarts, unlike the transient per-recording
-  // expand toggle. Docked pill ↔ pinned full timeline.
+  // Legacy preference retained for persisted-store compatibility. New reader UI
+  // uses readerSectionModes.player instead of scroll-driven pinning.
   waveformPinned: boolean
+
+  // Reader workspace layout. Each source section has an explicit state; none of
+  // these change implicitly when the user scrolls.
+  readerSectionModes: ReaderSectionModes
+  readerVerticalSizes: number[]
+
+  // Maximization is transient but must live above SourceReader: collapsing the
+  // list changes the tri-pane tree and remounts the reader component.
+  readerMaximizedSection: ReaderSectionId | null
+  readerListCollapsedBeforeMaximize: boolean | null
 
   // Selection state (transient - not persisted)
   selectedIds: Set<string>
@@ -115,6 +127,13 @@ interface LibraryActions {
   setWaveformPinned: (pinned: boolean) => void
   toggleWaveformPinned: () => void
 
+  // Reader workspace layout
+  setReaderSectionMode: (section: ReaderSectionId, mode: ReaderSectionMode) => void
+  setReaderVerticalSizes: (sizes: number[]) => void
+  maximizeReaderSection: (section: ReaderSectionId) => void
+  restoreReaderSection: () => void
+  resetReaderLayout: () => void
+
   // Selection
   selectSingle: (id: string) => void
   toggleSelection: (id: string) => void
@@ -165,9 +184,17 @@ const initialState: LibraryState = {
   searchQuery: '',
   // Default to the two-pane layout with the assistant collapsed to an icon rail.
   assistantDock: 'collapsed',
-  // Compact by default: remember the user's pin, but don't force the full
-  // timeline open until they ask for it.
+  // Retained for compatibility with stores written before explicit section modes.
   waveformPinned: false,
+  readerSectionModes: {
+    player: 'expanded',
+    metadata: 'expanded',
+    summary: 'expanded',
+    transcript: 'expanded'
+  },
+  readerVerticalSizes: [64, 36],
+  readerMaximizedSection: null,
+  readerListCollapsedBeforeMaximize: null,
   selectedIds: new Set(),
   expandedRowIds: new Set(),
   expandedTranscripts: new Set(),
@@ -224,6 +251,36 @@ export const useLibraryStore = create<LibraryStore>()(
       // Waveform timeline pin
       setWaveformPinned: (pinned) => set({ waveformPinned: pinned }),
       toggleWaveformPinned: () => set((state) => ({ waveformPinned: !state.waveformPinned })),
+
+      // Reader workspace layout
+      setReaderSectionMode: (section, mode) => set((state) => ({
+        readerSectionModes: { ...state.readerSectionModes, [section]: mode }
+      })),
+      setReaderVerticalSizes: (sizes) => set({ readerVerticalSizes: sizes }),
+      maximizeReaderSection: (section) => set((state) => ({
+        readerMaximizedSection: section,
+        readerListCollapsedBeforeMaximize: state.readerMaximizedSection === null
+          ? state.listCollapsed
+          : state.readerListCollapsedBeforeMaximize,
+        listCollapsed: true
+      })),
+      restoreReaderSection: () => set((state) => ({
+        readerMaximizedSection: null,
+        readerListCollapsedBeforeMaximize: null,
+        listCollapsed: state.readerListCollapsedBeforeMaximize ?? state.listCollapsed
+      })),
+      resetReaderLayout: () => set((state) => ({
+        readerSectionModes: {
+          player: 'expanded',
+          metadata: 'expanded',
+          summary: 'expanded',
+          transcript: 'expanded'
+        },
+        readerVerticalSizes: [64, 36],
+        readerMaximizedSection: null,
+        readerListCollapsedBeforeMaximize: null,
+        listCollapsed: state.readerListCollapsedBeforeMaximize ?? state.listCollapsed
+      })),
 
       // Selection
       selectSingle: (id) =>
@@ -361,6 +418,8 @@ export const useLibraryStore = create<LibraryStore>()(
         durationPreset: state.durationPreset,
         assistantDock: state.assistantDock,
         waveformPinned: state.waveformPinned,
+        readerSectionModes: state.readerSectionModes,
+        readerVerticalSizes: state.readerVerticalSizes,
         panelSizes: state.panelSizes,
         listPaneSize: state.listPaneSize,
         listCollapsed: state.listCollapsed

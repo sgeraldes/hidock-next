@@ -1,5 +1,5 @@
 
-import '@testing-library/jest-dom'
+import '@testing-library/jest-dom/vitest'
 import { vi } from 'vitest'
 
 // NOTE: the D3 better-sqlite3 dual-ABI shim is intentionally NOT here. It is

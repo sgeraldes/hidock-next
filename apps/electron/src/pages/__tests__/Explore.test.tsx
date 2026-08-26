@@ -12,6 +12,7 @@ const mockGlobalSearch = vi.fn().mockResolvedValue({
     projects: [{ id: 'pr1', name: 'Project 1', status: 'active' }]
   }
 })
+const mockGetRecurringTopics = vi.fn().mockResolvedValue([])
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -19,11 +20,59 @@ beforeEach(() => {
   global.window.electronAPI = {
     rag: {
       globalSearch: mockGlobalSearch
+    },
+    transcripts: {
+      getRecurringTopics: mockGetRecurringTopics
     }
   } as any
 })
 
 describe('Explore Page', () => {
+  it('shows a loading state while recurring topics are loading', () => {
+    mockGetRecurringTopics.mockImplementationOnce(() => new Promise(() => {}))
+
+    render(
+      <MemoryRouter>
+        <Explore />
+      </MemoryRouter>
+    )
+
+    expect(screen.getByText('Loading recurring topics...')).toBeInTheDocument()
+  })
+
+  it('renders real recurring topics and searches when a topic is clicked', async () => {
+    mockGetRecurringTopics.mockResolvedValueOnce([
+      { topic: 'Platform Security', recordingCount: 12 },
+      { topic: 'API Design', recordingCount: 7 }
+    ])
+
+    render(
+      <MemoryRouter>
+        <Explore />
+      </MemoryRouter>
+    )
+
+    const topic = await screen.findByRole('button', { name: 'Platform Security' })
+    fireEvent.click(topic)
+
+    await waitFor(() => {
+      expect(mockGlobalSearch).toHaveBeenCalledWith('Platform Security', 10)
+    }, { timeout: 2000 })
+  })
+
+  it('shows an honest empty state when no analyzed topics exist', async () => {
+    mockGetRecurringTopics.mockResolvedValueOnce([])
+
+    render(
+      <MemoryRouter>
+        <Explore />
+      </MemoryRouter>
+    )
+
+    expect(await screen.findByText('Topics appear as your meetings are analyzed')).toBeInTheDocument()
+    expect(screen.queryByText('Amazon Connect')).not.toBeInTheDocument()
+  })
+
   it('should render search results by category', async () => {
     render(
       <MemoryRouter>

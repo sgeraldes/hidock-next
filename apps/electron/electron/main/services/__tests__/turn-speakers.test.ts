@@ -12,7 +12,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { existsSync, rmSync } from 'fs'
+import { existsSync, rmSync, readFileSync } from 'fs'
+
+/** Target schema version read from database.ts — see database.test.ts for why. */
+const EXPECTED_SCHEMA_VERSION = Number(
+  readFileSync(join(__dirname, '..', 'database.ts'), 'utf-8').match(/const SCHEMA_VERSION = (\d+)\b/)![1]
+)
 
 const dbPath = join(tmpdir(), `hidock-v37-turnspeakers-${process.pid}.sqlite`)
 
@@ -47,9 +52,12 @@ function seedRecording(id: string, meetingId: string | null = null): void {
 }
 
 function seedContact(id: string, name: string): void {
+  // round-39: source='user' ⇒ VISIBLE structural contact (a real owner contact). The
+  // entity-reference-WRITE gates bind only visible contacts; a bare NULL-source contact
+  // is suppressed and would never be offered by a picker in production.
   run(
-    `INSERT INTO contacts (id, name, type, first_seen_at, last_seen_at, meeting_count)
-     VALUES (?, ?, 'unknown', ?, ?, 0)`,
+    `INSERT INTO contacts (id, name, type, first_seen_at, last_seen_at, meeting_count, source)
+     VALUES (?, ?, 'unknown', ?, ?, 0, 'user')`,
     [id, name, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z']
   )
 }
@@ -80,9 +88,9 @@ describe('migration v37 objects', () => {
     expect(info).toHaveLength(1)
   })
 
-  it('is at schema version 39', () => {
+  it('is at the current schema version', () => {
     const row = queryOne<{ version: number }>('SELECT version FROM schema_version ORDER BY version DESC LIMIT 1')
-    expect(row?.version).toBe(39)
+    expect(row?.version).toBe(EXPECTED_SCHEMA_VERSION)
   })
 })
 

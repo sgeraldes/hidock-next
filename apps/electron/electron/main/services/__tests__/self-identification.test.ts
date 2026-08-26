@@ -41,8 +41,21 @@ vi.mock('../database', () => ({
     mockAssignSpeaker(recordingId, label, opts),
   resolveMention: (recordingId: string, name: string, contactId: string, method: string, confidence: number) =>
     mockResolveMention(recordingId, name, contactId, method, confidence),
-  getQueueItems: vi.fn(() => [])
+  getQueueItems: vi.fn(() => []),
+  // P2 — used by the boot backfill; the direct runSelfIdentificationForRecording
+  // tests pass shouldPersist explicitly so this default is unused there.
+  isRecordingProcessable: () => true,
+  // RE8-3 (round-8) — runSelfIdentificationForRecording gates internally on
+  // isRecordingEligible. ADV9 (round-9): the boundary now uses the POSITIVE
+  // allowlist getEligibleRecordingIds; derive it from the same mutable source.
+  getExcludedRecordingIds: () => selfIdExcluded,
+  getEligibleRecordingIds: (ids: Iterable<string>) =>
+    selfIdExcluded.failClosed
+      ? { eligible: new Set<string>(), failClosed: true }
+      : { eligible: new Set([...ids].filter((i) => i && !selfIdExcluded.ids.has(i))), failClosed: false }
 }))
+
+let selfIdExcluded: { ids: Set<string>; failClosed: boolean } = { ids: new Set<string>(), failClosed: false }
 
 vi.mock('../entity-resolver', () => ({
   resolveContact: (name: string, ctx?: unknown) => mockResolveContact(name, ctx)
@@ -80,6 +93,7 @@ const ROLLCALL: SpeakerTurn[] = [
 beforeEach(() => {
   vi.clearAllMocks()
   currentSpeakers = null
+  selfIdExcluded = { ids: new Set<string>(), failClosed: false }
   mockGetSpeakerMap.mockReturnValue([])
   mockGetRecordingById.mockReturnValue({ meeting_id: null })
 })
@@ -371,7 +385,8 @@ describe('runSelfIdentificationForRecording — binding', () => {
 
     expect(result).toMatchObject({ bound: 1, mergeSuspected: 0, skipped: false })
     expect(mockAssignSpeaker).toHaveBeenCalledWith('rec-1', 'Speaker 7', {
-      newName: 'Santiago de la Colina'
+      newName: 'Santiago de la Colina',
+      voiceAnchor: { method: 'self-identification', confidence: 0.97 }
     })
     // Tiered mention-resolution recorded with the self-identification method.
     expect(mockResolveMention).toHaveBeenCalledWith(
@@ -383,6 +398,76 @@ describe('runSelfIdentificationForRecording — binding', () => {
     )
   })
 
+  it('P2 (round-3) — shouldPersist()=false persists no bindings/markers and sends nothing to the LLM', async () => {
+    currentSpeakers = JSON.stringify([
+      { speaker: 'Speaker 7', start: 0, end: 4, text: 'Yo también Seba, eh, Santiago de la Colina.' }
+    ])
+    const gatedLlm = vi.fn(async () => JSON.stringify([{ speaker: 'Speaker 7', name: 'Santiago de la Colina' }]))
+    mockResolveContact.mockReturnValue({ id: null, confidence: 0, method: 'none' })
+
+    const result = await runSelfIdentificationForRecording('rec-inelig', {
+      llm: gatedLlm,
+      shouldPersist: () => false
+    })
+
+    expect(result.skipped).toBe(true)
+    expect(result.bound).toBe(0)
+    // Pre-LLM gate — the turns are never sent to the provider…
+    expect(gatedLlm).not.toHaveBeenCalled()
+    // …and no contact/binding/mention is written.
+    expect(mockAssignSpeaker).not.toHaveBeenCalled()
+    expect(mockResolveMention).not.toHaveBeenCalled()
+  })
+
+  // RE8-3 (round-8) — the gate is INTERNAL + MANDATORY, so the production
+  // self-id:runForRecording IPC (which passes only {force}, no shouldPersist)
+  // can no longer send an excluded recording's diarized turns to the LLM nor
+  // create contacts/bindings for it.
+  it('refuses (no LLM, no bindings) when the recording is excluded — WITHOUT a shouldPersist callback', async () => {
+    currentSpeakers = JSON.stringify([
+      { speaker: 'Speaker 7', start: 0, end: 4, text: 'Yo también Seba, eh, Santiago de la Colina.' }
+    ])
+    const spyLlm = vi.fn(async () => JSON.stringify([{ speaker: 'Speaker 7', name: 'Santiago de la Colina' }]))
+    selfIdExcluded = { ids: new Set(['rec-x']), failClosed: false }
+
+    const result = await runSelfIdentificationForRecording('rec-x', { llm: spyLlm })
+
+    expect(result).toMatchObject({ bound: 0, mergeSuspected: 0, skipped: true })
+    expect(spyLlm).not.toHaveBeenCalled()
+    expect(mockAssignSpeaker).not.toHaveBeenCalled()
+    expect(mockResolveMention).not.toHaveBeenCalled()
+  })
+
+  it('fails closed (no LLM) when eligibility cannot be verified', async () => {
+    currentSpeakers = JSON.stringify([
+      { speaker: 'Speaker 7', start: 0, end: 4, text: 'Yo también Seba, eh, Santiago de la Colina.' }
+    ])
+    const spyLlm = vi.fn(async () => '[]')
+    selfIdExcluded = { ids: new Set<string>(), failClosed: true }
+
+    const result = await runSelfIdentificationForRecording('rec-fc', { llm: spyLlm })
+    expect(result.skipped).toBe(true)
+    expect(spyLlm).not.toHaveBeenCalled()
+  })
+
+  it('persists nothing when the recording becomes excluded during the LLM await', async () => {
+    currentSpeakers = JSON.stringify([
+      { speaker: 'Speaker 7', start: 0, end: 4, text: 'Yo también Seba, eh, Santiago de la Colina.' }
+    ])
+    // Eligible at entry; the LLM round-trip is where the exclusion lands.
+    const flipLlm = vi.fn(async () => {
+      selfIdExcluded = { ids: new Set(['rec-mid']), failClosed: false }
+      return JSON.stringify([{ speaker: 'Speaker 7', name: 'Santiago de la Colina' }])
+    })
+    mockResolveContact.mockReturnValue({ id: null, confidence: 0, method: 'none' })
+
+    const result = await runSelfIdentificationForRecording('rec-mid', { llm: flipLlm })
+    expect(flipLlm).toHaveBeenCalledTimes(1) // it DID run (eligible at entry)…
+    expect(result.skipped).toBe(true) // …but the post-await gate blocks persistence
+    expect(mockAssignSpeaker).not.toHaveBeenCalled()
+    expect(mockResolveMention).not.toHaveBeenCalled()
+  })
+
   it('links an existing contact when the resolver is confident (no duplicate)', async () => {
     currentSpeakers = JSON.stringify([
       { speaker: 'Speaker 7', start: 0, end: 4, text: 'Soy Santiago de la Colina.' }
@@ -392,7 +477,10 @@ describe('runSelfIdentificationForRecording — binding', () => {
 
     await runSelfIdentificationForRecording('rec-2', { llm })
 
-    expect(mockAssignSpeaker).toHaveBeenCalledWith('rec-2', 'Speaker 7', { contactId: 'existing-9' })
+    expect(mockAssignSpeaker).toHaveBeenCalledWith('rec-2', 'Speaker 7', {
+      contactId: 'existing-9',
+      voiceAnchor: { method: 'self-identification', confidence: 0.97 }
+    })
   })
 
   it('does NOT name a turn when the LLM contradicts the spoken self-name (the Mariana bug)', async () => {
@@ -419,7 +507,10 @@ describe('runSelfIdentificationForRecording — binding', () => {
     const result = await runSelfIdentificationForRecording('rec-ok', { llm: goodLlm })
 
     expect(result.bound).toBe(1)
-    expect(mockAssignSpeaker).toHaveBeenCalledWith('rec-ok', 'Speaker 5', { newName: 'Mariana' })
+    expect(mockAssignSpeaker).toHaveBeenCalledWith('rec-ok', 'Speaker 5', {
+      newName: 'Mariana',
+      voiceAnchor: { method: 'self-identification', confidence: 0.97 }
+    })
   })
 
   it('NEVER overwrites an existing (manual) speaker binding', async () => {

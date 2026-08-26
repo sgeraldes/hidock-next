@@ -30,7 +30,9 @@ vi.mock('../chat-llm', () => ({
 vi.mock('../embeddings', () => ({
   getEmbeddingsService: vi.fn(() => ({
     generateEmbedding: vi.fn().mockResolvedValue([0.1, 0.2]),
-    generateEmbeddings: vi.fn().mockResolvedValue([[0.1, 0.2]])
+    generateEmbeddings: vi.fn().mockResolvedValue([[0.1, 0.2]]),
+    activeProviderId: vi.fn(async () => 'gemini-api'),
+    relevanceThreshold: vi.fn(async () => 0.3)
   }))
 }))
 
@@ -38,6 +40,7 @@ vi.mock('../vector-store', () => ({
   getVectorStore: vi.fn(() => ({
     initialize: vi.fn().mockResolvedValue(true),
     getDocumentCount: vi.fn().mockReturnValue(10),
+    getEligibleDocumentCount: vi.fn().mockReturnValue(0),
     getMeetingCount: vi.fn().mockReturnValue(5),
     search: vi.fn().mockResolvedValue([]),
     searchByMeeting: vi.fn().mockResolvedValue([]),
@@ -258,18 +261,19 @@ describe('RAGService cancelRequest', () => {
     // Start the chat but don't await - it will block on the chat-llm generate call
     const chatPromise = rag.chat('active-session', 'test message')
 
-    // Yield to microtask queue so the RAG service reaches the generate call
-    await new Promise(resolve => setTimeout(resolve, 10))
+    try {
+      // Poll until the RAG service reaches the generate call — the abort controller
+      // is registered before generate is invoked, so this proves the session is active.
+      await vi.waitFor(() => expect(mockChatLLMService.generate).toHaveBeenCalled(), { timeout: 15000, interval: 25 })
 
-    // Cancel - the controller should have been set before generate was called
-    const cancelled = rag.cancelRequest('active-session')
-    expect(cancelled).toBe(true)
-
-    // Unblock the mock so the promise can settle
-    resolveChat('cancelled response')
-    await chatPromise
-
-    // Restore mock
-    mockChatLLMService.generate.mockResolvedValue('AI Response')
+      // Cancel - the controller should have been set before generate was called
+      const cancelled = rag.cancelRequest('active-session')
+      expect(cancelled).toBe(true)
+    } finally {
+      // Unblock the mock so the promise can settle, then restore it
+      resolveChat('cancelled response')
+      await chatPromise
+      mockChatLLMService.generate.mockResolvedValue('AI Response')
+    }
   })
 })

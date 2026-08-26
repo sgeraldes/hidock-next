@@ -28,7 +28,23 @@ vi.mock('../database', () => ({
     return rowsFrom(dbInstance.exec(sql, params))[0]
   },
   getContactById: (id: string) => (dbInstance ? rowsFrom(dbInstance.exec('SELECT * FROM contacts WHERE id = ?', [id]))[0] : undefined),
-  getProjectById: (id: string) => (dbInstance ? rowsFrom(dbInstance.exec('SELECT * FROM projects WHERE id = ?', [id]))[0] : undefined)
+  getProjectById: (id: string) => (dbInstance ? rowsFrom(dbInstance.exec('SELECT * FROM projects WHERE id = ?', [id]))[0] : undefined),
+  // ADV27-3 (round-28): the resolver now gates co-occurrence context through this
+  // per-row membership boundary. Mirror the structural rule (calendar/user-authored
+  // eligible; transcript rows would need a recording lookup, not modeled here; NULL
+  // legacy ineligible). These tests insert 'calendar' memberships so they contribute.
+  filterEligibleMembershipRows: (rows: Array<{ source?: string | null }>) => ({
+    eligible: rows.filter((r) => r.source != null && r.source !== 'transcript'),
+    failClosed: false
+  }),
+  // ADV29-1 (round-31): the resolver now bars SUPPRESSED entities as link targets.
+  // These tier-logic fixtures are all genuine resolvable people/projects, so treat
+  // every candidate as visible. The no-reanimation behavior is exercised against a
+  // real DB in entity-resolver-reanimation.round31.test.ts.
+  filterVisibleEntityIds: (_kind: string, ids: Iterable<string>) => ({
+    visible: new Set([...ids]),
+    failClosed: false
+  })
 }))
 
 import { resolveContact, resolveProject } from '../entity-resolver'
@@ -38,12 +54,12 @@ describe('entity-resolver', () => {
     const SQL = await initSqlJs()
     dbInstance = new SQL.Database()
     dbInstance.run(`
-      CREATE TABLE contacts (id TEXT PRIMARY KEY, name TEXT, email TEXT);
-      CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT);
+      CREATE TABLE contacts (id TEXT PRIMARY KEY, name TEXT, email TEXT, created_at TEXT);
+      CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT, created_at TEXT);
       CREATE TABLE contact_aliases (id TEXT PRIMARY KEY, alias_norm TEXT UNIQUE, contact_id TEXT, source TEXT, confidence REAL);
       CREATE TABLE project_aliases (id TEXT PRIMARY KEY, alias_norm TEXT UNIQUE, project_id TEXT, source TEXT, confidence REAL);
-      CREATE TABLE meeting_contacts (meeting_id TEXT, contact_id TEXT, role TEXT);
-      CREATE TABLE meeting_projects (meeting_id TEXT, project_id TEXT);
+      CREATE TABLE meeting_contacts (meeting_id TEXT, contact_id TEXT, role TEXT, source TEXT, source_recording_id TEXT);
+      CREATE TABLE meeting_projects (meeting_id TEXT, project_id TEXT, source TEXT, source_recording_id TEXT);
 
       INSERT INTO contacts (id, name, email) VALUES
         ('c-seb', 'Sebastián Geraldes', 'sebastian.geraldes@dfx5.com'),
@@ -96,7 +112,7 @@ describe('entity-resolver', () => {
   })
 
   it('context co-occurrence boosts a fuzzy match into auto-link range', () => {
-    dbInstance.run("INSERT INTO meeting_contacts (meeting_id, contact_id, role) VALUES ('m1', 'c-seb', 'attendee')")
+    dbInstance.run("INSERT INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES ('m1', 'c-seb', 'attendee', 'calendar')")
     const r = resolveContact('Sebastan Geraldes', { meetingId: 'm1' })
     expect(r.id).toBe('c-seb')
     expect(r.method).toBe('fuzzy-context')
@@ -124,6 +140,67 @@ describe('entity-resolver', () => {
     expect(r.method).toBe('alias')
   })
 
+  /**
+   * Short-acronym cross-linking. The length-gated edit-distance rule alone was
+   * not enough: the separate PREFIX rule still scored "crm" vs "crmx" at 0.68,
+   * and the co-occurrence boost (+0.15) carried it to 0.83 — over the 0.8
+   * auto-link line — silently attaching a distinct acronym project to another in
+   * the same meeting. Both projects are linked to the meeting here so the
+   * context boost is genuinely in play.
+   */
+  it('does not auto-link a short acronym project onto a prefix sibling, even with co-occurrence context', () => {
+    dbInstance.run(`
+      INSERT INTO projects (id, name) VALUES ('p-crm', 'CRM');
+      INSERT INTO meeting_projects (meeting_id, project_id) VALUES ('m-ctx', 'p-crm');
+    `)
+    const r = resolveProject('CRMX', { meetingId: 'm-ctx' })
+    expect(r.confidence).toBeLessThan(0.8) // never auto-links
+    expect(r.id).toBeNull() // and is not even a fuzzy candidate
+  })
+
+  it('still resolves a genuine prefix expansion of a long-enough name', () => {
+    dbInstance.run("INSERT INTO projects (id, name) VALUES ('p-plat', 'Plataforma')")
+    // "plataforma" -> "plataformadepagos": a real expansion, not a 1-char variant.
+    const r = resolveProject('Plataformadepagos')
+    expect(r.id).toBe('p-plat')
+    expect(r.confidence).toBeGreaterThan(0.6)
+  })
+
+  it('resolves a project whose stored name differs only by Unicode form (NFKC-exact, tier 1b)', () => {
+    // Stored decomposed (e + U+0301), queried composed (U+00E9): SQLite's
+    // ASCII-only LOWER can't equate them and tier 3 skips pNorm === norm, so
+    // without the NFKC-exact scan this mention would resolve to nothing and the
+    // reconciler would auto-create a byte-twin project.
+    const decomposed = 'Café Project'
+    const composed = 'Café Project'
+    expect(decomposed).not.toBe(composed)
+    dbInstance.run("INSERT INTO projects (id, name) VALUES ('p-cafe', ?)", [decomposed])
+    const r = resolveProject(composed)
+    expect(r.id).toBe('p-cafe')
+    expect(r.confidence).toBe(0.95)
+    expect(r.method).toBe('exact-name')
+  })
+
+  it('NFKC-exact project name beats a competing positive alias with the same key (tier 1b before tier 2)', () => {
+    // A project stored under the decomposed form of the name...
+    const decomposed = 'Café Project'
+    const composed = 'Café Project'
+    expect(decomposed).not.toBe(composed)
+    dbInstance.run("INSERT INTO projects (id, name) VALUES ('p-cafe', ?)", [decomposed])
+    // ...and a positive alias for the SAME NFKC key pointing at a DIFFERENT project.
+    dbInstance.run(
+      "INSERT INTO project_aliases (id, alias_norm, project_id, source, confidence) VALUES ('pa-hijack', ?, 'p-atlas', 'merge', 1.0)",
+      [composed.normalize('NFKC').toLowerCase()]
+    )
+    // The project's own exact name must win — the same precedence the SQL
+    // exact tier gives ASCII names over aliases. Resolving to p-atlas here
+    // would be wrong-project linkage under an exact-name confidence contract.
+    const r = resolveProject(composed)
+    expect(r.id).toBe('p-cafe')
+    expect(r.method).toBe('exact-name')
+    expect(r.confidence).toBe(0.95)
+  })
+
   describe('ambiguous bare first names', () => {
     beforeEach(() => {
       dbInstance.run(`
@@ -142,15 +219,15 @@ describe('entity-resolver', () => {
     })
 
     it('splits by attendee context when exactly one candidate attended', () => {
-      dbInstance.run("INSERT INTO meeting_contacts (meeting_id, contact_id, role) VALUES ('m1', 'c-sh', 'attendee')")
+      dbInstance.run("INSERT INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES ('m1', 'c-sh', 'attendee', 'calendar')")
       const r = resolveContact('Sergio', { meetingId: 'm1' })
       expect(r).toEqual({ id: 'c-sh', confidence: 0.85, method: 'attendee-context' })
     })
 
     it('stays ambiguous when two candidates both attended (cannot decide)', () => {
       dbInstance.run(`
-        INSERT INTO meeting_contacts (meeting_id, contact_id, role) VALUES
-          ('m1', 'c-sh', 'attendee'), ('m1', 'c-sr', 'attendee');
+        INSERT INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES
+          ('m1', 'c-sh', 'attendee', 'calendar'), ('m1', 'c-sr', 'attendee', 'calendar');
       `)
       const r = resolveContact('Sergio', { meetingId: 'm1' })
       expect(r.ambiguous).toBe(true)

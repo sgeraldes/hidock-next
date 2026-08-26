@@ -20,16 +20,27 @@ vi.mock('electron', () => ({
 vi.mock('../../services/database', () => ({
   getRecordings: vi.fn(),
   getRecordingById: vi.fn(),
+  getTrashedRecordings: vi.fn(),
   getRecordingsForMeeting: vi.fn(),
+  getMeetingById: vi.fn(),
+  updateRecordingDuration: vi.fn(),
+  backfillRecordingDurations: vi.fn(),
+  classifyLowValueCaptures: vi.fn(),
+  selectMeetingForRecordingByUser: vi.fn(),
+  setRecordingPreassignment: vi.fn(),
+  getRecordingPreassignment: vi.fn(),
+  clearRecordingPreassignment: vi.fn(),
   updateRecordingStatus: vi.fn(),
   updateRecordingTranscriptionStatus: vi.fn(),
   linkRecordingToMeeting: vi.fn(),
+  unlinkRecordingFromMeeting: vi.fn(),
   getTranscriptByRecordingId: vi.fn(),
   getCandidatesForRecordingWithDetails: vi.fn(),
   getMeetingsNearDate: vi.fn(),
   insertRecording: vi.fn(),
   resolveRecordingId: vi.fn(),
   getQueueItems: vi.fn(),
+  getActionableQueueItems: vi.fn(),
   addToQueue: vi.fn(),
   updateQueueItem: vi.fn()
 }))
@@ -37,7 +48,6 @@ vi.mock('../../services/database', () => ({
 // Mock file-storage service
 vi.mock('../../services/file-storage', () => ({
   getRecordingFiles: vi.fn(),
-  deleteRecording: vi.fn(),
   getRecordingsPath: vi.fn(() => '/mock/recordings')
 }))
 
@@ -96,26 +106,6 @@ function createSchemaMock(idField: string | string[]) {
 // Mock validation schemas
 vi.mock('../validation', () => ({
   GetRecordingByIdSchema: createSchemaMock('id'),
-  DeleteRecordingSchema: createSchemaMock('id'),
-  DeleteBatchRecordingsSchema: {
-    safeParse: vi.fn((data: any) => {
-      if (!data?.ids || !Array.isArray(data.ids)) {
-        return { success: false, error: { issues: [{ message: 'ids must be an array' }] } }
-      }
-      if (data.ids.length === 0) {
-        return { success: false, error: { issues: [{ message: 'ids must have at least 1 element' }] } }
-      }
-      if (data.ids.length > 1000) {
-        return { success: false, error: { issues: [{ message: 'ids must have at most 1000 elements' }] } }
-      }
-      for (const id of data.ids) {
-        if (!UUID_RE.test(id)) {
-          return { success: false, error: { issues: [{ message: 'Each ID must be a valid UUID' }] } }
-        }
-      }
-      return { success: true, data }
-    })
-  },
   LinkRecordingToMeetingSchema: createSchemaMock(['recordingId', 'meetingId']),
   UnlinkRecordingFromMeetingSchema: createSchemaMock('recordingId'),
   TranscribeRecordingSchema: createSchemaMock('recordingId'),
@@ -142,6 +132,19 @@ vi.mock('../../services/transcription', () => ({
   markUserPriority: vi.fn()
 }))
 
+// ADV40-2 (round-42) — recordings:getCandidates gates the recording id through
+// the shared fail-closed eligibility boundary before reading its transcript.
+// Default: every input id eligible; individual tests override per-call.
+const { mockFilterEligibleRecordingIds } = vi.hoisted(() => ({
+  mockFilterEligibleRecordingIds: vi.fn((...args: any[]) => {
+    const ids = (args[0] ?? []) as Iterable<string>
+    return { eligible: new Set([...ids].filter((x: any) => !!x)), failClosed: false }
+  })
+}))
+vi.mock('../../services/recording-eligibility', () => ({
+  filterEligibleRecordingIds: (...args: any[]) => mockFilterEligibleRecordingIds(...args)
+}))
+
 // Mock config service
 vi.mock('../../services/config', () => ({
   getConfig: vi.fn(() => ({
@@ -157,12 +160,12 @@ vi.mock('../../services/config', () => ({
 }))
 
 describe('Recording IPC Handlers', () => {
-  let handlers: Record<string, Function> = {}
+  let handlers: Record<string, (...args: any[]) => any> = {}
 
   beforeEach(async () => {
     vi.clearAllMocks()
     handlers = {}
-    vi.mocked(ipcMain.handle).mockImplementation((channel: string, handler: Function) => {
+    vi.mocked(ipcMain.handle).mockImplementation((channel: string, handler: (...args: any[]) => any) => {
       handlers[channel] = handler
       return undefined as any
     })
@@ -172,11 +175,10 @@ describe('Recording IPC Handlers', () => {
   it('should register all expected handlers', () => {
     const expectedChannels = [
       'recordings:getAll',
+      'recordings:getTrash',
       'recordings:getById',
       'recordings:getForMeeting',
       'recordings:getAllWithTranscripts',
-      'recordings:delete',
-      'recordings:deleteBatch',
       'recordings:linkToMeeting',
       'recordings:unlinkFromMeeting',
       'recordings:getTranscript',
@@ -231,6 +233,34 @@ describe('Recording IPC Handlers', () => {
       })
 
       const result = await handlers['recordings:getAll'](null)
+
+      expect(result).toEqual([])
+    })
+  })
+
+  // spec-005/F17 T5 §D1 step 2 — mirrors recordings:getAll's try/catch → [] shape.
+  describe('recordings:getTrash', () => {
+    it('should return all soft-deleted recordings from the database', async () => {
+      const { getTrashedRecordings } = await import('../../services/database')
+      const mockTrashed = [
+        { id: 'rec-1', filename: 'meeting-01.wav', deleted_at: '2026-01-02T00:00:00.000Z' },
+        { id: 'rec-2', filename: 'meeting-02.wav', deleted_at: '2026-01-01T00:00:00.000Z' }
+      ]
+      vi.mocked(getTrashedRecordings).mockReturnValue(mockTrashed as any)
+
+      const result = await handlers['recordings:getTrash'](null)
+
+      expect(getTrashedRecordings).toHaveBeenCalled()
+      expect(result).toEqual(mockTrashed)
+    })
+
+    it('should return empty array on error', async () => {
+      const { getTrashedRecordings } = await import('../../services/database')
+      vi.mocked(getTrashedRecordings).mockImplementation(() => {
+        throw new Error('Database error')
+      })
+
+      const result = await handlers['recordings:getTrash'](null)
 
       expect(result).toEqual([])
     })
@@ -326,142 +356,6 @@ describe('Recording IPC Handlers', () => {
     })
   })
 
-  describe('recordings:delete', () => {
-    it('should delete a recording file and update its status', async () => {
-      const { getRecordingById, updateRecordingStatus } = await import('../../services/database')
-      const { deleteRecording } = await import('../../services/file-storage')
-      const id = '550e8400-e29b-41d4-a716-446655440000'
-      vi.mocked(getRecordingById).mockReturnValue({
-        id,
-        file_path: '/path/to/file.wav',
-        filename: 'file.wav'
-      } as any)
-      vi.mocked(deleteRecording).mockReturnValue(true)
-
-      const result = await handlers['recordings:delete'](null, id)
-
-      expect(deleteRecording).toHaveBeenCalledWith('/path/to/file.wav')
-      expect(updateRecordingStatus).toHaveBeenCalledWith(id, 'deleted')
-      expect(result).toBe(true)
-    })
-
-    it('should return false if recording not found', async () => {
-      const { getRecordingById } = await import('../../services/database')
-      const id = '550e8400-e29b-41d4-a716-446655440000'
-      vi.mocked(getRecordingById).mockReturnValue(undefined)
-
-      const result = await handlers['recordings:delete'](null, id)
-
-      expect(result).toBe(false)
-    })
-
-    it('should not update status if file deletion fails', async () => {
-      const { getRecordingById, updateRecordingStatus } = await import('../../services/database')
-      const { deleteRecording } = await import('../../services/file-storage')
-      const id = '550e8400-e29b-41d4-a716-446655440000'
-      vi.mocked(getRecordingById).mockReturnValue({
-        id,
-        file_path: '/path/to/file.wav',
-        filename: 'file.wav'
-      } as any)
-      vi.mocked(deleteRecording).mockReturnValue(false)
-
-      const result = await handlers['recordings:delete'](null, id)
-
-      expect(updateRecordingStatus).not.toHaveBeenCalled()
-      expect(result).toBe(false)
-    })
-
-    it('should return false for invalid ID format', async () => {
-      const result = await handlers['recordings:delete'](null, 'not-a-uuid')
-
-      expect(result).toBe(false)
-    })
-
-    it('should return false on error', async () => {
-      const { getRecordingById } = await import('../../services/database')
-      const id = '550e8400-e29b-41d4-a716-446655440000'
-      vi.mocked(getRecordingById).mockImplementation(() => {
-        throw new Error('DB error')
-      })
-
-      const result = await handlers['recordings:delete'](null, id)
-
-      expect(result).toBe(false)
-    })
-  })
-
-  describe('recordings:deleteBatch', () => {
-    it('should delete multiple recordings and return results', async () => {
-      const { getRecordingById } = await import('../../services/database')
-      const { deleteRecording } = await import('../../services/file-storage')
-
-      const id1 = '550e8400-e29b-41d4-a716-446655440000'
-      const id2 = 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'
-
-      vi.mocked(getRecordingById)
-        .mockReturnValueOnce({ id: id1, file_path: '/path/file1.wav', filename: 'file1.wav' } as any)
-        .mockReturnValueOnce({ id: id2, file_path: '/path/file2.wav', filename: 'file2.wav' } as any)
-      vi.mocked(deleteRecording).mockReturnValue(true)
-
-      const result = await handlers['recordings:deleteBatch'](null, [id1, id2])
-
-      expect(result.success).toBe(true)
-      expect(result.deleted).toBe(2)
-      expect(result.failed).toBe(0)
-      expect(result.errors).toEqual([])
-    })
-
-    it('should return partial results when some deletions fail', async () => {
-      const { getRecordingById } = await import('../../services/database')
-      const { deleteRecording } = await import('../../services/file-storage')
-
-      const id1 = '550e8400-e29b-41d4-a716-446655440000'
-      const id2 = 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'
-
-      vi.mocked(getRecordingById)
-        .mockReturnValueOnce({ id: id1, file_path: '/path/file1.wav', filename: 'file1.wav' } as any)
-        .mockReturnValueOnce(undefined) // second recording not found
-
-      vi.mocked(deleteRecording).mockReturnValue(true)
-
-      const result = await handlers['recordings:deleteBatch'](null, [id1, id2])
-
-      expect(result.success).toBe(false)
-      expect(result.deleted).toBe(1)
-      expect(result.failed).toBe(1)
-      expect(result.errors).toHaveLength(1)
-    })
-
-    it('should reject invalid IDs', async () => {
-      const result = await handlers['recordings:deleteBatch'](null, ['not-a-uuid'])
-
-      expect(result.success).toBe(false)
-      expect(result.deleted).toBe(0)
-    })
-
-    it('should reject empty array', async () => {
-      const result = await handlers['recordings:deleteBatch'](null, [])
-
-      expect(result.success).toBe(false)
-    })
-
-    it('should handle errors gracefully', async () => {
-      const { getRecordingById } = await import('../../services/database')
-      const id1 = '550e8400-e29b-41d4-a716-446655440000'
-
-      vi.mocked(getRecordingById).mockImplementation(() => {
-        throw new Error('DB error')
-      })
-
-      const result = await handlers['recordings:deleteBatch'](null, [id1])
-
-      expect(result.success).toBe(false)
-      expect(result.failed).toBe(1)
-      expect(result.errors[0].error).toBe('DB error')
-    })
-  })
-
   describe('recordings:linkToMeeting', () => {
     it('should link a recording to a meeting with manual method', async () => {
       const { linkRecordingToMeeting } = await import('../../services/database')
@@ -487,13 +381,14 @@ describe('Recording IPC Handlers', () => {
   })
 
   describe('recordings:unlinkFromMeeting', () => {
-    it('should unlink a recording from its meeting', async () => {
-      const { linkRecordingToMeeting } = await import('../../services/database')
+    it('unlinks via the NULL-based unlink (never an empty-string id, 2026-07-24)', async () => {
+      const { linkRecordingToMeeting, unlinkRecordingFromMeeting } = await import('../../services/database')
       const recId = '550e8400-e29b-41d4-a716-446655440000'
 
       await handlers['recordings:unlinkFromMeeting'](null, recId)
 
-      expect(linkRecordingToMeeting).toHaveBeenCalledWith(recId, '', 0, '')
+      expect(unlinkRecordingFromMeeting).toHaveBeenCalledWith(recId)
+      expect(linkRecordingToMeeting).not.toHaveBeenCalled()
     })
 
     it('should throw on validation error for invalid recording ID', async () => {
@@ -673,6 +568,17 @@ describe('Recording IPC Handlers', () => {
       expect(result).toEqual(mockQueue)
     })
 
+    it('uses the bounded actionable projection when requested by the renderer sync', async () => {
+      const { getActionableQueueItems } = await import('../../services/database')
+      const active = [{ id: 'q-active', recording_id: 'r-active', status: 'processing' }]
+      vi.mocked(getActionableQueueItems).mockReturnValue(active as any)
+
+      const result = await handlers['transcription:getQueue'](null, true)
+
+      expect(getActionableQueueItems).toHaveBeenCalledOnce()
+      expect(result).toEqual(active)
+    })
+
     it('should return empty array on error', async () => {
       const { getQueueItems } = await import('../../services/database')
       vi.mocked(getQueueItems).mockImplementation(() => {
@@ -809,6 +715,35 @@ describe('Recording IPC Handlers', () => {
       expect(result).toEqual({ success: true, data: [], recordingContext: null })
     })
 
+    it('ADV40-2 (round-42) — an EXCLUDED recording returns empty, never reading its transcript', async () => {
+      const { getCandidatesForRecordingWithDetails, getTranscriptByRecordingId, resolveRecordingId } =
+        await import('../../services/database')
+      const { recording } = primeRec46()
+      vi.mocked(resolveRecordingId).mockReturnValue(recording as any)
+      // Soft-deleted / personal / value-excluded / hard-purged: the boundary
+      // returns the id as NOT eligible.
+      mockFilterEligibleRecordingIds.mockReturnValueOnce({ eligible: new Set<string>(), failClosed: false })
+
+      const result = await handlers['recordings:getCandidates'](null, recId)
+
+      // No transcript-derived metadata was read or returned.
+      expect(getTranscriptByRecordingId).not.toHaveBeenCalled()
+      expect(getCandidatesForRecordingWithDetails).not.toHaveBeenCalled()
+      expect(result).toEqual({ success: true, data: [], recordingContext: null })
+    })
+
+    it('ADV40-2 (round-42) — an eligibility lookup FAILURE fails closed (empty, no transcript read)', async () => {
+      const { getTranscriptByRecordingId, resolveRecordingId } = await import('../../services/database')
+      const { recording } = primeRec46()
+      vi.mocked(resolveRecordingId).mockReturnValue(recording as any)
+      mockFilterEligibleRecordingIds.mockReturnValueOnce({ eligible: new Set<string>(), failClosed: true })
+
+      const result = await handlers['recordings:getCandidates'](null, recId)
+
+      expect(getTranscriptByRecordingId).not.toHaveBeenCalled()
+      expect(result).toEqual({ success: true, data: [], recordingContext: null })
+    })
+
     it('should return error shape for non-string recording ID', async () => {
       const result = await handlers['recordings:getCandidates'](null, 42)
 
@@ -847,27 +782,28 @@ describe('Recording IPC Handlers', () => {
   })
 
   describe('recordings:selectMeeting', () => {
-    it('should link recording to meeting when meetingId is provided', async () => {
-      const { linkRecordingToMeeting } = await import('../../services/database')
+    it('delegates a user meeting pick to the database layer', async () => {
+      const { selectMeetingForRecordingByUser } = await import('../../services/database')
 
       const result = await handlers['recordings:selectMeeting'](null, 'rec-1', 'meet-1')
 
-      expect(linkRecordingToMeeting).toHaveBeenCalledWith('rec-1', 'meet-1', 1.0, 'manual')
+      expect(selectMeetingForRecordingByUser).toHaveBeenCalledWith('rec-1', 'meet-1')
       expect(result).toEqual({ success: true })
     })
 
-    it('should unlink recording when meetingId is null', async () => {
-      const { linkRecordingToMeeting } = await import('../../services/database')
+    it('passes a null meeting through as an unlink (2026-07-24)', async () => {
+      const { selectMeetingForRecordingByUser, linkRecordingToMeeting } = await import('../../services/database')
 
       const result = await handlers['recordings:selectMeeting'](null, 'rec-1', null)
 
-      expect(linkRecordingToMeeting).toHaveBeenCalledWith('rec-1', '', 0, '')
+      expect(selectMeetingForRecordingByUser).toHaveBeenCalledWith('rec-1', null)
+      expect(linkRecordingToMeeting).not.toHaveBeenCalled()
       expect(result).toEqual({ success: true })
     })
 
     it('should return error on failure', async () => {
-      const { linkRecordingToMeeting } = await import('../../services/database')
-      vi.mocked(linkRecordingToMeeting).mockImplementation(() => {
+      const { selectMeetingForRecordingByUser } = await import('../../services/database')
+      vi.mocked(selectMeetingForRecordingByUser).mockImplementation(() => {
         throw new Error('Link failed')
       })
 
@@ -886,7 +822,8 @@ describe('Recording IPC Handlers', () => {
       const result = await handlers['recordings:addToQueue'](null, 'rec-1')
 
       expect(addToQueue).toHaveBeenCalledWith('rec-1')
-      expect(updateRecordingTranscriptionStatus).toHaveBeenCalledWith('rec-1', 'queued')
+      // Queue insertion owns the durable pending-status transition atomically.
+      expect(updateRecordingTranscriptionStatus).not.toHaveBeenCalled()
       expect(result).toBe('queue-item-id')
     })
 
@@ -900,7 +837,7 @@ describe('Recording IPC Handlers', () => {
 
       expect(resolveRecordingId).toHaveBeenCalledWith('synced-file-id')
       expect(addToQueue).toHaveBeenCalledWith('real-rec-id')
-      expect(updateRecordingTranscriptionStatus).toHaveBeenCalledWith('real-rec-id', 'queued')
+      expect(updateRecordingTranscriptionStatus).not.toHaveBeenCalled()
       expect(result).toBe('queue-item-id')
     })
 

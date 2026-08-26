@@ -7,6 +7,9 @@ export type KnowledgeCaptureStatus = 'processing' | 'ready' | 'enriched'
 
 export interface KnowledgeCapture {
   id: string
+  /** Explicit user-authored content title. Independent from filename, meeting subject, and AI title. */
+  userTitle?: string | null
+  /** Legacy/source title retained for compatibility and non-audio artifacts. */
   title: string
   summary: string | null
   category: string | null
@@ -18,6 +21,12 @@ export interface KnowledgeCapture {
   quality: QualityRating
   qualityConfidence: number | null
   qualityAssessedAt: string | null
+  /** F16/spec-001: fixed tags explaining an AI content-based value classification
+   *  (see VALUE_REASON_TAGS in electron/main/services/value-classification.ts). */
+  qualityReasons: string[] | null
+  /** Distinguishes an AI-set rating from one the user set by hand, so a later
+   *  re-analysis never overwrites a manual rating (never-downgrade guard). */
+  qualitySource: 'ai' | 'user' | null
 
   // Storage tier and retention
   storageTier: StorageTier
@@ -507,6 +516,13 @@ export interface Project {
   // Project-as-hub metadata (v29)
   folderPath?: string | null
   url?: string | null
+
+  /**
+   * Durable provenance (v42): 'manual' = user-created, 'discovered' =
+   * auto-created by the reconciler from a transcript, null/undefined =
+   * legacy/unknown (not dismissable). Only 'discovered' projects offer Dismiss.
+   */
+  origin?: 'manual' | 'discovered' | null
 
 
 

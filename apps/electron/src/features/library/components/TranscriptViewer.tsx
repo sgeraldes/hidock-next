@@ -13,6 +13,7 @@ import { ChevronDown, ChevronRight, ArrowDownToLine } from 'lucide-react'
 import { expandInlineStoredSegments } from '../utils/splitInlineTurns'
 import { useMediaQuery } from '@/hooks/useMediaQuery'
 import { toast } from '@/components/ui/toaster'
+import { cn } from '@/lib/utils'
 import type { Person } from '@/types/knowledge'
 
 /** Stored transcript segment (from the `speakers` JSON column). Times in seconds. */
@@ -29,6 +30,7 @@ interface TranscriptViewerProps {
   onSeek: (startMs: number, endMs?: number) => void
   showSummary?: boolean
   showActionItems?: boolean
+  showTranscriptHeader?: boolean
   summary?: string
   actionItems?: string[]
   /**
@@ -53,6 +55,14 @@ interface TranscriptViewerProps {
    * Left `undefined` (e.g. MeetingDetail) preserves the legacy follow behavior.
    */
   isPlaying?: boolean
+  /**
+   * Cross-highlight request from the meeting-timeline markers: when a numbered
+   * marker (or its event-list row) is clicked, the reader asks the transcript to
+   * scroll to + briefly pulse the turn at `atMs`. `nonce` re-triggers the pulse
+   * even when the same marker is clicked twice. Only meaningful for timestamped
+   * transcripts (a fabricated action-item time can't map to a real turn → no-op).
+   */
+  highlightRequest?: { atMs: number; nonce: number } | null
 }
 
 interface TranscriptSegment {
@@ -265,18 +275,28 @@ export function TranscriptViewer({
   onSeek,
   showSummary = true,
   showActionItems = true,
+  showTranscriptHeader = true,
   summary,
   actionItems,
   segments: storedSegments,
   recordingId,
-  isPlaying
+  isPlaying,
+  highlightRequest
 }: TranscriptViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null)
-  const activeSegmentRef = useRef<HTMLDivElement>(null)
+  const activeSegmentRef = useRef<HTMLDivElement | null>(null)
+  const pulseSegmentRef = useRef<HTMLDivElement | null>(null)
+  const pulseTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   const [summaryExpanded, setSummaryExpanded] = useState(true)
   const [actionItemsExpanded, setActionItemsExpanded] = useState(true)
   const [transcriptExpanded, setTranscriptExpanded] = useState(true)
+
+  // Cross-highlight: the turn briefly pulsed after a timeline marker click.
+  // Carries the request's nonce so a rapid repeat click on the SAME turn is a
+  // state CHANGE — the scroll/timer effect below re-runs and the pulse restarts
+  // (a bare index would be a same-value setState → no re-run, stale timer).
+  const [pulse, setPulse] = useState<{ index: number; nonce: number } | null>(null)
 
   // Auto-follow: while audio plays, keep the current turn in view. We must not
   // fight the user — a manual scroll pauses following until the next play or an
@@ -502,6 +522,64 @@ export function TranscriptViewer({
     })
   }, [segments, currentTimeMs, hasTimestamps])
 
+  // Find the turn whose time span COVERS a given audio offset (ms), using
+  // half-open coverage: startMs ≤ ms < end. A turn's end is its own endMs, else
+  // the NEXT turn's startMs (turns abut when no explicit end was stored), else —
+  // only for the final turn with no evidence of an end — unbounded. Precedence
+  // when spans overlap: the LATEST turn (by index) that covers `ms` wins, since
+  // markers are anchored to turn STARTS, so the most-recently-started covering
+  // turn is the marker's source. Returns -1 (no match) for offsets in a real
+  // gap between known spans, before the first turn, or past the final turn's
+  // known end — never highlights unrelated text.
+  const findSegmentIndexAtMs = useCallback(
+    (ms: number): number => {
+      if (!hasTimestamps || segments.length === 0 || !Number.isFinite(ms)) return -1
+      let match = -1
+      for (let i = 0; i < segments.length; i++) {
+        const start = segments[i].startMs
+        if (start > ms) continue
+        const end = segments[i].endMs ?? (i + 1 < segments.length ? segments[i + 1].startMs : Infinity)
+        if (ms < end) match = i
+      }
+      return match
+    },
+    [hasTimestamps, segments]
+  )
+
+  // React to a cross-highlight request from the timeline markers: resolve the
+  // matching turn, expand + stop auto-follow so the jump isn't fought, and mark
+  // it for the pulse. Keyed on the nonce so re-clicking the same marker re-fires
+  // — the nonce travels into the pulse state so even a same-turn repeat is a
+  // state change (the scroll/timer effect below restarts).
+  useEffect(() => {
+    if (!highlightRequest) return
+    const idx = findSegmentIndexAtMs(highlightRequest.atMs)
+    if (idx < 0) return
+    setTranscriptExpanded(true)
+    setAutoFollow(false)
+    setPulse({ index: idx, nonce: highlightRequest.nonce })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [highlightRequest?.nonce])
+
+  // Once the pulsed turn is in the DOM, scroll it into view (reduced-motion →
+  // instant) and clear the pulse after a short, self-terminating window so the
+  // highlight reads as a brief flash, not a permanent selection. Depends on the
+  // whole {index, nonce} pulse object: a repeat request for the SAME turn still
+  // re-runs (fresh nonce), restarting the timer so the pulse lasts its full
+  // window after the LATEST click.
+  useEffect(() => {
+    if (pulse === null) return
+    pulseSegmentRef.current?.scrollIntoView({
+      behavior: prefersReducedMotion ? 'auto' : 'smooth',
+      block: 'center'
+    })
+    if (pulseTimerRef.current) clearTimeout(pulseTimerRef.current)
+    pulseTimerRef.current = setTimeout(() => setPulse(null), 1600)
+    return () => {
+      if (pulseTimerRef.current) clearTimeout(pulseTimerRef.current)
+    }
+  }, [pulse, prefersReducedMotion])
+
   // A (re)start of playback re-enables following: undefined→defined means this
   // transcript's audio just started (e.g. MeetingDetail, where currentTimeMs is
   // undefined unless this recording is the one playing), and a jump back to the
@@ -601,7 +679,7 @@ export function TranscriptViewer({
 
       {/* Full Transcript Section */}
       <section className="py-3 first:pt-0 last:pb-0">
-        <div className="flex items-center gap-2">
+        {showTranscriptHeader && <div className="flex items-center gap-2">
           <button
             onClick={() => setTranscriptExpanded(!transcriptExpanded)}
             className="flex items-center justify-between flex-1 text-left hover:text-foreground/70 transition-colors"
@@ -631,7 +709,22 @@ export function TranscriptViewer({
               Follow
             </button>
           )}
-        </div>
+        </div>}
+        {!showTranscriptHeader && hasTimestamps && !autoFollow && (
+          <div className="flex justify-end">
+            <button
+              onClick={() => {
+                setAutoFollow(true)
+                if (isPlaying === false) scrollToTop()
+              }}
+              className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium text-primary transition-colors hover:bg-accent"
+              title={isPlaying === false ? 'Jump to the top of the transcript' : 'Resume auto-scroll to follow playback'}
+            >
+              <ArrowDownToLine className="h-3.5 w-3.5" />
+              Follow
+            </button>
+          </div>
+        )}
         {transcriptExpanded && (
           <div
             ref={containerRef}
@@ -664,10 +757,20 @@ export function TranscriptViewer({
                   return (
                   <div
                     key={i}
-                    ref={hasTimestamps && i === currentSegmentIndex ? activeSegmentRef : null}
-                    className={`text-sm p-2 rounded-md transition-colors ${
-                      hasTimestamps && i === currentSegmentIndex ? 'bg-primary/10' : ''
-                    }`}
+                    ref={(el) => {
+                      if (hasTimestamps && i === currentSegmentIndex) activeSegmentRef.current = el
+                      if (i === pulse?.index) pulseSegmentRef.current = el
+                    }}
+                    data-testid={i === pulse?.index ? 'transcript-turn-highlighted' : undefined}
+                    className={cn(
+                      'text-sm p-2 rounded-md transition-colors',
+                      hasTimestamps && i === currentSegmentIndex && 'bg-primary/10',
+                      // Brief cross-highlight pulse from a timeline marker click. The
+                      // ring + wash fade out (motion-safe) when the pulse clears; a
+                      // reduced-motion user just gets the instant appear/disappear.
+                      i === pulse?.index &&
+                        'bg-primary/20 ring-2 ring-primary/60 motion-safe:transition-[background-color,box-shadow] motion-safe:duration-700'
+                    )}
                   >
                     {(hasTimestamps || segment.speaker) && (
                       <div className="flex items-center gap-2 mb-1">

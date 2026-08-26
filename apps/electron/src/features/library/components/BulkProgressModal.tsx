@@ -181,6 +181,7 @@ export function BulkProgressModal({
     if (progress.current > 0) {
       setAnnouncement(`${progress.current} of ${progress.total} items processed`)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- announce only on current/total changes, not on progress object identity
   }, [progress.current, progress.total])
 
   // Determine close behavior

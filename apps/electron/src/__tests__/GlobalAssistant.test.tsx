@@ -13,6 +13,7 @@ import { render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { GlobalAssistant } from '../App'
 import { useUIStore } from '@/store/ui/useUIStore'
+import { useFeatureStore } from '@/store/useFeatureStore'
 
 function renderAt(path: string) {
   return render(
@@ -27,6 +28,8 @@ beforeEach(() => {
   const ui = useUIStore.getState()
   ui.setChatPlacement('floating')
   ui.setChatOpen(false)
+  // Track I: default feature state = full preset (assistant enabled).
+  useFeatureStore.getState().setFromConfig(undefined)
 })
 
 describe('GlobalAssistant', () => {
@@ -44,5 +47,17 @@ describe('GlobalAssistant', () => {
     useUIStore.getState().setChatPlacement('embedded')
     renderAt('/people')
     expect(screen.getAllByTestId('floating-assistant-button')).toHaveLength(1)
+  })
+
+  it('does NOT mount when the Assistant feature is disabled (Track I flag)', () => {
+    useFeatureStore.getState().setFromConfig({ preset: 'library-only', flags: {} })
+    renderAt('/today')
+    expect(screen.queryByTestId('floating-assistant-button')).not.toBeInTheDocument()
+  })
+
+  it('does NOT mount when Assistant is cascade-disabled (transcription off)', () => {
+    useFeatureStore.getState().setFromConfig({ preset: 'full', flags: { transcription: false } })
+    renderAt('/today')
+    expect(screen.queryByTestId('floating-assistant-button')).not.toBeInTheDocument()
   })
 })

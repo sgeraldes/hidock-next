@@ -17,7 +17,10 @@ vi.mock('@/store/useAppStore', () => ({
     if (typeof selector === 'function') return selector(state)
     return state
   }),
-  useCalendarSyncing: vi.fn(() => false)
+  useCalendarSyncing: vi.fn(() => false),
+  // F15: the "Sync Now" control gates on the user's own request, not on any
+  // sync — a startup mount sync must not disable it.
+  useCalendarManualSyncing: vi.fn(() => false)
 }))
 
 vi.mock('@/store/domain/useConfigStore', () => ({
@@ -60,7 +63,18 @@ global.window.electronAPI = {
         embeddings: { ollamaBaseUrl: 'http://localhost:11434' }
       }
     }),
-    updateSection: vi.fn().mockResolvedValue({ success: true })
+    updateSection: vi.fn().mockResolvedValue({ success: true }),
+    listGeminiModels: vi.fn().mockResolvedValue({ success: true, data: { ok: false, models: [] } }),
+    checkSpeakerModelAccess: vi.fn().mockResolvedValue({
+      success: true,
+      data: {
+        status: 'token-missing',
+        model: 'pyannote/speaker-diarization-community-1',
+        fallbackModel: 'pyannote/speaker-diarization-3.1',
+        message: 'Add and save a Hugging Face token.'
+      }
+    }),
+    openSpeakerModelAccess: vi.fn().mockResolvedValue({ success: true, data: { opened: true } })
   },
   storage: {
     getInfo: vi.fn().mockResolvedValue({
@@ -106,6 +120,18 @@ describe('Settings Page', () => {
 
     expect(screen.getByLabelText('Gemini API Key')).toBeInTheDocument()
     expect(screen.getByLabelText('Transcription Model')).toBeInTheDocument()
+    expect(screen.getByLabelText('Hugging Face token for speaker identification')).toBeInTheDocument()
+    expect(screen.getByText('Speaker identification model')).toBeInTheDocument()
+  })
+
+  it('opens and rechecks Community-1 access from the transcription settings', async () => {
+    render(<Settings />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Review model access' }))
+    expect(window.electronAPI.config.openSpeakerModelAccess).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Check again' }))
+    expect(window.electronAPI.config.checkSpeakerModelAccess).toHaveBeenCalledWith('')
   })
 
   it('should render chat provider toggle buttons', async () => {
@@ -225,5 +251,85 @@ describe('Settings Page', () => {
     // The pressed state reflects the selection (honored on subsequent render).
     expect(screen.getByRole('button', { name: 'Embedded' })).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getByRole('button', { name: 'Left' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  // S-1 (Phase-1 integration review) — the valueClassificationEnabled
+  // kill-switch gates only the live path; the Settings-triggered backfill
+  // ignores it by design, so the card shows a one-line hint when it's off.
+  it('shows a kill-switch hint on the value-classification card when valueClassificationEnabled is false', async () => {
+    const { useConfigStore } = await import('@/store/domain/useConfigStore')
+    const mockedUseConfigStore = vi.mocked(useConfigStore)
+    // Settings re-renders (e.g. once loadStorageInfo's promise resolves), so
+    // useConfigStore is called more than once during this test — a persistent
+    // mockImplementation (not ...Once) is needed for every render to see the
+    // override; restored in `finally` so it never leaks into later tests.
+    const originalImpl = mockedUseConfigStore.getMockImplementation()
+    mockedUseConfigStore.mockImplementation((selector?: any) => {
+      const state = {
+        config: {
+          calendar: {
+            icsUrl: 'https://example.com/cal.ics',
+            syncEnabled: true,
+            syncIntervalMinutes: 15,
+            lastSyncAt: '2026-03-01T10:00:00Z'
+          },
+          transcription: {
+            geminiApiKey: 'AIzaTestKey12345',
+            geminiModel: 'gemini-3-pro-preview',
+            valueClassificationEnabled: false
+          },
+          chat: { provider: 'gemini' as const },
+          embeddings: { ollamaBaseUrl: 'http://localhost:11434' }
+        },
+        loadConfig: mockLoadConfig,
+        updateConfig: mockUpdateConfig,
+        configLoading: false
+      }
+      if (typeof selector === 'function') return selector(state)
+      return state
+    })
+
+    try {
+      render(<Settings />)
+      expect(screen.getByText(/Automatic rating of newly transcribed recordings is turned off/)).toBeInTheDocument()
+    } finally {
+      if (originalImpl) mockedUseConfigStore.mockImplementation(originalImpl)
+    }
+  })
+
+  it('hides the kill-switch hint when valueClassificationEnabled is not explicitly false', async () => {
+    render(<Settings />)
+    expect(screen.queryByText(/Automatic rating of newly transcribed recordings is turned off/)).not.toBeInTheDocument()
+  })
+
+  /**
+   * F15 / re-review #3: the startup mount sync parks on the boot gate for the
+   * whole startup window. Gating this control on "any sync in flight" disabled
+   * it during exactly the period the bounded manual path exists to serve.
+   */
+  describe('Sync Now availability during a startup sync', () => {
+    it('stays enabled while only a background/mount sync is in flight', async () => {
+      const { useCalendarSyncing, useCalendarManualSyncing } = await import('@/store/useAppStore')
+      vi.mocked(useCalendarSyncing).mockReturnValue(true) // something IS syncing
+      vi.mocked(useCalendarManualSyncing).mockReturnValue(false) // but not the user's
+
+      render(<Settings />)
+
+      const button = screen.getByRole('button', { name: 'Sync calendar now' })
+      expect(button).not.toBeDisabled()
+
+      // And clicking it reaches the manual path.
+      fireEvent.click(button)
+      expect(mockSyncCalendar).toHaveBeenCalledWith('manual')
+    })
+
+    it('is disabled while the user’s own request is outstanding', async () => {
+      const { useCalendarManualSyncing } = await import('@/store/useAppStore')
+      vi.mocked(useCalendarManualSyncing).mockReturnValue(true)
+
+      render(<Settings />)
+
+      expect(screen.getByRole('button', { name: 'Sync calendar now' })).toBeDisabled()
+    })
   })
 })

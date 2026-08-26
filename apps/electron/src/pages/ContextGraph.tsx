@@ -464,8 +464,12 @@ export function ContextGraph() {
           <div className="flex-1 min-w-0">
             <h1 className="text-2xl font-bold tracking-tight">Context Graph</h1>
             <p className="text-sm text-muted-foreground mt-0.5">
-              A reasoning-level view of your work — decisions, people, and the meetings they came
-              from, laid out by abstraction and time.
+              {tab === 'lens'
+                ? // Lens: the x axis is ORDINAL (sequence, not duration) — the copy says
+                  // "ordered by time", never "laid out by time"; the canvas date ticks
+                  // carry the real dates.
+                  'A reasoning-level view of your work — decisions, people, and the meetings they came from, layered by abstraction and ordered by time.'
+                : 'A reasoning-level view of your work — decisions, people, and the meetings they came from.'}
             </p>
           </div>
           <div className="flex items-center gap-2">

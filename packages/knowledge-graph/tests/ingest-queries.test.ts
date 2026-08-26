@@ -4,7 +4,7 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { existsSync, rmSync } from 'fs'
-import initSqlJs from 'sql.js'
+import { createRequire } from 'node:module'
 import { DatabaseEngine } from '@hidock/database'
 import { KnowledgeGraphStore } from '../src/graph-store.js'
 import { ingestExtraction } from '../src/ingest.js'
@@ -16,20 +16,30 @@ import {
 } from '../src/queries.js'
 import type { ExtractionResult, ExtractionMeta } from '../src/extract.js'
 
+// The engine requires the app-owned better-sqlite3 native module. Resolve the
+// database package's OWN copy (the one CI's "npm rebuild better-sqlite3"
+// Node-ABI restore step targets) so resolution never depends on hoisting.
+const requireFromDatabase = createRequire(new URL('../../database/package.json', import.meta.url))
+const BetterSqlite3 = requireFromDatabase('better-sqlite3')
+
+/** Engines opened by makeStore — closed in afterEach so temp DBs can be deleted. */
+const openEngines: DatabaseEngine[] = []
+
 function tempPath(name: string) {
-  return join(tmpdir(), `hidock-kg-ingest-${name}.sqlite`)
+  return join(tmpdir(), `hidock-kg-ingest-${name}-${Date.now()}-${Math.random().toString(36).slice(2)}.sqlite`)
 }
 
 async function makeStore(name: string) {
   const dbPath = tempPath(name)
   const engine = new DatabaseEngine({
-    initSqlJs,
+    betterSqlite3: BetterSqlite3,
     dbPathProvider: () => dbPath,
     schemaVersion: 1,
     schema: 'CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)',
     migrations: {},
   })
   await engine.initialize()
+  openEngines.push(engine)
   const store = new KnowledgeGraphStore(engine)
   store.initSchema()
   return { store, dbPath }
@@ -85,8 +95,16 @@ describe('ingestExtraction + queries', () => {
   const paths: string[] = []
 
   afterEach(() => {
+    // better-sqlite3 holds the DB file open — close engines first, or rmSync
+    // EPERMs on Windows and stale state leaks into the next run.
+    for (const e of openEngines) {
+      try { e.closeDatabase() } catch { /* already closed */ }
+    }
+    openEngines.length = 0
     for (const p of paths) {
-      if (existsSync(p)) rmSync(p, { force: true })
+      for (const f of [p, `${p}-wal`, `${p}-shm`]) {
+        if (existsSync(f)) rmSync(f, { force: true })
+      }
     }
     paths.length = 0
   })
@@ -205,5 +223,207 @@ describe('ingestExtraction + queries', () => {
     // 'Script' should match 'TypeScript'
     const results = topSkillDemonstrators(store, 'Script')
     expect(results.length).toBeGreaterThan(0)
+  })
+})
+
+// =============================================================================
+// F18 (spec-004): meeting-node id-keying + per-edge provenance writes
+// =============================================================================
+
+describe('ingestExtraction: meeting-node id-keying (F18)', () => {
+  const paths: string[] = []
+  afterEach(() => {
+    for (const e of openEngines) {
+      try { e.closeDatabase() } catch { /* already closed */ }
+    }
+    openEngines.length = 0
+    for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
+    paths.length = 0
+  })
+
+  it('same title, different meetingId → TWO meeting nodes (recurring occurrences no longer fold by title)', async () => {
+    const { store, dbPath } = await makeStore('id-keying-distinct')
+    paths.push(dbPath)
+    const occurrence1: ExtractionMeta = { meetingId: 'series-1::2026-06-01T10:00:00.000Z', title: 'Weekly Sync', date: '2026-06-01' }
+    const occurrence2: ExtractionMeta = { meetingId: 'series-1::2026-06-08T10:00:00.000Z', title: 'Weekly Sync', date: '2026-06-08' }
+
+    ingestExtraction(store, meeting1, occurrence1)
+    ingestExtraction(store, meeting1, occurrence2)
+
+    const meetings = store.findNodes({ type: 'meeting' })
+    expect(meetings).toHaveLength(2)
+    expect(new Set(meetings.map((m) => m.norm_key)).size).toBe(2)
+    // Both keep the SAME display title...
+    expect(meetings.every((m) => m.label === 'Weekly Sync')).toBe(true)
+    // ...but are keyed by their distinct meetingId (id-keying, not title).
+    expect(meetings.map((m) => m.norm_key).sort()).toEqual(
+      ['meeting:series-1::2026-06-01t10:00:00.000z', 'meeting:series-1::2026-06-08t10:00:00.000z']
+    )
+  })
+
+  it('same meetingId ingested twice still folds into ONE node (regression: id-keying does not break re-ingest dedup)', async () => {
+    const { store, dbPath } = await makeStore('id-keying-fold')
+    paths.push(dbPath)
+    ingestExtraction(store, meeting1, meta1)
+    ingestExtraction(store, meeting1, meta1)
+
+    const meetings = store.findNodes({ type: 'meeting' })
+    expect(meetings).toHaveLength(1)
+    expect(meetings[0].norm_key).toBe(`meeting:${meta1.meetingId.toLowerCase()}`)
+  })
+})
+
+describe('ingestExtraction: per-edge provenance writes (F18)', () => {
+  const paths: string[] = []
+  afterEach(() => {
+    for (const e of openEngines) {
+      try { e.closeDatabase() } catch { /* already closed */ }
+    }
+    openEngines.length = 0
+    for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
+    paths.length = 0
+  })
+
+  it('recordingId + transcriptId writes one graph_edge_sources row per upserted edge', async () => {
+    const { store, dbPath } = await makeStore('provenance-write')
+    paths.push(dbPath)
+    ingestExtraction(store, meeting1, meta1, { recordingId: 'rec-1', transcriptId: 'tx-1' })
+
+    const edges = store.db.queryAll<{ id: string }>('SELECT id FROM graph_edges')
+    expect(edges.length).toBeGreaterThan(0)
+
+    const sources = store.db.queryAll<{ edge_id: string; recording_id: string; transcript_id: string }>(
+      'SELECT edge_id, recording_id, transcript_id FROM graph_edge_sources'
+    )
+    // Every edge from this ingest has exactly one source row, all attributed
+    // to the same (recording, transcript).
+    expect(sources).toHaveLength(edges.length)
+    expect(sources.every((s) => s.recording_id === 'rec-1' && s.transcript_id === 'tx-1')).toBe(true)
+    expect(new Set(sources.map((s) => s.edge_id))).toEqual(new Set(edges.map((e) => e.id)))
+  })
+
+  it('a folder-style call (no recordingId/transcriptId) writes NO graph_edge_sources rows', async () => {
+    const { store, dbPath } = await makeStore('provenance-none')
+    paths.push(dbPath)
+    ingestExtraction(store, meeting1, meta1) // no options → folder-ingest shape
+
+    const edges = store.db.queryAll<{ id: string }>('SELECT id FROM graph_edges')
+    expect(edges.length).toBeGreaterThan(0)
+    const sources = store.db.queryAll('SELECT * FROM graph_edge_sources')
+    expect(sources).toHaveLength(0)
+  })
+
+  it('a duplicate entity within one extraction bumps assertion_count rather than erroring or duplicating the row', async () => {
+    const { store, dbPath } = await makeStore('provenance-duplicate-entity')
+    paths.push(dbPath)
+    const duplicated: ExtractionResult = {
+      people: [
+        { name: 'Alice', skills: [] },
+        { name: 'Alice', skills: [] }, // duplicate entity from the extractor
+      ],
+      topics: [],
+      projects: [],
+      decisions: [],
+      action_items: [],
+      risks: [],
+      next_steps: [],
+    }
+    ingestExtraction(store, duplicated, meta1, { recordingId: 'rec-dup', transcriptId: 'tx-dup' })
+
+    const attended = store.db.queryOne<{ id: string; weight: number }>(
+      "SELECT id, weight FROM graph_edges WHERE type = 'ATTENDED'"
+    )
+    expect(attended?.weight).toBe(2) // upsertEdge bumped weight for the repeat
+
+    const row = store.db.queryOne<{ assertion_count: number }>(
+      'SELECT assertion_count FROM graph_edge_sources WHERE edge_id = ? AND recording_id = ? AND transcript_id = ?',
+      [attended!.id, 'rec-dup', 'tx-dup']
+    )
+    expect(row?.assertion_count).toBe(2)
+
+    const allSourceRows = store.db.queryAll('SELECT * FROM graph_edge_sources WHERE edge_id = ?', [attended!.id])
+    expect(allSourceRows).toHaveLength(1) // one row, not two
+  })
+})
+
+// =============================================================================
+// ADV35-1 (round-37): NODE-LEVEL provenance writes (isolated-node visibility)
+// =============================================================================
+
+describe('ingestExtraction: node-level provenance (ADV35-1)', () => {
+  const paths: string[] = []
+  afterEach(() => {
+    for (const e of openEngines) {
+      try { e.closeDatabase() } catch { /* already closed */ }
+    }
+    openEngines.length = 0
+    for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
+    paths.length = 0
+  })
+
+  it('a recording-backed ingest stamps every node origin=derived + source_recording_id', async () => {
+    const { store, dbPath } = await makeStore('node-prov-derived')
+    paths.push(dbPath)
+    ingestExtraction(store, meeting1, meta1, { recordingId: 'rec-1', transcriptId: 'tx-1' })
+
+    const nodes = store.db.queryAll<{ origin: string | null; source_recording_id: string | null }>(
+      'SELECT origin, source_recording_id FROM graph_nodes'
+    )
+    expect(nodes.length).toBeGreaterThan(0)
+    expect(nodes.every((n) => n.origin === 'derived' && n.source_recording_id === 'rec-1')).toBe(true)
+  })
+
+  it('an ISOLATED risk (no raiser) carries derived provenance so it can later be suppressed', async () => {
+    const { store, dbPath } = await makeStore('node-prov-isolated-risk')
+    paths.push(dbPath)
+    const withOrphanRisk: ExtractionResult = {
+      people: [],
+      topics: [],
+      projects: [],
+      decisions: [],
+      action_items: [],
+      risks: [{ text: 'Unowned risk', raised_by: '' }], // no raiser ⇒ edgeless node
+      next_steps: [],
+    }
+    ingestExtraction(store, withOrphanRisk, meta1, { recordingId: 'rec-iso', transcriptId: 'tx-iso' })
+
+    const risk = store.db.queryOne<{ id: string; origin: string | null; source_recording_id: string | null }>(
+      "SELECT id, origin, source_recording_id FROM graph_nodes WHERE type = 'risk'"
+    )
+    expect(risk).toBeDefined()
+    expect(risk!.origin).toBe('derived')
+    expect(risk!.source_recording_id).toBe('rec-iso')
+    // Confirm it truly has NO incident edge (the case the round-35 finding is about).
+    const edges = store.db.queryAll('SELECT id FROM graph_edges WHERE source_id = ? OR target_id = ?', [risk!.id, risk!.id])
+    expect(edges).toHaveLength(0)
+  })
+
+  it('a folder-style ingest (no recordingId) stamps nodes origin=manual + NULL source', async () => {
+    const { store, dbPath } = await makeStore('node-prov-manual')
+    paths.push(dbPath)
+    ingestExtraction(store, meeting1, meta1) // no options → folder-ingest shape
+
+    const nodes = store.db.queryAll<{ origin: string | null; source_recording_id: string | null }>(
+      'SELECT origin, source_recording_id FROM graph_nodes'
+    )
+    expect(nodes.length).toBeGreaterThan(0)
+    expect(nodes.every((n) => n.origin === 'manual' && n.source_recording_id === null)).toBe(true)
+  })
+
+  it('an existing node keeps its FIRST origin when a later ingest re-touches it', async () => {
+    const { store, dbPath } = await makeStore('node-prov-first-wins')
+    paths.push(dbPath)
+    // First: derived from rec-A.
+    ingestExtraction(store, meeting1, meta1, { recordingId: 'rec-A', transcriptId: 'tx-A' })
+    // Second: the SAME meeting/people re-ingested from rec-B — nodes already exist.
+    ingestExtraction(store, meeting1, meta1, { recordingId: 'rec-B', transcriptId: 'tx-B' })
+
+    const nodes = store.db.queryAll<{ source_recording_id: string | null }>(
+      'SELECT source_recording_id FROM graph_nodes'
+    )
+    // Best-effort provenance for the isolated case: the FIRST source is retained
+    // (edge-provenance governs when a node is connected, so this only matters for
+    // an isolated node).
+    expect(nodes.every((n) => n.source_recording_id === 'rec-A')).toBe(true)
   })
 })

@@ -103,4 +103,28 @@ describe('remapOccurrenceIdsToExisting', () => {
     const out = remapOccurrenceIdsToExisting(incoming, existing)
     expect(out[0].id).toBe(`${UID}::${nextWeek}`)
   })
+
+  it('repairs a uniquely matching occurrence whose old DST parsing shifted it by one hour', () => {
+    const corrected = '2026-08-21T18:00:00.000Z'
+    const stale = '2026-08-21T19:00:00.000Z'
+    const incoming = [{ id: `${UID}::${corrected}`, start_time: corrected }]
+    const existing = [{ id: `${UID}::${stale}`, start_time: stale }]
+
+    const out = remapOccurrenceIdsToExisting(incoming, existing)
+
+    expect(out[0].id).toBe(`${UID}::${stale}`)
+    expect(out[0].start_time).toBe(corrected)
+  })
+
+  it('does not guess when multiple same-series rows are within the correction window', () => {
+    const corrected = '2026-08-21T18:00:00.000Z'
+    const incomingId = `${UID}::${corrected}`
+    const incoming = [{ id: incomingId, start_time: corrected }]
+    const existing = [
+      { id: `${UID}::2026-08-21T17:00:00.000Z`, start_time: '2026-08-21T17:00:00.000Z' },
+      { id: `${UID}::2026-08-21T19:00:00.000Z`, start_time: '2026-08-21T19:00:00.000Z' },
+    ]
+
+    expect(remapOccurrenceIdsToExisting(incoming, existing)[0].id).toBe(incomingId)
+  })
 })

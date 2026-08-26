@@ -36,9 +36,11 @@
  *    fed (converted) into WaveformCanvas's bar-coloring hook for the gaps.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Play, Pause, Square, SkipBack, SkipForward, Volume2, CheckSquare, GitBranch, StickyNote } from 'lucide-react'
+import { useCallback, useEffect, useId, useMemo, useState } from 'react'
+import { Play, Pause, Square, SkipBack, SkipForward, Volume2, CheckSquare, GitBranch, StickyNote, ChevronDown, Pencil, CircleCheck, CircleDashed, Scissors } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { Textarea } from '@/components/ui/textarea'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   Select,
   SelectContent,
@@ -73,6 +75,31 @@ export interface TimelineEvent {
   refId?: string
 }
 
+/**
+ * Rich detail for one timeline event, joined by the reader from the first-class
+ * action_items / decisions rows (via `refId`) or from the transcript's JSON
+ * arrays (persisted by index through `transcripts:updateExtractedItem`).
+ */
+export interface TimelineEventDetail {
+  kind: 'action' | 'decision' | 'note'
+  /** The COMPLETE item text (the persisted marker label is truncated at 80). */
+  fullText: string
+  /** First-class DB row → content/status edits persist. */
+  editable: boolean
+  assignee?: string | null
+  dueDate?: string | null
+  priority?: string | null
+  status?: string | null
+  /** Decisions only: the surrounding context the extractor recorded. */
+  context?: string | null
+}
+
+/** Fields the event list can persist for an editable event. */
+export interface TimelineEventPatch {
+  content?: string
+  status?: 'pending' | 'in_progress' | 'completed' | 'cancelled'
+}
+
 /** A sentiment sample over a time span; `score` in [-1, 1] (up = positive). */
 export interface SentimentScorePoint {
   startSec: number
@@ -101,10 +128,16 @@ interface WaveformPlayerProps {
   speakerRanges?: SpeakerRange[]
   /** Numbered event markers (full mode only; no-op when absent). */
   events?: TimelineEvent[]
+  /** Rich per-event details (full text + metadata + editability), keyed by refId/id. */
+  eventDetails?: Record<string, TimelineEventDetail>
+  /** Persist an edit for an editable event; resolves true when saved. */
+  onEventUpdate?: (event: TimelineEvent, patch: TimelineEventPatch) => Promise<boolean>
   /** Score-based sentiment for the curve + bar-coloring hook (full mode). */
   sentiment?: SentimentScorePoint[]
   /** Notified when the user seeks (seconds). */
   onSeek?: (sec: number) => void
+  /** Optional user-selected recording split point, independent from playback. */
+  splitPointSec?: number
   /** Notified when the user clicks an event marker or its list row. */
   onEventClick?: (event: TimelineEvent) => void
   /** Externally-controlled highlighted event id (bidirectional list linking). */
@@ -132,6 +165,11 @@ const EVENT_KIND_ICON = {
   decision: GitBranch,
   note: StickyNote
 } as const
+
+/** Full-mode stage dimensions + the subtle gradient panel (theme-aware). */
+const SENTIMENT_H = 68 // px — sentiment curve panel
+const WAVE_H = 58 // px — waveform band
+const STAGE_GRADIENT = 'linear-gradient(180deg, hsl(var(--muted) / 0.9), hsl(var(--muted) / 0.35))'
 
 /** Shared playback state + transport, derived once and used by every mode. */
 function usePlayback(recordingId?: string, filePath?: string) {
@@ -226,8 +264,11 @@ export function WaveformPlayer({
   fluid = false,
   speakerRanges,
   events,
+  eventDetails,
+  onEventUpdate,
   sentiment,
   onSeek,
+  splitPointSec,
   onEventClick,
   activeEventId,
   className
@@ -269,11 +310,13 @@ export function WaveformPlayer({
 
   const seekTo = useCallback(
     (sec: number) => {
-      if (!pb.liveDuration || pb.liveDuration <= 0) return
-      pb.audioControls.seek(sec)
-      onSeek?.(sec)
+      const seekDuration = pb.liveDuration > 0 ? pb.liveDuration : (durationSec ?? 0)
+      if (seekDuration <= 0) return
+      const bounded = Math.min(seekDuration, Math.max(0, sec))
+      pb.audioControls.seek(bounded)
+      onSeek?.(bounded)
     },
-    [pb.audioControls, pb.liveDuration, onSeek]
+    [durationSec, pb.audioControls, pb.liveDuration, onSeek]
   )
 
   const skipBackward = useCallback(() => pb.audioControls.seek(Math.max(0, pb.rawCurrentTime - 10)), [pb.audioControls, pb.rawCurrentTime])
@@ -433,11 +476,15 @@ export function WaveformPlayer({
       handleRate={handleRate}
       speakerRanges={speakerRanges}
       events={events}
+      eventDetails={eventDetails}
+      onEventUpdate={onEventUpdate}
       sentiment={sentiment}
+      splitPointSec={splitPointSec}
       storeSentiment={wf.storeSentiment}
       onEventClick={onEventClick}
       activeEvent={activeEvent}
       setInternalActiveEvent={setInternalActiveEvent}
+      recordingId={recordingId}
     />
   )
 }
@@ -457,11 +504,15 @@ interface FullTimelineProps {
   handleRate: (v: string) => void
   speakerRanges?: SpeakerRange[]
   events?: TimelineEvent[]
+  eventDetails?: Record<string, TimelineEventDetail>
+  onEventUpdate?: (event: TimelineEvent, patch: TimelineEventPatch) => Promise<boolean>
   sentiment?: SentimentScorePoint[]
+  splitPointSec?: number
   storeSentiment: SentimentSegment[] | null
   onEventClick?: (event: TimelineEvent) => void
   activeEvent: string | null
   setInternalActiveEvent: (id: string | null) => void
+  recordingId?: string
 }
 
 /** The full-mode meeting timeline: colored bars, playhead, markers, sentiment. */
@@ -478,16 +529,36 @@ function FullTimeline({
   handleRate,
   speakerRanges,
   events,
+  eventDetails,
+  onEventUpdate,
   sentiment,
+  splitPointSec,
   storeSentiment,
   onEventClick,
   activeEvent,
-  setInternalActiveEvent
+  setInternalActiveEvent,
+  recordingId
 }: FullTimelineProps) {
+  // Event-list detail interaction: expanded row + inline edit state.
+  const [expandedEventId, setExpandedEventId] = useState<string | null>(null)
+  const [editingEventId, setEditingEventId] = useState<string | null>(null)
+  const [editDraft, setEditDraft] = useState('')
+  const [editSaving, setEditSaving] = useState(false)
+
+  // Reset the transient event-list detail state when the recording changes.
+  useEffect(() => {
+    setExpandedEventId(null)
+    setEditingEventId(null)
+  }, [recordingId])
   // The time axis uses the REAL duration so the rich timeline renders on a silent
   // open; the playhead still tracks live playback position (0 when not playing).
   const duration = axisDuration
+  const splitPct = splitPointSec !== undefined && duration > 0
+    ? Math.min(100, Math.max(0, (splitPointSec / duration) * 100))
+    : null
   const playedProgress = pb.liveDuration > 0 ? Math.min(1, pb.liveTime / pb.liveDuration) : 0
+  // Unique id for this instance's SVG gradient defs (avoids cross-instance clashes).
+  const stageId = useId().replace(/:/g, '')
 
   // Speaker bars for the canvas (seconds → the canvas's WaveformSpeakerRange).
   const canvasSpeakerRanges = useMemo<WaveformSpeakerRange[] | undefined>(() => {
@@ -518,15 +589,33 @@ function FullTimeline({
   // Sentiment polyline points (px-independent: x in [0,1], y in [0,1], 0 = top).
   const sentimentPath = useMemo(() => {
     if (!sentiment || sentiment.length === 0 || duration <= 0) return null
-    const pts = sentiment
-      .filter((s) => s.endSec > s.startSec)
+    const validSegments = sentiment.filter((s) => s.endSec > s.startSec)
+    const pts = validSegments
       .map((s) => {
         const midX = ((s.startSec + s.endSec) / 2 / duration)
         const y = (1 - (Math.max(-1, Math.min(1, s.score)) + 1) / 2)
         return { x: Math.max(0, Math.min(1, midX)), y }
       })
       .sort((a, b) => a.x - b.x)
-    return pts.length >= 2 ? pts : null
+    if (pts.length >= 2) {
+      // Anchor BOTH edges: the segment midpoints never reach 0/duration, which
+      // left the curve visibly inset from the sides (2026-07-24 report). The
+      // fill polygon already spans the full width; the line must match.
+      const first = pts[0]
+      const last = pts[pts.length - 1]
+      return [
+        { x: 0, y: first.y },
+        ...pts,
+        { x: 1, y: last.y }
+      ]
+    }
+    if (pts.length === 1) {
+      return [
+        { x: 0, y: pts[0].y },
+        { x: 1, y: pts[0].y }
+      ]
+    }
+    return null
   }, [sentiment, duration])
 
   const activateEvent = useCallback(
@@ -538,103 +627,168 @@ function FullTimeline({
     [duration, seekTo, onEventClick, setInternalActiveEvent]
   )
 
+  // Interpolate the sentiment curve's y (0 = top … 1 = bottom) at a time fraction,
+  // so numbered markers can sit ON the curve. Falls back to the neutral midline.
+  const curveYAt = (frac: number): number => {
+    const pts = sentimentPath
+    if (!pts || pts.length === 0) return 0.5
+    if (frac <= pts[0].x) return pts[0].y
+    const last = pts[pts.length - 1]
+    if (frac >= last.x) return last.y
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1]
+      const b = pts[i]
+      if (frac >= a.x && frac <= b.x) {
+        const t = b.x === a.x ? 0 : (frac - a.x) / (b.x - a.x)
+        return a.y + (b.y - a.y) * t
+      }
+    }
+    return last.y
+  }
+
   return (
     <div className={cn('space-y-2 rounded-lg border bg-muted/40 p-3', className)} data-testid="waveform-player-full">
-      {/* Sentiment curve — a thin line above the waveform, same time axis. */}
-      {sentimentPath && (
-        <div className="relative h-6" data-testid="sentiment-curve" aria-hidden="true">
-          <svg className="absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none">
-            {/* neutral baseline */}
-            <line x1="0" y1="50" x2="100" y2="50" stroke="hsl(var(--muted-foreground))" strokeOpacity="0.25" strokeWidth="0.5" />
-            <polyline
-              points={sentimentPath.map((p) => `${p.x * 100},${p.y * 100}`).join(' ')}
-              fill="none"
-              stroke="hsl(var(--primary))"
-              strokeWidth="1.5"
-              strokeLinejoin="round"
-              strokeLinecap="round"
-              vectorEffect="non-scaling-stroke"
-            />
-          </svg>
-        </div>
-      )}
-
-      {/* Waveform + overlays. WaveformCanvas draws speaker-colored bars, a strong
-          2px playhead, and seeks on click. Numbered markers sit on the axis. */}
-      <div className="relative">
-        {wf.waveformData ? (
-          <WaveformCanvas
-            audioData={wf.waveformData}
-            sentimentData={canvasSentiment}
-            speakerRanges={canvasSpeakerRanges}
-            currentTime={pb.liveTime}
-            duration={duration}
-            onSeek={seekTo}
-            height={56}
-          />
-        ) : wf.waveformLoadingError ? (
-          <div className="flex h-14 items-center justify-center rounded bg-destructive/10 text-xs text-destructive">
-            Waveform unavailable
-          </div>
-        ) : hasAudio ? (
-          // Decoding (the silent auto-load is in flight). Never "Press play…".
-          <div
-            className="relative flex h-14 items-center gap-0.5 overflow-hidden rounded"
-            data-testid="waveform-loading"
-            role="status"
-            aria-label="Loading waveform"
-          >
-            {Array.from({ length: 64 }).map((_, i) => (
-              <div
-                key={i}
-                className="w-1 shrink-0 rounded bg-muted-foreground/25 motion-safe:animate-pulse"
-                style={{ height: `${((i * 37) % 80) + 20}%`, animationDelay: `${i * 20}ms` }}
-              />
-            ))}
-            <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-xs text-muted-foreground">
-              Loading waveform…
-            </span>
-          </div>
-        ) : (
-          <div className="flex h-14 items-center justify-center rounded bg-background text-xs text-muted-foreground">
-            No audio to load
-          </div>
-        )}
-
-        {/* Explicit playhead cursor line — reinforces WaveformCanvas's playhead
-            and stays visible over the placeholder/loading states too. Uses live
-            playback progress, so it sits at the start until Play is pressed. */}
-        {duration > 0 && (
-          <div
-            className="pointer-events-none absolute inset-y-0 w-px bg-foreground/80"
-            style={{ left: `${playedProgress * 100}%` }}
-            aria-hidden="true"
-          />
-        )}
-
-        {/* Numbered event markers — actions vs decisions in distinct accents. */}
-        {markers.map((m) => {
-          const kind = m.kind ?? 'note'
-          const color = EVENT_KIND_COLOR[kind]
-          const isActive = activeEvent === m.id
-          return (
-            <button
-              key={m.id}
-              type="button"
-              onClick={() => activateEvent(m)}
-              title={`${kind}${m.label ? `: ${m.label}` : ''} (${formatTimestamp(m.timeSec)})`}
-              aria-label={`Jump to marker ${m.index ?? ''} (${kind})${m.label ? `: ${m.label}` : ''}`.trim()}
-              aria-pressed={isActive}
-              className={cn(
-                'absolute -top-1 flex h-4 w-4 -translate-x-1/2 items-center justify-center rounded-full border text-[9px] font-semibold leading-none text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60',
-                isActive ? 'border-foreground ring-2 ring-foreground/40' : 'border-background'
+      {/* Stage: a subtle gradient panel holding the sentiment curve + numbered
+          markers on top, the per-speaker colored waveform below, and the time axis.
+          This composition mirrors the approved timeline mockup. */}
+      <div className="overflow-hidden rounded-lg border border-border/60" style={{ background: STAGE_GRADIENT }} data-testid="timeline-stage">
+        <div className="relative">
+          {/* Sentiment panel — gradient area, +positive / −negative axis labels,
+              the sentiment curve, and numbered event markers riding ON the curve. */}
+          <div className="relative" style={{ height: SENTIMENT_H }} data-testid="sentiment-panel">
+            <svg className="absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+              <defs>
+                <linearGradient id={`wf-sent-fill-${stageId}`} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0" stopColor="hsl(var(--primary))" stopOpacity="0.22" />
+                  <stop offset="1" stopColor="hsl(var(--primary))" stopOpacity="0" />
+                </linearGradient>
+              </defs>
+              {/* neutral baseline */}
+              <line x1="0" y1="50" x2="100" y2="50" stroke="hsl(var(--muted-foreground))" strokeOpacity="0.25" strokeWidth="0.4" />
+              {sentimentPath && (
+                <>
+                  <polygon
+                    points={`0,100 ${sentimentPath.map((p) => `${p.x * 100},${p.y * 100}`).join(' ')} 100,100`}
+                    fill={`url(#wf-sent-fill-${stageId})`}
+                  />
+                  <polyline
+                    data-testid="sentiment-curve"
+                    points={sentimentPath.map((p) => `${p.x * 100},${p.y * 100}`).join(' ')}
+                    fill="none"
+                    stroke="hsl(var(--primary))"
+                    strokeWidth="1.5"
+                    strokeLinejoin="round"
+                    strokeLinecap="round"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                </>
               )}
-              style={{ left: `${m.leftPct}%`, backgroundColor: color }}
+            </svg>
+            <span className="pointer-events-none absolute left-2 top-1 text-[10px] leading-none text-muted-foreground/80">＋ positive</span>
+            <span className="pointer-events-none absolute bottom-1 left-2 text-[10px] leading-none text-muted-foreground/80">－ negative</span>
+
+            {/* Numbered event markers ON the curve — colored ring per kind. */}
+            {markers.map((m) => {
+              const kind = m.kind ?? 'note'
+              const color = EVENT_KIND_COLOR[kind]
+              const isActive = activeEvent === m.id
+              const topPct = curveYAt(m.leftPct / 100) * 100
+              return (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => activateEvent(m)}
+                  title={`${kind}${m.label ? `: ${m.label}` : ''} (${formatTimestamp(m.timeSec)})`}
+                  aria-label={`Jump to marker ${m.index ?? ''} (${kind})${m.label ? `: ${m.label}` : ''}`.trim()}
+                  aria-pressed={isActive}
+                  className={cn(
+                    'absolute z-10 flex h-[18px] w-[18px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 bg-background text-[9px] font-bold leading-none shadow focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60',
+                    isActive && 'ring-2 ring-foreground/50'
+                  )}
+                  style={{ left: `${m.leftPct}%`, top: `${topPct}%`, borderColor: color, color }}
+                  data-testid="timeline-marker"
+                >
+                  {m.index ?? ''}
+                </button>
+              )
+            })}
+          </div>
+
+          {/* Wave band — per-speaker colored bars, or a clean placeholder. */}
+          <div className="relative px-2 pb-1.5" style={{ height: WAVE_H }} data-testid="wave-band">
+            {wf.waveformData ? (
+              <WaveformCanvas
+                audioData={wf.waveformData}
+                sentimentData={canvasSentiment}
+                speakerRanges={canvasSpeakerRanges}
+                currentTime={pb.liveTime}
+                duration={duration}
+                onSeek={seekTo}
+                height={WAVE_H - 6}
+              />
+            ) : wf.waveformLoadingError ? (
+              <div className="flex h-full items-center justify-center text-xs text-destructive">
+                Waveform unavailable
+              </div>
+            ) : hasAudio ? (
+              // H5: clean, centered placeholder while (rarely) computing — never a
+              // half-drawn wave with an overlaid label, and no partial bars.
+              <div
+                className="flex h-full items-center justify-center"
+                data-testid="waveform-preparing"
+                role="status"
+                aria-label="Preparing waveform"
+              >
+                <span className="text-xs text-muted-foreground motion-safe:animate-pulse">Preparing waveform…</span>
+              </div>
+            ) : (
+              <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+                No audio to load
+              </div>
+            )}
+          </div>
+
+          {/* Play-zone (dashed) + bright playhead spanning the panel and the wave.
+              Uses live playback progress, so it sits at the start until Play. */}
+          {duration > 0 && (
+            <>
+              <div
+                className="pointer-events-none absolute inset-y-0 z-20 border-x border-dashed border-foreground/40 bg-foreground/5"
+                style={{ left: `calc(${playedProgress * 100}% - 6px)`, width: 12 }}
+                aria-hidden="true"
+              />
+              <div
+                className="pointer-events-none absolute inset-y-0 z-20 w-0.5 bg-foreground shadow-[0_0_6px] shadow-foreground/60"
+                style={{ left: `${playedProgress * 100}%`, transform: 'translateX(-1px)' }}
+                aria-hidden="true"
+              >
+                <span className="absolute -left-[3px] -top-0.5 h-2 w-2 rounded-full bg-foreground" />
+              </div>
+            </>
+          )}
+
+          {splitPct !== null && (
+            <div
+              className="pointer-events-none absolute inset-y-0 z-30 w-0.5 bg-primary shadow-[0_0_7px_hsl(var(--primary)/0.7)]"
+              style={{ left: `${splitPct}%`, transform: 'translateX(-1px)' }}
+              data-testid="waveform-split-marker"
+              aria-hidden="true"
             >
-              {m.index ?? ''}
-            </button>
-          )
-        })}
+              <span className="absolute -left-3 top-1 inline-flex h-6 w-6 items-center justify-center rounded-full border border-primary/50 bg-primary text-primary-foreground shadow-sm">
+                <Scissors className="h-3.5 w-3.5" />
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Time axis — 0:00 … total, evenly quartered. */}
+        <div className="flex justify-between border-t border-border/60 px-2 py-1 text-[10px] tabular-nums text-muted-foreground">
+          <span>0:00</span>
+          <span>{formatTimestamp(duration * 0.25)}</span>
+          <span>{formatTimestamp(duration * 0.5)}</span>
+          <span>{formatTimestamp(duration * 0.75)}</span>
+          <span>{formatTimestamp(duration)}</span>
+        </div>
       </div>
 
       {/* Times + transport. NOTE: no speaker-name legend here — the names (and
@@ -663,38 +817,190 @@ function FullTimeline({
 
       {/* Event list — numbered actions/decisions, cross-linked with the markers.
           Height-capped + internally scrollable so a long list can't grow the
-          docked header and push the reader's docked essentials off-screen. */}
+          docked header and push the reader's docked essentials off-screen.
+          Row text WRAPS (full item text, no truncation). Click the text to
+          expand the detail panel (metadata + seek + edit); click the timestamp
+          chip to seek. */}
       {markers.length > 0 && (
-        <ul className="max-h-40 space-y-0.5 overflow-y-auto border-t pt-2" data-testid="timeline-events">
-          {markers.map((m) => {
-            const kind = m.kind ?? 'note'
-            const Icon = EVENT_KIND_ICON[kind]
-            const isActive = activeEvent === m.id
-            return (
-              <li key={m.id}>
-                <button
-                  type="button"
-                  onClick={() => activateEvent(m)}
-                  aria-pressed={isActive}
-                  className={cn(
-                    'flex w-full items-center gap-2 rounded px-1.5 py-1 text-left text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
-                    isActive ? 'bg-primary/10' : 'hover:bg-muted/60'
-                  )}
-                >
-                  <span
-                    className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-semibold text-white"
-                    style={{ backgroundColor: EVENT_KIND_COLOR[kind] }}
+        <TooltipProvider delayDuration={300}>
+          <ul className="max-h-40 space-y-0.5 overflow-y-auto border-t pt-2" data-testid="timeline-events">
+            {markers.map((m) => {
+              const kind = m.kind ?? 'note'
+              const Icon = EVENT_KIND_ICON[kind]
+              const isActive = activeEvent === m.id
+              const detail = eventDetails?.[m.refId ?? m.id]
+              const displayText = detail?.fullText ?? (m.label || `${kind} at ${formatTimestamp(m.timeSec)}`)
+              const isExpanded = expandedEventId === m.id
+              const isEditing = editingEventId === m.id
+              const isCompleted = detail?.status === 'completed'
+              const tooltipLines = [
+                displayText,
+                detail?.assignee ? `Assignee: ${detail.assignee}` : null,
+                detail?.dueDate ? `Due: ${detail.dueDate}` : null,
+                detail?.status ? `Status: ${detail.status}` : null
+              ].filter(Boolean) as string[]
+              return (
+                <li key={m.id}>
+                  <div
+                    className={cn(
+                      'rounded transition-colors',
+                      isActive ? 'bg-primary/10' : 'hover:bg-muted/60'
+                    )}
                   >
-                    {m.index ?? ''}
-                  </span>
-                  <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-                  <span className="min-w-0 flex-1 truncate">{m.label || `${kind} at ${formatTimestamp(m.timeSec)}`}</span>
-                  <span className="shrink-0 tabular-nums text-muted-foreground">{formatTimestamp(m.timeSec)}</span>
-                </button>
-              </li>
-            )
-          })}
-        </ul>
+                    <div className="flex items-start gap-2 px-1.5 py-1">
+                      <button
+                        type="button"
+                        onClick={() => setExpandedEventId(isExpanded ? null : m.id)}
+                        aria-expanded={isExpanded}
+                        aria-label={`${isExpanded ? 'Collapse' : 'Expand'} details for item ${m.index ?? ''}`}
+                        className="flex min-w-0 flex-1 items-start gap-2 text-left text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 rounded"
+                      >
+                        <span
+                          className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-semibold text-white"
+                          style={{ backgroundColor: EVENT_KIND_COLOR[kind] }}
+                        >
+                          {m.index ?? ''}
+                        </span>
+                        <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+                        {isEditing ? (
+                          <span className="min-w-0 flex-1" onClick={(e) => e.stopPropagation()}>
+                            <Textarea
+                              value={editDraft}
+                              onChange={(e) => setEditDraft(e.target.value)}
+                              rows={3}
+                              className="text-xs"
+                              aria-label={`Edit item ${m.index ?? ''} text`}
+                            />
+                            <span className="mt-1.5 flex items-center gap-2">
+                              <Button
+                                size="sm"
+                                className="h-6 px-2 text-xs"
+                                disabled={editSaving || !editDraft.trim()}
+                                onClick={() => {
+                                  setEditSaving(true)
+                                  void onEventUpdate?.(m, { content: editDraft.trim() }).then((ok) => {
+                                    setEditSaving(false)
+                                    if (ok) setEditingEventId(null)
+                                  })
+                                }}
+                              >
+                                {editSaving ? 'Saving…' : 'Save'}
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-6 px-2 text-xs"
+                                disabled={editSaving}
+                                onClick={() => setEditingEventId(null)}
+                              >
+                                Cancel
+                              </Button>
+                            </span>
+                          </span>
+                        ) : (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span
+                                className={cn(
+                                  'min-w-0 flex-1 whitespace-normal break-words leading-snug',
+                                  isCompleted && 'line-through text-muted-foreground'
+                                )}
+                              >
+                                {displayText}
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" align="start" className="max-w-md">
+                              {tooltipLines.map((line, i) => (
+                                <p key={i} className={i === 0 ? 'whitespace-pre-wrap' : 'text-xs text-muted-foreground'}>
+                                  {line}
+                                </p>
+                              ))}
+                              {!detail && <p className="text-xs text-muted-foreground">Click to seek; details unavailable</p>}
+                            </TooltipContent>
+                          </Tooltip>
+                        )}
+                        {!isEditing && (
+                          <ChevronDown
+                            className={cn('mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform', isExpanded && 'rotate-180')}
+                            aria-hidden="true"
+                          />
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => activateEvent(m)}
+                        aria-pressed={isActive}
+                        title={`Seek to ${formatTimestamp(m.timeSec)}`}
+                        className="shrink-0 rounded px-1 tabular-nums text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                      >
+                        {formatTimestamp(m.timeSec)}
+                      </button>
+                    </div>
+                    {isExpanded && !isEditing && (
+                      <div className="space-y-2 px-1.5 pb-2 pl-9 text-xs" data-testid={`event-detail-${m.id}`}>
+                        {detail?.context && (
+                          <p className="whitespace-pre-wrap text-muted-foreground">
+                            <span className="font-medium text-foreground">Context: </span>
+                            {detail.context}
+                          </p>
+                        )}
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-muted-foreground">
+                          <span className="font-medium text-foreground capitalize">{kind}</span>
+                          {detail?.status && <span>Status: <span className="capitalize">{detail.status.replace('_', ' ')}</span></span>}
+                          {detail?.assignee && <span>Assignee: {detail.assignee}</span>}
+                          {detail?.dueDate && <span>Due: {detail.dueDate}</span>}
+                          {detail?.priority && <span>Priority: <span className="capitalize">{detail.priority}</span></span>}
+                          {!detail?.editable && <span className="italic">Read-only item</span>}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-6 px-2 text-xs"
+                            onClick={() => activateEvent(m)}
+                          >
+                            Seek to {formatTimestamp(m.timeSec)}
+                          </Button>
+                          {detail?.editable && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-6 gap-1 px-2 text-xs"
+                              onClick={() => {
+                                setEditDraft(displayText)
+                                setEditingEventId(m.id)
+                              }}
+                            >
+                              <Pencil className="h-3 w-3" aria-hidden="true" />
+                              Edit
+                            </Button>
+                          )}
+                          {detail?.editable && kind === 'action' && detail?.status && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-6 gap-1 px-2 text-xs"
+                              onClick={() => {
+                                const next = isCompleted ? 'pending' : 'completed'
+                                void onEventUpdate?.(m, { status: next })
+                              }}
+                            >
+                              {isCompleted ? (
+                                <><CircleDashed className="h-3 w-3" aria-hidden="true" /> Reopen</>
+                              ) : (
+                                <><CircleCheck className="h-3 w-3" aria-hidden="true" /> Mark complete</>
+                              )}
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </li>
+              )
+            })}
+          </ul>
+        </TooltipProvider>
       )}
     </div>
   )

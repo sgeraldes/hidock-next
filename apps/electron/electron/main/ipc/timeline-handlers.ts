@@ -19,6 +19,7 @@ import { ipcMain } from 'electron'
 import {
   getTimelineAnalysis,
   analyzeTimeline,
+  classifyAnalysisError,
   type TimelineAnalysis
 } from '../services/timeline-analysis'
 
@@ -59,7 +60,9 @@ export function registerTimelineHandlers(): void {
       })
     } catch (error) {
       console.error('recordings:analyzeTimeline error:', error)
-      return { ...EMPTY }
+      // Classify HERE, where the raw error is available — the renderer keys its
+      // retry policy off this structured kind, never off message text.
+      return { ...EMPTY, analysisError: classifyAnalysisError(error) }
     }
   })
 }

@@ -35,6 +35,7 @@ vi.mock('../database', () => ({
   markRecordingDownloaded: vi.fn(),
   addSyncedFile: vi.fn(),
   isFileSynced: (filename: string) => mockIsFileSynced(filename),
+  isFilePurged: () => false,
   getRecordingByFilename: vi.fn(() => null),
   getSyncedFilenames: vi.fn(() => new Set()),
   queryOne: vi.fn(() => null),
@@ -149,24 +150,32 @@ describe('DownloadService B-007 Fixes', () => {
     })
   })
 
-  describe('B-DWN-006: cancelDownload has delayed cleanup', () => {
-    it('should mark as cancelled and schedule cleanup', () => {
+  describe('HIGH-3 (supersedes B-DWN-006): user cancel is a durable suppression marker', () => {
+    it('marks as cancelled with origin "user" and RETAINS the row (no 5s cleanup)', async () => {
       vi.useFakeTimers()
 
       service.queueDownloads([{ filename: 'test.wav', size: 1024 }])
 
-      const result = service.cancelDownload('test.wav')
+      const result = await service.cancelDownload('test.wav')
       expect(result.success).toBe(true)
 
       // C-004: Item should be marked as cancelled (not failed) immediately
       let state = service.getState()
       expect(state.queue[0]?.status).toBe('cancelled')
       expect(state.queue[0]?.error).toBe('Cancelled by user')
+      expect(state.queue[0]?.cancelReason).toBe('user')
 
-      // After 5s, item should be removed
-      vi.advanceTimersByTime(5000)
+      // HIGH-3: the row must SURVIVE — it is the terminal-suppression marker that
+      // stops reconciliation (this session or post-restart) from re-queueing the
+      // file. The old B-DWN-006 5s delete defeated that, resurrecting user cancels.
+      vi.advanceTimersByTime(10_000)
       state = service.getState()
-      expect(state.queue).toHaveLength(0)
+      expect(state.queue).toHaveLength(1)
+      expect(state.queue[0]?.status).toBe('cancelled')
+
+      // It clears through an explicit user action (here: clearCompleted).
+      service.clearCompleted()
+      expect(service.getState().queue).toHaveLength(0)
 
       vi.useRealTimers()
     })
@@ -225,8 +234,8 @@ describe('DownloadService B-007 Fixes', () => {
     })
   })
 
-  describe('B-DWN-001: Stall detection cleanup', () => {
-    it('should schedule cleanup after detecting stalled downloads', () => {
+  describe('B-DWN-001: Stall detection history', () => {
+    it('retains a stalled failure until explicit dismissal or the terminal-row prune', () => {
       vi.useFakeTimers()
 
       service.queueDownloads([{ filename: 'stalled.wav', size: 10000 }])
@@ -249,10 +258,11 @@ describe('DownloadService B-007 Fixes', () => {
       const failedItem = state.queue.find((i: DownloadQueueItem) => i.filename === 'stalled.wav')
       expect(failedItem?.status).toBe('failed')
 
-      // After 5s cleanup delay, item should be removed
+      // It must remain actionable after the old five-second cleanup window.
       vi.advanceTimersByTime(5000)
       state = service.getState()
-      expect(state.queue).toHaveLength(0)
+      expect(state.queue).toHaveLength(1)
+      expect(state.queue[0]?.status).toBe('failed')
 
       vi.useRealTimers()
     })

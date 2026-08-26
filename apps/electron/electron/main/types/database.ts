@@ -48,6 +48,8 @@ export interface Recording {
   file_path: string | null
   file_size: number | null
   duration_seconds: number | null
+  /** Read projection from the assigned meeting; never persisted on recordings. */
+  meeting_subject?: string | null
   date_recorded: string
   meeting_id: string | null
   correlation_confidence: number | null
@@ -56,7 +58,7 @@ export interface Recording {
   created_at: string
   // Lifecycle fields
   location: 'device-only' | 'local-only' | 'both' | 'deleted'
-  transcription_status: 'none' | 'pending' | 'processing' | 'complete' | 'error'
+  transcription_status: 'none' | 'pending' | 'processing' | 'complete' | 'no_speech' | 'error'
   on_device: number
   device_last_seen?: string
   on_local: number
@@ -158,6 +160,14 @@ export interface Contact {
   last_seen_at: string
   meeting_count: number
   created_at: string
+  /** v45 entity origin: 'user' | 'calendar' | 'transcript' | null (legacy). */
+  source?: string | null
+  /** v45 — recording whose transcript minted a transcript-origin entity. */
+  source_recording_id?: string | null
+  /** v46 (ADV29-2) — recording that supplied the current `role`. NULL = calendar/
+   *  manual/legacy-authored (always shown); a transcript-enriched role is BLANKED
+   *  on non-owner reads when this recording is ineligible. */
+  role_source_recording_id?: string | null
 }
 
 /**
@@ -204,6 +214,22 @@ export interface MeetingProject {
  */
 export interface RecordingWithTranscript extends Recording {
   transcript?: Transcript
+
+  // Present when fetched for a specific meeting (recordings:getForMeeting).
+  // A capture spanning back-to-back meetings is split into "<base> - Part N",
+  // and every overlapping part stays linked — the meeting really does span
+  // them. These fields say WHICH part holds the conversation, and the results
+  // are ordered by meetingCoverage descending so [0] is that part.
+  /** Share of the MEETING window this recording covers (0..1). */
+  meetingCoverage?: number
+  /** Share of THIS recording that falls inside the meeting (0..1). */
+  recordingCoverage?: number
+  /** Seconds of overlap with the meeting window. */
+  overlapSeconds?: number
+  /** Part number when the filename is `<base> - Part N`, else null. */
+  partNumber?: number | null
+  /** Base name shared with sibling parts, else null. */
+  partBaseName?: string | null
 }
 
 /**

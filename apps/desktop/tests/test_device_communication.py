@@ -22,6 +22,8 @@ import usb.util
 # Mark as GUI test for architectural separation
 pytestmark = [pytest.mark.gui, pytest.mark.integration]
 
+from .test_ci_skip import device_test_ci_skip
+
 from constants import (
     CMD_GET_DEVICE_INFO,
     CMD_TRANSFER_FILE,
@@ -645,6 +647,7 @@ class TestDeviceIntegrationEnhanced:
         return False
 
     @pytest.mark.device
+    @device_test_ci_skip
     def test_real_device_connection_with_retry(self):
         """Test connection to real device with retry mechanism (requires hardware)."""
         if self._is_ci_environment():
@@ -683,6 +686,7 @@ class TestDeviceIntegrationEnhanced:
             pytest.skip(f"Hardware test failed: {e}")
 
     @pytest.mark.device
+    @device_test_ci_skip
     def test_real_device_health_check(self):
         """Test health check with real device (requires hardware)."""
         if self._is_ci_environment():
@@ -723,6 +727,7 @@ class TestDeviceIntegrationEnhanced:
             pytest.skip(f"Hardware test failed: {e}")
 
     @pytest.mark.device
+    @device_test_ci_skip
     def test_real_device_error_recovery(self):
         """Test error recovery with real device (requires hardware)."""
         if self._is_ci_environment():
@@ -763,6 +768,7 @@ class TestDeviceIntegrationEnhanced:
             pytest.skip(f"Hardware test failed: {e}")
 
     @pytest.mark.device
+    @device_test_ci_skip
     def test_real_device_performance_monitoring(self):
         """Test performance monitoring with real device (requires hardware)."""
         if self._is_ci_environment():

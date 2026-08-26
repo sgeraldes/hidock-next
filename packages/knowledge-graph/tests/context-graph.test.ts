@@ -4,7 +4,7 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { existsSync, rmSync } from 'fs'
-import initSqlJs from 'sql.js'
+import { createRequire } from 'node:module'
 import { DatabaseEngine } from '@hidock/database'
 import { KnowledgeGraphStore } from '../src/graph-store.js'
 import { ingestExtraction, type PersonResolver } from '../src/ingest.js'
@@ -16,6 +16,15 @@ import {
 } from '../src/queries.js'
 import type { ExtractionResult, ExtractionMeta } from '../src/extract.js'
 
+// The engine requires the app-owned better-sqlite3 native module. Resolve the
+// database package's OWN copy (the one CI's "npm rebuild better-sqlite3"
+// Node-ABI restore step targets) so resolution never depends on hoisting.
+const requireFromDatabase = createRequire(new URL('../../database/package.json', import.meta.url))
+const BetterSqlite3 = requireFromDatabase('better-sqlite3')
+
+/** Engines opened by makeStore — closed in afterEach so temp DBs can be deleted. */
+const openEngines: DatabaseEngine[] = []
+
 function tempPath(name: string) {
   return join(tmpdir(), `hidock-kg-ctx-${name}-${Date.now()}.sqlite`)
 }
@@ -23,13 +32,14 @@ function tempPath(name: string) {
 async function makeStore(name: string) {
   const dbPath = tempPath(name)
   const engine = new DatabaseEngine({
-    initSqlJs,
+    betterSqlite3: BetterSqlite3,
     dbPathProvider: () => dbPath,
     schemaVersion: 1,
     schema: 'CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)',
     migrations: {},
   })
   await engine.initialize()
+  openEngines.push(engine)
   const store = new KnowledgeGraphStore(engine)
   store.initSchema()
   return { store, dbPath }
@@ -41,7 +51,17 @@ const meta2: ExtractionMeta = { meetingId: 'mtg-002', title: 'Review', date: '20
 describe('Context Graph: contact-keyed ingest', () => {
   const paths: string[] = []
   afterEach(() => {
-    for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
+    // better-sqlite3 holds the DB file open — close engines first, or rmSync
+    // EPERMs on Windows and stale state leaks into the next run.
+    for (const e of openEngines) {
+      try { e.closeDatabase() } catch { /* already closed */ }
+    }
+    openEngines.length = 0
+    for (const p of paths) {
+      for (const f of [p, `${p}-wal`, `${p}-shm`]) {
+        if (existsSync(f)) rmSync(f, { force: true })
+      }
+    }
     paths.length = 0
   })
 
@@ -108,7 +128,17 @@ describe('Context Graph: contact-keyed ingest', () => {
 describe('Context Graph: upsert id-collision fix', () => {
   const paths: string[] = []
   afterEach(() => {
-    for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
+    // better-sqlite3 holds the DB file open — close engines first, or rmSync
+    // EPERMs on Windows and stale state leaks into the next run.
+    for (const e of openEngines) {
+      try { e.closeDatabase() } catch { /* already closed */ }
+    }
+    openEngines.length = 0
+    for (const p of paths) {
+      for (const f of [p, `${p}-wal`, `${p}-shm`]) {
+        if (existsSync(f)) rmSync(f, { force: true })
+      }
+    }
     paths.length = 0
   })
 
@@ -135,7 +165,17 @@ describe('Context Graph: upsert id-collision fix', () => {
 describe('Context Graph: neighborhood + fullGraph traversal', () => {
   const paths: string[] = []
   afterEach(() => {
-    for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
+    // better-sqlite3 holds the DB file open — close engines first, or rmSync
+    // EPERMs on Windows and stale state leaks into the next run.
+    for (const e of openEngines) {
+      try { e.closeDatabase() } catch { /* already closed */ }
+    }
+    openEngines.length = 0
+    for (const p of paths) {
+      for (const f of [p, `${p}-wal`, `${p}-shm`]) {
+        if (existsSync(f)) rmSync(f, { force: true })
+      }
+    }
     paths.length = 0
   })
 
@@ -204,7 +244,17 @@ describe('Context Graph: neighborhood + fullGraph traversal', () => {
 describe('Context Graph: top-N overview default selection', () => {
   const paths: string[] = []
   afterEach(() => {
-    for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
+    // better-sqlite3 holds the DB file open — close engines first, or rmSync
+    // EPERMs on Windows and stale state leaks into the next run.
+    for (const e of openEngines) {
+      try { e.closeDatabase() } catch { /* already closed */ }
+    }
+    openEngines.length = 0
+    for (const p of paths) {
+      for (const f of [p, `${p}-wal`, `${p}-shm`]) {
+        if (existsSync(f)) rmSync(f, { force: true })
+      }
+    }
     paths.length = 0
   })
 
@@ -242,7 +292,17 @@ describe('Context Graph: top-N overview default selection', () => {
 describe('Context Graph: generic-node pruning', () => {
   const paths: string[] = []
   afterEach(() => {
-    for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
+    // better-sqlite3 holds the DB file open — close engines first, or rmSync
+    // EPERMs on Windows and stale state leaks into the next run.
+    for (const e of openEngines) {
+      try { e.closeDatabase() } catch { /* already closed */ }
+    }
+    openEngines.length = 0
+    for (const p of paths) {
+      for (const f of [p, `${p}-wal`, `${p}-shm`]) {
+        if (existsSync(f)) rmSync(f, { force: true })
+      }
+    }
     paths.length = 0
   })
 
@@ -286,12 +346,54 @@ describe('Context Graph: generic-node pruning', () => {
     expect(res2.removedNodes).toBe(0)
     expect(res2.removedEdges).toBe(0)
   })
+
+  it("pruneGenericNodes (CX-T4-3) cascades the pruned edges' graph_edge_sources rows", async () => {
+    const { store, dbPath } = await makeStore('prune-sources')
+    paths.push(dbPath)
+
+    ingestExtraction(
+      store,
+      {
+        people: [{ name: 'Alice', skills: [] }],
+        topics: [], projects: [], decisions: [], action_items: [], risks: [], next_steps: [],
+      },
+      meta,
+      { recordingId: 'rec-1', transcriptId: 'tx-1' }
+    )
+
+    // Inject a generic person with a provenance-bearing edge to the meeting.
+    const meetingId = store.findNodes({ type: 'meeting' })[0].id
+    const garbage = store.upsertNode({ type: 'person', label: 'All attendees' })
+    const garbageEdge = store.upsertEdge({ sourceId: garbage, targetId: meetingId, type: 'ATTENDED' })
+    store.recordEdgeSource(garbageEdge, 'rec-1', 'tx-1')
+
+    const before = store.db.queryAll('SELECT * FROM graph_edge_sources').length
+    const res = pruneGenericNodes(store)
+    expect(res.removedNodes).toBe(1)
+
+    // Exactly the pruned edge's row is gone; Alice's edges keep theirs.
+    const after = store.db.queryAll('SELECT * FROM graph_edge_sources').length
+    expect(after).toBe(before - 1)
+    expect(
+      store.db.queryAll('SELECT * FROM graph_edge_sources WHERE edge_id = ?', [garbageEdge])
+    ).toHaveLength(0)
+  })
 })
 
 describe('Context Graph: ingest-time stop-list', () => {
   const paths: string[] = []
   afterEach(() => {
-    for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
+    // better-sqlite3 holds the DB file open — close engines first, or rmSync
+    // EPERMs on Windows and stale state leaks into the next run.
+    for (const e of openEngines) {
+      try { e.closeDatabase() } catch { /* already closed */ }
+    }
+    openEngines.length = 0
+    for (const p of paths) {
+      for (const f of [p, `${p}-wal`, `${p}-shm`]) {
+        if (existsSync(f)) rmSync(f, { force: true })
+      }
+    }
     paths.length = 0
   })
 

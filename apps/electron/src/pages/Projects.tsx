@@ -107,6 +107,12 @@ export function Projects() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
   const [projectMembers, setProjectMembers] = useState<ProjectMember[]>([])
 
+  // Dismiss-vs-delete: the delete dialog doubles as the dismiss confirm for a
+  // discovered project. Dismiss routes through projects:dismissDiscovered, which
+  // writes a durable rejection tombstone (v41) BEFORE deleting — a bare delete
+  // let the next transcript re-analysis silently re-create the same project.
+  const [dismissMode, setDismissMode] = useState(false)
+
   // Inline description editing state
   const [isEditingDescription, setIsEditingDescription] = useState(false)
   const [editDescription, setEditDescription] = useState('')
@@ -127,6 +133,11 @@ export function Projects() {
 
   // Linked knowledge items — resolved so the count card becomes a clickable list.
   const [knowledgeItems, setKnowledgeItems] = useState<KnowledgeCapture[]>([])
+
+  // Provenance: the meeting(s) this project was discovered FROM (via
+  // meeting_projects). getById already returns them; the detail surfaces them so a
+  // discovered project links back to its source instead of being a dead end.
+  const [sourceMeetings, setSourceMeetings] = useState<{ id: string; subject: string }[]>([])
   const [newIssue, setNewIssue] = useState('')
   const [newRisk, setNewRisk] = useState('')
 
@@ -278,21 +289,34 @@ export function Projects() {
     setCreateDialogOpen(true)
   }
 
-  // B-PRJ-007: Delete project via AlertDialog instead of confirm()
+  // B-PRJ-007: Delete project via AlertDialog instead of confirm().
+  // In dismiss mode (discovered project) the same confirm routes through
+  // dismissDiscovered so the rejection is durable across re-analysis.
   const handleDeleteProject = async () => {
     if (!activeProject) return
+    const dismissing = dismissMode
     try {
-      const result = await window.electronAPI.projects.delete(activeProject.id)
+      const result = dismissing
+        ? await window.electronAPI.projects.dismissDiscovered(activeProject.id)
+        : await window.electronAPI.projects.delete(activeProject.id)
       if (result.success) {
-        toast.success('Project deleted', `"${activeProject.name}" has been deleted.`)
+        if (dismissing) {
+          toast.success('Discovery dismissed', `"${activeProject.name}" won't be re-created from transcripts.`)
+        } else {
+          toast.success('Project deleted', `"${activeProject.name}" has been deleted.`)
+        }
         setProjects(prev => prev.filter(p => p.id !== activeProject.id))
         setActiveProject(null)
       }
     } catch (error) {
       console.error('Failed to delete project:', error)
-      toast.error('Failed to delete project', error instanceof Error ? error.message : 'An unexpected error occurred')
+      toast.error(
+        dismissing ? 'Failed to dismiss project' : 'Failed to delete project',
+        error instanceof Error ? error.message : 'An unexpected error occurred'
+      )
     }
     setDeleteDialogOpen(false)
+    setDismissMode(false)
   }
 
   // Load a project's issues/risks/notes and linked actionables (R3b)
@@ -318,6 +342,7 @@ export function Projects() {
     setNotes([])
     setActionables([])
     setKnowledgeItems([])
+    setSourceMeetings([])
     setDetailLoading(true)
     setIsEditingDescription(false)
     setIsEditingName(false)
@@ -336,11 +361,22 @@ export function Projects() {
           knowledgeIds: p.knowledgeIds,
           personIds: p.personIds,
           folderPath: p.folderPath ?? p.folder_path ?? null,
-          url: p.url ?? null
+          url: p.url ?? null,
+          origin: p.origin ?? null
         }
         setActiveProject(detailed)
         setEditFolder(detailed.folderPath || '')
         setEditUrl(detailed.url || '')
+
+        // Provenance: meetings linked to this project (the source it was discovered
+        // from). Present for auto-discovered projects; empty for hand-created ones.
+        const rawMeetings = Array.isArray((result.data as any).meetings) ? (result.data as any).meetings : []
+        setSourceMeetings(
+          rawMeetings
+            .filter((m: any) => m && m.id)
+            .map((m: any) => ({ id: String(m.id), subject: (m.subject || m.title || 'Untitled meeting') as string }))
+        )
+
         void loadProjectExtras(detailed.id)
 
         // Resolve linked knowledge items so the count becomes a clickable list.
@@ -802,7 +838,7 @@ export function Projects() {
                   variant="ghost"
                   size="icon"
                   className="h-9 w-9 text-muted-foreground hover:text-destructive"
-                  onClick={() => setDeleteDialogOpen(true)}
+                  onClick={() => { setDismissMode(false); setDeleteDialogOpen(true) }}
                 >
                   <Trash2 className="h-4 w-4" />
                 </Button>
@@ -812,6 +848,123 @@ export function Projects() {
             {/* Content */}
             <div className="flex-1 overflow-auto p-8">
               <div className={cn(pageContent, 'space-y-8')}>
+                {/* Provenance / discovered-project honest state.
+                    An auto-discovered project links back to the meeting(s) it was
+                    inferred from. When it ALSO has zero knowledge items and zero
+                    people it is a thin (possibly spurious) discovery, so we show an
+                    explicit review state — source · merge · dismiss — instead of a
+                    bare "0 Items / 0 Involved" dead end. The review card is gated on
+                    PROVENANCE (linked meetings): a hand-created empty project is not
+                    "discovered", so it gets a neutral getting-started state instead. */}
+                {(() => {
+                  const knowledgeCount = activeProject.knowledgeIds?.length ?? 0
+                  const peopleCount = activeProject.personIds?.length ?? 0
+                  // Provenance is the durable origin column (v42), NOT linked
+                  // meetings — a manual project can have meetings tagged, and a
+                  // legacy (pre-v42, origin unknown) row must not claim discovery.
+                  // The DB layer enforces the same rule on Dismiss (fail-closed).
+                  const isDiscovered = activeProject.origin === 'discovered'
+                  const sourceChips = sourceMeetings.map((m) => (
+                    <EntityMention key={m.id} type="meeting" id={m.id} name={m.subject} showIcon />
+                  ))
+
+                  if (knowledgeCount === 0 && peopleCount === 0 && !isDiscovered) {
+                    // Manual empty project — honest but neutral (not "discovered").
+                    return (
+                      <Card className="animate-rise-in bg-muted/5">
+                        <CardContent className="p-6">
+                          <div className="flex items-start gap-3">
+                            <span title="Empty project">
+                              <FolderOpen className="h-5 w-5 text-muted-foreground shrink-0 mt-0.5" aria-hidden="true" />
+                            </span>
+                            <div className="min-w-0 space-y-1">
+                              <h3 className="text-sm font-bold">No items yet</h3>
+                              <p className="text-sm text-muted-foreground">
+                                Add knowledge or link meetings to start building this project&apos;s hub.
+                              </p>
+                            </div>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    )
+                  }
+
+                  if (knowledgeCount === 0 && peopleCount === 0) {
+                    return (
+                      <Card className="animate-rise-in border-amber-500/30 bg-amber-500/[0.06]">
+                        <CardContent className="p-6 space-y-4">
+                          <div className="flex items-start gap-3">
+                            <span title="Automatically discovered from a transcript">
+                              <Sparkles className="h-5 w-5 text-amber-500 shrink-0 mt-0.5" aria-hidden="true" />
+                            </span>
+                            <div className="min-w-0 space-y-1">
+                              <h3 className="text-sm font-bold">Discovered automatically</h3>
+                              <p className="text-sm text-muted-foreground">
+                                No knowledge items or people are linked yet — this project was inferred from a
+                                mention in a transcript. Review its source, merge it into an existing project, or
+                                dismiss it.
+                              </p>
+                            </div>
+                          </div>
+
+                          {sourceMeetings.length > 0 && (
+                            <div className="space-y-1.5">
+                              <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+                                Discovered from
+                              </p>
+                              <div className="flex flex-wrap gap-1.5">{sourceChips}</div>
+                            </div>
+                          )}
+
+                          <div className="flex flex-wrap items-center gap-2 pt-1">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-8 gap-1.5"
+                              onClick={handleDiscover}
+                              disabled={discovering}
+                              title="Scan projects for a likely duplicate to merge this into"
+                            >
+                              <Sparkles className={cn('h-3.5 w-3.5', discovering && 'animate-pulse')} />
+                              {discovering ? 'Finding duplicates…' : 'Merge into another project'}
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-8 gap-1.5 text-muted-foreground hover:text-destructive"
+                              onClick={() => { setDismissMode(true); setDeleteDialogOpen(true) }}
+                              title="Dismiss this discovered project (won't be re-created from transcripts)"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                              Dismiss
+                            </Button>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    )
+                  }
+
+                  if (isDiscovered && sourceMeetings.length > 0) {
+                    return (
+                      <Card className="animate-rise-in bg-muted/5">
+                        <CardContent className="p-4">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span title="Automatically discovered from a transcript">
+                              <Sparkles className="h-4 w-4 text-primary shrink-0" aria-hidden="true" />
+                            </span>
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+                              Discovered from
+                            </span>
+                            <div className="flex flex-wrap gap-1.5">{sourceChips}</div>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    )
+                  }
+
+                  return null
+                })()}
+
                 {/* Stats Grid */}
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                   <Card className="lift animate-rise-in bg-muted/5" style={{ animationDelay: '0ms' }}>
@@ -1163,7 +1316,7 @@ export function Projects() {
                       <h3 className="font-bold text-sm uppercase tracking-wider">AI Project Insight</h3>
                     </div>
                     <p className="text-sm leading-relaxed text-muted-foreground italic">
-                      AI-generated insights for "{activeProject.name}" will appear here once knowledge items are linked to this project.
+                      AI-generated insights for &quot;{activeProject.name}&quot; will appear here once knowledge items are linked to this project.
                     </p>
                     <div className="mt-4 flex gap-2">
                       <Button
@@ -1261,13 +1414,19 @@ export function Projects() {
         </DialogContent>
       </Dialog>
 
-      {/* B-PRJ-007: Delete Project AlertDialog (replaces confirm()) */}
-      <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+      {/* B-PRJ-007: Delete Project AlertDialog (replaces confirm()).
+          Doubles as the dismiss confirm for discovered projects (dismissMode). */}
+      <AlertDialog
+        open={deleteDialogOpen}
+        onOpenChange={(open) => { setDeleteDialogOpen(open); if (!open) setDismissMode(false) }}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete Project</AlertDialogTitle>
+            <AlertDialogTitle>{dismissMode ? 'Dismiss Discovered Project' : 'Delete Project'}</AlertDialogTitle>
             <AlertDialogDescription>
-              Are you sure you want to delete "{activeProject?.name}"? This will remove all meeting associations for this project. This action cannot be undone.
+              {dismissMode
+                ? `Dismiss "${activeProject?.name}"? It will be deleted and remembered as dismissed, so re-analyzing transcripts won't re-create it. Creating a project with this name manually is still allowed.`
+                : `Are you sure you want to delete "${activeProject?.name}"? This will remove all meeting associations for this project. This action cannot be undone.`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -1276,7 +1435,7 @@ export function Projects() {
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               onClick={handleDeleteProject}
             >
-              Delete
+              {dismissMode ? 'Dismiss' : 'Delete'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

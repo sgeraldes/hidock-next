@@ -8,7 +8,6 @@ import asyncio
 import os
 import sys
 import unittest
-from datetime import datetime
 from unittest.mock import mock_open, patch
 
 # Add current directory to path
@@ -43,31 +42,34 @@ class TestConfigAndLoggerHighCoverage(unittest.TestCase):
         # Test get_default_config structure
         config = config_and_logger.get_default_config()
 
-        # Verify all required keys exist
-        required_keys = ["autoconnect", "log_level", "theme", "last_directory"]
+        # Verify all required keys exist. The appearance keys are "appearance_mode" and
+        # "color_theme"; the download location is "download_directory".
+        required_keys = ["autoconnect", "log_level", "appearance_mode", "color_theme", "download_directory"]
         for key in required_keys:
             self.assertIn(key, config, f"Missing required config key: {key}")
 
         # Test config data types
         self.assertIsInstance(config["autoconnect"], bool)
         self.assertIsInstance(config["log_level"], str)
-        self.assertIsInstance(config["theme"], str)
+        self.assertIsInstance(config["appearance_mode"], str)
+        self.assertIsInstance(config["color_theme"], str)
+        self.assertIsInstance(config["download_directory"], str)
 
-    @patch("config_and_logger.os.path.makedirs")
+    @patch("config_and_logger.os.makedirs")
     @patch("config_and_logger.os.path.dirname")
     def test_config_directory_creation(self, mock_dirname, mock_makedirs):
-        """Test config directory creation logic."""
+        """save_config must create the config directory before writing to it."""
         import config_and_logger
 
         mock_dirname.return_value = "/test/config/dir"
 
         # Trigger config save which should create directory
-        with patch("builtins.open", mock_open()) as mock_file:
+        with patch("builtins.open", mock_open()):
             with patch("config_and_logger.json.dump"):
-                result = config_and_logger.save_config({"test": "data"})
+                config_and_logger.save_config({"test": "data"})
 
         # Verify directory creation was attempted
-        mock_makedirs.assert_called()
+        mock_makedirs.assert_called_once_with("/test/config/dir", exist_ok=True)
 
     def test_config_error_handling(self):
         """Test configuration error handling scenarios."""
@@ -85,8 +87,6 @@ class TestConfigAndLoggerHighCoverage(unittest.TestCase):
         import config_and_logger
 
         # Test partial config merge
-        partial_config = {"autoconnect": False}
-
         with patch("builtins.open", mock_open(read_data='{"autoconnect": false}')):
             with patch("config_and_logger.os.path.exists", return_value=True):
                 config = config_and_logger.load_config()
@@ -96,7 +96,8 @@ class TestConfigAndLoggerHighCoverage(unittest.TestCase):
 
                 # Should have other keys from defaults
                 self.assertIn("log_level", config)
-                self.assertIn("theme", config)
+                self.assertIn("appearance_mode", config)
+                self.assertIn("color_theme", config)
 
 
 class TestCalendarModulesHighCoverage(unittest.TestCase):
@@ -140,32 +141,10 @@ class TestCalendarModulesHighCoverage(unittest.TestCase):
         except Exception as e:
             self.skipTest(f"calendar_service test failed: {e}")
 
-    def test_simple_calendar_mixin_extended(self):
-        """Extended tests for SimpleCalendarMixin."""
-        import simple_calendar_mixin
-
-        class TestMixin(simple_calendar_mixin.SimpleCalendarMixin):
-            def __init__(self):
-                self._calendar_integration = None
-                self._calendar_cache = {}
-                self._calendar_cache_date = None
-
-        mixin = TestMixin()
-
-        # Test more methods
-        with patch.object(mixin, "_parse_file_datetime") as mock_parse:
-            mock_parse.return_value = datetime.now()
-
-            files = [
-                {"name": "test1.hda", "date": "2024-01-01", "time": "10:00:00"},
-                {"name": "test2.hda", "date": "2024-01-01", "time": "14:00:00"},
-            ]
-
-            result = mixin.enhance_files_with_meeting_data(files)
-            self.assertEqual(len(result), 2)
-            for file_data in result:
-                self.assertIn("has_meeting", file_data)
-                self.assertIn("meeting_subject", file_data)
+    # test_simple_calendar_mixin_extended was removed: the simple_calendar_mixin module it
+    # imported was deleted in dc080a52 (v1.0-RC1, 2025-09-02). AsyncCalendarMixin replaced
+    # it and is covered by test_async_calendar_mixin_extended below and by
+    # tests/test_async_calendar_mixin.py.
 
     def test_async_calendar_mixin_extended(self):
         """Extended tests for AsyncCalendarMixin."""

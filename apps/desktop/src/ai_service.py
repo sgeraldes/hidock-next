@@ -274,6 +274,7 @@ Provide structured meeting insights in strict JSON format:
                     "topics": analysis.get("topics", []),
                     "sentiment": analysis.get("sentiment", "neutral"),
                     "participants": analysis.get("participants", []),
+                    "conversation_segments": analysis.get("conversation_segments", []),
                 },
             }
 

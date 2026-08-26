@@ -1,4 +1,4 @@
-import type { KnowledgeGraphStore, GraphNode } from './graph-store.js'
+import { deleteEdgesCleanly, type KnowledgeGraphStore, type GraphNode } from './graph-store.js'
 import { isGenericEntityLabel } from './stop-list.js'
 
 /**
@@ -123,7 +123,8 @@ export function pruneGenericNodes(store: KnowledgeGraphStore): PruneResult {
       [p.id, p.id]
     )
     removedEdges += counted?.c ?? 0
-    store.db.run('DELETE FROM graph_edges WHERE source_id = ? OR target_id = ?', [p.id, p.id])
+    // CX-T4-3: the pruned edges' provenance rows die with them.
+    deleteEdgesCleanly(store.db, 'source_id = ? OR target_id = ?', [p.id, p.id])
     store.db.run('DELETE FROM graph_nodes WHERE id = ?', [p.id])
     removedNodes++
   }

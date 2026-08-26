@@ -199,7 +199,7 @@ class TestRecordingOperationsEdgeCases:
         """Test get_recordings when files_info is empty or malformed (line 278)."""
         self.mock_jensen.is_connected.return_value = True
         # Return None or malformed data
-        self.mock_jensen.list_files.return_value = None
+        self.mock_jensen.list_files_with_retry.return_value = None
 
         result = await self.adapter.get_recordings()
 
@@ -210,7 +210,7 @@ class TestRecordingOperationsEdgeCases:
         """Test get_recordings when files_info lacks 'files' key (line 278)."""
         self.mock_jensen.is_connected.return_value = True
         # Return dict without 'files' key
-        self.mock_jensen.list_files.return_value = {"status": "ok"}
+        self.mock_jensen.list_files_with_retry.return_value = {"status": "ok"}
 
         result = await self.adapter.get_recordings()
 
@@ -362,38 +362,42 @@ class TestDeleteRecordingEdgeCases:
 
     @pytest.mark.asyncio
     async def test_delete_recording_not_found(self):
-        """Test delete when recording not found (line 433)."""
+        """Test delete when the device reports the file does not exist (line 433).
+
+        delete_recording() passes recording_id straight through as the filename
+        instead of pre-fetching the file list, so "not found" surfaces as a device
+        status code (1 -> "not-exists" in HiDockJensen.delete_file) rather than a
+        local lookup failure.
+        """
         progress_callback = Mock()
         self.mock_jensen.is_connected.return_value = True
+        self.mock_jensen.delete_file.return_value = {"result": "not-exists", "code": 1}
 
-        # Mock get_recordings to return empty list
-        with patch.object(self.adapter, "get_recordings", return_value=[]):
-            with pytest.raises(FileNotFoundError) as exc_info:
-                await self.adapter.delete_recording("nonexistent.hta", progress_callback)
+        with pytest.raises(RuntimeError) as exc_info:
+            await self.adapter.delete_recording("nonexistent.hta", progress_callback)
 
-            assert "Recording nonexistent.hta not found" in str(exc_info.value)
+        assert "Delete failed: not-exists" in str(exc_info.value)
+        # The device is the authority on existence - no expensive file list involved
+        self.mock_jensen.delete_file.assert_called_once_with("nonexistent.hta")
+        self.mock_jensen.list_files_with_retry.assert_not_called()
+
+        # Should call error progress callback
+        error_calls = [call for call in progress_callback.call_args_list if call[0][0].status == OperationStatus.ERROR]
+        assert len(error_calls) > 0
 
     @pytest.mark.asyncio
     async def test_delete_recording_device_error(self):
         """Test delete when device returns error (line 449)."""
         progress_callback = Mock()
 
-        class MockRecording:
-            def __init__(self, id_val, filename):
-                self.id = id_val
-                self.filename = filename
-
-        mock_recording = MockRecording("test.hta", "test.hta")
-
         self.mock_jensen.is_connected.return_value = True
         # Device returns failure result
         self.mock_jensen.delete_file.return_value = {"result": "file_locked"}
 
-        with patch.object(self.adapter, "get_recordings", return_value=[mock_recording]):
-            with pytest.raises(RuntimeError) as exc_info:
-                await self.adapter.delete_recording("test.hta", progress_callback)
+        with pytest.raises(RuntimeError) as exc_info:
+            await self.adapter.delete_recording("test.hta", progress_callback)
 
-            assert "Delete failed: file_locked" in str(exc_info.value)
+        assert "Delete failed: file_locked" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_delete_recording_exception_handling(self):
@@ -401,18 +405,17 @@ class TestDeleteRecordingEdgeCases:
         progress_callback = Mock()
         self.mock_jensen.is_connected.return_value = True
 
-        # Mock get_recordings to raise exception
-        with patch.object(self.adapter, "get_recordings", side_effect=Exception("Communication error")):
-            with pytest.raises(Exception) as exc_info:
-                await self.adapter.delete_recording("test.hta", progress_callback)
+        # The device call itself fails mid-delete
+        self.mock_jensen.delete_file.side_effect = Exception("Communication error")
 
-            assert "Communication error" in str(exc_info.value)
+        with pytest.raises(Exception) as exc_info:
+            await self.adapter.delete_recording("test.hta", progress_callback)
 
-            # Should call error progress callback
-            error_calls = [
-                call for call in progress_callback.call_args_list if call[0][0].status == OperationStatus.ERROR
-            ]
-            assert len(error_calls) > 0
+        assert "Communication error" in str(exc_info.value)
+
+        # Should call error progress callback
+        error_calls = [call for call in progress_callback.call_args_list if call[0][0].status == OperationStatus.ERROR]
+        assert len(error_calls) > 0
 
 
 class TestFormatStorageEdgeCases:

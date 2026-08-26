@@ -2,6 +2,7 @@ import { getDisplayTitle } from './getDisplayTitle'
 import { parseAttendees } from '@/types'
 import type { UnifiedRecording } from '@/types/unified-recording'
 import type { Meeting, Transcript } from '@/types'
+import { isUnknownDate } from '@/lib/unknownDate'
 
 const MONTH_SHORT = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec']
 const MONTH_FULL  = ['january','february','march','april','may','june','july','august','september','october','november','december']
@@ -36,6 +37,11 @@ export function buildSearchCorpus(
 ): string {
   const parts: string[] = []
   parts.push(getDisplayTitle(recording, meeting, transcript).primaryText)
+  if (recording.userTitle) parts.push(recording.userTitle)
+  // Keep the legacy capture label searchable during the v52 ownership
+  // transition even though it is no longer trusted as the displayed title.
+  if (recording.title) parts.push(recording.title)
+  if (transcript?.title_suggestion) parts.push(transcript.title_suggestion)
   parts.push(recording.filename)
   if (meeting?.subject)    parts.push(meeting.subject)
   if (recording.summary)   parts.push(recording.summary)
@@ -44,6 +50,10 @@ export function buildSearchCorpus(
     if (att.name)  parts.push(att.name)
     if (att.email) parts.push(att.email)
   }
-  if (recording.dateRecorded) parts.push(buildDateAliases(recording.dateRecorded))
+  // Skip date aliases for undated recordings — otherwise the epoch sentinel would
+  // make them findable by a fake "jan 1970" / "1970-01-01" search token (#58).
+  if (recording.dateRecorded && !isUnknownDate(recording.dateRecorded)) {
+    parts.push(buildDateAliases(recording.dateRecorded))
+  }
   return parts.join(' ').toLowerCase()
 }

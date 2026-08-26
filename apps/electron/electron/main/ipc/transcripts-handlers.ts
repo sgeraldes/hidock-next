@@ -7,7 +7,19 @@
 
 import { ipcMain } from 'electron'
 import { z } from 'zod'
-import { assignSpeaker, getSpeakerMap, unassignSpeaker, Contact, SpeakerMapEntry } from '../services/database'
+import {
+  assignSpeaker,
+  getSpeakerMap,
+  unassignSpeaker,
+  getRecordingById,
+  resolveRecordingId,
+  queryOne,
+  run,
+  Contact,
+  SpeakerMapEntry,
+  getActiveProcessingRunsForRecording
+} from '../services/database'
+import { isRecordingEligible } from '../services/recording-eligibility'
 import { success, error, Result } from '../types/api'
 import { UUIDSchema } from '../validation/common'
 
@@ -36,7 +48,25 @@ const UnassignSpeakerRequestSchema = z.object({
   speakerLabel: SpeakerLabelSchema
 })
 
+const UpdateExtractedItemRequestSchema = z.object({
+  recordingId: RecordingIdSchema,
+  kind: z.enum(['action', 'decision']),
+  index: z.number().int().min(0).max(10000),
+  content: z.string().trim().min(1).max(4000)
+})
+
 export function registerTranscriptsHandlers(): void {
+  ipcMain.handle('transcripts:getProcessingRuns', async (_, request: unknown) => {
+    const parsed = GetSpeakerMapRequestSchema.safeParse(request)
+    if (!parsed.success) return error('VALIDATION_ERROR', 'Invalid processing-runs request', parsed.error.format())
+    try {
+      if (!getRecordingById(parsed.data.recordingId)) return success([])
+      return success(getActiveProcessingRunsForRecording(parsed.data.recordingId))
+    } catch (err) {
+      return error('DATABASE_ERROR', 'Failed to fetch processing provenance', err)
+    }
+  })
+
   /**
    * Bind a speaker label to a contact (existing contactId or a newName to upsert).
    */
@@ -48,7 +78,11 @@ export function registerTranscriptsHandlers(): void {
       }
 
       const { recordingId, speakerLabel, contactId, newName } = parsed.data
-      const contact = assignSpeaker(recordingId, speakerLabel, { contactId, newName })
+      const contact = assignSpeaker(recordingId, speakerLabel, {
+        contactId,
+        newName,
+        voiceAnchor: { method: 'manual', confidence: 1 }
+      })
       return success(contact)
     } catch (err) {
       console.error('transcripts:assignSpeaker error:', err)
@@ -90,4 +124,59 @@ export function registerTranscriptsHandlers(): void {
       return error('DATABASE_ERROR', 'Failed to unassign speaker', err)
     }
   })
+
+  /**
+   * Edit ONE element of the transcript's extracted action_items / key_points
+   * JSON arrays (2026-07-22 — reader event-list editability for
+   * transcript-derived items, refIds `txa_<i>` / `txk_<i>`).
+   *
+   * Gating (ADV17/38 lineage): the recording must be eligible BEFORE the read
+   * AND the write — an excluded recording's extracted text is neither read nor
+   * mutated. Index-addressed: a concurrent retranscription that rewrites the
+   * arrays between read and write is detected by re-reading inside the same
+   * synchronous statement sequence (sql.js is single-writer; there is no await
+   * between the eligibility check, the bounds check, and the UPDATE).
+   */
+  ipcMain.handle(
+    'transcripts:updateExtractedItem',
+    async (_, request: unknown): Promise<Result<{ kind: 'action' | 'decision'; index: number; content: string }>> => {
+      try {
+        const parsed = UpdateExtractedItemRequestSchema.safeParse(request)
+        if (!parsed.success) {
+          return error('VALIDATION_ERROR', 'Invalid updateExtractedItem request', parsed.error.format())
+        }
+        const { recordingId, kind, index, content } = parsed.data
+
+        const canonical = getRecordingById(recordingId) ?? resolveRecordingId(recordingId)
+        const id = canonical?.id ?? recordingId
+        if (!isRecordingEligible(id)) {
+          return error('RECORDING_INELIGIBLE', 'Recording not available')
+        }
+
+        const column = kind === 'action' ? 'action_items' : 'key_points'
+        const row = queryOne<{ v: string | null }>(
+          `SELECT ${column} AS v FROM transcripts WHERE recording_id = ?`,
+          [id]
+        )
+        if (!row) {
+          return error('NOT_FOUND', 'Transcript not found')
+        }
+        let arr: unknown
+        try {
+          arr = JSON.parse(row.v ?? '[]')
+        } catch {
+          arr = []
+        }
+        if (!Array.isArray(arr) || index >= arr.length || typeof arr[index] !== 'string') {
+          return error('NOT_FOUND', 'Extracted item not found at index')
+        }
+        arr[index] = content
+        run(`UPDATE transcripts SET ${column} = ? WHERE recording_id = ?`, [JSON.stringify(arr), id])
+        return success({ kind, index, content })
+      } catch (err) {
+        console.error('transcripts:updateExtractedItem error:', err)
+        return error('DATABASE_ERROR', 'Failed to update extracted item', err)
+      }
+    }
+  )
 }

@@ -4,7 +4,8 @@ import {
   getSourceType,
   sourceTypeHasDuration,
   sourceTypeLabel,
-  matchesSourceTypeFilter
+  matchesSourceTypeFilter,
+  normalizeArtifactTypeDescriptors
 } from '../sourceType'
 import type { UnifiedRecording } from '@/types/unified-recording'
 
@@ -34,7 +35,7 @@ describe('getSourceType', () => {
     expect(getSourceType(rec('doc.pdf'))).toBe('pdf')
     expect(getSourceType(rec('notes.md'))).toBe('note')
     expect(getSourceType(rec('log.txt'))).toBe('note')
-    expect(getSourceType(rec('data.json'))).toBe('data')
+    expect(getSourceType(rec('data.json'))).toBe('note')
     expect(getSourceType(rec('mystery.xyz'))).toBe('unknown')
   })
 
@@ -76,9 +77,18 @@ describe('matchesSourceTypeFilter', () => {
     expect(matchesSourceTypeFilter('image', 'audio')).toBe(false)
     expect(matchesSourceTypeFilter('pdf', 'pdf')).toBe(true)
   })
-  it('notes fold in data files', () => {
+  it('matches note files', () => {
     expect(matchesSourceTypeFilter('note', 'note')).toBe(true)
-    expect(matchesSourceTypeFilter('data', 'note')).toBe(true)
     expect(matchesSourceTypeFilter('audio', 'note')).toBe(false)
+  })
+
+  it('retains add-on kinds while folding extraction-level text types', () => {
+    const descriptors = normalizeArtifactTypeDescriptors([
+      { id: 'audio', label: 'Audio', pluralLabel: 'Audio', extensions: ['wav'], capabilities: ['timed'] },
+      { id: 'md', label: 'Markdown', pluralLabel: 'Markdown', extensions: ['md'], capabilities: ['previewable'] },
+      { id: 'diagram', label: 'Diagram', pluralLabel: 'Diagrams', extensions: ['drawio'], capabilities: ['previewable'] }
+    ])
+    expect(getSourceType(rec('flow.drawio'), descriptors)).toBe('diagram')
+    expect(getSourceType(rec('readme.md'), descriptors)).toBe('note')
   })
 })

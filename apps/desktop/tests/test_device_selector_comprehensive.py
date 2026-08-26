@@ -19,7 +19,13 @@ sys.modules["tkinter.simpledialog"] = Mock()
 
 # Import at module level to avoid race conditions
 import enhanced_device_selector
-import settings_window
+
+# conftest's autouse ``setup_test_environment`` fixture replaces ``settings_window.SettingsDialog``
+# with a stub ``MockSettingsDialog`` so that no test can ever spawn a real CustomTkinter dialog.
+# The integration tests below assert on the *real* dialog's connection tab, so bind the genuine
+# class here at import time: pytest imports test modules during collection, before any fixture
+# gets the chance to swap the module attribute out.
+from settings_window import SettingsDialog as RealSettingsDialog
 
 
 class TestDeviceSelectorComprehensive:
@@ -172,7 +178,7 @@ class TestDeviceSelectorComprehensive:
     def test_settings_window_uses_set_enabled_not_configure(self):
         """Settings window should use set_enabled method, not configure."""
         # Read the source code to verify the fix
-        source = inspect.getsource(settings_window.SettingsDialog._populate_connection_tab)
+        source = inspect.getsource(RealSettingsDialog._populate_connection_tab)
 
         # Should contain set_enabled call
         assert "set_enabled(False)" in source
@@ -213,7 +219,7 @@ class TestDeviceSelectorComprehensive:
             mock_scrollable_frame.return_value = mock_scroll_frame_instance
 
             # Create dialog instance without initialization
-            dialog = settings_window.SettingsDialog.__new__(settings_window.SettingsDialog)
+            dialog = RealSettingsDialog.__new__(RealSettingsDialog)
             dialog.dock = Mock()
             dialog.dock.is_connected.return_value = True
             dialog.local_vars = {"autoconnect_var": Mock(), "target_interface_var": Mock()}

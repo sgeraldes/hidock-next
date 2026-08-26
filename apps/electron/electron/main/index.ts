@@ -17,7 +17,7 @@ const USB_PRODUCT_IDS = [
   0xaf0f,  // P1 Mini
   0x2041   // P1 Mini (alternate)
 ]
-import { initializeDatabase, closeDatabase } from './services/database'
+import { initializeDatabase, closeDatabase, isGraphProvenanceCleanupRegistered } from './services/database'
 import { initializeConfig, getConfig } from './services/config'
 import { setAutoConnectChecker } from './services/jensen'
 import { initializeFileStorage } from './services/file-storage'
@@ -29,53 +29,38 @@ import {
   setMainWindow as setWatcherMainWindow
 } from './services/recording-watcher'
 import {
-  startTranscriptionProcessor,
   stopTranscriptionProcessor,
   setMainWindowForTranscription
 } from './services/transcription'
-import { getVectorStore } from './services/vector-store'
-import { getRAGService } from './services/rag'
 import { setMainWindowForEventBus } from './services/event-bus'
 import { getStoragePolicyService } from './services/storage-policy'
 import { setMainWindowForMigration } from './ipc/migration-handlers'
-import { getIntegrityService } from './services/integrity-service'
+import { setMainWindowForValueBackfill } from './services/value-backfill'
 import { acquireSingleInstanceLock } from './single-instance'
-import { registerBootTask, startBootScheduler } from './services/boot-scheduler'
+import { startBootScheduler } from './services/boot-scheduler'
+import { registerGatedBootTasks } from './services/boot-tasks'
+import { isFeatureEnabled, captureBootEffectiveFeatures } from './services/feature-gate'
+import { createSplashWindow } from './splash-screen'
+import { configureEarlyStartup } from './startup-configuration'
+import { getStartupState } from './startup-state'
+import { revealMainWindow, type WindowRevealReason } from './window-reveal'
 
-let mainWindow: BrowserWindow | null = null
-let splashWindow: BrowserWindow | null = null
+const startup = getStartupState()
+configureEarlyStartup() // idempotent fallback when this module is launched directly in tests/tools
+const runtimeDir = startup.runtimeDir ?? __dirname
+let mainWindow: BrowserWindow | null = startup.mainWindow
+let splashWindow: BrowserWindow | null = startup.splashWindow
+let mainWindowReveal: Promise<WindowRevealReason | null> | null = null
 
-// Inline splash HTML to avoid build complexity
-const SPLASH_HTML = "<!DOCTYPE html>\n<html><head><meta charset=\"UTF-8\"><title>Meeting Intelligence</title>\n<style>\n*{margin:0;padding:0;box-sizing:border-box}\nbody{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);color:#e8e8e8;height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;-webkit-app-region:drag;user-select:none}\n.logo{font-size:22px;font-weight:600;margin-bottom:24px;color:#fff;text-align:center;max-width:300px}\n.spinner{width:32px;height:32px;border:3px solid rgba(255,255,255,0.1);border-top-color:#4f8cff;border-radius:50%;animation:spin 1s linear infinite;margin-bottom:20px}\n@keyframes spin{to{transform:rotate(360deg)}}\n.status{font-size:13px;color:#a0a0a0;text-align:center;max-width:280px;min-height:40px}\n.progress-container{width:200px;height:4px;background:rgba(255,255,255,0.1);border-radius:2px;margin:16px 0;overflow:hidden}\n.progress-bar{height:100%;background:#4f8cff;border-radius:2px;transition:width 0.3s ease;width:0%}\n.cancel-btn{-webkit-app-region:no-drag;margin-top:24px;padding:8px 20px;background:transparent;border:1px solid rgba(255,255,255,0.2);color:#a0a0a0;border-radius:6px;cursor:pointer;font-size:12px;transition:all 0.2s}\n.cancel-btn:hover{background:rgba(255,255,255,0.05);border-color:rgba(255,255,255,0.3);color:#fff}\n</style></head>\n<body>\n<div class=\"logo\">Meeting Intelligence</div>\n<div class=\"spinner\"></div>\n<div class=\"progress-container\"><div class=\"progress-bar\" id=\"progress\"></div></div>\n<div class=\"status\" id=\"status\">Initializing...</div>\n<button class=\"cancel-btn\" id=\"cancelBtn\">Cancel</button>\n<script>\nconst statusEl=document.getElementById('status');\nconst progressEl=document.getElementById('progress');\nconst cancelBtn=document.getElementById('cancelBtn');\nwindow.electronAPI?.onSplashStatus?.((status,progress)=>{statusEl.textContent=status;if(progress!==undefined)progressEl.style.width=progress+'%';});\ncancelBtn.addEventListener('click',()=>{window.electronAPI?.quitApp?.();});\n</script>\n</body></html>"
-
-function createSplashWindow(): BrowserWindow {
-  console.log('[Splash] Creating splash window...')
-  const splash = new BrowserWindow({
-    width: 340,
-    height: 280,
-    frame: false,
-    transparent: false,
-    resizable: false,
-    center: true,
-    alwaysOnTop: true,
-    skipTaskbar: false,
-    show: true, // Show immediately
-    backgroundColor: '#1a1a2e', // Match splash background to avoid flash
-    webPreferences: {
-      preload: join(__dirname, '../preload/splash.js'),
-      contextIsolation: true,
-      nodeIntegration: false
-    }
-  })
-
-  splash.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(SPLASH_HTML))
-  console.log('[Splash] Window created and loading content')
-  return splash
-}
-
-function updateSplashStatus(status: string, progress?: number): void {
+async function updateSplashStatus(status: string, progress?: number): Promise<void> {
   if (splashWindow && !splashWindow.isDestroyed()) {
     splashWindow.webContents.send('splash:status', status, progress)
+    // Let the IPC flush and the splash PAINT before whatever heavy (often
+    // synchronous) work follows. A fire-and-forget send queues behind a
+    // blocked event loop — that was the blank-splash boot freeze: the
+    // 'Initializing search index…' update only rendered AFTER the vector
+    // store's multi-second sync load had already run.
+    await new Promise((resolve) => setImmediate(resolve))
   }
 }
 
@@ -83,6 +68,7 @@ function closeSplash(): void {
   if (splashWindow && !splashWindow.isDestroyed()) {
     splashWindow.close()
     splashWindow = null
+    startup.splashWindow = null
   }
 }
 
@@ -100,7 +86,9 @@ function createWindow(): void {
   //    top-right, tinted to match our dark titlebar chrome (slate-900 / slate-200).
   //  - macOS: 'hiddenInset' keeps the traffic lights top-left; TitleBar reserves
   //    left padding for them.
-  // The overlay height MUST match the TitleBar height (TITLEBAR_HEIGHT = 40px).
+  // The overlay height MUST match the TitleBar height (h-14 = 56px), and the
+  // overlay color MUST match the TitleBar's solid background (#0f1626) so the
+  // flat native-controls gutter blends seamlessly into the bar (no visible seam).
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -114,22 +102,23 @@ function createWindow(): void {
       ? {}
       : {
           titleBarOverlay: {
-            color: '#0f172a', // slate-900 — matches TitleBar background
+            color: '#0f1626', // matches TitleBar solid background (bg-[#0f1626])
             symbolColor: '#e2e8f0', // slate-200 — matches TitleBar icon color
-            height: 40
+            height: 56
           }
         }),
     webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
+      preload: join(runtimeDir, '../preload/index.js'),
       sandbox: false,
       contextIsolation: true,
       nodeIntegration: false
     }
   })
+  startup.mainWindow = mainWindow
 
-  mainWindow.on('ready-to-show', () => {
-    closeSplash()
-    mainWindow?.show()
+  mainWindowReveal = revealMainWindow(mainWindow, {
+    closeSplash,
+    log: (message) => console.log(message),
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
@@ -141,7 +130,7 @@ function createWindow(): void {
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    mainWindow.loadFile(join(runtimeDir, '../renderer/index.html'))
   }
 }
 
@@ -149,56 +138,77 @@ function createWindow(): void {
 async function initializeServices(): Promise<void> {
   console.log('Initializing services...')
 
-  updateSplashStatus('Loading configuration...', 10)
+  await updateSplashStatus('Loading configuration...', 10)
   await initializeConfig()
   console.log('Config initialized')
 
-  updateSplashStatus('Setting up storage...', 20)
+  // Track I (Review-2 [CRITICAL]): snapshot the effective feature state from the
+  // desired config NOW, before any IPC handlers register or any USB path can run.
+  // Restart-gated features (device-sync, assistant) are pinned to this snapshot
+  // for the IPC gate, so enabling them at runtime cannot open their IPC until the
+  // next boot — the USB safety boundary.
+  captureBootEffectiveFeatures()
+
+  await updateSplashStatus('Setting up storage...', 20)
   await initializeFileStorage()
   console.log('File storage initialized')
 
-  updateSplashStatus('Initializing database...', 30)
+  await updateSplashStatus('Initializing database...', 30)
   await initializeDatabase()
   console.log('Database initialized')
 
-  updateSplashStatus('Checking data integrity...', 40)
-  const integrityService = getIntegrityService()
-  const integrityResult = await integrityService.runStartupChecks()
-  if (integrityResult.issuesFound > 0) {
-    console.log(`Integrity checks: ${integrityResult.issuesFixed}/${integrityResult.issuesFound} issues fixed`)
-  }
-
-  updateSplashStatus('Initializing search index...', 60)
-  const vectorStore = getVectorStore()
-  await vectorStore.initialize()
-  console.log('Vector store initialized')
-
-  updateSplashStatus('Starting AI services...', 75)
-  const rag = getRAGService()
-  await rag.initialize()
-  console.log('RAG service initialized')
-
-  updateSplashStatus('Finalizing setup...', 90)
+  // The semantic index can exceed 2 GB. It is restored after the renderer's
+  // first paint by the assistant boot task, so opening the library never waits
+  // minutes for optional search infrastructure. RAG status remains honestly
+  // not-ready until that task has populated the in-memory store.
+  await updateSplashStatus('Finalizing setup...', 60)
   getStoragePolicyService()
   console.log('Storage policy service initialized')
 
   registerIpcHandlers()
   console.log('IPC handlers registered')
 
+  // spec-006/F17 T6 AR3-1 — loud startup tripwire. registerRecordingDeletionHandlers()
+  // (called from registerIpcHandlers() above) wires the graph-provenance
+  // cleanup seam as a side effect of registration; the hard-purge branch
+  // itself already fails closed if this is ever skipped (a refactor that
+  // reorders registration, an early throw, etc.), but that failure would
+  // otherwise only surface the next time a user tries to permanently delete
+  // something. Converts a silent wiring regression into a loud boot error.
+  if (!isGraphProvenanceCleanupRegistered()) {
+    console.error(
+      '[startup] graph provenance cleanup NOT wired — permanent deletes will leak graph residue'
+    )
+  }
+
   // Living knowledge graph (v27): subscribe graph-sync to entity events now, so
   // renames/merges and finished transcripts keep the graph in step. DB-only +
   // debounced ingest; guarded so it can never break the pipeline.
-  import('./services/graph-sync')
-    .then(({ startGraphSync }) => startGraphSync())
-    .catch((e) => console.error('[GraphSync] startup wiring failed:', e))
+  // Track I: gated on the Context Graph feature (skipped under library-only).
+  if (isFeatureEnabled('context-graph')) {
+    import('./services/graph-sync')
+      .then(({ startGraphSync }) => startGraphSync())
+      .catch((e) => console.error('[GraphSync] startup wiring failed:', e))
+  }
 
   // Gate USB hot-plug auto-connect on the user's "Auto-connect on startup"
   // preference. Without this the device reconnects on every power-on / plug-in
   // regardless of the toggle. Manual "Connect Device" is unaffected.
-  setAutoConnectChecker(() => getConfig().device.autoConnect === true)
+  // Track I: additionally requires the Device Sync feature. Auto-connect is an
+  // INITIATION path (round-3 partition): isFeatureEnabled('device-sync') is
+  // boot-enabled AND desired-enabled, so a live disable stops hot-plug
+  // auto-connect immediately, while boot-disabled keeps it off regardless of a
+  // live enable (USB safety — activation only across a reboot). Teardown /
+  // observation IPC stays reachable via the boot-only half of the gate.
+  setAutoConnectChecker(
+    () => getConfig().device.autoConnect === true && isFeatureEnabled('device-sync')
+  )
 
-  // CS-010: Initialize calendar auto-sync after IPC handlers and DB are ready
-  initializeCalendarAutoSync()
+  // CS-010: Initialize calendar auto-sync after IPC handlers and DB are ready.
+  // Track I: gated on the Calendar feature (skipped under library-only).
+  if (isFeatureEnabled('calendar')) {
+    initializeCalendarAutoSync()
+  }
 
   // Connectors (Layer 2): build the host + attempt silent (non-interactive)
   // resume for connectors that already have credentials. Never launches an
@@ -207,7 +217,7 @@ async function initializeServices(): Promise<void> {
     .then(({ initConnectors }) => initConnectors())
     .catch((e) => console.error('[Connectors] startup wiring failed:', e))
 
-  updateSplashStatus('Starting application...', 100)
+  await updateSplashStatus('Starting application...', 100)
 }
 
 // Single-instance guard — MUST run before any window is created and before the
@@ -218,30 +228,38 @@ async function initializeServices(): Promise<void> {
 // another instance already owns the lock, acquireSingleInstanceLock() calls
 // app.quit() and returns false; we then skip all boot so this process never
 // touches the DB.
-const hasSingleInstanceLock = acquireSingleInstanceLock({
+const hasSingleInstanceLock = startup.hasSingleInstanceLock ?? acquireSingleInstanceLock({
   getMainWindow: () => mainWindow,
   getSplashWindow: () => splashWindow
 })
 
-// Disable WebUSB blocklist to allow HiDock device access
-// Required since Electron 37+ which introduced Chromium's WebUSB blocklist
-// Without this, devices on the blocklist get "Access denied" errors
-app.commandLine.appendSwitch('disable-usb-blocklist')
-
-// Suppress Chromium-level USB/device enumeration noise on Windows
-// (usb_service_win.cc SetupDiGetDeviceProperty errors for non-HiDock devices — harmless)
-if (process.platform === 'win32') {
-  app.commandLine.appendSwitch('disable-usb-device-event-log')
-  // Suppress device_event_log severity to FATAL-only (3) to hide USB enumeration errors
-  app.commandLine.appendSwitch('device-event-log-level', '3')
-}
-
-// Conditionally enable remote debugging (dev mode or explicit opt-in)
-const enableRemoteDebugging = is.dev || process.env.ENABLE_REMOTE_DEBUGGING === 'true'
-if (enableRemoteDebugging) {
-  app.commandLine.appendSwitch('remote-debugging-port', '9222')
-  console.warn('[SECURITY] Remote debugging enabled on port 9222')
-}
+// BUG-R6 / BUG-R7 — accepted cosmetic stderr noise (documented decision, NOT a bug):
+//
+//   R6: residual "SetupDiGetDeviceProperty" USB enumeration errors from
+//       usb_service_win.cc, and R7: "Request Autofill.enable/setAddresses failed"
+//       DevTools-protocol errors when DevTools is open (Electron's CDP backend does
+//       not implement the Autofill domain).
+//
+// Both are written to stderr by native Chromium/DevTools code (fd 2), NOT via the
+// JS console. A JS-level filter (monkey-patching process.stderr.write) cannot catch
+// native writes, and raising the global Chromium --log-level would also hide genuine
+// errors — so there is no safe in-process suppression.
+//
+// R6 root cause CONFIRMED (not just believed) via Chromium source
+// (components/device_event_log/device_event_log_impl.cc): usb_service_win.cc logs
+// these via USB_PLOG(ERROR), and device_event_log's AddLogEntry() unconditionally
+// escalates LOG_LEVEL_ERROR entries to LOG(ERROR) (stderr) regardless of the
+// configured --device-event-log-level threshold —
+// `if (log_entry.log_level != LOG_LEVEL_ERROR && !VLOG_IS_ON(1)) return;` skips the
+// gate entirely for ERROR-severity entries. No value of --device-event-log-level or
+// --disable-usb-device-event-log can suppress an ERROR-level entry; the switches
+// above only affect USER/EVENT/DEBUG-level entries. There is no switch-level fix.
+//
+// The switches above are the clean mechanism and cover most of the USB noise;
+// anything that still leaks can only be filtered by redirecting the Electron child's
+// stderr in the dev launcher (dev-only concern). We therefore ACCEPT the remaining
+// lines as cosmetic rather than adding a risky filter. See
+// docs/specs/2026-03-25-remaining-bugs.md (BUG-R6, BUG-R7).
 
 app.whenReady().then(async () => {
   // A non-primary instance already called app.quit() in the single-instance
@@ -254,7 +272,13 @@ app.whenReady().then(async () => {
   electronApp.setAppUserModelId('com.hidock.meeting-intelligence')
 
   // Show splash screen immediately
-  splashWindow = createSplashWindow()
+  // Do not start service initialization until the splash preload and first DOM
+  // frame exist; otherwise the first progress IPC messages are lost and the
+  // user sees a grey/zero-progress gap.
+  if (!splashWindow || splashWindow.isDestroyed()) {
+    splashWindow = await createSplashWindow(join(runtimeDir, '../preload/splash.js'))
+    startup.splashWindow = splashWindow
+  }
 
   // Default open or close DevTools by F12 in development
   app.on('browser-window-created', (_, window) => {
@@ -325,6 +349,7 @@ app.whenReady().then(async () => {
     setMainWindowForTranscription(mainWindow)
     setMainWindowForEventBus(mainWindow)
     setMainWindowForMigration(mainWindow)
+    setMainWindowForValueBackfill(mainWindow)
   }
 
   // The recording watcher is cheap and powers auto-refresh — start it now.
@@ -332,7 +357,7 @@ app.whenReady().then(async () => {
   console.log('Recording watcher started')
 
   // ---------------------------------------------------------------------------
-  // Deferred heavy boot work — spread out, not bursted.
+  // Deferred bounded boot work.
   //
   // ROOT CAUSE of the post-restart freeze: on a large DB these tasks used to
   // fire together right after the window showed (the transcription backlog drain
@@ -341,95 +366,36 @@ app.whenReady().then(async () => {
   // main-process event loop, so it starved the renderer's IPC → "not responding"
   // with high CPU for a while.
   //
-  // Fix: register them on the boot scheduler, which runs them ONE AT A TIME with
-  // idle gaps in between (concurrency cap = 1) and only AFTER the renderer has
-  // painted. The same work still runs — just spread out so the UI stays live.
-  // Ordered cheapest/most-user-visible DB self-heals first; the sustained
-  // network-bound drains (transcription, embeddings) last so first paint and the
-  // initial library load are not competing for the event loop.
+  // Fix: register bounded local work on the boot scheduler, which runs tasks ONE
+  // AT A TIME with idle gaps (concurrency cap = 1) and only AFTER the renderer is
+  // visible. Provider-backed corpus sweeps are deliberately not boot tasks;
+  // startup must reach a terminal state rather than becoming a hidden
+  // maintenance session.
   // ---------------------------------------------------------------------------
 
-  // 1. Reconcile organization data (meeting↔recording links, People from
-  //    attendees, ICS text repair, ~1,521-row status self-heal). DB-only, idempotent.
-  registerBootTask({
-    name: 'org-reconcile',
-    run: async () => {
-      await import('./services/org-reconciler')
-        .then(({ reconcileOrganization }) => reconcileOrganization())
-        .catch((e) => console.error('[OrgReconciler] error:', e))
-    }
-  })
+  // Register the deferred heavy boot tasks, GATED by feature (Track I): a task
+  // whose owning feature is disabled by the active preset is simply never queued.
+  // Under the default `full` preset every bounded task registers. The
+  // definitions + gating live in services/boot-tasks.ts (unit-tested there):
+  //   org-reconcile (calendar), knowledge-capture-backfill (library floor),
+  //   meeting-wiki-backfill (meeting-intelligence), start-transcription-processor
+  //   (transcription), semantic-index-restore (assistant). Provider-backed repair
+  //   sweeps are explicit maintenance actions, not unbounded boot work.
+  registerGatedBootTasks()
 
-  // 2. Self-heal the Knowledge Library: create a knowledge_capture for any
-  //    transcript that lacks one. Cheap, DB-only, idempotent.
-  registerBootTask({
-    name: 'knowledge-capture-backfill',
-    run: async () => {
-      await import('./services/knowledge-capture-backfill')
-        .then(({ backfillKnowledgeCaptures }) => backfillKnowledgeCaptures())
-        .catch((e) => console.error('[KnowledgeCaptureBackfill] error:', e))
-    }
-  })
-
-  // 3. Backfill the plain-markdown meeting wiki (no API calls — DB → files).
-  registerBootTask({
-    name: 'meeting-wiki-backfill',
-    run: async () => {
-      await import('./services/meeting-wiki')
-        .then(({ backfillMeetingWiki }) => backfillMeetingWiki())
-        .catch((e) => console.error('[MeetingWiki] Backfill error:', e))
-    }
-  })
-
-  // 4. Start the transcription processor. This returns promptly (it arms the
-  //    10s interval and kicks a first pass); the backlog drain then runs in the
-  //    background, mutex-gated to one item at a time. Deferred to here so the
-  //    240-item drain does not compete with first paint + the library load.
-  //    NOTE: correctness and the queue's newest-first order are unchanged — only
-  //    WHEN the processor starts moved.
-  registerBootTask({
-    name: 'start-transcription-processor',
-    run: () => {
-      startTranscriptionProcessor()
-    }
-  })
-
-  // 5. Backfill vector embeddings for transcripts indexed before embeddings
-  //    worked (or added while the app was closed). Network-bound, per-item.
-  registerBootTask({
-    name: 'embeddings-backfill',
-    run: () =>
-      import('./services/vector-store')
-        .then(async ({ getVectorStore }) => {
-          const store = getVectorStore()
-          await store.initialize()
-          await store.backfillMissingTranscripts()
-        })
-        .catch((e) => console.error('[VectorStore] Backfill error:', e))
-  })
-
-  // 6. Self-heal transcripts whose Gemini analysis failed (or was never run on an
-  //    older build) by re-analysing the stored full_text. Bounded per run.
-  registerBootTask({
-    name: 'reanalyze-failed-transcripts',
-    run: async () => {
-      await import('./services/transcription')
-        .then(({ reanalyzeFailedTranscripts }) => reanalyzeFailedTranscripts())
-        .catch((e) => console.error('[Reanalyze] Backfill error:', e))
-    }
-  })
-
-  // Kick the scheduler once the renderer has painted its first frame, so heavy
-  // work never competes with first paint / the initial library IPC. A fallback
-  // timer covers the rare case where 'did-finish-load' never fires (load error);
-  // startBootScheduler is idempotent, so whichever fires first wins.
-  const kickBootScheduler = (): void => {
-    startBootScheduler().catch((e) => console.error('[BootScheduler] error:', e))
+  // The scheduler may start ONLY after the native main window is visible and
+  // the splash is closed. `did-finish-load` alone is too early: it previously
+  // launched a 52s vector restore while the main window was still hidden, then
+  // starved the `ready-to-show` handler and left the 100% splash up forever.
+  // revealMainWindow() also owns the bounded reveal fallback, so there is no
+  // background-work timer capable of firing behind a stuck splash.
+  const reveal = mainWindowReveal
+  if (reveal) {
+    void reveal.then((reason) => {
+      if (!reason) return
+      startBootScheduler().catch((e) => console.error('[BootScheduler] error:', e))
+    })
   }
-  if (mainWindow) {
-    mainWindow.webContents.once('did-finish-load', kickBootScheduler)
-  }
-  setTimeout(kickBootScheduler, 30000)
 
   console.log('Background services scheduled')
 

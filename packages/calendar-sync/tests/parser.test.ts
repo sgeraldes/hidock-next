@@ -183,8 +183,8 @@ describe('parseICS', () => {
 
     const events = parseICS(ics)
     expect(events).toHaveLength(1)
-    expect(events[0].startTime).toEqual(new Date('2026-03-29T09:00:00Z'))
-    expect(events[0].endTime).toEqual(new Date('2026-03-29T10:00:00Z'))
+    expect(events[0].startTime).toEqual(new Date('2026-03-29T13:00:00Z'))
+    expect(events[0].endTime).toEqual(new Date('2026-03-29T14:00:00Z'))
   })
 
   it('handles line folding (continuation lines)', () => {
@@ -394,6 +394,38 @@ describe('parseICS', () => {
   })
 
   describe('Windows timezone fallback (no VTIMEZONE)', () => {
+    it('distinguishes the three Aug 21 meetings by their real Argentina times', () => {
+      const ics = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:ai-sdlc',
+        'SUMMARY:Revisamos lo de AI SDLC',
+        'DTSTART;TZID=Pacific Standard Time:20260821T100000',
+        'DTEND;TZID=Pacific Standard Time:20260821T110000',
+        'END:VEVENT',
+        'BEGIN:VEVENT',
+        'UID:semu',
+        'SUMMARY:SEMU - WhatsApp Modernization S2D',
+        'DTSTART;TZID=Eastern Standard Time:20260821T140000',
+        'DTEND;TZID=Eastern Standard Time:20260821T150000',
+        'END:VEVENT',
+        'BEGIN:VEVENT',
+        'UID:resource-management',
+        'SUMMARY:Resource Management',
+        'DTSTART;TZID=SA Pacific Standard Time:20260821T140000',
+        'DTEND;TZID=SA Pacific Standard Time:20260821T150000',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n')
+
+      const events = parseICS(ics)
+      expect(events.map((event) => event.startTime.toISOString())).toEqual([
+        '2026-08-21T17:00:00.000Z', // 14:00 Argentina
+        '2026-08-21T18:00:00.000Z', // 15:00 Argentina — SEMU
+        '2026-08-21T19:00:00.000Z', // 16:00 Argentina
+      ])
+    })
+
     it('applies the Windows offset for a recognized Exchange TZID', () => {
       // Eastern Standard Time = UTC-5. A wall-clock of 09:00 local must become 14:00 UTC.
       const ics = [
@@ -433,7 +465,7 @@ describe('parseICS', () => {
       expect(events[0].endTime).toEqual(new Date('2026-01-15T02:00:00Z'))
     })
 
-    it('treats an unrecognized IANA TZID as UTC (unchanged behavior)', () => {
+    it('applies IANA timezone rules', () => {
       const ics = [
         'BEGIN:VCALENDAR',
         'BEGIN:VEVENT',
@@ -447,9 +479,9 @@ describe('parseICS', () => {
 
       const events = parseICS(ics)
       expect(events).toHaveLength(1)
-      // IANA name not in Windows map -> treated as UTC
-      expect(events[0].startTime).toEqual(new Date('2026-03-29T09:00:00Z'))
-      expect(events[0].endTime).toEqual(new Date('2026-03-29T10:00:00Z'))
+      // New York is observing EDT (UTC-4) on March 29.
+      expect(events[0].startTime).toEqual(new Date('2026-03-29T13:00:00Z'))
+      expect(events[0].endTime).toEqual(new Date('2026-03-29T14:00:00Z'))
     })
 
     it('does not apply offset when value already carries Z', () => {
@@ -564,8 +596,8 @@ describe('parseICS', () => {
       ].join('\r\n')
 
       const events = parseICS(ics)
-      // Eastern Standard Time = -5h → 17:00 local = 22:00 UTC
-      expect(events[0].exdates).toEqual([new Date('2026-07-03T22:00:00Z')])
+      // Despite its Windows name, this zone observes EDT in July: UTC-4.
+      expect(events[0].exdates).toEqual([new Date('2026-07-03T21:00:00Z')])
     })
 
     it('leaves exdates undefined when there is no EXDATE', () => {

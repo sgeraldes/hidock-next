@@ -9,6 +9,7 @@ import {
   deriveTranscriptSummary,
   countTranscriptSpeakers,
   buildContentText,
+  isAutomaticMeetingLinkTemporallyEligible,
   type MatchCandidateInput
 } from '../recording-match-scoring'
 
@@ -198,6 +199,58 @@ describe('scoreMeetingCandidates — all-day / bridge over-attribution (War Room
 })
 
 describe('scoreMeetingCandidates — labels & edges', () => {
+  it('never auto-links the reported 9:05 PM call to an event that ended at 8:45 PM', () => {
+    const recording = {
+      dateRecorded: '2026-08-19T00:05:30.000Z',
+      durationSeconds: 28.5 * 60,
+      contentText: 'networking deployment databases'
+    }
+    const bufferedNearMiss = {
+      meetingId: 'sip-war',
+      subject: 'RE: [EXTERNAL] DFX5 SIP Gateway WAR',
+      startTime: '2026-08-18T22:45:00.000Z',
+      endTime: '2026-08-18T23:45:00.000Z'
+    }
+
+    // It remains a discoverable near-time candidate, but content cannot turn a
+    // non-overlap into permission for automatic assignment.
+    expect(scoreMeetingCandidates(recording, [bufferedNearMiss])[0].hasOverlap).toBe(false)
+    expect(isAutomaticMeetingLinkTemporallyEligible(recording, bufferedNearMiss)).toBe(false)
+  })
+
+  it('allows automatic-link consideration for a normal meeting with real overlap', () => {
+    expect(isAutomaticMeetingLinkTemporallyEligible(
+      { dateRecorded: '2026-08-19T00:05:30.000Z', durationSeconds: 30 * 60 },
+      {
+        meetingId: 'actual',
+        subject: 'Out-of-office call',
+        startTime: '2026-08-19T00:00:00.000Z',
+        endTime: '2026-08-19T00:30:00.000Z'
+      }
+    )).toBe(true)
+  })
+
+  it('excludes cancelled calendar rows from the viable candidate field', () => {
+    const rec = { dateRecorded: '2026-08-18T20:07:09Z', durationSeconds: 35 * 60, contentText: null }
+    const scored = scoreMeetingCandidates(rec, [
+      {
+        meetingId: 'cancelled',
+        subject: 'Cancelada: Seguros Bolívar - Alineación técnica',
+        startTime: '2026-08-18T20:00:00Z',
+        endTime: '2026-08-18T21:00:00Z'
+      },
+      {
+        meetingId: 'sync',
+        subject: 'Sync Arturo-Seba',
+        startTime: '2026-08-18T20:00:00Z',
+        endTime: '2026-08-18T20:30:00Z'
+      }
+    ])
+
+    expect(scored.map((candidate) => candidate.meetingId)).toEqual(['sync'])
+    expect(scored[0]).toMatchObject({ hasOverlap: true, isBestMatch: true })
+  })
+
   it('labels far same-day meetings as "Same day · no overlap" with a low score', () => {
     const rec = { dateRecorded: '2026-07-08T09:00:00Z', durationSeconds: 10 * 60, contentText: null }
     const scored = scoreMeetingCandidates(rec, [

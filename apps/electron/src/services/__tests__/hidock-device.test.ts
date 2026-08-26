@@ -5,7 +5,7 @@
  * and listener management.
  */
 
-import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vitest'
 import type { ActivityLogEntry } from '../hidock-device'
 
 // Mock jensen module
@@ -22,6 +22,17 @@ vi.mock('../jensen', () => ({
     downloadFile: vi.fn(),
     deleteFile: vi.fn(),
     setTime: vi.fn(),
+    // Capabilities added to the Jensen client after this mock was written.
+    // A missing method here surfaces as "this.jensen.X is not a function"
+    // from inside hidock-device, not as an obvious mock error.
+    getBatteryStatus: vi.fn(),
+    getBluetoothStatus: vi.fn(),
+    startBluetoothScan: vi.fn(),
+    stopBluetoothScan: vi.fn(),
+    getRealtimeSettings: vi.fn(),
+    getRealtimeData: vi.fn(),
+    startRealtime: vi.fn(),
+    pauseRealtime: vi.fn(),
     onconnect: null,
     ondisconnect: null
   })),
@@ -58,19 +69,20 @@ vi.mock('../qa-monitor', () => ({
 //
 // Silence the service's own console output for the ENTIRE file lifetime (not just
 // per-test) so no message is ever forwarded to the worker RPC, including during
-// inter-test async work and teardown. Tests that assert on console.error re-spy
-// it themselves; those spies still record calls on top of these no-op stubs and
-// restore back to them (never to the real console) when done.
+// inter-test async work and teardown. Tests that assert on console output re-spy
+// the method — vi.spyOn returns this SAME spy instance (spies don't stack) — so
+// they MUST end with mockClear(), never mockRestore(): mockRestore() reinstalls
+// the REAL console method and un-silences the rest of the file.
 const SILENCED_CONSOLE_METHODS = ['log', 'info', 'warn', 'debug', 'error'] as const
-const silencedConsoleSpies: Array<ReturnType<typeof vi.spyOn>> = []
 beforeAll(() => {
   for (const method of SILENCED_CONSOLE_METHODS) {
-    silencedConsoleSpies.push(vi.spyOn(console, method).mockImplementation(() => {}))
+    vi.spyOn(console, method).mockImplementation(() => {})
   }
 })
-afterAll(() => {
-  silencedConsoleSpies.forEach((spy) => spy.mockRestore())
-})
+// Deliberately NO afterAll restore: the teardown window right after the last
+// test is exactly when the service's lingering timers/promises still log, so
+// restoring the real console here reintroduces the RPC race. Each test file
+// runs in its own isolated environment, so the stubs die with the worker.
 
 describe('HiDockDeviceService - Activity Log Historical Replay', () => {
   let HiDockDeviceService: any
@@ -208,7 +220,7 @@ describe('HiDockDeviceService - Activity Log Historical Replay', () => {
       expect.any(Error)
     )
 
-    consoleErrorSpy.mockRestore()
+    consoleErrorSpy.mockClear()
   })
 
   it('should handle initialization log and receive new logs', () => {
@@ -723,7 +735,7 @@ describe('HiDockDeviceService - Activity Log Management', () => {
 
   it('should return empty activity log initially', () => {
     const service = new HiDockDeviceService()
-    const logs = service.getActivityLog()
+    const logs: ActivityLogEntry[] = service.getActivityLog()
 
     // Should only have initialization log
     expect(logs.length).toBe(1)
@@ -737,7 +749,7 @@ describe('HiDockDeviceService - Activity Log Management', () => {
     serviceAny.logActivity('info', 'Test log 1')
     serviceAny.logActivity('success', 'Test log 2')
 
-    const logs = service.getActivityLog()
+    const logs: ActivityLogEntry[] = service.getActivityLog()
     expect(logs.length).toBe(3) // initialization + 2 test logs
 
     const testLogs = logs.filter(log => log.message.startsWith('Test log'))
@@ -754,7 +766,7 @@ describe('HiDockDeviceService - Activity Log Management', () => {
 
     serviceAny.logActivity('error', 'Error occurred', 'Stack trace here')
 
-    const logs = service.getActivityLog()
+    const logs: ActivityLogEntry[] = service.getActivityLog()
     const errorLog = logs.find(log => log.message === 'Error occurred')
 
     expect(errorLog).toBeDefined()
@@ -774,7 +786,7 @@ describe('HiDockDeviceService - Activity Log Management', () => {
 
     service.clearActivityLog()
 
-    const logs = service.getActivityLog()
+    const logs: ActivityLogEntry[] = service.getActivityLog()
     expect(logs.length).toBe(0)
   })
 
@@ -786,7 +798,7 @@ describe('HiDockDeviceService - Activity Log Management', () => {
     serviceAny.logActivity('info', 'Second log')
     serviceAny.logActivity('info', 'Third log')
 
-    const logs = service.getActivityLog()
+    const logs: ActivityLogEntry[] = service.getActivityLog()
     const testLogs = logs.filter(log => log.message.includes('log'))
 
     expect(testLogs[0].timestamp.getTime()).toBeLessThanOrEqual(testLogs[1].timestamp.getTime())
@@ -804,7 +816,7 @@ describe('HiDockDeviceService - Activity Log Management', () => {
     serviceAny.logActivity('usb-in', 'USB in log')
     serviceAny.logActivity('warning', 'Warning log')
 
-    const logs = service.getActivityLog()
+    const logs: ActivityLogEntry[] = service.getActivityLog()
     expect(logs.find(log => log.type === 'error')).toBeDefined()
     expect(logs.find(log => log.type === 'success')).toBeDefined()
     expect(logs.find(log => log.type === 'info')).toBeDefined()
@@ -961,7 +973,7 @@ describe('HiDockDeviceService - Error Handling', () => {
       expect.any(Error)
     )
 
-    consoleErrorSpy.mockRestore()
+    consoleErrorSpy.mockClear()
   })
 
   it('should handle listener errors in connection change notification', () => {
@@ -987,7 +999,7 @@ describe('HiDockDeviceService - Error Handling', () => {
       expect.any(Error)
     )
 
-    consoleErrorSpy.mockRestore()
+    consoleErrorSpy.mockClear()
   })
 
   it('should handle listener errors in status change notification', () => {
@@ -1019,7 +1031,7 @@ describe('HiDockDeviceService - Error Handling', () => {
       expect.any(Error)
     )
 
-    consoleErrorSpy.mockRestore()
+    consoleErrorSpy.mockClear()
   })
 
   it('should handle listener errors in progress notification', () => {
@@ -1046,7 +1058,7 @@ describe('HiDockDeviceService - Error Handling', () => {
       expect.any(Error)
     )
 
-    consoleErrorSpy.mockRestore()
+    consoleErrorSpy.mockClear()
   })
 
   it('should handle listener errors in activity notification', () => {
@@ -1072,7 +1084,7 @@ describe('HiDockDeviceService - Error Handling', () => {
       expect.any(Error)
     )
 
-    consoleErrorSpy.mockRestore()
+    consoleErrorSpy.mockClear()
   })
 })
 
@@ -1168,7 +1180,7 @@ describe('HiDockDeviceService - Constructor and Initialization', () => {
 
   it('should log initialization activity', () => {
     const service = new HiDockDeviceService()
-    const logs = service.getActivityLog()
+    const logs: ActivityLogEntry[] = service.getActivityLog()
 
     const initLog = logs.find(log => log.message === 'Device service initialized')
     expect(initLog).toBeDefined()
@@ -1778,7 +1790,7 @@ describe('HiDockDeviceService - Public Log Method', () => {
 
     service.log('info', 'Public log message')
 
-    const logs = service.getActivityLog()
+    const logs: ActivityLogEntry[] = service.getActivityLog()
     const publicLog = logs.find(log => log.message === 'Public log message')
 
     expect(publicLog).toBeDefined()
@@ -1790,7 +1802,7 @@ describe('HiDockDeviceService - Public Log Method', () => {
 
     service.log('error', 'Public error', 'Error details')
 
-    const logs = service.getActivityLog()
+    const logs: ActivityLogEntry[] = service.getActivityLog()
     const errorLog = logs.find(log => log.message === 'Public error')
 
     expect(errorLog).toBeDefined()
@@ -1808,7 +1820,7 @@ describe('HiDockDeviceService - Public Log Method', () => {
     service.log('usb-out', 'USB out message')
     service.log('usb-in', 'USB in message')
 
-    const logs = service.getActivityLog()
+    const logs: ActivityLogEntry[] = service.getActivityLog()
 
     expect(logs.find(log => log.message === 'Info message')).toBeDefined()
     expect(logs.find(log => log.message === 'Success message')).toBeDefined()
@@ -1857,7 +1869,7 @@ describe('HiDockDeviceService - Activity Log Max Entries', () => {
       service.log('info', `Log ${i}`)
     }
 
-    const logs = service.getActivityLog()
+    const logs: ActivityLogEntry[] = service.getActivityLog()
 
     // Should not exceed max entries
     expect(logs.length).toBeLessThanOrEqual(MAX_ACTIVITY_LOG_ENTRIES)
@@ -1871,7 +1883,7 @@ describe('HiDockDeviceService - Activity Log Max Entries', () => {
       service.log('info', `Log ${i}`)
     }
 
-    const logs = service.getActivityLog()
+    const logs: ActivityLogEntry[] = service.getActivityLog()
 
     // Should contain the most recent logs
     const lastLog = logs[logs.length - 1]
@@ -1886,7 +1898,7 @@ describe('HiDockDeviceService - Activity Log Max Entries', () => {
       service.log('info', `Log ${i}`)
     }
 
-    const logs = service.getActivityLog()
+    const logs: ActivityLogEntry[] = service.getActivityLog()
 
     // Should not contain the oldest logs
     const hasOldLog = logs.some(log => log.message === 'Log 0')
@@ -1984,8 +1996,8 @@ describe('HiDockDeviceService - Activity Log Copy', () => {
 
     service.log('info', 'Test log')
 
-    const log1 = service.getActivityLog()
-    const log2 = service.getActivityLog()
+    const log1: ActivityLogEntry[] = service.getActivityLog()
+    const log2: ActivityLogEntry[] = service.getActivityLog()
 
     // Should be different array references
     expect(log1).not.toBe(log2)
@@ -1999,7 +2011,7 @@ describe('HiDockDeviceService - Activity Log Copy', () => {
 
     service.log('info', 'Test log')
 
-    const log = service.getActivityLog()
+    const log: ActivityLogEntry[] = service.getActivityLog()
     const originalLength = log.length
 
     log.push({
@@ -2009,7 +2021,7 @@ describe('HiDockDeviceService - Activity Log Copy', () => {
     })
 
     // Internal log should not change
-    const newLog = service.getActivityLog()
+    const newLog: ActivityLogEntry[] = service.getActivityLog()
     expect(newLog.length).toBe(originalLength)
   })
 })
@@ -2119,7 +2131,7 @@ describe('HiDockDeviceService - Refresh Device Info', () => {
 
     await service.refreshDeviceInfo()
 
-    const logs = service.getActivityLog()
+    const logs: ActivityLogEntry[] = service.getActivityLog()
     const usbOutLog = logs.find(log => log.type === 'usb-out' && log.message === 'CMD: Get Device Info')
     const usbInLog = logs.find(log => log.type === 'usb-in' && log.message === 'Device Info Received')
 
@@ -2138,7 +2150,7 @@ describe('HiDockDeviceService - Refresh Device Info', () => {
 
     await service.refreshDeviceInfo()
 
-    const logs = service.getActivityLog()
+    const logs: ActivityLogEntry[] = service.getActivityLog()
     const errorLog = logs.find(log => log.type === 'error' && log.message === 'Failed to get device info')
 
     expect(errorLog).toBeDefined()
@@ -2324,7 +2336,7 @@ describe('HiDockDeviceService - Refresh Storage Info', () => {
 
     await service.refreshStorageInfo()
 
-    const logs = service.getActivityLog()
+    const logs: ActivityLogEntry[] = service.getActivityLog()
     const errorLog = logs.find(log => log.type === 'error' && log.message === 'Failed to get card info')
 
     expect(errorLog).toBeDefined()
@@ -2445,7 +2457,7 @@ describe('HiDockDeviceService - Refresh Settings', () => {
 
     await service.refreshSettings()
 
-    const logs = service.getActivityLog()
+    const logs: ActivityLogEntry[] = service.getActivityLog()
     const errorLog = logs.find(log => log.type === 'error' && log.message === 'Failed to get settings')
 
     expect(errorLog).toBeDefined()
@@ -2551,7 +2563,7 @@ describe('HiDockDeviceService - Sync Time', () => {
 
     await service.syncTime()
 
-    const logs = service.getActivityLog()
+    const logs: ActivityLogEntry[] = service.getActivityLog()
     const successLog = logs.find(log => log.type === 'success' && log.message === 'Time synced successfully')
 
     expect(successLog).toBeDefined()
@@ -2568,7 +2580,7 @@ describe('HiDockDeviceService - Sync Time', () => {
 
     await service.syncTime()
 
-    const logs = service.getActivityLog()
+    const logs: ActivityLogEntry[] = service.getActivityLog()
     const errorLog = logs.find(log => log.type === 'error' && log.message === 'Failed to sync time')
 
     expect(errorLog).toBeDefined()
@@ -2664,6 +2676,29 @@ describe('HiDockDeviceService - Get Recording Count', () => {
     expect(result).toBe(0)
   })
 
+  it('preserves the last factual count when the main process skips a busy-bus probe', async () => {
+    const service = new HiDockDeviceService()
+    const serviceAny = service as any
+
+    serviceAny.state.connected = true
+    serviceAny.state.recordingCount = 330
+    mockJensen.isConnected.mockReturnValue(true)
+    mockJensen.getFileCount.mockResolvedValue(null)
+
+    const listener = vi.fn()
+    service.onStateChange(listener)
+    const initialCallCount = listener.mock.calls.length
+
+    const result = await service.getRecordingCount()
+
+    expect(result).toBe(330)
+    expect(service.getState().recordingCount).toBe(330)
+    expect(listener).toHaveBeenCalledTimes(initialCallCount)
+    expect(service.getActivityLog()).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ message: 'File Count Received' })])
+    )
+  })
+
   it('should log activity when getting recording count', async () => {
     const service = new HiDockDeviceService()
     const serviceAny = service as any
@@ -2675,7 +2710,7 @@ describe('HiDockDeviceService - Get Recording Count', () => {
 
     await service.getRecordingCount()
 
-    const logs = service.getActivityLog()
+    const logs: ActivityLogEntry[] = service.getActivityLog()
     const usbOutLog = logs.find(log => log.type === 'usb-out' && log.message === 'CMD: Get File Count')
     const usbInLog = logs.find(log => log.type === 'usb-in' && log.message === 'File Count Received')
 
@@ -2757,7 +2792,7 @@ describe('HiDockDeviceService - List Recordings Not Connected', () => {
 
     await service.listRecordings()
 
-    const logs = service.getActivityLog()
+    const logs: ActivityLogEntry[] = service.getActivityLog()
     const errorLog = logs.find(log => log.message === 'Cannot list files')
 
     expect(errorLog).toBeDefined()
@@ -3079,6 +3114,7 @@ describe('HiDockDeviceService - Delete Recording', () => {
     const result = await service.deleteRecording('test.wav')
 
     expect(result).toBe(false)
+    expect(service.getLastDeleteError()).toBe('The HiDock disconnected before the erase could start.')
     expect(mockJensen.deleteFile).not.toHaveBeenCalled()
   })
 
@@ -3110,6 +3146,23 @@ describe('HiDockDeviceService - Delete Recording', () => {
     expect(result).toBe(true)
   })
 
+  it('treats not-exists as an idempotent success and evicts the stale cache row', async () => {
+    const service = new HiDockDeviceService()
+    const serviceAny = service as any
+    serviceAny.state.connected = true
+    serviceAny.cachedRecordings = [{ id: '1', filename: 'already-gone.hda' }]
+    serviceAny.cachedRecordingCount = 1
+    mockJensen.isConnected.mockReturnValue(true)
+    mockJensen.deleteFile.mockResolvedValue({ result: 'not-exists' })
+
+    await expect(service.deleteRecording('already-gone.hda')).resolves.toBe(true)
+    expect(service.getCachedRecordings()).toEqual([])
+    expect(service.getLastDeleteError()).toBeNull()
+    expect(service.getActivityLog()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ message: 'File already absent' })])
+    )
+  })
+
   it('should return false on failed delete', async () => {
     const service = new HiDockDeviceService()
     const serviceAny = service as any
@@ -3122,6 +3175,7 @@ describe('HiDockDeviceService - Delete Recording', () => {
     const result = await service.deleteRecording('recording.wav')
 
     expect(result).toBe(false)
+    expect(service.getLastDeleteError()).toContain('rejected the erase command')
   })
 
   it('should log success on successful delete', async () => {
@@ -3135,14 +3189,14 @@ describe('HiDockDeviceService - Delete Recording', () => {
 
     await service.deleteRecording('test.wav')
 
-    const logs = service.getActivityLog()
+    const logs: ActivityLogEntry[] = service.getActivityLog()
     const successLog = logs.find(log => log.type === 'success' && log.message === 'File deleted')
 
     expect(successLog).toBeDefined()
     expect(successLog!.details).toBe('test.wav')
   })
 
-  it('should invalidate cache on successful delete', async () => {
+  it('should remove the deleted row from cache on successful delete', async () => {
     const service = new HiDockDeviceService()
     const serviceAny = service as any
 
@@ -3157,8 +3211,30 @@ describe('HiDockDeviceService - Delete Recording', () => {
 
     await service.deleteRecording('test.wav')
 
-    expect(serviceAny.cachedRecordings).toBeNull()
-    expect(serviceAny.cachedRecordingCount).toBe(-1)
+    expect(serviceAny.cachedRecordings).toEqual([])
+    expect(serviceAny.cachedRecordingCount).toBe(0)
+    expect(serviceAny.state.recordingCount).toBe(0)
+  })
+
+  it('removes one confirmed filename from renderer cache without touching Jensen or siblings', () => {
+    const service = new HiDockDeviceService()
+    const serviceAny = service as any
+    serviceAny.cachedRecordings = [
+      { id: '1', filename: 'DELETE-ME.hda' },
+      { id: '2', filename: 'keep-me.hda' }
+    ]
+    serviceAny.cachedRecordingCount = 2
+    serviceAny.state.recordingCount = 2
+    serviceAny.persistCacheToStorage = vi.fn()
+
+    expect(service.removeCachedRecording('delete-me.HDA')).toBe(true)
+
+    expect(service.getCachedRecordings()).toEqual([{ id: '2', filename: 'keep-me.hda' }])
+    expect(serviceAny.cachedRecordingCount).toBe(1)
+    expect(serviceAny.state.recordingCount).toBe(1)
+    expect(serviceAny.persistCacheToStorage).toHaveBeenCalledTimes(1)
+    expect(mockJensen.deleteFile).not.toHaveBeenCalled()
+    expect(mockJensen.listFiles).not.toHaveBeenCalled()
   })
 
   it('should log error on failed delete', async () => {
@@ -3172,7 +3248,7 @@ describe('HiDockDeviceService - Delete Recording', () => {
 
     await service.deleteRecording('test.wav')
 
-    const logs = service.getActivityLog()
+    const logs: ActivityLogEntry[] = service.getActivityLog()
     const errorLog = logs.find(log => log.type === 'error' && log.message === 'Failed to delete file')
 
     expect(errorLog).toBeDefined()
@@ -3461,8 +3537,23 @@ describe('HiDockDeviceService - QA Logging Path', () => {
       shouldLogQa: mockShouldLogQa
     }))
 
+    // Provide electronAPI so the constructor's config-load loop resolves
+    // immediately instead of spinning 20 real 100ms setTimeout retries. With
+    // QA logging enabled here, those retries would each console.log AFTER the
+    // test file tears down — the source of the flaky
+    // "Closing rpc while onUserConsoleLog was pending" EnvironmentTeardownError.
+    ;(window as any).electronAPI = {
+      config: {
+        get: vi.fn(async () => ({ success: true, data: { device: { autoConnect: false } } }))
+      }
+    }
+
     const module = await import('../hidock-device')
     HiDockDeviceService = (module as any).HiDockDeviceService
+  })
+
+  afterEach(() => {
+    delete (window as any).electronAPI
   })
 
   it('should log activity notification count when QA logging is enabled', () => {
@@ -3482,7 +3573,7 @@ describe('HiDockDeviceService - QA Logging Path', () => {
     )
     expect(qaLogs.length).toBeGreaterThan(0)
 
-    consoleSpy.mockRestore()
+    consoleSpy.mockClear()
   })
 })
 
@@ -3650,18 +3741,24 @@ describe('HiDockDeviceService - persistCacheToStorage error path', () => {
       { filename: 'test.wav', size: 1024, duration: 60, dateCreated: new Date() }
     ]
 
-    serviceAny.persistCacheToStorage()
+    try {
+      serviceAny.persistCacheToStorage()
 
-    // Wait for the catch to fire
-    await new Promise(resolve => setTimeout(resolve, 10))
-
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Failed to persist cache'),
-      expect.any(Error)
-    )
-
-    warnSpy.mockRestore()
-    delete (globalThis as any).window
+      // persistCacheToStorage is fire-and-forget; poll until the saveAll
+      // rejection reaches its catch instead of racing it with a fixed sleep.
+      await vi.waitFor(() => {
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining('Failed to persist cache'),
+          expect.any(Error)
+        )
+      }, { timeout: 15000, interval: 25 })
+    } finally {
+      // mockClear, never mockRestore — the spy IS the file-lifetime console
+      // silencer, and restoring would reinstall the real console.warn (see the
+      // silencer note at the top of this file).
+      warnSpy.mockClear()
+      delete (globalThis as any).window
+    }
   })
 
   it('should use current date when dateCreated is missing', () => {
@@ -3698,6 +3795,35 @@ describe('HiDockDeviceService - Realtime/Battery/Bluetooth (not connected)', () 
   beforeEach(async () => {
     vi.clearAllMocks()
     vi.resetModules()
+    // Self-contained mock. Earlier blocks in this file install their own
+    // vi.doMock('../jensen', ...) with a much smaller client, and after
+    // resetModules() that registration is what a bare import picks up — the
+    // realtime/battery/bluetooth methods were missing, so the guarded
+    // not-connected paths blew up instead of returning null/false.
+    vi.doMock('../jensen', () => ({
+      getJensenDevice: vi.fn(() => ({
+        isConnected: vi.fn(() => false),
+        isOpen: vi.fn(() => false),
+        open: vi.fn(),
+        close: vi.fn(),
+        getDeviceInfo: vi.fn(),
+        getCardInfo: vi.fn(),
+        getSettings: vi.fn(),
+        listFiles: vi.fn(() => []),
+        getBatteryStatus: vi.fn(),
+        getBluetoothStatus: vi.fn(),
+        startBluetoothScan: vi.fn(),
+        stopBluetoothScan: vi.fn(),
+        getRealtimeSettings: vi.fn(),
+        getRealtimeData: vi.fn(),
+        startRealtime: vi.fn(),
+        pauseRealtime: vi.fn(),
+        stopRealtime: vi.fn(),
+        onconnect: null,
+        ondisconnect: null
+      })),
+      DeviceModel: { UNKNOWN: 'unknown', H1: 'H1', H1E: 'H1E', P1: 'P1' }
+    }))
     const module = await import('../hidock-device')
     HiDockDeviceService = (module as any).HiDockDeviceService
   })
@@ -3771,5 +3897,71 @@ describe('HiDockDeviceService - Singleton Factory', () => {
     const instance2 = getService()
 
     expect(instance1).toBe(instance2)
+  })
+})
+
+// HIGH-2 (Codex): listRecordings must restore an owning terminal connection status on
+// EVERY scan exit path. The scan enters 'counting-files'; without a terminal transition
+// the UI stays there and useDownloadOrchestrator (which gates on step === 'ready') never
+// starts queued downloads. A SUCCESSFUL scan → 'ready'; a failed/interrupted scan must
+// NOT be 'ready' (it surfaces an honest error state).
+describe('HiDockDeviceService - listRecordings terminal status (HIGH-2)', () => {
+  let HiDockDeviceService: any
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    vi.resetModules()
+    const module = await import('../hidock-device')
+    HiDockDeviceService = (module as any).HiDockDeviceService
+  })
+
+  function makeConnectedService(recordingCount: number) {
+    const service = new HiDockDeviceService()
+    const s = service as any
+    s.state.connected = true
+    s.state.recordingCount = recordingCount
+    s.initializationComplete = true
+    s.cachedRecordings = null
+    s.cachedRecordingCount = -1
+    s.listRecordingsFailureCount = 0
+    s.jensen.isConnected = () => true
+    s.jensen.getLockHolder = () => null
+    return { service, s }
+  }
+
+  it('a completed scan ends at step "ready" so queued downloads can start', async () => {
+    const { service, s } = makeConnectedService(2)
+    s.jensen.listFiles = vi.fn(async () => [
+      { name: 'a.hda', length: 100, duration: 10, time: new Date(), version: 1, signature: 'sig-a' },
+      { name: 'b.hda', length: 200, duration: 20, time: new Date(), version: 1, signature: 'sig-b' }
+    ])
+
+    const recordings = await service.listRecordings()
+
+    expect(recordings).toHaveLength(2)
+    expect(service.getConnectionStatus().step).toBe('ready')
+  })
+
+  it('a scan that THROWS does not end at "ready" — it surfaces an error state', async () => {
+    const { service, s } = makeConnectedService(2)
+    s.jensen.listFiles = vi.fn(async () => { throw new Error('USB decode error') })
+
+    await service.listRecordings()
+
+    const step = service.getConnectionStatus().step
+    expect(step).not.toBe('ready')
+    expect(step).toBe('error')
+  })
+
+  it('an interrupted scan (empty list while device reports files) does not end at "ready"', async () => {
+    const { service, s } = makeConnectedService(2)
+    // Device reports 2 recordings but the scan returns none → interrupted, not empty.
+    s.jensen.listFiles = vi.fn(async () => [])
+
+    await service.listRecordings()
+
+    const step = service.getConnectionStatus().step
+    expect(step).not.toBe('ready')
+    expect(step).toBe('error')
   })
 })

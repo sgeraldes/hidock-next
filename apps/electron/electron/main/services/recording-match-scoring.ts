@@ -23,6 +23,8 @@
  * the combined score decides. Every candidate carries a human-readable reason.
  */
 
+import { countDistinctSpeakers } from './diarization-quality'
+
 // Words that should never, on their own, drive a content match. Generic meeting
 // vocabulary + Spanish/English function words.
 const STOPWORDS = new Set([
@@ -103,6 +105,32 @@ export interface ScoredCandidate {
   isBestMatch: boolean
 }
 
+/**
+ * Hard eligibility boundary for automatic meeting assignment.
+ *
+ * The candidate search intentionally has a +/-30 minute discovery buffer so a
+ * nearby event can still appear in the verification UI. That buffer is not
+ * evidence that the recording belonged to the event. Automatic links require
+ * real temporal overlap (and reject weak all-day/long bridge containment), even
+ * when an LLM finds generic topical vocabulary in both texts.
+ */
+export function isAutomaticMeetingLinkTemporallyEligible(
+  recording: MatchRecordingContext,
+  candidate: MatchCandidateInput
+): boolean {
+  return scoreMeetingCandidates(
+    { ...recording, contentText: null },
+    [candidate]
+  )[0]?.hasOverlap === true
+}
+
+/** Calendar feeds often retain cancelled events as ordinary rows and encode
+ * cancellation only in the subject (for example Outlook's `Cancelada:`).
+ * Those events are historical context, never viable recording candidates. */
+export function isCancelledMeetingSubject(subject: string): boolean {
+  return /^\s*(?:cancelled|canceled|cancelad[oa]s?)\s*(?::|[-–—])/i.test(subject)
+}
+
 function stripAccents(value: string): string {
   return value.normalize('NFD').replace(/[̀-ͯ]/g, '')
 }
@@ -148,7 +176,7 @@ export function scoreMeetingCandidates(
   const recValid = Number.isFinite(recStart)
   const recTokens = recording.contentText ? uniqueTokens(recording.contentText) : []
 
-  const scored = candidates.map((candidate) => {
+  const scored = candidates.filter((candidate) => !isCancelledMeetingSubject(candidate.subject)).map((candidate) => {
     const mStart = Date.parse(candidate.startTime)
     const mEnd = Date.parse(candidate.endTime)
 
@@ -333,12 +361,15 @@ export function countTranscriptSpeakers(transcript: TranscriptContextInput | und
   try {
     const parsed = JSON.parse(transcript.speakers)
     if (!Array.isArray(parsed) || parsed.length === 0) return null
-    const names = new Set<string>()
+    const names: string[] = []
     for (const turn of parsed) {
       const name = turn && typeof turn === 'object' ? (turn as { speaker?: unknown }).speaker : undefined
-      if (typeof name === 'string' && name.trim()) names.add(name.trim())
+      if (typeof name === 'string' && name.trim()) names.push(name.trim())
     }
-    return names.size > 0 ? names.size : null
+    // Scheme-aware: a transcript carrying BOTH stable "Voice XXXXXX" labels and
+    // residual raw "SPEAKER_00" labels must not read as twice as many people.
+    const { speakerCount } = countDistinctSpeakers(names)
+    return speakerCount > 0 ? speakerCount : null
   } catch {
     return null
   }
@@ -353,4 +384,133 @@ export function buildContentText(transcript: TranscriptContextInput | undefined 
   if (topics) parts.push(topics)
   const joined = parts.join(' ').trim()
   return joined || null
+}
+
+// --- Split-recording ("- Part N") meeting coverage --------------------------
+//
+// When the device does not stop between back-to-back meetings, ONE capture
+// covers the tail of meeting A plus the whole of meeting B, and is later split
+// into "<base> - Part 1" / "<base> - Part 2". Both parts legitimately overlap
+// the calendar event and both get linked, so the meeting genuinely spans them.
+//
+// The harm was never the link - it was that consumers had no way to tell WHICH
+// part holds the meeting. getRecordingsForMeeting returned them in unspecified
+// (effectively insertion) order, so anything taking [0] got Part 1: a 25-minute
+// clip whose overlap with the event is the 4 minutes before the conversation
+// actually started, while the real 56-minute interview sat in Part 2. A
+// downstream tool concluded the interview never happened.
+//
+// So: rank by how much of the MEETING each part actually covers, and publish
+// the fraction so a consumer can see "this meeting spans Part 1 and Part 2".
+
+/** `<base> - Part N` decomposition, or null when the name is not a split part. */
+export interface RecordingPartName {
+  baseName: string
+  partNumber: number
+}
+
+const PART_SUFFIX = /^(?<base>.+?)\s+-\s+Part\s+(?<part>\d+)$/i
+
+/** Parse a split-part filename. Extension is ignored; `null` when not a part. */
+export function parsePartName(filename: string | null | undefined): RecordingPartName | null {
+  if (!filename) return null
+  const withoutExt = filename.replace(/\.[^.\\/]+$/, '')
+  const match = PART_SUFFIX.exec(withoutExt.trim())
+  const groups = match?.groups
+  if (!groups) return null
+  const partNumber = Number(groups.part)
+  if (!Number.isFinite(partNumber) || partNumber < 1) return null
+  return { baseName: groups.base.trim(), partNumber }
+}
+
+export interface CoverageRecordingInput {
+  filename?: string | null
+  dateRecorded: string
+  durationSeconds?: number | null
+}
+
+export interface CoverageMeetingInput {
+  startTime: string
+  endTime: string
+}
+
+export interface MeetingCoverage {
+  /** Seconds of the meeting window this recording actually spans. */
+  overlapSeconds: number
+  /** Share of the MEETING covered by this recording (0..1). The ranking signal. */
+  meetingCoverage: number
+  /** Share of the RECORDING that falls inside the meeting (0..1). */
+  recordingCoverage: number
+  /** Part number when the filename is `<base> - Part N`, else null. */
+  partNumber: number | null
+  /** Base name shared with sibling parts, else null. */
+  partBaseName: string | null
+}
+
+const EMPTY_COVERAGE: MeetingCoverage = {
+  overlapSeconds: 0,
+  meetingCoverage: 0,
+  recordingCoverage: 0,
+  partNumber: null,
+  partBaseName: null
+}
+
+/** How much of `meeting` this recording covers, and its split-part identity. */
+export function computeMeetingCoverage(
+  recording: CoverageRecordingInput,
+  meeting: CoverageMeetingInput
+): MeetingCoverage {
+  const part = parsePartName(recording.filename)
+  const partFields = {
+    partNumber: part?.partNumber ?? null,
+    partBaseName: part?.baseName ?? null
+  }
+
+  const recStart = Date.parse(recording.dateRecorded)
+  const meetStart = Date.parse(meeting.startTime)
+  const meetEnd = Date.parse(meeting.endTime)
+  const durationSeconds = recording.durationSeconds ?? 0
+  if (
+    !Number.isFinite(recStart) ||
+    !Number.isFinite(meetStart) ||
+    !Number.isFinite(meetEnd) ||
+    meetEnd <= meetStart ||
+    durationSeconds <= 0
+  ) {
+    return { ...EMPTY_COVERAGE, ...partFields }
+  }
+
+  const recEnd = recStart + durationSeconds * 1000
+  const overlapMs = Math.max(0, Math.min(recEnd, meetEnd) - Math.max(recStart, meetStart))
+  const meetingMs = meetEnd - meetStart
+  const recordingMs = recEnd - recStart
+  return {
+    overlapSeconds: Math.round(overlapMs / 1000),
+    meetingCoverage: round3(overlapMs / meetingMs),
+    recordingCoverage: round3(overlapMs / recordingMs),
+    ...partFields
+  }
+}
+
+function round3(value: number): number {
+  return Math.round(value * 1000) / 1000
+}
+
+/**
+ * Order recordings so the one that actually holds the meeting comes FIRST.
+ *
+ * Primary key is meeting coverage (descending) - the part containing the bulk
+ * of the meeting wins over one that merely clips its start edge. Ties fall back
+ * to chronological order so non-split recordings keep their familiar ordering.
+ */
+export function rankRecordingsByMeetingCoverage<
+  T extends CoverageRecordingInput
+>(recordings: T[], meeting: CoverageMeetingInput): Array<T & MeetingCoverage> {
+  return recordings
+    .map((recording) => ({ ...recording, ...computeMeetingCoverage(recording, meeting) }))
+    .sort(
+      (a, b) =>
+        b.meetingCoverage - a.meetingCoverage ||
+        Date.parse(a.dateRecorded) - Date.parse(b.dateRecorded)
+    )
 }

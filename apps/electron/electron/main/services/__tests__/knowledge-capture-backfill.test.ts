@@ -23,7 +23,8 @@ vi.mock('../file-storage', () => ({
 import { initializeDatabase, closeDatabase, run, queryOne } from '../database'
 import {
   backfillKnowledgeCaptures,
-  ensureKnowledgeCaptureForRecording
+  ensureKnowledgeCaptureForRecording,
+  ensureNoSpeechKnowledgeCapture
 } from '../knowledge-capture-backfill'
 
 function seedRecording(id: string, opts: { filename?: string; date?: string; meetingId?: string | null } = {}): void {
@@ -153,5 +154,50 @@ describe('ensureKnowledgeCaptureForRecording', () => {
     seedRecording('r-no-transcript')
     expect(ensureKnowledgeCaptureForRecording('r-no-transcript')).toBeNull()
     expect(captureCount()).toBe(0)
+  })
+})
+
+describe('ensureNoSpeechKnowledgeCapture', () => {
+  it('creates a transcript-free capture and deterministically marks it garbage', () => {
+    seedRecording('r-no-speech', { filename: 'silence.wav' })
+    run("UPDATE recordings SET status = 'no_speech', transcription_status = 'no_speech' WHERE id = ?", ['r-no-speech'])
+
+    const id = ensureNoSpeechKnowledgeCapture('r-no-speech')
+    expect(id).toBeTruthy()
+    const cap = queryOne<any>('SELECT * FROM knowledge_captures WHERE id = ?', [id])
+    expect(cap.title).toBe('silence.wav')
+    expect(cap.quality_rating).toBe('garbage')
+    expect(JSON.parse(cap.quality_reasons)).toEqual(['no_substance'])
+    expect(cap.quality_confidence).toBe(1)
+    expect(cap.quality_source).toBe('ai')
+  })
+
+  it('boot backfill heals historical no-speech rows without a transcript', () => {
+    seedRecording('r-historical', { filename: 'historical-silence.wav' })
+    run("UPDATE recordings SET transcription_status = 'no_speech' WHERE id = ?", ['r-historical'])
+
+    const first = backfillKnowledgeCaptures()
+    expect(first).toEqual({ created: 1, existing: 0 })
+    expect(queryOne<any>(
+      'SELECT quality_rating FROM knowledge_captures WHERE source_recording_id = ?',
+      ['r-historical']
+    )?.quality_rating).toBe('garbage')
+
+    const second = backfillKnowledgeCaptures()
+    expect(second).toEqual({ created: 0, existing: 1 })
+    expect(captureCount()).toBe(1)
+  })
+
+  it('does not overwrite a user-authored value rating', () => {
+    seedRecording('r-user')
+    const id = ensureNoSpeechKnowledgeCapture('r-user')!
+    run(
+      "UPDATE knowledge_captures SET quality_rating = 'valuable', quality_source = 'user' WHERE id = ?",
+      [id]
+    )
+
+    ensureNoSpeechKnowledgeCapture('r-user')
+    const cap = queryOne<any>('SELECT quality_rating, quality_source FROM knowledge_captures WHERE id = ?', [id])
+    expect(cap).toMatchObject({ quality_rating: 'valuable', quality_source: 'user' })
   })
 })

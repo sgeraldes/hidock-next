@@ -1,13 +1,19 @@
 import Database from 'better-sqlite3'
 import { existsSync, readFileSync } from 'fs'
-import { join } from 'path'
+import { join, normalize, resolve as resolvePath } from 'path'
 import { randomUUID } from 'crypto'
 import { getDatabasePath } from './file-storage'
+
+// Re-exported so consumers (e.g. vector-store's binary cache) can locate the
+// DB file without pulling the file-storage module graph into their tests.
+export { getDatabasePath }
 import { DatabaseEngine, getTableColumns, type SqlJsDatabase } from '@hidock/database'
 import { normalizeName, isGenericSpeakerLabel, detectAmbiguousName } from './entity-normalize'
 import { getEventBus } from './event-bus'
+import { isCancelledMeetingSubject, scoreMeetingCandidates } from './recording-match-scoring'
+import type { QualityRating } from '@/types/knowledge'
 
-const SCHEMA_VERSION = 39
+const SCHEMA_VERSION = 54
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -26,8 +32,17 @@ CREATE TABLE IF NOT EXISTS meetings (
     meeting_url TEXT,
     is_all_day INTEGER DEFAULT 0,
     all_day_date TEXT,
+    calendar_sync_token TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- The last fully committed ICS snapshot. Meeting rows are retained for history,
+-- but automatic attribution must only consider rows seen in this snapshot.
+CREATE TABLE IF NOT EXISTS calendar_sync_state (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    active_token TEXT,
+    completed_at TEXT
 );
 
 -- Recordings from HiDock device
@@ -72,6 +87,10 @@ CREATE TABLE IF NOT EXISTS recordings (
 CREATE TABLE IF NOT EXISTS knowledge_captures (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
+    -- User-authored content title. The title column remains the legacy/source label for
+    -- compatibility. AI title suggestions live on transcripts and meeting
+    -- subjects live on meetings. These fields must never overwrite each other.
+    user_title TEXT,
     summary TEXT,
     category TEXT CHECK(category IN ('meeting', 'interview', '1:1', 'brainstorm', 'note', 'other')) DEFAULT 'meeting',
     status TEXT CHECK(status IN ('processing', 'ready', 'enriched')) DEFAULT 'ready',
@@ -80,6 +99,13 @@ CREATE TABLE IF NOT EXISTS knowledge_captures (
     quality_rating TEXT CHECK(quality_rating IN ('valuable', 'archived', 'low-value', 'garbage', 'unrated')) DEFAULT 'unrated',
     quality_confidence REAL,
     quality_assessed_at TEXT,
+    -- Content-based VALUE classification, v42/F16. quality_reasons is a JSON
+    -- array of fixed tags, see VALUE_REASON_TAGS in value-classification.ts.
+    -- quality_source distinguishes an AI-set rating from a user-set one so
+    -- re-analysis can safely refresh an AI rating without ever touching a
+    -- rating the user set by hand, see applyCaptureValueClassification.
+    quality_reasons TEXT,
+    quality_source TEXT CHECK(quality_source IN ('ai', 'user')),
 
     -- Storage tier and retention
     storage_tier TEXT CHECK(storage_tier IN ('hot', 'cold', 'expiring', 'deleted')) DEFAULT 'hot',
@@ -260,6 +286,16 @@ CREATE TABLE IF NOT EXISTS transcripts (
     transcription_model TEXT,
     title_suggestion TEXT,
     question_suggestions TEXT,
+    -- Immutable stage-run references (v52). Provider/model labels displayed in
+    -- the UI are resolved through these runs, never guessed from current config.
+    transcription_run_id TEXT,
+    diarization_run_id TEXT,
+    summary_run_id TEXT,
+    title_run_id TEXT,
+    meeting_resolution_run_id TEXT,
+    diarization_quality_status TEXT,
+    diarization_quality TEXT,
+    mentioned_people TEXT,
     -- Meeting-timeline data (v39): windowed sentiment + event markers, both JSON.
     -- sentiment_segments: [{startSec,endSec,score:-1..1}] time-series across the recording.
     -- event_markers: [{id,kind,atSec,label,refId}] action/decision markers with audio offsets.
@@ -268,6 +304,38 @@ CREATE TABLE IF NOT EXISTS transcripts (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (recording_id) REFERENCES recordings(id)
 );
+
+-- Stage-level processing provenance (v52 / SPEC-009). One provider call can
+-- produce several output stages, but every displayed result references the
+-- exact immutable run that produced it.
+CREATE TABLE IF NOT EXISTS processing_runs (
+    id TEXT PRIMARY KEY,
+    recording_id TEXT NOT NULL,
+    transcript_id TEXT,
+    stage TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    tool TEXT,
+    model TEXT,
+    version TEXT,
+    execution TEXT CHECK(execution IN ('local', 'cloud', 'provider-managed')),
+    status TEXT NOT NULL CHECK(status IN ('pending', 'running', 'completed', 'degraded', 'failed', 'cancelled')),
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    parent_run_ids TEXT,
+    output_refs TEXT,
+    usage_json TEXT,
+    estimated_cost_amount REAL,
+    estimated_cost_currency TEXT,
+    cost_method TEXT,
+    quality_status TEXT,
+    quality_json TEXT,
+    error_message TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+    FOREIGN KEY (transcript_id) REFERENCES transcripts(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_processing_runs_recording_stage
+    ON processing_runs(recording_id, stage, created_at DESC);
 
 -- Embeddings for RAG
 CREATE TABLE IF NOT EXISTS embeddings (
@@ -312,6 +380,12 @@ CREATE TABLE IF NOT EXISTS transcription_service_lock (
 );
 
 -- Download queue (v20) - spec-007
+-- cancel_reason (v40): origin of a 'cancelled' status — 'user' (deliberate cancel,
+-- terminal-suppressed from auto-retry AND from reconciliation re-queue until a
+-- manual Retry) vs 'interrupted' (disconnect/re-sync, auto-retried on reconnect).
+-- NOTE: never put a semicolon character inside schema comments — the executor
+-- splits statements on that character, so the remainder of a comment line
+-- would run as (broken) SQL.
 CREATE TABLE IF NOT EXISTS download_queue (
     id TEXT PRIMARY KEY,
     filename TEXT NOT NULL UNIQUE,
@@ -322,6 +396,7 @@ CREATE TABLE IF NOT EXISTS download_queue (
     started_at TEXT,
     completed_at TEXT,
     recording_date TEXT,
+    cancel_reason TEXT CHECK(cancel_reason IN ('user', 'interrupted') OR cancel_reason IS NULL),
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -371,8 +446,49 @@ CREATE TABLE IF NOT EXISTS synced_files (
     synced_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
+-- v51 PURGE TOMBSTONES - prevents RESURRECTION of a hard-purged recording:
+-- the cascade deletes synced_files + recordings, so reconciliation would see
+-- the still-on-device file as "new" and re-download it (with transcript,
+-- actionables, embeddings regenerating behind it). Filename-only, no content.
+CREATE TABLE IF NOT EXISTS purged_files (
+    filename TEXT PRIMARY KEY,
+    purged_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Contacts extracted from meeting attendees (renamed to People in UI)
 -- Note: email is NOT UNIQUE - multiple contacts can share an email (spec-013)
+-- v45 (F18/round-28) ENTITY-level provenance. A contact ENTITY is created by TWO
+-- independent origins and the NON-OWNER identity surfaces must gate the entity by
+-- its origin (ADV27-1), not just its membership rows.
+--   source = user        -- manual "Add Person" / graph promotion, always visible
+--   source = calendar    -- calendar sync / connector import, always visible
+--   source = transcript  -- AI-extracted by applyTranscriptEntities, visible only
+--                           while a backing membership OR its source_recording_id
+--                           resolves to an eligible recording
+--   source IS NULL       -- legacy (pre-v45), derived from membership provenance,
+--                           an unassociable legacy entity is fail-closed suppressed
+-- source_recording_id is the recording whose transcript minted a transcript entity
+-- (used to gate a transcript entity that has NO membership rows yet).
+-- v46 (F18/round-31, ADV29-2) PER-FIELD provenance. role is the only contact
+-- scalar an AI transcript ENRICHES (org-reconciler.applyTranscriptEntities fills an
+-- empty role from a recording). Entity-level visibility cannot retract ONE field:
+-- a contact visible via an eligible recording B keeps a role enriched from an
+-- excluded recording A. role_source_recording_id records the recording that
+-- supplied the current role, and a NON-OWNER read BLANKS role when that recording
+-- is ineligible.
+-- v48 (F18/round-51, ADV49-2, tightened round-52 / ADV50-1) role_origin PROVENANCE-
+-- TRUST MARKER. A NULL role_source_recording_id is NOT proof of a calendar/manual role
+-- — pre-v46 applyTranscriptEntities wrote transcript-derived roles WITHOUT the column
+-- too, and it FILLED empty roles on calendar/user contacts as well, so a
+-- calendar/user-CLASSIFIED contact's NULL-provenance role is NOT proof of structural
+-- authorship either. role_origin carries POSITIVE authorship evidence and disambiguates
+-- a NULL-provenance role: 'manual' (owner edit) | 'calendar' (calendar/connector create)
+-- | 'user' (manual create) ⇒ structural/owner-authored (SHOWN),
+-- 'transcript' ⇒ transcript-derived (also stamps role_source_recording_id, gated by it),
+-- 'legacy' ⇒ pre-v48 unattributable NULL-provenance role (BLANKED on non-owner, fail-closed),
+-- NULL ⇒ marker-less row (only directly-inserted/test rows, since every production write
+-- path stamps role_origin) ⇒ AMBIGUOUS ⇒ BLANKED, fail-closed (no entity-source fallback:
+-- calendar/user CLASSIFICATION ≠ calendar/manual AUTHORSHIP, ADV50-1).
 CREATE TABLE IF NOT EXISTS contacts (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -385,12 +501,20 @@ CREATE TABLE IF NOT EXISTS contacts (
     first_seen_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
     meeting_count INTEGER DEFAULT 0,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    source TEXT,
+    source_recording_id TEXT,
+    role_source_recording_id TEXT,
+    role_origin TEXT
 );
 
 -- User-created projects for organizing meetings. Projects are full hubs (v29):
 -- folder_path binds a project to a location on disk (repo, docs folder), url binds
 -- it to a webpage. project_notes below holds its issues/risks/notes.
+-- v45 (F18/round-28) ENTITY-level provenance -- see contacts above. A project is
+-- 'user' (manual create), 'transcript' (AI-extracted by applyTranscriptEntities),
+-- or NULL legacy. Projects are never in calendar data, so there is no 'calendar'
+-- origin. A manual project tag is 'user'.
 CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -398,7 +522,16 @@ CREATE TABLE IF NOT EXISTS projects (
     status TEXT CHECK(status IN ('active', 'archived')) DEFAULT 'active',
     folder_path TEXT,
     url TEXT,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    -- Durable provenance (v49): 'manual' = explicit user create, 'discovered' =
+    -- reconciler auto-create from a transcript mention. NULL = legacy/unknown.
+    -- dismissDiscoveredProject requires 'discovered' (fail-closed): a project of
+    -- unproven origin can never be tombstone-deleted through the dismiss path.
+    origin TEXT CHECK(origin IN ('manual', 'discovered')),
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    -- Entity-level identity provenance (v45): 'user'/'calendar'/'transcript' +
+    -- the recording that minted a transcript-derived project.
+    source TEXT,
+    source_recording_id TEXT
 );
 
 -- Project issues / risks / free-form notes (v29). Each row is one item tracked
@@ -415,10 +548,21 @@ CREATE TABLE IF NOT EXISTS project_notes (
 );
 
 -- Junction table: Meeting-Contact relationship
+-- v44 (F18/round-27) per-row provenance. A membership row is written by TWO
+-- independent sources and the NON-OWNER identity surfaces must gate them per ROW,
+-- not per meeting (a calendar meeting also carries transcript-derived rows).
+--   source = calendar   -- structural (calendar/user-authored), always eligible
+--   source = transcript -- AI-extracted from source_recording_id, eligible only
+--                          while that recording is eligible
+--   source IS NULL      -- legacy/unclassified (pre-v44), ineligible fail-closed
+-- source_recording_id is the recording whose transcript produced a transcript
+-- row (NULL for calendar-authored / legacy).
 CREATE TABLE IF NOT EXISTS meeting_contacts (
     meeting_id TEXT NOT NULL,
     contact_id TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'attendee',
+    source TEXT,
+    source_recording_id TEXT,
     PRIMARY KEY (meeting_id, contact_id),
     FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE,
     FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
@@ -435,6 +579,55 @@ CREATE TABLE IF NOT EXISTS transcript_speakers (
     UNIQUE(recording_id, speaker_label),
     FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
     FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+);
+
+-- Persistent acoustic speaker memory (v53). A voice cluster is anonymous until
+-- independently anchored to a contact. Embeddings are model-scoped and never
+-- compared across incompatible model/version/dimension triples.
+CREATE TABLE IF NOT EXISTS voice_clusters (
+    id TEXT PRIMARY KEY,
+    model TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    embedding_dimension INTEGER NOT NULL,
+    centroid_json TEXT NOT NULL,
+    observation_count INTEGER NOT NULL DEFAULT 0,
+    total_speech_seconds REAL NOT NULL DEFAULT 0,
+    contact_id TEXT,
+    contact_link_method TEXT,
+    contact_link_confidence REAL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS voice_cluster_observations (
+    id TEXT PRIMARY KEY,
+    voice_cluster_id TEXT NOT NULL,
+    recording_id TEXT NOT NULL,
+    local_speaker_label TEXT NOT NULL,
+    embedding_json TEXT NOT NULL,
+    speech_seconds REAL NOT NULL,
+    quality_score REAL,
+    similarity REAL,
+    runner_up_margin REAL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(recording_id, local_speaker_label, voice_cluster_id),
+    FOREIGN KEY (voice_cluster_id) REFERENCES voice_clusters(id) ON DELETE CASCADE,
+    FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS recording_voice_clusters (
+    recording_id TEXT NOT NULL,
+    local_speaker_label TEXT NOT NULL,
+    transcript_speaker_label TEXT,
+    voice_cluster_id TEXT NOT NULL,
+    match_status TEXT NOT NULL CHECK(match_status IN ('matched', 'new', 'needs_review')),
+    similarity REAL,
+    runner_up_margin REAL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (recording_id, local_speaker_label),
+    FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+    FOREIGN KEY (voice_cluster_id) REFERENCES voice_clusters(id) ON DELETE CASCADE
 );
 
 -- Mention resolutions: per-recording assignment of an ambiguous bucket name
@@ -457,9 +650,15 @@ CREATE TABLE IF NOT EXISTS mention_resolutions (
 );
 
 -- Junction table: Meeting-Project relationship
+-- v44 (F18/round-27) per-row provenance -- see meeting_contacts above. Projects
+-- are never carried in calendar attendee data, so a calendar-marked row here is
+-- a USER-authored (manual) project tag. transcript rows are AI-extracted and
+-- gated by source_recording_id. NULL is legacy (ineligible fail-closed).
 CREATE TABLE IF NOT EXISTS meeting_projects (
     meeting_id TEXT NOT NULL,
     project_id TEXT NOT NULL,
+    source TEXT,
+    source_recording_id TEXT,
     PRIMARY KEY (meeting_id, project_id),
     FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE,
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -546,6 +745,11 @@ CREATE INDEX IF NOT EXISTS idx_projects_name ON projects(name);
 CREATE INDEX IF NOT EXISTS idx_meeting_contacts_meeting ON meeting_contacts(meeting_id);
 CREATE INDEX IF NOT EXISTS idx_meeting_contacts_contact ON meeting_contacts(contact_id);
 CREATE INDEX IF NOT EXISTS idx_transcript_speakers_recording ON transcript_speakers(recording_id);
+CREATE INDEX IF NOT EXISTS idx_voice_clusters_model ON voice_clusters(model, model_version, embedding_dimension);
+CREATE INDEX IF NOT EXISTS idx_voice_clusters_contact ON voice_clusters(contact_id);
+CREATE INDEX IF NOT EXISTS idx_voice_observations_recording ON voice_cluster_observations(recording_id);
+CREATE INDEX IF NOT EXISTS idx_voice_observations_cluster ON voice_cluster_observations(voice_cluster_id);
+CREATE INDEX IF NOT EXISTS idx_recording_voice_clusters_cluster ON recording_voice_clusters(voice_cluster_id);
 CREATE INDEX IF NOT EXISTS idx_mention_resolutions_recording ON mention_resolutions(recording_id);
 CREATE INDEX IF NOT EXISTS idx_mention_resolutions_contact ON mention_resolutions(resolved_contact_id);
 CREATE INDEX IF NOT EXISTS idx_meeting_projects_meeting ON meeting_projects(meeting_id);
@@ -612,6 +816,68 @@ CREATE TABLE IF NOT EXISTS project_aliases (
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
+-- Discovery tombstones (v41). Dismissing an auto-discovered project records its
+-- normalized name here so a later transcript re-analysis does NOT silently
+-- re-create it (dismiss→reappear loop). Deliberately NOT keyed to a project id:
+-- the dismissed project row is deleted, and project_aliases cascades away with
+-- it, so this standalone table is the durable memory. It blocks ONLY the
+-- reconciler's auto-create path — manual creation always wins and clears the
+-- tombstone (see createProject).
+CREATE TABLE IF NOT EXISTS project_discovery_rejections (
+    name_norm TEXT PRIMARY KEY,
+    original_name TEXT NOT NULL,
+    source_meeting_id TEXT,
+    rejected_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Discovery observation ledger (v43, F12). Every plausible project name a
+-- transcript analysis extracts is recorded here BEFORE anything is created, one
+-- row per (name, source). The reconciler auto-creates a project only once a name
+-- clears the plausibility floor AND appears in >= 2 DISTINCT sources. Everything
+-- else stays here as a deferred discovery suggestion the user can promote.
+-- Recurrence is only honest if the key is STABLE across re-processing, so
+-- source_key identifies the CAPTURE ('r:<recordingId>', preferred) rather than
+-- the meeting: a recording's id never changes, whereas its meeting_id is
+-- assigned late by correlation and rewritten by occurrence merges. Keying on the
+-- meeting let one conversation bank two sightings (once as 'r:x' before
+-- correlation, again as 'm:y' after). meeting_id is carried alongside and the
+-- count collapses on it, so two recordings of one meeting still count once.
+CREATE TABLE IF NOT EXISTS project_discovery_observations (
+    name_norm TEXT NOT NULL,
+    -- Stable capture identity: 'r:<recordingId>', or 'm:<meetingId>' when the
+    -- mention arrives with no recording at all.
+    source_key TEXT NOT NULL,
+    -- Conversation this capture belongs to, when known. NULL for a standalone
+    -- recording. Repointed by mergeDuplicateMeetingOccurrences like every other
+    -- meeting-referencing table.
+    meeting_id TEXT,
+    original_name TEXT NOT NULL,
+    -- Best name-plausibility score seen for this name (project-discovery-gate.ts).
+    score REAL NOT NULL DEFAULT 0,
+    first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (name_norm, source_key)
+);
+
+
+-- Resumable value-classification backfill cursor (v45/F16/spec-003). Durable
+-- per-capture marker so the ~1,900-capture backfill can be cancelled/resumed
+-- across runs (and across app restarts) without re-billing an LLM call for a
+-- capture already classified. status: 'in_progress' (reserved, mid-attempt) |
+-- 'classified' (done) | 'failed' (parked after MAX_ATTEMPTS). run_id
+-- disambiguates a stale 'in_progress' row left by a crashed/killed run from
+-- one belonging to the CURRENT run (Codex adversarial review AR-3). attempts
+-- increments ONCE per durable attempt, at reserve time (AR-4) — in-run
+-- transient retries (backoff/429) do not touch it. See value-backfill.ts.
+CREATE TABLE IF NOT EXISTS value_backfill_state (
+    capture_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    result_rating TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    run_id TEXT,
+    last_error TEXT,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 -- Identity suggestion queue (v27). The 0.5–0.8 resolver band lands here as
 -- reviewable cards. Accept writes an alias and links, reject blocks the pairing.
 CREATE TABLE IF NOT EXISTS identity_suggestions (
@@ -623,6 +889,12 @@ CREATE TABLE IF NOT EXISTS identity_suggestions (
     evidence TEXT,
     status TEXT CHECK(status IN ('pending', 'accepted', 'rejected')) DEFAULT 'pending',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    -- v44 (F18/round-27) — authoritative source recording id(s) for a
+    -- TRANSCRIPT-created suggestion (applyTranscriptEntities), stored as a JSON
+    -- array. Lets the surface + accept revalidation gate a suggestion that has NO
+    -- graph evidence through the recording allowlist (ADV26-1). NULL for
+    -- corpus/graph-derived (discovery) suggestions and legacy rows.
+    source_recording_ids TEXT,
     UNIQUE(kind, candidate_name, target_id)
 );
 
@@ -636,6 +908,14 @@ CREATE TABLE IF NOT EXISTS merge_journal (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL CHECK(kind IN ('contact', 'project')),
     keeper_id TEXT NOT NULL,
+    -- loser_id (v42): queryable loser identity for the dependency-aware
+    -- newest-first unmerge guard (also inside loser_snapshot, but the guard
+    -- must not JSON-parse every open journal on every unmerge).
+    loser_id TEXT,
+    -- seq (v42): explicit immutable merge order. rowid is an implementation
+    -- detail (VACUUM and dump/restore may renumber it), so ordering guards key
+    -- on this instead.
+    seq INTEGER,
     loser_snapshot TEXT NOT NULL,
     repointed_manifest TEXT NOT NULL,
     folded_fields TEXT,
@@ -689,7 +969,7 @@ CREATE TABLE IF NOT EXISTS turn_speaker_overrides (
 -- Speaker splits (v37). Forks a diarization label into an independently
 -- assignable derived label from a chosen turn onward. Fixes the merged-speaker
 -- case (one label = two real people): split at the boundary, then assign each
--- half its own contact. from_turn_index is the first turn of the derived label;
+-- half its own contact. from_turn_index is the first turn of the derived label.
 -- derived_label (e.g. "Speaker 1 · B") becomes a first-class key in
 -- transcript_speakers. Reversible by deleting the row ("merge back").
 CREATE TABLE IF NOT EXISTS speaker_splits (
@@ -1080,7 +1360,7 @@ const MIGRATIONS: Record<number, () => void> = {
         // Table exists, check for ALL columns added during redesign
         const captureInfo = database.exec("PRAGMA table_info(knowledge_captures)")
         const existingCols = captureInfo[0].values.map(col => col[1])
-        
+
         const requiredColumns = [
           { name: 'category', def: "category TEXT CHECK(category IN ('meeting', 'interview', '1:1', 'brainstorm', 'note', 'other')) DEFAULT 'meeting'" },
           { name: 'status', def: "status TEXT CHECK(status IN ('processing', 'ready', 'enriched')) DEFAULT 'ready'" },
@@ -2067,8 +2347,958 @@ const MIGRATIONS: Record<number, () => void> = {
       }
     }
     console.log('Migration v39 complete')
+  },
+
+  40: () => {
+    // v40: download_queue.cancel_reason — durable origin of a 'cancelled' download.
+    // 'user' = deliberate cancel, terminal-suppressed from auto-retry AND from
+    // reconciliation re-queue (across restarts) until a manual Retry clears it;
+    // 'interrupted' = disconnect/re-sync, auto-retried on reconnect. NULL for
+    // pre-v40 rows (treated as 'interrupted' for backward compatibility).
+    // Idempotent: guarded ALTER.
+    console.log('Running migration to schema v40: download_queue.cancel_reason')
+    const database = getDatabase()
+    const cols = getTableColumns(database, 'download_queue')
+    if (cols.length > 0 && !cols.includes('cancel_reason')) {
+      try {
+        database.run('ALTER TABLE download_queue ADD COLUMN cancel_reason TEXT')
+      } catch (e) {
+        console.warn('[Migration v40] add cancel_reason failed:', e)
+      }
+    }
+    console.log('Migration v40 complete')
+  },
+
+  41: () => {
+    // v41: project_discovery_rejections — durable tombstones for dismissed
+    // auto-discovered projects. Without this, dismissing a spurious discovery
+    // (delete) left nothing behind and the next transcript re-analysis re-created
+    // the same project. Keyed by normalized name (the deleted project row and its
+    // cascading aliases cannot carry the memory). Idempotent: CREATE IF NOT EXISTS.
+    console.log('Running migration to schema v41: project_discovery_rejections')
+    const database = getDatabase()
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS project_discovery_rejections (
+          name_norm TEXT PRIMARY KEY,
+          original_name TEXT NOT NULL,
+          source_meeting_id TEXT,
+          rejected_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+      `)
+    } catch (e) {
+      console.warn('[Migration v41] create project_discovery_rejections failed:', e)
+    }
+    console.log('Migration v41 complete')
+  },
+
+  42: () => {
+    // v42: projects.origin — durable provenance for the dismiss-discovered path.
+    // 'manual' = explicit user create, 'discovered' = reconciler auto-create.
+    // Legacy rows stay NULL (unknown) and are fail-closed: dismissDiscovered
+    // refuses them, so a renderer bug or direct IPC call can never tombstone-
+    // delete a manually created project. Idempotent: guarded ALTER.
+    console.log('Running migration to schema v42: projects.origin')
+    const database = getDatabase()
+    const cols = getTableColumns(database, 'projects')
+    if (cols.length > 0 && !cols.includes('origin')) {
+      try {
+        database.run('ALTER TABLE projects ADD COLUMN origin TEXT')
+      } catch (e) {
+        console.warn('[Migration v42] add origin failed:', e)
+      }
+    }
+
+    // merge_journal.loser_id + seq (still v42 — this version exists only on
+    // this lane and was never integrated or published, so the journal columns
+    // for the dependency-aware newest-first unmerge guard extend the SAME
+    // migration instead of minting v43). loser_id makes the loser queryable
+    // without JSON-parsing every snapshot; seq is the explicit immutable merge
+    // order (rowid can be renumbered by VACUUM/dump-restore). Backfill:
+    // loser_id from the snapshot's $.id, seq from rowid — rowid is monotonic
+    // for rows that have never been renumbered, and any historical renumbering
+    // predates the guard, so it is the best available witness of merge order.
+    const journalCols = getTableColumns(database, 'merge_journal')
+    if (journalCols.length > 0) {
+      if (!journalCols.includes('loser_id')) {
+        try {
+          database.run('ALTER TABLE merge_journal ADD COLUMN loser_id TEXT')
+        } catch (e) {
+          console.warn('[Migration v42] add merge_journal.loser_id failed:', e)
+        }
+      }
+      if (!journalCols.includes('seq')) {
+        try {
+          database.run('ALTER TABLE merge_journal ADD COLUMN seq INTEGER')
+        } catch (e) {
+          console.warn('[Migration v42] add merge_journal.seq failed:', e)
+        }
+      }
+      // Backfills run UNCONDITIONALLY (WHERE ... IS NULL makes them idempotent):
+      // repairPhase may have force-added the columns on this same boot — or an
+      // earlier FAILED v42 attempt may have added both nullable columns and
+      // died before filling them — in which case the includes-guards above
+      // skip the ALTERs but legacy rows still need their values.
+      //
+      // seq is ESSENTIAL (the unmerge ordering guard keys on it) and does not
+      // depend on snapshot validity, so it runs first, alone, and a failure
+      // RETHROWS — v42 must not be recorded over NULL-seq journals (same
+      // policy as the tombstone re-key below), or they would be stranded
+      // forever behind a recorded version with ordering unenforced.
+      try {
+        database.run('UPDATE merge_journal SET seq = rowid WHERE seq IS NULL')
+      } catch (e) {
+        console.warn('[Migration v42] merge_journal seq backfill failed:', e)
+        throw e
+      }
+      // loser_id is backfilled per-row behind json_valid so ONE malformed
+      // loser_snapshot cannot abort the statement and strand every valid row.
+      // Malformed rows are logged and keep loser_id NULL — the unmerge guard
+      // rejects them fail-closed (unreadable snapshot), never silently orders
+      // or undoes them. An unexpected statement failure still rethrows.
+      try {
+        const malformed = queryAll<{ id: string }>(
+          'SELECT id FROM merge_journal WHERE loser_id IS NULL AND NOT json_valid(loser_snapshot)'
+        )
+        if (malformed.length > 0) {
+          console.warn(
+            `[Migration v42] ${malformed.length} merge_journal row(s) have a malformed loser_snapshot and stay ` +
+              `un-unmergeable (fail-closed): ${malformed.map((r) => r.id).join(', ')}`
+          )
+        }
+        database.run(
+          "UPDATE merge_journal SET loser_id = json_extract(loser_snapshot, '$.id') " +
+            'WHERE loser_id IS NULL AND json_valid(loser_snapshot)'
+        )
+      } catch (e) {
+        console.warn('[Migration v42] merge_journal loser_id backfill failed:', e)
+        throw e
+      }
+    }
+
+    // Re-key v41 tombstones under the NFKC name normalization that ships with
+    // v42. v41 wrote name_norm with the pre-NFKC normalizeName, so a tombstone
+    // recorded under a decomposed (NFD) or compatibility form no longer matches
+    // post-v42 lookups: re-analysis would resurrect the dismissed project, and a
+    // manual re-create could never clear the stranded key. Recompute every key
+    // from original_name in one transaction. NFKC collisions (two old keys
+    // folding to one) are resolved deterministically: keep the NEWEST rejection
+    // (latest rejected_at, ties broken by old name_norm), drop the rest — the
+    // newest row is the user's most recent dismissal decision for that name.
+    try {
+      runInTransaction(() => {
+        const rows = queryAll<{
+          name_norm: string
+          original_name: string
+          source_meeting_id: string | null
+          rejected_at: string | null
+        }>(
+          'SELECT name_norm, original_name, source_meeting_id, rejected_at FROM project_discovery_rejections ' +
+            'ORDER BY rejected_at DESC, name_norm DESC'
+        )
+        let rekeyed = 0
+        const winners = new Map<string, (typeof rows)[number] & { oldNorm: string }>()
+        for (const row of rows) {
+          const newNorm = normalizeName(row.original_name)
+          if (!newNorm) continue
+          // Rows are newest-first, so the first row seen per new key wins.
+          if (!winners.has(newNorm)) winners.set(newNorm, { ...row, oldNorm: row.name_norm })
+        }
+        for (const [newNorm, row] of winners) {
+          if (newNorm !== row.oldNorm) rekeyed++
+        }
+        if (rekeyed > 0 || winners.size !== rows.length) {
+          run('DELETE FROM project_discovery_rejections')
+          for (const [newNorm, row] of winners) {
+            run(
+              `INSERT INTO project_discovery_rejections (name_norm, original_name, source_meeting_id, rejected_at)
+               VALUES (?, ?, ?, ?)`,
+              [newNorm, row.original_name, row.source_meeting_id, row.rejected_at]
+            )
+          }
+          console.log(
+            `[Migration v42] re-keyed ${rekeyed} tombstone(s) to NFKC, ` +
+              `dropped ${rows.length - winners.size} collision(s)`
+          )
+        }
+      })
+    } catch (e) {
+      // Rethrow: the transaction has rolled back, and schema_version must NOT
+      // advance to 42 on a failed rewrite — swallowing here would strand the
+      // v41 keys permanently (the migration never retries once 42 is recorded).
+      // The engine records each version only AFTER its migration returns, so
+      // failing loudly leaves the DB at 41 and the next boot retries the
+      // re-key. (The guarded ALTER above may have committed — that's fine:
+      // it is idempotent and repairPhase force-adds the column anyway.)
+      console.warn('[Migration v42] tombstone re-key failed:', e)
+      throw e
+    }
+    console.log('Migration v42 complete')
+  },
+
+  43: () => {
+    // v43 (F12): project_discovery_observations — the ledger that gates spurious
+    // project auto-creation. Before v43 the reconciler created a real projects
+    // row for ANY extracted name the resolver failed to match, so a one-off
+    // phrase became a zero-item dead-end project. The ledger records each
+    // (name, source) sighting so the reconciler can require BOTH a plausible
+    // name and >= 2 distinct sources before creating, and surface everything
+    // else as a deferred suggestion. Idempotent: CREATE IF NOT EXISTS.
+    console.log('Running migration to schema v43: project_discovery_observations')
+    const database = getDatabase()
+    database.run(OBSERVATIONS_TABLE_DDL)
+    // CREATE TABLE IF NOT EXISTS is a no-op against a table that already exists
+    // with the wrong shape, so the shared helper repairs what ALTER can add and
+    // validates the FULL write contract (every column + the ON CONFLICT target).
+    // Any failure propagates: the engine records a version only AFTER its
+    // migration returns, so throwing leaves the DB below 43 and the next boot
+    // retries — swallowing would mark the migration complete over a table that
+    // cannot accept an insert. Same fail-loud policy as the v42 re-key.
+    ensureObservationsTableUsable(database, '[Migration v43]')
+    console.log('Migration v43 complete')
+  },
+
+  44: () => {
+    // v44: knowledge_captures.quality_reasons + quality_source — content-based
+    // VALUE classification (F16/spec-001). quality_reasons is a JSON array of
+    // fixed tags (see VALUE_REASON_TAGS in value-classification.ts);
+    // quality_source distinguishes an AI-set rating ('ai') from a user-set one
+    // ('user') so re-analysis can safely refresh an AI rating without ever
+    // touching a rating the user set by hand. Idempotent: guarded ALTERs.
+    console.log('Running migration to schema v44: knowledge_captures.quality_reasons + quality_source')
+    const database = getDatabase()
+    const cols = getTableColumns(database, 'knowledge_captures')
+    if (cols.length > 0 && !cols.includes('quality_reasons')) {
+      try {
+        database.run('ALTER TABLE knowledge_captures ADD COLUMN quality_reasons TEXT')
+      } catch (e) {
+        console.warn('[Migration v44] add quality_reasons failed:', e)
+      }
+    }
+    if (cols.length > 0 && !cols.includes('quality_source')) {
+      try {
+        database.run("ALTER TABLE knowledge_captures ADD COLUMN quality_source TEXT CHECK(quality_source IN ('ai','user'))")
+      } catch (e) {
+        console.warn('[Migration v44] add quality_source failed:', e)
+      }
+    }
+    console.log('Migration v44 complete')
+  },
+
+  45: () => {
+    // v45: value_backfill_state — resumable cursor for the F16/spec-003 value
+    // backfill (see value-backfill.ts). CREATE TABLE IF NOT EXISTS is
+    // idempotent, and this table is ALSO created via the SCHEMA string (Phase
+    // 1, every boot) and lazily at runner start (mirrors
+    // knowledge-graph-service.ts's _ensureIngestTrackingTable) — belt-and-
+    // suspenders, since repairPhase only force-adds missing COLUMNS, not new
+    // tables, so a brand-new table must not rely on this migration alone.
+    console.log('Running migration to schema v45: value_backfill_state')
+    const database = getDatabase()
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS value_backfill_state (
+          capture_id TEXT PRIMARY KEY,
+          status TEXT NOT NULL,
+          result_rating TEXT,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          run_id TEXT,
+          last_error TEXT,
+          updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+      `)
+    } catch (e) {
+      console.warn('[Migration v45] create value_backfill_state failed:', e)
+    }
+    console.log('Migration v45 complete')
+  },
+
+  46: () => {
+    // v46 (F18/round-27): PER-ROW membership provenance. meeting_contacts and
+    // meeting_projects are written by BOTH the calendar/user path (structural) AND
+    // applyTranscriptEntities (AI-extracted from a specific recording), for the
+    // SAME meeting. A meeting-level eligibility check LAUNDERS transcript-derived
+    // rows on a calendar meeting (ADV26-2/-3), so we track provenance at the ROW:
+    //   source='calendar'|'transcript'; source_recording_id = the recording whose
+    //   transcript produced a 'transcript' row. identity_suggestions gets
+    //   source_recording_ids (JSON) so a transcript-created (non-graph) suggestion
+    //   can be revalidated through the recording allowlist (ADV26-1).
+    // Idempotent: guarded ALTERs (matching v44), then a one-time BEST-EFFORT
+    // backfill that classifies existing NULL-provenance rows conservatively.
+    console.log('Running migration to schema v46: per-row membership provenance')
+    const database = getDatabase()
+    const addCol = (table: string, col: string, def: string): void => {
+      const cols = getTableColumns(database, table)
+      if (cols.length > 0 && !cols.includes(col)) {
+        try {
+          database.run(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`)
+        } catch (e) {
+          console.warn(`[Migration v46] add ${table}.${col} failed:`, e)
+        }
+      }
+    }
+    addCol('meeting_contacts', 'source', 'TEXT')
+    addCol('meeting_contacts', 'source_recording_id', 'TEXT')
+    addCol('meeting_projects', 'source', 'TEXT')
+    addCol('meeting_projects', 'source_recording_id', 'TEXT')
+    addCol('identity_suggestions', 'source_recording_ids', 'TEXT')
+    try {
+      backfillMembershipProvenanceV44()
+    } catch (e) {
+      console.warn('[Migration v46] provenance backfill failed (non-fatal):', e)
+    }
+    console.log('Migration v46 complete')
+  },
+
+  47: () => {
+    // v47 (F18/round-28): ENTITY-level provenance (ADV27-1). applyTranscriptEntities
+    // mints contact/project ENTITY rows from transcript participants; v46 tracked
+    // provenance only on the MEMBERSHIP rows, so excluding the sole source recording
+    // hid the membership but left the extracted entity searchable/openable on the
+    // People/Projects non-owner surfaces. Add contacts/projects.source +
+    // source_recording_id and a one-time BEST-EFFORT origin backfill derived from
+    // each entity's membership provenance.
+    // Idempotent: guarded ALTERs, then a backfill that only touches source-NULL rows.
+    console.log('Running migration to schema v47: entity-level identity provenance')
+    const database = getDatabase()
+    const addCol = (table: string, col: string, def: string): void => {
+      const cols = getTableColumns(database, table)
+      if (cols.length > 0 && !cols.includes(col)) {
+        try {
+          database.run(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`)
+        } catch (e) {
+          console.warn(`[Migration v47] add ${table}.${col} failed:`, e)
+        }
+      }
+    }
+    addCol('contacts', 'source', 'TEXT')
+    addCol('contacts', 'source_recording_id', 'TEXT')
+    addCol('projects', 'source', 'TEXT')
+    addCol('projects', 'source_recording_id', 'TEXT')
+    try {
+      backfillEntityProvenanceV45()
+    } catch (e) {
+      console.warn('[Migration v47] entity provenance backfill failed (non-fatal):', e)
+    }
+    console.log('Migration v47 complete')
+  },
+
+  48: () => {
+    // v48 (F18/round-31, ADV29-2): PER-FIELD provenance for the one contact scalar
+    // an AI transcript enriches — `role`. Entity-level visibility (v47) suppresses a
+    // whole transcript entity when its source recording is excluded, but a contact
+    // kept visible by an ELIGIBLE recording B can still display a role that was
+    // enriched from an EXCLUDED recording A (org-reconciler.applyTranscriptEntities
+    // fills an empty role from a specific recording). Add
+    // contacts.role_source_recording_id so a non-owner read can BLANK a role whose
+    // source recording is ineligible.
+    // NO backfill: existing role values are treated as calendar/manual/legacy
+    // (role_source_recording_id NULL ⇒ always shown). Only NEW transcript enrichment
+    // going forward stamps provenance — we do not retroactively blank a legacy role
+    // we cannot attribute to a recording (conservative; documented in ARF-HIGHS-CHANGES).
+    // Projects have NO transcript-enriched scalar (description is user-authored only),
+    // so no per-field column is needed there.
+    // Idempotent: single guarded ALTER (matching v46/v47).
+    console.log('Running migration to schema v48: per-field role provenance')
+    const database = getDatabase()
+    const cols = getTableColumns(database, 'contacts')
+    if (cols.length > 0 && !cols.includes('role_source_recording_id')) {
+      try {
+        database.run('ALTER TABLE contacts ADD COLUMN role_source_recording_id TEXT')
+      } catch (e) {
+        console.warn('[Migration v48] add contacts.role_source_recording_id failed:', e)
+      }
+    }
+    console.log('Migration v48 complete')
+  },
+
+  49: () => {
+    // v49 (F18/round-37, ADV35-1): NODE-LEVEL provenance on graph_nodes. Edge-level
+    // provenance (graph_edge_sources) can only suppress a node that HAS edges; an
+    // ISOLATED node (e.g. a risk extracted with no raiser, or a topic that never
+    // linked) has none, so the old "zero incident edges ⇒ visible" branch kept
+    // exposing an edgeless derived orphan after its recording was excluded/purged.
+    // Add graph_nodes.origin ('derived' | 'manual') + source_recording_id so an
+    // isolated node's visibility can be decided by NODE provenance:
+    //   manual/structural ⇒ visible; derived ⇒ visible only if its source recording
+    //   is eligible; legacy-null ⇒ structural KIND visible / derived KIND suppressed.
+    // Populated at ingest going forward (packages/knowledge-graph ingestExtraction:
+    // recording-backed ⇒ 'derived'+source; folder ⇒ 'manual').
+    // NO DATA BACKFILL: an isolated legacy node has NO edges and therefore NO
+    // graph_edge_sources rows to associate it to a recording, so its recording is
+    // not derivable — it stays origin=NULL and is resolved at READ time by the
+    // node-KIND heuristic (structural kinds visible, derived kinds suppressed
+    // fail-closed). A CONNECTED legacy node is left NULL too (edge-provenance
+    // governs it, unchanged). Documented in ARF-HIGHS-CHANGES.
+    // Idempotent: guarded ALTERs; the graph_nodes table may not exist yet on a
+    // brand-new DB (it is created lazily by the KnowledgeGraphStore with these
+    // columns already present in GRAPH_SCHEMA), so the length guard skips it.
+    console.log('Running migration to schema v49: node-level graph provenance')
+    const database = getDatabase()
+    const addCol = (col: string): void => {
+      const cols = getTableColumns(database, 'graph_nodes')
+      if (cols.length > 0 && !cols.includes(col)) {
+        try {
+          database.run(`ALTER TABLE graph_nodes ADD COLUMN ${col} TEXT`)
+        } catch (e) {
+          console.warn(`[Migration v49] add graph_nodes.${col} failed:`, e)
+        }
+      }
+    }
+    addCol('origin')
+    addCol('source_recording_id')
+    console.log('Migration v49 complete')
+  },
+
+  50: () => {
+    // v50 (F18/round-51, ADV49-2): PROVENANCE-TRUST MARKER for the transcript-
+    // enriched contact scalar `role`. blankIneligibleContactFields treated EVERY
+    // role with a NULL role_source_recording_id as calendar/manual/legacy and
+    // always showed it — but pre-v48 applyTranscriptEntities wrote transcript-
+    // DERIVED roles with the column NULL too (v48 added the column with NO
+    // backfill), so a calendar/manual-retained contact could still expose a role
+    // learned SOLELY from a now-personal/deleted/value-excluded/purged recording.
+    // Add contacts.role_origin and CONSERVATIVELY classify existing role-bearing
+    // rows so a non-owner read can distinguish a trusted structural/manual role
+    // from an unattributable legacy transcript role.
+    //
+    // ADV50-1 (round-52) — a contact being CALENDAR/USER-CLASSIFIED (v47 structural
+    // membership) is NOT positive evidence that its ROLE was calendar/manual-AUTHORED:
+    // the BASE (28bea428) applyTranscriptEntities filled ANY high-confidence existing
+    // contact's EMPTY role from transcript output, INCLUDING calendar/manual contacts,
+    // and did so with NULL role provenance. So an earlier rule that trusted
+    // "NULL-provenance role on a user/calendar entity ⇒ manual" LAUNDERED a
+    // transcript-derived role as structural — after the source recording was excluded,
+    // the role kept showing. There is NO reliable field-level evidence of authorship in
+    // pre-v48 data (no role_origin marker existed; calendar data carries no job-title
+    // field to match the scalar role against), so ALL pre-v48 NULL-provenance roles are
+    // treated as LEGACY/UNTRUSTED. Positive authorship evidence is stamped GOING FORWARD
+    // by the write paths (updateContact ⇒ 'manual'; createContact/upsertContact from a
+    // user/calendar create ⇒ that source; applyTranscriptEntities ⇒ 'transcript' +
+    // role_source_recording_id). Prefer under-trusting legacy: an owner can re-add a
+    // genuinely-manual role via the People UI; we must never keep exposing a
+    // transcript-derived one after its recording is excluded.
+    // Rules (only role-bearing rows; leave role_origin NULL where role IS NULL):
+    //   (a) OPTION-A attribution — a transcript-ENTITY role with NULL provenance
+    //       is backfilled to the entity's minting recording (source_recording_id),
+    //       making it attributable (gated by that recording's eligibility);
+    //   (b) rows that already carry role_source_recording_id ⇒ 'transcript';
+    //   (c) EVERY remaining NULL-provenance role ⇒ 'legacy' (AMBIGUOUS, blanked on
+    //       non-owner surfaces, fail-closed) — including user/calendar-classified
+    //       contacts, whose NULL-provenance role is NOT proof of manual/calendar
+    //       authorship (ADV50-1). No trusted-structural backfill from a downstream
+    //       classification.
+    // Idempotent: guarded ALTER + UPDATEs that only touch role_origin-NULL rows.
+    // Documented in ARF-HIGHS-CHANGES.md.
+    console.log('Running migration to schema v50: role provenance-trust marker')
+    const database = getDatabase()
+    const cols = getTableColumns(database, 'contacts')
+    if (cols.length > 0 && !cols.includes('role_origin')) {
+      try {
+        database.run('ALTER TABLE contacts ADD COLUMN role_origin TEXT')
+      } catch (e) {
+        console.warn('[Migration v50] add contacts.role_origin failed:', e)
+      }
+    }
+    try {
+      backfillRoleOriginV48()
+    } catch (e) {
+      console.warn('[Migration v50] role_origin backfill failed (non-fatal):', e)
+    }
+    console.log('Migration v50 complete')
+  },
+
+  51: () => {
+    // v51 — PURGE TOMBSTONES. A hard purge deletes synced_files + recordings,
+    // so download reconciliation would treat the still-on-device file as new
+    // and RESURRECT the deleted recording (re-download → re-transcribe →
+    // re-embed). purged_files records filename-only tombstones; the reconciler
+    // skips them. Idempotent DDL (re-runs on repaired DBs).
+    console.log('Running migration to schema v51: purged_files tombstone table')
+    getDatabase().run(`
+      CREATE TABLE IF NOT EXISTS purged_files (
+        filename TEXT PRIMARY KEY,
+        purged_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `)
+    console.log('Migration v51 complete')
+  },
+
+  52: () => {
+    console.log('Running migration to schema v52: recording enrichment provenance')
+    const database = getDatabase()
+    const addColumn = (table: string, column: string, definition: string): void => {
+      const columns = getTableColumns(database, table)
+      if (columns.length > 0 && !columns.includes(column)) {
+        database.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
+      }
+    }
+
+    addColumn('knowledge_captures', 'user_title', 'TEXT')
+    addColumn('transcripts', 'transcription_run_id', 'TEXT')
+    addColumn('transcripts', 'diarization_run_id', 'TEXT')
+    addColumn('transcripts', 'summary_run_id', 'TEXT')
+    addColumn('transcripts', 'title_run_id', 'TEXT')
+    addColumn('transcripts', 'meeting_resolution_run_id', 'TEXT')
+    addColumn('transcripts', 'diarization_quality_status', 'TEXT')
+    addColumn('transcripts', 'diarization_quality', 'TEXT')
+    addColumn('transcripts', 'mentioned_people', 'TEXT')
+
+    database.run(`
+      CREATE TABLE IF NOT EXISTS processing_runs (
+        id TEXT PRIMARY KEY,
+        recording_id TEXT NOT NULL,
+        transcript_id TEXT,
+        stage TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        tool TEXT,
+        model TEXT,
+        version TEXT,
+        execution TEXT CHECK(execution IN ('local', 'cloud', 'provider-managed')),
+        status TEXT NOT NULL CHECK(status IN ('pending', 'running', 'completed', 'degraded', 'failed', 'cancelled')),
+        started_at TEXT NOT NULL,
+        completed_at TEXT,
+        parent_run_ids TEXT,
+        output_refs TEXT,
+        usage_json TEXT,
+        estimated_cost_amount REAL,
+        estimated_cost_currency TEXT,
+        cost_method TEXT,
+        quality_status TEXT,
+        quality_json TEXT,
+        error_message TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+        FOREIGN KEY (transcript_id) REFERENCES transcripts(id) ON DELETE SET NULL
+      )
+    `)
+    database.run(`CREATE INDEX IF NOT EXISTS idx_processing_runs_recording_stage
+      ON processing_runs(recording_id, stage, created_at DESC)`)
+    console.log('Migration v52 complete')
+  },
+
+  53: () => {
+    console.log('Running migration to schema v53: persistent acoustic speaker memory')
+    const database = getDatabase()
+    database.run(`
+      CREATE TABLE IF NOT EXISTS voice_clusters (
+        id TEXT PRIMARY KEY,
+        model TEXT NOT NULL,
+        model_version TEXT NOT NULL,
+        embedding_dimension INTEGER NOT NULL,
+        centroid_json TEXT NOT NULL,
+        observation_count INTEGER NOT NULL DEFAULT 0,
+        total_speech_seconds REAL NOT NULL DEFAULT 0,
+        contact_id TEXT,
+        contact_link_method TEXT,
+        contact_link_confidence REAL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE SET NULL
+      );
+      CREATE TABLE IF NOT EXISTS voice_cluster_observations (
+        id TEXT PRIMARY KEY,
+        voice_cluster_id TEXT NOT NULL,
+        recording_id TEXT NOT NULL,
+        local_speaker_label TEXT NOT NULL,
+        embedding_json TEXT NOT NULL,
+        speech_seconds REAL NOT NULL,
+        quality_score REAL,
+        similarity REAL,
+        runner_up_margin REAL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(recording_id, local_speaker_label, voice_cluster_id),
+        FOREIGN KEY (voice_cluster_id) REFERENCES voice_clusters(id) ON DELETE CASCADE,
+        FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS recording_voice_clusters (
+        recording_id TEXT NOT NULL,
+        local_speaker_label TEXT NOT NULL,
+        transcript_speaker_label TEXT,
+        voice_cluster_id TEXT NOT NULL,
+        match_status TEXT NOT NULL CHECK(match_status IN ('matched', 'new', 'needs_review')),
+        similarity REAL,
+        runner_up_margin REAL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (recording_id, local_speaker_label),
+        FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+        FOREIGN KEY (voice_cluster_id) REFERENCES voice_clusters(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_voice_clusters_model
+        ON voice_clusters(model, model_version, embedding_dimension);
+      CREATE INDEX IF NOT EXISTS idx_voice_clusters_contact ON voice_clusters(contact_id);
+      CREATE INDEX IF NOT EXISTS idx_voice_observations_recording
+        ON voice_cluster_observations(recording_id);
+      CREATE INDEX IF NOT EXISTS idx_voice_observations_cluster
+        ON voice_cluster_observations(voice_cluster_id);
+      CREATE INDEX IF NOT EXISTS idx_recording_voice_clusters_cluster
+        ON recording_voice_clusters(voice_cluster_id);
+    `)
+    console.log('Migration v53 complete')
+  },
+
+  54: () => {
+    console.log('Running migration to schema v54: current calendar snapshot tracking')
+    const database = getDatabase()
+    const columns = getTableColumns(database, 'meetings')
+    if (!columns.includes('calendar_sync_token')) {
+      database.run('ALTER TABLE meetings ADD COLUMN calendar_sync_token TEXT')
+    }
+    database.run(`
+      CREATE TABLE IF NOT EXISTS calendar_sync_state (
+        id INTEGER PRIMARY KEY CHECK(id = 1),
+        active_token TEXT,
+        completed_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_meetings_calendar_sync_token
+        ON meetings(calendar_sync_token, start_time, end_time);
+    `)
+
+    // Existing databases already carry a reliable last-seen signal: every
+    // event in a successful ICS pass has updated_at refreshed. Seed the active
+    // snapshot from the latest cohort so the first post-migration boot cannot
+    // auto-link against obsolete recurring rows before the next sync finishes.
+    const latestResult = database.exec('SELECT MAX(updated_at) AS value FROM meetings')
+    const latest = latestResult[0]?.values?.[0]?.[0]
+    if (typeof latest === 'string' && latest) {
+      const token = `migration-${randomUUID()}`
+      database.run(
+        `UPDATE meetings SET calendar_sync_token = ?
+         WHERE updated_at >= datetime(?, '-10 minutes')`,
+        [token, latest]
+      )
+      database.run(
+        `INSERT INTO calendar_sync_state (id, active_token, completed_at)
+         VALUES (1, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET active_token = excluded.active_token, completed_at = excluded.completed_at`,
+        [token, latest]
+      )
+    }
+    console.log('Migration v54 complete')
+  },
+}
+
+/** Single source of truth for the v43 ledger DDL — used by repairPhase and migration 43. */
+const OBSERVATIONS_TABLE_DDL = `
+  CREATE TABLE IF NOT EXISTS project_discovery_observations (
+    name_norm TEXT NOT NULL,
+    source_key TEXT NOT NULL,
+    meeting_id TEXT,
+    original_name TEXT NOT NULL,
+    score REAL NOT NULL DEFAULT 0,
+    first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (name_norm, source_key)
+  )
+`
+
+/** Every column recordProjectDiscoveryObservation writes. */
+const OBSERVATIONS_REQUIRED_COLUMNS = [
+  'name_norm',
+  'source_key',
+  'meeting_id',
+  'original_name',
+  'score',
+  'first_seen_at',
+  'last_seen_at'
+]
+
+/**
+ * Columns that can be ALTERed into an existing table: nullable, or NOT NULL with
+ * a CONSTANT default (SQLite rejects a non-constant one, which is why the
+ * timestamps are added bare — every writer passes them explicitly anyway).
+ *
+ * The rest (name_norm, source_key, original_name) are NOT NULL without a
+ * constant default and cannot be added at all. They are also the primary-key
+ * columns, so a table missing them is structurally wrong rather than incomplete.
+ */
+const OBSERVATIONS_REPAIRABLE_COLUMNS: Record<string, string> = {
+  meeting_id: 'TEXT',
+  score: 'REAL NOT NULL DEFAULT 0',
+  first_seen_at: 'TEXT',
+  last_seen_at: 'TEXT'
+}
+
+/** recordProjectDiscoveryObservation's ON CONFLICT target — needs a real constraint. */
+const OBSERVATIONS_CONFLICT_KEY = ['name_norm', 'source_key']
+
+/**
+ * THE write. Shared verbatim by recordProjectDiscoveryObservation and by the boot
+ * probe, so the statement the probe proves is the statement production runs —
+ * they cannot drift.
+ */
+const OBSERVATIONS_UPSERT_SQL = `
+  INSERT INTO project_discovery_observations
+    (name_norm, source_key, meeting_id, original_name, score, first_seen_at, last_seen_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(name_norm, source_key) DO UPDATE SET
+    meeting_id = COALESCE(excluded.meeting_id, project_discovery_observations.meeting_id),
+    original_name = excluded.original_name,
+    score = MAX(project_discovery_observations.score, excluded.score),
+    last_seen_at = excluded.last_seen_at
+`
+
+/**
+ * Prefix for the boot probe sentinel. The full key is generated FRESH per probe
+ * (prefix + UUID) and confirmed absent before use.
+ *
+ * A FIXED sentinel was a hole: normalizeName preserves any character and
+ * sourceKey accepts any non-empty string, so a real row could carry that exact
+ * (name_norm, source_key) pair — and then the first upsert takes the ON CONFLICT
+ * path instead of the INSERT path. A table with an AFTER INSERT trigger that
+ * aborts new rows would have PASSED the probe while every real observation
+ * insert failed, defeating the entire point of probing.
+ */
+const OBSERVATIONS_PROBE_PREFIX = 'hidock-schema-probe-'
+
+/**
+ * Run a pragma via its table-valued function form so its argument can be BOUND.
+ * String-interpolating an identifier breaks on any name needing SQL quoting — an
+ * index called `my "weird" idx` produced a syntax error and the reader silently
+ * returned nothing. Harmless now that metadata cannot refuse, but it made the
+ * diagnostics wrong precisely when they mattered most.
+ */
+function pragmaColumn(
+  database: ReturnType<typeof getDatabase>,
+  sql: string,
+  argument: string
+): string[] {
+  try {
+    const res = database.exec(sql, [argument])
+    return ((res[0]?.values as unknown[][]) ?? []).map((row) => String(row[0]))
+  } catch {
+    return []
+  }
+}
+
+const sameColumnSet = (a: string[], b: string[]): boolean =>
+  a.length === b.length && [...a].sort().join(' ') === [...b].sort().join(' ')
+
+/**
+ * Whether a UNIQUE constraint exists on exactly `target`, which is what SQLite
+ * requires to resolve an `ON CONFLICT(<target>)` clause. Checks the declared
+ * PRIMARY KEY (pragma_table_info's pk ordinal) and every non-partial UNIQUE index
+ * (pragma_index_list / pragma_index_info) — a partial index cannot be a target.
+ */
+function hasConflictTarget(
+  database: ReturnType<typeof getDatabase>,
+  table: string,
+  target: string[]
+): boolean {
+  const pkCols = pragmaColumn(
+    database,
+    'SELECT name FROM pragma_table_info(?) WHERE pk > 0 ORDER BY pk',
+    table
+  )
+  if (sameColumnSet(pkCols, target)) return true
+
+  const uniqueIndexes = pragmaColumn(
+    database,
+    'SELECT name FROM pragma_index_list(?) WHERE "unique" = 1 AND COALESCE(partial, 0) = 0',
+    table
+  )
+  for (const indexName of uniqueIndexes) {
+    if (sameColumnSet(pragmaColumn(database, 'SELECT name FROM pragma_index_info(?)', indexName), target)) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * Execute the REAL upsert (both its INSERT and its ON CONFLICT branch) with
+ * sentinel values inside a savepoint, then roll it back. Returns null on success
+ * or a description of the failure.
+ *
+ * This is the authority. Metadata inspection can only check the ways a schema is
+ * wrong that we thought to model, and that space is open-ended: an extra
+ * `NOT NULL` column with no default, a CHECK constraint, a trigger, a generated
+ * column — each passes every column-and-constraint check and then rejects the
+ * insert at runtime. Rather than chase them, run the actual write.
+ */
+function probeObservationsWrite(
+  database: ReturnType<typeof getDatabase>,
+  savepoint: string
+): { failure: string | null; cleanupError: string | null } {
+  const table = 'project_discovery_observations'
+  const reject = (e: unknown): string => `rejects the write it must accept (${(e as Error).message})`
+
+  // A FRESH key per probe, confirmed ABSENT, so the first upsert is guaranteed to
+  // take the INSERT path. Without this an existing row with the sentinel's key
+  // silently turned both statements into ON CONFLICT updates.
+  let key: string | null = null
+  for (let attempt = 0; attempt < 3 && key === null; attempt++) {
+    const candidate = `${OBSERVATIONS_PROBE_PREFIX}${randomUUID()}`
+    try {
+      const clash = database.exec(`SELECT 1 FROM ${table} WHERE name_norm = ? AND source_key = ?`, [
+        candidate,
+        candidate
+      ])
+      if ((clash[0]?.values?.length ?? 0) === 0) key = candidate
+    } catch (e) {
+      // The table cannot even be read the way the write reads it — a contract
+      // failure in its own right (e.g. the columns are missing).
+      return { failure: reject(e), cleanupError: null }
+    }
+  }
+  if (key === null) {
+    return { failure: 'could not obtain a collision-free probe key after 3 attempts', cleanupError: null }
   }
 
+  const now = new Date().toISOString()
+  const params = [key, key, null, key, 0, now, now]
+  let failure: string | null = null
+  let cleanupError: string | null = null
+  database.run(`SAVEPOINT ${savepoint}`)
+  try {
+    database.run(OBSERVATIONS_UPSERT_SQL, params) // the INSERT path
+    database.run(OBSERVATIONS_UPSERT_SQL, params) // the ON CONFLICT DO UPDATE path
+  } catch (e) {
+    failure = reject(e)
+  } finally {
+    // ALWAYS undo the probe — it must leave no rows behind, success or failure.
+    // FAIL CLOSED: if the undo itself fails (a RAISE(ROLLBACK) trigger destroys
+    // the savepoint stack, for instance) the state is indeterminate and the
+    // caller must surface it rather than proceed as though it were clean.
+    try {
+      database.run(`ROLLBACK TO ${savepoint}`)
+    } catch (e) {
+      cleanupError = `probe rollback failed: ${(e as Error).message}`
+    }
+    try {
+      database.run(`RELEASE ${savepoint}`)
+    } catch (e) {
+      cleanupError = cleanupError ?? `probe release failed: ${(e as Error).message}`
+    }
+  }
+  return { failure, cleanupError }
+}
+
+/**
+ * Bring project_discovery_observations up to its FULL write contract, or refuse
+ * to start — leaving a refused database byte-identical. Unconditional, and shared
+ * by both heal paths so they cannot drift.
+ *
+ * Three rounds of this guard leaked, each time because it MODELLED the contract
+ * instead of exercising it: "is a table" missed a missing column; "has
+ * meeting_id" missed the other columns; "has every column and a matching unique
+ * key" still missed an extra NOT NULL column the insert omits (and would equally
+ * miss CHECKs, triggers and generated columns). So the final authority is a real
+ * write — see {@link probeObservationsWrite}. The metadata checks are kept
+ * because they produce precise, actionable messages, but they no longer decide.
+ *
+ * Order matters, and it is the reason for the savepoint:
+ *   1. identity  — exists, and is a TABLE (not a view or index). No mutation.
+ *   2. PREFLIGHT — unrepairable column or missing conflict key? Refuse BEFORE
+ *                  touching anything, so a refused database is left untouched.
+ *                  (Repairing first and refusing after left half-ALTERed tables
+ *                  behind on a failed boot, since repairPhase is not itself
+ *                  transactional.)
+ *   3. repair    — ALTER in the columns ALTER can add.
+ *   4. probe     — run the real write; roll it back always.
+ *   5. commit the repairs, or roll them back too and throw.
+ */
+function ensureObservationsTableUsable(database: ReturnType<typeof getDatabase>, context: string): void {
+  const table = 'project_discovery_observations'
+  const refuse = (problem: string): never => {
+    throw new Error(`${context}: ${table} ${problem}; refusing to start with a schema that cannot record project discoveries`)
+  }
+
+  // --- 1. Identity. Read-only, so it can refuse before opening a savepoint. ---
+  const found = database.exec(`SELECT type FROM sqlite_master WHERE name = '${table}'`)
+  const type = found[0]?.values?.[0]?.[0]
+  if (!type) refuse('does not exist and could not be created')
+  if (type !== 'table') refuse(`exists as a ${String(type)}, not a table`)
+
+  const savepoint = 'hidock_observations_repair'
+  let failure: string | null = null
+  let cleanupError: string | null = null
+  const diagnostics: string[] = []
+
+  database.run(`SAVEPOINT ${savepoint}`)
+  try {
+    // --- 2. Preflight: DIAGNOSTICS ONLY. These never refuse. ---
+    // Metadata can misjudge a perfectly valid table (an index name needing SQL
+    // quoting, a constraint form the reader does not model), and a false refusal
+    // blocks boot on a healthy database. So the reader's findings are collected
+    // to make the eventual message actionable and nothing more — the probe below
+    // is the sole acceptance authority, which also collapses what used to be two
+    // parallel decision paths into one.
+    const original = new Set(getTableColumns(database, table))
+    const unrepairable = OBSERVATIONS_REQUIRED_COLUMNS.filter(
+      (c) => !original.has(c) && !OBSERVATIONS_REPAIRABLE_COLUMNS[c]
+    )
+    if (unrepairable.length > 0) {
+      diagnostics.push(
+        `is missing required column(s) ${unrepairable.join(', ')} which cannot be added by ALTER ` +
+          '(NOT NULL without a constant default); the table must be recreated'
+      )
+    }
+    if (!hasConflictTarget(database, table, OBSERVATIONS_CONFLICT_KEY)) {
+      diagnostics.push(
+        `has no UNIQUE constraint on (${OBSERVATIONS_CONFLICT_KEY.join(', ')}), which ` +
+          "recordProjectDiscoveryObservation's ON CONFLICT target requires; a primary key cannot be " +
+          'added by ALTER, so the table must be recreated'
+      )
+    }
+
+    // --- 3. Repair what ALTER can add (inside the savepoint, so a later refusal
+    //        rolls it back and leaves the database byte-identical). ---
+    for (const column of OBSERVATIONS_REQUIRED_COLUMNS) {
+      if (original.has(column)) continue
+      const definition = OBSERVATIONS_REPAIRABLE_COLUMNS[column]
+      if (!definition) continue // ALTER cannot add it; the probe will report it
+      console.log(`[Database] Repairing ${table}: adding ${column}`)
+      try {
+        database.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
+      } catch (e) {
+        console.warn(`[Database] ${table} ALTER ${column} failed:`, (e as Error).message)
+      }
+    }
+
+    // --- 4. Probe the real write contract. THE authority. ---
+    const probe = probeObservationsWrite(database, 'hidock_observations_probe')
+    failure = probe.failure
+    cleanupError = probe.cleanupError
+  } catch (e) {
+    failure = `could not be validated (${(e as Error).message})`
+  } finally {
+    // --- 5. Discard everything on failure; keep only the repairs on success.
+    //        Cleanup is FAIL CLOSED: if the undo itself fails the state is
+    //        indeterminate, and we must say so rather than continue. ---
+    if (failure || cleanupError) {
+      try {
+        database.run(`ROLLBACK TO ${savepoint}`)
+      } catch (e) {
+        cleanupError = cleanupError ?? `rollback failed: ${(e as Error).message}`
+      }
+    }
+    try {
+      database.run(`RELEASE ${savepoint}`)
+    } catch (e) {
+      cleanupError = cleanupError ?? `release failed: ${(e as Error).message}`
+    }
+  }
+
+  if (cleanupError) {
+    refuse(
+      `could not be restored to a known state after its schema check (${cleanupError}` +
+        (failure ? `; original problem: ${failure}` : '') +
+        ')'
+    )
+  }
+  // Only the probe refuses. Diagnostics ride along to make the message actionable.
+  if (failure) refuse([failure, ...diagnostics].join('; '))
+}
+
+/**
+ * Runtime self-check for the discovery ledger: same repair-and-probe the boot
+ * runs, callable on demand. Exported so the nesting behaviour is testable —
+ * savepoints must compose correctly when this executes inside an already-open
+ * transaction (repairPhase and initializeDatabase may hold one).
+ */
+export function verifyObservationsSchema(context = '[Database] verify'): void {
+  ensureObservationsTableUsable(getDatabase(), context)
 }
 
 /**
@@ -2085,7 +3315,8 @@ function repairPhase(): void {
   const meetingCols = getTableColumns(database, 'meetings')
   const meetingRepairs = [
     { name: 'is_all_day', def: 'INTEGER DEFAULT 0' },
-    { name: 'all_day_date', def: 'TEXT' }
+    { name: 'all_day_date', def: 'TEXT' },
+    { name: 'calendar_sync_token', def: 'TEXT' }
   ]
   if (meetingCols.length > 0) {
     for (const col of meetingRepairs) {
@@ -2094,6 +3325,13 @@ function repairPhase(): void {
         try { database.run(`ALTER TABLE meetings ADD COLUMN ${col.name} ${col.def}`) } catch {}
       }
     }
+    database.run(`
+      CREATE TABLE IF NOT EXISTS calendar_sync_state (
+        id INTEGER PRIMARY KEY CHECK(id = 1),
+        active_token TEXT,
+        completed_at TEXT
+      )
+    `)
   }
 
   // Repair Recordings
@@ -2132,7 +3370,13 @@ function repairPhase(): void {
     { name: 'meeting_id', def: "meeting_id TEXT REFERENCES meetings(id)" },
     { name: 'correlation_confidence', def: "correlation_confidence REAL" },
     { name: 'correlation_method', def: "correlation_method TEXT" },
-    { name: 'source_recording_id', def: "source_recording_id TEXT REFERENCES recordings(id)" }
+    { name: 'source_recording_id', def: "source_recording_id TEXT REFERENCES recordings(id)" },
+    // v42 (F16/spec-001) — NOTE: unlike the repairs above, this loop runs
+    // `ADD COLUMN ${col.def}` (not `${col.name} ${col.def}`), so def MUST
+    // embed the column name itself or the ALTER becomes `ADD COLUMN TEXT`
+    // (syntax error, silently swallowed by the try/catch below).
+    { name: 'quality_reasons', def: 'quality_reasons TEXT' },
+    { name: 'quality_source', def: "quality_source TEXT CHECK(quality_source IN ('ai','user'))" }
   ]
   if (capCols.length > 0) {
     for (const col of knowledgeRepairs) {
@@ -2162,6 +3406,64 @@ function repairPhase(): void {
     }
   }
 
+  // Repair download_queue (v40): cancel_reason — force-add so an older on-disk
+  // schema that skipped the migration still gets it before the DownloadService
+  // reads/writes cancellation origins. Idempotent.
+  const dlqCols = getTableColumns(database, 'download_queue')
+  if (dlqCols.length > 0 && !dlqCols.includes('cancel_reason')) {
+    console.log('[Database] Repairing download_queue: adding cancel_reason')
+    try { database.run('ALTER TABLE download_queue ADD COLUMN cancel_reason TEXT') } catch { /* column exists */ }
+  }
+
+  // Repair meeting_contacts / meeting_projects / identity_suggestions (v44/F18):
+  // per-row provenance columns — force-add so an older on-disk schema that skipped
+  // the migration still has them before any membership-eligibility read. Idempotent.
+  // NOTE: the repair only adds COLUMNS; the one-time provenance BACKFILL lives in
+  // the v44 migration (runs once per DB), so older rows stay NULL (fail-closed
+  // ineligible on non-owner surfaces) until the migration classifies them.
+  // v45/round-28 (ADV27-1) — entity-level provenance columns on contacts/projects
+  // added to the same force-add list so an older on-disk schema has them before any
+  // visible-identity read. The one-time origin BACKFILL lives in the v45 migration.
+  for (const [table, col] of [
+    ['meeting_contacts', 'source'],
+    ['meeting_contacts', 'source_recording_id'],
+    ['meeting_projects', 'source'],
+    ['meeting_projects', 'source_recording_id'],
+    ['identity_suggestions', 'source_recording_ids'],
+    ['contacts', 'source'],
+    ['contacts', 'source_recording_id'],
+    // v46/round-31 (ADV29-2) — per-field role provenance; force-add so an older
+    // on-disk schema has it before any role read blanks on ineligible provenance.
+    ['contacts', 'role_source_recording_id'],
+    // v48/round-51 (ADV49-2) — role provenance-trust marker; force-add so an older
+    // on-disk schema has it before any role read consults it. The one-time
+    // classification BACKFILL lives in the v48 migration (older rows stay NULL and
+    // fall back to the entity `source` until the migration classifies them).
+    ['contacts', 'role_origin'],
+    ['projects', 'source'],
+    ['projects', 'source_recording_id']
+  ] as const) {
+    const cols = getTableColumns(database, table)
+    if (cols.length > 0 && !cols.includes(col)) {
+      console.log(`[Database] Repairing ${table}: adding ${col}`)
+      try { database.run(`ALTER TABLE ${table} ADD COLUMN ${col} TEXT`) } catch { /* column exists */ }
+    }
+  }
+
+  // v47/round-37 (ADV35-1) — NODE-LEVEL graph provenance columns. graph_nodes is
+  // created lazily by the KnowledgeGraphStore (GRAPH_SCHEMA, with these columns), so
+  // it may not exist during this early boot repair — the length guard skips it then,
+  // and a graph that DOES already exist from an older build gets the columns
+  // force-added before any node-visibility read. The one-time v47 migration also
+  // adds them; this is the belt-and-suspenders (matching v44/v45). Idempotent.
+  for (const col of ['origin', 'source_recording_id'] as const) {
+    const cols = getTableColumns(database, 'graph_nodes')
+    if (cols.length > 0 && !cols.includes(col)) {
+      console.log(`[Database] Repairing graph_nodes: adding ${col}`)
+      try { database.run(`ALTER TABLE graph_nodes ADD COLUMN ${col} TEXT`) } catch { /* column exists */ }
+    }
+  }
+
   // Repair recording_preassignments (v31): force-create so an older on-disk DB
   // that skipped the migration still gets it before any preassign write. Idempotent.
   try {
@@ -2174,6 +3476,22 @@ function repairPhase(): void {
       )
     `)
   } catch { /* table already exists */ }
+
+  // Repair project_discovery_observations (v43): force-create the table AND
+  // force-add meeting_id. This one is not hypothetical — the column shipped one
+  // commit AFTER the table, under the SAME schema version, so a DB that reached
+  // v43 from the earlier build has the table WITHOUT meeting_id and will never
+  // run migration 43 again. CREATE TABLE IF NOT EXISTS cannot fix an existing
+  // table, so without this guarded ALTER every observation insert would fail and
+  // discovery reconciliation would be dead for all new candidates. repairPhase
+  // runs on every boot BEFORE migrations, so this heals such a DB in place.
+  try {
+    database.run(OBSERVATIONS_TABLE_DDL)
+  } catch (e) {
+    // May legitimately already exist — the unconditional check below decides.
+    console.warn('[Database] project_discovery_observations create skipped:', (e as Error).message)
+  }
+  ensureObservationsTableUsable(database, '[Database] repairPhase')
 
   // Repair transcript_speakers (v25): a new table has no columns to ALTER, but
   // force-create it here so an older on-disk DB that skipped the migration still
@@ -2347,7 +3665,10 @@ function repairPhase(): void {
     }
   }
 
-  // Repair projects (v29): force-add folder_path/url if missing.
+  // Repair projects (v29 + v42): force-add folder_path/url and the origin
+  // provenance column if missing, so an older on-disk schema that skipped a
+  // migration still gets them before the reconciler or dismissDiscoveredProject
+  // touches the table. Idempotent.
   const projectCols = getTableColumns(database, 'projects')
   if (projectCols.length > 0) {
     for (const col of ['folder_path', 'url']) {
@@ -2356,6 +3677,43 @@ function repairPhase(): void {
         try { database.run(`ALTER TABLE projects ADD COLUMN ${col} TEXT`) } catch {}
       }
     }
+    if (!projectCols.includes('origin')) {
+      console.log('[Database] Repairing projects: adding origin')
+      try { database.run('ALTER TABLE projects ADD COLUMN origin TEXT') } catch { /* already exists */ }
+    }
+  }
+
+  // Repair merge_journal (v42): loser_id + seq for the dependency-aware
+  // newest-first unmerge guard. Force-add so an older on-disk schema that
+  // skipped the migration still gets the columns before any unmerge runs.
+  const journalCols = getTableColumns(database, 'merge_journal')
+  if (journalCols.length > 0) {
+    if (!journalCols.includes('loser_id')) {
+      console.log('[Database] Repairing merge_journal: adding loser_id')
+      try { database.run('ALTER TABLE merge_journal ADD COLUMN loser_id TEXT') } catch { /* already exists */ }
+    }
+    if (!journalCols.includes('seq')) {
+      console.log('[Database] Repairing merge_journal: adding seq')
+      try { database.run('ALTER TABLE merge_journal ADD COLUMN seq INTEGER') } catch { /* already exists */ }
+    }
+    // Backfills run UNCONDITIONALLY every boot, independently, idempotent via
+    // WHERE ... IS NULL. This is the recovery path for a partially-applied
+    // earlier v42 attempt that added both nullable columns (making the
+    // conditional adds above no-ops) but died before filling them: a NULL seq
+    // makes that journal UNMERGEABLE (the guard rejects it fail-closed rather
+    // than ordering it as zero), so this backfill is what returns those
+    // journals to service. loser_id is guarded per-row by json_valid so one
+    // malformed snapshot never blocks the valid rows (malformed rows stay
+    // NULL and are rejected fail-closed at unmerge time).
+    try {
+      database.run('UPDATE merge_journal SET seq = rowid WHERE seq IS NULL')
+    } catch { /* seq column missing on an ancient schema — the migration adds it */ }
+    try {
+      database.run(
+        "UPDATE merge_journal SET loser_id = json_extract(loser_snapshot, '$.id') " +
+          'WHERE loser_id IS NULL AND json_valid(loser_snapshot)'
+      )
+    } catch { /* loser_id column missing on an ancient schema — the migration adds it */ }
   }
 
   // Repair project_notes (v29): force-create so an older on-disk DB that skipped
@@ -2412,6 +3770,7 @@ const engine = new DatabaseEngine({
   // runWithMassDeleteAllowed().
   protectedTables: ['knowledge_captures', 'transcripts', 'recordings', 'meetings', 'contacts'],
   backupOnBoot: { keep: 3 },
+  deferBackupOnBoot: true,
 })
 
 /**
@@ -2430,6 +3789,11 @@ export function runWithMassDeleteAllowed<T>(fn: () => T): T {
  */
 export async function initializeDatabase(): Promise<void> {
   await engine.initialize()
+}
+
+/** Invoked by the post-paint boot scheduler; never delays the main window. */
+export async function runDeferredDatabaseBackup(): Promise<void> {
+  await engine.runDeferredBackup()
 }
 
 export function saveDatabase(): void {
@@ -2492,8 +3856,18 @@ export function run(sql: string, params: any[] = []): void {
   engine.run(sql, params)
 }
 
+/** Rows modified by the most recent run()/runInTransaction() write — lets a
+ *  guarded UPDATE (WHERE clause acting as a permission check) tell whether it
+ *  actually took effect, without a separate SELECT. See
+ *  applyCaptureValueClassification (value-classification.ts) for the
+ *  motivating use: the never-downgrade guard's WHERE clause IS the write
+ *  permission, so "0 rows changed" means "blocked by the guard". */
+export function getRowsModified(): number {
+  return engine.getRowsModified()
+}
+
 // Internal run that doesn't auto-save (for use within transactions)
-function runNoSave(sql: string, params: any[] = []): void {
+export function runNoSave(sql: string, params: any[] = []): void {
   engine.runNoSave(sql, params)
 }
 
@@ -2545,17 +3919,45 @@ export function remapOccurrenceIdsToExisting<T extends { id: string; start_time:
   // canonical target so this matches the cleanup keeper preference and converges.
   const SEP = ' '
   const canonicalBySlot = new Map<string, string>()
+  const existingByBase = new Map<string, Array<{ id: string; start_time: string }>>()
   for (const e of existing) {
-    const key = meetingBaseUid(e.id) + SEP + e.start_time
+    const baseUid = meetingBaseUid(e.id)
+    const key = baseUid + SEP + e.start_time
     const current = canonicalBySlot.get(key)
     if (current === undefined || (current.includes('::') && !e.id.includes('::'))) {
       canonicalBySlot.set(key, e.id)
     }
+    const family = existingByBase.get(baseUid) ?? []
+    family.push(e)
+    existingByBase.set(baseUid, family)
   }
+  const claimedExistingIds = new Set<string>()
   return incoming.map((m) => {
-    if (existingIds.has(m.id)) return m
+    if (existingIds.has(m.id)) {
+      claimedExistingIds.add(m.id)
+      return m
+    }
     const canonical = canonicalBySlot.get(meetingBaseUid(m.id) + SEP + m.start_time)
-    return canonical && canonical !== m.id ? { ...m, id: canonical } : m
+    if (canonical && canonical !== m.id && !claimedExistingIds.has(canonical)) {
+      claimedExistingIds.add(canonical)
+      return { ...m, id: canonical }
+    }
+
+    // A corrected DST interpretation changes both the occurrence id suffix and
+    // start_time by exactly the timezone error (normally one hour). Reconcile a
+    // UNIQUE nearby row in the same UID family so resync repairs it in place
+    // instead of inserting a duplicate and orphaning its recording links.
+    const incomingMs = Date.parse(m.start_time)
+    const nearby = (existingByBase.get(meetingBaseUid(m.id)) ?? []).filter((candidate) => {
+      if (claimedExistingIds.has(candidate.id)) return false
+      const candidateMs = Date.parse(candidate.start_time)
+      return Number.isFinite(incomingMs) && Number.isFinite(candidateMs) && Math.abs(incomingMs - candidateMs) <= 2 * 60 * 60 * 1000
+    })
+    if (nearby.length === 1) {
+      claimedExistingIds.add(nearby[0].id)
+      return { ...m, id: nearby[0].id }
+    }
+    return m
   })
 }
 
@@ -2564,7 +3966,10 @@ export function remapOccurrenceIdsToExisting<T extends { id: string; start_time:
  * Used by calendar sync to ensure all-or-nothing behavior.
  * If any meeting fails to upsert, the entire batch is rolled back.
  */
-export function upsertMeetingsBatch(meetings: Omit<Meeting, 'created_at' | 'updated_at'>[]): void {
+export function upsertMeetingsBatch(
+  meetings: Omit<Meeting, 'created_at' | 'updated_at'>[],
+  calendarSyncToken?: string
+): void {
   if (meetings.length === 0) return
 
   // Reconcile occurrence ids against existing rows so a recurring occurrence
@@ -2582,9 +3987,11 @@ export function upsertMeetingsBatch(meetings: Omit<Meeting, 'created_at' | 'upda
         runNoSave(
           `UPDATE meetings SET
             subject = ?, start_time = ?, end_time = ?, location = ?,
-            organizer_name = ?, organizer_email = ?, attendees = ?,
+            organizer_name = ?, organizer_email = ?,
+            attendees = COALESCE(?, attendees),
             description = ?, is_recurring = ?, recurrence_rule = ?,
-            meeting_url = ?, is_all_day = ?, all_day_date = ?, updated_at = CURRENT_TIMESTAMP
+            meeting_url = ?, is_all_day = ?, all_day_date = ?,
+            calendar_sync_token = COALESCE(?, calendar_sync_token), updated_at = CURRENT_TIMESTAMP
           WHERE id = ?`,
           [
             meeting.subject,
@@ -2600,6 +4007,7 @@ export function upsertMeetingsBatch(meetings: Omit<Meeting, 'created_at' | 'upda
             meeting.meeting_url ?? null,
             meeting.is_all_day ?? 0,
             meeting.all_day_date ?? null,
+            calendarSyncToken ?? null,
             meeting.id
           ]
         )
@@ -2607,8 +4015,8 @@ export function upsertMeetingsBatch(meetings: Omit<Meeting, 'created_at' | 'upda
         runNoSave(
           `INSERT INTO meetings (id, subject, start_time, end_time, location, organizer_name,
             organizer_email, attendees, description, is_recurring, recurrence_rule, meeting_url,
-            is_all_day, all_day_date)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            is_all_day, all_day_date, calendar_sync_token)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             meeting.id,
             meeting.subject,
@@ -2623,7 +4031,8 @@ export function upsertMeetingsBatch(meetings: Omit<Meeting, 'created_at' | 'upda
             meeting.recurrence_rule ?? null,
             meeting.meeting_url ?? null,
             meeting.is_all_day ?? 0,
-            meeting.all_day_date ?? null
+            meeting.all_day_date ?? null,
+            calendarSyncToken ?? null
           ]
         )
       }
@@ -2631,6 +4040,22 @@ export function upsertMeetingsBatch(meetings: Omit<Meeting, 'created_at' | 'upda
       extractContactsFromMeetingDataInternal(meeting)
     }
   })
+}
+
+/** Publish a fully written ICS snapshot for automatic meeting attribution. */
+export function activateCalendarSyncToken(token: string, completedAt = new Date().toISOString()): void {
+  run(
+    `INSERT INTO calendar_sync_state (id, active_token, completed_at)
+     VALUES (1, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET active_token = excluded.active_token, completed_at = excluded.completed_at`,
+    [token, completedAt]
+  )
+}
+
+export function getActiveCalendarSyncToken(): string | null {
+  return queryOne<{ active_token: string | null }>(
+    'SELECT active_token FROM calendar_sync_state WHERE id = 1'
+  )?.active_token ?? null
 }
 
 // Meeting queries
@@ -2651,6 +4076,8 @@ export interface Meeting {
   is_all_day?: number
   /** Named calendar day (YYYY-MM-DD) for all-day events; null for timed (v32). */
   all_day_date?: string | null
+  /** ICS snapshot in which this row was last observed (v54). */
+  calendar_sync_token?: string | null
   created_at: string
   updated_at: string
 }
@@ -2825,7 +4252,7 @@ function extractContactsFromMeetingDataInternal(meeting: Omit<Meeting, 'created_
   // Handle organizer
   if (meeting.organizer_email || meeting.organizer_name) {
     const existing = meeting.organizer_email ? existingContacts.get(meeting.organizer_email) : undefined
-    let contactId: string
+    let contactId
 
     if (existing) {
       runNoSave(`UPDATE contacts SET name = COALESCE(?, name), last_seen_at = MAX(last_seen_at, ?) WHERE id = ?`,
@@ -2836,7 +4263,8 @@ function extractContactsFromMeetingDataInternal(meeting: Omit<Meeting, 'created_
       runNoSave(`INSERT INTO contacts (id, name, email, first_seen_at, last_seen_at, meeting_count) VALUES (?, ?, ?, ?, ?, 1)`,
         [contactId, meeting.organizer_name || 'Unknown', meeting.organizer_email || null, meeting.start_time, meeting.start_time])
     }
-    runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)',
+    // v44 provenance: calendar-authored (structural) — from ICS/M365 organizer field.
+    runNoSave("INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES (?, ?, ?, 'calendar')",
       [meeting.id, contactId, 'organizer'])
   }
 
@@ -2845,7 +4273,7 @@ function extractContactsFromMeetingDataInternal(meeting: Omit<Meeting, 'created_
     if (!attendee.email && !attendee.name) continue
 
     const existing = attendee.email ? existingContacts.get(attendee.email) : undefined
-    let contactId: string
+    let contactId
 
     if (existing) {
       runNoSave(`UPDATE contacts SET name = COALESCE(?, name), last_seen_at = MAX(last_seen_at, ?) WHERE id = ?`,
@@ -2856,7 +4284,8 @@ function extractContactsFromMeetingDataInternal(meeting: Omit<Meeting, 'created_
       runNoSave(`INSERT INTO contacts (id, name, email, first_seen_at, last_seen_at, meeting_count) VALUES (?, ?, ?, ?, ?, 1)`,
         [contactId, attendee.name || attendee.email || 'Unknown', attendee.email || null, meeting.start_time, meeting.start_time])
     }
-    runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)',
+    // v44 provenance: calendar-authored (structural) — from ICS/M365 attendee list.
+    runNoSave("INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES (?, ?, ?, 'calendar')",
       [meeting.id, contactId, 'attendee'])
   }
 }
@@ -2868,9 +4297,11 @@ export interface Recording {
   original_filename?: string
   file_path: string | null  // NULL if not stored locally
   file_size?: number
-  duration_seconds?: number
+  duration_seconds?: number | null
   date_recorded: string
   meeting_id?: string
+  /** Read projection from the assigned meeting; never persisted on recordings. */
+  meeting_subject?: string | null
   correlation_confidence?: number
   correlation_method?: string
   status: string  // Legacy field for backwards compatibility
@@ -2894,18 +4325,40 @@ export interface Recording {
 }
 
 /**
- * All live recordings for the Library, newest first. Excludes soft-deleted rows
- * (deleted_at set) — those are hidden until restored or hard-purged. Personal
+ * All available recordings for the Library, newest first. Excludes soft-deleted
+ * rows (deleted_at set) and rows whose final device copy was reconciled away
+ * (`location = 'deleted'`). The latter are durable identity/audit rows, not
+ * downloadable sources; surfacing them resurrects an erased device file as a
+ * false "device-only" item. Personal
  * ("ignored") recordings ARE returned so the Library can show them behind a
  * filter chip; every AI pipeline uses getActiveRecordingIdsForProcessing()
  * instead, which excludes both personal and soft-deleted.
  */
 export function getRecordings(): Recording[] {
-  return queryAll<Recording>('SELECT * FROM recordings WHERE deleted_at IS NULL ORDER BY date_recorded DESC')
+  return queryAll<Recording>(
+    `SELECT r.*, m.subject AS meeting_subject
+       FROM recordings r
+       LEFT JOIN meetings m ON m.id = r.meeting_id
+      WHERE r.deleted_at IS NULL
+        AND (r.location IS NULL OR r.location <> 'deleted')
+      ORDER BY r.date_recorded DESC`
+  )
 }
 
 export function getRecordingById(id: string): Recording | undefined {
   return queryOne<Recording>('SELECT * FROM recordings WHERE id = ?', [id])
+}
+
+/**
+ * All soft-deleted (tombstoned) recordings, newest-tombstone-first — feeds the
+ * Trash UI (spec-005/F17 T5). Read-only and isolated from every exclusion
+ * invariant elsewhere: `getExcludedRecordingIds()` (above) and the graph base
+ * query already hide `deleted_at IS NOT NULL` rows everywhere else; this is the
+ * ONLY path that surfaces them, and it changes nothing about how they're
+ * excluded from RAG/graph/default surfaces.
+ */
+export function getTrashedRecordings(): Recording[] {
+  return queryAll<Recording>('SELECT * FROM recordings WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC')
 }
 
 // =============================================================================
@@ -2916,9 +4369,11 @@ export function getRecordingById(id: string): Recording | undefined {
 
 /**
  * Mark / unmark a recording as "personal" (ignored). Non-destructive and fully
- * reversible: the file and all derived rows stay, but the recording is pulled
+ * reversible: the file and content derivatives stay, but the recording is pulled
  * from every AI pipeline (transcription queue, graph ingest, vector indexing,
- * RAG results, Today) and hidden from the Library default view. Returns the new
+ * RAG results, Today) and hidden from the Library default view. Acoustic voice
+ * observations are learned identity state, so they are removed when a recording
+ * becomes personal and can be rebuilt by a later transcription. Returns the new
  * flag state, or undefined if the recording does not exist.
  */
 export function setRecordingPersonal(id: string, personal: boolean): boolean | undefined {
@@ -2927,30 +4382,423 @@ export function setRecordingPersonal(id: string, personal: boolean): boolean | u
   runInTransaction(() => {
     runNoSave('UPDATE recordings SET personal = ? WHERE id = ?', [personal ? 1 : 0, id])
     if (personal) {
+      removeRecordingVoiceEvidenceNoSave(id)
       // Pull it out of the transcription queue immediately (a queued personal
       // recording must not be processed). Leaves completed history intact.
       runNoSave("DELETE FROM transcription_queue WHERE recording_id = ? AND status IN ('pending', 'failed')", [id])
+      // ARF-3 — tombstone a PROCESSING row too, mirroring soft delete: a
+      // recording marked personal mid-analysis stops persisting new
+      // post-analysis derivatives (gated by isRecordingProcessable).
+      runNoSave("UPDATE transcription_queue SET status = 'cancelled' WHERE recording_id = ? AND status = 'processing'", [id])
     }
   })
   return personal
 }
 
+// =============================================================================
+// F16/spec-002 (T2) — downstream value gates. A recording is "value-excluded"
+// when it has at least one non-deleted knowledge_capture rated garbage/
+// low-value AND none rated valuable/archived (an explicit "keep" on a
+// multi-capture recording rescues the whole recording). Both AI-set
+// (applyCaptureValueClassification) and user-set (knowledge:update) ratings
+// key on the same quality_rating column, so they gate identically.
+// =============================================================================
+
+/** The two "this isn't worth keeping" ratings that gate RAG/graph/actionables. */
+const VALUE_EXCLUDED_RATINGS = ['garbage', 'low-value'] as const
+/** Ratings that explicitly "keep" a capture — rescue the whole recording even
+ *  if another non-deleted capture of the same recording is garbage/low-value. */
+const VALUE_KEEP_RATINGS = ['valuable', 'archived'] as const
+
 /**
- * Recording ids that must be excluded from AI processing and RAG surfaces:
- * every recording flagged `personal` OR soft-deleted (`deleted_at` set). The
- * vector store filters search results against this set so that marking a
- * recording personal instantly pulls its chunks from the assistant's answers
- * WITHOUT re-indexing (reversible), and soft-deleted recordings never surface.
+ * Shared value-exclusion predicate (/simplify S-3) — factored out of
+ * {@link getValueExcludedRecordingIds} (Set form) and
+ * {@link isValueExcludedRecording} (point-read form) so the placeholder-build
+ * and the `NOT EXISTS` keep-clause can never drift apart between the two.
+ * Assumes the enclosing query aliases the outer knowledge_captures row `kc`.
+ * Both callers bind params in the same order this fragment references them:
+ * `[...VALUE_EXCLUDED_RATINGS, ...VALUE_KEEP_RATINGS]` (optionally prefixed
+ * with the point-read's own `recordingId`).
  */
-export function getExcludedRecordingIds(): Set<string> {
+const VALUE_EXCLUSION_PREDICATE = `kc.quality_rating IN (${VALUE_EXCLUDED_RATINGS.map(() => '?').join(',')})
+        AND NOT EXISTS (
+          SELECT 1 FROM knowledge_captures k2
+           WHERE k2.source_recording_id = kc.source_recording_id
+             AND k2.deleted_at IS NULL
+             AND k2.quality_rating IN (${VALUE_KEEP_RATINGS.map(() => '?').join(',')}))`
+
+/**
+ * Recording ids value-excluded from downstream intelligence surfaces (RAG
+ * retrieval via getExcludedRecordingIds, graph ingest, actionable
+ * extraction). This is a cheap once-per-call PRE-FILTER ONLY (Codex
+ * adversarial review AR-1): a caller iterating many rows across a
+ * long-running async loop (e.g. the graph ingest, which awaits an LLM
+ * extraction per row) MUST decide FINAL eligibility per row with the fresh
+ * point-read {@link isValueExcludedRecording} at persistence time — a Set
+ * computed once at the top of a long loop can go stale if a rating changes
+ * mid-run. This function is safe to use as-is for a single synchronous pass
+ * (e.g. the RAG union below).
+ */
+export function getValueExcludedRecordingIds(): Set<string> {
   const rows = queryAll<{ id: string }>(
-    'SELECT id FROM recordings WHERE personal = 1 OR deleted_at IS NOT NULL'
+    `SELECT DISTINCT kc.source_recording_id AS id
+       FROM knowledge_captures kc
+      WHERE kc.deleted_at IS NULL
+        AND kc.source_recording_id IS NOT NULL
+        AND ${VALUE_EXCLUSION_PREDICATE}`,
+    [...VALUE_EXCLUDED_RATINGS, ...VALUE_KEEP_RATINGS]
   )
   return new Set(rows.map((r) => r.id))
 }
 
+/**
+ * Single-recording point-read form of {@link getValueExcludedRecordingIds} —
+ * same predicate, scoped to one id. This is the FINAL-eligibility check
+ * (Codex adversarial review AR-1): callers that must decide "ingest/extract
+ * or skip" for one specific recording transactionally at persistence time
+ * (i.e. after a slow async step such as an LLM extraction call) MUST use this
+ * fresh read rather than a Set computed earlier in a long-running run, so a
+ * rating written at any point up to the moment of persistence is honored.
+ */
+export function isValueExcludedRecording(recordingId: string): boolean {
+  const row = queryOne<{ id: string }>(
+    `SELECT kc.source_recording_id AS id
+       FROM knowledge_captures kc
+      WHERE kc.deleted_at IS NULL
+        AND kc.source_recording_id = ?
+        AND ${VALUE_EXCLUSION_PREDICATE}
+      LIMIT 1`,
+    [recordingId, ...VALUE_EXCLUDED_RATINGS, ...VALUE_KEEP_RATINGS]
+  )
+  return !!row
+}
+
+/**
+ * F18 (spec-004): final transactional eligibility for graph ingest — the
+ * recording must still exist, be non-deleted, non-personal, AND not
+ * value-excluded. A strict superset of {@link isValueExcludedRecording}: it
+ * closes the purge/soft-delete-vs-ingest race (Codex adversarial review AR-1
+ * style) by making a hard-purged or soft-deleted recording ineligible for
+ * (re-)ingest at the exact persistence-time point-read, inside the same
+ * transaction as the graph write + ingested-marker insert.
+ */
+export function isRecordingGraphIngestable(recordingId: string): boolean {
+  const rec = queryOne<{ id: string }>(
+    'SELECT id FROM recordings WHERE id = ? AND deleted_at IS NULL AND COALESCE(personal,0) = 0',
+    [recordingId]
+  )
+  if (!rec) return false
+  return !isValueExcludedRecording(recordingId)
+}
+
+/**
+ * ARF-3 (Codex adversarial FINAL review) — cheap point-read: may the
+ * transcription pipeline still persist post-analysis derivatives (timeline,
+ * title, org-reconcile, identity, transcript-ready emit, wiki export, vector
+ * index) for this recording? True only when the recording still EXISTS, is NOT
+ * soft-deleted, and is NOT personal. Deliberately WITHOUT the value-exclusion
+ * check (unlike isRecordingGraphIngestable): a value-excluded recording is
+ * still transcribed and its own display data persisted — only its intelligence
+ * surfaces are value-gated separately. Checked immediately before each
+ * post-analysis boundary in transcribeRecording so a mid-flight soft-delete /
+ * mark-personal stops NEW derivatives from being written after the user
+ * trashed the recording.
+ */
+export function isRecordingProcessable(recordingId: string): boolean {
+  const rec = queryOne<{ id: string }>(
+    'SELECT id FROM recordings WHERE id = ? AND deleted_at IS NULL AND COALESCE(personal,0) = 0',
+    [recordingId]
+  )
+  return !!rec
+}
+
+/**
+ * Recording ids that must be excluded from AI processing and RAG surfaces:
+ * every recording flagged `personal` OR soft-deleted (`deleted_at` set),
+ * UNIONED (F16/spec-002) with {@link getValueExcludedRecordingIds} — a
+ * recording whose only rating(s) are garbage/low-value is excluded from RAG
+ * too. The value union is wrapped defensively: a failure there must never
+ * drop a privacy exclusion, only fail to ADD to it. The vector store filters
+ * search results against this set so that marking a recording personal (or a
+ * capture garbage/low-value) instantly pulls its chunks from the assistant's
+ * answers WITHOUT re-indexing (reversible), and soft-deleted recordings never
+ * surface.
+ *
+ * Cross-reference (/simplify S-5): the graph ingest (knowledge-graph-service.ts
+ * ingestFromDbTranscripts) composes the SAME two exclusions differently — its
+ * base query filters `COALESCE(r.personal,0)=0 AND r.deleted_at IS NULL`
+ * directly, then layers value-exclusion on top via the pre-filter Set /
+ * point-read pair above, rather than unioning everything into one Set like
+ * this function does for RAG. Same net effect (both exclusions always apply
+ * either way); this is a deliberate difference in composition, not drift.
+ *
+ * Round-6 FOUNDATION — this now returns `{ ids, failClosed }`. `failClosed` is
+ * true when EITHER sub-lookup (personal/deleted OR value-excluded) could not
+ * complete: the exclusion set is then INCOMPLETE, so every downstream reader
+ * MUST treat all recording-backed content as ineligible (previously a value
+ * sub-lookup failure was swallowed = fail-OPEN for value-excluded content,
+ * which defeated every "fail closed" consumer). All eligibility decisions go
+ * through the shared boundary in recording-eligibility.ts, built on this.
+ */
+export interface RecordingExclusion {
+  ids: Set<string>
+  failClosed: boolean
+}
+
+/** ADV9 (round-9) — positive-allowlist result: the subset of candidate ids that
+ *  are eligible to surface. `failClosed` = the lookup could not complete. */
+export interface RecordingEligibility {
+  eligible: Set<string>
+  failClosed: boolean
+}
+
+/**
+ * ADV9 (round-9) — THE positive eligibility allowlist. Returns the subset of the
+ * given candidate recording ids that are eligible to surface to AI / UI /
+ * exports: each must resolve to an EXISTING recording row that is non-personal,
+ * non-soft-deleted, AND not value-excluded. Any candidate NOT returned is
+ * ineligible — critically INCLUDING a HARD-PURGED id whose `recordings` row is
+ * gone (so it was in neither the table nor the old exclusion blocklist and was
+ * therefore wrongly treated as eligible, admitting a stale vector doc / graph
+ * edge that survived a deferred/failed cleanup). Fails CLOSED: any DB error
+ * yields an empty eligible set with `failClosed = true`.
+ *
+ * This INVERTS the previous blocklist model (subtract known-excluded ids, treat
+ * a MISSING id as eligible) — the root cause the 9th adversarial pass found.
+ * `getExcludedRecordingIds` (blocklist) is retained only for callers that need
+ * the LIVE excluded set for other purposes; all ELIGIBILITY decisions go through
+ * this positive query via recording-eligibility.ts.
+ */
+export function getEligibleRecordingIds(candidateIds: Iterable<string>): RecordingEligibility {
+  const unique = [...new Set([...candidateIds].filter((id): id is string => !!id))]
+  if (unique.length === 0) return { eligible: new Set<string>(), failClosed: false }
+  try {
+    const eligible = new Set<string>()
+    const CHUNK = 400 // stay under the SQL bound-parameter limit for large sets
+    for (let i = 0; i < unique.length; i += CHUNK) {
+      const chunk = unique.slice(i, i + CHUNK)
+      const placeholders = chunk.map(() => '?').join(',')
+      const rows = queryAll<{ id: string }>(
+        `SELECT r.id FROM recordings r
+          WHERE r.id IN (${placeholders})
+            AND r.deleted_at IS NULL
+            AND COALESCE(r.personal, 0) = 0
+            AND NOT EXISTS (
+              SELECT 1 FROM knowledge_captures kc
+               WHERE kc.source_recording_id = r.id
+                 AND kc.deleted_at IS NULL
+                 AND ${VALUE_EXCLUSION_PREDICATE})`,
+        [...chunk, ...VALUE_EXCLUDED_RATINGS, ...VALUE_KEEP_RATINGS]
+      )
+      for (const row of rows) eligible.add(row.id)
+    }
+    return { eligible, failClosed: false }
+  } catch (e) {
+    console.error('[Database] positive eligibility allowlist FAILED — failing closed:', e)
+    return { eligible: new Set<string>(), failClosed: true }
+  }
+}
+
+/**
+ * ADV11 (round-12) — id-EXISTENCE result. The subset of candidate ids that are
+ * present as rows in a table, plus a fail-closed flag on any lookup error.
+ * Existence is about IDENTITY, not eligibility: a soft-deleted / personal /
+ * value-excluded recording still EXISTS.
+ */
+export interface IdExistence {
+  ids: Set<string>
+  failClosed: boolean
+}
+
+/**
+ * ADV11 (round-12) — the subset of candidate ids that EXIST as rows in
+ * `recordings`, REGARDLESS of state (deleted_at set, personal, or value-excluded
+ * all still count as EXISTING). This answers "does this id name a real
+ * recording?" — the positive provenance question the vector-store resolver uses
+ * to decide whether a doc's `recordingId` is a genuine recording (⇒ governed by
+ * the eligibility allowlist) or NOT (⇒ artifact id or hard-purged orphan). It is
+ * deliberately DISTINCT from {@link getEligibleRecordingIds} (which additionally
+ * filters out excluded recordings): a forged `captureId` must never let a REAL
+ * excluded recording escape the allowlist, so existence and eligibility are
+ * resolved separately. Chunked IN() to stay under the SQL bound-parameter limit.
+ * Fails CLOSED: any DB error yields an empty set with failClosed=true.
+ */
+export function getExistingRecordingIds(candidateIds: Iterable<string>): IdExistence {
+  return idsPresentIn('recordings', candidateIds)
+}
+
+/** Normalize a filesystem path for equality comparison: absolute + normalized,
+ *  case-folded on win32 (paths are case-insensitive there). Mirrors
+ *  file-storage.readRecordingFile's own comparison so a resolved path and a
+ *  stored file_path compare identically. */
+function normalizePathForCompare(p: string): string {
+  const n = normalize(resolvePath(p))
+  return process.platform === 'win32' ? n.toLowerCase() : n
+}
+
+/**
+ * ADV45-2 (round-47) — resolve a filesystem path back to the recording row that
+ * OWNS it, so the raw-file IPCs (audio read / open-in-app / reveal-in-folder)
+ * can enforce an EXISTENCE-SCOPED owner gate instead of trusting a
+ * renderer-supplied path. Those are OWNER actions, so the recording may be in
+ * ANY state (trashed / personal / low-value) — this is deliberately
+ * EXISTENCE-scoped, NOT the full eligibility allowlist — but a HARD-PURGED /
+ * orphan / arbitrary path (no `recordings` row claims it) resolves to `null`
+ * and the caller REFUSES (no file bytes / no open / no reveal), which also
+ * blocks arbitrary-path traversal to files no recording owns. Case-insensitive
+ * on win32. Fail-closed: any DB error → `null`.
+ */
+export function getRecordingIdByFilePath(filePath: string): string | null {
+  if (!filePath || typeof filePath !== 'string') return null
+  try {
+    const target = normalizePathForCompare(filePath)
+    const rows = queryAll<{ id: string; file_path: string | null }>(
+      "SELECT id, file_path FROM recordings WHERE file_path IS NOT NULL AND file_path != ''"
+    )
+    for (const r of rows) {
+      if (r.file_path && normalizePathForCompare(r.file_path) === target) return r.id
+    }
+    return null
+  } catch (e) {
+    console.error('[Database] getRecordingIdByFilePath FAILED — failing closed:', e)
+    return null
+  }
+}
+
+/**
+ * ADV11 (round-12) — the subset of candidate ids present in `knowledge_captures`
+ * (a GENUINE artifact/capture id). Used to positively confirm that a vector doc
+ * whose `recordingId` does NOT resolve to a recording is a real artifact (its
+ * `captureId` names a live capture) rather than a forged-provenance chunk or a
+ * hard-purged recording orphan. Fails CLOSED.
+ */
+export function getExistingCaptureIds(candidateIds: Iterable<string>): IdExistence {
+  return idsPresentIn('knowledge_captures', candidateIds)
+}
+
+/**
+ * ADV15 (round-16) — raw capture rows the shared capture-eligibility boundary
+ * needs to decide eligibility: a capture's own soft-delete flag, its source
+ * recording (recording-derived vs standalone), and its own value rating (for the
+ * standalone case). Only captures that EXIST are returned — a missing/purged id
+ * is simply absent, so the positive-allowlist boundary treats it as ineligible.
+ * Chunked IN() to stay well under the SQLite bound-parameter limit; fail-closed
+ * on any DB error so the boundary drops everything rather than leaking.
+ */
+export interface CaptureEligibilityRow {
+  id: string
+  source_recording_id: string | null
+  quality_rating: string | null
+  deleted_at: string | null
+}
+export interface CaptureEligibilityRowsResult {
+  rows: CaptureEligibilityRow[]
+  failClosed: boolean
+}
+export function getCaptureEligibilityRows(captureIds: Iterable<string>): CaptureEligibilityRowsResult {
+  const unique = [...new Set([...captureIds].filter((id): id is string => !!id))]
+  if (unique.length === 0) return { rows: [], failClosed: false }
+  try {
+    const rows: CaptureEligibilityRow[] = []
+    const CHUNK = 400
+    for (let i = 0; i < unique.length; i += CHUNK) {
+      const chunk = unique.slice(i, i + CHUNK)
+      const placeholders = chunk.map(() => '?').join(',')
+      const batch = queryAll<CaptureEligibilityRow>(
+        `SELECT id, source_recording_id, quality_rating, deleted_at
+           FROM knowledge_captures WHERE id IN (${placeholders})`,
+        chunk
+      )
+      for (const row of batch) rows.push(row)
+    }
+    return { rows, failClosed: false }
+  } catch (e) {
+    console.error('[Database] capture-eligibility row lookup FAILED — failing closed:', e)
+    return { rows: [], failClosed: true }
+  }
+}
+
+/** Shared existence probe: the subset of `candidateIds` present as `id` rows in
+ *  `table`, chunked, fail-closed. `table` is a fixed internal literal (never
+ *  user input) so interpolation is safe. */
+function idsPresentIn(table: 'recordings' | 'knowledge_captures', candidateIds: Iterable<string>): IdExistence {
+  const unique = [...new Set([...candidateIds].filter((id): id is string => !!id))]
+  if (unique.length === 0) return { ids: new Set<string>(), failClosed: false }
+  try {
+    const ids = new Set<string>()
+    const CHUNK = 400
+    for (let i = 0; i < unique.length; i += CHUNK) {
+      const chunk = unique.slice(i, i + CHUNK)
+      const placeholders = chunk.map(() => '?').join(',')
+      const rows = queryAll<{ id: string }>(
+        `SELECT id FROM ${table} WHERE id IN (${placeholders})`,
+        chunk
+      )
+      for (const row of rows) ids.add(row.id)
+    }
+    return { ids, failClosed: false }
+  } catch (e) {
+    console.error(`[Database] id-existence lookup in ${table} FAILED — failing closed:`, e)
+    return { ids: new Set<string>(), failClosed: true }
+  }
+}
+
+export function getExcludedRecordingIds(): RecordingExclusion {
+  try {
+    const rows = queryAll<{ id: string }>(
+      'SELECT id FROM recordings WHERE personal = 1 OR deleted_at IS NOT NULL'
+    )
+    const ids = new Set(rows.map((r) => r.id))
+    let failClosed = false
+    try {
+      for (const id of getValueExcludedRecordingIds()) ids.add(id)
+    } catch (e) {
+      // The VALUE sub-lookup failed — we can no longer prove value-excluded
+      // content is filtered, so callers must fail closed (drop ALL
+      // recording-backed content) rather than surface it.
+      console.error('[Database] value-exclusion sub-lookup FAILED — exclusion set incomplete, callers must fail closed:', e)
+      failClosed = true
+    }
+    return { ids, failClosed }
+  } catch (e) {
+    // Even the privacy (personal/deleted) lookup failed → fully fail closed.
+    console.error('[Database] exclusion lookup FAILED — failing closed:', e)
+    return { ids: new Set<string>(), failClosed: true }
+  }
+}
+
+/**
+ * INC-3 (round-3) — failed/incomplete-analysis transcripts eligible for the
+ * boot reanalysis backfill, with EVERY exclusion baked into the query so the
+ * LIMIT counts only ELIGIBLE rows. Previously the caller applied LIMIT first
+ * then skipped value-excluded rows in JS, so the newest N garbage rows filled
+ * the slot every boot and permanently starved eligible failed transcripts.
+ * Excludes soft-deleted + personal + value-excluded (garbage/low-value with no
+ * keep capture). Fails CLOSED by construction: a DB error throws to the caller,
+ * which aborts the run (zero provider calls) rather than defaulting open.
+ */
+export function getFailedTranscriptsForReanalysis(
+  limit: number
+): Array<{ recording_id: string; full_text: string }> {
+  return queryAll<{ recording_id: string; full_text: string }>(
+    `SELECT t.recording_id AS recording_id, t.full_text AS full_text
+       FROM transcripts t JOIN recordings r ON r.id = t.recording_id
+      WHERE (t.summary IS NULL OR t.summary = 'Analysis failed' OR t.title_suggestion IS NULL)
+        AND t.full_text IS NOT NULL AND TRIM(t.full_text) != ''
+        AND r.deleted_at IS NULL AND COALESCE(r.personal, 0) = 0
+        AND NOT EXISTS (
+          SELECT 1 FROM knowledge_captures kc
+           WHERE kc.source_recording_id = t.recording_id
+             AND kc.deleted_at IS NULL
+             AND ${VALUE_EXCLUSION_PREDICATE})
+      ORDER BY t.created_at DESC
+      LIMIT ?`,
+    [...VALUE_EXCLUDED_RATINGS, ...VALUE_KEEP_RATINGS, limit]
+  )
+}
+
 /** All knowledge_capture ids owned by a recording (via source link or migration). */
-function getCaptureIdsForRecording(recordingId: string): string[] {
+export function getCaptureIdsForRecording(recordingId: string): string[] {
   const rec = queryOne<{ migrated_to_capture_id?: string | null }>(
     'SELECT migrated_to_capture_id FROM recordings WHERE id = ?',
     [recordingId]
@@ -2964,6 +4812,91 @@ function getCaptureIdsForRecording(recordingId: string): string[] {
   return Array.from(ids)
 }
 
+/**
+ * F16/spec-003 — manual per-row value-rating override, the write path behind
+ * `recordings:setValueRating`. Explicit user action: unlike
+ * applyCaptureValueClassification's guarded AI write, this ALWAYS applies —
+ * there is no never-downgrade check, because the user IS the authority the
+ * guard exists to protect. Stamps quality_source='user' (so a later AI
+ * re-analysis never touches it), full confidence, and clears any AI reason
+ * tags (they justified the OLD rating, not this one). Every capture owned by
+ * the recording is updated in one transaction. Returns success:false when the
+ * recording has no knowledge_captures yet (nothing to rate).
+ */
+export function setKnowledgeCaptureRatingByRecording(
+  recordingId: string,
+  rating: QualityRating
+): { success: boolean; rating?: QualityRating } {
+  const captureIds = getCaptureIdsForRecording(recordingId)
+  if (captureIds.length === 0) {
+    return { success: false }
+  }
+
+  const now = new Date().toISOString()
+  runInTransaction(() => {
+    for (const captureId of captureIds) {
+      runNoSave(
+        `UPDATE knowledge_captures
+            SET quality_rating = ?, quality_confidence = 1.0, quality_assessed_at = ?,
+                quality_source = 'user', quality_reasons = NULL, updated_at = ?
+          WHERE id = ?`,
+        [rating, now, now, captureId]
+      )
+    }
+    if (isValueExcludedRecording(recordingId)) removeRecordingVoiceEvidenceNoSave(recordingId)
+  })
+
+  return { success: true, rating }
+}
+
+// =============================================================================
+// F17/T6 (spec-006) — graph-provenance cleanup injection seam.
+//
+// database.ts is the lowest-level main-process module; knowledge-graph-service.ts
+// imports ~15 symbols FROM here, so a top-level import of the graph service here
+// would create a dependency cycle. This dependency-injection seam lets the hard
+// purge (below) call into the graph package's removal engine without database.ts
+// ever importing knowledge-graph-service. The seam is wired once, at startup, by
+// registerRecordingDeletionHandlers() (recording-deletion-handlers.ts) — see
+// main/index.ts's post-registration tripwire for the loud "unwired" guard.
+//
+// AR3-1 (Codex adversarial review, BINDING): the hard branch FAILS CLOSED —
+// when the seam is unregistered, the purge THROWS rather than silently
+// skipping graph cleanup, so it is refused end-to-end (nothing is deleted)
+// instead of leaving graph residue behind. Tests that don't want the graph
+// package involved wire an explicit no-op stub via setGraphProvenanceCleanup.
+// =============================================================================
+
+export interface GraphProvenanceCleanupResult {
+  ok: boolean
+  error?: string
+  markersRemoved: number
+  edgesRemoved: number
+  edgeSourceRowsRemoved: number
+  meetingNodesRemoved: number
+  orphanNodesRemoved: number
+}
+
+export type GraphProvenanceCleanupFn = (
+  recordingId: string,
+  opts: { meetingId?: string; transcriptIds?: string[] }
+) => GraphProvenanceCleanupResult
+
+let _graphProvenanceCleanup: GraphProvenanceCleanupFn | null = null
+
+/** Wire (or clear, passing null) the graph-provenance cleanup used by a hard
+ *  purge. Production wires this once at IPC-handler registration time; tests
+ *  wire an explicit stub (AR3-1 fail-closed means an unwired hard purge now
+ *  refuses rather than silently skipping cleanup). */
+export function setGraphProvenanceCleanup(fn: GraphProvenanceCleanupFn | null): void {
+  _graphProvenanceCleanup = fn
+}
+
+/** Startup tripwire support (main/index.ts) + the wiring-guard test. */
+export function isGraphProvenanceCleanupRegistered(): boolean {
+  return _graphProvenanceCleanup !== null
+}
+
 export interface RecordingDeletionImpact {
   recordingId: string
   filename: string
@@ -2974,6 +4907,28 @@ export interface RecordingDeletionImpact {
   artifacts: number
   meetingLinks: number
   hasAudioFile: boolean
+  /** F17/T6 (spec-006 D5): whether the recording is currently marked on-device
+   *  (rec.on_device). Gates the DeletePermanentDialog's "Also delete from
+   *  device" checkbox for a Trash row, which has no live UnifiedRecording
+   *  location signal (F-INFO-6 — trash rows always flatten to 'local-only'). */
+  onDevice: boolean
+  /** F17/T6 — the device's own filename for this recording (same value as
+   *  `filename`; device and local share one canonical name), or null when not
+   *  on device. Sourced from the DB row rather than the renderer's
+   *  UnifiedRecording, which loses this field entirely for Trash rows. */
+  deviceFilename: string | null
+  /**
+   * F17/T6 (spec-006 D5 + AR3-8): populated by the IPC handler layer
+   * (recording-deletion-handlers.ts), NOT by getRecordingDeletionImpact()
+   * itself — computing it requires a graph dry-run, and database.ts stays
+   * graph-free except for the cleanup seam above (no cycle). number = a
+   * point-in-time ESTIMATE ("~N graph links"); null = the graph dry-run
+   * explicitly failed (AR3-8: UNKNOWN, the dialog renders a warning, never a
+   * silent omission); absent only if the handler layer is bypassed entirely
+   * (shouldn't happen in production — every deletionImpact call goes through
+   * the handler).
+   */
+  graphEstimate?: number | null
 }
 
 /**
@@ -3030,7 +4985,18 @@ export function getRecordingDeletionImpact(recordingId: string): RecordingDeleti
     captures: captureIds.length,
     artifacts,
     meetingLinks,
-    hasAudioFile: !!(rec.file_path && rec.on_local)
+    hasAudioFile: !!(rec.file_path && rec.on_local),
+    // F17/T6 D5 + F-INFO-6: on_device/filename come straight from the DB row,
+    // available for BOTH a live and a soft-deleted (Trash) recording — unlike
+    // the renderer's UnifiedRecording, which loses deviceFilename entirely
+    // once a row is flattened into the Trash view.
+    onDevice: !!rec.on_device,
+    // Device-NATIVE name (original_filename — the .hda on the hardware), NOT
+    // the local normalized .wav: getHiDockDeviceService().deleteRecording()
+    // deletes by the device's own name, so passing rec.filename (.wav) made
+    // every "Also delete from device" call a silent no-op on the hardware
+    // (found 2026-07-20: both Rec07/Rec08 purges left their device copies).
+    deviceFilename: rec.on_device ? (rec.original_filename || rec.filename) : null
   }
 }
 
@@ -3110,6 +5076,60 @@ function recomputeMeetingParticipants(meetingId: string, excludeRecordingId: str
   return removed
 }
 
+/** Remove one recording's acoustic evidence and rebuild every affected centroid. */
+function removeRecordingVoiceEvidenceNoSave(recordingId: string): void {
+  const affected = queryAll<{ voice_cluster_id: string }>(
+    'SELECT DISTINCT voice_cluster_id FROM voice_cluster_observations WHERE recording_id = ?',
+    [recordingId]
+  ).map((row) => row.voice_cluster_id)
+  runNoSave('DELETE FROM recording_voice_clusters WHERE recording_id = ?', [recordingId])
+  runNoSave('DELETE FROM voice_cluster_observations WHERE recording_id = ?', [recordingId])
+  for (const clusterId of affected) {
+    const observations = queryAll<{ embedding_json: string; speech_seconds: number }>(
+      'SELECT embedding_json, speech_seconds FROM voice_cluster_observations WHERE voice_cluster_id = ?',
+      [clusterId]
+    )
+    if (!observations.length) {
+      runNoSave('DELETE FROM voice_clusters WHERE id = ?', [clusterId])
+      continue
+    }
+    let weighted: number[] = []
+    let totalWeight = 0
+    for (const observation of observations) {
+      let embedding: number[]
+      try {
+        const parsed = JSON.parse(observation.embedding_json)
+        embedding = Array.isArray(parsed) ? parsed.map(Number) : []
+      } catch {
+        embedding = []
+      }
+      if (!embedding.length || embedding.some((value) => !Number.isFinite(value))) continue
+      const weight = Math.max(0.001, Number(observation.speech_seconds) || 0)
+      if (!weighted.length) weighted = new Array(embedding.length).fill(0)
+      if (weighted.length !== embedding.length) continue
+      for (let index = 0; index < embedding.length; index++) weighted[index] += embedding[index] * weight
+      totalWeight += weight
+    }
+    if (!weighted.length || totalWeight <= 0) {
+      runNoSave('DELETE FROM voice_clusters WHERE id = ?', [clusterId])
+      continue
+    }
+    const mean = weighted.map((value) => value / totalWeight)
+    const magnitude = Math.sqrt(mean.reduce((sum, value) => sum + value * value, 0)) || 1
+    const centroid = mean.map((value) => value / magnitude)
+    runNoSave(
+      `UPDATE voice_clusters SET centroid_json = ?, observation_count = ?, total_speech_seconds = ?,
+       updated_at = ? WHERE id = ?`,
+      [JSON.stringify(centroid), observations.length, totalWeight, new Date().toISOString(), clusterId]
+    )
+  }
+}
+
+/** Remove one recording's acoustic identity evidence and rebuild affected centroids. */
+export function removeRecordingVoiceEvidence(recordingId: string): void {
+  runInTransaction(() => removeRecordingVoiceEvidenceNoSave(recordingId))
+}
+
 export interface RecordingDeletionResult {
   mode: 'soft' | 'hard'
   recordingId: string
@@ -3127,7 +5147,26 @@ export interface RecordingDeletionResult {
     speakerBindings: number
     candidates: number
     meetingLinksRemoved: number
+    // F17/T6 (spec-006 D1/D5) — actual (not estimated) graph-provenance
+    // cleanup counts, merged in from the injection seam's result. Zero for a
+    // soft delete (the graph is untouched) and for a hard delete that used
+    // the skipGraphCleanup escape hatch.
+    markersRemoved: number
+    edgesRemoved: number
+    edgeSourceRowsRemoved: number
+    meetingNodesRemoved: number
+    orphanNodesRemoved: number
   }
+  /** F17/T6 AR3-3(c) — true only when a hard purge used the explicit
+   *  skip-graph-cleanup escape hatch (a second, user-invoked action after a
+   *  fail-closed refusal). Always false for soft deletes and for a normal
+   *  hard purge. */
+  graphCleanupSkipped: boolean
+  /** F17/T6 AR3-2 — the deletion_journal row's own id (hard mode only), so the
+   *  post-commit file-cleanup step (recording-deletion-service.ts) can record
+   *  which on-disk targets it failed to remove, keyed precisely rather than by
+   *  a (possibly ambiguous) recording_id + mode lookup. */
+  journalId?: string
 }
 
 /**
@@ -3135,8 +5174,9 @@ export interface RecordingDeletionResult {
  *
  * Soft ({ hard: false }, the default): set `deleted_at`, snapshot the row into
  * deletion_journal, hide it everywhere. Fully reversible via restoreRecording.
- * No files are touched and no derived rows are removed — read-sites filter on
- * deleted_at, so nothing surfaces.
+ * No files or content derivatives are touched. Acoustic voice observations are
+ * removed immediately so trashed audio cannot keep influencing identity
+ * matches; they can be rebuilt if the restored recording is transcribed again.
  *
  * Hard ({ hard: true }): irreversibly remove ALL derived DB rows (transcripts +
  * their embeddings, vector chunks, knowledge_captures and every child, first-
@@ -3153,7 +5193,7 @@ export interface RecordingDeletionResult {
  */
 export function deleteRecordingCascade(
   recordingId: string,
-  opts: { hard?: boolean } = {}
+  opts: { hard?: boolean; skipGraphCleanup?: boolean } = {}
 ): RecordingDeletionResult | undefined {
   const rec = getRecordingById(recordingId)
   if (!rec) return undefined
@@ -3166,15 +5206,26 @@ export function deleteRecordingCascade(
     artifacts: 0,
     speakerBindings: 0,
     candidates: 0,
-    meetingLinksRemoved: 0
+    meetingLinksRemoved: 0,
+    markersRemoved: 0,
+    edgesRemoved: 0,
+    edgeSourceRowsRemoved: 0,
+    meetingNodesRemoved: 0,
+    orphanNodesRemoved: 0
   }
 
   if (!opts.hard) {
     const now = new Date().toISOString()
     runInTransaction(() => {
       runNoSave('UPDATE recordings SET deleted_at = ? WHERE id = ?', [now, recordingId])
+      removeRecordingVoiceEvidenceNoSave(recordingId)
       // Stop any in-flight/queued transcription for a hidden recording.
       runNoSave("DELETE FROM transcription_queue WHERE recording_id = ? AND status IN ('pending', 'failed')", [recordingId])
+      // ARF-3 — tombstone (cancel) a PROCESSING row too: a worker mid-analysis
+      // can then bail between stages if it checks, and the post-analysis
+      // boundary gates (isRecordingProcessable in transcription.ts) refuse to
+      // persist any further derivatives for this now-trashed recording.
+      runNoSave("UPDATE transcription_queue SET status = 'cancelled' WHERE recording_id = ? AND status = 'processing'", [recordingId])
       runNoSave(
         `INSERT INTO deletion_journal (id, recording_id, mode, recording_snapshot, created_at)
          VALUES (?, ?, 'soft', ?, ?)`,
@@ -3188,7 +5239,8 @@ export function deleteRecordingCascade(
       originalFilename: rec.original_filename,
       filePath: rec.file_path,
       artifactPaths: [],
-      removed: { ...zero }
+      removed: { ...zero },
+      graphCleanupSkipped: false
     }
   }
 
@@ -3206,6 +5258,48 @@ export function deleteRecordingCascade(
       )
       const transcriptIds = transcriptRows.map((t) => t.id)
       const tPlaceholders = transcriptIds.map(() => '?').join(',')
+
+      // spec-006/F17 T6 D1 — graph-provenance cleanup, run early using the
+      // PRE-CAPTURED meetingId/transcriptIds (this recording's transcripts/
+      // recordings rows are deleted further down in this SAME transaction —
+      // by the time removeRecordingProvenanceCore would try to self-resolve
+      // them, they'd be gone; passing them explicitly keeps it correct
+      // regardless of statement order, and running it here keeps intent
+      // unmistakable). meetingId mirrors ingest's own meta.meetingId
+      // (knowledge-graph-service.ts ingestFromDbTranscripts).
+      //
+      // AR3-1 (Codex adversarial review, BINDING, fail-closed): an unwired
+      // seam THROWS here — the whole transaction rolls back, so the purge is
+      // REFUSED end-to-end rather than silently leaving graph residue behind.
+      // AR3-3(c): the caller-supplied skipGraphCleanup escape hatch bypasses
+      // the seam call entirely — reachable only as an explicit second user
+      // action after a fail-closed refusal (recording-deletion-handlers.ts /
+      // Library.tsx), never automatically.
+      const meetingId = rec.meeting_id ?? recordingId
+      const graphCleanupSkipped = !!opts.skipGraphCleanup
+      let graphRemoved = {
+        markersRemoved: 0,
+        edgesRemoved: 0,
+        edgeSourceRowsRemoved: 0,
+        meetingNodesRemoved: 0,
+        orphanNodesRemoved: 0
+      }
+      if (!graphCleanupSkipped) {
+        if (!_graphProvenanceCleanup) {
+          throw new Error('graph cleanup unavailable — purge refused (fail-closed)')
+        }
+        const g = _graphProvenanceCleanup(recordingId, { meetingId, transcriptIds })
+        if (!g.ok) {
+          throw new Error(g.error || 'Graph provenance cleanup failed')
+        }
+        graphRemoved = {
+          markersRemoved: g.markersRemoved,
+          edgesRemoved: g.edgesRemoved,
+          edgeSourceRowsRemoved: g.edgeSourceRowsRemoved,
+          meetingNodesRemoved: g.meetingNodesRemoved,
+          orphanNodesRemoved: g.orphanNodesRemoved
+        }
+      }
 
       const countOf = (sql: string, params: any[]): number => {
         try {
@@ -3266,6 +5360,16 @@ export function deleteRecordingCascade(
           const col = child === 'actionables' ? 'source_knowledge_id' : 'knowledge_capture_id'
           runNoSave(`DELETE FROM ${child} WHERE ${col} IN (${capPlaceholders})`, captureIds)
         }
+        // Value-backfill classification markers (v43/F16, keyed by capture id) —
+        // part of the purge contract: a hard-purged recording must not leave
+        // its captures' classification bookkeeping behind. The table is
+        // triple-placed (SCHEMA/migration/lazy-create) so it should always
+        // exist, but tolerate its absence like vector_embeddings above.
+        try {
+          runNoSave(`DELETE FROM value_backfill_state WHERE capture_id IN (${capPlaceholders})`, captureIds)
+        } catch {
+          /* value_backfill_state not yet created — nothing to remove */
+        }
         runNoSave(`DELETE FROM knowledge_captures WHERE id IN (${capPlaceholders})`, captureIds)
       }
 
@@ -3274,6 +5378,7 @@ export function deleteRecordingCascade(
       runNoSave('DELETE FROM turn_speaker_overrides WHERE recording_id = ?', [recordingId])
       runNoSave('DELETE FROM speaker_splits WHERE recording_id = ?', [recordingId])
       runNoSave('DELETE FROM mention_resolutions WHERE recording_id = ?', [recordingId])
+      removeRecordingVoiceEvidenceNoSave(recordingId)
 
       // 5. Meeting candidates + processing/quality rows keyed by recording.
       runNoSave('DELETE FROM recording_meeting_candidates WHERE recording_id = ?', [recordingId])
@@ -3281,6 +5386,23 @@ export function deleteRecordingCascade(
       runNoSave('DELETE FROM quality_assessments WHERE recording_id = ?', [recordingId])
 
       // 6. Pre-assignments (keyed by device filename) + synced_files (by filename).
+      //
+      // v51 — PURGE TOMBSTONES FIRST: the synced_files/recordings cleanup
+      // below erases every "already synced" marker, so download reconciliation
+      // would treat the STILL-ON-DEVICE file as new and RESURRECT the purged
+      // recording (re-download → re-transcribe → re-embed). Record filename-
+      // only tombstones (all name variants the reconciler checks) in the SAME
+      // transaction; isFileAlreadySynced skips these. No content is retained.
+      const purgeTombstones = new Set<string>([rec.filename])
+      if (rec.original_filename) purgeTombstones.add(rec.original_filename)
+      for (const name of [...purgeTombstones]) {
+        if (/\.hda$/i.test(name)) purgeTombstones.add(name.replace(/\.hda$/i, '.wav'))
+        if (/\.wav$/i.test(name)) purgeTombstones.add(name.replace(/\.wav$/i, '.hda'))
+        purgeTombstones.add(name.replace(/\.(hda|wav)$/i, '.mp3'))
+      }
+      for (const name of purgeTombstones) {
+        runNoSave('INSERT OR IGNORE INTO purged_files (filename) VALUES (?)', [name])
+      }
       runNoSave('DELETE FROM recording_preassignments WHERE filename = ?', [rec.filename])
       if (rec.original_filename) {
         runNoSave('DELETE FROM synced_files WHERE original_filename = ?', [rec.original_filename])
@@ -3298,6 +5420,17 @@ export function deleteRecordingCascade(
 
       // 8. Finally the recording row itself, and an audit journal entry.
       runNoSave('DELETE FROM recordings WHERE id = ?', [recordingId])
+
+      // ARF-1 (Codex adversarial FINAL review, BINDING): a prior SOFT
+      // deletion_journal row for this recording still carries the FULL
+      // JSON.stringify(rec) snapshot (filename, on-disk paths, meeting
+      // linkage) written when it was moved to Trash. "Delete permanently" must
+      // retain ONLY the minimal opaque hard audit row (AR3-7), so purge EVERY
+      // prior journal row for this recording — soft snapshots included — in
+      // this SAME transaction, immediately before writing the minimal hard row
+      // below. (Restore fidelity is moot once we hard-purge: the recording row
+      // is gone, so no soft row will ever be restored again.)
+      runNoSave('DELETE FROM deletion_journal WHERE recording_id = ?', [recordingId])
       const removed = {
         transcripts: transcriptRows.length,
         embeddings: embeddingsCount,
@@ -3306,12 +5439,41 @@ export function deleteRecordingCascade(
         artifacts: artifactRows.length,
         speakerBindings: speakerCount,
         candidates: candidateCount,
-        meetingLinksRemoved
+        meetingLinksRemoved,
+        // spec-006/F17 T6 D1/D5 — actual graph cleanup counts, merged in.
+        ...graphRemoved
       }
+      // AR3-7 (Codex adversarial review, BINDING — supersedes D4's "keep a
+      // minimized snapshot" ruling): a HARD journal row is privacy-sensitive
+      // and stores NO filenames, NO paths, and NO counts — only the opaque
+      // recording_id + mode + created_at (already columns on this table) plus,
+      // ONLY when the escape hatch was used, a `graph_cleanup_skipped` marker
+      // (AR3-3c) so an auditor can see cleanup was intentionally bypassed.
+      // AR3-2's post-commit pending_files record (recording-deletion-service.ts,
+      // via recordPendingFileCleanups) is a LATER UPDATE to this same row —
+      // this INSERT never writes it. The soft-delete journal above is
+      // UNCHANGED (full snapshot — restore fidelity requires it).
+      const journalId = randomUUID()
+      // ARF-4 (Codex adversarial FINAL review, BINDING): the skipGraphCleanup
+      // escape hatch purges the DB rows but leaves graph residue behind with
+      // no way to retry — the recording is gone, so it can never be resolved
+      // again. Persist a durable pending-graph-cleanup LEDGER in the SAME
+      // journal row's snapshot: exactly the ids removeRecordingProvenanceCore
+      // needs (it takes explicit recordingId/meetingId/transcriptIds precisely
+      // for this), so the sweep (retryPendingGraphCleanups) can finish the
+      // cleanup by ids on a later pass / next boot. A normal hard purge (graph
+      // cleaned inline) still journals NULL (AR3-7 privacy default).
+      const hardSnapshot = graphCleanupSkipped
+        ? JSON.stringify({
+            mode: 'hard',
+            graph_cleanup_skipped: true,
+            pending_graph: { recordingId, meetingId, transcriptIds }
+          })
+        : null
       runNoSave(
         `INSERT INTO deletion_journal (id, recording_id, mode, recording_snapshot, removed_counts, created_at)
-         VALUES (?, ?, 'hard', ?, ?, ?)`,
-        [randomUUID(), recordingId, JSON.stringify(rec), JSON.stringify(removed), new Date().toISOString()]
+         VALUES (?, ?, 'hard', ?, NULL, ?)`,
+        [journalId, recordingId, hardSnapshot, new Date().toISOString()]
       )
 
       return {
@@ -3323,10 +5485,320 @@ export function deleteRecordingCascade(
         artifactPaths: artifactRows
           .map((a) => a.storage_path)
           .filter((p): p is string => !!p),
-        removed
+        removed,
+        graphCleanupSkipped,
+        journalId
       }
     })
   )
+}
+
+// =============================================================================
+// F17/T6 (spec-006 AR3-2) — post-commit file-cleanup partial-result ledger.
+//
+// A hard purge's DB rows are already committed by the time
+// recording-deletion-service.ts unlinks the audio file, wiki pages, artifact
+// blobs, and syncs the vector store — those are filesystem/in-memory side
+// effects OUTSIDE the cascade transaction, so a locked file or a transient I/O
+// error there must not (and cannot) roll back the DB purge. Instead of
+// silently swallowing that failure, the service durably records WHICH targets
+// still need cleanup, keyed by the hard journal row's own id (set on
+// RecordingDeletionResult.journalId above), and a bounded, non-fatal retry
+// sweep (recording-deletion-service.ts's retryPendingFileCleanups) re-attempts
+// them on every subsequent hard purge and on Trash-view entry.
+// =============================================================================
+
+export interface PendingCleanupTarget {
+  kind: 'audio' | 'wiki' | 'artifact' | 'vector' | 'device'
+  /** On-disk path for 'audio' | 'artifact'; the DEVICE-NATIVE filename for
+   *  'device'. 'wiki' | 'vector' retry by recordingId instead (their cleanup
+   *  functions operate on the whole recording, not a single path). */
+  path?: string
+}
+
+/**
+ * Persist which post-commit file-cleanup targets failed for a hard purge,
+ * keyed by the journal row's own id. Merges with (rather than clobbers) any
+ * existing snapshot content — e.g. AR3-3(c)'s graph_cleanup_skipped flag,
+ * already written by the INSERT this UPDATEs. No-ops when there is nothing
+ * pending (AR3-7's NULL-by-default stays true when every target succeeded).
+ */
+export function recordPendingFileCleanups(journalId: string, targets: PendingCleanupTarget[]): void {
+  if (targets.length === 0) return
+  const row = queryOne<{ recording_snapshot: string | null }>(
+    'SELECT recording_snapshot FROM deletion_journal WHERE id = ?',
+    [journalId]
+  )
+  let snapshot: Record<string, unknown> = { mode: 'hard' }
+  if (row?.recording_snapshot) {
+    try {
+      snapshot = JSON.parse(row.recording_snapshot) as Record<string, unknown>
+    } catch {
+      snapshot = { mode: 'hard' }
+    }
+  }
+  snapshot.pending_files = targets
+  runNoSave('UPDATE deletion_journal SET recording_snapshot = ? WHERE id = ?', [JSON.stringify(snapshot), journalId])
+}
+
+export interface PendingCleanupJournalRow {
+  journalId: string
+  recordingId: string
+  targets: PendingCleanupTarget[]
+}
+
+/**
+ * Bounded scan for hard journal rows still carrying pending file-cleanup
+ * targets — the AR3-2 retry sweep's read side. Newest first, capped so a
+ * large backlog can't make a single sweep expensive. Tolerates a malformed
+ * snapshot (skips that row rather than crashing the sweep).
+ */
+export function getPendingFileCleanups(limit = 25): PendingCleanupJournalRow[] {
+  const rows = queryAll<{ id: string; recording_id: string; recording_snapshot: string | null }>(
+    `SELECT id, recording_id, recording_snapshot FROM deletion_journal
+      WHERE mode = 'hard' AND recording_snapshot LIKE '%pending_files%'
+      ORDER BY created_at DESC LIMIT ?`,
+    [limit]
+  )
+  const out: PendingCleanupJournalRow[] = []
+  for (const row of rows) {
+    if (!row.recording_snapshot) continue
+    try {
+      const snapshot = JSON.parse(row.recording_snapshot) as { pending_files?: PendingCleanupTarget[] }
+      if (snapshot.pending_files && snapshot.pending_files.length > 0) {
+        out.push({ journalId: row.id, recordingId: row.recording_id, targets: snapshot.pending_files })
+      }
+    } catch {
+      /* malformed snapshot — skip, don't crash the retry sweep */
+    }
+  }
+  return out
+}
+
+/**
+ * Write back the REMAINING pending targets after a retry attempt (the AR3-2
+ * sweep's write side). An empty `remaining` array clears pending_files while
+ * preserving any other snapshot field (e.g. graph_cleanup_skipped); if
+ * nothing else is left on the snapshot, nulls the whole column (AR3-7's
+ * privacy default).
+ */
+export function updatePendingFileCleanups(journalId: string, remaining: PendingCleanupTarget[]): void {
+  const row = queryOne<{ recording_snapshot: string | null }>(
+    'SELECT recording_snapshot FROM deletion_journal WHERE id = ?',
+    [journalId]
+  )
+  // OP-NIT (T6 fix round): seed with {mode:'hard'} — matching
+  // recordPendingFileCleanups — so a rewrite of a missing/malformed snapshot
+  // doesn't drop the in-JSON mode marker (cosmetic: the mode COLUMN stays
+  // authoritative and getPendingFileCleanups filters on the column, but the
+  // JSON should stay self-describing).
+  let snapshot: Record<string, unknown> = { mode: 'hard' }
+  if (row?.recording_snapshot) {
+    try {
+      snapshot = JSON.parse(row.recording_snapshot) as Record<string, unknown>
+    } catch {
+      snapshot = { mode: 'hard' }
+    }
+  }
+  if (remaining.length > 0) {
+    snapshot.pending_files = remaining
+  } else {
+    delete snapshot.pending_files
+  }
+  const hasOtherFields = Object.keys(snapshot).some((k) => k !== 'mode' && k !== 'pending_files')
+  const next = remaining.length > 0 || hasOtherFields ? JSON.stringify(snapshot) : null
+  runNoSave('UPDATE deletion_journal SET recording_snapshot = ? WHERE id = ?', [next, journalId])
+}
+
+// =============================================================================
+// ARF-4 (Codex adversarial FINAL review) — durable pending-GRAPH-cleanup ledger
+// + retry sweep. Sibling of the file-cleanup ledger above. The skipGraphCleanup
+// escape hatch writes a `pending_graph` entry into the hard journal row's
+// snapshot (deleteRecordingCascade, above); this sweep re-runs the graph
+// provenance cleanup by the stored ids and clears the entry on success. It
+// survives a crash/restart because the ledger is on disk in deletion_journal.
+// =============================================================================
+
+export interface PendingGraphCleanupRow {
+  journalId: string
+  recordingId: string
+  meetingId?: string
+  transcriptIds: string[]
+}
+
+/**
+ * Bounded scan for hard journal rows still carrying a `pending_graph` entry —
+ * the ARF-4 graph-cleanup retry sweep's read side. Newest first, capped.
+ * Tolerates a malformed snapshot (skips that row rather than crashing).
+ */
+export function getPendingGraphCleanups(limit = 25): PendingGraphCleanupRow[] {
+  const rows = queryAll<{ id: string; recording_id: string; recording_snapshot: string | null }>(
+    `SELECT id, recording_id, recording_snapshot FROM deletion_journal
+      WHERE mode = 'hard' AND recording_snapshot LIKE '%pending_graph%'
+      ORDER BY created_at DESC LIMIT ?`,
+    [limit]
+  )
+  const out: PendingGraphCleanupRow[] = []
+  for (const row of rows) {
+    if (!row.recording_snapshot) continue
+    try {
+      const snapshot = JSON.parse(row.recording_snapshot) as {
+        pending_graph?: { recordingId?: string; meetingId?: string; transcriptIds?: string[] }
+      }
+      const pg = snapshot.pending_graph
+      if (pg && (pg.recordingId || row.recording_id)) {
+        out.push({
+          journalId: row.id,
+          recordingId: pg.recordingId ?? row.recording_id,
+          meetingId: pg.meetingId,
+          transcriptIds: Array.isArray(pg.transcriptIds) ? pg.transcriptIds : []
+        })
+      }
+    } catch {
+      /* malformed snapshot — skip, don't crash the sweep */
+    }
+  }
+  return out
+}
+
+/**
+ * Clear the `pending_graph` entry from a hard journal row after a successful
+ * graph-cleanup retry, preserving any other snapshot field (e.g.
+ * graph_cleanup_skipped); nulls the whole column if nothing else remains.
+ */
+export function clearPendingGraphCleanup(journalId: string): void {
+  const row = queryOne<{ recording_snapshot: string | null }>(
+    'SELECT recording_snapshot FROM deletion_journal WHERE id = ?',
+    [journalId]
+  )
+  let snapshot: Record<string, unknown> = { mode: 'hard' }
+  if (row?.recording_snapshot) {
+    try {
+      snapshot = JSON.parse(row.recording_snapshot) as Record<string, unknown>
+    } catch {
+      snapshot = { mode: 'hard' }
+    }
+  }
+  delete snapshot.pending_graph
+  const hasOtherFields = Object.keys(snapshot).some((k) => k !== 'mode')
+  const next = hasOtherFields ? JSON.stringify(snapshot) : null
+  runNoSave('UPDATE deletion_journal SET recording_snapshot = ? WHERE id = ?', [next, journalId])
+}
+
+/**
+ * ARF-4 retry sweep: for every hard journal row still carrying a deferred
+ * `pending_graph` entry (from a skipGraphCleanup escape-hatch purge), re-run
+ * the injected graph provenance cleanup by the stored ids and clear the entry
+ * on success. Uses the SAME injected seam (`_graphProvenanceCleanup`) the
+ * cascade uses, so it needs no graph-package import. Non-fatal and idempotent —
+ * a failure just leaves the entry for the next sweep (Trash-view entry / next
+ * hard purge / next boot). When the seam is unwired it does nothing (the
+ * entries survive until it is available again).
+ */
+export function retryPendingGraphCleanups(limit = 25): {
+  attempted: number
+  cleared: number
+  clearedJournalIds: string[]
+  stillPending: string[]
+} {
+  const clearedJournalIds: string[] = []
+  const stillPending: string[] = []
+  let attempted = 0
+  let cleared = 0
+  if (!_graphProvenanceCleanup) {
+    return { attempted, cleared, clearedJournalIds, stillPending }
+  }
+  try {
+    const rows = getPendingGraphCleanups(limit)
+    for (const row of rows) {
+      attempted++
+      try {
+        // The provenance cleanup touches protected graph tables, so run it in
+        // the same mass-delete-allowed transaction envelope the cascade uses.
+        const g = runWithMassDeleteAllowed(() =>
+          runInTransaction(() =>
+            _graphProvenanceCleanup!(row.recordingId, {
+              meetingId: row.meetingId,
+              transcriptIds: row.transcriptIds
+            })
+          )
+        )
+        if (g.ok) {
+          clearPendingGraphCleanup(row.journalId)
+          cleared++
+          clearedJournalIds.push(row.journalId)
+        } else {
+          stillPending.push(row.journalId)
+        }
+      } catch (e) {
+        console.warn(`[Database] pending graph-cleanup retry failed for ${row.journalId} (non-fatal):`, e)
+        stillPending.push(row.journalId)
+      }
+    }
+  } catch (e) {
+    console.warn('[Database] retryPendingGraphCleanups failed (non-fatal):', e)
+  }
+  return { attempted, cleared, clearedJournalIds, stillPending }
+}
+
+/**
+ * F17/T6 AR3-6(b) — immediately reconcile a single recording's device
+ * presence after a CONFIRMED device delete, so the UI doesn't show a stale
+ * 'both'/on-device row until the next authoritative scan (which remains the
+ * source of truth and will re-confirm this). Mirrors
+ * markRecordingsNotOnDevice's per-row logic, targeted at one id instead of a
+ * full-scan diff. No-ops for an unknown or already-not-on-device recording.
+ *
+ * Honest caller inventory (phase-3 integration-review C1): the sole IPC
+ * caller (`recordings:markNotOnDevice`) only reaches this function when its
+ * id still resolves — which, for the only wired production caller
+ * (`executeDeletePermanent`'s device checkbox in Library.tsx), is never
+ * true, because the hard cascade deletes the recordings row before the
+ * device delete confirms. This function is therefore effectively dead
+ * outside tests today. It is kept (rather than deleted) as the honest
+ * reconciliation contract for a future caller that still has a resolvable
+ * row at call time — e.g. the synced-row "Delete from device" flow
+ * (`executeDeleteFromDevice`), which currently does not call it and instead
+ * relies on the next device scan.
+ */
+export function markRecordingNotOnDeviceById(id: string): void {
+  const rec = getRecordingById(id)
+  if (!rec || !rec.on_device) return
+  const newLocation = rec.on_local ? 'local-only' : 'deleted'
+  updateRecordingLifecycle(id, { on_device: 0, location: newLocation as Recording['location'] })
+}
+
+/**
+ * F17/T6 fix round (CX-T6-1) — remove one filename from the offline device
+ * cache (`device_file_cache`, owned by device-cache-handlers.ts). The unified
+ * view synthesizes a device-only row from this cache whenever the in-memory
+ * device list is empty (buildRecordingMap's shouldUseCachedFiles branch) —
+ * and a confirmed device delete invalidates that in-memory list, so after a
+ * HARD PURGE + device delete (recordings/synced_files rows already gone) the
+ * stale cache entry is the ONLY data left, and it resurrects the deleted
+ * file as a ghost device-only row until the next full scan rewrites the
+ * cache. Row-level reconciliation (markRecordingNotOnDeviceById above) can't
+ * help there — the row no longer exists — so the post-purge path reconciles
+ * by FILENAME instead. Deleting a filename that isn't cached is a harmless
+ * no-op; the table is created lazily by deviceCache:saveAll, so its absence
+ * just means nothing is cached.
+ */
+export function removeDeviceFileCacheEntry(deviceFilename: string): void {
+  try {
+    run('DELETE FROM device_file_cache WHERE filename = ?', [deviceFilename])
+  } catch (e) {
+    // CX-T6-5 (fix round 2): ONLY the missing-table condition is a legitimate
+    // no-op (the table is created lazily by deviceCache:saveAll — absent =
+    // nothing cached = nothing to remove). Every OTHER error (corrupt DB,
+    // I/O failure, ...) must propagate: swallowing it here made
+    // recordings:markNotOnDevice report a false success while the stale
+    // cache row — the exact ghost this function exists to prevent — survived
+    // and could resurface after restart.
+    const message = e instanceof Error ? e.message : String(e)
+    if (!/no such table/i.test(message)) {
+      throw e
+    }
+  }
 }
 
 /**
@@ -3392,9 +5864,20 @@ export function getRecordingsByIds(ids: string[]): Map<string, Recording> {
 }
 
 
-// Get recording by filename (canonical identifier)
+// Get recording by filename (canonical identifier). Device discovery uses the
+// native .hda name while the durable local row commonly uses .wav/.mp3 and
+// stores the device name in original_filename. Prefer the local canonical row
+// when both exist so a device snapshot cannot create a second shadow row.
 export function getRecordingByFilename(filename: string): Recording | undefined {
-  return queryOne<Recording>('SELECT * FROM recordings WHERE filename = ?', [filename])
+  return queryOne<Recording>(
+    `SELECT * FROM recordings
+      WHERE filename = ? OR original_filename = ?
+      ORDER BY on_local DESC,
+               CASE WHEN filename = ? THEN 0 ELSE 1 END,
+               created_at ASC
+      LIMIT 1`,
+    [filename, filename, filename]
+  )
 }
 
 // Update recording lifecycle state
@@ -3447,21 +5930,30 @@ export function upsertRecordingFromDevice(deviceFile: {
   const now = new Date().toISOString()
 
   if (existing) {
-    // Update device presence and refresh duration from device (may have been calculated incorrectly before)
+    // Update the canonical row rather than creating a device-only .hda shadow
+    // beside an existing local .wav/.mp3 row. The device-native filename is
+    // authoritative for future reconciliation and device deletion.
     const newLocation = existing.on_local ? 'both' : 'device-only'
     run(
-      `UPDATE recordings SET on_device = 1, device_last_seen = ?, location = ?, file_size = ?, duration_seconds = ? WHERE id = ?`,
-      [now, newLocation, deviceFile.size, deviceFile.duration, existing.id]
+      `UPDATE recordings
+          SET on_device = 1,
+              device_last_seen = ?,
+              location = ?,
+              original_filename = ?,
+              file_size = CASE WHEN on_local = 1 THEN file_size ELSE ? END,
+              duration_seconds = ?
+        WHERE id = ?`,
+      [now, newLocation, deviceFile.filename, deviceFile.size, deviceFile.duration, existing.id]
     )
-    return { ...existing, on_device: 1, device_last_seen: now, location: newLocation as Recording['location'], duration_seconds: deviceFile.duration }
+    return getRecordingById(existing.id)!
   } else {
     // Create new recording entry
     const id = crypto.randomUUID()
     run(
-      `INSERT INTO recordings (id, filename, file_path, file_size, duration_seconds, date_recorded,
+      `INSERT INTO recordings (id, filename, original_filename, file_path, file_size, duration_seconds, date_recorded,
         status, location, transcription_status, on_device, device_last_seen, on_local, source, is_imported)
-       VALUES (?, ?, NULL, ?, ?, ?, 'none', 'device-only', 'none', 1, ?, 0, 'hidock', 0)`,
-      [id, deviceFile.filename, deviceFile.size, deviceFile.duration, deviceFile.dateCreated.toISOString(), now]
+       VALUES (?, ?, ?, NULL, ?, ?, ?, 'none', 'device-only', 'none', 1, ?, 0, 'hidock', 0)`,
+      [id, deviceFile.filename, deviceFile.filename, deviceFile.size, deviceFile.duration, deviceFile.dateCreated.toISOString(), now]
     )
     return getRecordingById(id)!
   }
@@ -3471,11 +5963,17 @@ export function upsertRecordingFromDevice(deviceFile: {
 export function markRecordingsNotOnDevice(presentFilenames: string[]): void {
   if (presentFilenames.length === 0) return
 
+  const presentBases = new Set(
+    presentFilenames.map((filename) => filename.replace(/\.(hda|wav|mp3|m4a|aac|ogg|flac)$/i, '').toLowerCase())
+  )
+
   // Get all recordings marked as on_device
   const onDevice = queryAll<Recording>('SELECT * FROM recordings WHERE on_device = 1')
 
   for (const rec of onDevice) {
-    if (!presentFilenames.includes(rec.filename)) {
+    const deviceIdentity = rec.original_filename || rec.filename
+    const base = deviceIdentity.replace(/\.(hda|wav|mp3|m4a|aac|ogg|flac)$/i, '').toLowerCase()
+    if (!presentBases.has(base)) {
       const newLocation = rec.on_local ? 'local-only' : 'deleted'
       updateRecordingLifecycle(rec.id, {
         on_device: 0,
@@ -3604,6 +6102,64 @@ export function deleteRecordingLocal(id: string): void {
   })
 }
 
+/** A locally-created child recording produced by a user-confirmed audio split. */
+export type RecordingSplitChild = Omit<Recording, 'created_at' | 'meeting_id' | 'correlation_confidence' | 'correlation_method'> & {
+  file_path: string
+  file_size: number
+  duration_seconds: number
+}
+
+/**
+ * Atomically register two split children and soft-delete their source recording.
+ * The source row, transcript, and original audio stay intact in Trash, so the
+ * user can recover from a cut without relying on filesystem undo.
+ */
+export function commitRecordingSplit(recordingId: string, children: RecordingSplitChild[]): void {
+  if (children.length !== 2) throw new Error('A recording split must create exactly two children')
+  if (new Set(children.map((child) => child.id)).size !== 2) throw new Error('Split child ids must be unique')
+
+  const parent = getRecordingById(recordingId)
+  if (!parent || parent.deleted_at) throw new Error('The source recording is unavailable')
+  const now = new Date().toISOString()
+
+  runInTransaction(() => {
+    for (const child of children) {
+      runNoSave(
+        `INSERT INTO recordings (id, filename, original_filename, file_path, file_size,
+          duration_seconds, date_recorded, meeting_id, correlation_confidence,
+          correlation_method, status, location, transcription_status, on_device,
+          on_local, source, is_imported)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          child.id,
+          child.filename,
+          child.original_filename ?? null,
+          child.file_path,
+          child.file_size,
+          child.duration_seconds,
+          child.date_recorded,
+          child.status,
+          child.location,
+          child.transcription_status,
+          child.on_device,
+          child.on_local,
+          child.source,
+          child.is_imported,
+        ]
+      )
+    }
+
+    runNoSave('UPDATE recordings SET deleted_at = ? WHERE id = ?', [now, recordingId])
+    runNoSave("DELETE FROM transcription_queue WHERE recording_id = ? AND status IN ('pending', 'failed')", [recordingId])
+    runNoSave("UPDATE transcription_queue SET status = 'cancelled' WHERE recording_id = ? AND status = 'processing'", [recordingId])
+    runNoSave(
+      `INSERT INTO deletion_journal (id, recording_id, mode, recording_snapshot, created_at)
+       VALUES (?, ?, 'soft', ?, ?)`,
+      [randomUUID(), recordingId, JSON.stringify(parent), now]
+    )
+  })
+}
+
 export function insertRecording(recording: Omit<Recording, 'created_at'>): void {
   // Lifecycle columns (location/on_device/on_local/...) must be written explicitly:
   // the DDL defaults are device-oriented ('device-only', on_device=1, on_local=0),
@@ -3642,6 +6198,87 @@ export function updateRecordingStatus(id: string, status: string): void {
 
 export function updateRecordingTranscriptionStatus(id: string, transcriptionStatus: string): void {
   run('UPDATE recordings SET transcription_status = ? WHERE id = ?', [transcriptionStatus, id])
+}
+
+/**
+ * Retire stale AI-derived content when a reprocess conclusively returns
+ * `no_speech`. The original recording and user-authored title survive. An
+ * automatic transcript-based meeting link is removed; manual/user links are
+ * preserved. Processing runs are immutable audit history and are not deleted.
+ */
+export function retireGeneratedContentForNoSpeech(recordingId: string): void {
+  runInTransaction(() => {
+    const recording = queryOne<{
+      filename: string
+      correlation_method: string | null
+    }>('SELECT filename, correlation_method FROM recordings WHERE id = ?', [recordingId])
+    if (!recording) return
+
+    const transcriptIds = queryAll<{ id: string }>(
+      'SELECT id FROM transcripts WHERE recording_id = ?',
+      [recordingId]
+    ).map((row) => row.id)
+    if (transcriptIds.length > 0) {
+      const placeholders = transcriptIds.map(() => '?').join(',')
+      runNoSave(`DELETE FROM embeddings WHERE transcript_id IN (${placeholders})`, transcriptIds)
+    }
+    runNoSave('DELETE FROM transcripts WHERE recording_id = ?', [recordingId])
+    try {
+      runNoSave('DELETE FROM vector_embeddings WHERE recording_id = ?', [recordingId])
+    } catch {
+      // The vector table is created lazily.
+    }
+
+    const captureIds = queryAll<{ id: string }>(
+      'SELECT id FROM knowledge_captures WHERE source_recording_id = ?',
+      [recordingId]
+    ).map((row) => row.id)
+    if (captureIds.length > 0) {
+      const placeholders = captureIds.map(() => '?').join(',')
+      // These tables are generated from transcript analysis for a recording-
+      // backed capture. They cannot remain actionable after no-speech proof.
+      for (const table of ['action_items', 'decisions', 'follow_ups']) {
+        runNoSave(`DELETE FROM ${table} WHERE knowledge_capture_id IN (${placeholders})`, captureIds)
+      }
+      runNoSave(`DELETE FROM actionables WHERE source_knowledge_id IN (${placeholders})`, captureIds)
+      runNoSave(
+        `UPDATE knowledge_captures
+            SET title = CASE WHEN TRIM(COALESCE(user_title, '')) != '' THEN user_title ELSE ? END,
+                summary = NULL,
+                quality_rating = CASE WHEN quality_source = 'ai' THEN 'unrated' ELSE quality_rating END,
+                quality_confidence = CASE WHEN quality_source = 'ai' THEN NULL ELSE quality_confidence END,
+                quality_reasons = CASE WHEN quality_source = 'ai' THEN NULL ELSE quality_reasons END,
+                quality_source = CASE WHEN quality_source = 'ai' THEN NULL ELSE quality_source END,
+                updated_at = ?
+          WHERE id IN (${placeholders})`,
+        [recording.filename, new Date().toISOString(), ...captureIds]
+      )
+    }
+
+    // Remove only transcript-provenance memberships from this recording.
+    runNoSave("DELETE FROM meeting_contacts WHERE source = 'transcript' AND source_recording_id = ?", [recordingId])
+    runNoSave("DELETE FROM meeting_projects WHERE source = 'transcript' AND source_recording_id = ?", [recordingId])
+
+    // A no-speech result invalidates every automatic attribution, including the
+    // provisional schedule/time link created before VAD ran. Explicit user links
+    // remain authoritative. This keeps the UI's "meeting auto-linking was
+    // skipped" statement truthful and prevents startup reconciliation from
+    // resurrecting a meeting for known non-speech audio.
+    const automaticMeetingMethods = new Set(['ai_transcript_match', 'schedule_candidate', 'time_overlap'])
+    if (recording.correlation_method && automaticMeetingMethods.has(recording.correlation_method)) {
+      runNoSave(
+        'UPDATE recordings SET meeting_id = NULL, correlation_confidence = NULL, correlation_method = NULL WHERE id = ?',
+        [recordingId]
+      )
+      runNoSave(
+        `UPDATE knowledge_captures
+            SET meeting_id = NULL, correlation_confidence = NULL, correlation_method = NULL, updated_at = ?
+          WHERE source_recording_id = ?`,
+        [new Date().toISOString(), recordingId]
+      )
+      runNoSave('UPDATE recording_meeting_candidates SET is_selected = 0 WHERE recording_id = ?', [recordingId])
+    }
+  })
 }
 
 /**
@@ -3830,9 +6467,13 @@ export function classifyLowValueCaptures(): { scanned: number; markedLowValue: n
     const linkedToMeeting = !!row.meeting_id
 
     if (isShort && negligibleTranscript && !linkedToMeeting) {
+      // quality_source='ai' (v42/F16) keeps all AI-set rows uniform, consistent
+      // with applyCaptureValueClassification; this classifier's own guard
+      // (quality_rating = 'unrated') is unaffected, since it never depends on
+      // quality_source.
       run(
         `UPDATE knowledge_captures
-         SET quality_rating = 'low-value', quality_confidence = 0.6, quality_assessed_at = ?
+         SET quality_rating = 'low-value', quality_confidence = 0.6, quality_assessed_at = ?, quality_source = 'ai'
          WHERE id = ? AND quality_rating = 'unrated'`,
         [new Date().toISOString(), row.id]
       )
@@ -3871,6 +6512,149 @@ export function linkRecordingToMeeting(
   )
 }
 
+/**
+ * Remove a recording's meeting link (2026-07-24). The old unlink wrote
+ * `meeting_id = ''` via linkRecordingToMeeting — an empty string is neither a
+ * valid meetings.id (the recordings.meeting_id FK makes the UPDATE throw,
+ * surfacing as "Failed to unlink recording" / a silent no-op) nor NULL (so
+ * `meeting_id IS NULL` checks kept treating the row as linked). Unlinking
+ * means NULL on every correlation column, on BOTH tables.
+ */
+/**
+ * Correlation methods written by an automatic correlator. Only these may be
+ * retracted without the user asking; anything else records a human decision.
+ */
+const AUTOMATIC_CORRELATION_METHODS = new Set([
+  'ai_transcript_match',
+  'time_overlap',
+  'calendar',
+  'auto',
+])
+
+/** True when this recording's meeting link was made by a machine, not a person. */
+export function isAutomaticCorrelationMethod(method: string | null | undefined): boolean {
+  return !!method && AUTOMATIC_CORRELATION_METHODS.has(method)
+}
+
+/**
+ * Retract a meeting link that an automatic correlator made and that a later,
+ * stricter evaluation no longer supports. Returns true when a link was cleared.
+ *
+ * Why this exists: auto-linking only ever ADDED a link. When the gate later
+ * declined, the recording kept whatever an older, looser gate had written, and
+ * the candidate rows (which ARE rewritten each pass) ended up contradicting
+ * recordings.meeting_id. That is how a manually split "- Part 1" — a complete
+ * meeting of its own — stayed attached to the NEXT meeting at a confidence
+ * (0.80) below the current threshold (0.85), with no candidate row marking it
+ * selected.
+ *
+ * This is deliberately NOT unlinkRecordingFromMeeting: that one stamps
+ * 'user_preassign_standalone', the marker meaning "the user says this belongs
+ * to no meeting", which permanently blocks the batch auto-linker. A machine
+ * retracting its own guess must leave the recording eligible again, so the
+ * method is cleared to NULL. A user's link (manual / user_override /
+ * user_preassign*) is never touched.
+ */
+export function clearAutomaticMeetingLink(recordingId: string): boolean {
+  const current = queryOne<{ meeting_id: string | null; correlation_method: string | null }>(
+    'SELECT meeting_id, correlation_method FROM recordings WHERE id = ?',
+    [recordingId]
+  )
+  if (!current?.meeting_id) return false
+  if (!isAutomaticCorrelationMethod(current.correlation_method)) return false
+
+  run(
+    `UPDATE recordings SET meeting_id = NULL, correlation_confidence = NULL,
+       correlation_method = NULL WHERE id = ?`,
+    [recordingId]
+  )
+  run(
+    `UPDATE knowledge_captures
+     SET meeting_id = NULL,
+         correlation_confidence = NULL,
+         correlation_method = NULL,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE source_recording_id = ?`,
+    [recordingId]
+  )
+  return true
+}
+
+export interface ContradictedAutomaticLink {
+  recordingId: string
+  filename: string
+  meetingId: string
+  correlationMethod: string | null
+  correlationConfidence: number | null
+}
+
+/**
+ * Automatic meeting links that their OWN candidate evidence contradicts.
+ *
+ * Every transcription pass rewrites recording_meeting_candidates and marks a row
+ * selected only when the full auto-link gate passed. So a recording holding a
+ * machine-made link while NO candidate row for that meeting is selected is a
+ * link the current rules would not make — written by an older, looser gate and
+ * never retracted, because auto-linking only ever added.
+ *
+ * Read-only; pair with repairContradictedAutomaticLinks to act on it.
+ */
+export function findContradictedAutomaticLinks(): ContradictedAutomaticLink[] {
+  return queryAll<ContradictedAutomaticLink>(
+    `SELECT r.id AS recordingId, r.filename AS filename, r.meeting_id AS meetingId,
+            r.correlation_method AS correlationMethod,
+            r.correlation_confidence AS correlationConfidence
+     FROM recordings r
+     WHERE r.meeting_id IS NOT NULL
+       AND r.deleted_at IS NULL
+       AND r.correlation_method IN ('ai_transcript_match', 'time_overlap', 'calendar', 'auto')
+       -- Only judge recordings that HAVE been evaluated; no candidate rows at
+       -- all means never analysed, not contradicted.
+       AND EXISTS (SELECT 1 FROM recording_meeting_candidates c WHERE c.recording_id = r.id)
+       AND NOT EXISTS (
+         SELECT 1 FROM recording_meeting_candidates c
+         WHERE c.recording_id = r.id
+           AND c.meeting_id = r.meeting_id
+           AND c.is_selected = 1
+       )
+     ORDER BY r.date_recorded`
+  )
+}
+
+/**
+ * Retract every automatic link contradicted by its own candidate evidence.
+ * Returns what was cleared. A person's link is never eligible (the query only
+ * matches automatic correlation methods).
+ */
+export function repairContradictedAutomaticLinks(): ContradictedAutomaticLink[] {
+  const stale = findContradictedAutomaticLinks()
+  for (const row of stale) clearAutomaticMeetingLink(row.recordingId)
+  if (stale.length > 0) {
+    console.log(`[Repair] Retracted ${stale.length} automatic meeting link(s) contradicted by candidate evidence`)
+  }
+  return stale
+}
+
+export function unlinkRecordingFromMeeting(recordingId: string): void {
+  // correlation_method = the standalone marker: an EXPLICIT unlink is the user
+  // saying "this recording belongs to no meeting" — the batch auto-linker must
+  // never silently re-link it (its query excludes this method). A manual link
+  // later still overrides (linkRecordingToMeeting replaces the method).
+  run(
+    `UPDATE recordings SET meeting_id = NULL, correlation_confidence = NULL, correlation_method = 'user_preassign_standalone' WHERE id = ?`,
+    [recordingId]
+  )
+  run(
+    `UPDATE knowledge_captures
+     SET meeting_id = NULL,
+         correlation_confidence = NULL,
+         correlation_method = NULL,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE source_recording_id = ?`,
+    [recordingId]
+  )
+}
+
 // Transcript queries
 export interface Transcript {
   id: string
@@ -3888,7 +6672,155 @@ export interface Transcript {
   transcription_model?: string
   title_suggestion?: string
   question_suggestions?: string
+  transcription_run_id?: string
+  diarization_run_id?: string
+  summary_run_id?: string
+  title_run_id?: string
+  meeting_resolution_run_id?: string
+  diarization_quality_status?: DiarizationQualityStatus
+  diarization_quality?: string
+  mentioned_people?: string
   created_at: string
+}
+
+export type ProcessingStage =
+  | 'metadata'
+  | 'schedule-match'
+  | 'vad'
+  | 'diarization'
+  | 'transcription'
+  | 'summary'
+  | 'title'
+  | 'meeting-resolution'
+  | 'speaker-identity'
+  | 'voice-id'
+
+export type ProcessingRunStatus = 'pending' | 'running' | 'completed' | 'degraded' | 'failed' | 'cancelled'
+export type DiarizationQualityStatus = 'high' | 'degraded' | 'failed' | 'unavailable'
+
+export interface ProcessingRun {
+  id: string
+  recording_id: string
+  transcript_id: string | null
+  stage: ProcessingStage
+  provider: string
+  tool: string | null
+  model: string | null
+  version: string | null
+  execution: 'local' | 'cloud' | 'provider-managed' | null
+  status: ProcessingRunStatus
+  started_at: string
+  completed_at: string | null
+  parent_run_ids: string | null
+  output_refs: string | null
+  usage_json: string | null
+  estimated_cost_amount: number | null
+  estimated_cost_currency: string | null
+  cost_method: string | null
+  quality_status: string | null
+  quality_json: string | null
+  error_message: string | null
+  created_at: string
+}
+
+export interface CreateProcessingRunInput {
+  recordingId: string
+  transcriptId?: string | null
+  stage: ProcessingStage
+  provider: string
+  tool?: string | null
+  model?: string | null
+  version?: string | null
+  execution?: ProcessingRun['execution']
+  parentRunIds?: string[]
+}
+
+export function createProcessingRun(input: CreateProcessingRunInput): ProcessingRun {
+  const id = randomUUID()
+  const startedAt = new Date().toISOString()
+  run(
+    `INSERT INTO processing_runs
+      (id, recording_id, transcript_id, stage, provider, tool, model, version, execution,
+       status, started_at, parent_run_ids)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`,
+    [
+      id,
+      input.recordingId,
+      input.transcriptId ?? null,
+      input.stage,
+      input.provider,
+      input.tool ?? null,
+      input.model ?? null,
+      input.version ?? null,
+      input.execution ?? null,
+      startedAt,
+      input.parentRunIds?.length ? JSON.stringify(input.parentRunIds) : null
+    ]
+  )
+  return queryOne<ProcessingRun>('SELECT * FROM processing_runs WHERE id = ?', [id])!
+}
+
+export interface CompleteProcessingRunInput {
+  status?: Extract<ProcessingRunStatus, 'completed' | 'degraded' | 'cancelled'>
+  transcriptId?: string | null
+  tool?: string | null
+  model?: string | null
+  version?: string | null
+  outputRefs?: Record<string, unknown> | string[]
+  usage?: Record<string, unknown>
+  estimatedCostAmount?: number | null
+  estimatedCostCurrency?: string | null
+  costMethod?: string | null
+  qualityStatus?: string | null
+  quality?: Record<string, unknown> | null
+}
+
+export function completeProcessingRun(id: string, result: CompleteProcessingRunInput = {}): void {
+  run(
+    `UPDATE processing_runs SET status = ?, completed_at = ?, transcript_id = COALESCE(?, transcript_id),
+       tool = COALESCE(?, tool), model = COALESCE(?, model), version = COALESCE(?, version),
+       output_refs = ?, usage_json = ?, estimated_cost_amount = ?, estimated_cost_currency = ?,
+       cost_method = ?, quality_status = ?, quality_json = ?, error_message = NULL
+     WHERE id = ?`,
+    [
+      result.status ?? 'completed',
+      new Date().toISOString(),
+      result.transcriptId ?? null,
+      result.tool ?? null,
+      result.model ?? null,
+      result.version ?? null,
+      result.outputRefs ? JSON.stringify(result.outputRefs) : null,
+      result.usage ? JSON.stringify(result.usage) : null,
+      result.estimatedCostAmount ?? null,
+      result.estimatedCostCurrency ?? null,
+      result.costMethod ?? null,
+      result.qualityStatus ?? null,
+      result.quality ? JSON.stringify(result.quality) : null,
+      id
+    ]
+  )
+}
+
+export function failProcessingRun(id: string, message: string, cancelled = false): void {
+  run(
+    `UPDATE processing_runs SET status = ?, completed_at = ?, error_message = ? WHERE id = ?`,
+    [cancelled ? 'cancelled' : 'failed', new Date().toISOString(), message.slice(0, 2000), id]
+  )
+}
+
+export function getProcessingRunsForRecording(recordingId: string): ProcessingRun[] {
+  return queryAll<ProcessingRun>(
+    `SELECT * FROM processing_runs WHERE recording_id = ? ORDER BY started_at ASC, created_at ASC`,
+    [recordingId]
+  )
+}
+
+/** Latest terminal run per stage, suitable for the compact reader header. */
+export function getActiveProcessingRunsForRecording(recordingId: string): ProcessingRun[] {
+  const runs = getProcessingRunsForRecording(recordingId)
+  const latest = new Map<ProcessingStage, ProcessingRun>()
+  for (const processingRun of runs) latest.set(processingRun.stage, processingRun)
+  return Array.from(latest.values())
 }
 
 export function getTranscriptByRecordingId(recordingId: string): Transcript | undefined {
@@ -3925,8 +6857,9 @@ export function insertTranscript(transcript: Omit<Transcript, 'created_at'>): vo
   run(
     `INSERT OR REPLACE INTO transcripts (id, recording_id, full_text, language, summary, action_items,
       topics, key_points, sentiment, speakers, word_count, transcription_provider, transcription_model,
-      title_suggestion, question_suggestions)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      title_suggestion, question_suggestions, transcription_run_id, diarization_run_id, summary_run_id,
+      title_run_id, meeting_resolution_run_id, diarization_quality_status, diarization_quality, mentioned_people)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       transcript.id,
       transcript.recording_id,
@@ -3942,7 +6875,15 @@ export function insertTranscript(transcript: Omit<Transcript, 'created_at'>): vo
       transcript.transcription_provider ?? null,
       transcript.transcription_model ?? null,
       transcript.title_suggestion ?? null,
-      transcript.question_suggestions ?? null
+      transcript.question_suggestions ?? null,
+      transcript.transcription_run_id ?? null,
+      transcript.diarization_run_id ?? null,
+      transcript.summary_run_id ?? null,
+      transcript.title_run_id ?? null,
+      transcript.meeting_resolution_run_id ?? null,
+      transcript.diarization_quality_status ?? null,
+      transcript.diarization_quality ?? null,
+      transcript.mentioned_people ?? null
     ]
   )
 }
@@ -4014,9 +6955,21 @@ export function getMentionSnippets(name: string, limit = 2): MentionResult {
     `SELECT recording_id FROM transcripts WHERE full_text LIKE ? ESCAPE '\\'`,
     [pattern]
   )
-  const recordingIds = idRows.map((r) => r.recording_id)
+
+  // ADV14 round-15 sweep — getMentionSnippets returns RAW transcript excerpts +
+  // the full set of matching recording ids to the Identity-Suggestions merge UI
+  // (a non-exempt discovery surface, NOT the owner meeting-detail viewer). Route
+  // every candidate recording id through the positive fail-closed allowlist so a
+  // soft-deleted / personal / value-excluded / hard-purged recording's text can
+  // NOT leak into merge cards. getEligibleRecordingIds lives in THIS module (no
+  // import cycle with recording-eligibility.ts, which imports database.ts).
+  const { eligible, failClosed } = getEligibleRecordingIds(idRows.map((r) => r.recording_id))
+  if (failClosed) return { snippets: [], recordingIds: [] }
+  const recordingIds = idRows.map((r) => r.recording_id).filter((id) => eligible.has(id))
+  if (recordingIds.length === 0) return { snippets: [], recordingIds: [] }
 
   const cap = Math.max(1, Math.min(Math.floor(limit) || 2, 10))
+  const placeholders = recordingIds.map(() => '?').join(',')
   const rows = queryAll<{ recording_id: string; full_text: string; title: string | null; date: string | null }>(
     `SELECT t.recording_id AS recording_id, t.full_text AS full_text,
             COALESCE(t.title_suggestion, m.subject, r.filename) AS title,
@@ -4025,9 +6978,10 @@ export function getMentionSnippets(name: string, limit = 2): MentionResult {
        JOIN recordings r ON r.id = t.recording_id
        LEFT JOIN meetings m ON m.id = r.meeting_id
       WHERE t.full_text LIKE ? ESCAPE '\\'
+        AND t.recording_id IN (${placeholders})
       ORDER BY r.date_recorded DESC
       LIMIT ?`,
-    [pattern, cap]
+    [pattern, ...recordingIds, cap]
   )
 
   const snippets = rows.map((row) => ({
@@ -4091,11 +7045,29 @@ export function addToQueue(recordingId: string, provider?: string): string {
     console.log(`[Transcription] Skipping enqueue of personal/deleted recording ${recordingId}`)
     return ''
   }
+
+  // A recording may be rediscovered by auto-sync while it is already queued
+  // (or the user may click Process All before the renderer has refreshed). A
+  // second active row would duplicate cost and make every UI status ambiguous.
+  const existing = queryOne<{ id: string }>(`
+    SELECT id
+    FROM transcription_queue
+    WHERE recording_id = ? AND status IN ('pending', 'processing')
+    ORDER BY created_at ASC
+    LIMIT 1
+  `, [recordingId])
+  if (existing) return existing.id
+
   const id = crypto.randomUUID()
-  run(
-    'INSERT INTO transcription_queue (id, recording_id, provider) VALUES (?, ?, ?)',
-    [id, recordingId, provider ?? null]
-  )
+  runInTransaction(() => {
+    run(
+      'INSERT INTO transcription_queue (id, recording_id, provider) VALUES (?, ?, ?)',
+      [id, recordingId, provider ?? null]
+    )
+    // Keep the durable recording projection aligned at the enqueue chokepoint.
+    // This covers auto-download, manual, and bulk enqueue paths immediately.
+    updateRecordingTranscriptionStatus(recordingId, 'pending')
+  })
   return id
 }
 
@@ -4117,12 +7089,39 @@ export function getQueueItems(status?: string): (QueueItem & { filename?: string
   return queryAll<QueueItem & { filename?: string; date_recorded?: string }>(sql)
 }
 
+/**
+ * Renderer-facing queue projection. Completed/cancelled history is intentionally
+ * excluded so a periodic UI reconciliation does not serialize and scan years of
+ * terminal rows merely to render the handful of actionable operations.
+ */
+export function getActionableQueueItems(): (QueueItem & { filename?: string; date_recorded?: string })[] {
+  return queryAll<QueueItem & { filename?: string; date_recorded?: string }>(`
+    SELECT tq.*, r.filename, r.date_recorded
+    FROM transcription_queue tq
+    LEFT JOIN recordings r ON tq.recording_id = r.id
+    WHERE tq.status IN ('pending', 'processing', 'failed')
+      AND NOT (
+        tq.status = 'failed'
+        AND EXISTS (
+          SELECT 1
+          FROM transcripts t
+          WHERE t.recording_id = tq.recording_id
+            AND datetime(t.created_at) > datetime(COALESCE(tq.completed_at, tq.started_at, tq.created_at))
+        )
+      )
+    ORDER BY r.date_recorded DESC, tq.created_at ASC
+  `)
+}
+
 export function updateQueueItem(id: string, status: string, errorMessage?: string): void {
   if (status === 'processing') {
-    run('UPDATE transcription_queue SET status = ?, started_at = CURRENT_TIMESTAMP, attempts = attempts + 1 WHERE id = ?', [
-      status,
-      id
-    ])
+    run(
+      `UPDATE transcription_queue
+       SET status = ?, started_at = CURRENT_TIMESTAMP, completed_at = NULL,
+           error_message = NULL, attempts = attempts + 1
+       WHERE id = ?`,
+      [status, id]
+    )
   } else if (status === 'completed' || status === 'failed') {
     run('UPDATE transcription_queue SET status = ?, completed_at = CURRENT_TIMESTAMP, error_message = ? WHERE id = ?', [
       status,
@@ -4203,6 +7202,35 @@ export function isFileSynced(originalFilename: string): boolean {
     originalFilename
   ])
   return (result?.count ?? 0) > 0
+}
+
+/**
+ * v51 — was this filename PERMANENTLY deleted (hard purge tombstone)? The
+ * download reconciler checks this FIRST: a purged recording whose file is
+ * still on the device must never be re-downloaded (resurrection). Tolerates
+ * the table's absence (pre-v51 DB) as "not purged".
+ */
+export function isFilePurged(filename: string): boolean {
+  try {
+    const result = queryOne<{ count: number }>('SELECT COUNT(*) as count FROM purged_files WHERE filename = ?', [
+      filename
+    ])
+    return (result?.count ?? 0) > 0
+  } catch {
+    return false
+  }
+}
+
+/**
+ * v51 — every purge-tombstoned filename (all variants), for renderer surfaces
+ * that badge "Deleted — still on device" (DeviceFileList).
+ */
+export function getPurgedFilenames(): string[] {
+  try {
+    return queryAll<{ filename: string }>('SELECT filename FROM purged_files').map((r) => r.filename)
+  } catch {
+    return []
+  }
 }
 
 export function getSyncedFile(originalFilename: string): SyncedFile | undefined {
@@ -4339,6 +7367,18 @@ export interface Contact {
   last_seen_at: string
   meeting_count: number
   created_at: string
+  /** v45 entity origin: 'user' | 'calendar' | 'transcript' | null (legacy). */
+  source?: string | null
+  /** v45 — recording whose transcript minted a transcript-origin entity. */
+  source_recording_id?: string | null
+  /** v46 (ADV29-2) — recording that supplied the current `role`. Transcript-enriched
+   *  role is blanked on non-owner reads when this recording is ineligible. */
+  role_source_recording_id?: string | null
+  /** v48 (ADV49-2) — provenance-trust marker for a NULL-provenance role:
+   *  'manual'|'calendar'|'user' ⇒ structural (shown); 'transcript' ⇒ gated by
+   *  role_source_recording_id; 'legacy' ⇒ unattributable pre-v48 role (blanked on
+   *  non-owner); NULL ⇒ fall back to the entity `source`. */
+  role_origin?: string | null
 }
 
 export type ContactRole = 'organizer' | 'attendee'
@@ -4349,7 +7389,15 @@ export interface MeetingContact {
   role: ContactRole
 }
 
-export function getContacts(search?: string, type?: string, limit = 100, offset = 0): { contacts: Contact[]; total: number } {
+export type ContactSortBy = 'name' | 'lastSeen' | 'interactions'
+
+export function getContacts(
+  search?: string,
+  type?: string,
+  limit = 100,
+  offset = 0,
+  sortBy?: ContactSortBy
+): { contacts: Contact[]; total: number } {
   let countSql = 'SELECT COUNT(*) as count FROM contacts'
   let sql = 'SELECT * FROM contacts'
   const params: unknown[] = []
@@ -4357,7 +7405,9 @@ export function getContacts(search?: string, type?: string, limit = 100, offset 
 
   if (search) {
     const escaped = escapeLikePattern(search)
-    whereClauses.push("(name LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\' OR company LIKE ? ESCAPE '\\' OR role LIKE ? ESCAPE '\\')")
+    whereClauses.push(
+      "(name LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\' OR company LIKE ? ESCAPE '\\' OR role LIKE ? ESCAPE '\\')"
+    )
     params.push(`%${escaped}%`, `%${escaped}%`, `%${escaped}%`, `%${escaped}%`)
   }
 
@@ -4372,7 +7422,15 @@ export function getContacts(search?: string, type?: string, limit = 100, offset 
     sql += whereClause
   }
 
-  sql += ' ORDER BY meeting_count DESC, last_seen_at DESC LIMIT ? OFFSET ?'
+  const orderBy = {
+    name: 'name COLLATE NOCASE ASC, id ASC',
+    lastSeen: 'last_seen_at DESC, name COLLATE NOCASE ASC, id ASC',
+    interactions: 'meeting_count DESC, last_seen_at DESC, name COLLATE NOCASE ASC, id ASC'
+  } satisfies Record<ContactSortBy, string>
+  const selectedOrder = sortBy
+    ? orderBy[sortBy]
+    : 'meeting_count DESC, last_seen_at DESC, id ASC'
+  sql += ` ORDER BY ${selectedOrder} LIMIT ? OFFSET ?`
 
   const countResult = queryOne<{ count: number }>(countSql, params)
   const contacts = queryAll<Contact>(sql, [...params, limit, offset])
@@ -4401,6 +7459,614 @@ function safeGraphQuery<T>(sql: string, params: unknown[]): T[] {
   }
 }
 
+/** Result of {@link filterEligibleGraphEdgeIds}: the visible-edge allowlist + a
+ *  fail-closed flag when the recording-eligibility lookup could not complete. */
+export interface GraphEdgeEligibility {
+  /** The subset of candidate edge ids that remain VISIBLE on a NON-OWNER surface. */
+  eligibleEdgeIds: Set<string>
+  /** True when the recording-eligibility lookup failed → every attributed edge suppressed. */
+  failClosed: boolean
+}
+
+/**
+ * ADV24 (round-25) — THE ONE shared zero-provenance + exclusion suppression
+ * predicate for GRAPH EDGES surfaced on NON-OWNER discovery surfaces (identity
+ * merge cards: getPersonContext topics via {@link suppressExcludedTopicLabels} +
+ * identity-discovery graph closeness/sharedTopics). It mirrors the NON-OWNER
+ * (suppressZeroProvenance) rule that knowledge-graph-service's
+ * provenanceSuppressedEdgeIds already applies to the 13 gated graph read fns
+ * (ADV23-2, round-24), so identity / discovery inherit the EXACT same policy
+ * instead of re-deriving a per-site predicate.
+ *
+ * An edge is VISIBLE (in `eligibleEdgeIds`) iff it has ≥1 graph_edge_sources row
+ * from an ELIGIBLE recording (ADV24-1: "≥1 provenance row from an eligible
+ * recording"). It is SUPPRESSED when:
+ *   • it has NO provenance rows — legacy pre-F18 zero-provenance edge: it cannot
+ *     be proven NOT to derive from a now-excluded recording, so on a non-owner
+ *     surface it is dropped (the F21 rebuild restores it WITH attribution later);
+ *   • every source recording is excluded (personal/soft-deleted/value-excluded/
+ *     hard-purged); or
+ *   • the eligibility lookup fails (fail-closed — every provenance-bearing edge is
+ *     suppressed; failClosed is surfaced so callers can drop derived confidence).
+ * `safeGraphQuery` returning [] (graph_edge_sources absent pre-first-ingest OR a
+ * read error) collapses to "no provable provenance" ⇒ every edge zero-provenance
+ * ⇒ suppressed, which is the fail-closed outcome.
+ */
+export function filterEligibleGraphEdgeIds(edgeIds: Iterable<string>): GraphEdgeEligibility {
+  const unique = [...new Set([...edgeIds].filter((id): id is string => !!id))]
+  if (unique.length === 0) return { eligibleEdgeIds: new Set<string>(), failClosed: false }
+
+  const provByEdge = new Map<string, string[]>()
+  const allRecIds = new Set<string>()
+  const CHUNK = 400
+  for (let i = 0; i < unique.length; i += CHUNK) {
+    const chunk = unique.slice(i, i + CHUNK)
+    const placeholders = chunk.map(() => '?').join(',')
+    const srcs = safeGraphQuery<{ edge_id: string; recording_id: string }>(
+      `SELECT edge_id, recording_id FROM graph_edge_sources
+        WHERE edge_id IN (${placeholders}) AND recording_id IS NOT NULL`,
+      chunk
+    )
+    for (const s of srcs) {
+      if (!provByEdge.has(s.edge_id)) provByEdge.set(s.edge_id, [])
+      provByEdge.get(s.edge_id)!.push(s.recording_id)
+      allRecIds.add(s.recording_id)
+    }
+  }
+  const { eligible, failClosed } = getEligibleRecordingIds(allRecIds)
+  const eligibleEdgeIds = new Set<string>()
+  for (const edgeId of unique) {
+    const prov = provByEdge.get(edgeId)
+    if (!prov || prov.length === 0) continue // zero-provenance (legacy) ⇒ suppressed on non-owner surface
+    if (failClosed) continue // attributed but eligibility unknown ⇒ suppressed (fail-closed)
+    if (prov.some((id) => eligible.has(id))) eligibleEdgeIds.add(edgeId) // ≥1 eligible source survives
+  }
+  return { eligibleEdgeIds, failClosed }
+}
+
+/**
+ * ADV24-1 (round-25) — edge-provenance suppression for the graph topic labels
+ * surfaced by getPersonContext (the Identity merge card, a NON-OWNER discovery
+ * surface). Given (label, edge_id) rows for a person's ABOUT edges, keep a topic
+ * label only when at least ONE of its contributing edges is VISIBLE under the
+ * shared non-owner rule ({@link filterEligibleGraphEdgeIds}): the edge has ≥1
+ * ELIGIBLE source recording. A ZERO-PROVENANCE (legacy pre-F18) edge is now
+ * SUPPRESSED (round-25 inverts the round-15 keep-legacy behavior — consistent
+ * with the ADV23-2 non-owner graph-view suppression); a fail-closed eligibility
+ * lookup suppresses every attributed edge too. Dedupes labels and caps AFTER
+ * filtering so a run of suppressed edges can't truncate eligible topics out.
+ */
+function suppressExcludedTopicLabels(rows: Array<{ label: string; edge_id: string }>, cap: number): string[] {
+  if (rows.length === 0) return []
+  const { eligibleEdgeIds } = filterEligibleGraphEdgeIds(
+    rows.map((r) => r.edge_id).filter((id): id is string => !!id)
+  )
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const row of rows) {
+    if (!row.label || seen.has(row.label)) continue
+    // Suppressed edge (zero-provenance / all-excluded / fail-closed) ⇒ skip WITHOUT
+    // marking the label seen, so a later eligible edge for the same label still wins.
+    if (!row.edge_id || !eligibleEdgeIds.has(row.edge_id)) continue
+    seen.add(row.label)
+    out.push(row.label)
+    if (out.length >= cap) break
+  }
+  return out
+}
+
+/**
+ * v44/round-27 — a membership ROW (meeting_contacts / meeting_projects) with its
+ * per-row provenance. This is the RESOLUTION UNIT the non-owner identity surfaces
+ * consume: gate the ROW, not the parent meeting (a calendar meeting also carries
+ * transcript-derived rows — ADV26-2/-3).
+ */
+export interface MembershipRow {
+  /** 'calendar' (structural, calendar/user-authored) | 'transcript' (AI-extracted) | null (legacy). */
+  source?: string | null
+  /** The recording whose transcript produced a 'transcript' row (else null). */
+  source_recording_id?: string | null
+}
+
+/** Result of {@link filterEligibleMembershipRows}. */
+export interface MembershipRowEligibility<T> {
+  /** The subset of input rows eligible on a NON-OWNER identity surface. */
+  eligible: T[]
+  /** True only on a HARD lookup exception → callers suppress everything. */
+  failClosed: boolean
+}
+
+/**
+ * ADV26 (round-27) — THE shared per-ROW membership-eligibility boundary for
+ * NON-OWNER identity surfaces (person-context people + project-label fallback,
+ * suggestion mJac in discovery + revalidation). Supersedes the round-26
+ * meeting-level `eligibleMeetingIdsForIdentity` (removed), which laundered
+ * transcript-derived rows on a calendar meeting.
+ *
+ * A membership row is ELIGIBLE iff:
+ *   • source === 'transcript' → its `source_recording_id` resolves to an ELIGIBLE
+ *     recording (via {@link getEligibleRecordingIds}: non-personal, non-deleted,
+ *     non-value-excluded, still existing). A missing / excluded source recording
+ *     ⇒ ineligible.
+ *   • source is any OTHER non-null value ('calendar' — calendar-sync or
+ *     user-authored/manual) → STRUCTURAL, always eligible (independent of any
+ *     recording).
+ *   • source IS NULL → legacy / unclassified (pre-v44 or unassociable backfill)
+ *     ⇒ INELIGIBLE (fail-closed): provenance can't be established.
+ *
+ * FAIL-CLOSED: a recording sub-lookup failure drops ONLY the transcript-derived
+ * rows (structural rows survive and the result never over-includes, so the outer
+ * `failClosed` stays false — mirroring {@link filterEligibleCaptureIds}); a hard
+ * exception yields an empty set with `failClosed = true` so callers suppress all.
+ */
+export function filterEligibleMembershipRows<T extends MembershipRow>(rows: T[]): MembershipRowEligibility<T> {
+  if (rows.length === 0) return { eligible: [], failClosed: false }
+  try {
+    const recIds = new Set<string>()
+    for (const r of rows) {
+      if (r.source === 'transcript' && r.source_recording_id) recIds.add(r.source_recording_id)
+    }
+    let eligibleRecs = new Set<string>()
+    let recFailClosed = false
+    if (recIds.size > 0) {
+      const res = getEligibleRecordingIds(recIds)
+      eligibleRecs = res.eligible
+      recFailClosed = res.failClosed
+    }
+    const eligible: T[] = []
+    for (const r of rows) {
+      if (r.source === 'transcript') {
+        // Recording-backed: keep iff the source recording is currently eligible.
+        if (!recFailClosed && r.source_recording_id && eligibleRecs.has(r.source_recording_id)) eligible.push(r)
+      } else if (r.source == null) {
+        // Legacy / unclassified provenance ⇒ fail-closed ineligible.
+      } else {
+        // Structural (calendar / user-authored) ⇒ always eligible.
+        eligible.push(r)
+      }
+    }
+    return { eligible, failClosed: false }
+  } catch (e) {
+    console.error('[Database] filterEligibleMembershipRows FAILED — failing closed:', e)
+    return { eligible: [], failClosed: true }
+  }
+}
+
+/**
+ * v48/round-51 (ADV49-2), tightened round-52 (ADV50-1) — one-time CONSERVATIVE
+ * classification of pre-v48 role-bearing contacts into contacts.role_origin. Called
+ * by migration v48 (and directly by its test). Only touches role-bearing rows whose
+ * role_origin is still NULL, so it is idempotent.
+ *   (a) attribute a transcript-ENTITY's NULL-provenance role to its minting recording
+ *       (source_recording_id) so it becomes gated by that recording's eligibility;
+ *   (b) rows already carrying role_source_recording_id ⇒ 'transcript';
+ *   (c) EVERY remaining NULL-provenance role ⇒ 'legacy' (untrusted, blanked on
+ *       non-owner surfaces). ADV50-1: this INCLUDES calendar/user-CLASSIFIED contacts
+ *       — the base applyTranscriptEntities filled empty roles on them from transcript
+ *       output, so a calendar/user classification is NOT positive evidence the ROLE
+ *       was calendar/manual-authored, and pre-v46 data carries no field-level
+ *       authorship marker. Prefer under-trusting: an owner can re-add a genuinely
+ *       manual role; we must never keep exposing a transcript-derived one after its
+ *       recording is excluded. Positive authorship is stamped going forward by the
+ *       write paths (updateContact/createContact/upsertContact/applyTranscriptEntities).
+ */
+export function backfillRoleOriginV48(): void {
+  const database = getDatabase()
+  // (a) attribute a transcript-entity's NULL-provenance role to its minting recording.
+  database.run(
+    `UPDATE contacts SET role_source_recording_id = source_recording_id
+      WHERE role IS NOT NULL AND role_source_recording_id IS NULL
+        AND source = 'transcript' AND source_recording_id IS NOT NULL`
+  )
+  // (b) already-attributed transcript roles.
+  database.run(
+    `UPDATE contacts SET role_origin = 'transcript'
+      WHERE role IS NOT NULL AND role_origin IS NULL AND role_source_recording_id IS NOT NULL`
+  )
+  // (c) EVERY remaining NULL-provenance role ⇒ 'legacy' (ADV50-1).
+  database.run(
+    `UPDATE contacts SET role_origin = 'legacy'
+      WHERE role IS NOT NULL AND role_origin IS NULL AND role_source_recording_id IS NULL`
+  )
+}
+
+/**
+ * v44/round-27 — one-time BEST-EFFORT provenance backfill for pre-v44
+ * meeting_contacts / meeting_projects rows (source IS NULL). Called by migration
+ * v44 (and directly by its test). Conservative + documented:
+ *   • meeting_contacts:
+ *       - role='organizer' OR the contact's email appears in the meeting's calendar
+ *         data (organizer_email / attendees JSON) ⇒ 'calendar' (structural).
+ *       - else if the meeting has EXACTLY ONE recording ⇒ 'transcript' + that
+ *         recording id (the recording is the UNAMBIGUOUS transcript source, so the
+ *         row is correctly gated by that recording's eligibility).
+ *       - else ⇒ leave NULL (legacy / unassociable ⇒ ineligible on non-owner surfaces).
+ *   • meeting_projects: projects are never in calendar attendee data, so a row is
+ *       'transcript' + the meeting's SOLE recording when exactly one exists, else NULL.
+ *
+ * ADV27-2 (round-28) — a meeting with MULTIPLE recordings has NO uniquely
+ * attributable transcript source, so attributing an ambiguous membership to the
+ * FIRST recording LAUNDERS a row that may derive from an EXCLUDED sibling recording
+ * into an eligible one. Such rows are left NULL (fail-closed ineligible on non-owner
+ * surfaces) rather than positively (mis)attributed.
+ * Idempotent: only touches rows still NULL. Wrapped in one transaction.
+ */
+export function backfillMembershipProvenanceV44(): void {
+  runInTransaction(() => {
+    // Per-meeting calendar email set (organizer + attendees) for the calendar match.
+    const calEmails = new Map<string, Set<string>>()
+    for (const m of queryAll<{ id: string; organizer_email: string | null; attendees: string | null }>(
+      'SELECT id, organizer_email, attendees FROM meetings'
+    )) {
+      const set = new Set<string>()
+      if (m.organizer_email) set.add(m.organizer_email.trim().toLowerCase())
+      if (m.attendees) {
+        try {
+          const parsed = JSON.parse(m.attendees) as Array<{ email?: string }>
+          if (Array.isArray(parsed)) for (const a of parsed) if (a?.email) set.add(a.email.trim().toLowerCase())
+        } catch { /* malformed attendees JSON — skip */ }
+      }
+      if (set.size > 0) calEmails.set(m.id, set)
+    }
+
+    // ADV27-2 (round-28) — per-meeting recording ids. A membership is only
+    // positively attributable to a transcript source when the meeting has EXACTLY
+    // ONE recording; a multi-recording meeting is ambiguous ⇒ leave NULL.
+    const recsByMeeting = new Map<string, string[]>()
+    for (const r of queryAll<{ meeting_id: string; id: string }>(
+      'SELECT meeting_id, id FROM recordings WHERE meeting_id IS NOT NULL ORDER BY date_recorded ASC'
+    )) {
+      const arr = recsByMeeting.get(r.meeting_id)
+      if (arr) arr.push(r.id)
+      else recsByMeeting.set(r.meeting_id, [r.id])
+    }
+    /** The SOLE recording id of a meeting, or null when zero/ambiguous (>1). */
+    const soleRec = (meetingId: string): string | null => {
+      const arr = recsByMeeting.get(meetingId)
+      return arr && arr.length === 1 ? arr[0] : null
+    }
+
+    // meeting_contacts.
+    const mcRows = queryAll<{ meeting_id: string; contact_id: string; role: string | null; email: string | null }>(
+      `SELECT mc.meeting_id AS meeting_id, mc.contact_id AS contact_id, mc.role AS role, LOWER(c.email) AS email
+         FROM meeting_contacts mc LEFT JOIN contacts c ON c.id = mc.contact_id
+        WHERE mc.source IS NULL`
+    )
+    for (const row of mcRows) {
+      const emails = calEmails.get(row.meeting_id)
+      const calendarAuthored = row.role === 'organizer' || (!!row.email && !!emails && emails.has(row.email))
+      if (calendarAuthored) {
+        run(`UPDATE meeting_contacts SET source = 'calendar' WHERE meeting_id = ? AND contact_id = ?`, [
+          row.meeting_id,
+          row.contact_id
+        ])
+      } else {
+        const rec = soleRec(row.meeting_id)
+        if (rec) {
+          run(
+            `UPDATE meeting_contacts SET source = 'transcript', source_recording_id = ? WHERE meeting_id = ? AND contact_id = ?`,
+            [rec, row.meeting_id, row.contact_id]
+          )
+        }
+        // else: leave NULL (legacy / unassociable / multi-recording ambiguous).
+      }
+    }
+
+    // meeting_projects.
+    const mpRows = queryAll<{ meeting_id: string; project_id: string }>(
+      `SELECT meeting_id, project_id FROM meeting_projects WHERE source IS NULL`
+    )
+    for (const row of mpRows) {
+      const rec = soleRec(row.meeting_id)
+      if (rec) {
+        run(
+          `UPDATE meeting_projects SET source = 'transcript', source_recording_id = ? WHERE meeting_id = ? AND project_id = ?`,
+          [rec, row.meeting_id, row.project_id]
+        )
+      }
+      // else: leave NULL (legacy / unassociable / multi-recording ambiguous).
+    }
+  })
+}
+
+/**
+ * v45/round-28 (ADV27-1) — one-time BEST-EFFORT ENTITY-origin backfill for pre-v45
+ * contacts / projects (entity `source` IS NULL). Runs AFTER
+ * {@link backfillMembershipProvenanceV44} so membership provenance is populated
+ * first. Classifies each entity from its membership rows:
+ *   • ≥1 'calendar' (structural) membership  ⇒ entity 'calendar' (always visible)
+ *   • else ≥1 'transcript' membership        ⇒ entity 'transcript' (visible only
+ *       while a backing membership / its source recording is eligible; the
+ *       membership rows already carry the recording, so entity.source_recording_id
+ *       stays NULL here — the visibility boundary falls back to the memberships)
+ *   • else (no classified membership)        ⇒ leave NULL (legacy / unassociable ⇒
+ *       fail-closed suppressed on non-owner surfaces per the round-28 fail-safe)
+ * Idempotent: only touches entities whose `source` is still NULL.
+ */
+export function backfillEntityProvenanceV45(): void {
+  runInTransaction(() => {
+    const classify = (table: 'contacts' | 'projects', junction: 'meeting_contacts' | 'meeting_projects', idCol: 'contact_id' | 'project_id'): void => {
+      // Entity ids still lacking an origin.
+      const ents = queryAll<{ id: string }>(`SELECT id FROM ${table} WHERE source IS NULL`)
+      for (const e of ents) {
+        const rows = queryAll<{ source: string | null }>(
+          `SELECT DISTINCT source FROM ${junction} WHERE ${idCol} = ?`,
+          [e.id]
+        )
+        const sources = new Set(rows.map((r) => r.source))
+        // meeting_contacts uses 'calendar' for structural rows; meeting_projects uses
+        // 'calendar' for a manual project tag — treat any non-transcript non-null
+        // membership source as structural for the entity.
+        let origin: string | null = null
+        if ([...sources].some((s) => s != null && s !== 'transcript')) origin = 'calendar'
+        else if (sources.has('transcript')) origin = 'transcript'
+        if (origin) run(`UPDATE ${table} SET source = ? WHERE id = ?`, [origin, e.id])
+      }
+    }
+    classify('contacts', 'meeting_contacts', 'contact_id')
+    classify('projects', 'meeting_projects', 'project_id')
+  })
+}
+
+/** v45/round-28 — a contact/project ENTITY row with its origin provenance. */
+export interface EntityProvenanceRow {
+  id: string
+  /** 'user' | 'calendar' (structural, always visible) | 'transcript' | null (legacy). */
+  source?: string | null
+  /** The recording whose transcript minted a 'transcript' entity (for the zero-membership case). */
+  source_recording_id?: string | null
+}
+
+/** Result of {@link filterVisibleEntityIds}. */
+export interface EntityVisibility {
+  /** The subset of input entity ids that are visible on a NON-OWNER identity surface. */
+  visible: Set<string>
+  /** True only on a HARD lookup exception → callers suppress everything. */
+  failClosed: boolean
+}
+
+/**
+ * ADV27-1 (round-28) — THE central visible-identity boundary for NON-OWNER
+ * contact/project LIST + POINT reads (contacts:getAll/getById, projects:getAll/
+ * getById). applyTranscriptEntities mints ENTITY rows (name/role/company) from
+ * transcript participants; v44 gated only the MEMBERSHIP rows, so excluding the
+ * sole source recording hid the membership but left the extracted entity
+ * searchable/openable. This boundary suppresses a transcript-created entity whose
+ * provenance is fully excluded, while ALWAYS keeping the owner's OWN data
+ * (manual/calendar/user entities) — so no per-surface owner exemption is needed:
+ * the rule itself never hides manual/calendar entities.
+ *
+ * An entity is VISIBLE iff ANY of:
+ *   • its `source` is STRUCTURAL — any non-null value other than 'transcript'
+ *     ('user' manual/graph-promotion, 'calendar' sync/connector) ⇒ always visible;
+ *   • it has ≥1 membership row eligible via {@link filterEligibleMembershipRows}
+ *     (a calendar membership, or a transcript membership whose recording is still
+ *     eligible) — this also covers legacy NULL-source entities that still have a
+ *     live structural/eligible membership;
+ *   • it is 'transcript'-origin with NO eligible membership but its own
+ *     `source_recording_id` resolves to an eligible recording (the entity minted
+ *     from a transcript that is not yet linked to a meeting).
+ * Otherwise SUPPRESSED (fail-closed): a transcript entity whose every membership +
+ * source recording is excluded, and a legacy NULL-source entity with no eligible
+ * membership (ambiguous ⇒ suppress per the round-28 fail-safe).
+ *
+ * FAIL-CLOSED: a hard exception (entity-row lookup) yields an empty visible set
+ * with failClosed=true so callers drop everything.
+ */
+export function filterVisibleEntityIds(kind: 'contact' | 'project', ids: Iterable<string>): EntityVisibility {
+  const unique = [...new Set([...ids].filter((id): id is string => !!id))]
+  if (unique.length === 0) return { visible: new Set<string>(), failClosed: false }
+  const table = kind === 'contact' ? 'contacts' : 'projects'
+  const junction = kind === 'contact' ? 'meeting_contacts' : 'meeting_projects'
+  const idCol = kind === 'contact' ? 'contact_id' : 'project_id'
+  try {
+    const entities = new Map<string, EntityProvenanceRow>()
+    const membershipsByEntity = new Map<string, Array<MembershipRow & { entity_id: string }>>()
+    const transcriptEntityRecIds = new Set<string>()
+    const CHUNK = 400
+    for (let i = 0; i < unique.length; i += CHUNK) {
+      const chunk = unique.slice(i, i + CHUNK)
+      const ph = chunk.map(() => '?').join(',')
+      for (const row of queryAll<EntityProvenanceRow>(
+        `SELECT id, source, source_recording_id FROM ${table} WHERE id IN (${ph})`,
+        chunk
+      )) {
+        entities.set(row.id, row)
+        if (row.source === 'transcript' && row.source_recording_id) transcriptEntityRecIds.add(row.source_recording_id)
+      }
+      for (const row of queryAll<MembershipRow & { entity_id: string }>(
+        `SELECT ${idCol} AS entity_id, source, source_recording_id FROM ${junction} WHERE ${idCol} IN (${ph})`,
+        chunk
+      )) {
+        const arr = membershipsByEntity.get(row.entity_id)
+        if (arr) arr.push(row)
+        else membershipsByEntity.set(row.entity_id, [row])
+      }
+    }
+
+    // Resolve the zero-membership transcript-entity source recordings once.
+    const { eligible: eligibleEntityRecs, failClosed: entityRecFailClosed } =
+      transcriptEntityRecIds.size > 0
+        ? getEligibleRecordingIds(transcriptEntityRecIds)
+        : { eligible: new Set<string>(), failClosed: false }
+
+    const visible = new Set<string>()
+    for (const id of unique) {
+      const ent = entities.get(id)
+      if (!ent) continue // does not resolve to a live entity row ⇒ not visible (positive allowlist)
+      // Structural origin ('user'/'calendar' — anything non-null except 'transcript') ⇒ always visible.
+      if (ent.source != null && ent.source !== 'transcript') {
+        visible.add(id)
+        continue
+      }
+      // ≥1 eligible membership (structural or eligible-transcript) ⇒ visible.
+      const rows = membershipsByEntity.get(id) ?? []
+      if (rows.length > 0 && filterEligibleMembershipRows(rows).eligible.length > 0) {
+        visible.add(id)
+        continue
+      }
+      // Transcript entity with no eligible membership: fall back to its own source recording.
+      if (ent.source === 'transcript' && ent.source_recording_id && !entityRecFailClosed && eligibleEntityRecs.has(ent.source_recording_id)) {
+        visible.add(id)
+        continue
+      }
+      // Otherwise suppressed (transcript fully excluded, or legacy NULL with no eligible membership).
+    }
+    return { visible, failClosed: false }
+  } catch (e) {
+    console.error('[Database] filterVisibleEntityIds FAILED — failing closed:', e)
+    return { visible: new Set<string>(), failClosed: true }
+  }
+}
+
+/**
+ * ADV29-2 (round-31) — FIELD-LEVEL provenance blanking for the transcript-enriched
+ * contact scalar `role`. {@link filterVisibleEntityIds} gates the WHOLE entity, but
+ * a contact kept visible by an ELIGIBLE recording B can still carry a `role` that
+ * was enriched from a now-EXCLUDED recording A (org-reconciler.applyTranscriptEntities
+ * fills an empty role from one specific recording, stamping role_source_recording_id).
+ * Entity-level visibility cannot retract that one field, so this blanks it on
+ * NON-OWNER display surfaces (People list/detail, assistant participant/hover, graph
+ * inspector). Rules per contact:
+ *   • role_source_recording_id NULL  ⇒ calendar/manual/legacy-authored ⇒ role SHOWN.
+ *   • resolves to an ELIGIBLE recording ⇒ role SHOWN.
+ *   • resolves to an INELIGIBLE / missing (hard-purged) recording ⇒ role BLANKED.
+ *   • FAIL-CLOSED: the eligibility lookup failing ⇒ every transcript-sourced role
+ *     BLANKED (a transient DB error must not leak an excluded-recording role).
+ * Non-mutating: returns shallow copies for contacts that need blanking; passes the
+ * original row through untouched otherwise, so internal (non-display) callers that
+ * do NOT route through this keep the raw role. Only owner-management surfaces
+ * (Library/Trash, MeetingDetail owner participant view) skip this helper.
+ *
+ * ADV49-2 (round-51) / ADV50-1 (round-52) — a NULL role_source_recording_id is NO
+ * LONGER treated as always-trusted: pre-v46 applyTranscriptEntities wrote
+ * transcript-derived roles with the column NULL too — AND it filled empty roles on
+ * calendar/user contacts — so a calendar/user-retained contact could still expose a
+ * role learned solely from a now-excluded recording. A NULL-provenance role is shown
+ * ONLY when role_origin carries POSITIVE authorship evidence ('manual'|'calendar'|
+ * 'user'); an AMBIGUOUS role (role_origin 'legacy'/'transcript' or unset) is BLANKED
+ * on non-owner surfaces (fail-closed). The entity `source` column is NOT a fallback:
+ * calendar/user CLASSIFICATION ≠ calendar/manual AUTHORSHIP (ADV50-1).
+ */
+export function blankIneligibleContactFields<
+  T extends { role?: string | null; role_source_recording_id?: string | null; role_origin?: string | null; source?: string | null }
+>(contacts: T[]): T[] {
+  return blankIneligibleContactFieldsWithStatus(contacts).contacts
+}
+
+/**
+ * ADV51-1 (round-53) — the SAME field-provenance sanitizer as
+ * {@link blankIneligibleContactFields}, but returning the `failClosed` signal from
+ * the underlying eligibility lookup so a scoring caller (identity-discovery role
+ * recompute) can distinguish two outcomes it must treat differently:
+ *   • an ATTRIBUTABLE transcript role whose source recording is verified INELIGIBLE
+ *     ⇒ role blanked, `failClosed = false` (the role contributes NOTHING, and the
+ *     caller lowers the composite — a determinate exclusion, not an error), vs.
+ *   • the eligibility lookup could NOT complete ⇒ every attributable role blanked
+ *     AND `failClosed = true`, so the caller SUPPRESSES the suggestion (surfacing)
+ *     and REJECTS acceptance rather than trusting a blanked-to-nothing role that
+ *     might actually be eligible.
+ * A NULL-provenance untrusted/legacy role is blanked deterministically (fail-closed
+ * within this fn) but does NOT set `failClosed` — it is a known-untrusted role, not
+ * an unverifiable one.
+ */
+export function blankIneligibleContactFieldsWithStatus<
+  T extends { role?: string | null; role_source_recording_id?: string | null; role_origin?: string | null; source?: string | null }
+>(contacts: T[]): { contacts: T[]; failClosed: boolean } {
+  if (contacts.length === 0) return { contacts, failClosed: false }
+  const srcIds = new Set<string>()
+  for (const c of contacts) {
+    if (c.role && c.role_source_recording_id) srcIds.add(c.role_source_recording_id)
+  }
+  // getEligibleRecordingIds handles an empty set (returns {eligible:∅, failClosed:false}).
+  const { eligible, failClosed } = getEligibleRecordingIds(srcIds)
+  const out = contacts.map((c) => {
+    if (!c.role) return c // no role ⇒ nothing to blank
+    // (1) Attributable transcript role ⇒ gate by its source recording's eligibility
+    //     (fail-closed: a lookup failure blanks it).
+    if (c.role_source_recording_id) {
+      const ok = !failClosed && eligible.has(c.role_source_recording_id)
+      return ok ? c : { ...c, role: null }
+    }
+    // (2) NULL provenance ⇒ show ONLY an explicitly-structural/manual role.
+    return roleIsTrustedStructural(c) ? c : { ...c, role: null }
+  })
+  return { contacts: out, failClosed }
+}
+
+/**
+ * ADV49-2 (round-51) / ADV50-1 (round-52) — is a NULL-provenance
+ * (role_source_recording_id IS NULL) role trusted to show on a non-owner surface?
+ * Trusted ONLY when role_origin carries POSITIVE field-level authorship evidence — an
+ * explicit structural/manual marker ('manual' from an owner edit, 'calendar' from a
+ * calendar/connector create, 'user' from a manual create). UNTRUSTED for 'legacy',
+ * 'transcript' (a transcript role should have carried a source recording — if it lost
+ * it, fail closed), AND for an unset/ambiguous NULL marker.
+ *
+ * ADV50-1 — the entity `source` column is NO LONGER a fallback: a contact being
+ * calendar/user-CLASSIFIED (structural membership) is not proof its ROLE was
+ * calendar/manual-AUTHORED (the base applyTranscriptEntities filled empty roles on
+ * calendar/user contacts from transcript output). An unset role_origin is therefore
+ * an AMBIGUOUS legacy role ⇒ BLANKED, fail-closed. Every production write path now
+ * stamps role_origin, so an unset marker only appears on directly-inserted
+ * (e.g. test) rows, which are treated conservatively.
+ */
+function roleIsTrustedStructural(c: { role_origin?: string | null }): boolean {
+  const origin = c.role_origin
+  return origin === 'manual' || origin === 'calendar' || origin === 'user'
+}
+
+/**
+ * ADV37 (round-39) — thrown by an entity-reference WRITE gate when the visible-
+ * identity boundary ({@link filterVisibleEntityIds}) cannot be evaluated (a hard DB
+ * lookup failure ⇒ failClosed). The enclosing transaction rolls back so NO membership
+ * is written and NO raw entity is returned; IPC handlers map it to a RETRYABLE error
+ * so a transient fault never persists a reanimating link or reveals a suppressed
+ * entity.
+ */
+export class EntityVisibilityUnavailableError extends Error {
+  constructor(message = 'Entity visibility could not be verified') {
+    super(message)
+    this.name = 'EntityVisibilityUnavailableError'
+  }
+}
+
+/**
+ * ADV37 (round-39) — reanimation-safe reuse decision for a resolve-by-name/email
+ * WRITE (addMeetingAttendee, assignSpeaker, per-turn/split binds). Given the raw
+ * exact-name / exact-email candidate rows already fetched, return the FIRST candidate
+ * that is currently VISIBLE on non-owner identity surfaces (safe to reuse), or
+ * undefined when EVERY candidate is SUPPRESSED — in which case the caller MUST mint a
+ * NEW distinct contact rather than reuse (and thereby reanimate, via an always-eligible
+ * source='calendar' membership) a suppressed transcript-derived entity. A
+ * source='calendar' membership is treated ALWAYS-ELIGIBLE by the boundary, so reusing a
+ * suppressed entity here and linking it would permanently re-expose its fields
+ * downstream. THROWS {@link EntityVisibilityUnavailableError} on a fail-closed
+ * visibility lookup so the enclosing transaction aborts with no write.
+ */
+function pickReusableVisibleContact(candidates: Contact[]): Contact | undefined {
+  if (candidates.length === 0) return undefined
+  const { visible, failClosed } = filterVisibleEntityIds(
+    'contact',
+    candidates.map((c) => c.id)
+  )
+  if (failClosed) throw new EntityVisibilityUnavailableError()
+  return candidates.find((c) => visible.has(c.id))
+}
+
+/**
+ * ADV37 (round-39) — is an EXISTING entity referenced by explicit id currently VISIBLE
+ * on non-owner identity surfaces? Used before a WRITE that links the referenced entity
+ * via an always-eligible source='calendar' membership (assignSpeaker/per-turn binds by
+ * contactId). A SUPPRESSED id must NOT be reanimated; a fail-closed lookup must NOT be
+ * trusted. Returns true ONLY when the id resolves to a visible entity AND the lookup
+ * succeeded — the caller refuses (treats as absent) otherwise.
+ */
+function isEntityReferenceVisible(kind: 'contact' | 'project', id: string): boolean {
+  const { visible, failClosed } = filterVisibleEntityIds(kind, [id])
+  return !failClosed && visible.has(id)
+}
+
 /**
  * Compact graph-neighborhood context for the identity merge card (B7 symmetric
  * context): the people this person most co-attends meetings with, and the
@@ -4423,49 +8089,104 @@ export function getPersonContext(idOrName: string, limit = 4): PersonContext {
   const contactId = contact?.id ?? null
   const normKey = (contact?.name ?? raw).toLowerCase().trim().replace(/\s+/g, ' ')
 
-  const people = contactId
-    ? queryAll<{ name: string }>(
-        `SELECT c.name AS name, COUNT(*) AS shared
-           FROM meeting_contacts mc1
-           JOIN meeting_contacts mc2 ON mc2.meeting_id = mc1.meeting_id AND mc2.contact_id <> mc1.contact_id
-           JOIN contacts c ON c.id = mc2.contact_id
-          WHERE mc1.contact_id = ?
-          GROUP BY mc2.contact_id
-          ORDER BY shared DESC, c.name ASC
-          LIMIT ?`,
-        [contactId, cap]
-      )
-        .map((r) => r.name)
-        .filter(Boolean)
-    : []
+  // ADV26-3 (round-27) — the co-attendee (people) list is built from
+  // meeting_contacts rows, which are written by BOTH calendar sync AND
+  // applyTranscriptEntities (transcript-derived). Two participants learned SOLELY
+  // from an excluded recording must NOT stay mutually visible on this NON-OWNER
+  // identity card. Fetch each co-attendance WITH the co-attendee's per-row
+  // provenance and gate it through {@link filterEligibleMembershipRows}: a
+  // co-attendee counts only via membership rows that are calendar/user-authored OR
+  // backed by an eligible source recording. Legacy (NULL-provenance) rows and a
+  // fail-closed lookup are dropped; the `cap` is applied AFTER filtering so a run
+  // of ineligible rows can't truncate eligible co-attendees out.
+  let people: string[] = []
+  if (contactId) {
+    const coRows = queryAll<{
+      name: string
+      co_id: string
+      source: string | null
+      source_recording_id: string | null
+    }>(
+      `SELECT c.name AS name, mc2.contact_id AS co_id, mc2.source AS source,
+              mc2.source_recording_id AS source_recording_id
+         FROM meeting_contacts mc1
+         JOIN meeting_contacts mc2 ON mc2.meeting_id = mc1.meeting_id AND mc2.contact_id <> mc1.contact_id
+         JOIN contacts c ON c.id = mc2.contact_id
+        WHERE mc1.contact_id = ?`,
+      [contactId]
+    )
+    const { eligible } = filterEligibleMembershipRows(coRows)
+    // Rank co-attendees by their count of ELIGIBLE shared memberships.
+    const counts = new Map<string, { name: string; shared: number }>()
+    for (const r of eligible) {
+      if (!r.name) continue
+      const cur = counts.get(r.co_id)
+      if (cur) cur.shared++
+      else counts.set(r.co_id, { name: r.name, shared: 1 })
+    }
+    people = [...counts.values()]
+      .sort((a, b) => (b.shared - a.shared) || a.name.localeCompare(b.name))
+      .slice(0, cap)
+      .map((r) => r.name)
+  }
 
   // Topics via the graph; fall back to the person's meeting projects when empty.
-  let topics = safeGraphQuery<{ label: string }>(
-    `SELECT DISTINCT t.label AS label
+  //
+  // ADV24-1 round-25 — these topic labels come from ABOUT edges built from
+  // transcript analysis, so a value-excluded / soft-deleted / personal
+  // recording's edge would otherwise surface its topic label in the Identity
+  // merge card (a non-exempt discovery surface, NOT the owner meeting-detail
+  // viewer). Apply the shared NON-OWNER edge-provenance suppression
+  // (suppressExcludedTopicLabels → filterEligibleGraphEdgeIds): keep a topic only
+  // when its ABOUT edge has ≥1 ELIGIBLE source recording; drop it when every
+  // source is excluded, on a fail-closed lookup, OR when the edge is
+  // zero-provenance (legacy pre-F18) — round-25 inverts the round-15 keep-legacy
+  // behavior to match the ADV23-2 non-owner graph-view suppression. The `cap` is
+  // applied AFTER suppression so a run of excluded edges can't truncate eligible
+  // topics out of the result.
+  const topicRows = safeGraphQuery<{ label: string; edge_id: string }>(
+    `SELECT DISTINCT t.label AS label, ab.id AS edge_id
        FROM graph_nodes p
        JOIN graph_edges ea ON ea.source_id = p.id AND ea.type = 'ATTENDED'
        JOIN graph_nodes m  ON m.id = ea.target_id AND m.type = 'meeting'
        JOIN graph_edges ab ON ab.source_id = m.id AND ab.type = 'ABOUT'
        JOIN graph_nodes t  ON t.id = ab.target_id AND (t.type = 'topic' OR t.type = 'project')
-      WHERE p.type = 'person' AND p.norm_key = ?
-      LIMIT ?`,
-    [normKey, cap]
+      WHERE p.type = 'person' AND p.norm_key = ?`,
+    [normKey]
   )
-    .map((r) => r.label)
-    .filter(Boolean)
+  const topics = suppressExcludedTopicLabels(topicRows, cap)
 
   if (topics.length === 0 && contactId) {
-    topics = safeGraphQuery<{ label: string }>(
-      `SELECT DISTINCT pr.name AS label
+    // ADV26-2 (round-27) — this relational fallback returns project labels via
+    // meeting_projects rows, which are written by applyTranscriptEntities
+    // (transcript-derived) OR by a manual user tag. Round-26 gated the parent
+    // MEETING, which LAUNDERED a transcript-derived project row on a meeting that
+    // merely carried calendar metadata. Gate the meeting_projects ROW ITSELF
+    // through {@link filterEligibleMembershipRows}: a 'transcript' row surfaces
+    // only while its source recording is eligible; a 'calendar' (manual/structural)
+    // row is always allowed; a legacy NULL-provenance row is fail-closed ineligible
+    // — EVEN when the meeting has calendar metadata. The `cap` is applied AFTER
+    // filtering so a run of ineligible rows can't truncate eligible labels out.
+    const rows = safeGraphQuery<{
+      label: string
+      source: string | null
+      source_recording_id: string | null
+    }>(
+      `SELECT DISTINCT pr.name AS label, mp.source AS source, mp.source_recording_id AS source_recording_id
          FROM meeting_contacts mc
          JOIN meeting_projects mp ON mp.meeting_id = mc.meeting_id
          JOIN projects pr ON pr.id = mp.project_id
-        WHERE mc.contact_id = ?
-        LIMIT ?`,
-      [contactId, cap]
+        WHERE mc.contact_id = ?`,
+      [contactId]
     )
-      .map((r) => r.label)
-      .filter(Boolean)
+    const { eligible } = filterEligibleMembershipRows(rows)
+    const seen = new Set<string>()
+    for (const row of eligible) {
+      if (!row.label || seen.has(row.label)) continue
+      seen.add(row.label)
+      topics.push(row.label)
+      if (topics.length >= cap) break
+    }
   }
 
   return { people, topics }
@@ -4522,10 +8243,15 @@ export function upsertContact(contact: Omit<Contact, 'created_at'>): Contact {
     )
     return { ...existing, name: contact.name, last_seen_at: contact.last_seen_at, meeting_count: existing.meeting_count + 1 }
   } else {
-    // Insert new contact
+    // Insert new contact. v45/round-28: upsertContact folds calendar/meeting
+    // attendee sightings, so a NEW row here is calendar/structural-authored ⇒
+    // entity source 'calendar' (always visible on non-owner identity surfaces).
+    // v48/round-52 (ADV50-1): a role folded from calendar/attendee data IS
+    // calendar-authored — stamp role_origin='calendar' (only when a role is present)
+    // so the read gate trusts it. No role ⇒ leave role_origin NULL.
     run(
-      `INSERT INTO contacts (id, name, email, type, role, company, notes, tags, first_seen_at, last_seen_at, meeting_count)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO contacts (id, name, email, type, role, company, notes, tags, first_seen_at, last_seen_at, meeting_count, source, role_origin)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'calendar', ?)`,
       [
         contact.id,
         contact.name,
@@ -4537,7 +8263,8 @@ export function upsertContact(contact: Omit<Contact, 'created_at'>): Contact {
         contact.tags || null,
         contact.first_seen_at,
         contact.last_seen_at,
-        contact.meeting_count
+        contact.meeting_count,
+        contact.role ? 'calendar' : null
       ]
     )
     return { ...contact, created_at: new Date().toISOString() } as Contact
@@ -4557,9 +8284,14 @@ export function createContact(input: {
   role?: string | null
   company?: string | null
   notes?: string | null
+  /** v45/round-28 ENTITY origin. Defaults to 'user' (manual "Add Person" / graph
+   *  promotion). Connector/calendar imports pass 'calendar'. Transcript-extracted
+   *  contacts are minted by applyTranscriptEntities' raw INSERT, NOT this helper. */
+  source?: string
 }): Contact {
   const id = randomUUID()
   const now = new Date().toISOString()
+  const source = input.source ?? 'user'
   const contact: Contact = {
     id,
     name: input.name,
@@ -4574,9 +8306,14 @@ export function createContact(input: {
     meeting_count: 0,
     created_at: now
   }
+  // v48/round-52 (ADV50-1): a role supplied at manual/calendar create IS positive
+  // authorship evidence — stamp role_origin = the entity source ('user' manual
+  // "Add Person"/graph promotion, or 'calendar' connector import) so the read gate
+  // trusts it. No role ⇒ leave role_origin NULL (nothing to trust or blank).
+  const roleOrigin = contact.role != null ? source : null
   run(
-    `INSERT INTO contacts (id, name, email, type, role, company, notes, tags, first_seen_at, last_seen_at, meeting_count)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO contacts (id, name, email, type, role, company, notes, tags, first_seen_at, last_seen_at, meeting_count, source, role_origin)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       contact.id,
       contact.name,
@@ -4588,7 +8325,9 @@ export function createContact(input: {
       contact.tags,
       contact.first_seen_at,
       contact.last_seen_at,
-      contact.meeting_count
+      contact.meeting_count,
+      source,
+      roleOrigin
     ]
   )
   return contact
@@ -4601,7 +8340,12 @@ export function updateContact(id: string, updates: Partial<Contact>): void {
   if (updates.name !== undefined) { fields.push('name = ?'); params.push(updates.name); }
   if (updates.email !== undefined) { fields.push('email = ?'); params.push(updates.email); }
   if (updates.type !== undefined) { fields.push('type = ?'); params.push(updates.type); }
-  if (updates.role !== undefined) { fields.push('role = ?'); params.push(updates.role); }
+  // v46/round-31 (ADV29-2): a user-authored role is always shown — clear any
+  // transcript field-provenance so read-blanking never hides an owner-set role.
+  // v48/round-51 (ADV49-2): also stamp role_origin='manual' so the owner-set role
+  // is trusted as structural even on a transcript-origin entity (a NULL provenance
+  // is no longer implicitly trusted).
+  if (updates.role !== undefined) { fields.push('role = ?'); params.push(updates.role); fields.push('role_source_recording_id = NULL'); fields.push("role_origin = 'manual'"); }
   if (updates.company !== undefined) { fields.push('company = ?'); params.push(updates.company); }
   if (updates.notes !== undefined) { fields.push('notes = ?'); params.push(updates.notes); }
   if (updates.tags !== undefined) { fields.push('tags = ?'); params.push(updates.tags); }
@@ -4626,7 +8370,51 @@ export function getMeetingsForContact(contactId: string): Meeting[] {
   )
 }
 
+/**
+ * R28-RES-1 (round-29) — GATED default meeting-scoped participant read (the
+ * ASSISTANT / hover / Today tier). A meeting's participants are stored in
+ * `meeting_contacts`, written by BOTH calendar sync AND applyTranscriptEntities
+ * (transcript-derived). A transcript-extracted attendee whose source recording is
+ * personal / soft-deleted / value-excluded / hard-purged must NOT surface as a
+ * participant on a non-owner surface (EntityHoverCards, CalendarTooltips, Today).
+ *
+ * Fetch each linked contact WITH its per-row membership provenance and gate the
+ * ROW through the shared {@link filterEligibleMembershipRows}: calendar/user-authored
+ * rows are kept structurally; transcript rows are kept only when their source
+ * recording is still eligible; legacy NULL-provenance rows are dropped (fail-closed).
+ * A hard lookup failure returns [] (fail-closed).
+ *
+ * The OWNER meeting-management surfaces (MeetingDetail, SourceReader/useReaderPeople)
+ * use {@link getContactsForMeetingOwner} instead (existence-scoped: the owner sees
+ * their own meeting's participants, including excluded-recording-derived ones).
+ */
 export function getContactsForMeeting(meetingId: string): Contact[] {
+  const rows = queryAll<Contact & { mc_source: string | null; mc_src_rec: string | null }>(
+    `SELECT c.*, mc.source AS mc_source, mc.source_recording_id AS mc_src_rec
+     FROM contacts c
+     JOIN meeting_contacts mc ON c.id = mc.contact_id
+     WHERE mc.meeting_id = ?`,
+    [meetingId]
+  )
+  const membership = rows.map((r) => ({ id: r.id, source: r.mc_source, source_recording_id: r.mc_src_rec }))
+  const { eligible, failClosed } = filterEligibleMembershipRows(membership)
+  if (failClosed) return []
+  const eligibleIds = new Set(eligible.map((m) => m.id))
+  return rows
+    .filter((r) => eligibleIds.has(r.id))
+    .map(({ mc_source: _s, mc_src_rec: _r, ...c }) => c as Contact)
+}
+
+/**
+ * R28-RES-1 (round-29) — OWNER-MANAGEMENT meeting-scoped participant accessor.
+ * Existence-scoped: returns every contact linked to the meeting regardless of the
+ * membership row's source-recording eligibility, so the owner can view/manage their
+ * OWN meeting's participants (including ones derived from an excluded recording)
+ * before purge. NOT exposed to assistant/Today surfaces — only MeetingDetail and
+ * SourceReader/useReaderPeople repoint here. (F17's promise is about AI processing +
+ * honest-deletion semantics, NOT preventing the owner from viewing their own data.)
+ */
+export function getContactsForMeetingOwner(meetingId: string): Contact[] {
   return queryAll<Contact>(
     `SELECT c.* FROM contacts c
      JOIN meeting_contacts mc ON c.id = mc.contact_id
@@ -4638,12 +8426,19 @@ export function getContactsForMeeting(meetingId: string): Contact[] {
 export function deleteContact(id: string): void {
   // Remove junction table entries first, then the contact
   run('DELETE FROM meeting_contacts WHERE contact_id = ?', [id])
+  run(
+    `UPDATE voice_clusters SET contact_id = NULL, contact_link_method = NULL,
+     contact_link_confidence = NULL, updated_at = ? WHERE contact_id = ?`,
+    [new Date().toISOString(), id]
+  )
   run('DELETE FROM contacts WHERE id = ?', [id])
 }
 
 export function linkContactToMeeting(meetingId: string, contactId: string, role: ContactRole): void {
+  // v44 provenance: this is a structural/user-driven link (not AI transcript
+  // extraction) ⇒ 'calendar' (always eligible on non-owner identity surfaces).
   run(
-    'INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)',
+    "INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES (?, ?, ?, 'calendar')",
     [meetingId, contactId, role]
   )
 }
@@ -4679,13 +8474,42 @@ interface RepointedLink {
   role?: string
 }
 
+/**
+ * ADV56-2 (round-58): snapshot of the LOSER node's pre-fold subgraph, journaled into
+ * the merge manifest so unmerge can reverse the graph mergeNodes fold EXACTLY. Captured
+ * inside the graph-aware composite immediately BEFORE the fold; consumed by
+ * reverseGraphFold on unmerge. Full-row copies so the reconstruction is byte-identical.
+ */
+export interface GraphMergeSnapshot {
+  keeperNode: string | null // keeper graph node id (to compute the fold's repointed endpoints)
+  loserNode: Record<string, unknown> | null // full graph_nodes row for the loser
+  edges: Array<Record<string, unknown>> // full graph_edges rows incident to the loser (pre-fold)
+  edgeSources: Array<Record<string, unknown>> // full graph_edge_sources rows for those edges
+}
+
+/**
+ * ADV58-1 (round-60): stamped onto a manifest by the hard-purge relational scrub
+ * ({@link scrubMergeJournalRelationalSnapshots}) when the LOSER entity's identity
+ * provenance was the purged recording. The merge can no longer be honestly undone
+ * (undo would resurrect a permanently-deleted entity), so the loser_snapshot PII is
+ * redacted and this flag makes unmerge refuse and hides the row from the undo surface.
+ * Schema-migration-free (a manifest field, not a merge_journal column).
+ */
+interface MergeInvalidatedByPurge {
+  recordingId: string // the hard-purged recording whose deletion invalidated this undo
+  at: string // ISO timestamp of the purge
+}
+
 /** Contact-merge manifest: everything the fold touched, enough to reverse it. */
 interface ContactMergeManifest {
   meetingContacts: { repointed: RepointedLink[]; collided: RepointedLink[] }
   transcriptSpeakers: { repointed: string[] } // transcript_speakers.id values moved
+  voiceClusters?: { repointed: string[] } // voice_clusters.id values moved
   createdAliasNorms: string[] // aliases the merge created (loser-name → keeper)
   loserAliases: Array<{ alias_norm: string; source: string | null; confidence: number | null }>
   keeperBefore: { meetingIds: string[]; speakerIds: string[] }
+  graph?: GraphMergeSnapshot // ADV56-2: loser subgraph, present when the graph node was folded
+  invalidatedByPurge?: MergeInvalidatedByPurge // ADV58-1: set when the loser's source recording was hard-purged
 }
 
 /** Project-merge manifest. */
@@ -4695,6 +8519,8 @@ interface ProjectMergeManifest {
   createdAliasNorms: string[]
   loserAliases: Array<{ alias_norm: string; source: string | null; confidence: number | null }>
   keeperBefore: { meetingIds: string[]; knowledgeIds: string[] }
+  graph?: GraphMergeSnapshot // ADV56-2: loser subgraph, present when the graph node was folded
+  invalidatedByPurge?: MergeInvalidatedByPurge // ADV58-1: set when the loser's source recording was hard-purged
 }
 
 /** A keeper link that appeared after the merge — the user must review it by hand. */
@@ -4736,6 +8562,10 @@ interface MergeJournalRow {
   id: string
   kind: MergeKind
   keeper_id: string
+  /** Queryable loser identity (v42). Null only on pre-backfill legacy rows. */
+  loser_id: string | null
+  /** Explicit immutable merge order (v42). Null only on pre-backfill legacy rows. */
+  seq: number | null
   loser_snapshot: string
   repointed_manifest: string
   folded_fields: string | null
@@ -4818,6 +8648,10 @@ export function mergeContacts(keeperId: string, loserId: string): Contact {
       'SELECT id FROM transcript_speakers WHERE contact_id = ?',
       [loserId]
     ).map((r) => r.id)
+    const loserVoiceClusterIds = queryAll<{ id: string }>(
+      'SELECT id FROM voice_clusters WHERE contact_id = ?',
+      [loserId]
+    ).map((r) => r.id)
     const loserAliases = queryAll<{ alias_norm: string; source: string | null; confidence: number | null }>(
       'SELECT alias_norm, source, confidence FROM contact_aliases WHERE contact_id = ?',
       [loserId]
@@ -4836,11 +8670,24 @@ export function mergeContacts(keeperId: string, loserId: string): Contact {
     // Repoint transcript_speakers. Its UNIQUE is (recording_id, speaker_label),
     // unaffected by contact_id, so a plain update never collides.
     runNoSave('UPDATE transcript_speakers SET contact_id = ? WHERE contact_id = ?', [keeperId, loserId])
+    runNoSave('UPDATE voice_clusters SET contact_id = ?, updated_at = ? WHERE contact_id = ?', [
+      keeperId,
+      new Date().toISOString(),
+      loserId
+    ])
 
     // Fold fields onto the keeper.
     const notEmpty = (v: string | null | undefined) => !!(v && v.trim())
     const email = notEmpty(keeper.email) ? keeper.email : loser.email ?? null
     const role = notEmpty(keeper.role) ? keeper.role : loser.role ?? null
+    // v46/round-31 (ADV29-2): fold the role's FIELD-provenance alongside the role
+    // value it came from, so a folded transcript role keeps being blanked on
+    // non-owner reads when its source recording is excluded (no laundering via merge).
+    const roleSrc = notEmpty(keeper.role) ? keeper.role_source_recording_id ?? null : loser.role_source_recording_id ?? null
+    // v48/round-51 (ADV49-2): carry the role's provenance-trust marker alongside the
+    // folded role so a folded structural/manual role stays trusted (and a folded
+    // ambiguous legacy role stays blanked) after the merge.
+    const roleOrigin = notEmpty(keeper.role) ? keeper.role_origin ?? null : loser.role_origin ?? null
     const company = notEmpty(keeper.company) ? keeper.company : loser.company ?? null
     const notes = notEmpty(keeper.notes) ? keeper.notes : loser.notes ?? null
     const type = keeper.type && keeper.type !== 'unknown' ? keeper.type : loser.type || 'unknown'
@@ -4855,6 +8702,7 @@ export function mergeContacts(keeperId: string, loserId: string): Contact {
       {
         email: keeper.email,
         role: keeper.role,
+        role_source_recording_id: keeper.role_source_recording_id ?? null,
         company: keeper.company,
         notes: keeper.notes,
         type: keeper.type,
@@ -4862,13 +8710,13 @@ export function mergeContacts(keeperId: string, loserId: string): Contact {
         first_seen_at: keeper.first_seen_at,
         last_seen_at: keeper.last_seen_at
       },
-      { email, role, company, notes, type, tags: tagsJson, first_seen_at: firstSeen, last_seen_at: lastSeen }
+      { email, role, role_source_recording_id: roleSrc, company, notes, type, tags: tagsJson, first_seen_at: firstSeen, last_seen_at: lastSeen }
     )
 
     runNoSave(
-      `UPDATE contacts SET email = ?, role = ?, company = ?, notes = ?, type = ?, tags = ?,
+      `UPDATE contacts SET email = ?, role = ?, role_source_recording_id = ?, role_origin = ?, company = ?, notes = ?, type = ?, tags = ?,
          first_seen_at = ?, last_seen_at = ? WHERE id = ?`,
-      [email, role, company, notes, type, tagsJson, firstSeen, lastSeen, keeperId]
+      [email, role, roleSrc, roleOrigin, company, notes, type, tagsJson, firstSeen, lastSeen, keeperId]
     )
 
     runNoSave('DELETE FROM contacts WHERE id = ?', [loserId])
@@ -4877,11 +8725,12 @@ export function mergeContacts(keeperId: string, loserId: string): Contact {
     const manifest: ContactMergeManifest = {
       meetingContacts: { repointed: mcRepointed, collided: mcCollided },
       transcriptSpeakers: { repointed: loserSpeakerIds },
+      voiceClusters: { repointed: loserVoiceClusterIds },
       createdAliasNorms: createdAliasNorm ? [createdAliasNorm] : [],
       loserAliases,
       keeperBefore: { meetingIds: keeperMeetingIds, speakerIds: keeperSpeakerIds }
     }
-    writeMergeJournalNoSave('contact', keeperId, loser, manifest, foldedFields)
+    writeMergeJournalNoSave('contact', keeperId, loser.id, loser, manifest, foldedFields)
 
     return queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [keeperId])!
   })
@@ -4924,22 +8773,124 @@ function diffFoldedFields(
 function writeMergeJournalNoSave(
   kind: MergeKind,
   keeperId: string,
+  loserId: string,
   loserRow: unknown,
   manifest: ContactMergeManifest | ProjectMergeManifest,
   foldedFields: Record<string, { from: string | null; to: string | null }>
 ): void {
+  // seq: explicit immutable merge order (v42) — assigned monotonically at write
+  // time so the newest-first unmerge guard never depends on rowid or timestamps.
   runNoSave(
-    `INSERT INTO merge_journal (id, kind, keeper_id, loser_snapshot, repointed_manifest, folded_fields, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO merge_journal (id, kind, keeper_id, loser_id, seq, loser_snapshot, repointed_manifest, folded_fields, created_at)
+     VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM merge_journal), ?, ?, ?, ?)`,
     [
       randomUUID(),
       kind,
       keeperId,
+      loserId,
       JSON.stringify(loserRow),
       JSON.stringify(manifest),
       Object.keys(foldedFields).length ? JSON.stringify(foldedFields) : null,
       new Date().toISOString()
     ]
+  )
+}
+
+/**
+ * Typed ordering failure for unmerge: a newer, still-open merge depends on one
+ * of this journal's entities. Carries the blocking journal's id (and its
+ * loser's display name when parseable) so the IPC layer can surface a precise,
+ * actionable rejection instead of a generic database error.
+ */
+export class MergeOrderConflictError extends Error {
+  constructor(
+    public readonly blockingJournalId: string,
+    public readonly blockingLoserName: string | null,
+    message: string
+  ) {
+    super(message)
+    this.name = 'MergeOrderConflictError'
+  }
+}
+
+/**
+ * Dependency-aware newest-first guard, shared by {@link unmergeContacts} and
+ * {@link unmergeProjects}. Journals are delta-based: folded_fields records the
+ * change from the state the PREVIOUS merge left behind, and a merge's manifest
+ * assumes its keeper/loser rows exist exactly as the merges before it arranged
+ * them. Undoing a journal while a NEWER open journal touches either of its
+ * entities therefore corrupts state two ways:
+ *   - same keeper: an older restore rewinds folded fields (origin, tags) out
+ *     from under the newer merge's still-folded data (provenance laundering);
+ *   - keeper-of-keeper chains: J1 = A->D, then J2 = D->E deletes D. Unmerging
+ *     J1 first "recreates" A against a keeper that no longer exists, skipping
+ *     every link move, while J2's snapshot of D still contains A's folded data
+ *     — duplication and misattribution on the later unwind.
+ * Blocking on ANY newer open journal (same kind) that shares the keeper or the
+ * loser id makes newest-first unwinding always legal and everything else
+ * rejected — correctness by induction, no delta reconstruction. Ordering keys
+ * on the explicit immutable seq column, never rowid.
+ */
+function assertNewestFirstUnmerge(row: MergeJournalRow): void {
+  // Fail-closed on journals the ordering system cannot place: a NULL seq
+  // (partially-applied v42 that the boot-time repair backfill has not healed
+  // yet) must NEVER be silently ordered as zero — that would exempt the row
+  // from the guard entirely and reopen the out-of-order corruption class.
+  if (row.seq === null || row.seq === undefined) {
+    throw new Error(
+      `Merge journal ${row.id} has no merge-order sequence (seq) and cannot be safely undone. ` +
+        'Restart the app so the repair pass can backfill journal ordering, then retry.'
+    )
+  }
+  // ...and symmetrically: while ANY open journal of this kind is unsequenced,
+  // "newer than" is unknowable for the whole kind (a NULL-seq row can never
+  // match `seq > ?`, so it could silently fail to block an older undo). Pause
+  // undo for the kind until the backfill heals it — transient by construction,
+  // since seq backfill is unconditional on every boot and snapshot-independent.
+  const unsequenced = queryOne<{ id: string }>(
+    'SELECT id FROM merge_journal WHERE kind = ? AND undone_at IS NULL AND seq IS NULL LIMIT 1',
+    [row.kind]
+  )
+  if (unsequenced) {
+    throw new Error(
+      `Merge journal ${unsequenced.id} has no merge-order sequence (seq), so ${row.kind} merges cannot be ` +
+        'safely undone right now. Restart the app so the repair pass can backfill journal ordering, then retry.'
+    )
+  }
+  // Fail-closed on journals the undo cannot faithfully replay: if loser_id was
+  // never backfilled AND the snapshot is unparseable, the loser cannot be
+  // recreated from it — reject here with a precise message instead of letting
+  // JSON.parse explode mid-unmerge.
+  let loserId: string | null = row.loser_id
+  if (loserId === null || loserId === undefined) {
+    try {
+      loserId = (JSON.parse(row.loser_snapshot) as { id?: string }).id ?? null
+    } catch {
+      throw new Error(
+        `Merge journal ${row.id} has an unreadable loser snapshot; this merge cannot be undone.`
+      )
+    }
+  }
+  const newer = queryOne<{ id: string; loser_snapshot: string }>(
+    `SELECT id, loser_snapshot FROM merge_journal
+     WHERE kind = ? AND undone_at IS NULL AND seq > ?
+       AND (keeper_id = ? OR keeper_id = ? OR loser_id = ? OR loser_id = ?)
+     ORDER BY seq DESC LIMIT 1`,
+    [row.kind, row.seq, row.keeper_id, loserId, row.keeper_id, loserId]
+  )
+  if (!newer) return
+  let blockingName: string | null = null
+  try {
+    blockingName = (JSON.parse(newer.loser_snapshot) as { name?: string }).name ?? null
+  } catch {
+    /* name stays null */
+  }
+  throw new MergeOrderConflictError(
+    newer.id,
+    blockingName,
+    `Merges must be undone newest-first: undo the newer merge${
+      blockingName ? ` of "${blockingName}"` : ''
+    } (${newer.id}) before this one`
   )
 }
 
@@ -4964,6 +8915,468 @@ function restoreFoldedFields(table: 'contacts' | 'projects', keeperId: string, f
     }
   }
   return restored
+}
+
+// -----------------------------------------------------------------------------
+// ADV56-2 (round-58): graph-fold reversal — snapshot the loser's pre-fold subgraph
+// at merge time; reconstruct it exactly on unmerge.
+// -----------------------------------------------------------------------------
+
+/**
+ * Snapshot the LOSER graph node's full pre-fold subgraph: its graph_nodes row, every
+ * graph_edges row incident to it, and every graph_edge_sources row for those edges.
+ * Called inside the graph-aware merge composite immediately BEFORE mergeNodes folds
+ * (and deletes) the loser node, so unmerge can reverse the fold exactly. `keeperNodeId`
+ * is recorded so the reversal can recompute the fold's repointed endpoints (L→K).
+ */
+export function captureLoserSubgraph(loserNodeId: string, keeperNodeId: string): GraphMergeSnapshot {
+  const loserNode = queryOne<Record<string, unknown>>('SELECT * FROM graph_nodes WHERE id = ?', [loserNodeId]) ?? null
+  const edges = queryAll<Record<string, unknown>>(
+    'SELECT * FROM graph_edges WHERE source_id = ? OR target_id = ?',
+    [loserNodeId, loserNodeId]
+  )
+  let edgeSources: Array<Record<string, unknown>> = []
+  const edgeIds = edges.map((e) => e.id as string)
+  if (edgeIds.length) {
+    const placeholders = edgeIds.map(() => '?').join(',')
+    edgeSources = queryAll<Record<string, unknown>>(
+      `SELECT * FROM graph_edge_sources WHERE edge_id IN (${placeholders})`,
+      edgeIds
+    )
+  }
+  return { keeperNode: keeperNodeId, loserNode, edges, edgeSources }
+}
+
+/**
+ * Attach a captured {@link GraphMergeSnapshot} to an already-written merge_journal row's
+ * manifest (the composite writes the relational manifest via mergeContacts/mergeProjects
+ * FIRST, then folds the graph and patches the same row). No-op if the row is gone. Runs
+ * through runNoSave so it joins the composite's open transaction.
+ */
+export function attachGraphSnapshotToJournal(journalId: string, snapshot: GraphMergeSnapshot): void {
+  const row = queryOne<{ repointed_manifest: string }>('SELECT repointed_manifest FROM merge_journal WHERE id = ?', [
+    journalId
+  ])
+  if (!row) return
+  let manifest: Record<string, unknown>
+  try {
+    manifest = JSON.parse(row.repointed_manifest) as Record<string, unknown>
+  } catch {
+    return
+  }
+  manifest.graph = snapshot
+  runNoSave('UPDATE merge_journal SET repointed_manifest = ? WHERE id = ?', [JSON.stringify(manifest), journalId])
+}
+
+/** Re-insert a full graph_edges row from a snapshot (all columns). */
+function reinsertGraphEdge(e: Record<string, unknown>): void {
+  runNoSave(
+    'INSERT OR IGNORE INTO graph_edges (id, source_id, target_id, type, props, weight, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [e.id, e.source_id, e.target_id, e.type, e.props ?? null, e.weight ?? 1, e.created_at ?? null]
+  )
+}
+
+/** Re-insert a full graph_edge_sources row from a snapshot (all columns). */
+function reinsertGraphEdgeSource(s: Record<string, unknown>): void {
+  runNoSave(
+    'INSERT OR IGNORE INTO graph_edge_sources (edge_id, recording_id, transcript_id, assertion_count, created_at) VALUES (?, ?, ?, ?, ?)',
+    [s.edge_id, s.recording_id, s.transcript_id, s.assertion_count ?? 1, s.created_at ?? null]
+  )
+}
+
+/**
+ * Reverse the graph mergeNodes fold recorded in {@link GraphMergeSnapshot}, restoring
+ * the pre-merge graph EXACTLY. Runs inside the unmerge transaction. For each loser edge
+ * in the snapshot:
+ *   - if the edge id still exists (a non-colliding repoint kept its id) → restore its
+ *     original endpoints/weight and re-insert its original sources;
+ *   - else it was deleted at the fold (a collision drop or a loser↔keeper self-loop):
+ *     re-insert it; and for a COLLISION (a keeper edge at the repointed endpoints
+ *     absorbed it) subtract the loser edge's weight and per-source assertion_count from
+ *     that keeper edge — deleting a keeper source row only when it drops to ≤0 (i.e. the
+ *     row existed solely because of the transfer). This exactly inverts mergeNodes'
+ *     transferEdgeSources upsert (which never alters the keeper's created_at and only
+ *     sums counts) so the round-trip is byte-identical.
+ * The loser node row is recreated first (idempotently).
+ */
+function reverseGraphFold(snapshot: GraphMergeSnapshot | undefined): void {
+  if (!snapshot || !snapshot.loserNode) return
+  const L = snapshot.loserNode.id as string
+  const K = snapshot.keeperNode
+  if (!L) return
+
+  // ADV57-1 (round-59) Part B — belt-and-suspenders against a manifest that still
+  // references a HARD-PURGED recording (F17 permanent delete). Part A (the
+  // purge-time journal scrub) normally strips those rows AT REST, but a manifest
+  // written before that fix — or by any path that skipped the scrub — could still
+  // carry a snapshot edge_source whose recording no longer exists. Re-inserting it
+  // would resurrect unprovenanced context-graph traces after a purge, which is
+  // exactly what F17 forbids. So: never re-insert a snapshot source whose recording
+  // is gone, and drop any snapshot edge whose sources are ALL gone.
+  //
+  // A source with no recording_id attribution is left untouched (it is not a purge
+  // target). A structurally source-less edge (no snapshot edge_source rows at all)
+  // is likewise never dropped — only an edge that HAD sources and lost every one of
+  // them to a purge is suppressed. In the normal (no-purge) round-trip every source
+  // recording still exists, so this filter is a no-op and byte-identity is preserved.
+  const recExistsCache = new Map<string, boolean>()
+  const sourceStillValid = (s: Record<string, unknown>): boolean => {
+    const rid = s.recording_id
+    if (rid == null) return true // no recording attribution — not a purge target
+    const key = String(rid)
+    let ex = recExistsCache.get(key)
+    if (ex === undefined) {
+      ex = !!queryOne<{ x: number }>('SELECT 1 AS x FROM recordings WHERE id = ?', [key])
+      recExistsCache.set(key, ex)
+    }
+    return ex
+  }
+
+  // 1. Recreate the loser node (idempotent — skip if a node with its id already exists).
+  if (!queryOne<{ id: string }>('SELECT id FROM graph_nodes WHERE id = ?', [L])) {
+    const n = snapshot.loserNode
+    runNoSave(
+      `INSERT OR IGNORE INTO graph_nodes (id, type, label, norm_key, props, created_at, updated_at, origin, source_recording_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [n.id, n.type, n.label, n.norm_key, n.props ?? null, n.created_at ?? null, n.updated_at ?? null, n.origin ?? null, n.source_recording_id ?? null]
+    )
+  }
+
+  // 2. Reverse each loser edge.
+  for (const le of snapshot.edges) {
+    const leId = le.id as string
+    const rawSources = snapshot.edgeSources.filter((s) => s.edge_id === leId)
+    // Part B: only re-insert sources whose recording still exists; if the edge HAD
+    // sources but every one is now purged, skip the edge entirely (do not resurrect it).
+    const leSources = rawSources.filter(sourceStillValid)
+    if (rawSources.length > 0 && leSources.length === 0) continue
+    const exists = queryOne<{ id: string }>('SELECT id FROM graph_edges WHERE id = ?', [leId])
+    if (exists) {
+      // Non-colliding repoint (or untouched): restore endpoints/weight + sources exactly.
+      runNoSave(
+        'UPDATE graph_edges SET source_id = ?, target_id = ?, type = ?, props = ?, weight = ?, created_at = ? WHERE id = ?',
+        [le.source_id, le.target_id, le.type, le.props ?? null, le.weight ?? 1, le.created_at ?? null, leId]
+      )
+      runNoSave('DELETE FROM graph_edge_sources WHERE edge_id = ?', [leId])
+      for (const s of leSources) reinsertGraphEdgeSource(s)
+      continue
+    }
+
+    // Edge was deleted at the fold. Compute the endpoints it repointed to (L→K).
+    const s2 = le.source_id === L ? K : le.source_id
+    const t2 = le.target_id === L ? K : le.target_id
+    if (K && s2 !== t2) {
+      // Collision: a keeper edge at (s2,t2,type) absorbed this loser edge's weight+sources.
+      const ke = queryOne<{ id: string }>(
+        'SELECT id FROM graph_edges WHERE source_id = ? AND target_id = ? AND type = ?',
+        [s2, t2, le.type]
+      )
+      if (ke) {
+        runNoSave('UPDATE graph_edges SET weight = weight - ? WHERE id = ?', [le.weight ?? 1, ke.id])
+        for (const s of leSources) {
+          const cur = queryOne<{ assertion_count: number }>(
+            'SELECT assertion_count FROM graph_edge_sources WHERE edge_id = ? AND recording_id = ? AND transcript_id = ?',
+            [ke.id, s.recording_id, s.transcript_id]
+          )
+          if (cur) {
+            const next = (cur.assertion_count ?? 0) - ((s.assertion_count as number) ?? 0)
+            if (next <= 0) {
+              runNoSave(
+                'DELETE FROM graph_edge_sources WHERE edge_id = ? AND recording_id = ? AND transcript_id = ?',
+                [ke.id, s.recording_id, s.transcript_id]
+              )
+            } else {
+              runNoSave(
+                'UPDATE graph_edge_sources SET assertion_count = ? WHERE edge_id = ? AND recording_id = ? AND transcript_id = ?',
+                [next, ke.id, s.recording_id, s.transcript_id]
+              )
+            }
+          }
+        }
+      }
+    }
+    // Re-insert the deleted loser edge (collision drop or self-loop) + its sources.
+    reinsertGraphEdge(le)
+    for (const s of leSources) reinsertGraphEdgeSource(s)
+  }
+}
+
+// -----------------------------------------------------------------------------
+// ADV57-1 (round-59): a HARD-PURGE (F17 permanent delete) of a recording R must
+// also strip R's contribution from every OPEN merge_journal graph snapshot, not
+// just from the live graph. Round-58 journaled a full loser-subgraph snapshot
+// (loser node + incident edges + their graph_edge_sources) so unmerge could
+// reverse the graph fold. But `removeRecordingProvenanceCore` scrubbed only the
+// LIVE graph; the journal snapshot kept recoverable full-row copies referencing
+// R. A later UNMERGE then re-inserted R's edges + edge_sources — resurrecting
+// unprovenanced traces of a permanently-deleted recording, AND meaning the
+// retained manifest itself preserved recoverable node/edge data after a purge.
+//
+// This scrub runs INSIDE the same purge transaction as the live-graph cleanup
+// (invoked from removeRecordingProvenanceCore), so the manifest-at-rest is
+// trimmed atomically with the live graph. It mirrors the live purge's semantics
+// EXACTLY so a later reverseGraphFold stays byte-consistent with the (now purged)
+// live graph:
+//   • drop R's edge_source rows from the snapshot;
+//   • an edge left with ZERO surviving snapshot sources is DROPPED ONLY when R's
+//     removed assertion sum fully accounts for the edge weight (removed ≥ weight)
+//     — i.e. it was genuinely sole-sourced by R, which the live purge deleted.
+//     When weight EXCEEDS R's removed sum, the excess is UNATTRIBUTED RESIDUE (a
+//     legacy/co-asserted edge R later re-asserted); the live purge KEEPS such an
+//     edge at max(1, weight − removed), so the snapshot must keep it too — dropping
+//     it would let a later unmerge launder the residue onto the keeper under the
+//     WRONG entity. This mirrors removeRecordingProvenance's residue rule
+//     (recording-provenance.ts:166-180) EXACTLY;
+//   • an edge that keeps ≥1 surviving source (genuinely shared with a surviving
+//     recording) is KEPT with its snapshot weight decremented by R's removed
+//     assertion sum, floored at 1 — exactly what removeRecordingProvenance did;
+//   • the loser NODE is kept iff it retains ≥1 surviving snapshot edge OR live
+//     orphan-node GC would keep it anyway (persons and protected projects are
+//     never GC'd); otherwise the snapshot node is nulled so unmerge cannot
+//     resurrect a source-less node.
+// -----------------------------------------------------------------------------
+
+/** Node types the live purge GCs when orphaned (mirror of GC_ELIGIBLE_TYPES in
+ *  @hidock/knowledge-graph recording-provenance.ts). Person is never GC'd;
+ *  project is conditionally protected; every other type is left alone. */
+const JOURNAL_GC_ELIGIBLE_TYPES = new Set(['topic', 'decision', 'action_item', 'next_step', 'skill', 'risk'])
+
+/**
+ * Would the live orphan-node GC KEEP this (now edge-less in the snapshot) node?
+ * Mirrors `removeRecordingProvenance`'s node-GC policy: never GC a person; GC a
+ * project only when it is NOT backed by a real `projects` row (isProjectNodeProtected,
+ * name-keyed); GC the derived types; leave any other type alone.
+ */
+function journalSnapshotNodeIndependentlyKept(node: Record<string, unknown>): boolean {
+  const type = String(node.type ?? '')
+  if (type === 'person') return true // live purge never GCs a person node
+  if (type === 'project') {
+    const label = String(node.label ?? '').toLowerCase().trim()
+    const row = queryOne<{ id: string }>('SELECT id FROM projects WHERE LOWER(name) = ?', [label])
+    return !!row // protected iff linked to a real projects row
+  }
+  return !JOURNAL_GC_ELIGIBLE_TYPES.has(type) // GC-eligible → not kept; anything else → kept
+}
+
+/**
+ * Strip a hard-purged recording's contribution from every OPEN (not-yet-undone)
+ * merge_journal graph snapshot. See the section banner for the full contract.
+ * Runs through the module-local runNoSave/queryOne so it JOINS the caller's open
+ * purge transaction (engine.ts inTransaction re-entrancy). Returns the number of
+ * journal rows whose manifest was rewritten (0 when nothing referenced R).
+ *
+ * `purgedTranscriptIds` is the same union removeRecordingProvenanceCore computes
+ * (live ∪ graph-sourced ∪ caller-supplied); a snapshot source is R's contribution
+ * when its recording_id === purgedRecordingId OR its transcript_id is in that set
+ * (the transcript match is defensive — a well-formed row already has recording_id
+ * === R, but this also catches any inconsistent row).
+ */
+export function scrubMergeJournalGraphSnapshots(purgedRecordingId: string, purgedTranscriptIds: string[]): number {
+  const txSet = new Set(purgedTranscriptIds)
+  const rows = queryAll<{ id: string; repointed_manifest: string }>(
+    'SELECT id, repointed_manifest FROM merge_journal WHERE undone_at IS NULL'
+  )
+  const isPurgedSource = (s: Record<string, unknown>): boolean =>
+    s.recording_id === purgedRecordingId || (typeof s.transcript_id === 'string' && txSet.has(s.transcript_id))
+
+  let modified = 0
+  for (const row of rows) {
+    let manifest: Record<string, unknown>
+    try {
+      manifest = JSON.parse(row.repointed_manifest) as Record<string, unknown>
+    } catch {
+      continue
+    }
+    const snap = manifest.graph as GraphMergeSnapshot | undefined
+    if (!snap) continue
+    const edgeSources = Array.isArray(snap.edgeSources) ? snap.edgeSources : []
+    const edges = Array.isArray(snap.edges) ? snap.edges : []
+    if (!edgeSources.some(isPurgedSource)) continue // nothing of R's in this snapshot
+
+    // 1. Remove R's edge_source rows; accumulate the removed assertion weight per edge.
+    const removedWeightByEdge = new Map<string, number>()
+    const keptSources: Array<Record<string, unknown>> = []
+    for (const s of edgeSources) {
+      if (isPurgedSource(s)) {
+        const eid = String(s.edge_id ?? '')
+        const amt = Number(s.assertion_count ?? 1) || 0
+        removedWeightByEdge.set(eid, (removedWeightByEdge.get(eid) ?? 0) + amt)
+      } else {
+        keptSources.push(s)
+      }
+    }
+    const survivingSourceEdgeIds = new Set(keptSources.map((s) => String(s.edge_id ?? '')))
+
+    // 2. Trim edges — mirror the LIVE removal engine (recording-provenance.ts:166-180)
+    //    EXACTLY. For an edge R sourced (removed > 0):
+    //      • no surviving source rows: DELETE only when removed ≥ weight (fully
+    //        attributed sole-source, as the live purge deleted it); otherwise the
+    //        excess weight is UNATTRIBUTED RESIDUE — KEEP the edge at
+    //        max(1, weight − removed) (never drop), exactly as the live purge kept
+    //        the live edge. Dropping it here would let a later unmerge launder that
+    //        residue onto the keeper under the wrong entity (AR2-3, weight dimension).
+    //      • ≥1 surviving source row (genuinely shared): KEEP, decrement by R's sum,
+    //        floor 1.
+    //    An edge R never sourced (removed === 0) is untouched.
+    const trimmedEdges: Array<Record<string, unknown>> = []
+    for (const e of edges) {
+      const eid = String(e.id ?? '')
+      const removed = removedWeightByEdge.get(eid) ?? 0
+      if (removed === 0) {
+        trimmedEdges.push(e)
+        continue
+      }
+      const w = Number(e.weight ?? 1) || 1
+      if (!survivingSourceEdgeIds.has(eid) && removed >= w) continue // sole-source → drop
+      trimmedEdges.push({ ...e, weight: Math.max(1, w - removed) }) // shared OR residue → keep, decrement
+    }
+
+    // 3. Loser node: keep iff it still has a surviving edge OR live orphan-GC keeps it.
+    let loserNode = snap.loserNode
+    if (loserNode) {
+      const nodeId = loserNode.id
+      const stillHasEdge = trimmedEdges.some((e) => e.source_id === nodeId || e.target_id === nodeId)
+      if (!stillHasEdge && !journalSnapshotNodeIndependentlyKept(loserNode)) {
+        loserNode = null
+      }
+    }
+
+    const newSnap: GraphMergeSnapshot = {
+      keeperNode: snap.keeperNode,
+      loserNode,
+      edges: trimmedEdges,
+      edgeSources: keptSources,
+    }
+    manifest.graph = newSnap
+    runNoSave('UPDATE merge_journal SET repointed_manifest = ? WHERE id = ?', [JSON.stringify(manifest), row.id])
+    modified++
+  }
+  return modified
+}
+
+// -----------------------------------------------------------------------------
+// ADV58-1 (round-60): the graph scrub above trims only `manifest.graph`. It never
+// inspects `loser_snapshot` — the full loser Contact/Project row (name, email,
+// company, notes, role, tags, description…) — nor field-level provenance. So a
+// hard-purge of a recording R that MINTED a merged-away transcript entity left the
+// entity's identifying PII sitting in the retained journal AT REST (F17 data-retention
+// violation), and a later UNMERGE resurrected the row from that snapshot — under the
+// round-58 INSERT that also omitted source/source_recording_id, i.e. UNPROVENANCED.
+//
+// This sibling scrub runs in the SAME purge transaction (invoked from
+// removeRecordingProvenanceCore, guarded !dryRun). For every OPEN (undone_at IS NULL)
+// journal row:
+//   • ENTITY solely purged-sourced — loser_snapshot.source_recording_id === R (the
+//     loser entity's IDENTITY provenance IS the purged recording). The merge can no
+//     longer be honestly undone (undo would resurrect a permanently-deleted entity),
+//     so REDACT the loser_snapshot's identifying PII (name/email/company/notes/role/
+//     tags/description/folder_path/url + role field-provenance) AND stamp the manifest
+//     `invalidatedByPurge` flag — unmerge then REFUSES and the undo surface hides it.
+//   • ENTITY independently sourced (source_recording_id is a different, surviving
+//     recording, or null) — KEEP the snapshot, but REDACT any FIELD whose field-level
+//     provenance is R (contacts: `role` via role_source_recording_id === R) so unmerge
+//     cannot restore purged-sourced field data. The journal is NOT invalidated.
+//
+// PII fields not present on a given entity kind are simply skipped, so one field list
+// serves contacts and projects.
+// -----------------------------------------------------------------------------
+
+/** Loser-snapshot fields carrying retained personal/user data — nulled when the entity's
+ *  identity provenance is the purged recording. Non-present keys are skipped per row. */
+const JOURNAL_SNAPSHOT_PII_FIELDS = [
+  'name',
+  'email',
+  'company',
+  'notes',
+  'role',
+  'tags',
+  'description',
+  'folder_path',
+  'url',
+  'role_source_recording_id',
+  'role_origin',
+] as const
+
+/**
+ * Strip a hard-purged recording's RELATIONAL contribution from every OPEN merge_journal
+ * loser_snapshot / manifest (sibling of {@link scrubMergeJournalGraphSnapshots}). See the
+ * section banner for the exact entity-vs-field contract. Runs through the module-local
+ * runNoSave/queryAll so it JOINS the caller's open purge transaction. Returns the number of
+ * journal rows rewritten (0 when nothing referenced R).
+ */
+export function scrubMergeJournalRelationalSnapshots(purgedRecordingId: string): number {
+  const rows = queryAll<{ id: string; loser_snapshot: string; repointed_manifest: string }>(
+    'SELECT id, loser_snapshot, repointed_manifest FROM merge_journal WHERE undone_at IS NULL'
+  )
+  let modified = 0
+  for (const row of rows) {
+    let loser: Record<string, unknown>
+    let manifest: Record<string, unknown>
+    try {
+      loser = JSON.parse(row.loser_snapshot) as Record<string, unknown>
+      manifest = JSON.parse(row.repointed_manifest) as Record<string, unknown>
+    } catch {
+      continue
+    }
+    let changed = false
+
+    if (loser.source_recording_id === purgedRecordingId) {
+      // Case A — the loser entity's IDENTITY provenance is the purged recording.
+      // Redact all retained PII and invalidate the merge (cannot honestly undo).
+      for (const f of JOURNAL_SNAPSHOT_PII_FIELDS) {
+        if (f in loser && loser[f] !== null) {
+          loser[f] = null
+          changed = true
+        }
+      }
+      if (!manifest.invalidatedByPurge) {
+        manifest.invalidatedByPurge = { recordingId: purgedRecordingId, at: new Date().toISOString() }
+        changed = true
+      }
+    } else if (loser.role_source_recording_id === purgedRecordingId) {
+      // Case B — independently-sourced entity, but the `role` FIELD was minted by the
+      // purged recording (contacts only). Redact just that field's value + provenance;
+      // do NOT invalidate the journal (the entity itself remains honestly restorable).
+      loser.role = null
+      loser.role_source_recording_id = null
+      loser.role_origin = null
+      changed = true
+    }
+
+    if (changed) {
+      runNoSave('UPDATE merge_journal SET loser_snapshot = ?, repointed_manifest = ? WHERE id = ?', [
+        JSON.stringify(loser),
+        JSON.stringify(manifest),
+        row.id,
+      ])
+      modified++
+    }
+  }
+  return modified
+}
+
+/**
+ * ADV58-1 (round-60): refuse to undo a merge whose loser entity can no longer be honestly
+ * resurrected. Two guards: (1) the manifest carries the `invalidatedByPurge` flag stamped
+ * by the relational scrub; (2) defense-in-depth — the loser's identity-provenance recording
+ * no longer exists in `recordings` (catches manifests written before this fix). @throws when
+ * either holds.
+ */
+function assertJournalNotPurgeInvalidated(
+  manifest: { invalidatedByPurge?: MergeInvalidatedByPurge },
+  loser: { source_recording_id?: string | null }
+): void {
+  if (manifest.invalidatedByPurge) {
+    throw new Error(
+      `Cannot unmerge: the merged entity's source recording (${manifest.invalidatedByPurge.recordingId}) was permanently deleted; this merge can no longer be undone.`
+    )
+  }
+  const rid = loser.source_recording_id
+  if (rid && !queryOne('SELECT 1 FROM recordings WHERE id = ?', [rid])) {
+    throw new Error(
+      `Cannot unmerge: the merged entity's source recording (${rid}) no longer exists; this merge can no longer be undone.`
+    )
+  }
 }
 
 /** Fetch and validate an un-undone journal row of the given kind. @throws otherwise. */
@@ -4994,17 +9407,31 @@ export function unmergeContacts(journalId: string): UnmergeResult {
   return runInTransaction(() => {
     const row = loadOpenJournal(journalId, 'contact')
     const keeperId = row.keeper_id
+
+    // Dependency-aware newest-first guard (v42): contacts share the delta-based
+    // merge_journal model, so out-of-order undo corrupts cumulative folded
+    // fields (tags union, widened seen-spans) and hits the same
+    // keeper-of-keeper hole as projects. One shared guard for both kinds.
+    assertNewestFirstUnmerge(row)
+
     const loser = JSON.parse(row.loser_snapshot) as Contact
     const manifest = JSON.parse(row.repointed_manifest) as ContactMergeManifest
+
+    // ADV58-1: refuse when the loser's source recording was hard-purged (the entity can
+    // no longer be honestly resurrected). Checked before any write.
+    assertJournalNotPurgeInvalidated(manifest, loser)
 
     if (queryOne('SELECT 1 FROM contacts WHERE id = ?', [loser.id])) {
       throw new Error(`Cannot unmerge: a contact with id ${loser.id} already exists`)
     }
 
-    // 1. Recreate the loser row from the snapshot.
+    // 1. Recreate the loser row from the snapshot. ADV58-1: carry the entity + role
+    //    field provenance (source/source_recording_id/role_source_recording_id/role_origin)
+    //    so the restored loser keeps its validated positive provenance (the round-58 INSERT
+    //    omitted these, leaving the resurrected entity unprovenanced).
     runNoSave(
-      `INSERT INTO contacts (id, name, email, type, role, company, notes, tags, first_seen_at, last_seen_at, meeting_count, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO contacts (id, name, email, type, role, company, notes, tags, first_seen_at, last_seen_at, meeting_count, created_at, source, source_recording_id, role_source_recording_id, role_origin)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         loser.id,
         loser.name,
@@ -5017,7 +9444,11 @@ export function unmergeContacts(journalId: string): UnmergeResult {
         loser.first_seen_at,
         loser.last_seen_at,
         0,
-        loser.created_at
+        loser.created_at,
+        loser.source ?? null,
+        loser.source_recording_id ?? null,
+        loser.role_source_recording_id ?? null,
+        loser.role_origin ?? null
       ]
     )
 
@@ -5052,6 +9483,10 @@ export function unmergeContacts(journalId: string): UnmergeResult {
       meetingLinks++
     }
     // 3b. Re-insert the loser links the merge dropped as collisions (keeper keeps its own).
+    //     v44: the original per-row provenance was not captured in the merge manifest,
+    //     so a restored collision row is left NULL-provenance ⇒ ineligible (fail-closed)
+    //     on non-owner identity surfaces until the recording is re-analyzed. Safe (no
+    //     leak); the owner Library/meeting-detail views are exempt from the gate anyway.
     for (const l of manifest.meetingContacts.collided) {
       if (!queryOne('SELECT 1 FROM meetings WHERE id = ?', [l.key])) {
         skipped++
@@ -5075,6 +9510,18 @@ export function unmergeContacts(journalId: string): UnmergeResult {
       runNoSave('UPDATE transcript_speakers SET contact_id = ? WHERE id = ?', [loser.id, tsId])
       speakerLinks++
     }
+    for (const clusterId of manifest.voiceClusters?.repointed ?? []) {
+      const current = queryOne<{ contact_id: string | null }>('SELECT contact_id FROM voice_clusters WHERE id = ?', [clusterId])
+      if (!current || current.contact_id !== keeperId) {
+        skipped++
+        continue
+      }
+      runNoSave('UPDATE voice_clusters SET contact_id = ?, updated_at = ? WHERE id = ?', [
+        loser.id,
+        new Date().toISOString(),
+        clusterId
+      ])
+    }
 
     // 4. Delete the alias(es) the merge created, restore folded keeper fields.
     for (const norm of manifest.createdAliasNorms ?? []) {
@@ -5085,6 +9532,12 @@ export function unmergeContacts(journalId: string): UnmergeResult {
       ])
     }
     const fieldsRestored = restoreFoldedFields('contacts', keeperId, row.folded_fields)
+
+    // ADV56-2 (round-58): reverse the graph mergeNodes fold EXACTLY (recreate the loser
+    // node, restore its edges + provenance, and remove from the keeper exactly what the
+    // fold transferred in) so the graph is not left attributing the loser's context to
+    // the keeper while unmerge reports success. No-op when the merge folded no graph node.
+    reverseGraphFold(manifest.graph)
 
     recomputeContactMeetingCount(keeperId)
     recomputeContactMeetingCount(loser.id)
@@ -5136,6 +9589,39 @@ export function unmergeContacts(journalId: string): UnmergeResult {
   })
 }
 
+/**
+ * ATOMICALLY reverse a GROUP of contact merges (the group-merge Undo). Every
+ * given journal is unwound newest-first (ordered by seq, regardless of caller
+ * order) inside ONE transaction: any rejection — order conflict, missing or
+ * unsequenced journal, unreadable snapshot, already-unmerged — rolls the WHOLE
+ * group back and rethrows that journal's typed error, leaving the group state
+ * exactly as before the call (fully re-attemptable).
+ *
+ * Why atomic: per-journal unmerges each commit independently, so a
+ * mid-sequence failure used to leave the newest journals undone and the older
+ * ones unreachable — a retry started at the already-undone newest journal, was
+ * rejected, and stopped. The engine's re-entrant runInTransaction folds each
+ * inner unmergeContacts transaction into this outer one, making the rollback
+ * total.
+ */
+export function unmergeContactsGroup(journalIds: string[]): UnmergeResult[] {
+  if (journalIds.length === 0) return []
+  return runInTransaction(() => {
+    // Newest-first by seq. Unknown ids sort last and fail inside
+    // unmergeContacts with the precise not-found error; NULL-seq rows are
+    // rejected fail-closed by the ordering guard. Duplicates are collapsed so
+    // one id cannot trip the already-unmerged rejection against itself.
+    const unique = [...new Set(journalIds)]
+    const seqOf = new Map<string, number>()
+    for (const id of unique) {
+      const r = queryOne<{ seq: number | null }>('SELECT seq FROM merge_journal WHERE id = ?', [id])
+      if (r && r.seq !== null) seqOf.set(id, r.seq)
+    }
+    const ordered = unique.sort((a, b) => (seqOf.get(b) ?? -1) - (seqOf.get(a) ?? -1))
+    return ordered.map((id) => unmergeContacts(id))
+  })
+}
+
 // =============================================================================
 // Transcript speaker identity (v25)
 // =============================================================================
@@ -5159,6 +9645,28 @@ export function getSpeakerMap(recordingId: string): SpeakerMapEntry[] {
 }
 
 /**
+ * ADV45-1 (round-47) — gate the RECORDING axis on every speaker-identity
+ * mutation. A speaker mutation resolves/creates a contact, writes a
+ * transcript_speakers binding, and (when the recording is meeting-linked) an
+ * always-eligible source='calendar' meeting_contacts membership — i.e. it can
+ * LAUNDER an excluded recording's interaction into visible identity. Round 39
+ * gated the CONTACT axis (never reanimate a suppressed contact); this gates the
+ * RECORDING axis: the recording itself must be ELIGIBLE (an EXISTING,
+ * non-personal, non-deleted, non-value-excluded row). Called INSIDE each
+ * mutation's transaction BEFORE any contact resolution/creation and BEFORE any
+ * write, so an ineligible / hard-purged recording — OR a fail-closed eligibility
+ * lookup — throws and the whole mutation rolls back with zero state change.
+ * getEligibleRecordingIds lives in THIS module (no import cycle with
+ * recording-eligibility.ts, which imports database.ts).
+ */
+function assertRecordingEligibleForSpeakerMutation(recordingId: string): void {
+  const { eligible, failClosed } = getEligibleRecordingIds([recordingId])
+  if (failClosed || !eligible.has(recordingId)) {
+    throw new Error(`Recording ${recordingId} is not eligible for speaker identity mutation`)
+  }
+}
+
+/**
  * Bind a transcript speaker label to a contact. Provide either an existing
  * contactId or a newName (upserted by case-insensitive name). Writes the map
  * row (replacing any prior binding for the label) and, when the recording is
@@ -5169,23 +9677,38 @@ export function getSpeakerMap(recordingId: string): SpeakerMapEntry[] {
 export function assignSpeaker(
   recordingId: string,
   speakerLabel: string,
-  opts: { contactId?: string; newName?: string }
+  opts: {
+    contactId?: string
+    newName?: string
+    voiceAnchor?: { method: 'manual' | 'self-identification'; confidence: number }
+  }
 ): Contact {
   return runInTransaction(() => {
+    // ADV45-1 (round-47) — RECORDING-axis gate, in-transaction, before any write.
+    assertRecordingEligibleForSpeakerMutation(recordingId)
     let contact: Contact | undefined
 
+    // ADV37 (round-39) — this WRITE links the resolved contact via an always-eligible
+    // source='calendar' membership (below), so resolving/reusing a SUPPRESSED entity here
+    // would reanimate it on non-owner surfaces. Gate BOTH resolution paths:
+    //   • explicit contactId ⇒ require it be currently VISIBLE (treat suppressed/
+    //     fail-closed as absent — a suppressed contact is never offered by the picker);
+    //   • newName ⇒ reuse ONLY a VISIBLE exact-name match; when every match is
+    //     SUPPRESSED, mint a NEW distinct contact rather than reanimate the hidden one.
     if (opts.contactId) {
+      if (!isEntityReferenceVisible('contact', opts.contactId)) throw new Error(`Contact ${opts.contactId} not found`)
       contact = queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [opts.contactId])
       if (!contact) throw new Error(`Contact ${opts.contactId} not found`)
     } else if (opts.newName && opts.newName.trim()) {
       const name = opts.newName.trim()
-      contact = queryOne<Contact>('SELECT * FROM contacts WHERE LOWER(name) = LOWER(?)', [name])
+      contact = pickReusableVisibleContact(getContactsByName(name))
       if (!contact) {
         const id = randomUUID()
         const now = new Date().toISOString()
+        // source='user': explicit owner speaker bind ⇒ structural (always visible).
         runNoSave(
-          `INSERT INTO contacts (id, name, type, first_seen_at, last_seen_at, meeting_count)
-           VALUES (?, ?, 'unknown', ?, ?, 0)`,
+          `INSERT INTO contacts (id, name, type, first_seen_at, last_seen_at, meeting_count, source)
+           VALUES (?, ?, 'unknown', ?, ?, 0, 'user')`,
           [id, name, now, now]
         )
         contact = queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [id])!
@@ -5200,6 +9723,29 @@ export function assignSpeaker(
       [randomUUID(), recordingId, speakerLabel, contact.id]
     )
 
+    // A manual confirmation or explicit first-person self-identification can
+    // anchor the anonymous acoustic cluster to this contact. Calendar/LLM
+    // inference intentionally does not receive voiceAnchor and therefore can
+    // never turn contextual guessing into persistent acoustic identity.
+    if (opts.voiceAnchor) {
+      runNoSave(
+        `UPDATE voice_clusters SET contact_id = ?, contact_link_method = ?,
+         contact_link_confidence = ?, updated_at = ?
+         WHERE id = (
+           SELECT voice_cluster_id FROM recording_voice_clusters
+           WHERE recording_id = ? AND transcript_speaker_label = ?
+         )`,
+        [
+          contact.id,
+          opts.voiceAnchor.method,
+          Math.max(0, Math.min(1, opts.voiceAnchor.confidence)),
+          new Date().toISOString(),
+          recordingId,
+          speakerLabel
+        ]
+      )
+    }
+
     // Alias memory (v27): a non-generic speaker label ("Javier", not "Speaker 2")
     // is a real name the user just bound — remember it as an alias of the contact.
     if (!isGenericSpeakerLabel(speakerLabel)) {
@@ -5208,7 +9754,8 @@ export function assignSpeaker(
 
     const rec = queryOne<{ meeting_id?: string | null }>('SELECT meeting_id FROM recordings WHERE id = ?', [recordingId])
     if (rec?.meeting_id) {
-      runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)', [
+      // v44 provenance: an explicit user speaker binding is a structural link ⇒ 'calendar'.
+      runNoSave("INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES (?, ?, ?, 'calendar')", [
         rec.meeting_id,
         contact.id,
         'attendee'
@@ -5222,7 +9769,11 @@ export function assignSpeaker(
 
 /** Remove a speaker-label → contact binding for a recording. */
 export function unassignSpeaker(recordingId: string, speakerLabel: string): void {
-  run('DELETE FROM transcript_speakers WHERE recording_id = ? AND speaker_label = ?', [recordingId, speakerLabel])
+  runInTransaction(() => {
+    // ADV45-1 (round-47) — RECORDING-axis gate before any mutation.
+    assertRecordingEligibleForSpeakerMutation(recordingId)
+    runNoSave('DELETE FROM transcript_speakers WHERE recording_id = ? AND speaker_label = ?', [recordingId, speakerLabel])
+  })
 }
 
 // =============================================================================
@@ -5248,20 +9799,27 @@ export interface SpeakerSplitEntry {
  * identities the same way. @throws if neither is usable or the id is unknown.
  */
 function resolveContactForBinding(opts: { contactId?: string; newName?: string }): Contact {
+  // ADV37 (round-39) — mirrors assignSpeaker's reanimation-safe resolution (callers
+  // setTurnOverride / assignSpeakerFromHere link the contact via an always-eligible
+  // source='calendar' membership). Explicit id ⇒ require VISIBLE; newName ⇒ reuse ONLY
+  // a VISIBLE exact-name match, else mint a NEW distinct contact (never reanimate a
+  // suppressed transcript entity).
   if (opts.contactId) {
+    if (!isEntityReferenceVisible('contact', opts.contactId)) throw new Error(`Contact ${opts.contactId} not found`)
     const contact = queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [opts.contactId])
     if (!contact) throw new Error(`Contact ${opts.contactId} not found`)
     return contact
   }
   if (opts.newName && opts.newName.trim()) {
     const name = opts.newName.trim()
-    const existing = queryOne<Contact>('SELECT * FROM contacts WHERE LOWER(name) = LOWER(?)', [name])
+    const existing = pickReusableVisibleContact(getContactsByName(name))
     if (existing) return existing
     const id = randomUUID()
     const now = new Date().toISOString()
+    // source='user': explicit owner speaker bind ⇒ structural (always visible).
     runNoSave(
-      `INSERT INTO contacts (id, name, type, first_seen_at, last_seen_at, meeting_count)
-       VALUES (?, ?, 'unknown', ?, ?, 0)`,
+      `INSERT INTO contacts (id, name, type, first_seen_at, last_seen_at, meeting_count, source)
+       VALUES (?, ?, 'unknown', ?, ?, 0, 'user')`,
       [id, name, now, now]
     )
     return queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [id])!
@@ -5293,6 +9851,8 @@ export function setTurnOverride(
   opts: { contactId?: string; newName?: string }
 ): Contact {
   return runInTransaction(() => {
+    // ADV45-1 (round-47) — RECORDING-axis gate, in-transaction, before any write.
+    assertRecordingEligibleForSpeakerMutation(recordingId)
     const contact = resolveContactForBinding(opts)
     runNoSave(
       'INSERT OR REPLACE INTO turn_speaker_overrides (id, recording_id, turn_index, contact_id) VALUES (?, ?, ?, ?)',
@@ -5300,7 +9860,8 @@ export function setTurnOverride(
     )
     const rec = queryOne<{ meeting_id?: string | null }>('SELECT meeting_id FROM recordings WHERE id = ?', [recordingId])
     if (rec?.meeting_id) {
-      runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)', [
+      // v44 provenance: an explicit user speaker binding is a structural link ⇒ 'calendar'.
+      runNoSave("INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES (?, ?, ?, 'calendar')", [
         rec.meeting_id,
         contact.id,
         'attendee'
@@ -5313,7 +9874,11 @@ export function setTurnOverride(
 
 /** Remove a per-turn override, reverting the turn to its label/split default. */
 export function clearTurnOverride(recordingId: string, turnIndex: number): void {
-  run('DELETE FROM turn_speaker_overrides WHERE recording_id = ? AND turn_index = ?', [recordingId, turnIndex])
+  runInTransaction(() => {
+    // ADV45-1 (round-47) — RECORDING-axis gate before any mutation.
+    assertRecordingEligibleForSpeakerMutation(recordingId)
+    runNoSave('DELETE FROM turn_speaker_overrides WHERE recording_id = ? AND turn_index = ?', [recordingId, turnIndex])
+  })
 }
 
 /** All speaker splits for a recording, ordered so the render can pick the last
@@ -5349,6 +9914,8 @@ function nextSplitLetter(usedDerived: string[], baseLabel: string): string {
  */
 export function splitSpeakerFrom(recordingId: string, baseLabel: string, fromTurnIndex: number): string {
   return runInTransaction(() => {
+    // ADV45-1 (round-47) — RECORDING-axis gate, in-transaction, before any write.
+    assertRecordingEligibleForSpeakerMutation(recordingId)
     const existing = queryOne<{ derived_label: string }>(
       'SELECT derived_label FROM speaker_splits WHERE recording_id = ? AND base_label = ? AND from_turn_index = ?',
       [recordingId, baseLabel, fromTurnIndex]
@@ -5376,6 +9943,8 @@ export function splitSpeakerFrom(recordingId: string, baseLabel: string, fromTur
  */
 export function mergeSpeakerSplit(recordingId: string, baseLabel: string, fromTurnIndex: number): void {
   runInTransaction(() => {
+    // ADV45-1 (round-47) — RECORDING-axis gate, in-transaction, before any write.
+    assertRecordingEligibleForSpeakerMutation(recordingId)
     const row = queryOne<{ derived_label: string }>(
       'SELECT derived_label FROM speaker_splits WHERE recording_id = ? AND base_label = ? AND from_turn_index = ?',
       [recordingId, baseLabel, fromTurnIndex]
@@ -5406,6 +9975,9 @@ export function assignSpeakerFromHere(
   opts: { contactId?: string; newName?: string }
 ): { derivedLabel: string; contact: Contact } {
   return runInTransaction(() => {
+    // ADV45-1 (round-47) — RECORDING-axis gate up front (splitSpeakerFrom +
+    // assignSpeaker each re-assert inside their own nested transactions).
+    assertRecordingEligibleForSpeakerMutation(recordingId)
     const derivedLabel = splitSpeakerFrom(recordingId, baseLabel, fromTurnIndex)
     const contact = assignSpeaker(recordingId, derivedLabel, opts)
     return { derivedLabel, contact }
@@ -5456,20 +10028,45 @@ export function addMeetingAttendee(meetingId: string, payload: { name?: string; 
     const name = payload.name?.trim() || null
     if (!email && !name) throw new Error('addMeetingAttendee requires a name or an email')
 
-    let contact: Contact | undefined
+    // ADV37-1 (round-39) — resolve ALL email + exact-name candidates and REUSE ONLY a
+    // VISIBLE one. The old code reused the first raw email/name match with NO visibility
+    // filter, so typing a name/email that matched a SUPPRESSED transcript-derived contact
+    // (sole source recording excluded/deleted/personal/purged) would update the hidden
+    // row, attach an always-eligible source='calendar' membership, and return its RAW
+    // fields — permanently reanimating the suppressed entity and disclosing it. Now:
+    //   • ≥1 VISIBLE candidate ⇒ reuse it (a genuine existing contact);
+    //   • every candidate SUPPRESSED (or none) ⇒ mint a NEW distinct user-sourced
+    //     contact (a legitimate NEW calendar attendee still gets created — we simply
+    //     never reuse a suppressed transcript entity);
+    //   • visibility-eval FAILS ⇒ throw (transaction rolls back — no write, no raw return).
+    const candidates: Contact[] = []
+    const seenIds = new Set<string>()
     if (email) {
-      contact = queryOne<Contact>('SELECT * FROM contacts WHERE LOWER(email) = ?', [email])
+      for (const c of queryAll<Contact>('SELECT * FROM contacts WHERE LOWER(email) = ?', [email])) {
+        if (!seenIds.has(c.id)) {
+          seenIds.add(c.id)
+          candidates.push(c)
+        }
+      }
     }
-    if (!contact && name) {
-      contact = queryOne<Contact>('SELECT * FROM contacts WHERE LOWER(name) = LOWER(?)', [name])
+    if (name) {
+      for (const c of getContactsByName(name)) {
+        if (!seenIds.has(c.id)) {
+          seenIds.add(c.id)
+          candidates.push(c)
+        }
+      }
     }
+    let contact = pickReusableVisibleContact(candidates)
 
     if (!contact) {
       const id = randomUUID()
       const now = new Date().toISOString()
+      // source='user': an explicit owner "add attendee" ⇒ structural (always visible);
+      // never a reused suppressed entity.
       runNoSave(
-        `INSERT INTO contacts (id, name, email, type, first_seen_at, last_seen_at, meeting_count)
-         VALUES (?, ?, ?, 'unknown', ?, ?, 0)`,
+        `INSERT INTO contacts (id, name, email, type, first_seen_at, last_seen_at, meeting_count, source)
+         VALUES (?, ?, ?, 'unknown', ?, ?, 0, 'user')`,
         [id, name || (email ? email.split('@')[0] : 'Unknown'), email, now, now]
       )
       contact = queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [id])!
@@ -5494,7 +10091,8 @@ export function addMeetingAttendee(meetingId: string, payload: { name?: string; 
       }
     }
 
-    runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)', [
+    // v44 provenance: manual "add attendee" is a structural/user link ⇒ 'calendar'.
+    runNoSave("INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES (?, ?, ?, 'calendar')", [
       meetingId,
       contact.id,
       'attendee'
@@ -5526,7 +10124,17 @@ export interface Project {
   status: string
   folder_path: string | null
   url: string | null
+  /**
+   * Durable provenance (v42): 'manual' (explicit user create) or 'discovered'
+   * (reconciler auto-create from a transcript). null = legacy/unknown — treated
+   * as NOT dismissable (fail-closed).
+   */
+  origin: 'manual' | 'discovered' | null
   created_at: string
+  /** v45 entity origin: 'user' | 'transcript' | null (legacy). */
+  source?: string | null
+  /** v45 — recording whose transcript minted a transcript-origin project. */
+  source_recording_id?: string | null
 }
 
 /** One issue / risk / note tracked against a project (v29). */
@@ -5580,12 +10188,305 @@ export function getProjectById(id: string): Project | undefined {
   return queryOne<Project>('SELECT * FROM projects WHERE id = ?', [id])
 }
 
-export function createProject(project: Omit<Project, 'created_at' | 'folder_path' | 'url'>): Project {
+export function createProject(project: Omit<Project, 'created_at' | 'folder_path' | 'url' | 'origin'>): Project {
+  // This function IS the manual path — it stamps origin='manual' itself so no
+  // caller can accidentally (or deliberately) mint a dismissable project here.
+  // v45/round-28: an explicit user create also ⇒ entity source 'user' (always
+  // visible on non-owner identity surfaces). Transcript-extracted projects are
+  // minted by applyTranscriptEntities' raw INSERT with source='transcript'.
   run(
-    'INSERT INTO projects (id, name, description, status) VALUES (?, ?, ?, ?)',
+    "INSERT INTO projects (id, name, description, status, source, origin) VALUES (?, ?, ?, ?, 'user', 'manual')",
     [project.id, project.name, project.description, project.status || 'active']
   )
-  return { ...project, folder_path: null, url: null, created_at: new Date().toISOString() }
+  // Manual beats rejection: an explicit create clears any discovery tombstone for
+  // this name, so future transcript mentions resolve and link to it normally.
+  clearProjectDiscoveryRejection(project.name)
+  // The project now exists, so its pending discovery evidence (v43) is settled —
+  // future mentions resolve to this row instead of accumulating sightings.
+  clearProjectDiscoveryObservations(project.name)
+  return { ...project, folder_path: null, url: null, origin: 'manual', created_at: new Date().toISOString() }
+}
+
+// ---------------------------------------------------------------------------
+// Project discovery tombstones (v41)
+// ---------------------------------------------------------------------------
+// Dismissing an auto-discovered project must be durable: deleting the row alone
+// let the next transcript re-analysis silently re-create it. These helpers give
+// the reconciler's auto-create path a memory keyed by normalized name. Manual
+// creation clears the tombstone (createProject above), so "manual beats
+// rejection" holds.
+
+/** Record that a discovered project name was dismissed (upsert — latest wins). */
+export function addProjectDiscoveryRejection(name: string, sourceMeetingId?: string | null): void {
+  const norm = normalizeName(name)
+  if (!norm) return
+  run(
+    `INSERT INTO project_discovery_rejections (name_norm, original_name, source_meeting_id, rejected_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(name_norm) DO UPDATE SET
+       original_name = excluded.original_name,
+       source_meeting_id = excluded.source_meeting_id,
+       rejected_at = excluded.rejected_at`,
+    [norm, name, sourceMeetingId ?? null, new Date().toISOString()]
+  )
+  // The user has answered the question for this name — drop its accumulated
+  // sightings so it cannot linger in the deferred-discovery queue (the
+  // suggestion-surface equivalent of the dismiss->reappear loop v41 fixed).
+  clearProjectDiscoveryObservations(name)
+}
+
+/** True when this name was dismissed as a spurious discovery (blocks auto-create only). */
+export function isProjectDiscoveryRejected(name: string): boolean {
+  const norm = normalizeName(name)
+  if (!norm) return false
+  return !!queryOne<{ name_norm: string }>(
+    'SELECT name_norm FROM project_discovery_rejections WHERE name_norm = ?',
+    [norm]
+  )
+}
+
+/** Remove a tombstone (called on explicit manual create — manual beats rejection). */
+export function clearProjectDiscoveryRejection(name: string): void {
+  const norm = normalizeName(name)
+  if (!norm) return
+  run('DELETE FROM project_discovery_rejections WHERE name_norm = ?', [norm])
+}
+
+// ---------------------------------------------------------------------------
+// Project discovery observation ledger (v43, F12)
+// ---------------------------------------------------------------------------
+// The recurrence half of the auto-creation gate. Each plausible extracted
+// project name is recorded here per SOURCE before anything is created, so the
+// reconciler can ask "has this name actually come back?" instead of trusting a
+// single mention. Names that never clear both bars stay here as deferred
+// discovery suggestions rather than becoming zero-item projects.
+
+/** One name's accumulated discovery evidence — a deferred suggestion row. */
+export interface PendingProjectDiscovery {
+  /** NFKC-normalized key (same normalization the tombstones use). */
+  nameNorm: string
+  /** Most recently seen original spelling. */
+  name: string
+  /** Best name-plausibility score observed (project-discovery-gate.ts). */
+  score: number
+  /** How many DISTINCT meetings/recordings mentioned it. */
+  sourceCount: number
+  firstSeenAt: string
+  lastSeenAt: string
+}
+
+/**
+ * Record one sighting of an extracted project name and return how many DISTINCT
+ * sources have now mentioned it (this sighting included).
+ *
+ * `sourceKey` must be STABLE for a given capture across re-processing — the
+ * reconciler passes `r:<recordingId>` whenever a recording is known, falling
+ * back to `m:<meetingId>` only for a mention with no recording at all. The
+ * composite primary key then makes re-analysis idempotent: re-transcribing the
+ * same recording upserts its existing row instead of banking a second sighting,
+ * even if the recording has since been correlated to a meeting (which is exactly
+ * what a meeting-keyed scheme got wrong). `meetingId` rides along so the count
+ * can still collapse two recordings of one conversation into a single source.
+ *
+ * `score` keeps the best value seen, so a cleanly-spelled later mention can lift
+ * a name that first arrived mangled.
+ */
+export function recordProjectDiscoveryObservation(
+  name: string,
+  sourceKey: string,
+  meetingId: string | null,
+  score: number
+): number {
+  const norm = normalizeName(name)
+  if (!norm || !sourceKey) return 0
+  const now = new Date().toISOString()
+  // OBSERVATIONS_UPSERT_SQL is shared with the boot probe (see
+  // ensureObservationsTableUsable) so the schema check exercises THIS statement.
+  // Its ON CONFLICT branch is what makes late correlation UPDATE the row's
+  // meeting rather than mint a second one.
+  run(OBSERVATIONS_UPSERT_SQL, [norm, sourceKey, meetingId ?? null, name, score, now, now])
+  return countProjectDiscoverySources(name)
+}
+
+/**
+ * How many distinct CONVERSATIONS have mentioned this project name. Captures
+ * that share a meeting collapse to one; a capture with no meeting counts on its
+ * own stable key.
+ */
+export function countProjectDiscoverySources(name: string): number {
+  const norm = normalizeName(name)
+  if (!norm) return 0
+  return (
+    queryOne<{ n: number }>(
+      `SELECT COUNT(DISTINCT COALESCE(meeting_id, source_key)) AS n
+         FROM project_discovery_observations WHERE name_norm = ?`,
+      [norm]
+    )?.n ?? 0
+  )
+}
+
+/** A corroborating meeting paired with the recording that produced its sighting. */
+export interface ProjectDiscoveryCorroboration {
+  meetingId: string
+  /** The recording from the observation's 'r:<id>' source_key, or NULL for an 'm:' (recording-less) sighting. */
+  recordingId: string | null
+}
+
+/**
+ * Every distinct meeting that corroborated this project name, paired with the
+ * RECORDING that produced the corroborating sighting.
+ *
+ * Read by the reconciler at creation time so the meetings whose corroboration
+ * EARNED the project are linked to it. Without this the first sighting's meeting
+ * — the evidence itself — was dropped when the ledger was cleared, and the graph
+ * permanently omitted a valid association unless that transcript happened to be
+ * reprocessed later.
+ *
+ * ADV-F1 (post-merge review): also returns the source recording (parsed from the
+ * observation's 'r:<recordingId>' source_key — the recording id is already stored
+ * there, so no schema change is needed) so the reconciler can stamp each
+ * backfilled meeting_projects row with source='transcript' + that recording id.
+ * A provenance-less (source=NULL) corroborating row is legacy/ineligible under
+ * {@link filterEligibleMembershipRows}; stamping the real recording keeps the
+ * association visible on non-owner surfaces exactly as long as its recording is
+ * eligible, so excluding the threshold-crossing recording no longer erases a
+ * project that a still-eligible corroborating recording continues to support.
+ *
+ * When a meeting has several corroborating sightings we prefer one carrying a
+ * recording (an 'r:' key), most-recent first, so the row is gated by a real
+ * recording rather than left provenance-less.
+ */
+export function getProjectDiscoveryCorroborations(name: string): ProjectDiscoveryCorroboration[] {
+  const norm = normalizeName(name)
+  if (!norm) return []
+  const rows = queryAll<{ meeting_id: string; source_key: string }>(
+    `SELECT meeting_id, source_key FROM project_discovery_observations
+      WHERE name_norm = ? AND meeting_id IS NOT NULL
+      ORDER BY last_seen_at DESC, rowid DESC`,
+    [norm]
+  )
+  const byMeeting = new Map<string, string | null>()
+  for (const r of rows) {
+    const rid = r.source_key.startsWith('r:') ? r.source_key.slice(2) : null
+    if (!byMeeting.has(r.meeting_id)) {
+      byMeeting.set(r.meeting_id, rid)
+    } else if (byMeeting.get(r.meeting_id) == null && rid != null) {
+      // Upgrade a recording-less ('m:') provenance to a real recording when a
+      // sibling sighting for the same meeting carries one.
+      byMeeting.set(r.meeting_id, rid)
+    }
+  }
+  return [...byMeeting.entries()].map(([meetingId, recordingId]) => ({ meetingId, recordingId }))
+}
+
+/**
+ * Forget a name's accumulated sightings. Called whenever the name stops being an
+ * open question — the project got created (auto or manual), or the user dismissed
+ * it — so a settled name never lingers in the deferred-suggestion queue.
+ */
+export function clearProjectDiscoveryObservations(name: string): void {
+  const norm = normalizeName(name)
+  if (!norm) return
+  run('DELETE FROM project_discovery_observations WHERE name_norm = ?', [norm])
+}
+
+/**
+ * The deferred discovery queue: names the gate saw but refused to auto-create,
+ * strongest evidence first. Tombstoned names and names that already exist as a
+ * project are filtered out defensively (both are purged on the way in, so this is
+ * belt-and-braces against a ledger written before either happened).
+ *
+ * The already-a-project filter is applied in JS on the NFKC key, NOT as
+ * `name_norm NOT IN (SELECT LOWER(name) FROM projects)`: SQLite's LOWER() is
+ * ASCII-only and does no Unicode folding or whitespace collapsing, so a project
+ * whose stored name differs from the key only by accent composition or spacing
+ * would slip through and be offered as a "new" discovery. This is the same
+ * ASCII-LOWER trap resolveProject's tier 1b exists to close.
+ */
+export function getPendingProjectDiscoveries(limit = 50): PendingProjectDiscovery[] {
+  const rows = queryAll<{
+    name_norm: string
+    name: string
+    score: number
+    source_count: number
+    first_seen_at: string
+    last_seen_at: string
+  }>(
+    `SELECT o.name_norm AS name_norm,
+            -- Most RECENT spelling, not MAX() (which is lexicographic order).
+            (SELECT o2.original_name FROM project_discovery_observations o2
+              WHERE o2.name_norm = o.name_norm
+              ORDER BY o2.last_seen_at DESC, o2.rowid DESC LIMIT 1) AS name,
+            MAX(o.score) AS score,
+            COUNT(DISTINCT COALESCE(o.meeting_id, o.source_key)) AS source_count,
+            MIN(o.first_seen_at) AS first_seen_at,
+            MAX(o.last_seen_at) AS last_seen_at
+       FROM project_discovery_observations o
+      WHERE o.name_norm NOT IN (SELECT name_norm FROM project_discovery_rejections)
+      GROUP BY o.name_norm
+      ORDER BY source_count DESC, score DESC, last_seen_at DESC`
+  )
+
+  const existing = new Set(
+    queryAll<{ name: string }>('SELECT name FROM projects').map((p) => normalizeName(p.name))
+  )
+
+  const out: PendingProjectDiscovery[] = []
+  for (const r of rows) {
+    if (existing.has(r.name_norm)) continue
+    out.push({
+      nameNorm: r.name_norm,
+      name: r.name,
+      score: r.score,
+      sourceCount: r.source_count,
+      firstSeenAt: r.first_seen_at,
+      lastSeenAt: r.last_seen_at
+    })
+    if (out.length >= limit) break
+  }
+  return out
+}
+
+/** Typed failure reasons for {@link dismissDiscoveredProject}. */
+export class DismissDiscoveredError extends Error {
+  constructor(public readonly code: 'NOT_FOUND' | 'NOT_DISCOVERED', message: string) {
+    super(message)
+    this.name = 'DismissDiscoveredError'
+  }
+}
+
+/**
+ * Dismiss an auto-discovered project: verify provenance, record the durable
+ * tombstone, and delete the row — all in ONE transaction.
+ *
+ * Provenance is enforced HERE, in the database layer, not in the renderer: the
+ * row's origin (v42) must be exactly 'discovered'. 'manual' and NULL (legacy/
+ * unknown) are rejected fail-closed, so a stale UI, a bug, or a compromised
+ * renderer invoking the IPC channel directly can never cascade-delete a
+ * manually created project through this path. (Plain projects:delete remains
+ * the explicit, tombstone-free removal for any project.)
+ */
+export function dismissDiscoveredProject(id: string): void {
+  runInTransaction(() => {
+    const project = queryOne<Project>('SELECT * FROM projects WHERE id = ?', [id])
+    if (!project) {
+      throw new DismissDiscoveredError('NOT_FOUND', `Project with ID ${id} not found`)
+    }
+    if (project.origin !== 'discovered') {
+      throw new DismissDiscoveredError(
+        'NOT_DISCOVERED',
+        'Only auto-discovered projects can be dismissed. This project was created manually ' +
+          '(or predates provenance tracking) — delete it explicitly instead.'
+      )
+    }
+    const sourceMeeting = queryOne<{ meeting_id: string }>(
+      'SELECT mp.meeting_id FROM meeting_projects mp JOIN meetings m ON m.id = mp.meeting_id ' +
+        'WHERE mp.project_id = ? ORDER BY m.start_time DESC LIMIT 1',
+      [id]
+    )
+    addProjectDiscoveryRejection(project.name, sourceMeeting?.meeting_id ?? null)
+    run('DELETE FROM projects WHERE id = ?', [id])
+  })
 }
 
 export interface ProjectUpdateFields {
@@ -5642,18 +10543,39 @@ export function getMeetingsForProject(projectId: string): Meeting[] {
   )
 }
 
+/**
+ * R28-RES-1 sub-sweep (round-29) — GATED default meeting-scoped PROJECT membership
+ * read (the projects twin of {@link getContactsForMeeting}). meeting_projects rows
+ * are written by BOTH manual tagging (calendar/user-authored) AND
+ * applyTranscriptEntities (transcript-derived). A transcript-derived project tag from
+ * an excluded recording must NOT surface as a meeting's project on a non-owner
+ * surface. Gate each membership ROW through {@link filterEligibleMembershipRows};
+ * fail-closed. (No owner caller currently repoints away from this — the
+ * projects:getForMeeting IPC has no renderer consumers; gated as the fail-safe
+ * default per the round-29 sweep mandate. Add an owner accessor mirroring
+ * getContactsForMeetingOwner if an owner surface ever needs the unfiltered list.)
+ */
 export function getProjectsForMeeting(meetingId: string): Project[] {
-  return queryAll<Project>(
-    `SELECT p.* FROM projects p
+  const rows = queryAll<Project & { mp_source: string | null; mp_src_rec: string | null }>(
+    `SELECT p.*, mp.source AS mp_source, mp.source_recording_id AS mp_src_rec
+     FROM projects p
      JOIN meeting_projects mp ON p.id = mp.project_id
      WHERE mp.meeting_id = ?`,
     [meetingId]
   )
+  const membership = rows.map((r) => ({ id: r.id, source: r.mp_source, source_recording_id: r.mp_src_rec }))
+  const { eligible, failClosed } = filterEligibleMembershipRows(membership)
+  if (failClosed) return []
+  const eligibleIds = new Set(eligible.map((m) => m.id))
+  return rows
+    .filter((r) => eligibleIds.has(r.id))
+    .map(({ mp_source: _s, mp_src_rec: _r, ...p }) => p as Project)
 }
 
 export function tagMeetingToProject(meetingId: string, projectId: string): void {
+  // v44 provenance: a manual project tag is structural/user-authored ⇒ 'calendar'.
   run(
-    'INSERT OR IGNORE INTO meeting_projects (meeting_id, project_id) VALUES (?, ?)',
+    "INSERT OR IGNORE INTO meeting_projects (meeting_id, project_id, source) VALUES (?, ?, 'calendar')",
     [meetingId, projectId]
   )
 }
@@ -5763,12 +10685,29 @@ export function mergeProjects(keeperId: string, loserId: string): Project {
     const notEmpty = (v: string | null | undefined) => !!(v && v.trim())
     const description = notEmpty(keeper.description) ? keeper.description : loser.description ?? null
     const status = notEmpty(keeper.status) ? keeper.status : loser.status || 'active'
+    // Provenance dominance (v42): the merged row now contains BOTH projects'
+    // data, so it may only stay 'discovered' (dismissable) when both inputs were
+    // 'discovered'. 'manual' dominates ('manual' merged either way is guarded),
+    // and NULL (legacy/unknown) dominates 'discovered' — fail-closed: data of
+    // unproven origin must never become tombstone-deletable through a merge.
+    // Journaled in folded_fields, so unmerge restores the keeper's own origin.
+    const origin: Project['origin'] =
+      keeper.origin === 'manual' || loser.origin === 'manual'
+        ? 'manual'
+        : keeper.origin === 'discovered' && loser.origin === 'discovered'
+          ? 'discovered'
+          : null
     const foldedFields = diffFoldedFields(
-      { description: keeper.description, status: keeper.status },
-      { description, status }
+      { description: keeper.description, status: keeper.status, origin: keeper.origin },
+      { description, status, origin }
     )
 
-    runNoSave('UPDATE projects SET description = ?, status = ? WHERE id = ?', [description, status, keeperId])
+    runNoSave('UPDATE projects SET description = ?, status = ?, origin = ? WHERE id = ?', [
+      description,
+      status,
+      origin,
+      keeperId
+    ])
     runNoSave('DELETE FROM projects WHERE id = ?', [loserId])
 
     const manifest: ProjectMergeManifest = {
@@ -5778,7 +10717,7 @@ export function mergeProjects(keeperId: string, loserId: string): Project {
       loserAliases,
       keeperBefore: { meetingIds: keeperMeetingIds, knowledgeIds: keeperKnowledgeIds }
     }
-    writeMergeJournalNoSave('project', keeperId, loser, manifest, foldedFields)
+    writeMergeJournalNoSave('project', keeperId, loser.id, loser, manifest, foldedFields)
 
     return queryOne<Project>('SELECT * FROM projects WHERE id = ?', [keeperId])!
   })
@@ -5796,17 +10735,31 @@ export function unmergeProjects(journalId: string): UnmergeResult {
   return runInTransaction(() => {
     const row = loadOpenJournal(journalId, 'project')
     const keeperId = row.keeper_id
+
+    // Dependency-aware newest-first guard (v42): rejects this unmerge while any
+    // newer open project journal touches this journal's keeper OR loser — the
+    // same-keeper provenance-laundering case AND keeper-of-keeper chains
+    // (A->D then D->E), where D no longer exists and an early J1 undo would
+    // recreate A linkless while J2's snapshot of D still holds A's folded data.
+    assertNewestFirstUnmerge(row)
+
     const loser = JSON.parse(row.loser_snapshot) as Project
     const manifest = JSON.parse(row.repointed_manifest) as ProjectMergeManifest
+
+    // ADV58-1: refuse when the loser's source recording was hard-purged.
+    assertJournalNotPurgeInvalidated(manifest, loser)
 
     if (queryOne('SELECT 1 FROM projects WHERE id = ?', [loser.id])) {
       throw new Error(`Cannot unmerge: a project with id ${loser.id} already exists`)
     }
 
-    // 1. Recreate the loser project from the snapshot.
+    // 1. Recreate the loser project from the snapshot. ADV58-1: carry source/
+    //    source_recording_id so the restored project keeps its positive provenance;
+    //    origin preserved too — an unmerged discovered project stays dismissable,
+    //    a manual one stays guarded.
     runNoSave(
-      `INSERT INTO projects (id, name, description, status, folder_path, url, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO projects (id, name, description, status, folder_path, url, origin, created_at, source, source_recording_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         loser.id,
         loser.name,
@@ -5814,7 +10767,10 @@ export function unmergeProjects(journalId: string): UnmergeResult {
         loser.status ?? 'active',
         loser.folder_path ?? null,
         loser.url ?? null,
-        loser.created_at
+        loser.origin ?? null,
+        loser.created_at,
+        loser.source ?? null,
+        loser.source_recording_id ?? null
       ]
     )
 
@@ -5848,6 +10804,9 @@ export function unmergeProjects(journalId: string): UnmergeResult {
       meetingLinks++
     }
     // 3b. Re-insert dropped meeting_projects collisions for the loser.
+    //     v44: original per-row provenance is not captured in the merge manifest, so
+    //     a restored collision row stays NULL ⇒ ineligible (fail-closed) on non-owner
+    //     identity surfaces until re-analysis. Safe (no leak).
     for (const meetingId of manifest.meetingProjects.collided) {
       if (!queryOne('SELECT 1 FROM meetings WHERE id = ?', [meetingId])) {
         skipped++
@@ -5893,6 +10852,10 @@ export function unmergeProjects(journalId: string): UnmergeResult {
       ])
     }
     const fieldsRestored = restoreFoldedFields('projects', keeperId, row.folded_fields)
+
+    // ADV56-2 (round-58): reverse the graph mergeNodes fold EXACTLY (see unmergeContacts).
+    // No-op when the merge folded no project graph node.
+    reverseGraphFold(manifest.graph)
 
     // 5. Orphan report: keeper links not present before the merge (added since).
     const beforeMeetings = new Set(manifest.keeperBefore.meetingIds)
@@ -5952,7 +10915,18 @@ export function getMergeJournal(kind: MergeKind, keeperId: string, includeUndone
      ORDER BY created_at DESC`,
     [kind, keeperId]
   )
-  return rows.map((r) => {
+  return rows
+    // ADV58-1: never surface a purge-invalidated merge as undoable — its loser entity's
+    // source recording was permanently deleted, so unmerge would refuse anyway. Hide it
+    // from the undo list (defense in depth alongside the unmerge refusal).
+    .filter((r) => {
+      try {
+        return !(JSON.parse(r.repointed_manifest) as { invalidatedByPurge?: unknown }).invalidatedByPurge
+      } catch {
+        return true
+      }
+    })
+    .map((r) => {
     let loserName = 'Unknown'
     let loserId = ''
     let linkCount = 0
@@ -6136,11 +11110,28 @@ export interface ActionItem {
 }
 
 /**
+ * ADV38-1 (round-40) — read a single action item row (incl. its
+ * knowledge_capture_id) so a caller can gate the item through
+ * {@link filterEligibleCaptureIds} BEFORE reading/updating/returning its content.
+ * Returns undefined when the row does not exist (or its capture cascade-deleted it).
+ */
+export function getActionItemById(actionItemId: string): ActionItem | undefined {
+  return queryOne<ActionItem>('SELECT * FROM action_items WHERE id = ?', [actionItemId])
+}
+
+/**
  * Bind (or clear) the canonical contact for an action item's assignee (v26).
  * The raw `assignee` name string is left untouched — this only sets the id link.
  * Pass null to clear the binding. Returns the updated row.
  *
  * @throws if the action item does not exist.
+ *
+ * SECURITY (ADV38-1, round-40): this function performs NO eligibility gating — the
+ * caller (actionItems:setAssignee) MUST resolve the item's source-capture
+ * eligibility ({@link filterEligibleCaptureIds}) and any contact's visibility
+ * ({@link filterVisibleEntityIds}) BEFORE calling this, in the SAME synchronous
+ * transaction, so a suppressed derivative's content is never read/updated/returned
+ * and a suppressed contact is never persisted as an assignee.
  */
 export function setActionItemAssignee(actionItemId: string, contactId: string | null): ActionItem {
   const item = queryOne<ActionItem>('SELECT * FROM action_items WHERE id = ?', [actionItemId])
@@ -6153,6 +11144,100 @@ export function setActionItemAssignee(actionItemId: string, contactId: string | 
   return queryOne<ActionItem>('SELECT * FROM action_items WHERE id = ?', [actionItemId])!
 }
 
+// ---------------------------------------------------------------------------
+// Action-item / decision content editing (2026-07-22, reader event-list detail)
+//
+// Like setActionItemAssignee, these perform NO eligibility gating — the IPC
+// handler MUST gate the row's source capture (filterEligibleCaptureIds) in the
+// SAME synchronous transaction before calling them.
+// ---------------------------------------------------------------------------
+
+export interface ActionItemPatch {
+  content?: string
+  status?: string
+  dueDate?: string | null
+  priority?: string
+}
+
+/** Partially update an action item's user-editable fields. Returns the updated row.
+ *  @throws if the row does not exist or the patch is empty. */
+export function updateActionItem(actionItemId: string, patch: ActionItemPatch): ActionItem {
+  const item = queryOne<ActionItem>('SELECT * FROM action_items WHERE id = ?', [actionItemId])
+  if (!item) throw new Error(`Action item ${actionItemId} not found`)
+  const sets: string[] = []
+  const params: unknown[] = []
+  if (patch.content !== undefined) { sets.push('content = ?'); params.push(patch.content) }
+  if (patch.status !== undefined) { sets.push('status = ?'); params.push(patch.status) }
+  if (patch.dueDate !== undefined) { sets.push('due_date = ?'); params.push(patch.dueDate) }
+  if (patch.priority !== undefined) { sets.push('priority = ?'); params.push(patch.priority) }
+  if (sets.length === 0) throw new Error('updateActionItem: empty patch')
+  sets.push('updated_at = ?')
+  params.push(new Date().toISOString(), actionItemId)
+  run(`UPDATE action_items SET ${sets.join(', ')} WHERE id = ?`, params)
+  return queryOne<ActionItem>('SELECT * FROM action_items WHERE id = ?', [actionItemId])!
+}
+
+export interface DecisionRow {
+  id: string
+  knowledge_capture_id: string
+  content: string
+  context: string | null
+  participants: string | null
+  extracted_from: string | null
+  confidence: number | null
+  decided_at: string | null
+}
+
+export function getDecisionById(decisionId: string): DecisionRow | undefined {
+  return queryOne<DecisionRow>('SELECT * FROM decisions WHERE id = ?', [decisionId])
+}
+
+export interface DecisionPatch {
+  content?: string
+  context?: string | null
+}
+
+/** Partially update a decision's user-editable fields. Returns the updated row.
+ *  @throws if the row does not exist or the patch is empty. */
+export function updateDecision(decisionId: string, patch: DecisionPatch): DecisionRow {
+  const row = queryOne<DecisionRow>('SELECT * FROM decisions WHERE id = ?', [decisionId])
+  if (!row) throw new Error(`Decision ${decisionId} not found`)
+  const sets: string[] = []
+  const params: unknown[] = []
+  if (patch.content !== undefined) { sets.push('content = ?'); params.push(patch.content) }
+  if (patch.context !== undefined) { sets.push('context = ?'); params.push(patch.context) }
+  if (sets.length === 0) throw new Error('updateDecision: empty patch')
+  sets.push('updated_at = ?')
+  params.push(new Date().toISOString(), decisionId)
+  run(`UPDATE decisions SET ${sets.join(', ')} WHERE id = ?`, params)
+  return queryOne<DecisionRow>('SELECT * FROM decisions WHERE id = ?', [decisionId])!
+}
+
+/**
+ * All knowledge-capture ids that belong to a recording: captures whose
+ * source_recording_id matches, plus a migrated-to capture. Mirrors the
+ * resolution timeline-analysis uses so the reader's event list and the
+ * timeline markers join on the same rows. Canonicalize the id first
+ * (getRecordingById ?? resolveRecordingId) when the caller may hold an alias.
+ */
+export function getActionItemsForCaptureIds(captureIds: string[]): ActionItem[] {
+  if (captureIds.length === 0) return []
+  const placeholders = captureIds.map(() => '?').join(', ')
+  return queryAll<ActionItem>(
+    `SELECT * FROM action_items WHERE knowledge_capture_id IN (${placeholders}) ORDER BY created_at ASC`,
+    captureIds
+  )
+}
+
+export function getDecisionsForCaptureIds(captureIds: string[]): DecisionRow[] {
+  if (captureIds.length === 0) return []
+  const placeholders = captureIds.map(() => '?').join(', ')
+  return queryAll<DecisionRow>(
+    `SELECT * FROM decisions WHERE knowledge_capture_id IN (${placeholders}) ORDER BY created_at ASC`,
+    captureIds
+  )
+}
+
 /**
  * Resolve a contact by case-insensitive exact name (v26). Backs graph:resolvePerson
  * so the renderer's name-based resolution has a direct path instead of scanning
@@ -6160,6 +11245,20 @@ export function setActionItemAssignee(actionItemId: string, contactId: string | 
  */
 export function getContactByName(name: string): Contact | undefined {
   return queryOne<Contact>('SELECT * FROM contacts WHERE LOWER(name) = LOWER(?) LIMIT 1', [name])
+}
+
+/**
+ * ADV36-3 (round-38) — ALL exact-name (case-insensitive) contact candidates, not
+ * just the first. contacts:create must inspect EVERY same-name row (both a
+ * suppressed transcript-derived twin AND a visible one can coexist) so it can pick
+ * the VISIBLE duplicate rather than a suppressed row that would hide a genuine
+ * duplicate and mint another. Ordered by created_at for deterministic selection.
+ */
+export function getContactsByName(name: string): Contact[] {
+  return queryAll<Contact>(
+    'SELECT * FROM contacts WHERE LOWER(name) = LOWER(?) ORDER BY created_at ASC, id ASC',
+    [name]
+  )
 }
 
 // =============================================================================
@@ -6251,6 +11350,14 @@ export interface IdentitySuggestion {
   evidence: string | null
   status: 'pending' | 'accepted' | 'rejected'
   created_at: string
+  /**
+   * v44/round-27 — JSON array of authoritative SOURCE recording id(s) for a
+   * TRANSCRIPT-created suggestion (applyTranscriptEntities). NULL for
+   * corpus/graph-derived (discovery) suggestions and legacy rows. The surface +
+   * accept revalidation gates a transcript suggestion (which has NO graph evidence)
+   * through the recording allowlist using this (ADV26-1).
+   */
+  source_recording_ids?: string | null
 }
 
 /**
@@ -6258,18 +11365,40 @@ export interface IdentitySuggestion {
  * UNIQUE(kind, candidate_name, target_id) so a settled pairing is never re-queued
  * — a prior 'rejected'/'accepted' row for the same pairing wins. Uses run() so it
  * composes with applyTranscriptEntities' existing run()-based transaction.
+ *
+ * v44/round-27: `sourceRecordingIds` persists the recording id(s) whose transcript
+ * produced this suggestion (applyTranscriptEntities). Pass it for transcript
+ * suggestions so revalidation can gate them through the recording allowlist even
+ * though they carry no graph evidence; OMIT it for discovery (graph-derived)
+ * suggestions, which keep NULL provenance and are revalidated via the graph path.
  */
 export function insertIdentitySuggestion(
   kind: 'person' | 'project',
   candidateName: string,
   targetId: string,
   confidence: number,
-  evidence: Record<string, unknown>
+  evidence: Record<string, unknown>,
+  sourceRecordingIds?: string[]
 ): void {
+  // undefined ⇒ NULL (discovery / no provenance); an array (even empty) ⇒ a
+  // TRANSCRIPT suggestion whose provenance is KNOWN (empty = no eligible source).
+  const srcJson =
+    sourceRecordingIds !== undefined
+      ? JSON.stringify(sourceRecordingIds.filter((id): id is string => !!id))
+      : null
   run(
-    `INSERT OR IGNORE INTO identity_suggestions (id, kind, candidate_name, target_id, confidence, evidence, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
-    [randomUUID(), kind, candidateName, targetId, confidence, JSON.stringify(evidence ?? {}), new Date().toISOString()]
+    `INSERT OR IGNORE INTO identity_suggestions (id, kind, candidate_name, target_id, confidence, evidence, status, created_at, source_recording_ids)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+    [
+      randomUUID(),
+      kind,
+      candidateName,
+      targetId,
+      confidence,
+      JSON.stringify(evidence ?? {}),
+      new Date().toISOString(),
+      srcJson
+    ]
   )
 }
 
@@ -6284,6 +11413,11 @@ export function getIdentitySuggestions(status?: 'pending' | 'accepted' | 'reject
   return queryAll<IdentitySuggestion>('SELECT * FROM identity_suggestions ORDER BY confidence DESC, created_at DESC')
 }
 
+/** Fetch a single identity suggestion by id (used by the accept-time TOCTOU guard). */
+export function getIdentitySuggestionById(id: string): IdentitySuggestion | undefined {
+  return queryOne<IdentitySuggestion>('SELECT * FROM identity_suggestions WHERE id = ?', [id])
+}
+
 /** Outcome of accepting a suggestion — the row plus undo/cascade metadata. */
 export interface AcceptSuggestionResult extends IdentitySuggestion {
   /** merge_journal id when the accept merged two existing entities (undo handle); null for alias-only accepts. */
@@ -6293,7 +11427,7 @@ export interface AcceptSuggestionResult extends IdentitySuggestion {
 }
 
 /** Every merge_journal id for a keeper — snapshot before a merge to spot the row it writes. */
-function mergeJournalIdsFor(kind: MergeKind, keeperId: string): Set<string> {
+export function mergeJournalIdsFor(kind: MergeKind, keeperId: string): Set<string> {
   return new Set(
     queryAll<{ id: string }>('SELECT id FROM merge_journal WHERE kind = ? AND keeper_id = ?', [kind, keeperId]).map(
       (r) => r.id
@@ -6377,6 +11511,31 @@ export function supersedeOrphanedSuggestions(kind?: 'person' | 'project'): numbe
 }
 
 /**
+ * Shared tail of an accepted resolvable-loser merge (ADV56-1 / round-58): after the
+ * relational (or graph-aware) merge has run inside the caller's OPEN transaction, this
+ * computes the merge_journal id the merge just wrote (the one not in `journalIdsBefore`),
+ * supersedes the sibling suggestions the merge invalidated, and flips this suggestion to
+ * 'accepted'. Runs entirely through no-save writes so it JOINS the caller's transaction —
+ * both database.ts's acceptIdentitySuggestion and the graph-aware wrapper call it, so the
+ * accept is atomic in either path. Caller must capture `journalIdsBefore` BEFORE the merge.
+ */
+export function finalizeAcceptedMerge(
+  s: IdentitySuggestion,
+  loserId: string,
+  jkind: MergeKind,
+  journalIdsBefore: Set<string>
+): { mergeJournalId: string | null; supersededCount: number } {
+  const after = queryAll<{ id: string }>(
+    'SELECT id FROM merge_journal WHERE kind = ? AND keeper_id = ? ORDER BY created_at DESC',
+    [jkind, s.target_id]
+  )
+  const mergeJournalId = after.find((r) => !journalIdsBefore.has(r.id))?.id ?? null
+  const supersededCount = supersedeSuggestionsForMergedLoser(s.kind, loserId, s.id)
+  runNoSave("UPDATE identity_suggestions SET status = 'accepted' WHERE id = ?", [s.id])
+  return { mergeJournalId, supersededCount }
+}
+
+/**
  * Accept an identity suggestion. Two shapes:
  *
  *  - **Discovery** (evidence carries a `loserId` for a real, still-present entity):
@@ -6414,21 +11573,22 @@ export function acceptIdentitySuggestion(id: string): AcceptSuggestionResult {
     !!queryOne<{ id: string }>(`SELECT id FROM ${table} WHERE id = ?`, [loserId])
 
   if (loserExists) {
-    const before = mergeJournalIdsFor(jkind, s.target_id)
-    if (s.kind === 'person') mergeContacts(s.target_id, loserId!)
-    else mergeProjects(s.target_id, loserId!)
-    const after = queryAll<{ id: string }>(
-      'SELECT id FROM merge_journal WHERE kind = ? AND keeper_id = ? ORDER BY created_at DESC',
-      [jkind, s.target_id]
-    )
-    const mergeJournalId = after.find((r) => !before.has(r.id))?.id ?? null
-
-    const { row, supersededCount } = runInTransaction(() => {
-      const count = supersedeSuggestionsForMergedLoser(s.kind, loserId!, id)
-      runNoSave("UPDATE identity_suggestions SET status = 'accepted' WHERE id = ?", [id])
-      return { row: queryOne<IdentitySuggestion>('SELECT * FROM identity_suggestions WHERE id = ?', [id])!, supersededCount: count }
+    // ADV56-1 (round-58): ATOMIC. Previously the merge COMMITTED in its own
+    // transaction and the supersede + status='accepted' write ran in a SEPARATE
+    // transaction afterward — if that second tx failed, the identity was merged but
+    // the suggestion stayed pending, so a retry took a DIFFERENT path. Wrap the merge,
+    // the journal-id capture, the sibling-supersede, and the status write in ONE
+    // re-entrant runInTransaction so the whole accept is all-or-nothing. (This is the
+    // relational primitive — graph-neutral; the graph fold is added by the graph-aware
+    // wrapper acceptIdentitySuggestionWithGraph, the sole production entry point.)
+    return runInTransaction(() => {
+      const before = mergeJournalIdsFor(jkind, s.target_id)
+      if (s.kind === 'person') mergeContacts(s.target_id, loserId!)
+      else mergeProjects(s.target_id, loserId!)
+      const { mergeJournalId, supersededCount } = finalizeAcceptedMerge(s, loserId!, jkind, before)
+      const row = queryOne<IdentitySuggestion>('SELECT * FROM identity_suggestions WHERE id = ?', [id])!
+      return { ...row, mergeJournalId, supersededCount }
     })
-    return { ...row, mergeJournalId, supersededCount }
   }
 
   const row = runInTransaction(() => {
@@ -6436,7 +11596,9 @@ export function acceptIdentitySuggestion(id: string): AcceptSuggestionResult {
     if (s.kind === 'person') {
       upsertContactAliasNoSave(s.target_id, s.candidate_name, 'manual', 1.0)
       if (meetingId) {
-        runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)', [
+        // v44 provenance: the user ACCEPTED this suggestion ⇒ user-confirmed
+        // structural link ⇒ 'calendar' (always eligible on non-owner surfaces).
+        runNoSave("INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES (?, ?, ?, 'calendar')", [
           meetingId,
           s.target_id,
           'attendee'
@@ -6446,7 +11608,7 @@ export function acceptIdentitySuggestion(id: string): AcceptSuggestionResult {
     } else {
       upsertProjectAliasNoSave(s.target_id, s.candidate_name, 'manual', 1.0)
       if (meetingId) {
-        runNoSave('INSERT OR IGNORE INTO meeting_projects (meeting_id, project_id) VALUES (?, ?)', [
+        runNoSave("INSERT OR IGNORE INTO meeting_projects (meeting_id, project_id, source) VALUES (?, ?, 'calendar')", [
           meetingId,
           s.target_id
         ])
@@ -6553,7 +11715,7 @@ function buildBucketResolution(
   const candIds = candidates.map((c) => c.id)
   const nameKey = normalizeName(contact.name)
 
-  const recRows =
+  const rawRecRows =
     candIds.length === 0
       ? []
       : queryAll<{ recordingId: string; filename: string | null; date: string | null; meetingId: string | null; subject: string | null }>(
@@ -6567,6 +11729,18 @@ function buildBucketResolution(
             ORDER BY r.date_recorded DESC`,
           [contact.id]
         )
+
+  // ADV27-4 (round-28) — the bucket-resolution recordings feed identity display
+  // (getAmbiguousBuckets / getBucketResolution) AND the startup autoSplit WRITER
+  // (creates mention resolutions + membership links). The SQL above filters only
+  // personal + deleted_at, NOT the F16 value / capture-exclusion / hard-purge
+  // allowlist. Route every candidate recording id through the positive
+  // {@link getEligibleRecordingIds} allowlist and DROP ineligible ones so a
+  // value-excluded / capture-excluded / hard-purged recording never appears in a
+  // bucket or gets auto-split into durable identity state. Fail-closed: an
+  // eligibility lookup failure drops ALL bucket recordings.
+  const { eligible: eligibleRecs } = getEligibleRecordingIds(rawRecRows.map((r) => r.recordingId))
+  const recRows = rawRecRows.filter((r) => eligibleRecs.has(r.recordingId))
 
   const recIds = recRows.map((r) => r.recordingId)
   const meetingIds = [...new Set(recRows.map((r) => r.meetingId).filter((x): x is string => !!x))]
@@ -6795,7 +11969,8 @@ export function resolveMention(
         recordingId
       ])
       if (rec?.meeting_id) {
-        runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)', [
+        // v44 provenance: a user "resolve mention" decision is structural ⇒ 'calendar'.
+        runNoSave("INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES (?, ?, ?, 'calendar')", [
           rec.meeting_id,
           contactId,
           'attendee'
@@ -6811,15 +11986,23 @@ export function resolveMention(
  * Eliminates N+1: project -> meeting_projects -> recordings -> transcripts
  * Returns the raw topics JSON strings (caller parses them).
  */
-export function getTopicsForProjectMeetings(projectId: string): string[] {
-  const rows = queryAll<{ topics: string }>(
-    `SELECT t.topics FROM transcripts t
+/**
+ * ADV15 (round-16) — return topic rows WITH their source recording id so the
+ * projects:getById handler can route each through the shared
+ * filterEligibleRecordingIds boundary and derive the topic set only from
+ * ELIGIBLE recordings. Previously this JOINed transcripts→recordings→projects
+ * with NO personal/soft-deleted/value predicate (the recurring-topics trap on
+ * Projects), leaking excluded meetings' topics. Gating is done in the handler so
+ * the fail-closed policy lives at the one shared boundary.
+ */
+export function getTopicsForProjectMeetings(projectId: string): Array<{ recording_id: string; topics: string }> {
+  return queryAll<{ recording_id: string; topics: string }>(
+    `SELECT t.recording_id, t.topics FROM transcripts t
      JOIN recordings r ON t.recording_id = r.id
      JOIN meeting_projects mp ON r.meeting_id = mp.meeting_id
      WHERE mp.project_id = ? AND t.topics IS NOT NULL`,
     [projectId]
   )
-  return rows.map(r => r.topics)
 }
 
 // =============================================================================
@@ -6855,15 +12038,146 @@ export function findCandidateMeetingsForRecording(recordingId: string): Meeting[
   const windowStart = new Date(recStart.getTime() - bufferMs).toISOString()
   const windowEnd = new Date(recEnd.getTime() + bufferMs).toISOString()
 
-  // Find meetings that overlap with this time window
+  // Only the last fully committed ICS snapshot is eligible. Rows absent from
+  // the current feed remain available as history/manual evidence but cannot
+  // win a fresh automatic attribution.
+  const activeToken = getActiveCalendarSyncToken()
+  const tokenClause = activeToken ? 'AND calendar_sync_token = ?' : ''
+  const params = [windowEnd, windowStart, windowStart, windowEnd, windowStart, windowEnd]
+  if (activeToken) params.push(activeToken)
+
   return queryAll<Meeting>(
     `SELECT * FROM meetings
-     WHERE (start_time <= ? AND end_time >= ?)
-        OR (start_time >= ? AND start_time <= ?)
-        OR (end_time >= ? AND end_time <= ?)
+     WHERE ((start_time <= ? AND end_time >= ?)
+         OR (start_time >= ? AND start_time <= ?)
+         OR (end_time >= ? AND end_time <= ?))
+       ${tokenClause}
      ORDER BY start_time`,
-    [windowEnd, windowStart, windowStart, windowEnd, windowStart, windowEnd]
-  )
+    params
+  ).filter((meeting) => !isCancelledMeetingSubject(meeting.subject))
+}
+
+export interface ScheduleEnrichmentResult {
+  recordingId: string
+  candidateCount: number
+  selectedMeetingId: string | null
+  hasConflict: boolean
+  runId: string
+}
+
+/**
+ * Persist deterministic calendar candidates as soon as device metadata exists.
+ * This is deliberately LLM-free and safe to run before the audio is downloaded.
+ * Existing user-confirmed decisions are immutable; refreshed schedule data may
+ * update candidate scores but never silently replace the user's assignment.
+ */
+export function enrichRecordingScheduleMetadata(recordingId: string): ScheduleEnrichmentResult {
+  const recording = getRecordingById(recordingId)
+  if (!recording) throw new Error(`Recording ${recordingId} not found`)
+
+  const processingRun = createProcessingRun({
+    recordingId,
+    stage: 'schedule-match',
+    provider: 'hidock-next',
+    tool: 'calendar-overlap-scorer',
+    version: '1',
+    execution: 'local'
+  })
+
+  try {
+    const meetings = findCandidateMeetingsForRecording(recordingId)
+    const scored = scoreMeetingCandidates(
+      {
+        dateRecorded: recording.date_recorded,
+        durationSeconds: recording.duration_seconds,
+        contentText: null
+      },
+      meetings.map((meeting) => ({
+        meetingId: meeting.id,
+        subject: meeting.subject,
+        startTime: meeting.start_time,
+        endTime: meeting.end_time,
+        isAllDay: !!meeting.is_all_day
+      }))
+    )
+
+    const confirmed = queryOne<{ meeting_id: string }>(
+      `SELECT meeting_id FROM recording_meeting_candidates
+       WHERE recording_id = ? AND is_user_confirmed = 1 LIMIT 1`,
+      [recordingId]
+    )
+    const explicitStandalone = recording.correlation_method === 'user_preassign_standalone'
+      || recording.correlation_method === 'user_standalone'
+    const top = scored[0]
+    const unambiguous = !!top && top.isBestMatch && top.hasOverlap && top.confidenceScore >= 0.75
+    const selectedMeetingId = confirmed?.meeting_id
+      ?? (!explicitStandalone && unambiguous ? top.meetingId : null)
+
+    runInTransaction(() => {
+      // Stale auto candidates may disappear after a calendar refresh. Preserve
+      // user-confirmed evidence even when the source event is temporarily absent.
+      runNoSave(
+        `DELETE FROM recording_meeting_candidates
+         WHERE recording_id = ? AND is_user_confirmed = 0`,
+        [recordingId]
+      )
+      for (const candidate of scored) {
+        const existing = queryOne<{ id: string; is_user_confirmed: number }>(
+          `SELECT id, is_user_confirmed FROM recording_meeting_candidates
+           WHERE recording_id = ? AND meeting_id = ?`,
+          [recordingId, candidate.meetingId]
+        )
+        if (existing?.is_user_confirmed) continue
+        runNoSave(
+          `INSERT INTO recording_meeting_candidates
+            (id, recording_id, meeting_id, confidence_score, match_reason, is_selected, is_ai_selected,
+             is_user_confirmed)
+           VALUES (?, ?, ?, ?, ?, ?, 0, 0)`,
+          [
+            existing?.id ?? randomUUID(),
+            recordingId,
+            candidate.meetingId,
+            candidate.confidenceScore,
+            candidate.matchReason,
+            selectedMeetingId === candidate.meetingId ? 1 : 0
+          ]
+        )
+      }
+      if (!confirmed && selectedMeetingId) {
+        runNoSave(
+          `UPDATE recordings SET meeting_id = ?, correlation_confidence = ?, correlation_method = 'schedule_candidate'
+           WHERE id = ?`,
+          [selectedMeetingId, top.confidenceScore, recordingId]
+        )
+        runNoSave(
+          `UPDATE knowledge_captures SET meeting_id = ?, correlation_confidence = ?,
+             correlation_method = 'schedule_candidate', updated_at = CURRENT_TIMESTAMP
+           WHERE source_recording_id = ?`,
+          [selectedMeetingId, top.confidenceScore, recordingId]
+        )
+      }
+    })
+
+    const credibleOverlaps = scored.filter((candidate) => candidate.hasOverlap && candidate.confidenceScore >= 0.5)
+    const result = {
+      recordingId,
+      candidateCount: scored.length,
+      selectedMeetingId,
+      hasConflict: credibleOverlaps.length > 1,
+      runId: processingRun.id
+    }
+    completeProcessingRun(processingRun.id, {
+      outputRefs: {
+        candidateMeetingIds: scored.map((candidate) => candidate.meetingId),
+        selectedMeetingId,
+        hasConflict: result.hasConflict
+      }
+    })
+    return result
+  } catch (error) {
+    failProcessingRun(processingRun.id, error instanceof Error ? error.message : String(error))
+    throw error
+  }
 }
 
 /**
@@ -6876,18 +12190,34 @@ export function addRecordingMeetingCandidate(
   matchReason: string,
   isAiSelected: boolean = false
 ): string {
-  const id = crypto.randomUUID()
-  run(
-    `INSERT OR REPLACE INTO recording_meeting_candidates
-      (id, recording_id, meeting_id, confidence_score, match_reason, is_selected, is_ai_selected)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [id, recordingId, meetingId, confidenceScore, matchReason, isAiSelected ? 1 : 0, isAiSelected ? 1 : 0]
+  const existing = queryOne<{ id: string; is_user_confirmed: number }>(
+    `SELECT id, is_user_confirmed FROM recording_meeting_candidates
+     WHERE recording_id = ? AND meeting_id = ?`,
+    [recordingId, meetingId]
   )
+  // User confirmation is stronger evidence than any later model run.
+  if (existing?.is_user_confirmed) return existing.id
 
-  // If AI selected, also update the recording's meeting_id
-  if (isAiSelected) {
-    linkRecordingToMeeting(recordingId, meetingId, confidenceScore, 'ai_transcript_match')
+  const id = existing?.id ?? randomUUID()
+  if (existing) {
+    run(
+      `UPDATE recording_meeting_candidates SET confidence_score = ?, match_reason = ?,
+         is_selected = ?, is_ai_selected = ? WHERE id = ?`,
+      [confidenceScore, matchReason, isAiSelected ? 1 : 0, isAiSelected ? 1 : 0, id]
+    )
+  } else {
+    run(
+      `INSERT INTO recording_meeting_candidates
+        (id, recording_id, meeting_id, confidence_score, match_reason, is_selected, is_ai_selected)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [id, recordingId, meetingId, confidenceScore, matchReason, isAiSelected ? 1 : 0, isAiSelected ? 1 : 0]
+    )
   }
+
+  // Candidate persistence and recording assignment are deliberately separate.
+  // The transcription service owns the conservative auto-link gate (temporal
+  // overlap + confidence + winner margin + content evidence). Linking here used
+  // to bypass that gate as soon as Gemini selected any buffered near-time event.
 
   return id
 }
@@ -7048,30 +12378,49 @@ export function getMeetingsNearDate(date: string): Meeting[] {
 }
 
 export function selectMeetingForRecordingByUser(recordingId: string, meetingId: string | null): void {
-  const db = getDatabase()
   if (!recordingId || typeof recordingId !== 'string') throw new Error('Invalid recording ID')
+  if (!getRecordingById(recordingId)) throw new Error(`Recording ${recordingId} no longer exists`)
 
-  try {
-    db.run('BEGIN TRANSACTION')
+  runInTransaction(() => {
     if (meetingId !== null && !getMeetingById(meetingId)) {
       throw new Error(`Meeting ${meetingId} no longer exists`)
     }
-    run('UPDATE recording_meeting_candidates SET is_selected = 0 WHERE recording_id = ?', [recordingId])
+    // Exactly one user decision is authoritative. Leaving an older row marked
+    // confirmed made schedule refreshes select whichever LIMIT 1 returned.
+    runNoSave(
+      `UPDATE recording_meeting_candidates
+       SET is_selected = 0, is_user_confirmed = 0
+       WHERE recording_id = ?`,
+      [recordingId]
+    )
 
     if (meetingId === null) {
-      run(`UPDATE recordings SET meeting_id = NULL, correlation_confidence = NULL,
-           correlation_method = 'user_standalone' WHERE id = ?`, [recordingId])
+      unlinkRecordingFromMeeting(recordingId)
     } else {
-      run(`UPDATE recording_meeting_candidates SET is_selected = 1, is_user_confirmed = 1
-           WHERE recording_id = ? AND meeting_id = ?`, [recordingId, meetingId])
+      const existing = queryOne<{ id: string }>(
+        `SELECT id FROM recording_meeting_candidates WHERE recording_id = ? AND meeting_id = ?`,
+        [recordingId, meetingId]
+      )
+      if (existing) {
+        runNoSave(
+          `UPDATE recording_meeting_candidates
+           SET confidence_score = 1, match_reason = 'Selected by user',
+               is_selected = 1, is_ai_selected = 0, is_user_confirmed = 1
+           WHERE id = ?`,
+          [existing.id]
+        )
+      } else {
+        runNoSave(
+          `INSERT INTO recording_meeting_candidates
+            (id, recording_id, meeting_id, confidence_score, match_reason,
+             is_selected, is_ai_selected, is_user_confirmed)
+           VALUES (?, ?, ?, 1, 'Selected by user', 1, 0, 1)`,
+          [randomUUID(), recordingId, meetingId]
+        )
+      }
       linkRecordingToMeeting(recordingId, meetingId, 1.0, 'user_override')
     }
-    db.run('COMMIT')
-    saveDatabase()
-  } catch (error) {
-    db.run('ROLLBACK')
-    throw error
-  }
+  })
 }
 
 export function resetStuckTranscriptions(): { recordingsReset: number; queueItemsReset: number } {

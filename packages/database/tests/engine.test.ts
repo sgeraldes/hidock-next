@@ -297,6 +297,61 @@ describe('DatabaseEngine', () => {
     engine.closeDatabase()
   })
 
+  it('re-initialize closes the previous handle instead of stranding it', async () => {
+    const first = tempDbPath('reinit-a')
+    const second = tempDbPath('reinit-b')
+    paths.push(first, second)
+    const created: InstanceType<typeof Database>[] = []
+    class TrackingDatabase extends Database {
+      constructor(...args: ConstructorParameters<typeof Database>) {
+        super(...args)
+        created.push(this)
+      }
+    }
+    let currentPath = first
+    const engine = new DatabaseEngine({
+      ...makeEngineConfig({ path: first }),
+      betterSqlite3: TrackingDatabase,
+      dbPathProvider: () => currentPath,
+    })
+
+    await engine.initialize()
+    expect(created).toHaveLength(1)
+    expect(created[0].open).toBe(true)
+
+    currentPath = second
+    await engine.initialize()
+    expect(created).toHaveLength(2)
+    // The first native handle must be closed — not stranded open until process
+    // exit (better-sqlite3 handles are never GC-closed).
+    expect(created[0].open).toBe(false)
+    // Windows refuses to delete a file somebody still holds open — the
+    // stranded-handle symptom that leaked temp DBs from tests. Closed ⇒ deletable.
+    expect(() => rmSync(first, { force: true })).not.toThrow()
+
+    // The engine stays fully usable on the new connection.
+    engine.run('INSERT INTO items (id, name) VALUES (?, ?)', ['a', 'Alpha'])
+    expect(engine.queryAll('SELECT * FROM items')).toHaveLength(1)
+    engine.closeDatabase()
+    expect(created[1].open).toBe(false)
+  })
+
+  it('re-initialize resets per-boot migration state (no repeat VACUUM when nothing migrated)', async () => {
+    const path = tempDbPath('reinit-vacuum')
+    paths.push(path)
+    const engine = new DatabaseEngine(makeEngineConfig({ path, schemaVersion: 2, migrations: { 2: () => {} } }))
+
+    await engine.initialize() // applies v2 — this boot ends in VACUUM, not a checkpoint
+    expect(engine.getPhysicalSaveCount()).toBe(0)
+
+    await engine.initialize() // already at v2 — nothing applied THIS boot
+    // A boot that applied no migration ends in a WAL checkpoint; a stale
+    // appliedMigration=true carried over from the first boot would VACUUM again
+    // (and skip the checkpoint) on every subsequent re-initialize.
+    expect(engine.getPhysicalSaveCount()).toBe(1)
+    engine.closeDatabase()
+  })
+
   it('calls the repairPhase callback during boot', async () => {
     let repaired = false
     const engine = makeEngine('repair', {

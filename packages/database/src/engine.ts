@@ -23,8 +23,9 @@
  *   - The file stays a standard SQLite database (better-sqlite3 opens the old
  *     sql.js files directly — same on-disk format), so migration is a one-time
  *     `PRAGMA journal_mode=WAL` (+ optional VACUUM after a size-reducing
- *     migration). A timestamped on-boot backup is taken before the first WAL
- *     open via {@link DatabaseEngineConfig.backupOnBoot}.
+ *     migration). A timestamped SQLite online backup is taken before pending
+ *     migrations, or deferred until post-paint on an ordinary schema-current
+ *     boot via {@link DatabaseEngineConfig.backupOnBoot}.
  *
  * ── Source compatibility ─────────────────────────────────────────────────────
  * {@link DatabaseEngine.getDatabase} returns a sql.js-API-compatible facade over
@@ -42,7 +43,7 @@
  *   4. Full Schema       — re-run all statements to apply indexes/constraints
  */
 
-import { existsSync, copyFileSync, readdirSync, rmSync, statSync } from 'fs'
+import { existsSync, readdirSync, renameSync, rmSync, statSync } from 'fs'
 import { dirname, basename, join } from 'path'
 
 /* -------------------------------------------------------------------------- */
@@ -68,6 +69,7 @@ export interface BetterSqlite3Database {
   exec(sql: string): BetterSqlite3Database
   pragma(source: string, options?: { simple?: boolean }): unknown
   serialize(): Buffer
+  backup(destinationFile: string): Promise<{ totalPages: number; remainingPages: number }>
   close(): void
   readonly open: boolean
   readonly inTransaction: boolean
@@ -421,12 +423,20 @@ export interface DatabaseEngineConfig {
    */
   protectedTables?: string[]
   /**
-   * When set, initialize() copies the on-disk database to
-   * `<dbPath>.bak-<YYYY-MM-DD>` before the first WAL open / any migration runs,
-   * keeping the newest `keep` daily backups. A cheap file copy — the safety net
-   * for a corrupting migration. Omit to disable.
+   * When set, creates a SQLite online backup at `<dbPath>.bak-<YYYY-MM-DD>` and
+   * keeps the newest `keep` complete daily backups. Pending migrations await a
+   * successful snapshot before schema mutation; routine snapshots may be
+   * deferred by {@link deferBackupOnBoot}. Omit to disable.
    */
   backupOnBoot?: { keep: number }
+  /**
+   * When true, a routine daily backup runs asynchronously after schema setup so
+   * a multi-gigabyte copy does not hold the application splash for minutes.
+   * A boot with pending migrations still awaits the backup before any schema
+   * mutation. Defaults to false for callers that require initialize() to imply
+   * backup completion.
+   */
+  deferBackupOnBoot?: boolean
   /**
    * When true (default), the engine runs VACUUM once after any boot that applied
    * a new migration — reclaiming free pages left by a size-reducing migration
@@ -455,6 +465,7 @@ export class DatabaseEngine {
   private lastChanges = 0
   private appliedMigration = false
   private checkpointCount = 0
+  private deferredBackupPending = false
 
   private readonly protectedTables: Set<string>
   private massDeleteAllowed = false
@@ -470,7 +481,7 @@ export class DatabaseEngine {
 
   /* --- Backup + destructive guard (unchanged semantics) ------------------- */
 
-  private backupOnBoot(): void {
+  private async backupOnBoot(failClosed = false): Promise<void> {
     const cfg = this.config.backupOnBoot
     if (!cfg || cfg.keep <= 0) return
     try {
@@ -481,11 +492,36 @@ export class DatabaseEngine {
       const day = new Date().toISOString().slice(0, 10)
       const bak = join(dir, `${prefix}${day}`)
       if (!existsSync(bak)) {
-        copyFileSync(this.dbPath, bak)
+        // SQLite's online backup API runs incrementally without blocking the
+        // Node event loop and includes committed WAL pages. A raw copyFileSync
+        // of the 2.79 GB main file blocked Electron startup for ~153 seconds and
+        // could omit WAL state.
+        const partial = `${bak}.partial`
+        rmSync(partial, { force: true })
+        const source = new this.config.betterSqlite3(this.dbPath, { readonly: true, fileMustExist: true })
+        try {
+          await source.backup(partial)
+        } finally {
+          source.close()
+        }
+        // Only the final dated name denotes a complete backup. A crash leaves a
+        // .partial file that the next boot removes and retries instead of
+        // accepting a permanently truncated snapshot.
+        renameSync(partial, bak)
         console.log(`[Database] Boot backup written: ${bak}`)
       }
-      const existing = readdirSync(dir)
-        .filter((f) => f.startsWith(prefix))
+      const directoryEntries = readdirSync(dir)
+      for (const stalePartial of directoryEntries.filter(
+        (file) => file.startsWith(prefix) && file.endsWith('.partial')
+      )) {
+        try {
+          rmSync(join(dir, stalePartial), { force: true })
+        } catch {
+          /* best-effort partial cleanup */
+        }
+      }
+      const existing = directoryEntries
+        .filter((file) => file.startsWith(prefix) && /^\d{4}-\d{2}-\d{2}$/.test(file.slice(prefix.length)))
         .sort()
       for (const stale of existing.slice(0, Math.max(0, existing.length - cfg.keep))) {
         try {
@@ -495,8 +531,19 @@ export class DatabaseEngine {
         }
       }
     } catch (e) {
-      console.warn('[Database] Boot backup failed (non-fatal):', (e as Error).message)
+      console.warn(
+        failClosed ? '[Database] Required pre-migration backup failed:' : '[Database] Boot backup failed (non-fatal):',
+        (e as Error).message
+      )
+      if (failClosed) throw e
     }
+  }
+
+  /** Run the routine backup explicitly from an application's post-paint scheduler. */
+  async runDeferredBackup(): Promise<void> {
+    if (!this.deferredBackupPending) return
+    this.deferredBackupPending = false
+    await this.backupOnBoot(false)
   }
 
   runWithMassDeleteAllowed<T>(fn: () => T): T {
@@ -553,10 +600,17 @@ export class DatabaseEngine {
   /* --- Initialization / 4-phase boot -------------------------------------- */
 
   async initialize(): Promise<void> {
-    this.dbPath = this.config.dbPathProvider()
+    // Re-initialization: release any previous connection before opening a new
+    // one — better-sqlite3 handles are never GC-closed, so overwriting this.bdb
+    // below would strand the old native file handle (open until process exit,
+    // which on Windows also keeps the old .sqlite file undeletable).
+    if (this.bdb) this.closeDatabase()
+    // Per-boot flag (drives the one-time post-migration VACUUM); must not leak
+    // a previous boot's value into this one.
+    this.appliedMigration = false
+    this.deferredBackupPending = false
 
-    // Safety net: snapshot the existing file BEFORE the first WAL open / migration.
-    this.backupOnBoot()
+    this.dbPath = this.config.dbPathProvider()
 
     const hadExistingFile = existsSync(this.dbPath)
     const sizeBefore = hadExistingFile ? this.fileSize(this.dbPath) : 0
@@ -580,6 +634,15 @@ export class DatabaseEngine {
       // — a behavior change out of scope for this stability fix.
 
       this.shim = new SqlJsCompatDatabase(this.bdb, this.recordChanges, () => this.lastChanges)
+
+      // Preserve the pre-migration safety contract, but do not make every
+      // ordinary boot wait for a multi-gigabyte daily snapshot. If migrations
+      // are pending, the online backup is awaited before phase 1/repair. When
+      // schema is current, Electron may opt into a deferred best-effort backup.
+      const versionBeforeBoot = hadExistingFile ? this.readSchemaVersion() : this.config.schemaVersion
+      const migrationPending = hadExistingFile && versionBeforeBoot < this.config.schemaVersion
+      const deferRoutineBackup = this.config.deferBackupOnBoot === true && !migrationPending
+      if (hadExistingFile && !deferRoutineBackup) await this.backupOnBoot(migrationPending)
 
       const statements = this.config.schema
         .split(';')
@@ -632,6 +695,10 @@ export class DatabaseEngine {
         this.vacuum(sizeBefore)
       } else {
         this.checkpoint()
+      }
+
+      if (hadExistingFile && deferRoutineBackup) {
+        this.deferredBackupPending = true
       }
 
       console.log(`[Database] Initialization complete (schema v${this.config.schemaVersion})`)

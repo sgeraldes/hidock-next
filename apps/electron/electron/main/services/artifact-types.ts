@@ -19,6 +19,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai'
 import pdfParse, { type PdfParseResult } from 'pdf-parse/lib/pdf-parse.js'
 import { chunkText } from './vector-store'
 import { getConfig } from './config'
+import { resolveGeminiApiKey } from './brains'
 
 /** Result of a type's text extraction: the plain text plus optional metadata. */
 export interface ArtifactExtraction {
@@ -40,6 +41,12 @@ export interface ArtifactTypeDefinition {
   chunk: (text: string) => string[]
   /** Optional post-processing enrichment (queued/budgeted in later rounds). */
   enrich?: (extraction: ArtifactExtraction) => Promise<ArtifactExtraction>
+  /** Renderer-safe presentation/capability metadata. Add-ons should provide it. */
+  presentation?: {
+    label: string
+    pluralLabel: string
+    capabilities: Array<'timed' | 'conversation' | 'rateable' | 'transcribable' | 'device-backed' | 'previewable'>
+  }
 }
 
 /**
@@ -122,7 +129,8 @@ registerArtifactType({
   mimes: ['text/markdown'],
   exts: ['md', 'markdown'],
   chunk: chunkText,
-  extractText: async (filePath, buffer) => ({ text: readText(filePath, buffer) })
+  extractText: async (filePath, buffer) => ({ text: readText(filePath, buffer) }),
+  presentation: { label: 'Markdown', pluralLabel: 'Markdown', capabilities: ['rateable', 'previewable'] }
 })
 
 registerArtifactType({
@@ -130,7 +138,8 @@ registerArtifactType({
   mimes: ['text/plain'],
   exts: ['txt', 'text', 'log'],
   chunk: chunkText,
-  extractText: async (filePath, buffer) => ({ text: readText(filePath, buffer) })
+  extractText: async (filePath, buffer) => ({ text: readText(filePath, buffer) }),
+  presentation: { label: 'Text file', pluralLabel: 'Text files', capabilities: ['rateable', 'previewable'] }
 })
 
 registerArtifactType({
@@ -138,6 +147,7 @@ registerArtifactType({
   mimes: ['application/json'],
   exts: ['json'],
   chunk: chunkText,
+  presentation: { label: 'JSON', pluralLabel: 'JSON', capabilities: ['rateable', 'previewable'] },
   extractText: async (filePath, buffer) => {
     const raw = readText(filePath, buffer)
     try {
@@ -156,6 +166,7 @@ registerArtifactType({
   mimes: ['application/pdf'],
   exts: ['pdf'],
   chunk: chunkText,
+  presentation: { label: 'PDF', pluralLabel: 'PDFs', capabilities: ['rateable', 'previewable'] },
   extractText: async (filePath, buffer) => {
     const data = buffer ?? readFileSync(filePath)
 
@@ -199,8 +210,12 @@ registerArtifactType({
   mimes: ['image/png', 'image/jpeg', 'image/webp', 'image/svg+xml'],
   exts: ['png', 'jpg', 'jpeg', 'webp', 'svg'],
   chunk: chunkText,
+  presentation: { label: 'Image', pluralLabel: 'Images', capabilities: ['rateable', 'previewable'] },
   extractText: async (filePath, buffer) => {
-    const apiKey = getConfig().transcription.geminiApiKey
+    // Key resolves via the brain credential store (falls back to the plaintext
+    // config key). Vision uses inlineData multimodal input, which has no AIBrain
+    // method in Phase 1, so the SDK call stays here (key resolution is shared).
+    const apiKey = resolveGeminiApiKey()
     if (!apiKey) {
       // Skip gracefully — no vision model configured.
       return { text: '', metadata: { description: null, note: 'image description skipped (no Gemini key)' } }

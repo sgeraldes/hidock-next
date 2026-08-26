@@ -16,15 +16,16 @@ import {
   Eye
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Checkbox } from '@/components/ui/checkbox'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { AudioPlayer } from '@/components/AudioPlayer'
 import { formatDateTime, formatDuration, formatBytes } from '@/lib/utils'
 import { parseJsonArray, Transcript, Meeting } from '@/types'
-import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
+import { UnifiedRecording, hasLocalPath, isDeviceOnly, isRecordingBacked } from '@/types/unified-recording'
+import { LABEL_DELETE_FROM_DEVICE, LABEL_MOVE_TO_TRASH } from '@/features/library/utils/deletionCopy'
 import { StatusIcon } from './StatusIcon'
 import { TranscriptionStatusBadge } from './TranscriptionStatusBadge'
 import { useLibraryStore } from '@/store/useLibraryStore'
+import type { DownloadStatus } from '@/store/useAppStore'
 
 interface SourceCardProps {
   recording: UnifiedRecording
@@ -34,6 +35,7 @@ interface SourceCardProps {
   isTranscriptExpanded: boolean
   isDownloading: boolean
   downloadProgress?: number
+  downloadStatus?: DownloadStatus
   isDeleting: boolean
   deviceConnected: boolean
   isSelected?: boolean
@@ -60,6 +62,7 @@ export const SourceCard = memo(function SourceCard({
   isTranscriptExpanded,
   isDownloading,
   downloadProgress,
+  downloadStatus,
   isDeleting,
   deviceConnected,
   isSelected = false,
@@ -80,15 +83,16 @@ export const SourceCard = memo(function SourceCard({
   const canPlay = hasLocalPath(recording)
   const error = useLibraryStore((state) => state.recordingErrors.get(recording.id))
 
-  const handleCheckboxClick = (e: React.MouseEvent) => {
-    e.stopPropagation()
-    onSelectionChange?.(recording.id, e.shiftKey)
-  }
-
   const handleCardClick = (e: React.MouseEvent) => {
-    // Don't trigger onClick if clicking on buttons, checkbox, or interactive elements
+    // Buttons and links own their clicks. Everywhere else on the card follows
+    // Explorer semantics: modifier clicks change the selection without opening;
+    // plain clicks replace the selection and open the source.
     const target = e.target as HTMLElement
-    if (target.closest('button') || target.closest('[role="checkbox"]') || target.closest('a')) {
+    if (target.closest('button') || target.closest('a')) {
+      return
+    }
+    if (e.ctrlKey || e.metaKey || e.shiftKey) {
+      onSelectionChange?.(recording.id, e.shiftKey)
       return
     }
     onClick?.()
@@ -106,14 +110,6 @@ export const SourceCard = memo(function SourceCard({
       <CardHeader className="pb-3">
         <div className="flex items-start justify-between">
           <div className="flex items-center gap-3">
-            {onSelectionChange && (
-              <Checkbox
-                checked={isSelected}
-                onClick={handleCheckboxClick}
-                aria-label={`Select ${recording.filename}`}
-                className="shrink-0"
-              />
-            )}
             <StatusIcon recording={recording} />
             <div>
               <CardTitle className="text-base">{recording.title || recording.filename}</CardTitle>
@@ -187,10 +183,16 @@ export const SourceCard = memo(function SourceCard({
 
             {/* Download button for device-only recordings */}
             {isDeviceOnly(recording) &&
-              (isDownloading ? (
+              (downloadStatus ? (
                 <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <RefreshCw className="h-4 w-4 animate-spin" />
-                  {downloadProgress ?? 0}%
+                  <RefreshCw className={`h-4 w-4 ${isDownloading ? 'animate-spin' : ''}`} />
+                  {downloadStatus === 'pending'
+                    ? 'Queued'
+                    : (downloadProgress ?? 0) > 0
+                      ? `${downloadProgress}%`
+                      : downloadStatus === 'cancelling'
+                        ? 'Cancelling'
+                        : 'Starting'}
                 </div>
               ) : (
                 <Button
@@ -241,29 +243,30 @@ export const SourceCard = memo(function SourceCard({
               </Button>
             )}
 
-            {/* Delete button */}
-            <Button
-              variant="ghost"
-              size="icon"
-              className={
-                recording.location === 'device-only'
-                  ? 'text-destructive hover:text-destructive'
-                  : recording.location === 'local-only'
-                  ? 'text-orange-500 hover:text-orange-600'
-                  : 'text-muted-foreground hover:text-orange-500'
-              }
-              onClick={onDelete}
-              disabled={(recording.location === 'device-only' && !deviceConnected) || isDeleting}
-              title={
-                recording.location === 'device-only'
-                  ? 'Delete from device'
-                  : recording.location === 'local-only'
-                  ? 'Delete local file'
-                  : 'Delete local copy'
-              }
-            >
-              {isDeleting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
-            </Button>
+            {/* Delete button — spec-005/F17 T5 §D3b/AR3-4. Card view is a THIRD delete
+                surface; the `title` MUST match what onDelete actually does (routes
+                through Library's handleDelete → soft handleDeleteLocal for non-device
+                rows, i.e. Move to Trash, never a real delete). Card view intentionally
+                does not gain permanent-delete or synced device-delete affordances —
+                the list row + reader carry the full set (documented limitation).
+                AR3-4: capture-only synthetic rows (no source recording) show no
+                delete affordance at all. */}
+            {isRecordingBacked(recording) && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className={
+                  recording.location === 'device-only'
+                    ? 'text-destructive hover:text-destructive'
+                    : 'text-orange-500 hover:text-orange-600'
+                }
+                onClick={onDelete}
+                disabled={(recording.location === 'device-only' && !deviceConnected) || isDeleting}
+                title={recording.location === 'device-only' ? LABEL_DELETE_FROM_DEVICE : LABEL_MOVE_TO_TRASH}
+              >
+                {isDeleting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+              </Button>
+            )}
           </div>
         </div>
       </CardHeader>
@@ -396,6 +399,7 @@ export const SourceCard = memo(function SourceCard({
     prevProps.isTranscriptExpanded === nextProps.isTranscriptExpanded &&
     prevProps.isDownloading === nextProps.isDownloading &&
     prevProps.downloadProgress === nextProps.downloadProgress &&
+    prevProps.downloadStatus === nextProps.downloadStatus &&
     prevProps.isDeleting === nextProps.isDeleting &&
     prevProps.deviceConnected === nextProps.deviceConnected &&
     prevProps.isSelected === nextProps.isSelected &&

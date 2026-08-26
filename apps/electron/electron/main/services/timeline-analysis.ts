@@ -30,6 +30,8 @@
 
 import { GoogleGenerativeAI } from '@google/generative-ai'
 import { getRecordingById, resolveRecordingId, queryOne, queryAll, run } from './database'
+import { isRecordingEligible } from './recording-eligibility'
+import { eligibleToGenerate } from './brains/eligibility'
 
 export interface SentimentSegment {
   startSec: number
@@ -51,9 +53,294 @@ export interface EventMarker {
   refId: string
 }
 
+/**
+ * Coarse, renderer-actionable classification of an analysis failure. Derived
+ * HERE (at the service/IPC boundary) where the raw provider error — with its
+ * structured status codes and canonical English tokens — is available, so the
+ * renderer never has to pattern-match possibly-localized message text.
+ */
+export type AnalysisErrorKind = 'auth' | 'quota' | 'rate-limit' | 'network' | 'invalid-input' | 'unknown'
+
+export interface AnalysisError {
+  kind: AnalysisErrorKind
+  /** For rate-limit errors that carry a retry-after hint, in milliseconds. */
+  retryAfterMs?: number
+  /** Raw message, for logging/diagnostics only — NOT for classification. */
+  message?: string
+}
+
+/**
+ * Retry-after hints at or beyond this cap are not auto-honored: consumers
+ * treat such a failure as needs-attention (manual Retry) rather than promising
+ * an auto-retry that far out. parseRetryAfter CLAMPS to this value, so a
+ * consumer seeing retryAfterMs >= RETRY_AFTER_MAX_MS knows the hint was at or
+ * over the cap.
+ */
+export const RETRY_AFTER_MAX_MS = 15 * 60 * 1000
+
+/**
+ * Parse a Retry-After value — delta-seconds ("120", "1.5") or HTTP-date
+ * ("Wed, 21 Oct 2026 07:28:00 GMT") — into a millisecond delay. Non-finite,
+ * non-positive, or unparseable input → undefined. Finite results are clamped
+ * to RETRY_AFTER_MAX_MS. Exported for tests; `nowMs` injects the clock.
+ */
+export function parseRetryAfter(value: unknown, nowMs: number = Date.now()): number | undefined {
+  if (value == null) return undefined
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value > 0 ? Math.min(Math.round(value * 1000), RETRY_AFTER_MAX_MS) : undefined
+  }
+  const s = String(value).trim()
+  if (!s) return undefined
+  // Delta-seconds form (the common header shape).
+  if (/^\d+(\.\d+)?$/.test(s)) {
+    const ms = parseFloat(s) * 1000
+    return Number.isFinite(ms) && ms > 0 ? Math.min(Math.round(ms), RETRY_AFTER_MAX_MS) : undefined
+  }
+  // HTTP-date form.
+  const t = Date.parse(s)
+  if (Number.isFinite(t)) {
+    const delta = t - nowMs
+    return delta > 0 ? Math.min(Math.round(delta), RETRY_AFTER_MAX_MS) : undefined
+  }
+  return undefined
+}
+
+/** Parse an in-message retry hint ("retry after 12s" / "retry in 1.5 seconds"). */
+function retryHintFromMessage(message: string): number | undefined {
+  const m = message.match(/retry(?:-|\s+)?(?:after|in)[:\s]+(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|secs?|seconds?)?/i)
+  if (!m) return undefined
+  const value = parseFloat(m[1])
+  if (!Number.isFinite(value) || value <= 0) return undefined
+  const unit = (m[2] || 's').toLowerCase()
+  const ms = unit.startsWith('ms') || unit.startsWith('millisecond') ? value : value * 1000
+  return Math.min(Math.round(ms), RETRY_AFTER_MAX_MS)
+}
+
+/** Numeric coercion for status-like fields (rejects non-finite / non-number). */
+function numericStatus(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined
+}
+
+/**
+ * Collect the error node plus every nested error-ish node reachable through
+ * the shapes real SDKs use — `cause` (wrapped fetch errors), `errors[]`
+ * (AggregateError), `response` (fetch Response on SDK wrappers), and a nested
+ * `error` field (JSON API envelopes). Bounded (depth ≤ 4) and cycle-safe.
+ */
+function collectErrorNodes(root: unknown): unknown[] {
+  const out: unknown[] = []
+  const visited = new Set<object>()
+  const visit = (node: unknown, depth: number): void => {
+    if (node == null || depth > 4) return
+    if (typeof node === 'object') {
+      if (visited.has(node as object)) return
+      visited.add(node as object)
+    }
+    out.push(node)
+    if (typeof node !== 'object') return
+    const n = node as Record<string, unknown>
+    visit(n.cause, depth + 1)
+    visit(n.error, depth + 1)
+    visit(n.response, depth + 1)
+    if (Array.isArray(n.errors)) {
+      for (const child of n.errors) visit(child, depth + 1)
+    }
+  }
+  visit(root, 0)
+  return out
+}
+
+/** Read a retry-after header off a Headers-like or plain-object `headers`. */
+function retryAfterFromHeaders(node: unknown, nowMs: number): number | undefined {
+  if (!node || typeof node !== 'object') return undefined
+  const headers = (node as { headers?: unknown }).headers
+  if (!headers || typeof headers !== 'object') return undefined
+  const h = headers as { get?: (name: string) => unknown } & Record<string, unknown>
+  const raw = typeof h.get === 'function' ? h.get('retry-after') : (h['retry-after'] ?? h['Retry-After'])
+  return parseRetryAfter(raw, nowMs)
+}
+
+/** Classify ONE node (status fields + message tokens), without traversal. */
+function classifyNode(node: unknown): { kind: AnalysisErrorKind; retryAfterMs?: number } {
+  const e = (node ?? {}) as { status?: unknown; httpStatus?: unknown; code?: unknown; message?: unknown; statusText?: unknown }
+  const message =
+    node instanceof Error
+      ? node.message
+      : typeof node === 'string'
+        ? node
+        : [e.message, e.statusText].filter((v) => typeof v === 'string').join(' ')
+
+  const statusFromText = message.match(/\b([45]\d\d)\b/)
+  const status =
+    numericStatus(e.status) ??
+    numericStatus(e.httpStatus) ??
+    numericStatus(e.code) ??
+    (statusFromText ? Number(statusFromText[1]) : undefined)
+  const stringCode = typeof e.code === 'string' ? e.code : ''
+
+  if (status === 401 || status === 403 || /\b(api.?key|credential\w*|unauthoriz\w*|forbidden|permission.?denied)\b/i.test(message)) {
+    return { kind: 'auth' }
+  }
+  if (status === 429 || /\b(rate.?limit\w*|too many requests)\b/i.test(message)) {
+    return { kind: 'rate-limit', retryAfterMs: retryHintFromMessage(message) }
+  }
+  if (/\b(quota|resource.?exhausted|billing)\b/i.test(message)) {
+    return { kind: 'quota' }
+  }
+  if (status === 400 || /\binvalid\s+(argument|request|input)\b/i.test(message)) {
+    return { kind: 'invalid-input' }
+  }
+  if (
+    (status !== undefined && status >= 500) ||
+    /^(ECONN\w*|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EPIPE|ENETUNREACH)$/i.test(stringCode) ||
+    /\b(network|fetch failed|timed?\s?out|timeout|econn\w*|enotfound|eai_again|socket|offline|unavailable)\b/i.test(message)
+  ) {
+    return { kind: 'network' }
+  }
+  return { kind: 'unknown' }
+}
+
+/** Combination precedence when nested nodes classify differently. */
+const KIND_RANK: Record<AnalysisErrorKind, number> = {
+  auth: 5,
+  'rate-limit': 4,
+  quota: 3,
+  'invalid-input': 2,
+  network: 1,
+  unknown: 0
+}
+
+/**
+ * Map a raw provider/IPC error onto an AnalysisError. Inspects the WHOLE error
+ * shape — `cause` chains, AggregateError `errors[]`, SDK wrappers holding a
+ * fetch `response` (including its Retry-After header), and nested `error`
+ * envelopes — via a bounded, cycle-safe traversal, so a wrapped 401 classifies
+ * as auth instead of falling to 'unknown'. Structured status fields win over
+ * message tokens; the most actionable kind found anywhere wins overall
+ * (auth > rate-limit > quota > invalid-input > network). Unrecognized shapes
+ * are 'unknown' — consumers treat that conservatively (bounded auto-retries,
+ * then manual). retryAfterMs, when present, is validated and CLAMPED to
+ * RETRY_AFTER_MAX_MS by parseRetryAfter.
+ */
+export function classifyAnalysisError(err: unknown, nowMs: number = Date.now()): AnalysisError {
+  const topMessage =
+    err instanceof Error ? err.message : typeof err === 'string' ? err : String((err as { message?: unknown } | null)?.message ?? '')
+
+  let bestKind: AnalysisErrorKind = 'unknown'
+  let retryAfterMs: number | undefined
+  for (const node of collectErrorNodes(err)) {
+    const info = classifyNode(node)
+    if (KIND_RANK[info.kind] > KIND_RANK[bestKind]) bestKind = info.kind
+    // Retry-after may live on a different node (e.g. Response headers) than the
+    // one that classified — take the first hint found anywhere.
+    retryAfterMs ??= info.retryAfterMs ?? retryAfterFromHeaders(node, nowMs)
+  }
+
+  return bestKind === 'rate-limit'
+    ? { kind: bestKind, retryAfterMs, message: topMessage }
+    : { kind: bestKind, message: topMessage }
+}
+
+/**
+ * PERSISTED per-component completion state. `sentimentAnalyzed` /
+ * `markersAnalyzed` are true only when that component's analysis COMPLETED for
+ * the transcript's CURRENT content — a legitimately-empty result stays
+ * completed (consumers must not re-bill it on every mount/restart), while a
+ * retranscription (content change) makes both flags read back false.
+ */
+export interface TimelineAnalysisStatus {
+  sentimentAnalyzed: boolean
+  markersAnalyzed: boolean
+}
+
 export interface TimelineAnalysis {
   sentimentSegments: SentimentSegment[]
   eventMarkers: EventMarker[]
+  /**
+   * Present once an analysis has been persisted for this transcript (absent
+   * for never-analyzed rows and legacy bare-array persistence). Flags are
+   * reconciled against the transcript's CURRENT content hash at READ time, so
+   * completion survives app restarts but honestly invalidates on
+   * retranscription.
+   */
+  analysisStatus?: TimelineAnalysisStatus
+  /**
+   * Present when part of the analysis FAILED (e.g. the Gemini sentiment pass) —
+   * classified where the raw error is available. Not persisted; consumers use
+   * it to drive their retry policy. Absent = the run completed (even when the
+   * honest result is empty).
+   */
+  analysisError?: AnalysisError
+}
+
+// ---------------------------------------------------------------------------
+// Persisted analysis envelope (v2) — completion state WITHOUT a schema bump.
+//
+// The `transcripts.sentiment_segments` column (this module's exclusive
+// read/write territory — nothing else parses it) historically held a bare
+// SentimentSegment[]. It now holds a v2 envelope wrapping the segments plus
+// per-component completion flags and the content hash of the transcript AT
+// ANALYSIS TIME. Legacy bare arrays still parse (segments only, no completion
+// → consumers backfill once, which upgrades the row). `event_markers` stays a
+// bare array.
+// ---------------------------------------------------------------------------
+
+interface SentimentEnvelope {
+  v: 2
+  /** computeTranscriptContentHash(...) of the transcript when analyzed. */
+  contentHash: string
+  sentimentAnalyzed: boolean
+  markersAnalyzed: boolean
+  segments: SentimentSegment[]
+}
+
+/** Cheap deterministic content hash (djb2-xor). */
+function djb2(s: string | null | undefined): string {
+  if (!s) return '0'
+  let h = 5381
+  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) | 0
+  return (h >>> 0).toString(36)
+}
+
+/**
+ * Hash of the timeline-relevant transcript content. Computed identically at
+ * WRITE (analyzeTimeline) and READ (getTimelineAnalysis) so completion flags
+ * are honored only while the content they were computed FROM is unchanged —
+ * the stable transcript id / second-precision created_at are useless for that.
+ */
+function computeTranscriptContentHash(row: {
+  full_text?: string | null
+  speakers: string | null
+  action_items?: string | null
+  key_points?: string | null
+}): string {
+  return [
+    row.full_text?.length ?? 0,
+    djb2(row.full_text),
+    djb2(row.speakers),
+    djb2(row.action_items),
+    djb2(row.key_points)
+  ].join(':')
+}
+
+/** Parse the sentiment column: v2 envelope, legacy bare array, or empty. */
+function parseSentimentColumn(json: string | null | undefined): {
+  segments: SentimentSegment[]
+  envelope?: SentimentEnvelope
+} {
+  if (!json) return { segments: [] }
+  let raw: unknown
+  try {
+    raw = JSON.parse(json)
+  } catch {
+    return { segments: [] }
+  }
+  if (Array.isArray(raw)) return { segments: raw as SentimentSegment[] } // legacy bare array
+  if (raw && typeof raw === 'object' && (raw as { v?: unknown }).v === 2) {
+    const env = raw as SentimentEnvelope
+    return { segments: Array.isArray(env.segments) ? env.segments : [], envelope: env }
+  }
+  return { segments: [] }
 }
 
 /** One coalesced window of speaker turns, ready to be scored. */
@@ -192,13 +479,40 @@ export function buildSentimentWindows(
   return windows
 }
 
-/** Scores keyed by window index, each clamped to [-1, 1]. */
-export type WindowScorer = (windows: SentimentWindow[]) => Promise<Map<number, number>>
+/**
+ * Scores keyed by window index, each clamped to [-1, 1].
+ *
+ * ADV43-3 (round-45) — the scorer receives a fail-closed `shouldGenerate` gate.
+ * The production scorer (geminiWindowScorer) awaits a dynamic config import
+ * BEFORE its `generateContent` call, so an owner exclusion committed during that
+ * setup await would otherwise reach Gemini unobserved. The scorer re-evaluates
+ * the gate SYNCHRONOUSLY after all awaited setup, immediately before the provider
+ * call, and aborts (returns an empty score map — sentiment simply omitted) on a
+ * `false` return or a throw. Absent ⇒ no gate (injected test scorers ignore it).
+ */
+export type WindowScorer = (
+  windows: SentimentWindow[],
+  shouldGenerate?: () => boolean
+) => Promise<Map<number, number>>
 
 export interface SentimentOptions {
   targetWindowSec?: number
   /** Inject a scorer (tests). Defaults to the Gemini scorer. */
   scoreWindows?: WindowScorer
+  /**
+   * ADV43-3 (round-45) — MANDATORY fail-closed eligibility gate for the
+   * PRODUCTION scorer. analyzeTimeline wires its recording-eligibility check
+   * here; deriveSentimentSegments forwards it to the scorer, which re-checks it
+   * after its setup await and immediately before generateContent. Omitted ⇒ no
+   * gate (direct/test callers).
+   */
+  shouldGenerate?: () => boolean
+  /**
+   * Invoked with the RAW scorer error when sentiment scoring fails (the series
+   * is then omitted). Lets analyzeTimeline classify the failure while this
+   * function keeps its non-throwing contract.
+   */
+  onError?: (err: unknown) => void
 }
 
 /**
@@ -216,9 +530,12 @@ export async function deriveSentimentSegments(
   const scorer = opts.scoreWindows ?? geminiWindowScorer
   let scores: Map<number, number>
   try {
-    scores = await scorer(windows)
+    // ADV43-3 (round-45) — forward the fail-closed gate so the production scorer
+    // re-checks eligibility after its setup await, immediately before the Gemini call.
+    scores = await scorer(windows, opts.shouldGenerate)
   } catch (e) {
     console.warn('[Timeline] sentiment scoring failed:', e instanceof Error ? e.message : e)
+    opts.onError?.(e)
     return []
   }
 
@@ -236,13 +553,20 @@ export async function deriveSentimentSegments(
  * empty map when Gemini is not configured, so sentiment is simply omitted rather
  * than failing the whole analysis.
  */
-export const geminiWindowScorer: WindowScorer = async (windows) => {
+export const geminiWindowScorer: WindowScorer = async (windows, shouldGenerate) => {
   // Lazy import so this leaf module doesn't pull in config.ts (which touches the
   // Electron `app` at load) — keeps the pure pieces testable under plain node.
   const { getConfig } = await import('./config')
   const config = getConfig()
   const apiKey = config.transcription.geminiApiKey
   if (!apiKey) return new Map()
+
+  // ADV43-3 (round-45) — the dynamic import above is an AWAIT between
+  // analyzeTimeline's up-front eligibility check and this provider call. Re-check
+  // the fail-closed gate SYNCHRONOUSLY here — after all awaited setup, immediately
+  // before generateContent — and ABORT (return an empty map ⇒ sentiment omitted,
+  // NO provider call) when the source became ineligible or the check throws.
+  if (!eligibleToGenerate(shouldGenerate)) return new Map()
 
   const genAI = new GoogleGenerativeAI(apiKey)
   const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-3.5-flash' })
@@ -434,10 +758,17 @@ function buildLabel(text: string): string {
 
 interface TranscriptRow {
   recording_id: string
+  full_text: string | null
   speakers: string | null
+  action_items: string | null
+  key_points: string | null
   sentiment_segments: string | null
   event_markers: string | null
 }
+
+/** Shared SELECT — includes the content columns the completion hash covers. */
+const TRANSCRIPT_ROW_SELECT =
+  'SELECT recording_id, full_text, speakers, action_items, key_points, sentiment_segments, event_markers FROM transcripts WHERE recording_id = ?'
 
 interface TranscriptItemsRow {
   action_items: string | null
@@ -467,10 +798,10 @@ export function getTimelineItemsForRecording(recordingId: string): TimelineItem[
   const id = canonical?.id ?? recordingId
 
   const items: TimelineItem[] = []
-  const seen = new Set<string>() // dedupe key: `${kind} ${normalizedText}`
+  const seen = new Set<string>() // dedupe key: `${kind}\0${normalizedText}`
 
   const add = (item: TimelineItem): void => {
-    const key = `${item.kind} ${normalize(item.text)}`
+    const key = `${item.kind}\u0000${normalize(item.text)}`
     if (!item.text.trim() || seen.has(key)) return
     seen.add(key)
     items.push(item)
@@ -551,19 +882,36 @@ export interface AnalyzeProgress {
 /**
  * Read the persisted timeline analysis for a recording. Returns empty arrays if
  * the recording / transcript doesn't exist or hasn't been analyzed yet.
+ * When a v2 completion envelope is present, `analysisStatus` is included with
+ * its flags reconciled against the transcript's CURRENT content hash — so
+ * "analyzed and honestly empty" (no re-bill) is distinguishable from
+ * "never analyzed / content changed" (backfill-eligible) across restarts.
  */
 export function getTimelineAnalysis(recordingId: string): TimelineAnalysis {
   const canonical = getRecordingById(recordingId) ?? resolveRecordingId(recordingId)
   const id = canonical?.id ?? recordingId
-  const row = queryOne<TranscriptRow>(
-    'SELECT recording_id, speakers, sentiment_segments, event_markers FROM transcripts WHERE recording_id = ?',
-    [id]
-  )
+  // ADV17-1 (round-18) — DISPLAY read boundary. Event markers persist labels
+  // derived from transcript action/decision text; the sibling analyzeTimeline is
+  // gated (round-8) so this read path must match. isRecordingEligible is a
+  // positive allowlist + fail-closed: a trashed / personal / value-excluded /
+  // hard-purged / unresolvable recording returns NO markers (empty), never the
+  // stale derived labels.
+  if (!isRecordingEligible(id)) return { ...EMPTY }
+  const row = queryOne<TranscriptRow>(TRANSCRIPT_ROW_SELECT, [id])
   if (!row) return { ...EMPTY }
-  return {
-    sentimentSegments: parseJsonArray<SentimentSegment>(row.sentiment_segments),
+  const { segments, envelope } = parseSentimentColumn(row.sentiment_segments)
+  const result: TimelineAnalysis = {
+    sentimentSegments: segments,
     eventMarkers: parseJsonArray<EventMarker>(row.event_markers)
   }
+  if (envelope) {
+    const fresh = envelope.contentHash === computeTranscriptContentHash(row)
+    result.analysisStatus = {
+      sentimentAnalyzed: fresh && envelope.sentimentAnalyzed === true,
+      markersAnalyzed: fresh && envelope.markersAnalyzed === true
+    }
+  }
+  return result
 }
 
 /**
@@ -575,34 +923,97 @@ export function getTimelineAnalysis(recordingId: string): TimelineAnalysis {
 export async function analyzeTimeline(
   recordingId: string,
   onProgress?: (p: AnalyzeProgress) => void,
-  sentimentOpts?: SentimentOptions
+  sentimentOpts?: SentimentOptions,
+  /**
+   * P2 (round-3) — eligibility gate re-checked AFTER the sentiment LLM await
+   * and immediately BEFORE the synchronous UPDATE write. Returns false ⇒ the
+   * recording was trashed / marked personal / hard-purged while sentiment
+   * scoring was in flight, so the computed results are returned WITHOUT
+   * persisting. Omitted ⇒ always persists (manual/direct callers).
+   */
+  shouldPersist?: () => boolean
 ): Promise<TimelineAnalysis> {
   const canonical = getRecordingById(recordingId) ?? resolveRecordingId(recordingId)
   const id = canonical?.id ?? recordingId
 
-  const row = queryOne<TranscriptRow>(
-    'SELECT recording_id, speakers, sentiment_segments, event_markers FROM transcripts WHERE recording_id = ?',
-    [id]
-  )
+  // RE8-2 (round-8) — MANDATORY internal eligibility gate BEFORE the sentiment
+  // LLM. The prior design threaded eligibility only through the OPTIONAL
+  // `shouldPersist` callback, which the production recordings:analyzeTimeline IPC
+  // omits — so a trashed / personal / value-excluded recording's transcript went
+  // to Gemini anyway. Gate here so no caller can bypass it; fail-closed → empty.
+  if (!isRecordingEligible(id)) {
+    onProgress?.({ stage: 'complete', progress: 100 })
+    return { ...EMPTY }
+  }
+
+  const row = queryOne<TranscriptRow>(TRANSCRIPT_ROW_SELECT, [id])
   if (!row) return { ...EMPTY }
 
   const turns = parseSpeakerTurns(row.speakers)
 
   onProgress?.({ stage: 'sentiment', progress: 10 })
-  const sentimentSegments = await deriveSentimentSegments(turns, sentimentOpts)
+  // Capture + classify a scorer failure (deriveSentimentSegments itself never
+  // throws) so consumers get a structured errorKind instead of guessing from
+  // message text. The caller's own onError, if any, still runs.
+  let analysisError: AnalysisError | undefined
+  const callerOnError = sentimentOpts?.onError
+  const sentimentSegments = await deriveSentimentSegments(turns, {
+    ...sentimentOpts,
+    // ADV43-3 (round-45) — MANDATORY fail-closed gate for the production scorer.
+    // geminiWindowScorer awaits a dynamic config import before generateContent;
+    // this re-checks recording eligibility after that await and immediately before
+    // the Gemini call, so an exclusion committed during the scorer's setup aborts
+    // the provider call (no transcript windows sent). Set AFTER the spread so it
+    // is not overridden by a caller-supplied value.
+    shouldGenerate: () => isRecordingEligible(id),
+    onError: (err) => {
+      analysisError = classifyAnalysisError(err)
+      callerOnError?.(err)
+    }
+  })
 
   onProgress?.({ stage: 'markers', progress: 70 })
   const items = getTimelineItemsForRecording(id)
   const eventMarkers = deriveEventMarkers(items, turns)
 
-  run('UPDATE transcripts SET sentiment_segments = ?, event_markers = ? WHERE recording_id = ?', [
-    JSON.stringify(sentimentSegments),
-    JSON.stringify(eventMarkers),
-    id
-  ])
+  // Persist the v2 envelope: segments + per-component completion flags + the
+  // content hash of the transcript AS ANALYZED. Markers derivation is pure and
+  // local (cannot fail transiently) → completed whenever this runs; sentiment
+  // is completed only when the scorer did not fail. A success with honestly
+  // EMPTY results still persists completed=true, so consumers never re-bill it
+  // on remount/restart — while a retranscription changes the content hash and
+  // reads back as not-completed.
+  const envelope: SentimentEnvelope = {
+    v: 2,
+    contentHash: computeTranscriptContentHash(row),
+    sentimentAnalyzed: !analysisError,
+    markersAnalyzed: true,
+    segments: sentimentSegments
+  }
+  // RE8-2 (round-8) / P2 (round-3) — re-check eligibility ADJACENT to the write
+  // (no await between here and the UPDATE). MANDATORY internal boundary check
+  // (covers value-exclusion + fail-closed for EVERY caller) AND the optional
+  // `shouldPersist` (the pipeline's in-flight cancel via isRecordingProcessable).
+  // A purge/trash/exclusion landing during the sentiment await must not persist a
+  // timeline derivative for a now-ineligible recording.
+  if (!isRecordingEligible(id) || (shouldPersist && !shouldPersist())) {
+    console.log(`[Timeline] Recording ${id} became ineligible mid-analysis — timeline not persisted`)
+  } else {
+    run('UPDATE transcripts SET sentiment_segments = ?, event_markers = ? WHERE recording_id = ?', [
+      JSON.stringify(envelope),
+      JSON.stringify(eventMarkers),
+      id
+    ])
+  }
 
   onProgress?.({ stage: 'complete', progress: 100 })
-  return { sentimentSegments, eventMarkers }
+  const analysisStatus: TimelineAnalysisStatus = {
+    sentimentAnalyzed: !analysisError,
+    markersAnalyzed: true
+  }
+  return analysisError
+    ? { sentimentSegments, eventMarkers, analysisStatus, analysisError }
+    : { sentimentSegments, eventMarkers, analysisStatus }
 }
 
 function parseJsonArray<T>(json: string | null | undefined): T[] {

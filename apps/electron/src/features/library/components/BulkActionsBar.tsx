@@ -1,4 +1,4 @@
-import { X, Download, Wand2, Trash2, CheckSquare, Square, EyeOff } from 'lucide-react'
+import { X, Download, Wand2, Trash2, CheckSquare, Square, EyeOff, Skull } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import { cn } from '@/lib/utils'
@@ -14,6 +14,8 @@ interface BulkActionsBarProps {
     process?: boolean
     delete?: boolean
   }
+  showDownload?: boolean
+  showProcess?: boolean
   onSelectAll: () => void
   onDeselectAll: () => void
   onDownload: () => void
@@ -21,6 +23,8 @@ interface BulkActionsBarProps {
   onDelete: () => void
   /** Mark all selected recordings personal (ignore). Optional. */
   onMarkPersonal?: () => void
+  /** HARD purge of every selected row (tombstones + cache + optional device). Optional. */
+  onDeletePermanent?: () => void
 }
 
 export function BulkActionsBar({
@@ -30,12 +34,15 @@ export function BulkActionsBar({
   isProcessing,
   progress,
   disabledActions = {},
+  showDownload = true,
+  showProcess = true,
   onSelectAll,
   onDeselectAll,
   onDownload,
   onProcess,
   onDelete,
-  onMarkPersonal
+  onMarkPersonal,
+  onDeletePermanent
 }: BulkActionsBarProps) {
   if (selectedCount === 0) return null
 
@@ -53,7 +60,7 @@ export function BulkActionsBar({
     >
       <div className="flex items-center gap-3">
         {/* Selection Toggle */}
-        <Button
+        {showDownload && <Button
           variant="ghost"
           size="sm"
           onClick={allSelected ? onDeselectAll : onSelectAll}
@@ -66,7 +73,7 @@ export function BulkActionsBar({
             <Square className="h-4 w-4" />
           )}
           {allSelected ? 'Deselect All' : 'Select All'}
-        </Button>
+        </Button>}
 
         {/* Selection Count */}
         <span className="text-sm text-muted-foreground">
@@ -86,7 +93,7 @@ export function BulkActionsBar({
 
       <div className="flex items-center gap-2">
         {/* Download Action */}
-        <Button
+        {showProcess && <Button
           variant="outline"
           size="sm"
           onClick={onDownload}
@@ -96,7 +103,7 @@ export function BulkActionsBar({
         >
           <Download className="h-4 w-4" />
           Download
-        </Button>
+        </Button>}
 
         {/* Process/Transcribe Action */}
         <Button
@@ -126,18 +133,33 @@ export function BulkActionsBar({
           </Button>
         )}
 
-        {/* Delete Action */}
+        {/* Delete Action — SOFT: moves selected rows to Trash (restorable). */}
         <Button
           variant="outline"
           size="sm"
           onClick={onDelete}
           disabled={isProcessing || disabledActions.delete}
-          className="gap-2 text-destructive hover:text-destructive"
-          title="Delete selected"
+          className="gap-2"
+          title="Move selected to Trash (hidden, restorable — nothing is erased)"
         >
           <Trash2 className="h-4 w-4" />
-          Delete
+          Move to Trash
         </Button>
+
+        {/* Permanent delete — HARD cascade per row (tombstones + cache + optional device copy). */}
+        {onDeletePermanent && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onDeletePermanent}
+            disabled={isProcessing || disabledActions.delete}
+            className="gap-2 text-destructive hover:text-destructive border-destructive/40"
+            title="Permanently erase selected rows and all derived data (transcripts, embeddings, actionables) — cannot be undone"
+          >
+            <Skull className="h-4 w-4" />
+            Delete permanently
+          </Button>
+        )}
 
         {/* Clear Selection */}
         <Button

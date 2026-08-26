@@ -4,17 +4,21 @@ import {
   matchRecordingsToMeetings,
   buildCalendarRecordings,
   createPlaceholderMeetings,
+  getRecordingMeetingMatchScore,
   groupByDay,
   formatDurationStr,
   recordingCategory,
   formatUnmatchedRecordingMeta,
   recordingBlockTitle,
   sortMeetingsByProximity,
+  assignOverlapLanes,
+  buildEventAriaLabel,
   type CalendarRecording,
   type CalendarMeetingOverlay,
 } from '../calendar-utils'
 import type { Meeting } from '@/types'
 import type { UnifiedRecording } from '@/types/unified-recording'
+import { UNKNOWN_DATE } from '@/lib/unknownDate'
 
 /**
  * B-CAL-003: Unit tests for computeVisibleHourRange
@@ -516,5 +520,265 @@ describe('sortMeetingsByProximity', () => {
     const copy = [...meetings]
     sortMeetingsByProximity(meetings, '2026-03-02T14:00:00.000Z')
     expect(meetings).toEqual(copy)
+  })
+})
+
+/**
+ * #58 — the UNKNOWN_DATE (Unix-epoch) sentinel must NEVER leak into the Calendar
+ * as a real 1970 date. Undated recordings (unparseable filename + no device/db
+ * date) carry `dateRecorded = UNKNOWN_DATE`; they stay fully visible in the
+ * Library as "Unknown date" but are simply not PLACED on the Calendar: not
+ * matched to a meeting, not turned into a 1970 placeholder meeting, not built into
+ * a recording block, and not bucketed into any day. Dated recordings are
+ * unaffected.
+ */
+describe('#58 UNKNOWN_DATE sentinel does not leak into the Calendar', () => {
+  // An undated recording: a normal recording stamped with the epoch sentinel
+  // instead of a real capture time (unparseable filename + no device/db date).
+  // Optionally carries an explicit manual link (meetingId): that link is
+  // AUTHORITATIVE and keeps the recording on the Calendar at the linked meeting's
+  // time; without it the recording is simply not placed.
+  const makeUndatedRecording = (id: string, meetingId?: string): UnifiedRecording => ({
+    ...makeUnifiedRecording(id, 9, 20, meetingId),
+    filename: `undated-${id}.hda`,
+    dateRecorded: UNKNOWN_DATE,
+  })
+
+  // Serialize anything the Calendar produces and assert no 1970/1969 date leaked.
+  const hasEpochDate = (value: unknown): boolean => {
+    const s = JSON.stringify(value)
+    return /1970|1969|Dec 31, 1969|Jan 1, 1970/.test(s)
+  }
+
+  it('getRecordingMeetingMatchScore returns 0 for an undated recording (matches nothing)', () => {
+    // A meeting positioned at the epoch would "overlap" a raw epoch recStart — the
+    // guard must short-circuit before any such arithmetic.
+    const epochMeeting: Meeting = {
+      ...makeMeetingEntity('m-epoch', 'Epoch trap', 0, 1),
+      start_time: new Date(0).toISOString(),
+      end_time: new Date(60 * 60 * 1000).toISOString(),
+    }
+    expect(getRecordingMeetingMatchScore(makeUndatedRecording('u1'), epochMeeting)).toBe(0)
+  })
+
+  it('does not match an undated recording to a meeting and does not orphan it (no placeholder source)', () => {
+    const meetings = [makeMeetingEntity('m1', 'Team Standup', 9, 10)]
+    const recordings = [makeUndatedRecording('u1')]
+
+    const { calendarMeetings, orphanRecordings } = matchRecordingsToMeetings(meetings, recordings)
+
+    // The real meeting shows as "no recording"; the undated recording is neither
+    // matched nor orphaned (so it can never become a 1970 placeholder).
+    expect(calendarMeetings).toHaveLength(1)
+    expect(calendarMeetings[0].hasRecording).toBe(false)
+    expect(orphanRecordings).toHaveLength(0)
+    expect(hasEpochDate(calendarMeetings)).toBe(false)
+  })
+
+  it('creates no 1970 placeholder meeting from an undated recording', () => {
+    // Direct call (defense-in-depth): even if handed an undated recording, no
+    // placeholder is synthesized and no epoch ISO appears.
+    const placeholders = createPlaceholderMeetings([
+      makeUndatedRecording('u1'),
+      makeUnifiedRecording('r1', 14, 30),
+    ])
+    expect(placeholders).toHaveLength(1)
+    expect(placeholders[0].matchedRecordingId).toBe('r1')
+    expect(hasEpochDate(placeholders)).toBe(false)
+  })
+
+  it('does not build a recording block for an undated recording', () => {
+    const meetings = [makeMeetingEntity('m1', 'Team Standup', 9, 10)]
+    const { calendarRecordings } = buildCalendarRecordings(
+      [makeUndatedRecording('u1'), makeUnifiedRecording('r1', 9, 60)],
+      meetings
+    )
+    // Only the dated recording produces a block; no 1970 timestamp anywhere.
+    expect(calendarRecordings.map((r) => r.id)).toEqual(['r1'])
+    expect(hasEpochDate(calendarRecordings)).toBe(false)
+  })
+
+  it('does not bucket an undated recording into any calendar day', () => {
+    const { calendarRecordings } = buildCalendarRecordings(
+      [makeUndatedRecording('u1'), makeUnifiedRecording('r1', 9, 60)],
+      []
+    )
+    const viewDates = [new Date(2026, 2, 2), new Date(2026, 2, 3)]
+    const grouped = groupByDay(calendarRecordings, (r) => r.startTime, viewDates)
+
+    // The dated recording lands in its day; nothing lands in a 1970 bucket, and no
+    // "1970-01-01" key exists.
+    expect(grouped['2026-03-02']).toHaveLength(1)
+    expect(grouped['1970-01-01']).toBeUndefined()
+    const totalBucketed = Object.values(grouped).reduce((n, arr) => n + arr.length, 0)
+    expect(totalBucketed).toBe(1)
+  })
+
+  it('leaves dated recordings fully placed and matched (control)', () => {
+    const meetings = [makeMeetingEntity('m1', 'Team Standup', 9, 10)]
+    const recordings = [makeUnifiedRecording('r1', 9, 60), makeUndatedRecording('u1')]
+
+    const { calendarMeetings, orphanRecordings } = matchRecordingsToMeetings(meetings, recordings)
+    expect(calendarMeetings[0].hasRecording).toBe(true)
+    expect(calendarMeetings[0].matchedRecordingId).toBe('r1')
+    expect(orphanRecordings).toHaveLength(0)
+
+    const { calendarRecordings } = buildCalendarRecordings(recordings, meetings)
+    expect(calendarRecordings).toHaveLength(1)
+    expect(calendarRecordings[0].id).toBe('r1')
+    expect(calendarRecordings[0].linkedMeeting?.subject).toBe('Team Standup')
+  })
+
+  // Review follow-up: an explicit manual link (meetingId) is AUTHORITATIVE — an
+  // undated recording that the user linked to a meeting must NOT vanish from the
+  // Calendar. It stays in meeting-match state and is placed at the LINKED
+  // MEETING's time (the link supplies the timestamp the recording lacks).
+  describe('explicitly-linked undated recordings stay on the Calendar', () => {
+    const meeting = makeMeetingEntity('m1', 'Team Standup', 9, 10)
+
+    it('getRecordingMeetingMatchScore honors the manual link before the unknown-date guard', () => {
+      const linked = makeUndatedRecording('u1', 'm1')
+      expect(getRecordingMeetingMatchScore(linked, meeting)).toBe(1000)
+      // Same recording against a DIFFERENT meeting still matches nothing.
+      const other = makeMeetingEntity('m2', 'Planning', 14, 15)
+      expect(getRecordingMeetingMatchScore(linked, other)).toBe(0)
+    })
+
+    it('matchRecordingsToMeetings matches it to the linked meeting at the MEETING time', () => {
+      const { calendarMeetings, orphanRecordings } = matchRecordingsToMeetings(
+        [meeting],
+        [makeUndatedRecording('u1', 'm1')]
+      )
+
+      expect(calendarMeetings).toHaveLength(1)
+      expect(calendarMeetings[0].hasRecording).toBe(true)
+      expect(calendarMeetings[0].matchedRecordingId).toBe('u1')
+      // Placed at the linked meeting's start — never the 1970 epoch.
+      expect(calendarMeetings[0].recordingStartTime?.toISOString()).toBe(meeting.start_time)
+      expect(orphanRecordings).toHaveLength(0)
+      expect(hasEpochDate(calendarMeetings)).toBe(false)
+    })
+
+    it('buildCalendarRecordings builds its block at the linked meeting time and buckets it into that day', () => {
+      const { calendarRecordings, meetingOverlays } = buildCalendarRecordings(
+        [makeUndatedRecording('u1', 'm1')],
+        [meeting]
+      )
+
+      expect(calendarRecordings).toHaveLength(1)
+      expect(calendarRecordings[0].id).toBe('u1')
+      expect(calendarRecordings[0].linkedMeeting?.id).toBe('m1')
+      expect(calendarRecordings[0].startTime.toISOString()).toBe(meeting.start_time)
+      expect(meetingOverlays[0].hasRecording).toBe(true)
+      expect(hasEpochDate(calendarRecordings)).toBe(false)
+
+      // Bucketing: it lands in the linked meeting's day, not a 1970 bucket.
+      const viewDates = [new Date(2026, 2, 2), new Date(2026, 2, 3)]
+      const grouped = groupByDay(calendarRecordings, (r) => r.startTime, viewDates)
+      const meetingDayKey = new Date(meeting.start_time).toISOString().split('T')[0]
+      expect(grouped[meetingDayKey]).toHaveLength(1)
+      expect(grouped['1970-01-01']).toBeUndefined()
+    })
+
+    it('an undated recording linked to a meeting NOT in view is still excluded (no time source)', () => {
+      const elsewhere = makeUndatedRecording('u1', 'meeting-in-another-week')
+
+      const { calendarMeetings, orphanRecordings } = matchRecordingsToMeetings([meeting], [elsewhere])
+      expect(calendarMeetings[0].hasRecording).toBe(false)
+      expect(orphanRecordings).toHaveLength(0)
+
+      const { calendarRecordings } = buildCalendarRecordings([elsewhere], [meeting])
+      expect(calendarRecordings).toHaveLength(0)
+    })
+
+    it('an undated recording WITHOUT a link is still excluded everywhere (control)', () => {
+      const unlinked = makeUndatedRecording('u1')
+
+      const { calendarMeetings, orphanRecordings } = matchRecordingsToMeetings([meeting], [unlinked])
+      expect(calendarMeetings[0].hasRecording).toBe(false)
+      expect(orphanRecordings).toHaveLength(0)
+
+      const { calendarRecordings } = buildCalendarRecordings([unlinked], [meeting])
+      expect(calendarRecordings).toHaveLength(0)
+    })
+  })
+})
+
+/**
+ * F6: Overlap cascade layout — assignOverlapLanes.
+ * Verifies overlapping calendar blocks get distinct cascade lanes (so titles stay
+ * readable) while non-overlapping blocks stay in lane 0 (no regression), and that a
+ * later-starting overlapping block lands in a deeper lane (rendered indented + on top).
+ * This is the honest replacement for the Outlook-style side-by-side split the owner rejected.
+ */
+function overlapBlock(startHour: number, startMin: number, endHour: number, endMin: number, id = `b-${startHour}-${startMin}`) {
+  return {
+    id,
+    startTime: new Date(2026, 2, 2, startHour, startMin, 0),
+    endTime: new Date(2026, 2, 2, endHour, endMin, 0),
+  }
+}
+
+describe('assignOverlapLanes', () => {
+  it('keeps non-overlapping blocks all in lane 0 (no cascade / no regression)', () => {
+    const items = [overlapBlock(9, 0, 10, 0), overlapBlock(10, 0, 11, 0), overlapBlock(11, 0, 12, 0)]
+    const laid = assignOverlapLanes(items)
+    expect(laid.map((i) => i.lane)).toEqual([0, 0, 0])
+  })
+
+  it('assigns a deeper lane to a later-starting overlapping block', () => {
+    // A 9-11 fully contains B 9:30-10:30 => B must be indented + on top.
+    const items = [overlapBlock(9, 0, 11, 0, 'A'), overlapBlock(9, 30, 10, 30, 'B')]
+    const laid = assignOverlapLanes(items)
+    expect(laid.find((i) => i.id === 'A')!.lane).toBe(0)
+    expect(laid.find((i) => i.id === 'B')!.lane).toBe(1)
+  })
+
+  it('cascades three mutually-overlapping blocks into lanes 0,1,2 (>=3 colliding pairs)', () => {
+    const items = [overlapBlock(9, 0, 12, 0, 'A'), overlapBlock(9, 30, 12, 0, 'B'), overlapBlock(10, 0, 12, 0, 'C')]
+    const laid = assignOverlapLanes(items)
+    expect(laid.find((i) => i.id === 'A')!.lane).toBe(0)
+    expect(laid.find((i) => i.id === 'B')!.lane).toBe(1)
+    expect(laid.find((i) => i.id === 'C')!.lane).toBe(2)
+    // Deeper lane => higher z-index in the caller, so C renders above B above A.
+    expect(laid.map((i) => i.lane)).toEqual([0, 1, 2])
+  })
+
+  it('reuses a freed lane once an earlier block ends (touching != overlapping)', () => {
+    // A 9-10, B 9:30-10:30 (overlaps A -> lane 1), C 10:00-11:00 starts as A ends.
+    // A ended, so C reclaims lane 0; B still open in lane 1.
+    const items = [overlapBlock(9, 0, 10, 0, 'A'), overlapBlock(9, 30, 10, 30, 'B'), overlapBlock(10, 0, 11, 0, 'C')]
+    const laid = assignOverlapLanes(items)
+    expect(laid.find((i) => i.id === 'A')!.lane).toBe(0)
+    expect(laid.find((i) => i.id === 'B')!.lane).toBe(1)
+    expect(laid.find((i) => i.id === 'C')!.lane).toBe(0)
+  })
+
+  it('preserves input order and does not mutate the original items', () => {
+    const items = [overlapBlock(9, 0, 11, 0, 'A'), overlapBlock(9, 30, 10, 30, 'B')]
+    const laid = assignOverlapLanes(items)
+    expect(laid.map((i) => i.id)).toEqual(['A', 'B'])
+    expect((items[0] as unknown as { lane?: number }).lane).toBeUndefined()
+  })
+
+  it('returns an empty array for no items', () => {
+    expect(assignOverlapLanes([])).toEqual([])
+  })
+})
+
+/**
+ * F7: accessible label builder for calendar event blocks.
+ */
+describe('buildEventAriaLabel', () => {
+  it('combines subject with a readable time range', () => {
+    const start = new Date(2026, 2, 2, 9, 0, 0)
+    const end = new Date(2026, 2, 2, 10, 30, 0)
+    expect(buildEventAriaLabel('Team Standup', start, end)).toBe('Team Standup, 9:00 AM to 10:30 AM')
+  })
+
+  it('falls back to "Untitled event" for a blank subject', () => {
+    const start = new Date(2026, 2, 2, 14, 0, 0)
+    const end = new Date(2026, 2, 2, 15, 0, 0)
+    expect(buildEventAriaLabel('   ', start, end)).toBe('Untitled event, 2:00 PM to 3:00 PM')
   })
 })

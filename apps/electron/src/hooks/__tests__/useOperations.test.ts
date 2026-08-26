@@ -12,7 +12,12 @@ vi.mock('@/hooks/useDownloadOrchestrator', () => ({
   cancelDownloads: vi.fn(),
   cancelDownloadsComplete: vi.fn(),
   requestScopedDownloads: vi.fn(),
-  markDownloadPriority: vi.fn()
+  markDownloadPriority: vi.fn(),
+  releaseDownloadBookkeeping: vi.fn(),
+  clearAllDownloadBookkeeping: vi.fn(),
+  markDownloadCancelled: vi.fn(),
+  clearDownloadCancelled: vi.fn(),
+  drainDownloadQueue: vi.fn()
 }))
 
 // Mock transcription store
@@ -45,19 +50,23 @@ const mockCancelTranscription = vi.fn().mockResolvedValue(undefined)
 const mockCancelAllTranscriptions = vi.fn().mockResolvedValue({ count: 3 })
 const mockQueueDownloads = vi.fn().mockResolvedValue(undefined)
 const mockCancelAllDownloads = vi.fn().mockResolvedValue(undefined)
+const mockCancelDownload = vi.fn().mockResolvedValue({ success: true })
 
 const mockAddToQueueIPC = vi.fn().mockResolvedValue('queue-item-1')
+const mockReprocessWith = vi.fn().mockResolvedValue({ success: true, queueItemId: 'queue-reprocess-1' })
 
 global.window.electronAPI = {
   recordings: {
     updateStatus: mockUpdateStatus,
     addToQueue: mockAddToQueueIPC,
+    reprocessWith: mockReprocessWith,
     cancelTranscription: mockCancelTranscription,
     cancelAllTranscriptions: mockCancelAllTranscriptions
   },
   downloadService: {
     queueDownloads: mockQueueDownloads,
-    cancelAll: mockCancelAllDownloads
+    cancelAll: mockCancelAllDownloads,
+    cancel: mockCancelDownload
   },
   config: {
     get: vi.fn().mockResolvedValue({
@@ -178,6 +187,31 @@ describe('useOperations', () => {
       expect(mockAddToQueue).toHaveBeenCalledWith('queue-item-1', 'rec-3', 'eligible.wav')
     })
 
+    it('routes the primary Re-transcribe action through an explicit provider reprocess', async () => {
+      const { result } = renderHook(() => useOperations())
+      const completed = {
+        id: 'rec-complete',
+        filename: 'completed.wav',
+        location: 'local-only' as const,
+        localPath: '/path/completed.wav',
+        syncStatus: 'synced' as const,
+        transcriptionStatus: 'complete' as const,
+        size: 1024,
+        duration: 60,
+        dateRecorded: new Date()
+      }
+
+      let success: boolean | undefined
+      await act(async () => {
+        success = await result.current.queueTranscription(completed as any)
+      })
+
+      expect(success).toBe(true)
+      expect(mockReprocessWith).toHaveBeenCalledWith('rec-complete', 'gemini')
+      expect(mockAddToQueueIPC).not.toHaveBeenCalled()
+      expect(mockAddToQueue).toHaveBeenCalledWith('queue-reprocess-1', 'rec-complete', 'completed.wav')
+    })
+
     it('queues local ASR transcription without a Gemini API key', async () => {
       vi.mocked(window.electronAPI.config.get).mockResolvedValue({
         success: true,
@@ -246,6 +280,7 @@ describe('useOperations', () => {
     })
 
     it('queues download for device-only recording', async () => {
+      const { drainDownloadQueue } = await import('@/hooks/useDownloadOrchestrator')
       const { result } = renderHook(() => useOperations())
 
       const deviceOnly = {
@@ -271,6 +306,7 @@ describe('useOperations', () => {
         size: 2048,
         dateCreated: expect.any(String)
       }])
+      expect(drainDownloadQueue).toHaveBeenCalledOnce()
     })
   })
 
@@ -288,7 +324,8 @@ describe('useOperations', () => {
   })
 
   describe('cancelAllDownloads', () => {
-    it('calls IPC cancel', async () => {
+    it('awaits the main-process cancelAll and clears bookkeeping', async () => {
+      const { clearAllDownloadBookkeeping } = await import('@/hooks/useDownloadOrchestrator')
       const { result } = renderHook(() => useOperations())
 
       await act(async () => {
@@ -296,6 +333,47 @@ describe('useOperations', () => {
       })
 
       expect(mockCancelAllDownloads).toHaveBeenCalled()
+      expect(clearAllDownloadBookkeeping).toHaveBeenCalled()
+    })
+  })
+
+  describe('cancelDownload', () => {
+    it('cancels a single download via IPC, marks it cancelled, and releases its bookkeeping', async () => {
+      const { releaseDownloadBookkeeping, markDownloadCancelled, clearDownloadCancelled } =
+        await import('@/hooks/useDownloadOrchestrator')
+      const { result } = renderHook(() => useOperations())
+
+      let ok: boolean | undefined
+      await act(async () => {
+        ok = await result.current.cancelDownload('REC0001.WAV')
+      })
+
+      expect(mockCancelDownload).toHaveBeenCalledWith('REC0001.WAV')
+      // Finding 1: the renderer orchestrator is told BEFORE the IPC so the aborted
+      // transfer resolves as a cancellation, not a failure.
+      expect(markDownloadCancelled).toHaveBeenCalledWith('REC0001.WAV')
+      expect(releaseDownloadBookkeeping).toHaveBeenCalledWith('REC0001.WAV')
+      // A successful cancel keeps the marker (the orchestrator consumes it) — not cleared.
+      expect(clearDownloadCancelled).not.toHaveBeenCalled()
+      expect(ok).toBe(true)
+    })
+
+    it('returns false and clears the marker when the item is unknown/terminal', async () => {
+      mockCancelDownload.mockResolvedValueOnce({ success: false, error: 'not found' })
+      const { markDownloadCancelled, clearDownloadCancelled } =
+        await import('@/hooks/useDownloadOrchestrator')
+      const { result } = renderHook(() => useOperations())
+
+      let ok: boolean | undefined
+      await act(async () => {
+        ok = await result.current.cancelDownload('missing.wav')
+      })
+
+      // Marker was optimistically set, then cleared because nothing was cancelled (so a
+      // genuinely running transfer is never mislabeled as cancelled).
+      expect(markDownloadCancelled).toHaveBeenCalledWith('missing.wav')
+      expect(clearDownloadCancelled).toHaveBeenCalledWith('missing.wav')
+      expect(ok).toBe(false)
     })
   })
 })

@@ -35,7 +35,7 @@ describe('useTransitionFilters', () => {
       clearFilters: vi.fn()
     }
 
-    // @ts-ignore
+    // @ts-expect-error mock method not present on typed import
     useLibraryFilterManager.mockReturnValue(mockFilterManager)
   })
 

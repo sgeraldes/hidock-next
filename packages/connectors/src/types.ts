@@ -114,7 +114,8 @@ export interface ExternalMeeting {
   isOnline?: boolean
   onlineJoinUrl?: string
   organizer?: ExternalPerson
-  attendees: ExternalPerson[]
+  /** Omitted when an incremental source update does not include attendee data. */
+  attendees?: ExternalPerson[]
   metadata?: Record<string, unknown>
 }
 

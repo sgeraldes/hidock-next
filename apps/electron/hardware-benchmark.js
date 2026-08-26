@@ -1,5 +1,5 @@
 
-const { app, BrowserWindow } = require('electron');
+const { app } = require('electron');
 const { performance } = require('perf_hooks');
 
 // --- LEGACY PARSING LOGIC (Current Production Code) ---
@@ -49,10 +49,10 @@ function runNewParser(buffer) {
     const files = [];
     let pos = 6;
     while (pos < buffer.length) {
-        const fileVersion = buffer[pos++];
+        const _fileVersion = buffer[pos++];
         const nameLen = ((buffer[pos] << 16) | (buffer[pos + 1] << 8) | buffer[pos + 2]);
         pos += 3;
-        
+
         // Faster string conversion
         const filename = String.fromCharCode.apply(null, buffer.subarray(pos, pos + nameLen));
         pos += nameLen;
@@ -120,7 +120,7 @@ app.whenReady().then(async () => {
     // 4. Benchmark New Parser (Silent)
     console.log('\nBenchmarking Optimized Parser (No logs, no regex)...');
     const startNew = performance.now();
-    const filesNew = runNewParser(rawBuffer);
+    const _filesNew = runNewParser(rawBuffer);
     const endNew = performance.now();
     const newTime = endNew - startNew;
 

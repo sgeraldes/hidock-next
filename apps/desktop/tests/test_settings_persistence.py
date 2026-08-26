@@ -18,7 +18,13 @@ import config_and_logger
 import gui_event_handlers
 import gui_main_window
 import pytest
-import settings_window
+
+# conftest's autouse ``setup_test_environment`` fixture replaces ``settings_window.SettingsDialog``
+# with a stub ``MockSettingsDialog`` so that no test can ever spawn a real CustomTkinter dialog.
+# The test below exercises the *real* dialog's atomic single-setting save, so bind the genuine
+# class here at import time: pytest imports test modules during collection, before any fixture
+# gets the chance to swap the module attribute out.
+from settings_window import SettingsDialog as RealSettingsDialog
 
 
 class TestSettingsPersistence:
@@ -92,7 +98,7 @@ class TestSettingsPersistence:
         mock_dock.is_connected.return_value = False
 
         # Create dialog instance without calling __init__
-        dialog = settings_window.SettingsDialog.__new__(settings_window.SettingsDialog)
+        dialog = RealSettingsDialog.__new__(RealSettingsDialog)
         dialog.parent_gui = mock_parent
         dialog.dock = mock_dock
         dialog.local_vars = {"autoconnect_var": Mock(), "log_level_var": Mock()}

@@ -1,5 +1,5 @@
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 import { Library } from '@/pages/Library'
 import { generateMockRecordings } from './mockData'
@@ -16,9 +16,12 @@ const localStorageMock = {
 Object.defineProperty(window, 'localStorage', { value: localStorageMock })
 
 // Mock hooks
-vi.mock('@/hooks/useUnifiedRecordings', () => ({
-  useUnifiedRecordings: vi.fn()
-}))
+vi.mock('@/hooks/useUnifiedRecordings', async (importOriginal) => {
+  // Spread the real module so helpers the page imports (e.g.
+  // overlayActiveTranscriptionStatuses) do not vanish as the page evolves.
+  const actual = await importOriginal<typeof import('@/hooks/useUnifiedRecordings')>()
+  return { ...actual, useUnifiedRecordings: vi.fn() }
+})
 
 vi.mock('@/store/useUIStore', () => ({
   useUIStore: vi.fn((selector) => {
@@ -56,6 +59,26 @@ vi.mock('@/store/useAppStore', () => ({
 vi.mock('@/store/useLibraryStore', () => ({
   useLibraryStore: vi.fn((selector) => {
     const state = {
+      // Reader-pane state. Keep in sync with useLibraryStore's initialState —
+      // a missing key here surfaces as "Cannot read properties of undefined"
+      // deep inside a render, not as an obvious mock error.
+      readerSectionModes: {
+        player: 'expanded',
+        metadata: 'expanded',
+        summary: 'expanded',
+        transcript: 'expanded'
+      },
+      setReaderSectionMode: vi.fn(),
+      readerVerticalSizes: [64, 36],
+      setReaderVerticalSizes: vi.fn(),
+      readerMaximizedSection: null,
+      setReaderMaximizedSection: vi.fn(),
+      toggleReaderMaximizedSection: vi.fn(),
+      readerListCollapsedBeforeMaximize: null,
+      listPaneSize: 25,
+      setListPaneSize: vi.fn(),
+      listCollapsed: false,
+      setListCollapsed: vi.fn(),
       viewMode: 'card',
       sortBy: 'date',
       sortOrder: 'desc',
@@ -163,7 +186,9 @@ vi.mock('@/features/library/hooks', () => ({
     setStatusFilter: vi.fn(),
     setSearchQuery: vi.fn(),
     isPending: false
-  }))
+  })),
+  // F16/spec-003 Part F — mounted once on the Library page; no-op here.
+  useValueSuggestionToasts: vi.fn()
 }))
 
 vi.mock('@tanstack/react-virtual', () => ({
@@ -184,13 +209,15 @@ vi.mock('@tanstack/react-virtual', () => ({
 
 // Mock electronAPI
 global.window.electronAPI = {
-  transcripts: { getByRecordingIds: vi.fn().mockResolvedValue({}) },
+  transcripts: { getByRecordingIds: vi.fn().mockResolvedValue({}), getByRecordingIdsOwner: vi.fn().mockResolvedValue({}) },
   meetings: { getByIds: vi.fn().mockResolvedValue({}) },
   storage: { openFolder: vi.fn() },
   recordings: {
     addExternal: vi.fn(),
     delete: vi.fn(),
-    updateStatus: vi.fn()
+    updateStatus: vi.fn(),
+    // spec-005/F17 T5 — loaded eagerly on mount (for the Trash toggle's count).
+    getTrash: vi.fn().mockResolvedValue([])
   },
   downloadService: {
     queueDownloads: vi.fn()
@@ -213,6 +240,40 @@ describe('Library Performance', () => {
       </MemoryRouter>
     )
   }
+
+  // Warmup: pay the one-time costs (module init, jsdom bootstrap, cold JIT of
+  // the React/Library render path) OUTSIDE any timed window. The first timed
+  // render used to absorb all of that and blew its 2000ms budget on a loaded
+  // shared CI runner (run 29342252597 measured 2229ms for 100 items) while the
+  // same suite passed locally. With the warmup, every timed case below
+  // measures steady-state render cost — the thing a real regression moves.
+  // The generous hook timeout only covers this known-cold render; it does not
+  // loosen any timed assertion.
+  beforeAll(async () => {
+    const recordings = generateMockRecordings(10)
+    vi.mocked(useUnifiedRecordings).mockReturnValue({
+      recordings,
+      loading: false,
+      error: null,
+      refresh: vi.fn(),
+      deviceConnected: false,
+      stats: {
+        total: recordings.length,
+        deviceOnly: 3,
+        localOnly: 3,
+        both: 4,
+        synced: 7,
+        unsynced: 3,
+        onSource: 6,
+        locallyAvailable: 6
+      }
+    })
+    const { unmount } = renderLibrary()
+    await waitFor(() => {
+      expect(screen.getByTestId('library-list')).toBeInTheDocument()
+    })
+    unmount()
+  }, 30_000)
 
   testCases.forEach(count => {
     it(`renders ${count} items within performance budget`, async () => {
@@ -250,16 +311,18 @@ describe('Library Performance', () => {
       console.log(`Render time for ${count} items: ${renderTime.toFixed(2)}ms`)
 
       // Phase 6 target: <100ms for 1000 items
-      // jsdom rendering includes setup overhead, tri-pane layout complexity,
-      // and varies significantly under parallel test execution with system load.
-      // The 100-item case often takes LONGER than 1000 due to being the first
-      // render in the test suite (cold JIT, module init, jsdom bootstrap).
+      // jsdom rendering includes tri-pane layout complexity and varies with
+      // concurrent CPU load under parallel test execution. One-time costs
+      // (module init, jsdom bootstrap, cold JIT) are paid by the beforeAll
+      // warmup render, so these budgets bound the steady-state render cost;
+      // they are sized to catch pathological regressions (an un-virtualized
+      // 5000-row render takes seconds in jsdom), not micro-timing.
       if (count <= 100) {
-        expect(renderTime).toBeLessThan(2000) // First render: cold JIT + jsdom bootstrap + tri-pane + parallel test load
+        expect(renderTime).toBeLessThan(2000)
       } else if (count <= 1000) {
-        expect(renderTime).toBeLessThan(2000) // Warmed up but more data
+        expect(renderTime).toBeLessThan(2000) // same budget, more data
       } else if (count <= 5000) {
-        expect(renderTime).toBeLessThan(2500) // Larger sets need proportionally more headroom
+        expect(renderTime).toBeLessThan(2500) // larger sets need proportionally more headroom
       }
     })
   })

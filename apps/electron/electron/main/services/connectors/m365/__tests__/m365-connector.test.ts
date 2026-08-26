@@ -91,6 +91,33 @@ describe('M365Connector — calendar sync', () => {
     expect(page2.cursor).toContain('FINAL')
   })
 
+  it('distinguishes omitted attendees from an explicit empty attendee list', async () => {
+    const ctx = fakeCtx({ clientId: 'abc' })
+    const graphFetch = vi.fn(async () => ({
+      value: [
+        {
+          id: 'omitted',
+          subject: 'Partial update',
+          start: { dateTime: '2026-07-09T10:00:00', timeZone: 'UTC' },
+          end: { dateTime: '2026-07-09T11:00:00', timeZone: 'UTC' },
+        },
+        {
+          id: 'cleared',
+          subject: 'Attendees removed',
+          start: { dateTime: '2026-07-09T12:00:00', timeZone: 'UTC' },
+          end: { dateTime: '2026-07-09T13:00:00', timeZone: 'UTC' },
+          attendees: [],
+        },
+      ],
+      '@odata.deltaLink': 'https://graph.microsoft.com/v1.0/me/calendarView/delta?$deltatoken=FINAL',
+    }))
+    const connector = new M365Connector(ctx, { acquireToken: async () => 'tok', graphFetch })
+
+    const result = await connector.capabilities.sources!.pull({ externalId: 'calendar', name: 'Calendar', kind: 'calendar' })
+    expect((result.items[0].entity as any).attendees).toBeUndefined()
+    expect((result.items[1].entity as any).attendees).toEqual([])
+  })
+
   it('maps contacts with emails and skips emailless contacts', async () => {
     const ctx = fakeCtx({ clientId: 'abc' })
     const page = {

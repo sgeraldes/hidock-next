@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Users,
@@ -48,23 +48,24 @@ import { toast } from '@/components/ui/toaster'
 /** Above this many links on BOTH sides, a merge requires typing the loser's name. */
 const MERGE_LINK_THRESHOLD = 10
 
+const PAGE_SIZE = 40
+
+type PeopleSort = 'name' | 'lastSeen' | 'interactions'
+
 export function People() {
   const navigate = useNavigate()
 
   const [people, setPeople] = useState<Person[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [typeFilter, setTypeFilter] = useState<PersonType | 'all'>('all')
   const [totalCount, setTotalCount] = useState(0)
 
-  // Pagination state
-  const PAGE_SIZE = 30
-  const [currentPage, setCurrentPage] = useState(0)
-
   // Delete confirmation state (replaces confirm())
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null)
-  const [sortBy, setSortBy] = useState<'name' | 'lastSeen' | 'interactions'>('name')
+  const [sortBy, setSortBy] = useState<PeopleSort>('name')
 
   // Quick-merge selection mode: pick exactly two contacts, then fold one into the other.
   const [mergeMode, setMergeMode] = useState(false)
@@ -82,57 +83,65 @@ export function People() {
   // Add Person dialog
   const [addDialogOpen, setAddDialogOpen] = useState(false)
 
-  // Debounce: skip firing on initial mount
   const isFirstMount = useRef(true)
+  const requestIdRef = useRef(0)
+  const loadedCountRef = useRef(0)
+  const loadedQueryRef = useRef<string | null>(null)
+  const queryKey = JSON.stringify([searchQuery, typeFilter, sortBy])
 
-  const loadPeople = useCallback(async (page = 0) => {
-    setLoading(true)
+  const loadPeople = useCallback(async (mode: 'reset' | 'append' = 'reset') => {
+    const isAppend = mode === 'append'
+    if (isAppend && loadedQueryRef.current !== queryKey) return
+
+    const requestId = ++requestIdRef.current
+    if (isAppend) {
+      setLoadingMore(true)
+    } else {
+      setLoading(true)
+      setLoadingMore(false)
+    }
+
     try {
       const result = await window.electronAPI.contacts.getAll({
         search: searchQuery,
         type: typeFilter,
+        sortBy,
         limit: PAGE_SIZE,
-        offset: page * PAGE_SIZE
+        offset: isAppend ? loadedCountRef.current : 0
       })
+      if (requestId !== requestIdRef.current) return
+
       if (result.success) {
-        // Server returns already-mapped Person objects from contacts-handlers.ts
         const contacts: Person[] = result.data.contacts
-        setPeople(contacts)
+        const nextCount = isAppend ? loadedCountRef.current + contacts.length : contacts.length
+        setPeople((current) => (isAppend ? [...current, ...contacts] : contacts))
+        loadedCountRef.current = nextCount
+        loadedQueryRef.current = queryKey
         setTotalCount(result.data.total)
       }
     } catch (error) {
+      if (requestId !== requestIdRef.current) return
       console.error('Failed to load people:', error)
       toast.error('Failed to load people', error instanceof Error ? error.message : 'An unexpected error occurred')
     } finally {
-      setLoading(false)
+      if (requestId === requestIdRef.current) {
+        setLoading(false)
+        setLoadingMore(false)
+      }
     }
-  }, [searchQuery, typeFilter])
+  }, [queryKey, searchQuery, sortBy, typeFilter])
 
-  // Initial load: fire immediately
   useEffect(() => {
-    loadPeople(0)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  // Subsequent changes: debounce search/filter and reset to first page
-  useEffect(() => {
-    if (isFirstMount.current) {
-      isFirstMount.current = false
-      return
-    }
-    setCurrentPage(0)
+    requestIdRef.current += 1
+    const delay = isFirstMount.current ? 0 : 300
+    isFirstMount.current = false
     const timer = setTimeout(() => {
-      loadPeople(0)
-    }, 300)
+      void loadPeople('reset')
+    }, delay)
     return () => clearTimeout(timer)
   }, [loadPeople])
 
-  // Pagination helpers
-  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE))
-  const handlePageChange = useCallback((page: number) => {
-    setCurrentPage(page)
-    loadPeople(page)
-  }, [loadPeople])
+  const hasMorePeople = loadedQueryRef.current === queryKey && people.length < totalCount
 
   const handleDeleteClick = useCallback((personId: string, personName: string, event: React.MouseEvent) => {
     event.stopPropagation()
@@ -147,7 +156,7 @@ export function People() {
       const result = await window.electronAPI.contacts.delete(deleteTarget.id)
       if (result.success) {
         toast.success('Contact deleted', `${deleteTarget.name} has been removed`)
-        await loadPeople(currentPage)
+        await loadPeople('reset')
       } else {
         toast.error('Failed to delete contact', (result as any).error?.message || 'Unknown error')
       }
@@ -157,7 +166,7 @@ export function People() {
     }
     setDeleteDialogOpen(false)
     setDeleteTarget(null)
-  }, [deleteTarget, loadPeople, currentPage])
+  }, [deleteTarget, loadPeople])
 
   // --- Quick merge ---
 
@@ -241,7 +250,7 @@ export function People() {
         setMergeMode(false)
         setSelectedForMerge([])
         setKeeperId(null)
-        await loadPeople(currentPage)
+        await loadPeople('reset')
       } else {
         toast.error('Failed to merge contacts', (result as any).error?.message || 'Unknown error')
       }
@@ -251,7 +260,7 @@ export function People() {
     } finally {
       setMerging(false)
     }
-  }, [keeper, loser, loadPeople, currentPage])
+  }, [keeper, loser, loadPeople])
 
   const handleDiscover = useCallback(async () => {
     setDiscovering(true)
@@ -274,22 +283,6 @@ export function People() {
       setDiscovering(false)
     }
   }, [])
-
-  const sortedPeople = useMemo(() => {
-    const sorted = [...people]
-    switch (sortBy) {
-      case 'name':
-        sorted.sort((a, b) => a.name.localeCompare(b.name))
-        break
-      case 'lastSeen':
-        sorted.sort((a, b) => new Date(b.lastSeenAt).getTime() - new Date(a.lastSeenAt).getTime())
-        break
-      case 'interactions':
-        sorted.sort((a, b) => b.interactionCount - a.interactionCount)
-        break
-    }
-    return sorted
-  }, [people, sortBy])
 
   /** Safely format a date string, returning fallback for invalid dates */
   const formatDate = (dateStr: string | null | undefined): string => {
@@ -335,7 +328,7 @@ export function People() {
             <p className="text-sm text-muted-foreground">Everyone mentioned in your knowledge base</p>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={() => loadPeople(currentPage)}>
+            <Button variant="outline" size="sm" onClick={() => loadPeople('reset')}>
               <RefreshCw className={cn("h-4 w-4 mr-2", loading && "animate-spin")} />
               Refresh
             </Button>
@@ -443,14 +436,14 @@ export function People() {
           {/* Result count indicator */}
           {!loading && totalCount > 0 && (
             <p className="text-xs text-muted-foreground mb-4">
-              Showing {Math.min(currentPage * PAGE_SIZE + 1, totalCount)}–{Math.min((currentPage + 1) * PAGE_SIZE, totalCount)} of {totalCount} {totalCount === 1 ? 'person' : 'people'}
+              Showing {people.length} of {totalCount} {totalCount === 1 ? 'person' : 'people'}
             </p>
           )}
           {loading && people.length === 0 ? (
             <div className="flex items-center justify-center py-20">
               <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
             </div>
-          ) : sortedPeople.length === 0 ? (
+          ) : people.length === 0 ? (
             <Card>
               <CardContent className="py-16 text-center">
                 <Users className="h-12 w-12 mx-auto mb-4 text-muted-foreground opacity-50" />
@@ -465,7 +458,7 @@ export function People() {
           ) : (
             <div>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
-              {sortedPeople.map((person, index) => {
+              {people.map((person, index) => {
                 const isSelected = selectedForMerge.some((p) => p.id === person.id)
                 const typeLabel = getTypeLabel(person.type)
                 const card = (
@@ -599,29 +592,19 @@ export function People() {
               })}
             </div>
 
-            {/* Pagination controls */}
-            {totalPages > 1 && (
-              <div className="flex items-center justify-center gap-2 mt-6">
+            {/* Load more */}
+            {hasMorePeople && (
+              <div className="flex items-center justify-center mt-6">
                 <Button
                   variant="outline"
                   size="sm"
-                  disabled={currentPage === 0 || loading}
-                  onClick={() => handlePageChange(currentPage - 1)}
-                  aria-label="Previous page"
+                  disabled={loadingMore}
+                  onClick={() => loadPeople('append')}
                 >
-                  Previous
-                </Button>
-                <span className="text-sm text-muted-foreground px-2">
-                  Page {currentPage + 1} of {totalPages}
-                </span>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={currentPage >= totalPages - 1 || loading}
-                  onClick={() => handlePageChange(currentPage + 1)}
-                  aria-label="Next page"
-                >
-                  Next
+                  {loadingMore ? (
+                    <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                  ) : null}
+                  {loadingMore ? 'Loading…' : 'Load more'}
                 </Button>
               </div>
             )}
@@ -693,7 +676,7 @@ export function People() {
         open={addDialogOpen}
         onOpenChange={setAddDialogOpen}
         onCreated={(person) => {
-          loadPeople(0)
+          loadPeople('reset')
           navigate(`/person/${person.id}`)
         }}
         onOpenExisting={(existingId) => navigate(`/person/${existingId}`)}

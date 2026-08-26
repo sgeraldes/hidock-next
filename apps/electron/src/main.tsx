@@ -17,8 +17,10 @@ console.log('[main.tsx] executing; rootAlreadyCreated =', !!container.__hidockRo
 
 if (!container.__hidockRootCreated) {
   container.__hidockRootCreated = true
+  // react-router v7: startTransition wrapping and splat-relative path
+  // resolution are the default now, so the v6 `future` opt-ins are gone.
   ReactDOM.createRoot(container).render(
-    <HashRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+    <HashRouter>
       <App />
     </HashRouter>
   )

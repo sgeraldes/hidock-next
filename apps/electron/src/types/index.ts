@@ -30,6 +30,8 @@
 export * from './stores'
 export type { Actionable } from './knowledge'
 import type { Actionable } from './knowledge'
+export type { FeaturesConfig } from '@/shared/feature-registry'
+import type { FeaturesConfig } from '@/shared/feature-registry'
 
 // =============================================================================
 // Existing Types
@@ -97,11 +99,35 @@ export interface Transcript {
   transcription_model: string | null
   title_suggestion: string | null
   question_suggestions: string | null // JSON string of suggested questions
+  transcription_run_id?: string | null
+  diarization_run_id?: string | null
+  summary_run_id?: string | null
+  title_run_id?: string | null
+  meeting_resolution_run_id?: string | null
+  diarization_quality_status?: 'high' | 'degraded' | 'failed' | 'unavailable' | null
+  diarization_quality?: string | null
+  mentioned_people?: string | null
   created_at: string
 }
 
 export interface RecordingWithTranscript extends Recording {
   transcript?: Transcript
+
+  // Present when fetched for a specific meeting (recordings:getForMeeting).
+  // A capture spanning back-to-back meetings is split into "<base> - Part N",
+  // and every overlapping part stays linked — the meeting really does span
+  // them. These fields say WHICH part holds the conversation, and the results
+  // are ordered by meetingCoverage descending so [0] is that part.
+  /** Share of the MEETING window this recording covers (0..1). */
+  meetingCoverage?: number
+  /** Share of THIS recording that falls inside the meeting (0..1). */
+  recordingCoverage?: number
+  /** Seconds of overlap with the meeting window. */
+  overlapSeconds?: number
+  /** Part number when the filename is `<base> - Part N`, else null. */
+  partNumber?: number | null
+  /** Base name shared with sibling parts, else null. */
+  partBaseName?: string | null
 }
 
 export interface MeetingDetails {
@@ -147,7 +173,14 @@ export interface CalendarSettings {
 }
 
 // B-CAL-004: Error category for calendar sync failures
-export type CalendarErrorCategory = 'network' | 'parse' | 'database' | 'validation' | 'unknown'
+export type CalendarErrorCategory =
+  | 'network'
+  | 'parse'
+  | 'database'
+  | 'validation'
+  | 'auth'
+  | 'cancelled'
+  | 'unknown'
 
 export interface CalendarSyncResult {
   success: boolean
@@ -155,6 +188,12 @@ export interface CalendarSyncResult {
   error?: string
   errorCategory?: CalendarErrorCategory
   lastSync?: string
+  /**
+   * The sync did not run inline — startup work was still going, so main started
+   * it in the background and calendar:synced will land when it completes. Only a
+   * user-initiated ('manual') sync can come back this way.
+   */
+  queued?: boolean
 }
 
 export interface AppConfig {
@@ -175,8 +214,23 @@ export interface AppConfig {
     localAsrVocabularyFile: string
     localAsrDiarize: boolean
     localAsrNumBeams: number
+    speakerLinkingEnabled: boolean
+    speakerLinkingPythonPath: string
+    speakerLinkingWorkerPath: string
+    speakerLinkingModel: string
+    speakerLinkingFallbackModel: string
+    speakerLinkingMatchThreshold: number
+    speakerLinkingMatchMargin: number
+    speakerLinkingMinSpeechSeconds: number
+    speakerLinkingTimeoutSeconds: number
     autoTranscribe: boolean
     language: string
+    /** F16/spec-001 kill-switch (main-process config.ts) — mirrored here only
+     *  so Settings can show a hint when the manual backfill runs while live
+     *  classification is off; not itself a user-editable Settings field.
+     *  Optional (unlike its form-bound siblings above) since it's read
+     *  defensively (`=== false`) rather than round-tripped through a form. */
+    valueClassificationEnabled?: boolean
   }
   embeddings: {
     provider: 'ollama'
@@ -195,6 +249,9 @@ export interface AppConfig {
     autoConnect: boolean
     autoDownload: boolean
   }
+  // Modular features (Track I) — mirror of the main-process shape. `preset`
+  // selects a named feature-set; `flags` are sparse per-feature overrides.
+  features?: FeaturesConfig
   ui: {
     theme: 'light' | 'dark' | 'system'
     defaultView: 'week' | 'month'

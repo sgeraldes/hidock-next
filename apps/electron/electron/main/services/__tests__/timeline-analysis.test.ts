@@ -12,7 +12,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { existsSync, rmSync } from 'fs'
+import { existsSync, rmSync, readFileSync } from 'fs'
+
+/** Target schema version read from database.ts — see database.test.ts for why. */
+const EXPECTED_SCHEMA_VERSION = Number(
+  readFileSync(join(__dirname, '..', 'database.ts'), 'utf-8').match(/const SCHEMA_VERSION = (\d+)\b/)![1]
+)
 
 const dbPath = join(tmpdir(), `hidock-v39-timeline-${process.pid}.sqlite`)
 
@@ -111,9 +116,9 @@ afterEach(() => {
 })
 
 describe('schema v39 timeline columns', () => {
-  it('is at schema version 39', () => {
+  it('is at the current schema version', () => {
     const row = queryOne<{ version: number }>('SELECT version FROM schema_version ORDER BY version DESC LIMIT 1')
-    expect(row?.version).toBe(39)
+    expect(row?.version).toBe(EXPECTED_SCHEMA_VERSION)
   })
 
   it('transcripts has sentiment_segments + event_markers columns', () => {
@@ -365,6 +370,46 @@ describe('getTimelineAnalysis', () => {
   })
 })
 
+// ADV17-1 (round-18) — the point-read must match analyzeTimeline's gate: an
+// excluded recording's persisted markers (labels derived from action/decision
+// text) are NEVER returned. Fail-closed = empty on false OR lookup failure.
+describe('getTimelineAnalysis — ADV17-1 eligibility gate', () => {
+  const EMPTY = { sentimentSegments: [], eventMarkers: [] }
+
+  beforeEach(async () => {
+    seedRecording('recGate')
+    seedTranscript('recGate', SPEAKERS_JSON)
+    seedCapture('capGate', 'recGate')
+    run('INSERT INTO action_items (id, knowledge_capture_id, content) VALUES (?, ?, ?)', [
+      'aiG',
+      'capGate',
+      'Carlos will prepare the rollback plan before the deploy window'
+    ])
+    // Persist markers WHILE the recording is still eligible.
+    await analyzeTimeline('recGate', undefined, { scoreWindows: fakeScorer })
+  })
+
+  it('returns persisted markers while the recording is eligible', () => {
+    const r = getTimelineAnalysis('recGate')
+    expect(r.eventMarkers.length).toBeGreaterThan(0)
+  })
+
+  it('returns EMPTY once the recording is soft-deleted', () => {
+    run('UPDATE recordings SET deleted_at = ? WHERE id = ?', ['2026-07-15T00:00:00.000Z', 'recGate'])
+    expect(getTimelineAnalysis('recGate')).toEqual(EMPTY)
+  })
+
+  it('returns EMPTY once the recording is marked personal', () => {
+    run('UPDATE recordings SET personal = 1 WHERE id = ?', ['recGate'])
+    expect(getTimelineAnalysis('recGate')).toEqual(EMPTY)
+  })
+
+  it('returns EMPTY once the recording is value-excluded (garbage capture)', () => {
+    run("UPDATE knowledge_captures SET quality_rating = 'garbage' WHERE id = ?", ['capGate'])
+    expect(getTimelineAnalysis('recGate')).toEqual(EMPTY)
+  })
+})
+
 describe('analyzeTimeline (persist + idempotent)', () => {
   beforeEach(() => {
     seedRecording('rec3')
@@ -393,6 +438,17 @@ describe('analyzeTimeline (persist + idempotent)', () => {
     expect(persisted.sentimentSegments.length).toBe(result.sentimentSegments.length)
   })
 
+  it('P2 (round-3) — shouldPersist()=false returns the computed result WITHOUT persisting', async () => {
+    const result = await analyzeTimeline('rec3', undefined, { scoreWindows: fakeScorer }, () => false)
+    // Computed + returned to the caller…
+    expect(result.sentimentSegments.length).toBeGreaterThan(0)
+    expect(result.eventMarkers.length).toBe(2)
+    // …but NOTHING is written back (a purge landed during the sentiment await).
+    const persisted = getTimelineAnalysis('rec3')
+    expect(persisted.sentimentSegments.length).toBe(0)
+    expect(persisted.eventMarkers.length).toBe(0)
+  })
+
   it('is idempotent — re-running yields the same persisted result', async () => {
     const first = await analyzeTimeline('rec3', undefined, { scoreWindows: fakeScorer })
     const second = await analyzeTimeline('rec3', undefined, { scoreWindows: fakeScorer })
@@ -409,6 +465,40 @@ describe('analyzeTimeline (persist + idempotent)', () => {
     expect(stages).toContain('sentiment')
     expect(stages).toContain('markers')
     expect(stages).toContain('complete')
+  })
+
+  // RE8-2 (round-8) — analyzeTimeline gates internally on isRecordingEligible, so
+  // the production recordings:analyzeTimeline IPC (which omits shouldPersist) can
+  // no longer send an excluded recording's transcript to Gemini or persist a
+  // sentiment derivative for it.
+  it('refuses (empty, no LLM) when the recording is excluded — even with no shouldPersist', async () => {
+    let scorerCalls = 0
+    const spyScorer = async (windows: SentimentWindow[]) => {
+      scorerCalls++
+      return fakeScorer(windows)
+    }
+    run('UPDATE recordings SET personal = 1 WHERE id = ?', ['rec3'])
+    const result = await analyzeTimeline('rec3', undefined, { scoreWindows: spyScorer })
+    expect(result).toEqual({ sentimentSegments: [], eventMarkers: [] })
+    expect(scorerCalls).toBe(0) // never sent to the provider
+    const persisted = getTimelineAnalysis('rec3')
+    expect(persisted.sentimentSegments.length).toBe(0)
+    expect(persisted.eventMarkers.length).toBe(0)
+  })
+
+  it('does not persist when the recording becomes excluded during the sentiment await (no shouldPersist needed)', async () => {
+    // Eligible at entry; the scorer trashes it mid-flight.
+    const flipScorer = async (windows: SentimentWindow[]) => {
+      run('UPDATE recordings SET deleted_at = ? WHERE id = ?', ['2026-07-15T00:00:00.000Z', 'rec3'])
+      return fakeScorer(windows)
+    }
+    const result = await analyzeTimeline('rec3', undefined, { scoreWindows: flipScorer })
+    // Computed + returned to the caller…
+    expect(result.sentimentSegments.length).toBeGreaterThan(0)
+    // …but NOTHING is written back for the now-excluded recording.
+    const persisted = getTimelineAnalysis('rec3')
+    expect(persisted.sentimentSegments.length).toBe(0)
+    expect(persisted.eventMarkers.length).toBe(0)
   })
 
   it('returns empty arrays when the recording has no transcript', async () => {
@@ -446,5 +536,78 @@ describe('analyzeTimeline (persist + idempotent)', () => {
     expect(persisted.eventMarkers.length).toBe(2)
     const second = await analyzeTimeline('recFresh2', undefined, { scoreWindows: fakeScorer })
     expect(second.eventMarkers).toEqual(result.eventMarkers)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Persisted per-component completion (v2 sentiment envelope) — success-empty
+// must survive app restarts (any fresh read of the DB) without re-billing,
+// while a retranscription (content change) invalidates the flags. No schema
+// bump: the envelope lives inside the existing sentiment_segments column.
+// ---------------------------------------------------------------------------
+describe('analysisStatus — persisted success-empty completion', () => {
+  // A scorer that legitimately returns no scores → honestly-empty sentiment.
+  const emptyScorer = async () => new Map<number, number>()
+
+  it('a success with EMPTY results persists completed flags readable on a fresh read (restart-equivalent)', async () => {
+    seedRecording('recEnv1')
+    seedTranscript('recEnv1', SPEAKERS_JSON) // speakers, but no items → both components empty
+
+    const result = await analyzeTimeline('recEnv1', undefined, { scoreWindows: emptyScorer })
+    expect(result.sentimentSegments).toEqual([])
+    expect(result.eventMarkers).toEqual([])
+    expect(result.analysisStatus).toEqual({ sentimentAnalyzed: true, markersAnalyzed: true })
+
+    // A brand-new read from the DB (what a remounted reader / restarted app
+    // sees) carries the SAME completion — consumers skip the backfill.
+    const persisted = getTimelineAnalysis('recEnv1')
+    expect(persisted.sentimentSegments).toEqual([])
+    expect(persisted.eventMarkers).toEqual([])
+    expect(persisted.analysisStatus).toEqual({ sentimentAnalyzed: true, markersAnalyzed: true })
+  })
+
+  it('a CONTENT change (retranscription) reads the flags back as false', async () => {
+    seedRecording('recEnv2')
+    seedTranscript('recEnv2', SPEAKERS_JSON)
+    await analyzeTimeline('recEnv2', undefined, { scoreWindows: emptyScorer })
+    expect(getTimelineAnalysis('recEnv2').analysisStatus).toEqual({ sentimentAnalyzed: true, markersAnalyzed: true })
+
+    // Retranscription rewrites content (id / created_at may be identical).
+    run('UPDATE transcripts SET full_text = ? WHERE recording_id = ?', ['a completely different second pass', 'recEnv2'])
+    expect(getTimelineAnalysis('recEnv2').analysisStatus).toEqual({ sentimentAnalyzed: false, markersAnalyzed: false })
+  })
+
+  it('a FAILED sentiment pass persists sentimentAnalyzed=false while markers stay completed', async () => {
+    seedRecording('recEnv3')
+    seedFreshTranscript(
+      'recEnv3',
+      SPEAKERS_JSON,
+      ['Carlos will prepare the rollback plan before the deploy window'],
+      []
+    )
+    const throwingScorer = async () => {
+      throw Object.assign(new Error('scorer down'), { status: 503 })
+    }
+    const result = await analyzeTimeline('recEnv3', undefined, { scoreWindows: throwingScorer })
+    expect(result.analysisStatus).toEqual({ sentimentAnalyzed: false, markersAnalyzed: true })
+    expect(result.analysisError?.kind).toBe('network')
+    expect(result.eventMarkers.length).toBe(1)
+
+    // The persisted read agrees: markers completed, sentiment retry-eligible.
+    const persisted = getTimelineAnalysis('recEnv3')
+    expect(persisted.analysisStatus).toEqual({ sentimentAnalyzed: false, markersAnalyzed: true })
+    expect(persisted.eventMarkers.length).toBe(1)
+  })
+
+  it('legacy bare-array persistence still parses — segments returned, NO analysisStatus', async () => {
+    seedRecording('recEnv4')
+    seedTranscript('recEnv4', SPEAKERS_JSON)
+    run('UPDATE transcripts SET sentiment_segments = ? WHERE recording_id = ?', [
+      JSON.stringify([{ startSec: 0, endSec: 10, score: 0.5 }]),
+      'recEnv4'
+    ])
+    const result = getTimelineAnalysis('recEnv4')
+    expect(result.sentimentSegments).toEqual([{ startSec: 0, endSec: 10, score: 0.5 }])
+    expect(result.analysisStatus).toBeUndefined()
   })
 })

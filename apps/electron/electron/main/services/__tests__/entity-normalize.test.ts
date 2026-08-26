@@ -29,6 +29,20 @@ describe('normalizeName', () => {
     expect(normalizeName('')).toBe('')
     expect(normalizeName('   ')).toBe('')
   })
+  it('folds Unicode composition + compatibility forms (NFKC) so equivalent spellings share one key', () => {
+    // Composed (NFC) vs decomposed (NFD) accents are DIFFERENT JS strings but the
+    // same name. Without NFKC a discovery tombstone written under one form fails
+    // to match a re-analysis arriving in the other (the dismiss→reappear bug).
+    const composed = 'Café Project' // é = U+00E9
+    const decomposed = 'Café Project' // e + U+0301 combining acute
+    expect(composed).not.toBe(decomposed)
+    expect(normalizeName(composed)).toBe(normalizeName(decomposed))
+    expect(normalizeName(decomposed)).toBe('café project')
+    // NFKC also folds compatibility forms: the ﬁ ligature (U+FB01) → 'fi', and a
+    // non-breaking space (U+00A0) becomes a normal space (then collapses).
+    expect(normalizeName('ﬁle sync')).toBe('file sync')
+    expect(normalizeName('atlas migration')).toBe('atlas migration')
+  })
 })
 
 describe('stripDiacritics / accentFoldedKey', () => {
@@ -86,6 +100,24 @@ describe('fuzzyNameScore', () => {
   })
   it('never exceeds the fuzzy band', () => {
     expect(fuzzyNameScore('a', 'b')).toBeLessThanOrEqual(0.8)
+  })
+
+  /**
+   * Edit distance is only a typo signal RELATIVE to length. With flat thresholds
+   * every short name was a near-miss for every other — "ai" vs "xr" is distance
+   * 2 on a 2-char string, i.e. entirely different, yet scored 0.7. With a
+   * co-occurrence boost that was enough to auto-link one acronym project onto
+   * another. Surfaced by F12 making short acronym projects creatable.
+   */
+  it('does not treat short unrelated names as edits of each other', () => {
+    expect(fuzzyNameScore('ai', 'xr')).toBe(0) // distance 2 on 2 chars
+    expect(fuzzyNameScore('crm', 'erp')).toBe(0)
+    expect(fuzzyNameScore('ana', 'ane')).toBe(0) // distance 1 on 3 chars
+  })
+
+  it('still scores edits on names long enough for the distance to mean a typo', () => {
+    expect(fuzzyNameScore('atlas', 'atlus')).toBeGreaterThanOrEqual(0.7) // lev 1, len 5
+    expect(fuzzyNameScore('meridian', 'meridain')).toBeGreaterThanOrEqual(0.6) // lev 2, len 8
   })
 
   it('docks opposite-gender Spanish pairs below a plain edit-1 match', () => {

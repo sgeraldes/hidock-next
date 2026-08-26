@@ -110,7 +110,7 @@ export interface PipelineDownloadService {
     filename: string,
     data: Buffer
   ): Promise<{ success: boolean; filePath?: string; error?: string }>
-  cancelActiveDownloads(reason?: string): number
+  cancelActiveDownloads(reason?: string, origin?: 'user' | 'interrupted'): number
 }
 
 /** Minimal WebUSB-like event target for the hot-plug listeners. */
@@ -364,10 +364,15 @@ export class DevicePipelineService extends EventEmitter {
 
   async scanFiles(): Promise<FileInfo[]> {
     const expected = this.state.device?.recordingCount ?? 0
+    const streamedFiles: FileInfo[] = []
     const onProgress = (current: number, total: number): void => {
       this.patchState({ scanProgress: { current, total } })
     }
-    const files = await this.safe(() => this.jensen.listFiles(onProgress, expected))
+    const onNewFiles = (files: FileInfo[]): void => {
+      streamedFiles.push(...files)
+      this.emit('files', [...streamedFiles])
+    }
+    const files = await this.safe(() => this.jensen.listFiles(onProgress, expected, onNewFiles))
     this.patchState({ scanProgress: null })
     return files ?? []
   }
@@ -556,7 +561,8 @@ export class DevicePipelineService extends EventEmitter {
   /** Cancel downloads only — return to IDLE without disconnecting. */
   async cancelDownloads(): Promise<void> {
     this.abortController?.abort()
-    this.downloadService.cancelActiveDownloads('Cancelled by user')
+    // HIGH-3: an explicit user cancel stays terminal until a MANUAL retry.
+    this.downloadService.cancelActiveDownloads('Cancelled by user', 'user')
     this.patchState({ downloadProgress: null })
     this.setPhase('idle')
   }

@@ -9,6 +9,21 @@ export type { MentionResult } from './mentionEvidence'
 export type { PersonContext } from './personContext'
 
 /**
+ * Shared unmerge-result inspection for EVERY Undo flow in this hook (accept,
+ * direct merge, group merge). Returns null when the unmerge succeeded, or the
+ * message to display when it did not. A rejected Result — most importantly
+ * MERGE_ORDER_CONFLICT ("undo the newer merge of X first") — must surface the
+ * backend's actionable message and must NEVER be reported as success.
+ * Exported for tests.
+ */
+export function unmergeFailureMessage(res: unknown): string | null {
+  const r = res as { success?: boolean; error?: { message?: string } } | null | undefined
+  if (r && r.success === true) return null
+  const msg = r?.error?.message
+  return msg && msg.trim() !== '' ? msg : 'The records could not be separated again.'
+}
+
+/**
  * A row from `identity:getSuggestions` — the resolver's 0.5–0.8 confidence band
  * surfaced for human review. Mirrors the main-process `IdentitySuggestion` shape.
  */
@@ -48,6 +63,19 @@ function idsFor(s: IdentitySuggestion): Array<{ id: string; kind: 'person' | 'pr
   if (ev.loserId && ev.loserId !== s.target_id) out.push({ id: ev.loserId, kind: s.kind })
   return out
 }
+
+/**
+ * Concurrency cap for the transcript-mention fan-out. The main process serves every
+ * `identity:getMentionSnippets` call from a SINGLE serial sql.js queue, each doing a
+ * `LIKE` full-text scan (~150–200ms). Firing every suggestion's lookup at once (a bare
+ * `Promise.all`) queues hundreds of scans behind one another, so any lookup past the
+ * first few seconds of queue blows its per-call timeout and is (permanently) cached as
+ * an error — the root cause of F1, where every low-confidence project card, sorted to
+ * the tail of the queue, showed "Couldn't check transcripts". Bounding concurrency
+ * means each dispatched call only ever waits behind a handful of others, so its timer
+ * (started at dispatch) reflects real service time, never queue backlog.
+ */
+const MENTION_FETCH_CONCURRENCY = 6
 
 /** Reject after `ms` if the promise hasn't settled — guards a hung/never-resolving IPC lookup. */
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
@@ -104,7 +132,7 @@ async function fetchProfile(id: string, kind: 'person' | 'project'): Promise<Min
  * the success toast offers a time-boxed Undo, and the queue is refetched because the
  * merge may have superseded sibling suggestions in the backend.
  */
-export function useIdentitySuggestions() {
+export function useIdentitySuggestions(kind?: 'person' | 'project') {
   const [suggestions, setSuggestions] = useState<IdentitySuggestion[]>([])
   const [loading, setLoading] = useState(true)
   const [profiles, setProfiles] = useState<Record<string, MiniProfile>>({})
@@ -131,6 +159,18 @@ export function useIdentitySuggestions() {
     }
   }, [])
 
+  // The lazy-resolve effects below (profiles, mentions, impacts, contexts) all issue
+  // IPC that shares the main process's single serial queue. When the host view is
+  // scoped to one kind (e.g. the Projects page passes 'project'), resolving the OTHER
+  // kind's — usually far more numerous — suggestions would queue their lookups ahead
+  // of the ones actually on screen, starving them past the mention timeout. So the
+  // effects work only over the suggestions this view will render; the full list is
+  // still returned for the section's own filtering, accept/reject, and merge handlers.
+  const scoped = useMemo(
+    () => (kind ? suggestions.filter((s) => s.kind === kind) : suggestions),
+    [suggestions, kind]
+  )
+
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
     try {
@@ -151,7 +191,7 @@ export function useIdentitySuggestions() {
   // Lazily resolve keeper + loser profiles (once per id).
   useEffect(() => {
     const wanted = new Map<string, 'person' | 'project'>()
-    for (const s of suggestions) {
+    for (const s of scoped) {
       for (const { id, kind } of idsFor(s)) {
         if (!(id in profiles) && !resolving.current.has(id)) wanted.set(id, kind)
       }
@@ -170,7 +210,7 @@ export function useIdentitySuggestions() {
         setProfiles((prev) => ({ ...prev, ...updates }))
       }
     })()
-  }, [suggestions, profiles])
+  }, [scoped, profiles])
 
   // Lazily fetch primary-source mention evidence for each distinct name — the
   // candidate (loser) name and its keeper's display name — so the card can show
@@ -183,41 +223,56 @@ export function useIdentitySuggestions() {
       const key = mentionKey(raw)
       if (!(key in mentions) && !resolvingMentions.current.has(key)) names.set(key, raw)
     }
-    for (const s of suggestions) {
+    for (const s of scoped) {
       want(s.candidate_name)
       want(profiles[s.target_id]?.name || parseEvidence(s.evidence).keeperName)
     }
     if (names.size === 0) return
     for (const key of names.keys()) resolvingMentions.current.add(key)
     ;(async () => {
-      const updates: Record<string, MentionResult> = {}
-      await Promise.all(
-        [...names].map(async ([key, raw]) => {
-          try {
-            // 5s guard: a hung transcript lookup must not leave the card stuck on
-            // "checking transcripts…" forever — surface a distinct error state instead.
-            const res = await withTimeout(window.electronAPI.identity.getMentionSnippets(raw, 2), 5000)
-            updates[key] = res.success
-              ? res.data
-                ? { ...res.data, error: false }
-                : { snippets: [], recordingIds: [], error: false }
-              : { snippets: [], recordingIds: [], error: true }
-          } catch {
-            updates[key] = { snippets: [], recordingIds: [], error: true }
-          }
-        })
-      )
-      // Commit whenever still mounted — never gate on a per-run flag (see mountedRef).
-      if (mountedRef.current && Object.keys(updates).length > 0) {
-        setMentions((prev) => ({ ...prev, ...updates }))
+      const lookup = async (raw: string): Promise<MentionResult> => {
+        try {
+          // 5s guard: a hung transcript lookup must not leave the card stuck on
+          // "checking transcripts…" forever — surface a distinct error state instead.
+          // The timer starts when THIS call is dispatched (concurrency is bounded
+          // below), so it measures real service time, not queue backlog (see F1).
+          const res = await withTimeout(window.electronAPI.identity.getMentionSnippets(raw, 2), 5000)
+          return res.success
+            ? res.data
+              ? { ...res.data, error: false }
+              : { snippets: [], recordingIds: [], error: false }
+            : { snippets: [], recordingIds: [], error: true }
+        } catch {
+          return { snippets: [], recordingIds: [], error: true }
+        }
+      }
+
+      // Bounded fan-out: process names in fixed-size batches so at most
+      // MENTION_FETCH_CONCURRENCY transcript scans are ever queued at once. Each batch
+      // commits as it settles, so cards fill in progressively instead of after every
+      // lookup finishes. Commit whenever still mounted — never gate on a per-run flag
+      // (see mountedRef).
+      const pending = [...names]
+      for (let i = 0; i < pending.length; i += MENTION_FETCH_CONCURRENCY) {
+        if (!mountedRef.current) return
+        const batch = pending.slice(i, i + MENTION_FETCH_CONCURRENCY)
+        const updates: Record<string, MentionResult> = {}
+        await Promise.all(
+          batch.map(async ([key, raw]) => {
+            updates[key] = await lookup(raw)
+          })
+        )
+        if (mountedRef.current && Object.keys(updates).length > 0) {
+          setMentions((prev) => ({ ...prev, ...updates }))
+        }
       }
     })()
-  }, [suggestions, profiles, mentions])
+  }, [scoped, profiles, mentions])
 
   // Lazily fetch the pre-merge blast radius for each discovery suggestion (one that
   // pairs two existing entities). Keyed by suggestion id.
   useEffect(() => {
-    const pending = suggestions.filter((s) => {
+    const pending = scoped.filter((s) => {
       if (s.id in impacts || resolvingImpacts.current.has(s.id)) return false
       const ev = parseEvidence(s.evidence)
       return !!ev.loserId && ev.loserId !== s.target_id
@@ -245,7 +300,7 @@ export function useIdentitySuggestions() {
         setImpacts((prev) => ({ ...prev, ...updates }))
       }
     })()
-  }, [suggestions, impacts])
+  }, [scoped, impacts])
 
   // Lazily fetch graph-neighborhood context for each PERSON side of a suggestion —
   // the keeper (by target id) and the candidate (by loser id, else its name) — so the
@@ -253,7 +308,7 @@ export function useIdentitySuggestions() {
   // Cached per key so each person hits the graph once.
   useEffect(() => {
     const wanted = new Set<string>()
-    for (const s of suggestions) {
+    for (const s of scoped) {
       if (s.kind !== 'person') continue
       const ev = parseEvidence(s.evidence)
       for (const k of [s.target_id, ev.loserId || s.candidate_name]) {
@@ -279,7 +334,7 @@ export function useIdentitySuggestions() {
         setContexts((prev) => ({ ...prev, ...updates }))
       }
     })()
-  }, [suggestions, contexts])
+  }, [scoped, contexts])
 
   // Backward-compatible map of target_id → display name (used by the Today card).
   const targetNames = useMemo(() => {
@@ -307,11 +362,20 @@ export function useIdentitySuggestions() {
               label: 'Undo',
               onClick: async () => {
                 try {
-                  const undo = await unmerge(journalId)
-                  if (!undo.success) throw new Error('unmerge failed')
-                  toast.info('Merge undone', 'The separate records were restored.')
-                } catch {
-                  toast.error('Undo failed', 'The records could not be separated again.')
+                  // Centralized result handling: an ordering rejection
+                  // (MERGE_ORDER_CONFLICT) tells the user exactly which newer
+                  // merge to undo first.
+                  const failure = unmergeFailureMessage(await unmerge(journalId))
+                  if (failure) {
+                    toast.error('Undo failed', failure)
+                  } else {
+                    toast.info('Merge undone', 'The separate records were restored.')
+                  }
+                } catch (err) {
+                  toast.error(
+                    'Undo failed',
+                    err instanceof Error && err.message ? err.message : 'The records could not be separated again.'
+                  )
                 } finally {
                   load(true)
                 }
@@ -392,11 +456,21 @@ export function useIdentitySuggestions() {
                   label: 'Undo',
                   onClick: async () => {
                     try {
-                      const undo = await window.electronAPI.contacts.unmerge(journalId as string)
-                      if (!undo.success) throw new Error('unmerge failed')
-                      toast.info('Merge undone', 'The separate records were restored.')
-                    } catch {
-                      toast.error('Undo failed', 'The records could not be separated again.')
+                      // Centralized result handling — surfaces MERGE_ORDER_CONFLICT's
+                      // "undo the newer merge first" message instead of a fixed string.
+                      const failure = unmergeFailureMessage(
+                        await window.electronAPI.contacts.unmerge(journalId as string)
+                      )
+                      if (failure) {
+                        toast.error('Undo failed', failure)
+                      } else {
+                        toast.info('Merge undone', 'The separate records were restored.')
+                      }
+                    } catch (err) {
+                      toast.error(
+                        'Undo failed',
+                        err instanceof Error && err.message ? err.message : 'The records could not be separated again.'
+                      )
                     } finally {
                       load(true)
                     }
@@ -490,17 +564,66 @@ export function useIdentitySuggestions() {
                 action: {
                   label: 'Undo',
                   onClick: async () => {
+                    // Tracks whether the atomic backend unmerge has COMMITTED, so
+                    // the catch below can report honestly: once records are
+                    // separated, a later throw (e.g. the name-restore rejecting at
+                    // the IPC transport) must NOT be reported as "nothing undone".
+                    let unmergeCommitted = false
                     try {
-                      // Reverse every merge newest-first, then restore the prior name.
-                      for (const jid of [...journalIds].reverse()) {
-                        await window.electronAPI.contacts.unmerge(jid)
+                      // (1) Only unwind merges if any were actually recorded. A
+                      // rename-only group (every candidate was a bare-mention
+                      // alias → empty journalIds) has nothing to unmerge, and the
+                      // unmergeGroup IPC schema rejects an empty list — so skip
+                      // straight to the name-restore. When journals DO exist, ONE
+                      // atomic backend call unwinds them newest-first in a single
+                      // transaction; any rejection (e.g. MERGE_ORDER_CONFLICT)
+                      // rolls the ENTIRE group back, leaving it fully
+                      // re-attemptable rather than half-unwound.
+                      if (journalIds.length > 0) {
+                        const failure = unmergeFailureMessage(
+                          await window.electronAPI.contacts.unmergeGroup(journalIds)
+                        )
+                        if (failure) {
+                          // Nothing changed on the backend — do NOT restore the
+                          // name and do NOT claim the group was undone.
+                          toast.error('Undo failed', failure)
+                          return
+                        }
+                        unmergeCommitted = true
                       }
+                      // (2) Restore the prior canonical name. The rename was a
+                      // separate contacts.update (never journaled), so it returns
+                      // a Result rather than throwing — a failure here must
+                      // surface, not be masked by a success toast.
                       if (rename) {
-                        await window.electronAPI.contacts.update({ id: keeperId, name: keeperName })
+                        const restore = await window.electronAPI.contacts.update({ id: keeperId, name: keeperName })
+                        if (!restore.success) {
+                          const msg = (restore as { error?: { message?: string } }).error?.message
+                          toast.error(
+                            'Undo incomplete',
+                            msg || 'The merges were reversed but the previous name could not be restored.'
+                          )
+                          return
+                        }
                       }
                       toast.info('Group merge undone', 'The separate records were restored.')
-                    } catch {
-                      toast.error('Undo failed', 'Some records could not be separated again.')
+                    } catch (err) {
+                      const detail = err instanceof Error && err.message ? err.message : undefined
+                      if (unmergeCommitted) {
+                        // The unmerge already committed (records ARE separated);
+                        // only a later step threw. A flat "Undo failed" would be
+                        // dishonest — the merges were reversed.
+                        toast.error(
+                          'Undo incomplete',
+                          detail
+                            ? `The records were separated, but the previous name could not be restored: ${detail}`
+                            : 'The records were separated, but the previous name could not be restored.'
+                        )
+                      } else {
+                        // The unmerge itself failed/threw (or there was nothing to
+                        // unmerge) — nothing was undone.
+                        toast.error('Undo failed', detail || 'Some records could not be separated again.')
+                      }
                     } finally {
                       load(true)
                     }

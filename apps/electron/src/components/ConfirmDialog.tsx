@@ -26,6 +26,9 @@ export interface ConfirmDialogProps {
   cancelLabel?: string
   variant?: 'default' | 'destructive'
   onConfirm: () => void
+  /** Optional extra content between the description and the footer (e.g. the
+   *  "Also delete from device" checkbox of the bulk permanent-delete flow). */
+  children?: React.ReactNode
 }
 
 export function ConfirmDialog({
@@ -36,7 +39,8 @@ export function ConfirmDialog({
   actionLabel = 'Continue',
   cancelLabel = 'Cancel',
   variant = 'destructive',
-  onConfirm
+  onConfirm,
+  children
 }: ConfirmDialogProps) {
   return (
     <AlertDialog open={open} onOpenChange={onOpenChange}>
@@ -45,6 +49,7 @@ export function ConfirmDialog({
           <AlertDialogTitle>{title}</AlertDialogTitle>
           <AlertDialogDescription>{description}</AlertDialogDescription>
         </AlertDialogHeader>
+        {children}
         <AlertDialogFooter>
           <AlertDialogCancel>{cancelLabel}</AlertDialogCancel>
           <AlertDialogAction

@@ -38,7 +38,13 @@ export default defineConfig({
           name: 'main-db',
           include: ['electron/**/__tests__/**/*.test.ts', 'electron/**/__tests__/**/*.test.tsx'],
           exclude: [...configDefaults.exclude, '**/*.smoke.test.ts'],
-          setupFiles: ['./src/test/setup.ts', './src/test/setup-db.ts']
+          setupFiles: ['./src/test/setup.ts', './src/test/setup-db.ts'],
+          // Many main-db files run initializeDatabase() in beforeAll/beforeEach.
+          // That's sub-second warm, but on cold or starved CI runners it blows
+          // the default 10s hookTimeout (pixel-rag, timeline-analysis and
+          // merge-journal have each red-lighted CI this way). A hung hook still
+          // fails — it just gets a runner-realistic margin.
+          hookTimeout: 60000
         }
       },
       {

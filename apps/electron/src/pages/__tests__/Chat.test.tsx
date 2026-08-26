@@ -1,7 +1,33 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react'
 import { Chat } from '../Chat'
 import { MemoryRouter } from 'react-router-dom'
+import { FloatingAssistant } from '@/components/assistant/FloatingAssistant'
+import { useUIStore } from '@/store/ui/useUIStore'
+
+// F2 (review finding 3): capture the ResizeObserver callback so tests can trigger
+// re-evaluation of the container breakpoint. Chat measures the LIVE container width
+// (getBoundingClientRect) and LIVE root font size on every evaluation, so tests
+// stub the container's rect and use the callback purely as the trigger. jsdom's
+// default rect width is 0, so Chat boots in narrow mode.
+let resizeCallback: (() => void) | null = null
+class MockResizeObserver {
+  constructor(cb: () => void) {
+    resizeCallback = cb
+  }
+  observe = vi.fn()
+  unobserve = vi.fn()
+  disconnect = vi.fn()
+}
+vi.stubGlobal('ResizeObserver', MockResizeObserver)
+
+/** Stub the Chat root container's measured width (jsdom always reports 0). */
+function stubContainerWidth(container: HTMLElement, width: number): HTMLElement {
+  const rootDiv = container.querySelector('[data-container-narrow]') as HTMLElement
+  rootDiv.getBoundingClientRect = () =>
+    ({ width, height: 600, top: 0, left: 0, right: width, bottom: 600, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect
+  return rootDiv
+}
 
 // Mock Electron API
 const now = new Date()
@@ -27,6 +53,7 @@ global.window.electronAPI = {
     deleteConversation: vi.fn().mockResolvedValue({ success: true }),
     getContext: vi.fn().mockResolvedValue([]),
     addContext: vi.fn().mockResolvedValue({ success: true }),
+    setContext: vi.fn().mockResolvedValue({ success: true }),
     removeContext: vi.fn().mockResolvedValue({ success: true })
   },
   knowledge: {
@@ -41,6 +68,9 @@ global.window.electronAPI = {
 describe('Chat Component', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    // Reset environment state that individual tests may mutate.
+    document.documentElement.style.fontSize = ''
+    useUIStore.getState().setChatOpen(false)
   })
 
   it('should render conversation history sidebar', async () => {
@@ -88,6 +118,61 @@ describe('Chat Component', () => {
 
     await waitFor(() => {
       expect(window.electronAPI.assistant.addContext).toHaveBeenCalledWith('c3', 'k1')
+    })
+  })
+
+  // ADV39-MED (round-41): the renderer must RESPECT the addContext write result.
+  // The main-process gate refuses to pin a capture that became excluded between
+  // fetch and write; on refusal the capture must NOT be installed or displayed, and
+  // metadata must be re-fetched only AFTER a successful write.
+  describe('addContext result-respect (handleToggleContext)', () => {
+    it('addContext {success:true} ⇒ capture installed + displayed, metadata re-fetched', async () => {
+      ;(window.electronAPI.assistant.addContext as ReturnType<typeof vi.fn>).mockResolvedValue({ success: true })
+
+      render(
+        <MemoryRouter>
+          <Chat />
+        </MemoryRouter>
+      )
+      await screen.findByText('HISTORY')
+
+      fireEvent.click(await screen.findByTitle(/Add Context/i))
+      fireEvent.click(await screen.findByText('Knowledge 1'))
+
+      await waitFor(() => {
+        expect(window.electronAPI.assistant.addContext).toHaveBeenCalledWith('c3', 'k1')
+      })
+      // Installed → the attached-context bar renders, and metadata was re-fetched
+      // (only after the successful write).
+      await waitFor(() => {
+        expect(screen.getByText('Context:')).toBeInTheDocument()
+      })
+      expect(window.electronAPI.knowledge.getById).toHaveBeenCalledWith('k1')
+    })
+
+    it('addContext {success:false} ⇒ capture NOT installed/displayed, no metadata re-fetch', async () => {
+      ;(window.electronAPI.assistant.addContext as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: false,
+        error: 'Knowledge capture not found'
+      })
+
+      render(
+        <MemoryRouter>
+          <Chat />
+        </MemoryRouter>
+      )
+      await screen.findByText('HISTORY')
+
+      fireEvent.click(await screen.findByTitle(/Add Context/i))
+      fireEvent.click(await screen.findByText('Knowledge 1'))
+
+      await waitFor(() => {
+        expect(window.electronAPI.assistant.addContext).toHaveBeenCalledWith('c3', 'k1')
+      })
+      // Refused → the attached-context bar is never shown and metadata is NOT
+      // re-fetched (getById is only called on the success path).
+      expect(screen.queryByText('Context:')).toBeNull()
+      expect(window.electronAPI.knowledge.getById).not.toHaveBeenCalled()
     })
   })
 
@@ -169,6 +254,361 @@ describe('Chat Component', () => {
       // ReactMarkdown renders **bold** as <strong>
       const boldEl = screen.getByText('Bold text')
       expect(boldEl.tagName).toBe('STRONG')
+    })
+  })
+
+  // F2: Narrow-container adaptation (floating assistant overlay). Container queries
+  // (@lg/@sm) are not evaluated by jsdom, so these assert the structural contract
+  // that makes the overlay usable: the docked sidebar collapses (carries the
+  // container-hidden classes), a History toggle opens a drawer with the list, and
+  // the send-row caption can never wrap one-word-per-line.
+  describe('narrow-container (overlay) adaptation', () => {
+    it('collapses the docked history sidebar via container-query classes', async () => {
+      render(
+        <MemoryRouter>
+          <Chat />
+        </MemoryRouter>
+      )
+      await screen.findByText('HISTORY')
+
+      const sidebar = screen.getByTestId('chat-history-sidebar')
+      // Hidden by default; only shown as a flex column at the @lg container width.
+      expect(sidebar.className).toContain('hidden')
+      expect(sidebar.className).toContain('@lg:flex')
+    })
+
+    it('opens a history drawer from the narrow-mode toggle and lists conversations', async () => {
+      render(
+        <MemoryRouter>
+          <Chat />
+        </MemoryRouter>
+      )
+      await screen.findByText('HISTORY')
+
+      // Drawer is not mounted until the toggle is used.
+      expect(screen.queryByTestId('chat-history-drawer')).toBeNull()
+
+      fireEvent.click(screen.getByTestId('chat-history-toggle'))
+
+      const drawer = await screen.findByTestId('chat-history-drawer')
+      // The conversation list renders inside the drawer (not just the docked sidebar).
+      expect(within(drawer).getByText('Conversation 1')).toBeInTheDocument()
+      expect(within(drawer).getByText('Latest Chat')).toBeInTheDocument()
+    })
+
+    it('closes the history drawer after selecting a conversation', async () => {
+      render(
+        <MemoryRouter>
+          <Chat />
+        </MemoryRouter>
+      )
+      await screen.findByText('HISTORY')
+
+      fireEvent.click(screen.getByTestId('chat-history-toggle'))
+      const drawer = await screen.findByTestId('chat-history-drawer')
+
+      fireEvent.click(within(drawer).getByText('Conversation 1'))
+
+      await waitFor(() => {
+        expect(screen.queryByTestId('chat-history-drawer')).toBeNull()
+      })
+    })
+
+    it('closes the history drawer via its Close button', async () => {
+      render(
+        <MemoryRouter>
+          <Chat />
+        </MemoryRouter>
+      )
+      await screen.findByText('HISTORY')
+
+      fireEvent.click(screen.getByTestId('chat-history-toggle'))
+      const drawer = await screen.findByTestId('chat-history-drawer')
+
+      fireEvent.click(within(drawer).getByLabelText('Close history'))
+
+      await waitFor(() => {
+        expect(screen.queryByTestId('chat-history-drawer')).toBeNull()
+      })
+    })
+
+    // F2 review finding 1 (HIGH): the drawer must be a real accessible modal.
+    it('history drawer is an accessible modal: dialog semantics + initial focus inside', async () => {
+      render(
+        <MemoryRouter>
+          <Chat />
+        </MemoryRouter>
+      )
+      await screen.findByText('HISTORY')
+
+      const toggle = screen.getByTestId('chat-history-toggle')
+      toggle.focus()
+      fireEvent.click(toggle)
+
+      const drawer = await screen.findByTestId('chat-history-drawer')
+      // Radix Dialog semantics: role=dialog labelled by the DialogTitle. (Radix
+      // conveys modality by aria-hiding the outside content rather than aria-modal.)
+      expect(drawer).toHaveAttribute('role', 'dialog')
+      const labelledBy = drawer.getAttribute('aria-labelledby')
+      expect(labelledBy).toBeTruthy()
+      const title = document.getElementById(labelledBy as string)
+      expect(title?.textContent).toBe('History')
+      // Initial focus lands inside the drawer (Radix FocusScope).
+      await waitFor(() => {
+        expect(drawer.contains(document.activeElement)).toBe(true)
+      })
+    })
+
+    it('contains Tab focus inside the drawer while open', async () => {
+      render(
+        <MemoryRouter>
+          <Chat />
+        </MemoryRouter>
+      )
+      await screen.findByText('HISTORY')
+
+      const toggle = screen.getByTestId('chat-history-toggle')
+      toggle.focus()
+      fireEvent.click(toggle)
+      const drawer = await screen.findByTestId('chat-history-drawer')
+      await waitFor(() => {
+        expect(drawer.contains(document.activeElement)).toBe(true)
+      })
+
+      // Repeated Tab presses never let focus escape the drawer (Radix focus trap
+      // wraps at the edges; jsdom performs no default focus moves in between).
+      for (let i = 0; i < 6; i++) {
+        fireEvent.keyDown(document.activeElement ?? drawer, { key: 'Tab' })
+        expect(drawer.contains(document.activeElement)).toBe(true)
+      }
+      // And Shift+Tab as well.
+      for (let i = 0; i < 3; i++) {
+        fireEvent.keyDown(document.activeElement ?? drawer, { key: 'Tab', shiftKey: true })
+        expect(drawer.contains(document.activeElement)).toBe(true)
+      }
+    })
+
+    it('Escape closes the drawer and focus returns to the History toggle', async () => {
+      render(
+        <MemoryRouter>
+          <Chat />
+        </MemoryRouter>
+      )
+      await screen.findByText('HISTORY')
+
+      const toggle = screen.getByTestId('chat-history-toggle')
+      toggle.focus()
+      fireEvent.click(toggle)
+      const drawer = await screen.findByTestId('chat-history-drawer')
+      await waitFor(() => {
+        expect(drawer.contains(document.activeElement)).toBe(true)
+      })
+
+      fireEvent.keyDown(document.activeElement ?? drawer, { key: 'Escape' })
+
+      await waitFor(() => {
+        expect(screen.queryByTestId('chat-history-drawer')).toBeNull()
+      })
+      // Focus restoration (Radix onCloseAutoFocus → previously focused element).
+      await waitFor(() => {
+        expect(document.activeElement).toBe(toggle)
+      })
+    })
+
+    // F2 review finding 3 (MEDIUM): historyOpen must not survive breakpoint transitions.
+    it('resets an open drawer when the container widens past @lg, and it stays closed on re-narrowing', async () => {
+      const { container } = render(
+        <MemoryRouter>
+          <Chat />
+        </MemoryRouter>
+      )
+      await screen.findByText('HISTORY')
+
+      fireEvent.click(screen.getByTestId('chat-history-toggle'))
+      await screen.findByTestId('chat-history-drawer')
+
+      // Widen past the @lg threshold (32rem = 512px at 16px root font size).
+      const rootDiv = stubContainerWidth(container, 800)
+      act(() => {
+        resizeCallback?.()
+      })
+      await waitFor(() => {
+        expect(rootDiv).toHaveAttribute('data-container-narrow', 'false')
+      })
+      expect(screen.queryByTestId('chat-history-drawer')).toBeNull()
+
+      // Narrow again — the drawer must NOT pop back uninvited.
+      stubContainerWidth(container, 400)
+      act(() => {
+        resizeCallback?.()
+      })
+      await waitFor(() => {
+        expect(rootDiv).toHaveAttribute('data-container-narrow', 'true')
+      })
+      expect(screen.queryByTestId('chat-history-drawer')).toBeNull()
+    })
+
+    // F2 micro-round: the @lg threshold must track the LIVE root font size — a
+    // zoom/font-size change (rem→px shift) at constant container width must flip
+    // JS narrow-state in agreement with the CSS container query, and compact
+    // search must stay usable (the cached-threshold bug closed it on the first
+    // keystroke because typing re-ran the !isNarrowContainer reset branch).
+    it('re-reads the root font size on every evaluation — font change flips modes and compact search stays open', async () => {
+      ;(window.electronAPI.assistant.getMessages as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+        { id: 'm1', role: 'user', content: 'zoom message', createdAt: now.toISOString(), sources: null }
+      ])
+      const { container } = render(
+        <MemoryRouter>
+          <Chat />
+        </MemoryRouter>
+      )
+      await screen.findByText('HISTORY')
+      await screen.findByText('zoom message')
+
+      // Constant container width of 600px throughout the test.
+      const rootDiv = stubContainerWidth(container, 600)
+      act(() => {
+        resizeCallback?.()
+      })
+      // 16px root font → threshold 512px → 600 is WIDE.
+      await waitFor(() => {
+        expect(rootDiv).toHaveAttribute('data-container-narrow', 'false')
+      })
+
+      try {
+        // User zoom / font setting: 20px root font → CSS @lg flips compact at
+        // 640px. Width unchanged — only the MutationObserver on <html> fires.
+        document.documentElement.style.fontSize = '20px'
+        await waitFor(() => {
+          expect(rootDiv).toHaveAttribute('data-container-narrow', 'true')
+        })
+
+        // Compact search is now fully usable: open it and type — the bar must
+        // stay open (with a stale 512px threshold the first keystroke closed it).
+        fireEvent.click(screen.getByTestId('chat-search-toggle'))
+        const bar = await screen.findByTestId('chat-search-bar')
+        fireEvent.change(within(bar).getByPlaceholderText('Search messages...'), { target: { value: 'zoom' } })
+
+        expect(screen.getByTestId('chat-search-bar')).toBeInTheDocument()
+        expect(screen.getByText('zoom message')).toBeInTheDocument()
+      } finally {
+        document.documentElement.style.fontSize = ''
+      }
+    })
+
+    // F2 micro-round: integration — Chat hosted inside the FloatingAssistant
+    // overlay. One Escape must close ONLY the inner history drawer; the overlay
+    // stays open and focus stays within the assistant.
+    it('inside FloatingAssistant, Escape closes only the inner drawer and focus stays in the assistant', async () => {
+      useUIStore.getState().setChatOpen(true)
+      render(
+        <MemoryRouter>
+          <FloatingAssistant title="Assistant">
+            <Chat />
+          </FloatingAssistant>
+        </MemoryRouter>
+      )
+      const overlay = await screen.findByTestId('floating-assistant-overlay')
+      await screen.findByText('HISTORY')
+
+      const toggle = screen.getByTestId('chat-history-toggle')
+      toggle.focus()
+      fireEvent.click(toggle)
+      const drawer = await screen.findByTestId('chat-history-drawer')
+      await waitFor(() => {
+        expect(drawer.contains(document.activeElement)).toBe(true)
+      })
+
+      // ONE Escape press.
+      fireEvent.keyDown(document.activeElement ?? drawer, { key: 'Escape' })
+
+      // The inner drawer closes…
+      await waitFor(() => {
+        expect(screen.queryByTestId('chat-history-drawer')).toBeNull()
+      })
+      // …but the floating overlay is still open (the drawer consumed the press).
+      expect(screen.getByTestId('floating-assistant-overlay')).toBeInTheDocument()
+      expect(useUIStore.getState().chatOpen).toBe(true)
+      // Focus stays within the assistant, restored to the History toggle.
+      await waitFor(() => {
+        expect(document.activeElement).toBe(toggle)
+      })
+      expect(overlay.contains(document.activeElement)).toBe(true)
+    })
+
+    // F2 review finding 2 (MEDIUM): search/export must keep compact affordances below @lg.
+    it('keeps compact search and export icon affordances in narrow mode', async () => {
+      ;(window.electronAPI.assistant.getMessages as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+        { id: 'm1', role: 'user', content: 'alpha question', createdAt: now.toISOString(), sources: null },
+        { id: 'm2', role: 'user', content: 'beta question', createdAt: now.toISOString(), sources: null }
+      ])
+
+      render(
+        <MemoryRouter>
+          <Chat />
+        </MemoryRouter>
+      )
+      await screen.findByText('HISTORY')
+      await screen.findByText('alpha question')
+
+      // Compact icon affordances exist (the wide-mode group is container-hidden below @lg).
+      const searchToggle = screen.getByTestId('chat-search-toggle')
+      expect(screen.getByTestId('chat-export-compact')).toBeInTheDocument()
+
+      // Icon-triggered search input appears and actually filters messages.
+      fireEvent.click(searchToggle)
+      const bar = await screen.findByTestId('chat-search-bar')
+      const barInput = within(bar).getByPlaceholderText('Search messages...')
+      fireEvent.change(barInput, { target: { value: 'alpha' } })
+
+      await waitFor(() => {
+        expect(screen.queryByText('beta question')).toBeNull()
+      })
+      expect(screen.getByText('alpha question')).toBeInTheDocument()
+
+      // Closing the compact search clears the filter — no invisible filtering.
+      fireEvent.click(searchToggle)
+      await waitFor(() => {
+        expect(screen.queryByTestId('chat-search-bar')).toBeNull()
+      })
+      expect(screen.getByText('beta question')).toBeInTheDocument()
+    })
+
+    it('compact export icon triggers the export flow', async () => {
+      ;(window.electronAPI.assistant.getMessages as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+        { id: 'm1', role: 'user', content: 'exportable message', createdAt: now.toISOString(), sources: null }
+      ])
+      const saveToFile = vi.fn().mockResolvedValue({ success: true, data: 'saved' })
+      ;(window.electronAPI as any).outputs = { saveToFile }
+
+      render(
+        <MemoryRouter>
+          <Chat />
+        </MemoryRouter>
+      )
+      await screen.findByText('HISTORY')
+      await screen.findByText('exportable message')
+
+      fireEvent.click(screen.getByTestId('chat-export-compact'))
+
+      await waitFor(() => {
+        expect(saveToFile).toHaveBeenCalled()
+      })
+    })
+
+    it('keeps the send-row caption on a single line (never wraps one-word-per-line)', async () => {
+      render(
+        <MemoryRouter>
+          <Chat />
+        </MemoryRouter>
+      )
+      await screen.findByText('HISTORY')
+
+      const caption = screen.getByText('I answer based on your meeting transcripts and documents.')
+      // `truncate` forces a single line; `@sm:block` hides it entirely in the
+      // sub-24rem overlay so it can never collapse into a one-word-per-line column.
+      expect(caption.className).toContain('truncate')
+      expect(caption.className).toContain('@sm:block')
     })
   })
 })

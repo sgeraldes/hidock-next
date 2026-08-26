@@ -7,7 +7,13 @@
 function toDate(value: Date | string | number | null | undefined): Date | null {
   if (value == null) return null
   const d = value instanceof Date ? value : new Date(value)
-  return Number.isNaN(d.getTime()) ? null : d
+  const ms = d.getTime()
+  // Treat NaN AND the Unix epoch (or earlier) as "no real date". A timestamp at or
+  // before 1970 is never a genuine capture/meeting date in this app — it's the
+  // UNKNOWN_DATE sentinel used for undated recordings (see useUnifiedRecordings).
+  // Rendering it as "Unknown date" (rather than "Jan 1, 1970" or a fake today) keeps
+  // undated items honest and prevents months-apart bundling (#58).
+  return Number.isNaN(ms) || ms <= 0 ? null : d
 }
 
 /**

@@ -1,7 +1,7 @@
 const { performance } = require('perf_hooks');
 
 // --- LEGACY LOGIC (mimicking jensen.ts and calculateDurationSeconds) ---
-function calculateDurationLegacy(fileLength, fileVersion) {
+function calculateDurationLegacy(fileLength, _fileVersion) {
     // Current code has these logs in the hot path
     // console.log(`[Jensen] calculateDurationSeconds: fileLength=${fileLength}, fileVersion=${fileVersion}`);
     const duration = Math.round(fileLength / 8000);
@@ -20,17 +20,17 @@ function parseFilenameDateTimeLegacy(filename) {
 }
 
 // --- OPTIMIZED LOGIC ---
-function calculateDurationOptimized(fileLength, fileVersion) {
+function calculateDurationOptimized(fileLength, _fileVersion) {
     // NO LOGS here
     return Math.round(fileLength / 8000);
 }
 
 // Optimized single-pass date parsing
-function parseFilenameDateTimeOptimized(filename) {
+function _parseFilenameDateTimeOptimized(filename) {
     // Substring is significantly faster than regex for fixed-format strings
     if (filename.startsWith('HDA_')) {
-        const year = filename.substring(4, 8);
-        const month = filename.substring(8, 10);
+        const _year = filename.substring(4, 8);
+        const _month = filename.substring(8, 10);
         // ... etc
     }
     // For proof, we just show the impact of removing the regex call
@@ -45,7 +45,7 @@ async function runProof() {
     // --- TEST 1: SEQUENTIAL OVERHEAD (Logs enabled) ---
     // Note: We simulate the cost of console.log by actually doing it 
     // but redirecting to a dummy function to avoid CLI clutter
-    const dummyLog = () => {}; 
+    const _dummyLog = () => {};
     
     const startLegacy = performance.now();
     for (let i = 0; i < FILE_COUNT; i++) {
@@ -73,7 +73,7 @@ async function runProof() {
         calculateDurationOptimized(15000000, 1);
         // Direct string access is faster
         const filename = `HDA_20251228_100000.hda`;
-        const year = filename.slice(4, 8); 
+        const _year = filename.slice(4, 8);
     }
     const endOpt = performance.now();
     const optTotal = endOpt - startOpt;

@@ -119,20 +119,6 @@ export const GetRecordingByIdSchema = z.object({
 })
 
 /**
- * Delete recording request
- */
-export const DeleteRecordingSchema = z.object({
-  id: RecordingIdSchema
-})
-
-/**
- * Batch delete recordings request (B-LIB-007)
- */
-export const DeleteBatchRecordingsSchema = z.object({
-  ids: z.array(z.string().uuid('Each ID must be a valid UUID')).min(1).max(1000)
-})
-
-/**
  * Link recording to meeting request
  */
 export const LinkRecordingToMeetingSchema = z.object({
@@ -162,7 +148,9 @@ export const RecordingStatusSchema = z.enum(['ready', 'processing', 'deleted', '
 /**
  * Transcription status enum
  */
-export const TranscriptionStatusSchema = z.enum(['none', 'pending', 'queued', 'transcribing', 'transcribed', 'failed', 'complete', 'processing'])
+export const TranscriptionStatusSchema = z.enum([
+  'none', 'pending', 'queued', 'transcribing', 'transcribed', 'failed', 'complete', 'processing', 'no_speech', 'error'
+])
 
 /**
  * Update recording status request
@@ -256,8 +244,6 @@ export type ExecuteCleanup = z.infer<typeof ExecuteCleanupSchema>
 export type AssignTier = z.infer<typeof AssignTierSchema>
 export type RecordingId = z.infer<typeof RecordingIdSchema>
 export type GetRecordingById = z.infer<typeof GetRecordingByIdSchema>
-export type DeleteRecording = z.infer<typeof DeleteRecordingSchema>
-export type DeleteBatchRecordings = z.infer<typeof DeleteBatchRecordingsSchema>
 export type LinkRecordingToMeeting = z.infer<typeof LinkRecordingToMeetingSchema>
 export type UnlinkRecordingFromMeeting = z.infer<typeof UnlinkRecordingFromMeetingSchema>
 export type TranscribeRecording = z.infer<typeof TranscribeRecordingSchema>

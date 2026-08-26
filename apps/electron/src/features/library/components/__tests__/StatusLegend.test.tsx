@@ -22,4 +22,14 @@ describe('StatusLegend', () => {
     expect(screen.getByText('Transcribed')).toBeInTheDocument()
     expect(screen.getByText('Failed')).toBeInTheDocument()
   })
+
+  // F16/spec-003 Part C
+  it('reveals the value classification meanings when opened', () => {
+    render(<StatusLegend />)
+    fireEvent.click(screen.getByRole('button', { name: /status icon legend/i }))
+
+    expect(screen.getByText('Value')).toBeInTheDocument()
+    expect(screen.getByText('Low value')).toBeInTheDocument()
+    expect(screen.getByText('Garbage')).toBeInTheDocument()
+  })
 })

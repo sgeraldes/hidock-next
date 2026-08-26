@@ -35,10 +35,12 @@ vi.mock('electron', () => ({
 
 // Mock database functions
 const mockIsFileSynced = vi.fn((_filename: string) => false)
+const mockPurgedFiles = new Set<string>()
 vi.mock('../database', () => ({
   markRecordingDownloaded: vi.fn(),
   addSyncedFile: vi.fn(),
   isFileSynced: (filename: string) => mockIsFileSynced(filename),
+  isFilePurged: (filename: string) => mockPurgedFiles.has(filename),
   getRecordingByFilename: vi.fn(() => null),
   getSyncedFilenames: vi.fn(() => new Set()),
   queryOne: vi.fn(() => null),
@@ -86,10 +88,10 @@ describe('DownloadService C-004 Fixes', () => {
   })
 
   describe('C-004-DS-001: cancelDownload uses cancelled status', () => {
-    it('should set status to cancelled (not failed) on user cancellation', () => {
+    it('should set status to cancelled (not failed) on user cancellation', async () => {
       service.queueDownloads([{ filename: 'cancel-test.hda', size: 5000 }])
 
-      const result = service.cancelDownload('cancel-test.hda')
+      const result = await service.cancelDownload('cancel-test.hda')
       expect(result.success).toBe(true)
 
       const state = service.getState()
@@ -98,20 +100,34 @@ describe('DownloadService C-004 Fixes', () => {
       expect(item?.error).toBe('Cancelled by user')
     })
 
-    it('should return error when file is not in queue', () => {
-      const result = service.cancelDownload('nonexistent.hda')
+    it('should return error when file is not in queue', async () => {
+      const result = await service.cancelDownload('nonexistent.hda')
       expect(result.success).toBe(false)
       expect(result.error).toContain('not found')
     })
 
-    it('should reject cancellation of already completed items', () => {
+    it('should reject cancellation of already completed items', async () => {
       service.queueDownloads([{ filename: 'done.hda', size: 1000 }])
       // Mark as failed first
       service.markFailed('done.hda', 'test')
 
-      const result = service.cancelDownload('done.hda')
+      const result = await service.cancelDownload('done.hda')
       expect(result.success).toBe(false)
       expect(result.error).toContain('Cannot cancel')
+    })
+  })
+
+  describe('BUG-R9: active cancellation remains a cancellation', () => {
+    it('marks downloading items and the session as cancelled rather than failed', () => {
+      service.queueDownloads([{ filename: 'active-cancel.hda', size: 5000 }])
+      service.startSyncSession([{ filename: 'active-cancel.hda', size: 5000 }])
+      service.updateProgress('active-cancel.hda', 100)
+
+      expect(service.cancelActiveDownloads('Device disconnected')).toBe(1)
+
+      const state = service.getState()
+      expect(state.queue.find(item => item.filename === 'active-cancel.hda')?.status).toBe('cancelled')
+      expect(state.session?.failedFiles).toBe(0)
     })
   })
 
@@ -145,6 +161,35 @@ describe('DownloadService C-004 Fixes', () => {
 
       const result = service.isFileAlreadySynced('recording.mp3')
       expect(result.synced).toBe(false)
+    })
+
+    // v51 — AUTO reconciliation skips purged files (anti-resurrection), but
+    // an EXPLICIT user download of a purged file is allowed (the user's call).
+    it('auto reconciliation skips purged files, manual re-download is allowed', () => {
+      try {
+        mockPurgedFiles.add('deleted.mp3')
+
+        // isFileAlreadySynced is FACTUAL: a purged file is not synced (it is
+        // not on disk, not in synced_files) — manual paths must not be blocked.
+        const factual = service.isFileAlreadySynced('deleted.hda')
+        expect(factual.synced).toBe(false)
+
+        // getFilesToSync (the auto path) skips it with the tombstone reason.
+        const results = service.getFilesToSync([
+          { filename: 'deleted.hda', size: 100, duration: 1, dateCreated: new Date() },
+        ])
+        expect(results[0].skipReason).toContain('Permanently deleted')
+
+        // …and the manual variant-matching covers .wav/.hda/.mp3 tombstones.
+        mockPurgedFiles.clear()
+        mockPurgedFiles.add('deleted.wav')
+        const r2 = service.getFilesToSync([
+          { filename: 'deleted.hda', size: 100, duration: 1, dateCreated: new Date() },
+        ])
+        expect(r2[0].skipReason).toContain('Permanently deleted')
+      } finally {
+        mockPurgedFiles.clear()
+      }
     })
   })
 

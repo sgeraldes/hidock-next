@@ -22,14 +22,19 @@ import {
   RotateCcw,
   Search,
   Download,
-  GripVertical
+  GripVertical,
+  Image as ImageIcon
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import * as DialogPrimitive from '@radix-ui/react-dialog'
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogHeader,
+  DialogOverlay,
+  DialogPortal,
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog"
@@ -77,6 +82,14 @@ interface RAGStatus {
   documentCount: number
   meetingCount: number
   ready: boolean
+  /** Active embedding provider partition (main/types/api.ts RAGStatus). */
+  embedProvider?: string | null
+  embedProviderLabel?: string | null
+  embedDocumentCount?: number
+  indexState?: 'idle' | 'queued' | 'loading' | 'ready' | 'failed'
+  indexLoaded?: number
+  indexTotal?: number
+  indexError?: string | null
 }
 
 interface Source {
@@ -85,6 +98,25 @@ interface Source {
   subject?: string
   timestamp?: string
   score: number
+  /** 'image' for a screenshot capture chunk; absent for meeting transcripts. */
+  sourceType?: string
+  /** knowledge_capture id backing a non-meeting source (F5 PixelRAG citations). */
+  captureId?: string
+}
+
+/**
+ * Parse the persisted `sources` JSON string a message carries into the Source[]
+ * the chip UI expects. ADV20-1 (round-21) — assistant messages are returned by main
+ * with their sanitized sources; the renderer displays these rather than re-deriving.
+ */
+function parseMessageSources(sourcesJson?: string | null): Source[] {
+  if (!sourcesJson) return []
+  try {
+    const parsed = JSON.parse(sourcesJson)
+    return Array.isArray(parsed) ? (parsed as Source[]) : []
+  } catch {
+    return []
+  }
 }
 
 // Human-readable label for the active chat backend shown in the status badge.
@@ -131,6 +163,75 @@ export function Chat() {
   // C-CHAT: Search within conversation
   const [searchQuery, setSearchQuery] = useState('')
 
+  // F2: History drawer for narrow containers (e.g. the floating assistant overlay).
+  // Below the @lg container breakpoint the fixed-width sidebar is hidden; this toggles
+  // a temporary drawer so the conversation list stays reachable without crushing the
+  // chat column.
+  const [historyOpen, setHistoryOpen] = useState(false)
+
+  // F2 (review finding 2): compact search affordance below @lg — toggles an inline
+  // search bar under the header so the wide-mode search input has a narrow-mode
+  // replacement instead of vanishing.
+  const [searchOpen, setSearchOpen] = useState(false)
+
+  // F2 (review finding 3): track whether the container is below the @lg breakpoint
+  // (Tailwind container-queries @lg = 32rem) so state that only makes sense in
+  // narrow mode (the history drawer) is reset when the container widens — otherwise
+  // an open-but-CSS-hidden drawer would pop back uninvited on the next narrowing.
+  // The element is held in state (callback ref) so the ResizeObserver effect and the
+  // drawer's portal container both re-run once it mounts.
+  const [containerEl, setContainerEl] = useState<HTMLDivElement | null>(null)
+  const [isNarrowContainer, setIsNarrowContainer] = useState(false)
+
+  useEffect(() => {
+    if (!containerEl) return undefined
+    // Evaluate from LIVE values on every pass: the container's current width AND
+    // the current root font size. The @lg threshold is 32rem — user zoom or an
+    // app font-size change alters rem→px, and a threshold cached at mount would
+    // disagree with the CSS container query (review finding: after a font-size
+    // change, CSS shows the compact layout while stale JS state still says
+    // "wide", so typing in compact search immediately closed it).
+    const evaluate = () => {
+      const remPx = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16
+      const threshold = 32 * remPx // @lg container breakpoint (32rem)
+      setIsNarrowContainer(containerEl.getBoundingClientRect().width < threshold)
+    }
+    evaluate()
+    const cleanups: Array<() => void> = []
+    if (typeof ResizeObserver !== 'undefined') {
+      const resizeObserver = new ResizeObserver(evaluate)
+      resizeObserver.observe(containerEl)
+      // A root font-size change usually reflows <html> too; observing it catches
+      // zoom-style changes that never resize the chat container itself.
+      resizeObserver.observe(document.documentElement)
+      cleanups.push(() => resizeObserver.disconnect())
+    }
+    if (typeof MutationObserver !== 'undefined') {
+      // Font-size settings applied as an inline style or class swap on <html>
+      // (theme/font preferences) don't necessarily fire a resize — watch the
+      // attributes as well.
+      const mutationObserver = new MutationObserver(evaluate)
+      mutationObserver.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ['style', 'class'],
+      })
+      cleanups.push(() => mutationObserver.disconnect())
+    }
+    return () => cleanups.forEach((fn) => fn())
+  }, [containerEl])
+
+  // Reset narrow-only UI state when the container enters wide mode. Conversely,
+  // when narrowing with an active filter, open the compact bar so the filter is
+  // never applied invisibly.
+  useEffect(() => {
+    if (!isNarrowContainer) {
+      setHistoryOpen(false)
+      setSearchOpen(false)
+    } else if (searchQuery) {
+      setSearchOpen(true)
+    }
+  }, [isNarrowContainer, searchQuery])
+
   // C-CHAT: Resizable sidebar
   const [sidebarWidth, setSidebarWidth] = useState<number>(CHAT_SIDEBAR.DEFAULT_WIDTH)
   const [isResizing, setIsResizing] = useState(false)
@@ -148,6 +249,10 @@ export function Chat() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  // F2: the narrow-mode History toggle — the drawer restores focus here on close
+  // (we open the dialog controlled, without a DialogTrigger, so Radix has no
+  // trigger ref of its own to restore to).
+  const historyToggleRef = useRef<HTMLButtonElement>(null)
 
   // Initialize
   useEffect(() => {
@@ -171,6 +276,7 @@ export function Chat() {
       }
     }
     initialize()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- initialize chat once on mount
   }, [])
 
   // Load recording context
@@ -184,7 +290,6 @@ export function Chat() {
         setContextError('Recording not found')
         return
       }
-      setContextRecording(capture)
 
       // Auto-create or select conversation for this context
       if (!activeConversation) {
@@ -194,17 +299,38 @@ export function Chat() {
         setConversations(prev => [newConv, ...prev])
         setActiveConversation(newConv)
 
-        // Attach context to the new conversation
-        await window.electronAPI.assistant.addContext(newConv.id, contextId)
-        setContextIds([contextId])
-        setContextItems([capture])
-      } else {
-        // Attach to existing conversation
-        if (!contextIds.includes(contextId)) {
-          await window.electronAPI.assistant.addContext(activeConversation.id, contextId)
-          setContextIds(prev => [...prev, contextId])
-          setContextItems(prev => [...prev, capture])
+        // ADV39: respect the write result. The main-process gate refuses to pin
+        // a capture that became personal/deleted/value-excluded between fetch
+        // and write; only install/display the capture when the write SUCCEEDED.
+        // setContext (not addContext): "Ask about this source" means "about
+        // THIS source" — the conversation's pins become exactly this capture
+        // instead of accumulating every previously asked one (2026-07-24).
+        const result = await window.electronAPI.assistant.setContext(newConv.id, contextId)
+        if (!result?.success) {
+          setContextError('That item is no longer available')
+          return
         }
+        const fresh = await window.electronAPI.knowledge.getById(contextId)
+        const installed = fresh ?? capture
+        setContextRecording(installed)
+        setContextIds([contextId])
+        setContextItems([installed])
+      } else if (!contextIds.includes(contextId)) {
+        // Attach to existing conversation — REPLACE its pins with this source
+        // (same "about THIS source" model), only install/display on success.
+        const result = await window.electronAPI.assistant.setContext(activeConversation.id, contextId)
+        if (!result?.success) {
+          setContextError('That item is no longer available')
+          return
+        }
+        const fresh = await window.electronAPI.knowledge.getById(contextId)
+        const installed = fresh ?? capture
+        setContextRecording(installed)
+        setContextIds([contextId])
+        setContextItems([installed])
+      } else {
+        // Already attached — surface it in the banner without re-writing.
+        setContextRecording(capture)
       }
     } catch (error) {
       setContextError('Failed to load recording context')
@@ -297,6 +423,7 @@ export function Chat() {
   // AUD3-004: Use generation counter to discard stale async results from rapid switching
   const handleSelectConversation = async (conv: Conversation) => {
     const loadId = ++conversationLoadIdRef.current
+    setHistoryOpen(false) // F2: close narrow-mode drawer on selection
     setActiveConversation(conv)
     setMessages([]) // Clear immediately to avoid showing stale messages
     setContextIds([])
@@ -349,6 +476,7 @@ export function Chat() {
   // Create new conversation
   const handleNewChat = async () => {
     try {
+      setHistoryOpen(false) // F2: close narrow-mode drawer
       const newConv = await window.electronAPI.assistant.createConversation('New Chat')
       setConversations(prev => [newConv, ...prev])
       handleSelectConversation(newConv)
@@ -410,9 +538,17 @@ export function Chat() {
         setContextItems(prev => prev.filter(item => item.id !== id))
       } else {
         // Step 1: Add context on server FIRST
-        await window.electronAPI.assistant.addContext(activeConversation.id, id)
+        const result = await window.electronAPI.assistant.addContext(activeConversation.id, id)
 
-        // Step 2: Fetch metadata BEFORE updating store
+        // ADV39: respect the write result. The main-process gate refuses to pin a
+        // capture that became excluded between fetch and write; do not install or
+        // display a capture the write refused.
+        if (!result?.success) {
+          toast.error('Unable to add context', 'That item is no longer available.')
+          return
+        }
+
+        // Step 2: Fetch metadata only AFTER a successful write
         const item = await window.electronAPI.knowledge.getById(id)
 
         // Step 3: Update store ONLY after both operations succeed
@@ -441,7 +577,7 @@ export function Chat() {
     try {
       const result = await window.electronAPI.rag.status()
       setStatus(result.success ? result.data : unavailable)
-    } catch (error) {
+    } catch {
       setStatus(unavailable)
     }
   }
@@ -497,7 +633,10 @@ export function Chat() {
       `---`,
       ``,
       ...messages.map(msg => {
-        const role = msg.role === 'user' ? '**You:**' : '**Assistant:**'
+        // ADV21 (round-22) — label only EXACT roles. A smuggled/unknown role
+        // (main already redacts its content) is exported neutrally, never as
+        // 'Assistant'. Main-side gates are authoritative; this is defense-in-depth.
+        const role = msg.role === 'user' ? '**You:**' : msg.role === 'assistant' ? '**Assistant:**' : '**Message:**'
         const timestamp = new Date(msg.createdAt).toLocaleString()
         return `### ${role} _(${timestamp})_\n\n${msg.content}\n`
       })
@@ -618,22 +757,32 @@ export function Chat() {
       const response = await window.electronAPI.rag.chatLegacy(currentConv!.id, userMessageContent)
 
       if (response.error) {
-        const errorMsg = await window.electronAPI.assistant.addMessage(currentConv!.id, 'assistant', response.error)
+        // ADV20-1 (round-21) — the renderer no longer authors assistant text. A
+        // provider-side failure carries a generationId whose main-owned error string
+        // is replayed by addMessage; a transport/guard error with no generation is
+        // shown via the fixed main-owned notice catalog.
+        const errorMsg = response.generationId
+          ? await window.electronAPI.assistant.addMessage(currentConv!.id, 'assistant', '', undefined, response.generationId)
+          : await window.electronAPI.assistant.addNotice(currentConv!.id, 'generic-error')
         setMessages((prev) => [...prev, errorMsg])
         setFailedMessageIds(prev => new Set(prev).add(errorMsg.id))
       } else {
-        // Add assistant response
+        // ADV20-1 (round-21) — MAIN owns the answer. Pass back only the generationId;
+        // main replays the stored answer TEXT + sanitized sources it generated. The
+        // renderer DISPLAYS what main returns (it does not author assistant content).
         const assistantMsg = await window.electronAPI.assistant.addMessage(
           currentConv!.id,
           'assistant',
-          response.answer,
-          JSON.stringify(response.sources || [])
+          '',
+          undefined,
+          response.generationId
         )
         setMessages((prev) => [...prev, assistantMsg])
 
-        // Store sources for assistant message only
-        if (response.sources && response.sources.length > 0) {
-          setSources((prev) => new Map(prev).set(assistantMsg.id, response.sources))
+        // Show the citation chips main returned with the persisted message.
+        const persistedSources = parseMessageSources(assistantMsg.sources)
+        if (persistedSources.length > 0) {
+          setSources((prev) => new Map(prev).set(assistantMsg.id, persistedSources))
         }
       }
 
@@ -658,13 +807,10 @@ export function Chat() {
 
     } catch (error) {
       console.error('Chat error:', error)
-      // Use activeConversation since currentConv may be out of scope
+      // Use activeConversation since currentConv may be out of scope. ADV20-1 — the
+      // renderer shows a fixed main-owned notice; it cannot author assistant text.
       if (activeConversation) {
-        const errorMsg = await window.electronAPI.assistant.addMessage(
-          activeConversation.id,
-          'assistant',
-          'Sorry, I encountered an error processing your request. Please check that a Gemini API key is set in Settings (or that Ollama is running) and try again.'
-        )
+        const errorMsg = await window.electronAPI.assistant.addNotice(activeConversation.id, 'generic-error')
         setMessages((prev) => [...prev, errorMsg])
         setFailedMessageIds(prev => new Set(prev).add(errorMsg.id))
       }
@@ -724,28 +870,28 @@ export function Chat() {
       )
 
       if (response.error) {
-        const errorMsg = await window.electronAPI.assistant.addMessage(
-          activeConversation.id, 'assistant', response.error
-        )
+        // ADV20-1 — main owns the text: provider failure replays its error via the
+        // generationId; a transport/guard error uses the fixed notice catalog.
+        const errorMsg = response.generationId
+          ? await window.electronAPI.assistant.addMessage(activeConversation.id, 'assistant', '', undefined, response.generationId)
+          : await window.electronAPI.assistant.addNotice(activeConversation.id, 'retry-failed')
         setMessages(prev => [...prev, errorMsg])
         setFailedMessageIds(prev => new Set(prev).add(errorMsg.id))
       } else {
+        // ADV20-1 — main replays the stored answer; the renderer displays it.
         const assistantMsg = await window.electronAPI.assistant.addMessage(
-          activeConversation.id, 'assistant', response.answer,
-          JSON.stringify(response.sources || [])
+          activeConversation.id, 'assistant', '', undefined, response.generationId
         )
         setMessages(prev => [...prev, assistantMsg])
 
-        if (response.sources && response.sources.length > 0) {
-          setSources(prev => new Map(prev).set(assistantMsg.id, response.sources))
+        const persistedSources = parseMessageSources(assistantMsg.sources)
+        if (persistedSources.length > 0) {
+          setSources(prev => new Map(prev).set(assistantMsg.id, persistedSources))
         }
       }
     } catch (error) {
       console.error('Retry error:', error)
-      const errorMsg = await window.electronAPI.assistant.addMessage(
-        activeConversation.id, 'assistant',
-        'Retry failed. Please check your connection and try again.'
-      )
+      const errorMsg = await window.electronAPI.assistant.addNotice(activeConversation.id, 'retry-failed')
       setMessages(prev => [...prev, errorMsg])
       setFailedMessageIds(prev => new Set(prev).add(errorMsg.id))
     } finally {
@@ -793,8 +939,74 @@ export function Chat() {
     )
   }
 
+  // F2: Shared conversation-history content — rendered both in the docked sidebar
+  // (wide containers) and in the temporary drawer (narrow containers such as the
+  // floating assistant overlay). Kept as one definition so the two stay in sync.
+  const historyPanel = (
+    <>
+      <div className="p-4 border-b">
+        <Button onClick={handleNewChat} className="w-full gap-2" variant="default">
+          <Plus className="h-4 w-4" />
+          New Chat
+        </Button>
+      </div>
+      <div className="flex-1 overflow-auto">
+        <div className="p-2 space-y-1">
+          <div className="px-2 py-2 text-xs font-semibold text-muted-foreground flex items-center gap-2">
+            <History className="h-3 w-3" />
+            HISTORY
+          </div>
+          {conversations.length === 0 ? (
+            <p className="text-xs text-center text-muted-foreground py-4">No history yet</p>
+          ) : (
+            conversations.map((conv) => (
+              <div
+                key={conv.id}
+                onClick={() => handleSelectConversation(conv)}
+                className={cn(
+                  "w-full text-left px-3 py-2 rounded-lg text-sm transition-colors flex items-center justify-between group cursor-pointer",
+                  activeConversation?.id === conv.id
+                    ? "bg-primary text-primary-foreground"
+                    : "hover:bg-muted text-muted-foreground hover:text-foreground"
+                )}
+              >
+                <div className="flex flex-col gap-0.5 overflow-hidden flex-1">
+                  <div className="flex items-center gap-2 overflow-hidden">
+                    <MessageSquare className={cn("h-4 w-4 flex-shrink-0", activeConversation?.id === conv.id ? "text-primary-foreground" : "text-muted-foreground")} />
+                    <span className="truncate">{conv.title || 'Untitled'}</span>
+                  </div>
+                  <span className={cn(
+                    "text-[10px] pl-6",
+                    activeConversation?.id === conv.id ? "text-primary-foreground/60" : "text-muted-foreground/60"
+                  )}>
+                    {getRelativeTime(conv.updatedAt)}
+                  </span>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className={cn(
+                    "h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0",
+                    activeConversation?.id === conv.id ? "text-primary-foreground hover:bg-primary-foreground/20" : "hover:text-destructive"
+                  )}
+                  onClick={(e) => handleDeleteClick(e, conv.id)}
+                >
+                  <Trash2 className="h-3 w-3" />
+                </Button>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </>
+  )
+
   return (
-    <div className="flex h-full bg-background">
+    <div
+      ref={setContainerEl}
+      className="@container relative flex h-full bg-background"
+      data-container-narrow={isNarrowContainer ? 'true' : 'false'}
+    >
       {/* B-CHAT-003: Radix AlertDialog for delete confirmation */}
       <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
         <AlertDialogContent>
@@ -816,65 +1028,16 @@ export function Chat() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Sidebar - Conversations History (C-CHAT: Resizable) */}
+      {/* Sidebar - Conversations History (C-CHAT: Resizable).
+          F2: Hidden below the @lg container width (e.g. inside the floating overlay)
+          where a 256px sidebar would crush the chat column — the drawer below takes
+          over there. */}
       <aside
-        className="border-r flex flex-col bg-muted/10 relative"
+        data-testid="chat-history-sidebar"
+        className="hidden @lg:flex border-r flex-col bg-muted/10 relative"
         style={{ width: `${sidebarWidth}px` }}
       >
-        <div className="p-4 border-b">
-          <Button onClick={handleNewChat} className="w-full gap-2" variant="default">
-            <Plus className="h-4 w-4" />
-            New Chat
-          </Button>
-        </div>
-        <div className="flex-1 overflow-auto">
-          <div className="p-2 space-y-1">
-            <div className="px-2 py-2 text-xs font-semibold text-muted-foreground flex items-center gap-2">
-              <History className="h-3 w-3" />
-              HISTORY
-            </div>
-            {conversations.length === 0 ? (
-              <p className="text-xs text-center text-muted-foreground py-4">No history yet</p>
-            ) : (
-              conversations.map((conv) => (
-                <div
-                  key={conv.id}
-                  onClick={() => handleSelectConversation(conv)}
-                  className={cn(
-                    "w-full text-left px-3 py-2 rounded-lg text-sm transition-colors flex items-center justify-between group cursor-pointer",
-                    activeConversation?.id === conv.id
-                      ? "bg-primary text-primary-foreground"
-                      : "hover:bg-muted text-muted-foreground hover:text-foreground"
-                  )}
-                >
-                  <div className="flex flex-col gap-0.5 overflow-hidden flex-1">
-                    <div className="flex items-center gap-2 overflow-hidden">
-                      <MessageSquare className={cn("h-4 w-4 flex-shrink-0", activeConversation?.id === conv.id ? "text-primary-foreground" : "text-muted-foreground")} />
-                      <span className="truncate">{conv.title || 'Untitled'}</span>
-                    </div>
-                    <span className={cn(
-                      "text-[10px] pl-6",
-                      activeConversation?.id === conv.id ? "text-primary-foreground/60" : "text-muted-foreground/60"
-                    )}>
-                      {getRelativeTime(conv.updatedAt)}
-                    </span>
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className={cn(
-                      "h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0",
-                      activeConversation?.id === conv.id ? "text-primary-foreground hover:bg-primary-foreground/20" : "hover:text-destructive"
-                    )}
-                    onClick={(e) => handleDeleteClick(e, conv.id)}
-                  >
-                    <Trash2 className="h-3 w-3" />
-                  </Button>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
+        {historyPanel}
 
         {/* C-CHAT: Resize handle */}
         <div
@@ -887,17 +1050,70 @@ export function Chat() {
         </div>
       </aside>
 
+      {/* F2: Narrow-container history drawer — only used below @lg (the toggle that
+          opens it is @lg:hidden, and isNarrowContainer resets it in wide mode).
+          Built on the Radix Dialog primitives so it is a real accessible modal:
+          focus trap, Tab containment, Escape dismissal, and focus restoration to
+          the toggle come from Radix. Portaled INTO the chat container so it stays
+          inside the floating assistant overlay rather than covering the window. */}
+      <Dialog open={historyOpen} onOpenChange={setHistoryOpen}>
+        <DialogPortal container={containerEl ?? undefined}>
+          <DialogOverlay className="absolute inset-0 z-30 bg-background/60" />
+          <DialogPrimitive.Content
+            data-testid="chat-history-drawer"
+            aria-describedby={undefined}
+            // Stop the Escape keydown from also reaching the FloatingAssistant's
+            // window listener, which would close the whole overlay in the same press.
+            onEscapeKeyDown={(e) => e.stopPropagation()}
+            // Restore focus to the History toggle on close. Radix's modal default
+            // focuses its DialogTrigger ref — null here (controlled open) — so we
+            // take over: preventDefault skips both defaults, then focus the toggle.
+            onCloseAutoFocus={(e) => {
+              e.preventDefault()
+              historyToggleRef.current?.focus()
+            }}
+            className="absolute inset-y-0 left-0 z-30 flex w-64 max-w-[80%] flex-col border-r bg-background shadow-xl focus:outline-none"
+          >
+            <div className="flex shrink-0 items-center justify-between border-b px-3 py-2">
+              <DialogTitle className="text-sm font-semibold leading-none">History</DialogTitle>
+              <DialogClose asChild>
+                <Button variant="ghost" size="icon" className="h-7 w-7" aria-label="Close history">
+                  <X className="h-4 w-4" />
+                </Button>
+              </DialogClose>
+            </div>
+            {historyPanel}
+          </DialogPrimitive.Content>
+        </DialogPortal>
+      </Dialog>
+
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col min-w-0">
-        {/* Header */}
-        <header className="flex items-center justify-between border-b px-6 py-4 h-[85px]">
-          <div className="min-w-0">
-            <h1 className="text-2xl font-bold">Knowledge Assistant</h1>
-            <p className="text-sm text-muted-foreground truncate">
-              {activeConversation ? activeConversation.title : 'Knowledge-powered AI conversations'}
-            </p>
+        {/* Header. F2: below @lg (narrow overlay) it compacts — the big title,
+            search and export collapse, and a History toggle replaces the docked
+            sidebar so nothing clips or wraps one-word-per-line. */}
+        <header className="flex items-center justify-between gap-2 border-b px-3 py-2 min-h-[56px] @lg:px-6 @lg:py-4 @lg:h-[85px]">
+          <div className="flex min-w-0 items-center gap-2">
+            {/* F2: History toggle — narrow containers only (sidebar is hidden there). */}
+            <Button
+              ref={historyToggleRef}
+              variant="ghost"
+              size="icon"
+              className="@lg:hidden shrink-0 h-8 w-8"
+              onClick={() => setHistoryOpen(true)}
+              aria-label="Open conversation history"
+              data-testid="chat-history-toggle"
+            >
+              <History className="h-4 w-4" />
+            </Button>
+            <div className="min-w-0">
+              <h1 className="truncate text-base font-bold @lg:text-2xl">Knowledge Assistant</h1>
+              <p className="hidden @lg:block text-sm text-muted-foreground truncate">
+                {activeConversation ? activeConversation.title : 'Knowledge-powered AI conversations'}
+              </p>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="hidden @lg:flex items-center gap-2">
             {/* C-CHAT: Search within conversation */}
             {activeConversation && messages.length > 0 && (
               <div className="relative">
@@ -924,21 +1140,80 @@ export function Chat() {
               </Button>
             )}
           </div>
-          <div className="flex items-center gap-4">
+          <div className="flex shrink-0 items-center gap-2 @lg:gap-4">
+            {/* F2 (review finding 2): compact icon affordances below @lg — search and
+                export stay reachable at every container width instead of vanishing
+                with the wide-mode group. */}
+            {activeConversation && messages.length > 0 && (
+              <div className="flex @lg:hidden items-center gap-1">
+                <Button
+                  variant={searchOpen ? 'secondary' : 'ghost'}
+                  size="icon"
+                  className="h-8 w-8"
+                  onClick={() => {
+                    if (searchOpen) {
+                      setSearchOpen(false)
+                      setSearchQuery('') // closing clears the filter — no invisible filtering
+                    } else {
+                      setSearchOpen(true)
+                    }
+                  }}
+                  aria-label="Search messages"
+                  aria-expanded={searchOpen}
+                  title="Search messages"
+                  data-testid="chat-search-toggle"
+                >
+                  <Search className="h-4 w-4" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8"
+                  onClick={handleExportConversation}
+                  aria-label="Export conversation"
+                  title="Export conversation"
+                  data-testid="chat-export-compact"
+                >
+                  <Download className="h-4 w-4" />
+                </Button>
+              </div>
+            )}
             {status && (
               <div className="flex items-center gap-2 text-xs">
                 {status.ready ? (
-                  <div className="hidden sm:flex items-center gap-1.5 text-green-600 dark:text-green-400 bg-green-500/10 px-2 py-1 rounded-full border border-green-500/20">
+                  <div className="hidden @lg:flex items-center gap-1.5 text-green-600 dark:text-green-400 bg-green-500/10 px-2 py-1 rounded-full border border-green-500/20">
                     <CheckCircle2 className="h-3.5 w-3.5" />
-                    <span>{backendLabel(status.backend)} · {status.documentCount} chunks</span>
+                    <span>
+                      {(status.embedProviderLabel ?? backendLabel(status.backend)) +
+                        ' · ' +
+                        (status.embedDocumentCount ?? status.documentCount) +
+                        ' chunks'}
+                    </span>
+                  </div>
+                ) : status.indexState === 'queued' || status.indexState === 'loading' ? (
+                  <div className="hidden @lg:flex items-center gap-1.5 text-blue-600 dark:text-blue-400 bg-blue-500/10 px-2 py-1 rounded-full border border-blue-500/20">
+                    <Database className="h-3.5 w-3.5" />
+                    <span>
+                      {status.indexTotal
+                        ? `Loading knowledge · ${Math.round(((status.indexLoaded ?? 0) / status.indexTotal) * 100)}%`
+                        : 'Knowledge index queued'}
+                    </span>
+                  </div>
+                ) : status.indexState === 'failed' ? (
+                  <div
+                    className="hidden @lg:flex items-center gap-1.5 text-red-600 dark:text-red-400 bg-red-500/10 px-2 py-1 rounded-full border border-red-500/20"
+                    title={status.indexError ?? 'Knowledge index failed'}
+                  >
+                    <AlertCircle className="h-3.5 w-3.5" />
+                    <span>Index failed</span>
                   </div>
                 ) : status.backend === 'none' ? (
-                  <div className="hidden sm:flex items-center gap-1.5 text-yellow-600 dark:text-yellow-400 bg-yellow-500/10 px-2 py-1 rounded-full border border-yellow-500/20">
+                  <div className="hidden @lg:flex items-center gap-1.5 text-yellow-600 dark:text-yellow-400 bg-yellow-500/10 px-2 py-1 rounded-full border border-yellow-500/20">
                     <AlertCircle className="h-3.5 w-3.5" />
                     <span>AI offline</span>
                   </div>
                 ) : (
-                  <div className="hidden sm:flex items-center gap-1.5 text-yellow-600 dark:text-yellow-400 bg-yellow-500/10 px-2 py-1 rounded-full border border-yellow-500/20">
+                  <div className="hidden @lg:flex items-center gap-1.5 text-yellow-600 dark:text-yellow-400 bg-yellow-500/10 px-2 py-1 rounded-full border border-yellow-500/20">
                     <Database className="h-3.5 w-3.5" />
                     <span>Empty knowledge base</span>
                   </div>
@@ -951,7 +1226,7 @@ export function Chat() {
               <DialogTrigger asChild>
                 <Button variant="outline" size="sm" className="gap-2 h-8" disabled={!activeConversation} title="Add Context">
                   <Layers className="h-4 w-4" />
-                  <span className="hidden md:inline">Context</span>
+                  <span className="hidden @lg:inline">Context</span>
                   {contextIds.length > 0 && (
                     <span className="bg-primary text-primary-foreground rounded-full w-4 h-4 flex items-center justify-center text-[10px]">
                       {contextIds.length}
@@ -977,10 +1252,40 @@ export function Chat() {
               className="h-8 gap-2"
             >
               <FileText className="h-4 w-4" />
-              <span className="hidden md:inline">Chunks</span>
+              <span className="hidden @lg:inline">Chunks</span>
             </Button>
           </div>
         </header>
+
+        {/* F2 (review finding 2): narrow-mode inline search bar — the compact
+            replacement for the wide-mode header search input. */}
+        {searchOpen && (
+          <div className="flex @lg:hidden items-center gap-2 border-b bg-muted/20 px-3 py-2" data-testid="chat-search-bar">
+            <div className="relative flex-1">
+              <Search className="absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                type="text"
+                placeholder="Search messages..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="h-8 pl-8"
+                autoFocus
+              />
+            </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 shrink-0"
+              onClick={() => {
+                setSearchOpen(false)
+                setSearchQuery('') // closing clears the filter — no invisible filtering
+              }}
+              aria-label="Close search"
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+        )}
 
         {/* Recording Context Loading */}
         {contextLoading && (
@@ -1047,7 +1352,7 @@ export function Chat() {
                   No chunks indexed yet. Transcribe recordings to populate the knowledge base.
                 </div>
               ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 pb-4">
+                <div className="grid grid-cols-1 @md:grid-cols-2 gap-2 pb-4">
                   {chunks.map((chunk) => (
                     <div
                       key={chunk.id}
@@ -1065,7 +1370,7 @@ export function Chat() {
                         </span>
                       </div>
                       <p className="text-xs line-clamp-3 text-muted-foreground italic">
-                        "{chunk.content}"
+                        &quot;{chunk.content}&quot;
                       </p>
                     </div>
                   ))}
@@ -1118,7 +1423,7 @@ export function Chat() {
         )}
 
         {/* Messages List */}
-        <div className="flex-1 overflow-auto p-6 scroll-smooth">
+        <div className="flex-1 overflow-auto p-4 @lg:p-6 scroll-smooth">
           <div className="max-w-3xl mx-auto space-y-6">
             {messages.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-full py-12 text-center">
@@ -1127,7 +1432,7 @@ export function Chat() {
                 <p className="text-muted-foreground max-w-sm mb-8">
                   I can answer questions based on your captured knowledge and recorded meetings.
                 </p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full max-w-lg">
+                <div className="grid grid-cols-1 @md:grid-cols-2 gap-3 w-full max-w-lg">
                   {[
                     'Summarize my recent meetings',
                     'What are my pending action items?',
@@ -1210,10 +1515,20 @@ export function Chat() {
                       {message.role === 'assistant' && msgSources.length > 0 && (
                         <div className="flex flex-wrap gap-2 mt-1">
                           {msgSources.slice(0, 3).map((source, idx) => {
+                            // F5 (PixelRAG): screenshot captures cite with an image icon
+                            // and a "Screenshot:" prefix so the origin is unmistakable.
+                            const isImage = source.sourceType === 'image'
+                            const chipLabel = isImage
+                              ? `Screenshot: ${source.subject || 'Screenshot'}`
+                              : source.subject || 'Reference'
                             const chipInner = (
                               <>
-                                <FileText className="h-3 w-3 text-muted-foreground" />
-                                <span className="max-w-[120px] truncate">{source.subject || 'Reference'}</span>
+                                {isImage ? (
+                                  <ImageIcon className="h-3 w-3 text-muted-foreground" />
+                                ) : (
+                                  <FileText className="h-3 w-3 text-muted-foreground" />
+                                )}
+                                <span className="max-w-[140px] truncate">{chipLabel}</span>
                               </>
                             )
                             // Sources with a meeting id deep-link to the meeting + show a
@@ -1240,6 +1555,9 @@ export function Chat() {
                             return (
                               <div
                                 key={idx}
+                                title={isImage ? chipLabel : undefined}
+                                aria-label={isImage ? chipLabel : undefined}
+                                data-capture-id={isImage ? source.captureId : undefined}
                                 className="flex items-center gap-1.5 text-[10px] px-2 py-1 bg-muted rounded-full border border-border/50 transition-colors"
                               >
                                 {chipInner}
@@ -1289,7 +1607,7 @@ export function Chat() {
         </div>
 
         {/* Input Form */}
-        <div className="border-t p-6">
+        <div className="border-t p-3 @lg:p-6">
           <form onSubmit={handleSubmit} className="max-w-3xl mx-auto">
             <div className="relative flex items-center">
               <Input
@@ -1297,6 +1615,8 @@ export function Chat() {
                 placeholder={
                   status?.ready
                     ? 'Ask me anything about your knowledge base...'
+                    : status?.indexState === 'queued' || status?.indexState === 'loading'
+                      ? 'Knowledge index is loading...'
                     : status?.backend === 'none'
                       ? 'Add a Gemini API key in Settings to enable AI chat'
                       : 'Index meetings to enable AI conversations'
@@ -1320,12 +1640,15 @@ export function Chat() {
                 <Send className="h-5 w-5" />
               </Button>
             </div>
-            <div className="flex items-center justify-between mt-3 px-1">
-              <p className="text-[10px] text-muted-foreground">
+            {/* F2: caption never wraps one-word-per-line — it truncates on one line,
+                and hides entirely below @sm (the floating overlay) where the counter
+                alone suffices. */}
+            <div className="flex items-center justify-between gap-2 mt-3 px-1">
+              <p className="hidden @sm:block min-w-0 truncate text-[10px] text-muted-foreground">
                 I answer based on your meeting transcripts and documents.
               </p>
               <p className={cn(
-                'text-[10px] tabular-nums',
+                'shrink-0 ml-auto text-[10px] tabular-nums',
                 input.length > MAX_INPUT_LENGTH * 0.9
                   ? 'text-destructive'
                   : 'text-muted-foreground'

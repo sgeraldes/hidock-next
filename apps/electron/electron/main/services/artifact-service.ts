@@ -16,8 +16,10 @@ import { existsSync, mkdirSync, readFileSync, copyFileSync } from 'fs'
 import { join, extname, basename } from 'path'
 import { getDataPath } from './config'
 import { queryOne, queryAll, run, runInTransaction } from './database'
-import { resolveType, getArtifactType, ArtifactExtractionError } from './artifact-types'
+import { resolveType, getArtifactType, listArtifactTypes, ArtifactExtractionError } from './artifact-types'
+import { resolveGeminiApiKey } from './brains'
 import { getVectorStore } from './vector-store'
+import { filterEligibleCaptureIds, isCaptureEligible } from './recording-eligibility'
 import { getEventBus } from './event-bus'
 
 export interface ArtifactRow {
@@ -60,6 +62,18 @@ export interface ImportArtifactResult {
 /** Root for the artifacts store — mirrors file-storage's getDataPath()-based resolution. */
 export function getArtifactsPath(): string {
   return join(getDataPath(), 'artifacts')
+}
+
+/**
+ * The human caption for an image artifact — the vision model's `description`
+ * (set by the `image` artifact type). Returns null for non-image kinds or when
+ * no description was produced (e.g. extraction skipped for a missing Gemini key),
+ * so callers fall back to the filename.
+ */
+function imageCaption(kind: string, metadata: Record<string, unknown>): string | null {
+  if (kind !== 'image') return null
+  const desc = metadata.description
+  return typeof desc === 'string' && desc.trim() ? desc.trim() : null
 }
 
 /**
@@ -167,17 +181,38 @@ export async function importArtifact(
     )
   })
 
+  // F5 (PixelRAG): persist a screenshot/image's vision description onto the
+  // capture row so the capture is searchable and citations have concise text
+  // without re-reading the artifact. Reuses the existing knowledge_captures.summary
+  // column (no schema bump); never overwrites a summary a user/enricher already set.
+  const captionText = imageCaption(kind, metadata)
+  if (captionText && knowledgeCaptureId) {
+    try {
+      run(
+        `UPDATE knowledge_captures SET summary = ?, updated_at = ?
+         WHERE id = ? AND (summary IS NULL OR TRIM(summary) = '')`,
+        [captionText, now, knowledgeCaptureId]
+      )
+    } catch (e) {
+      console.error('[ArtifactService] Failed to set capture summary:', e)
+    }
+  }
+
   // Index extracted text into embeddings by reusing the transcript indexer
-  // (generic: keyed by the artifact id, subject = filename). No-op without text.
+  // (generic: keyed by the artifact id). Chunks are tagged with the artifact kind
+  // (sourceType) and owning capture id so RAG can label + cite them — e.g. an
+  // image capture surfaces as "[Screenshot: <description>]". No-op without text.
   let indexedChunks = 0
   if (extractedText && extractedText.trim().length > 0) {
     try {
       const store = getVectorStore()
-      await store.initialize()
+      store.ensureSchema()
       indexedChunks = await store.indexTranscript(extractedText, {
         recordingId: id,
         timestamp: now,
-        subject: filename
+        subject: captionText || filename,
+        sourceType: kind,
+        captureId: knowledgeCaptureId
       })
     } catch (e) {
       console.error('[ArtifactService] Failed to index artifact embeddings:', e)
@@ -211,5 +246,345 @@ export function getArtifactById(id: string): ArtifactRow | undefined {
   return queryOne<ArtifactRow>('SELECT * FROM artifacts WHERE id = ?', [id])
 }
 
+export interface ImageCaptureBackfillResult {
+  /** Eligible image artifacts processed this run (bounded by `limit`). */
+  scanned: number
+  /** Artifacts that got at least one chunk embedded. */
+  indexed: number
+  /** Artifacts whose vision text was (re)produced from the stored image this run. */
+  extracted: number
+  /** Artifacts left for a later boot (no text / no embedding backend / failure). */
+  skipped: number
+}
+
+interface ImageBackfillRow {
+  artifact_id: string
+  knowledge_capture_id: string | null
+  storage_path: string | null
+  extracted_text: string | null
+  metadata: string | null
+  title: string | null
+  summary: string | null
+  captured_at: string | null
+}
+
+/**
+ * Durable per-artifact backfill state, persisted under the `pixelRagBackfill`
+ * key of the artifact's EXISTING metadata JSON column (no schema bump). Rows
+ * with `terminal: true` or `attempts >= BACKFILL_MAX_ATTEMPTS` are never
+ * vision-billed again; non-terminal failures cool down before a retry.
+ */
+interface PixelRagBackfillState {
+  attempts: number
+  lastAttemptAt: string
+  errorKind?: string
+  terminal?: boolean
+}
+
+const BACKFILL_STATE_KEY = 'pixelRagBackfill'
+const BACKFILL_MAX_ATTEMPTS = 3
+const BACKFILL_COOLDOWN_MS = 24 * 60 * 60 * 1000 // one boot-tick-per-day retry cadence
+
+function parseMetadata(json: string | null): Record<string, unknown> {
+  if (!json) return {}
+  try {
+    const parsed = JSON.parse(json)
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {}
+  } catch {
+    return {}
+  }
+}
+
+function readBackfillState(metadata: Record<string, unknown>): PixelRagBackfillState | null {
+  const raw = metadata[BACKFILL_STATE_KEY]
+  if (!raw || typeof raw !== 'object') return null
+  const state = raw as Partial<PixelRagBackfillState>
+  if (typeof state.attempts !== 'number' || typeof state.lastAttemptAt !== 'string') return null
+  return state as PixelRagBackfillState
+}
+
+/**
+ * A row is eligible when it has never been attempted, or its last failure is
+ * non-terminal AND its cooldown has elapsed. Terminal / max-attempts rows are
+ * excluded forever (never re-billed); cooling-down rows are excluded for now —
+ * either way they no longer occupy the batch, so OLDER healthy rows progress.
+ */
+function isBackfillEligible(state: PixelRagBackfillState | null, nowMs: number): boolean {
+  if (!state) return true
+  if (state.terminal || state.attempts >= BACKFILL_MAX_ATTEMPTS) return false
+  const last = Date.parse(state.lastAttemptAt)
+  return !Number.isFinite(last) || nowMs - last >= BACKFILL_COOLDOWN_MS
+}
+
+/** Persist a (failed) attempt onto the artifact's metadata JSON. Best-effort. */
+function recordBackfillAttempt(
+  artifactId: string,
+  metadata: Record<string, unknown>,
+  errorKind: string,
+  opts?: { terminal?: boolean }
+): void {
+  const prev = readBackfillState(metadata)
+  const attempts = (prev?.attempts ?? 0) + 1
+  const state: PixelRagBackfillState = {
+    attempts,
+    lastAttemptAt: new Date().toISOString(),
+    errorKind,
+    terminal: opts?.terminal || attempts >= BACKFILL_MAX_ATTEMPTS || undefined
+  }
+  try {
+    run('UPDATE artifacts SET metadata = ? WHERE id = ?', [
+      JSON.stringify({ ...metadata, [BACKFILL_STATE_KEY]: state }),
+      artifactId
+    ])
+  } catch (e) {
+    console.error(`[ArtifactService] backfill state update failed for ${artifactId}:`, e)
+  }
+}
+
+/**
+ * Select up to `limit` ELIGIBLE image artifacts lacking embeddings.
+ *
+ * Eligibility (terminal / max-attempts / cooldown) is enforced IN SQL via JSON
+ * predicates on the metadata column, so ineligible rows are never retrieved at
+ * all — there is no scan window that terminal/cooling rows can occupy. Any
+ * number of terminal rows ahead of an older healthy capture therefore cannot
+ * hide it: the query walks straight past them and the LIMIT applies to
+ * eligible rows only. (A previous revision filtered eligibility in JS after an
+ * OFFSET-paged retrieval capped at 500 rows, which restarted at offset 0 every
+ * run — 500+ terminal rows ahead of a healthy row starved it forever.)
+ *
+ * The CASE expression guarantees evaluation order, so json_extract only runs
+ * on rows whose metadata passed json_valid — a single row with garbage
+ * metadata can never make the whole query throw (it is treated as eligible,
+ * matching {@link parseMetadata}'s lenient JS behavior). Retrieved rows are
+ * re-checked with {@link isBackfillEligible} as belt-and-suspenders.
+ */
+function selectEligibleBackfillRows(limit: number, nowMs: number): ImageBackfillRow[] {
+  const cooldownCutoffIso = new Date(nowMs - BACKFILL_COOLDOWN_MS).toISOString()
+  try {
+    const rows = queryAll<ImageBackfillRow>(
+      `SELECT a.id AS artifact_id, a.knowledge_capture_id, a.storage_path,
+              a.extracted_text, a.metadata, k.title, k.summary, k.captured_at
+         FROM artifacts a
+         LEFT JOIN knowledge_captures k ON k.id = a.knowledge_capture_id
+        WHERE a.kind = 'image'
+          AND NOT EXISTS (SELECT 1 FROM vector_embeddings v WHERE v.recording_id = a.id)
+          AND CASE
+                WHEN a.metadata IS NULL OR json_valid(a.metadata) = 0 THEN 1
+                WHEN COALESCE(json_extract(a.metadata, '$.pixelRagBackfill.terminal'), 0) = 1 THEN 0
+                WHEN COALESCE(json_extract(a.metadata, '$.pixelRagBackfill.attempts'), 0) >= ? THEN 0
+                WHEN json_extract(a.metadata, '$.pixelRagBackfill.lastAttemptAt') IS NULL THEN 1
+                WHEN datetime(json_extract(a.metadata, '$.pixelRagBackfill.lastAttemptAt')) <= datetime(?) THEN 1
+                ELSE 0
+              END = 1
+        ORDER BY a.created_at DESC, a.id DESC
+        LIMIT ?`,
+      [BACKFILL_MAX_ATTEMPTS, cooldownCutoffIso, limit]
+    )
+    return rows.filter((row) => isBackfillEligible(readBackfillState(parseMetadata(row.metadata)), nowMs))
+  } catch (e) {
+    console.error('[ArtifactService] image-capture backfill query failed:', e)
+    return []
+  }
+}
+
+/**
+ * F5 (PixelRAG) backfill: index EXISTING image captures that have no vector
+ * embeddings yet — including screenshots imported before a Gemini key existed,
+ * whose vision extraction is (re)run here and persisted back onto the artifact +
+ * capture. Batched (`limit` eligible rows per run) so a single boot tick stays
+ * cheap, and guarded like {@link VectorStore.backfillMissingTranscripts}.
+ *
+ * Failure policy (billable vision calls are strictly bounded):
+ *  - vision call failed → attempt recorded (cooldown, terminal after
+ *    {@link BACKFILL_MAX_ATTEMPTS}); the row stops occupying the batch;
+ *  - vision succeeded but the image yields no text → terminal (billed once, never again);
+ *  - stored file missing → terminal without billing;
+ *  - NO GEMINI KEY → vision is not attempted and NO attempt is recorded, so the
+ *    rows are retried when a key appears (silent degrade);
+ *  - text present but no embedding backend → no attempt recorded (nothing was
+ *    billed; the persisted text is re-indexed vision-free on a later boot).
+ */
+export async function backfillImageCaptureIndex(limit = 10): Promise<ImageCaptureBackfillResult> {
+  const result: ImageCaptureBackfillResult = { scanned: 0, indexed: 0, extracted: 0, skipped: 0 }
+  if (limit <= 0) return result
+
+  const store = getVectorStore()
+  store.ensureSchema() // query access without hydrating the complete in-memory index
+
+  const backfillRows = selectEligibleBackfillRows(limit, Date.now())
+  // ADV40 sweep (round-42) — the backfill re-runs Gemini VISION on the image AND
+  // embeds the extracted text, so it must gate on the owning capture's
+  // eligibility BEFORE those provider calls. selectEligibleBackfillRows only
+  // scopes by backfill-attempt state, not by deletion/value exclusion, so a
+  // soft-deleted or value-excluded image CAPTURE would otherwise be re-sent to
+  // the vision + embeddings providers on boot. Route every capture id through
+  // THE shared fail-closed capture boundary; drop a capture-backed row whose
+  // capture is ineligible or unverifiable (fail-closed).
+  //
+  // ADV41-1 (round-43, HIGH) — a row with NO knowledge_capture_id (schema
+  // permits NULL + the LEFT JOIN) is an UNASSOCIABLE orphan: it has no positive
+  // provenance/eligibility, so it must NOT be sent to Gemini vision or the
+  // embeddings provider. The earlier `: true` branch retained such orphans and
+  // was the hole this finding closes — an artifact WITHOUT a resolvable eligible
+  // capture is now SKIPPED fail-closed (was `: true`, now `: false`).
+  const captureIds = backfillRows.map((r) => r.knowledge_capture_id).filter((id): id is string => !!id)
+  const { eligible: eligibleCaptures, failClosed: captureFailClosed } = filterEligibleCaptureIds(captureIds)
+  const rows = backfillRows.filter((r) =>
+    r.knowledge_capture_id ? !captureFailClosed && eligibleCaptures.has(r.knowledge_capture_id) : false
+  )
+  result.skipped += backfillRows.length - rows.length
+  const imageType = getArtifactType('image')
+
+  let visionKeyAvailable: boolean
+  try {
+    visionKeyAvailable = Boolean(resolveGeminiApiKey())
+  } catch {
+    visionKeyAvailable = false
+  }
+
+  for (const row of rows) {
+    result.scanned++
+    const baseMetadata = parseMetadata(row.metadata)
+    // ADV41-1/ADV41-3 (round-43) — every surviving row has a non-null capture id
+    // (orphans were skipped fail-closed above). Bind it once; this is the id
+    // re-validated before EACH provider call in this iteration.
+    const captureId = row.knowledge_capture_id
+    if (!captureId) {
+      // Defensive: the filter above already dropped NULL-capture orphans.
+      result.skipped++
+      continue
+    }
+    try {
+      let text = row.extracted_text && row.extracted_text.trim() ? row.extracted_text : ''
+      let caption: string | null = null
+
+      // Re-run vision extraction only when we have no stored text yet (e.g. the
+      // capture predates the Gemini key). Reuses the registered image type's
+      // Gemini brain path — no duplicate vision code here.
+      if (!text) {
+        if (!row.storage_path || !existsSync(row.storage_path)) {
+          // The stored image is gone — terminal, and no vision call was billed.
+          recordBackfillAttempt(row.artifact_id, baseMetadata, 'FILE_MISSING', { terminal: true })
+          result.skipped++
+          continue
+        }
+        if (!imageType || !visionKeyAvailable) {
+          // No vision backend — degrade silently WITHOUT recording an attempt,
+          // so these rows are retried as soon as a Gemini key is configured.
+          result.skipped++
+          continue
+        }
+
+        // ADV41-3 (round-43) — capture eligibility was snapshotted ONCE before
+        // the loop; an owner exclusion committing during a PRIOR row's vision /
+        // embed await must not let THIS row's image reach the vision provider.
+        // Re-validate in the SAME synchronous step immediately before the call.
+        if (!isCaptureEligible(captureId)) {
+          result.skipped++
+          continue
+        }
+
+        const extraction = await imageType.extractText(row.storage_path)
+        text = extraction.text ?? ''
+        caption = imageCaption('image', extraction.metadata ?? {})
+
+        if (!text.trim()) {
+          // The vision call ran and produced nothing: a reported error is a
+          // retryable failure (cooldown → terminal after max attempts); a clean
+          // empty result is terminal immediately — re-billing an image with no
+          // extractable content every boot buys nothing.
+          const visionError = (extraction.metadata as Record<string, unknown> | undefined)?.error
+          if (visionError) {
+            recordBackfillAttempt(row.artifact_id, baseMetadata, 'VISION_FAILED')
+          } else {
+            recordBackfillAttempt(row.artifact_id, baseMetadata, 'EMPTY_EXTRACTION', { terminal: true })
+          }
+          result.skipped++
+          continue
+        }
+
+        // ADV41-3 (round-43) — re-validate AFTER the vision await, BEFORE
+        // persisting any vision-derived text/summary. An exclusion committing
+        // during the vision call must not leave the excluded image's extracted
+        // text/caption written back. No await between here and the writes below
+        // (the artifact UPDATE and, after this block, the capture-summary
+        // UPDATE), so this check is adjacent to both.
+        if (!isCaptureEligible(captureId)) {
+          result.skipped++
+          continue
+        }
+
+        result.extracted++
+        try {
+          // Persist the extraction merged over the existing metadata, clearing
+          // any prior backfill failure state (the row succeeded).
+          const merged = { ...baseMetadata, ...(extraction.metadata ?? {}) }
+          delete merged[BACKFILL_STATE_KEY]
+          run('UPDATE artifacts SET extracted_text = ?, metadata = ? WHERE id = ?', [
+            text,
+            JSON.stringify(merged),
+            row.artifact_id
+          ])
+        } catch (e) {
+          console.error('[ArtifactService] backfill artifact update failed:', e)
+        }
+      }
+
+      const now = new Date().toISOString()
+      if (caption && row.knowledge_capture_id) {
+        try {
+          run(
+            `UPDATE knowledge_captures SET summary = ?, updated_at = ?
+             WHERE id = ? AND (summary IS NULL OR TRIM(summary) = '')`,
+            [caption, now, row.knowledge_capture_id]
+          )
+        } catch {
+          /* best-effort summary backfill */
+        }
+      }
+
+      const subject =
+        caption || (row.summary && row.summary.trim() ? row.summary : row.title) || 'Screenshot'
+
+      // ADV41-3 (round-43) — re-validate IMMEDIATELY before the embeddings
+      // provider call. Exclusion during the vision call or the write window must
+      // not let the excluded image's text be embedded.
+      if (!isCaptureEligible(captureId)) {
+        result.skipped++
+        continue
+      }
+      const count = await store.indexTranscript(text, {
+        recordingId: row.artifact_id,
+        timestamp: row.captured_at ?? now,
+        subject,
+        sourceType: 'image',
+        captureId,
+        // Pre-provider + post-await guards INSIDE indexTranscript so an exclusion
+        // committing during the embeddings await also blocks the send (round-43
+        // shouldGenerate) and the persist (shouldPersist).
+        shouldGenerate: () => isCaptureEligible(captureId),
+        shouldPersist: () => isCaptureEligible(captureId)
+      })
+      if (count > 0) result.indexed++
+      else result.skipped++ // no embedding backend — text is persisted; retried vision-free later
+    } catch (e) {
+      // Unexpected failure (extractText throw, DB error mid-row): record the
+      // attempt so the row cools down instead of re-occupying every batch.
+      recordBackfillAttempt(row.artifact_id, baseMetadata, 'VISION_FAILED')
+      result.skipped++
+      console.error(`[ArtifactService] image-capture backfill failed for ${row.artifact_id}:`, e)
+    }
+  }
+
+  if (result.scanned > 0) {
+    console.log(
+      `[ArtifactService] image-capture backfill: ${result.indexed} indexed, ` +
+        `${result.extracted} re-extracted, ${result.skipped} skipped (of ${result.scanned})`
+    )
+  }
+  return result
+}
+
 /** Re-export so IPC/tests can resolve types without importing the registry directly. */
-export { resolveType, getArtifactType }
+export { resolveType, getArtifactType, listArtifactTypes }

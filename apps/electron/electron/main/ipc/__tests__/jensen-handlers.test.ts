@@ -20,6 +20,16 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
+const mockRetryPendingFileCleanups = vi.hoisted(() => vi.fn().mockResolvedValue({
+  attempted: 0,
+  cleared: 0,
+  stillPending: {}
+}))
+
+vi.mock('../../services/recording-deletion-service', () => ({
+  retryPendingFileCleanups: mockRetryPendingFileCleanups
+}))
+
 // ---------------------------------------------------------------------------
 // Shared registries — populated by vi.mock factories at module load time
 // NOTE: These must be plain object literals (not `new Map`, not `const x = ...`
@@ -40,6 +50,8 @@ const broadcastWindowState = { destroyed: false }
 // ---------------------------------------------------------------------------
 
 vi.mock('electron', () => ({
+  // recording-deletion-service (connect sweep) pulls config → electron app.
+  app: { getPath: () => 'test-path' },
   ipcMain: {
     handle: (channel: string, fn: (event: any, args?: any) => any) => {
       mockHandlers[channel] = fn
@@ -151,6 +163,7 @@ function makeEvent(destroyed = false) {
 describe('registerJensenHandlers', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockRetryPendingFileCleanups.mockResolvedValue({ attempted: 0, cleared: 0, stillPending: {} })
     broadcastSendCalls.length = 0
     broadcastWindowState.destroyed = false
     // Re-register handlers so mockHandlers is fully populated
@@ -215,6 +228,31 @@ describe('registerJensenHandlers', () => {
     const result = await mockHandlers['jensen:connect'](makeEvent())
     expect(mockJensen.connect).toHaveBeenCalledTimes(1)
     expect(result).toBe(true)
+    expect(mockRetryPendingFileCleanups).toHaveBeenCalledTimes(1)
+  })
+
+  it('jensen:connect does not finish until queued device erases have been swept', async () => {
+    let releaseCleanup!: () => void
+    let reportCleanupStarted!: () => void
+    const cleanupStarted = new Promise<void>((resolve) => { reportCleanupStarted = resolve })
+    mockJensen.connect.mockResolvedValue(true)
+    mockRetryPendingFileCleanups.mockImplementation(() => new Promise((resolve) => {
+      reportCleanupStarted()
+      releaseCleanup = () => resolve({ attempted: 1, cleared: 1, stillPending: {} })
+    }))
+
+    let settled = false
+    const connect = mockHandlers['jensen:connect'](makeEvent()).then((result) => {
+      settled = true
+      return result
+    })
+    await cleanupStarted
+
+    expect(mockRetryPendingFileCleanups).toHaveBeenCalledTimes(1)
+    expect(settled).toBe(false)
+
+    releaseCleanup()
+    await expect(connect).resolves.toBe(true)
   })
 
   it('jensen:isConnected returns boolean', async () => {
@@ -262,6 +300,28 @@ describe('registerJensenHandlers', () => {
     const result = await mockHandlers['jensen:deleteFile'](makeEvent(), { filename: 'recording.hda' })
     expect(mockJensen.deleteFile).toHaveBeenCalledWith('recording.hda')
     expect(result).toEqual({ result: 'success' })
+  })
+
+  it('jensen:deleteFile waits behind an in-flight serialized device operation', async () => {
+    mockJensen.isConnected.mockReturnValue(true)
+    let releaseCount!: () => void
+    let reportCountStarted!: () => void
+    const countStarted = new Promise<void>((resolve) => { reportCountStarted = resolve })
+    mockJensen.getFileCount.mockImplementation(() => new Promise((resolve) => {
+      reportCountStarted()
+      releaseCount = () => resolve({ count: 1 })
+    }))
+
+    const countPromise = mockHandlers['jensen:getFileCount'](makeEvent())
+    await countStarted
+    const deletePromise = mockHandlers['jensen:deleteFile'](makeEvent(), { filename: 'recording.hda' })
+    await Promise.resolve()
+
+    expect(mockJensen.deleteFile).not.toHaveBeenCalled()
+    releaseCount()
+    await countPromise
+    await expect(deletePromise).resolves.toEqual({ result: 'success' })
+    expect(mockJensen.deleteFile).toHaveBeenCalledWith('recording.hda')
   })
 
   it('jensen:downloadFile rejects path traversal filenames', async () => {
@@ -497,6 +557,53 @@ describe('registerJensenHandlers', () => {
     expect(mockJensen.getFileCount).not.toHaveBeenCalled()
   })
 
+  it('does not issue file-count or list commands while a download owns the USB stream', async () => {
+    mockJensen.isConnected.mockReturnValue(true)
+    let releaseDownload!: () => void
+    mockJensen.downloadFile.mockImplementation(async () => {
+      await new Promise<void>((resolve) => { releaseDownload = resolve })
+      return true
+    })
+
+    const downloadPromise = mockHandlers['jensen:downloadFile'](makeEvent(), {
+      filename: 'active.hda',
+      fileSize: 1024,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    await expect(mockHandlers['jensen:getFileCount'](makeEvent())).resolves.toBeNull()
+    await expect(mockHandlers['jensen:listFiles'](makeEvent())).resolves.toBeNull()
+    expect(mockJensen.getFileCount).not.toHaveBeenCalled()
+    expect(mockJensen.listFiles).not.toHaveBeenCalled()
+
+    releaseDownload()
+    await expect(downloadPromise).resolves.toBe(true)
+  })
+
+  it('does not start a download until an already-running count command has settled', async () => {
+    mockJensen.isConnected.mockReturnValue(true)
+    mockJensen.downloadFile.mockResolvedValue(true)
+    let releaseCount!: () => void
+    mockJensen.getFileCount.mockImplementation(async () => {
+      await new Promise<void>((resolve) => { releaseCount = resolve })
+      return { count: 330 }
+    })
+
+    const countPromise = mockHandlers['jensen:getFileCount'](makeEvent())
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const downloadPromise = mockHandlers['jensen:downloadFile'](makeEvent(), {
+      filename: 'after-count.hda',
+      fileSize: 38_000,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(mockJensen.downloadFile).not.toHaveBeenCalled()
+    releaseCount()
+    await expect(countPromise).resolves.toEqual({ count: 330 })
+    await expect(downloadPromise).resolves.toBe(true)
+    expect(mockJensen.downloadFile).toHaveBeenCalledTimes(1)
+  })
+
   it('jensen:disconnect does NOT preempt in-flight work (waits for it via the serializer)', async () => {
     // Disconnect must let a running scan finish so the device empties its USB FIFO
     // before close — preempting it leaves stale bytes that wedge the next connect.
@@ -595,6 +702,23 @@ describe('registerJensenHandlers', () => {
       await mockHandlers['jensen:disconnect'](makeEvent())
       const channels = broadcastSendCalls.map(([c]) => c)
       expect(channels).toContain('jensen:state-changed')
+    })
+
+    it('jensen:getState includes the active recording for fresh renderers (reload mid-record seed)', async () => {
+      vi.useFakeTimers()
+      mockJensen.isConnected.mockReturnValue(true)
+      mockJensen.listFiles.mockResolvedValue([])
+      mockJensen.getRecordingFile.mockResolvedValue({ recording: '2026Jul22-120145-Rec26.hda' })
+      await mockHandlers['jensen:listFiles'](makeEvent())
+      await vi.advanceTimersByTimeAsync(2000) // kickoff poll reads the active recording
+
+      const state = await mockHandlers['jensen:getState'](makeEvent())
+      expect(state).toMatchObject({ connected: true, recording: '2026Jul22-120145-Rec26.hda' })
+    })
+
+    it('jensen:getState reports recording: null when the device is idle', async () => {
+      const state = await mockHandlers['jensen:getState'](makeEvent())
+      expect(state).toMatchObject({ recording: null })
     })
   })
 

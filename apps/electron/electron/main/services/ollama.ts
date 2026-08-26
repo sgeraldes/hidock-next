@@ -20,6 +20,7 @@
 
 import { embed } from '@hidock/ai-providers'
 import { getConfig } from './config'
+import { eligibleToGenerate } from './brains/eligibility'
 
 // AI-07 FIX: These are now fallback defaults only - actual values come from config
 const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434'
@@ -127,9 +128,22 @@ class OllamaService {
     }
   }
 
-  async generateEmbeddings(texts: string[]): Promise<(number[] | null)[]> {
+  async generateEmbeddings(
+    texts: string[],
+    opts: { shouldGenerate?: () => boolean } = {}
+  ): Promise<(number[] | null)[]> {
     const embeddings: (number[] | null)[] = []
     for (const text of texts) {
+      // ADV43-2 (round-45) — Ollama does one request per text. Re-evaluate the
+      // fail-closed eligibility gate IMMEDIATELY before EACH request: on
+      // ineligible (false / throw) stop issuing further requests and fill the
+      // remaining texts with null (the "no embedding available" shape callers
+      // persist as nothing), so an exclusion committed while an earlier request
+      // was pending never sends the later texts to the provider.
+      if (!eligibleToGenerate(opts.shouldGenerate)) {
+        while (embeddings.length < texts.length) embeddings.push(null)
+        return embeddings
+      }
       const embedding = await this.generateEmbedding(text)
       embeddings.push(embedding)
     }

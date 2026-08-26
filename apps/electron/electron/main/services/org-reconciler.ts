@@ -17,7 +17,6 @@ import {
   queryOne,
   run,
   runInTransaction,
-  mergeContacts,
   meetingBaseUid,
   insertIdentitySuggestion,
   getAllRecordingPreassignments,
@@ -25,11 +24,20 @@ import {
   recordMentionResolutionNoSave,
   getAmbiguousBuckets,
   getBucketResolution,
+  getActiveCalendarSyncToken,
   healRecordingStatusFromTranscripts,
+  isProjectDiscoveryRejected,
+  filterVisibleEntityIds,
+  recordProjectDiscoveryObservation,
+  clearProjectDiscoveryObservations,
+  getProjectDiscoveryCorroborations,
   type RecordingPreassignment
 } from './database'
+import { filterEligibleRecordingIds } from './recording-eligibility'
+import { mergeContactsWithGraph } from './knowledge-graph-service'
 import { resolveContact, resolveProject } from './entity-resolver'
 import { isGenericSpeakerLabel, cleanRole } from './entity-normalize'
+import { decideProjectDiscovery, scoreProjectNameCandidate } from './project-discovery-gate'
 import { canUpgrade, methodConfidence } from './signal-tiers'
 import { LONG_MEETING_MS } from './recording-match-scoring'
 import { randomUUID } from 'crypto'
@@ -154,6 +162,7 @@ export function autoLinkRecordingsToMeetings(): number {
      FROM recordings
      WHERE meeting_id IS NULL AND date_recorded IS NOT NULL
        AND deleted_at IS NULL AND COALESCE(personal, 0) = 0
+       AND COALESCE(transcription_status, 'none') != 'no_speech'
        AND (correlation_method IS NULL OR correlation_method != '${STANDALONE_METHOD}')`
   )
   if (recordings.length === 0) return 0
@@ -168,8 +177,12 @@ export function autoLinkRecordingsToMeetings(): number {
     preassignByBase.set(baseRecordingName(pa.filename).toLowerCase(), pa)
   }
 
+  const activeCalendarToken = getActiveCalendarSyncToken()
   const meetings = queryAll<MeetingRow>(
-    `SELECT id, subject, start_time, end_time, is_all_day FROM meetings`
+    activeCalendarToken
+      ? `SELECT id, subject, start_time, end_time, is_all_day FROM meetings WHERE calendar_sync_token = ?`
+      : `SELECT id, subject, start_time, end_time, is_all_day FROM meetings`,
+    activeCalendarToken ? [activeCalendarToken] : []
   )
   const meetingIds = new Set(meetings.map((m) => m.id))
   const meetingWindows: AutoLinkWindow[] = meetings
@@ -230,7 +243,7 @@ export function autoLinkRecordingsToMeetings(): number {
   if (!hasWork) {
     if (declinedBridgeCount > 0) {
       console.log(
-        `[OrgReconciler] Left ${declinedBridgeCount} recording(s) unlinked — only ` +
+        `[OrgReconciler] Left ${declinedBridgeCount} recording(s) unlinked - only ` +
         `all-day/long "bridge" meetings overlapped (need user/content corroboration)`
       )
     }
@@ -245,6 +258,13 @@ export function autoLinkRecordingsToMeetings(): number {
          WHERE id = ? AND meeting_id IS NULL`,
         [u.meetingId, u.recordingId]
       )
+      run(
+        `UPDATE knowledge_captures
+         SET meeting_id = ?, correlation_confidence = 1.0, correlation_method = 'user_preassign',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE source_recording_id = ?`,
+        [u.meetingId, u.recordingId]
+      )
       linked++
     }
     for (const id of standaloneMarks) {
@@ -253,11 +273,25 @@ export function autoLinkRecordingsToMeetings(): number {
          WHERE id = ? AND meeting_id IS NULL`,
         [id]
       )
+      run(
+        `UPDATE knowledge_captures
+         SET meeting_id = NULL, correlation_confidence = NULL, correlation_method = NULL,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE source_recording_id = ?`,
+        [id]
+      )
     }
     for (const u of overlapUpdates) {
       run(
         `UPDATE recordings SET meeting_id = ?, correlation_confidence = 0.7, correlation_method = 'time_overlap'
          WHERE id = ? AND meeting_id IS NULL`,
+        [u.meetingId, u.recordingId]
+      )
+      run(
+        `UPDATE knowledge_captures
+         SET meeting_id = ?, correlation_confidence = 0.7, correlation_method = 'time_overlap',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE source_recording_id = ?`,
         [u.meetingId, u.recordingId]
       )
       linked++
@@ -338,8 +372,15 @@ export function upsertContactsFromMeetings(): { contacts: number; links: number 
           [meeting.id, contact.id]
         )
         if (!existingLink) {
+          // These people come straight from the meeting's calendar organizer/
+          // attendee data, so the membership is CALENDAR-authored (structural) —
+          // tag it 'calendar' so the non-owner identity boundary treats it as
+          // always-eligible, matching the sibling calendar path in database.ts
+          // (syncMeetingContacts). Omitting the source left it NULL = legacy =
+          // fail-closed suppressed, which would wrongly hide a real calendar
+          // contact and (round-30) mis-partition it in mergeDuplicateContacts.
           run(
-            `INSERT INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)`,
+            `INSERT INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES (?, ?, ?, 'calendar')`,
             [meeting.id, contact.id, person.role]
           )
           newLinks++
@@ -395,15 +436,33 @@ export function repairEscapedMeetingText(): number {
   return repaired
 }
 
-/** Idempotently link a contact to a meeting and refresh its meeting count/last-seen. */
-function linkContactToMeeting(contactId: string, meetingId: string | undefined, now: string): void {
+/**
+ * Idempotently link a contact to a meeting and refresh its meeting count/last-seen.
+ *
+ * v44/round-27 provenance: this helper only ever links AI-EXTRACTED / auto-resolved
+ * participants (applyTranscriptEntities + autoSplitAmbiguousBuckets), so a NEW row
+ * it writes is TRANSCRIPT-derived — tagged source='transcript' + the source
+ * recording id so the non-owner identity surfaces gate it by that recording's
+ * eligibility. A NULL sourceRecordingId leaves the row transcript-with-no-recording
+ * ⇒ ineligible fail-closed (correct: unprovenanced transcript membership).
+ */
+function linkContactToMeeting(
+  contactId: string,
+  meetingId: string | undefined,
+  now: string,
+  sourceRecordingId?: string | null
+): void {
   if (!contactId || !meetingId) return
   const link = queryOne<{ meeting_id: string }>(
     `SELECT meeting_id FROM meeting_contacts WHERE meeting_id = ? AND contact_id = ?`,
     [meetingId, contactId]
   )
   if (!link) {
-    run(`INSERT INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, 'attendee')`, [meetingId, contactId])
+    run(`INSERT INTO meeting_contacts (meeting_id, contact_id, role, source, source_recording_id) VALUES (?, ?, 'attendee', 'transcript', ?)`, [
+      meetingId,
+      contactId,
+      sourceRecordingId ?? null
+    ])
   }
   run(
     `UPDATE contacts SET
@@ -464,7 +523,7 @@ export function applyTranscriptEntities(opts: {
             // Explicitly marked Unclear — leave it unattributed, do not create.
             continue
           }
-          linkContactToMeeting(contactId, opts.meetingId, now)
+          linkContactToMeeting(contactId, opts.meetingId, now, opts.recordingId)
           continue
         }
       }
@@ -481,15 +540,22 @@ export function applyTranscriptEntities(opts: {
           contactId = res.id
         } else {
           const id = randomUUID()
+          // v45/round-28: a transcript-extracted ENTITY ⇒ source='transcript' +
+          // the source recording, so the visible-identity boundary suppresses it
+          // on non-owner surfaces once that recording is excluded (ADV27-1).
+          // v46/round-31 (ADV29-2): stamp role_source_recording_id = the recording
+          // when we set a transcript-derived role, so a non-owner read can blank the
+          // role if this recording is later excluded even while the entity stays
+          // visible via another eligible recording.
           run(
-            `INSERT INTO contacts (id, name, type, role, first_seen_at, last_seen_at, meeting_count)
-             VALUES (?, ?, 'unknown', ?, ?, ?, 0)`,
-            [id, name, person.role ?? null, now, now]
+            `INSERT INTO contacts (id, name, type, role, first_seen_at, last_seen_at, meeting_count, source, source_recording_id, role_source_recording_id, role_origin)
+             VALUES (?, ?, 'unknown', ?, ?, ?, 0, 'transcript', ?, ?, ?)`,
+            [id, name, person.role ?? null, now, now, opts.recordingId ?? null, person.role ? (opts.recordingId ?? null) : null, person.role ? 'transcript' : null]
           )
           contactId = id
           contacts++
         }
-        linkContactToMeeting(contactId, opts.meetingId, now)
+        linkContactToMeeting(contactId, opts.meetingId, now, opts.recordingId)
         continue
       }
 
@@ -497,8 +563,29 @@ export function applyTranscriptEntities(opts: {
         // High confidence — link the existing contact, never create.
         contactId = res.id
         if (person.role) {
-          const existing = queryOne<{ role?: string }>(`SELECT role FROM contacts WHERE id = ?`, [contactId])
-          if (existing && !existing.role) run(`UPDATE contacts SET role = ? WHERE id = ?`, [person.role, contactId])
+          // ADV28-1 (round-30): transcript enrichment must NOT mutate a STRUCTURAL
+          // (calendar/user) or legacy contact's DISPLAYED fields. A transcript-derived
+          // role written onto a structural entity would show on People + graph detail
+          // and could never be revoked when the source recording is later excluded
+          // (personal/soft-deleted/value/purged) — the structural entity has no field
+          // provenance to reverse. So only fill an EMPTY role on a TRANSCRIPT-
+          // provenanced contact, whose whole visibility is already gated by the
+          // source recording via filterVisibleEntityIds. Structural/legacy contacts
+          // keep only calendar/manual data (fail-closed: no laundering).
+          const existing = queryOne<{ role?: string; source?: string | null }>(
+            `SELECT role, source FROM contacts WHERE id = ?`,
+            [contactId]
+          )
+          if (existing && !existing.role && existing.source === 'transcript') {
+            // v46/round-31 (ADV29-2): record the recording that supplied this role so
+            // a non-owner read blanks it if the recording is later excluded, even
+            // though the entity stays visible via another eligible recording.
+            run(`UPDATE contacts SET role = ?, role_source_recording_id = ?, role_origin = 'transcript' WHERE id = ?`, [
+              person.role,
+              opts.recordingId ?? null,
+              contactId
+            ])
+          }
         }
         // Remember an attendee-context split so re-analysis attributes it the same way
         // instead of re-running the bucket guess (only meaningful with a recording).
@@ -507,27 +594,32 @@ export function applyTranscriptEntities(opts: {
         }
       } else if (res.id && res.confidence >= SUGGEST_THRESHOLD) {
         // Mid confidence — queue a reviewable suggestion; do NOT create or link.
+        // v44/round-27 (ADV26-1): persist the authoritative source recording id so
+        // this NON-graph transcript suggestion is revalidated through the recording
+        // allowlist at surface + accept (excluded/purged source ⇒ suppressed/refused).
         insertIdentitySuggestion('person', name, res.id, res.confidence, {
           method: res.method,
           meetingId: opts.meetingId,
           coOccurring: meetingAttendeeNames(),
           ...(res.rarity ? { rarity: res.rarity } : {})
-        })
+        }, opts.recordingId ? [opts.recordingId] : [])
         continue
       } else {
         // Low confidence — genuinely new person.
         const id = randomUUID()
+        // v45/round-28: transcript-extracted ENTITY ⇒ source='transcript' + recording (ADV27-1).
+        // v46/round-31 (ADV29-2): stamp role_source_recording_id when a transcript role is set.
         run(
-          `INSERT INTO contacts (id, name, type, role, first_seen_at, last_seen_at, meeting_count)
-           VALUES (?, ?, 'unknown', ?, ?, ?, 0)`,
-          [id, name, person.role ?? null, now, now]
+          `INSERT INTO contacts (id, name, type, role, first_seen_at, last_seen_at, meeting_count, source, source_recording_id, role_source_recording_id, role_origin)
+           VALUES (?, ?, 'unknown', ?, ?, ?, 0, 'transcript', ?, ?, ?)`,
+          [id, name, person.role ?? null, now, now, opts.recordingId ?? null, person.role ? (opts.recordingId ?? null) : null, person.role ? 'transcript' : null]
         )
         contactId = id
         contacts++
       }
 
       if (contactId && opts.meetingId) {
-        linkContactToMeeting(contactId, opts.meetingId, now)
+        linkContactToMeeting(contactId, opts.meetingId, now, opts.recordingId)
       }
     }
 
@@ -539,16 +631,107 @@ export function applyTranscriptEntities(opts: {
       if (res.id && res.confidence >= AUTO_LINK_THRESHOLD) {
         projectId = res.id
       } else if (res.id && res.confidence >= SUGGEST_THRESHOLD) {
+        // v44/round-27 (ADV26-1): persist the source recording id (see person path).
         insertIdentitySuggestion('project', projectName, res.id, res.confidence, {
           method: res.method,
           meetingId: opts.meetingId,
           coOccurring: [],
           ...(res.rarity ? { rarity: res.rarity } : {})
-        })
+        }, opts.recordingId ? [opts.recordingId] : [])
+      } else if (isProjectDiscoveryRejected(projectName)) {
+        // Dismissed discovery — a durable tombstone (v41) blocks silent
+        // re-creation on re-analysis. Only the AUTO-create path is blocked:
+        // if the user manually creates a project with this name, createProject
+        // clears the tombstone and resolveProject links to it normally above.
+        // Deliberately short-circuits BEFORE the discovery gate: a dismissed name
+        // must not even accumulate sightings, or it would climb back into the
+        // deferred-suggestion queue the user just cleared.
       } else {
-        const id = randomUUID()
-        run(`INSERT INTO projects (id, name, status) VALUES (?, ?, 'active')`, [id, projectName])
-        projectId = id
+        // F12 discovery gate. The resolver landing here means only "this is not a
+        // project I already know" — NOT "this is a project". Require a plausible
+        // name AND corroboration across >= 2 distinct sources before minting a
+        // row; anything weaker is remembered as a deferred suggestion instead of
+        // becoming a zero-item dead-end project.
+        //
+        // The ledger key must be STABLE across re-processing, so it identifies
+        // the CAPTURE (the recording), not the meeting: a recording id never
+        // changes, while its meeting_id is assigned late by correlation and
+        // rewritten by occurrence merges. Keying on the meeting let one
+        // conversation bank two sightings — once as 'r:x' before it was
+        // correlated, again as 'm:y' after — manufacturing the very corroboration
+        // this gate exists to require. The meeting rides along separately so the
+        // count still collapses two recordings of one conversation into one
+        // source. With neither id there is nothing to corroborate against, so we
+        // neither record nor create.
+        const quality = scoreProjectNameCandidate(projectName)
+        const sourceKey = opts.recordingId
+          ? `r:${opts.recordingId}`
+          : opts.meetingId
+            ? `m:${opts.meetingId}`
+            : null
+        // Score 0 is structural noise (a sentence fragment, digit soup) — dropped
+        // before it reaches the ledger so the deferred queue stays reviewable.
+        const distinctSources =
+          quality.score > 0 && sourceKey
+            ? recordProjectDiscoveryObservation(projectName, sourceKey, opts.meetingId ?? null, quality.score)
+            : 0
+        const decision = decideProjectDiscovery({ name: projectName, distinctSources })
+
+        if (decision.action === 'create') {
+          const id = randomUUID()
+          // origin='discovered' (v42): durable provenance — ONLY rows created here
+          // are dismissable via projects:dismissDiscovered (fail-closed elsewhere).
+          // source='transcript' + recording (F18/round-28): the project ENTITY is
+          // transcript-extracted, so it is suppressed on non-owner surfaces once its
+          // source recording is excluded (ADV27-1).
+          run(`INSERT INTO projects (id, name, status, origin, source, source_recording_id) VALUES (?, ?, 'active', 'discovered', 'transcript', ?)`, [
+            id,
+            projectName,
+            opts.recordingId ?? null
+          ])
+          projectId = id
+
+          // Link EVERY meeting whose mention earned this project, not just the one
+          // that happened to cross the threshold. The corroborating sightings are
+          // the evidence for creating it; dropping them when the ledger is cleared
+          // left the graph permanently missing those associations (the first
+          // meeting could only ever be linked by reprocessing its transcript).
+          // Runs BEFORE the purge, inside applyTranscriptEntities' transaction.
+          //
+          // ADV-F1 (post-merge review): each backfilled row MUST carry the SAME
+          // per-row provenance the normal link path stamps below —
+          // source='transcript' + the recording that produced THIS corroborating
+          // sighting (from the observation's 'r:<id>' source_key). A provenance-less
+          // (source=NULL) row is legacy/ineligible under filterEligibleMembershipRows,
+          // so if the threshold-crossing recording is later excluded, the still-
+          // eligible corroborating recording could no longer keep the project visible
+          // (filterVisibleEntityIds needs >= 1 ELIGIBLE membership) and the whole
+          // project would vanish. Stamping the true source recording keeps the
+          // corroborating association alive exactly as long as its recording is.
+          const corroborating = getProjectDiscoveryCorroborations(projectName)
+          let backfilled = 0
+          for (const { meetingId: mid, recordingId: rid } of corroborating) {
+            if (mid === opts.meetingId) continue // linked below by the normal path
+            run(
+              `INSERT OR IGNORE INTO meeting_projects (meeting_id, project_id, source, source_recording_id) VALUES (?, ?, 'transcript', ?)`,
+              [mid, id, rid]
+            )
+            backfilled++
+          }
+
+          // The name is settled — stop tracking it as an open discovery question.
+          clearProjectDiscoveryObservations(projectName)
+          console.log(
+            `[OrgReconciler] Discovered project "${projectName}" ` +
+              `(name score ${decision.score}, seen in ${decision.distinctSources} sources` +
+              `${backfilled > 0 ? `, linked ${backfilled} corroborating meeting(s)` : ''})`
+          )
+        } else {
+          console.log(
+            `[OrgReconciler] Withheld project "${projectName}" — ${decision.action} ` +
+              `(name score ${decision.score}, ${decision.distinctSources} source(s): ${decision.reasons.join(', ')})`
+          )
+        }
       }
 
       if (projectId && opts.meetingId) {
@@ -557,7 +740,13 @@ export function applyTranscriptEntities(opts: {
           [opts.meetingId, projectId]
         )
         if (!link) {
-          run(`INSERT INTO meeting_projects (meeting_id, project_id) VALUES (?, ?)`, [opts.meetingId, projectId])
+          // v44 provenance: this project link is AI-extracted from the transcript ⇒
+          // 'transcript' + the source recording id (gated by its eligibility).
+          run(`INSERT INTO meeting_projects (meeting_id, project_id, source, source_recording_id) VALUES (?, ?, 'transcript', ?)`, [
+            opts.meetingId,
+            projectId,
+            opts.recordingId ?? null
+          ])
         }
         projectLinked = true
       }
@@ -645,6 +834,23 @@ export function mergeDuplicateRecordings(): number {
   const dupGroups = [...groups.values()].filter((g) => g.length > 1)
   if (dupGroups.length === 0) return 0
 
+  // ADV28-3 (round-30) — NEVER merge recordings across an eligibility boundary.
+  // This reconcile REPARENTS a loser's knowledge_captures (and transcript / vector
+  // rows) onto the keeper. If an ELIGIBLE keeper absorbed a personal / soft-deleted /
+  // value-excluded sibling, that sibling's captures would be reparented onto the
+  // eligible keeper and pass filterEligibleCaptureIds again ⇒ formerly-excluded
+  // content reaches RAG / LLM / display / search (REOPENS the core F16/F17 promise).
+  // Fix: partition each duplicate group by the positive recording allowlist and
+  // collapse ONLY the ELIGIBLE members among themselves. Excluded recordings are
+  // left as separate rows, each still gated by its own recording's exclusion (their
+  // captures keep pointing at the excluded recording). This also side-steps a
+  // value-flip: reparenting a valuable capture from an excluded sibling could
+  // otherwise clear the keeper's value-exclusion. Fail-closed: an eligibility lookup
+  // failure ⇒ merge nothing this pass.
+  const { eligible: eligibleRecIds, failClosed: eligFailClosed } = filterEligibleRecordingIds(
+    dupGroups.flat().map((r) => r.id)
+  )
+
   // vector_embeddings is created lazily by the vector store and may not exist
   // yet; skip it rather than blowing up the whole transaction on a fresh DB.
   const existingTables = new Set(
@@ -655,8 +861,12 @@ export function mergeDuplicateRecordings(): number {
   let removedRows = 0
 
   runInTransaction(() => {
+    if (eligFailClosed) return
     for (const group of dupGroups) {
-      const rows = group.map((r) => ({ ...r, hasTranscript: withTranscript.has(r.id) }))
+      // Only the eligible members of the group may be collapsed together.
+      const eligibleGroup = group.filter((r) => eligibleRecIds.has(r.id))
+      if (eligibleGroup.length < 2) continue
+      const rows = eligibleGroup.map((r) => ({ ...r, hasTranscript: withTranscript.has(r.id) }))
       const keeper = pickKeeperRecording(rows)
       const losers = rows.filter((r) => r.id !== keeper.id)
       if (losers.length === 0) continue
@@ -796,9 +1006,26 @@ export function mergeDuplicateContacts(): number {
     for (const group of groups.values()) {
       if (group.length < 2) continue
       const keeper = pickKeeperContact(group)
+      // ADV28-2 (round-30): partition the group by the visible-identity boundary so
+      // an AUTOMATIC startup dedup NEVER folds an excluded/suppressed transcript-only
+      // contact's role/company/notes/tags/memberships into a structurally-visible
+      // (calendar/manual/eligible-transcript) survivor — that would launder
+      // excluded-derived fields onto a visible entity. Merge only pairs on the SAME
+      // side of the visibility boundary: two visible contacts dedup as before; two
+      // suppressed contacts collapse (the survivor stays suppressed, no leak); a
+      // visible↔suppressed pair is left separate. Fail-closed: if visibility can't be
+      // determined, fold nothing this pass.
+      const { visible, failClosed } = filterVisibleEntityIds('contact', group.map((c) => c.id))
+      if (failClosed) continue
+      const keeperVisible = visible.has(keeper.id)
       for (const loser of group) {
         if (loser.id === keeper.id) continue
-        mergeContacts(keeper.id, loser.id)
+        if (visible.has(loser.id) !== keeperVisible) continue // cross visibility boundary — never launder
+        // ADV55-1 (round-57): fold the backing graph person nodes atomically with the
+        // relational merge (was bare mergeContacts, which left the loser's graph node +
+        // provenance stranded under the deleted loser contact id whenever the
+        // post-commit name event no-opped for contact-keyed nodes or graph sync was off).
+        mergeContactsWithGraph(keeper.id, loser.id)
         removed++
       }
     }
@@ -918,6 +1145,16 @@ export function mergeDuplicateMeetingOccurrences(): number {
         }
         if (existingTables.has('recording_preassignments')) {
           run(`UPDATE recording_preassignments SET meeting_id = ? WHERE meeting_id = ?`, [keeper.id, loser.id])
+        }
+        // Discovery ledger (v43): the sightings of the two occurrences describe
+        // ONE conversation. Without this repoint the merged-away meeting id
+        // survives in the ledger and the distinct-source count double-counts it,
+        // which would let a single conversation clear the recurrence bar alone.
+        if (existingTables.has('project_discovery_observations')) {
+          run(`UPDATE project_discovery_observations SET meeting_id = ? WHERE meeting_id = ?`, [
+            keeper.id,
+            loser.id
+          ])
         }
         // Composite-key link tables — move what won't collide, drop leftovers.
         run(`UPDATE OR IGNORE meeting_contacts SET meeting_id = ? WHERE meeting_id = ?`, [keeper.id, loser.id])
@@ -1169,7 +1406,7 @@ export function autoSplitAmbiguousBuckets(): { buckets: number; resolved: number
     runInTransaction(() => {
       for (const r of toResolve) {
         recordMentionResolutionNoSave(r.recordingId, res.name, r.bestGuessId as string, r.method, methodConfidence(r.method))
-        linkContactToMeeting(r.bestGuessId as string, r.meetingId ?? undefined, now)
+        linkContactToMeeting(r.bestGuessId as string, r.meetingId ?? undefined, now, r.recordingId)
         resolvedTotal++
       }
     })

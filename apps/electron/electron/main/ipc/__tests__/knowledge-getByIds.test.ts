@@ -10,22 +10,35 @@ vi.mock('electron', () => ({
   }
 }))
 
-// Mock database
+// Mock database. ROUND-15 RESIDUAL: getByIds now routes captures through the
+// eligibility boundary; mock its DB helpers so the gate is a no-op here (default
+// eligible/existing) and these assertions stay about the query shape. Exclusion
+// behavior is covered by knowledge-handlers.eligibility.test.ts.
 vi.mock('../../services/database', () => ({
   queryAll: vi.fn(),
   queryOne: vi.fn(),
   run: vi.fn(),
-  runInTransaction: vi.fn((fn) => fn())
+  runInTransaction: vi.fn((fn) => fn()),
+  getEligibleRecordingIds: vi.fn((ids: Iterable<string>) => ({ eligible: new Set([...ids]), failClosed: false })),
+  getExistingRecordingIds: vi.fn((ids: Iterable<string>) => ({ ids: new Set([...ids]), failClosed: false })),
+  getExistingCaptureIds: vi.fn((ids: Iterable<string>) => ({ ids: new Set([...ids]), failClosed: false })),
+  // ADV15 (round-16): getByIds routes through filterEligibleCaptureIds →
+  // getCaptureEligibilityRows. Return each id as an eligible standalone capture so
+  // the gate is a no-op for these query-shape assertions.
+  getCaptureEligibilityRows: vi.fn((ids: Iterable<string>) => ({
+    rows: [...ids].map((id) => ({ id, source_recording_id: null, quality_rating: 'valuable', deleted_at: null })),
+    failClosed: false
+  }))
 }))
 
 describe('knowledge:getByIds handler (B-CHAT-004)', () => {
-  let handlers: Record<string, Function> = {}
+  let handlers: Record<string, (...args: any[]) => any> = {}
 
   beforeEach(() => {
     vi.clearAllMocks()
     handlers = {}
-    // @ts-ignore
-    ipcMain.handle.mockImplementation((channel: string, handler: Function) => {
+    // @ts-expect-error mock method not present on typed import
+    ipcMain.handle.mockImplementation((channel: string, handler: (...args: any[]) => any) => {
       handlers[channel] = handler
     })
     registerKnowledgeHandlers()
@@ -68,7 +81,7 @@ describe('knowledge:getByIds handler (B-CHAT-004)', () => {
         status: 'enriched'
       }
     ]
-    // @ts-ignore
+    // @ts-expect-error mock method not present on typed import
     queryAll.mockReturnValue(mockRows)
 
     const result = await handlers['knowledge:getByIds']({}, ['kc-1', 'kc-2'])
@@ -93,7 +106,7 @@ describe('knowledge:getByIds handler (B-CHAT-004)', () => {
   })
 
   it('should build correct number of placeholders for IDs', async () => {
-    // @ts-ignore
+    // @ts-expect-error mock method not present on typed import
     queryAll.mockReturnValue([])
 
     await handlers['knowledge:getByIds']({}, ['a', 'b', 'c'])
@@ -105,7 +118,7 @@ describe('knowledge:getByIds handler (B-CHAT-004)', () => {
   })
 
   it('should handle single ID', async () => {
-    // @ts-ignore
+    // @ts-expect-error mock method not present on typed import
     queryAll.mockReturnValue([{
       id: 'single',
       title: 'Single Item',
@@ -123,7 +136,7 @@ describe('knowledge:getByIds handler (B-CHAT-004)', () => {
   })
 
   it('should return empty array on database error', async () => {
-    // @ts-ignore
+    // @ts-expect-error mock method not present on typed import
     queryAll.mockImplementation(() => { throw new Error('DB Error') })
 
     const result = await handlers['knowledge:getByIds']({}, ['kc-1'])
@@ -131,7 +144,7 @@ describe('knowledge:getByIds handler (B-CHAT-004)', () => {
   })
 
   it('should not use SELECT * in the query', async () => {
-    // @ts-ignore
+    // @ts-expect-error mock method not present on typed import
     queryAll.mockReturnValue([])
 
     await handlers['knowledge:getByIds']({}, ['kc-1'])
@@ -139,6 +152,6 @@ describe('knowledge:getByIds handler (B-CHAT-004)', () => {
     const queryString = vi.mocked(queryAll).mock.calls[0][0]
     expect(queryString).not.toContain('SELECT *')
     // Should use explicit column list
-    expect(queryString).toContain('id, title, summary')
+    expect(queryString).toContain('id, title, user_title, summary')
   })
 })

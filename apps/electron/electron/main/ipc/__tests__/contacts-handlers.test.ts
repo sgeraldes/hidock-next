@@ -18,13 +18,35 @@ vi.mock('../../services/database', () => ({
   runInTransaction: vi.fn((fn) => fn()),
   getContacts: vi.fn(),
   getContactById: vi.fn(),
-  getContactByName: vi.fn(),
+  getContactsByName: vi.fn(() => []),
   createContact: vi.fn(),
   updateContact: vi.fn(),
   deleteContact: vi.fn(),
   getMeetingsForContact: vi.fn(),
   getContactsForMeeting: vi.fn(),
+  getContactsForMeetingOwner: vi.fn(),
+  // ADV27-1 (round-28) — contacts:getAll/getById route through the visible-identity
+  // boundary. Default to all-visible so these shape assertions are unaffected;
+  // behavioral suppression is covered by the real-temp-DB suite.
+  filterVisibleEntityIds: vi.fn((_kind: string, ids: Iterable<string>) => ({ visible: new Set([...ids]), failClosed: false })),
+  // ADV29-2 (round-31) — getAll/getById/getForMeeting blank a transcript-enriched
+  // role whose source recording is ineligible. Default to pass-through; behavioral
+  // blanking is covered by the real-temp-DB round-31 suite.
+  blankIneligibleContactFields: vi.fn(<T,>(contacts: T[]) => contacts),
   mergeContacts: vi.fn(),
+  unmergeContacts: vi.fn(),
+  unmergeContactsGroup: vi.fn(),
+  // Real class so the handler's `err instanceof MergeOrderConflictError` guard works.
+  MergeOrderConflictError: class MergeOrderConflictError extends Error {
+    constructor(
+      public readonly blockingJournalId: string,
+      public readonly blockingLoserName: string | null,
+      message: string
+    ) {
+      super(message)
+      this.name = 'MergeOrderConflictError'
+    }
+  },
   getDatabase: vi.fn(() => ({
     prepare: vi.fn(() => ({
       bind: vi.fn(),
@@ -33,6 +55,14 @@ vi.mock('../../services/database', () => ({
       free: vi.fn()
     }))
   }))
+}))
+
+// ADV55-1 (round-57) — contacts:merge now routes through the graph-aware composite
+// (mergeContactsWithGraph) so the loser's graph node/edges/provenance fold atomically
+// with the relational merge. Mock it here (the real one pulls in @hidock/knowledge-graph);
+// behavioral coverage lives in context-graph-mutations.test.ts against a real temp DB.
+vi.mock('../../services/knowledge-graph-service', () => ({
+  mergeContactsWithGraph: vi.fn()
 }))
 
 describe('Contacts IPC Handlers', () => {
@@ -48,11 +78,12 @@ describe('Contacts IPC Handlers', () => {
     expect(ipcMain.handle).toHaveBeenCalledWith('contacts:update', expect.any(Function))
     expect(ipcMain.handle).toHaveBeenCalledWith('contacts:delete', expect.any(Function))
     expect(ipcMain.handle).toHaveBeenCalledWith('contacts:getForMeeting', expect.any(Function))
+    expect(ipcMain.handle).toHaveBeenCalledWith('contacts:getForMeetingOwner', expect.any(Function))
   })
 
   it('should create a new contact (contacts:create)', async () => {
-    const { getContactByName, createContact } = await import('../../services/database')
-    vi.mocked(getContactByName).mockReturnValue(undefined)
+    const { getContactsByName, createContact } = await import('../../services/database')
+    vi.mocked(getContactsByName).mockReturnValue([])
     vi.mocked(createContact).mockReturnValue({
       id: 'new-id',
       name: 'Jane Doe',
@@ -80,7 +111,7 @@ describe('Contacts IPC Handlers', () => {
     expect(result.success).toBe(true)
     expect(result.data.id).toBe('new-id')
     // Name is trimmed before the duplicate check + insert.
-    expect(getContactByName).toHaveBeenCalledWith('Jane Doe')
+    expect(getContactsByName).toHaveBeenCalledWith('Jane Doe')
     expect(createContact).toHaveBeenCalledWith(expect.objectContaining({ name: 'Jane Doe', type: 'team' }))
   })
 
@@ -94,8 +125,9 @@ describe('Contacts IPC Handlers', () => {
   })
 
   it('should guard against duplicate names and surface the existing id (DUPLICATE_ENTRY)', async () => {
-    const { getContactByName, createContact } = await import('../../services/database')
-    vi.mocked(getContactByName).mockReturnValue({ id: 'existing-id', name: 'Jane Doe' } as any)
+    const { getContactsByName, createContact } = await import('../../services/database')
+    // ADV36-3 (round-38) — fetch ALL same-name candidates; the visible one is the dup.
+    vi.mocked(getContactsByName).mockReturnValue([{ id: 'existing-id', name: 'Jane Doe' } as any])
 
     registerContactsHandlers()
     const handler = vi.mocked(ipcMain.handle).mock.calls.find((call) => call[0] === 'contacts:create')?.[1]
@@ -216,9 +248,10 @@ describe('Contacts IPC Handlers', () => {
   const LOSER = '660e8400-e29b-41d4-a716-446655440001'
 
   it('should merge two contacts (contacts:merge)', async () => {
-    const { getContactById, mergeContacts } = await import('../../services/database')
+    const { getContactById } = await import('../../services/database')
+    const { mergeContactsWithGraph } = await import('../../services/knowledge-graph-service')
     vi.mocked(getContactById).mockReturnValue({ id: KEEPER, name: 'K', tags: null } as any)
-    vi.mocked(mergeContacts).mockReturnValue({ id: KEEPER, name: 'K', tags: null } as any)
+    vi.mocked(mergeContactsWithGraph).mockReturnValue({ id: KEEPER, name: 'K', tags: null } as any)
 
     registerContactsHandlers()
     expect(ipcMain.handle).toHaveBeenCalledWith('contacts:merge', expect.any(Function))
@@ -228,7 +261,8 @@ describe('Contacts IPC Handlers', () => {
 
     expect(result.success).toBe(true)
     expect(result.data.id).toBe(KEEPER)
-    expect(mergeContacts).toHaveBeenCalledWith(KEEPER, LOSER)
+    // Routed through the graph-aware composite (ADV55-1) rather than bare mergeContacts.
+    expect(mergeContactsWithGraph).toHaveBeenCalledWith(KEEPER, LOSER)
   })
 
   it('should reject merging a contact into itself', async () => {
@@ -250,5 +284,59 @@ describe('Contacts IPC Handlers', () => {
 
     expect(result.success).toBe(false)
     expect(result.error.code).toBe('NOT_FOUND')
+  })
+
+  it('unmerge maps an ordering rejection to MERGE_ORDER_CONFLICT with the blocking journal in details', async () => {
+    const { unmergeContacts, MergeOrderConflictError } = await import('../../services/database')
+    vi.mocked(unmergeContacts).mockImplementation(() => {
+      throw new (MergeOrderConflictError as any)(
+        'j-newer',
+        'Dora Delta',
+        'Merges must be undone newest-first: undo the newer merge of "Dora Delta" (j-newer) before this one'
+      )
+    })
+
+    registerContactsHandlers()
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(call => call[0] === 'contacts:unmerge')?.[1]
+    const result = await handler?.({} as any, 'j-older') as any
+
+    expect(result.success).toBe(false)
+    // Distinct code (NOT the generic DATABASE_ERROR) + structured details so
+    // the undo UI can point at the exact blocking merge.
+    expect(result.error.code).toBe('MERGE_ORDER_CONFLICT')
+    expect(result.error.message).toMatch(/undo the newer merge of "Dora Delta"/)
+    expect(result.error.details).toMatchObject({ blockingJournalId: 'j-newer', blockingLoserName: 'Dora Delta' })
+  })
+
+  it('unmergeGroup delegates the id list to the atomic group function and returns its results', async () => {
+    const { unmergeContactsGroup } = await import('../../services/database')
+    vi.mocked(unmergeContactsGroup).mockReturnValue([{ loserId: 'L2' }, { loserId: 'L1' }] as any)
+
+    registerContactsHandlers()
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(call => call[0] === 'contacts:unmergeGroup')?.[1]
+    const result = await handler?.({} as any, ['j1', 'j2']) as any
+
+    expect(result.success).toBe(true)
+    expect(unmergeContactsGroup).toHaveBeenCalledWith(['j1', 'j2'])
+    expect(result.data).toHaveLength(2)
+  })
+
+  it('unmergeGroup maps an ordering rejection to MERGE_ORDER_CONFLICT (whole group rolled back)', async () => {
+    const { unmergeContactsGroup, MergeOrderConflictError } = await import('../../services/database')
+    vi.mocked(unmergeContactsGroup).mockImplementation(() => {
+      throw new (MergeOrderConflictError as any)(
+        'j-newer',
+        'Dora Delta',
+        'Merges must be undone newest-first: undo the newer merge of "Dora Delta" (j-newer) before this one'
+      )
+    })
+
+    registerContactsHandlers()
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(call => call[0] === 'contacts:unmergeGroup')?.[1]
+    const result = await handler?.({} as any, ['j1', 'j2']) as any
+
+    expect(result.success).toBe(false)
+    expect(result.error.code).toBe('MERGE_ORDER_CONFLICT')
+    expect(result.error.details).toMatchObject({ blockingJournalId: 'j-newer', blockingLoserName: 'Dora Delta' })
   })
 })

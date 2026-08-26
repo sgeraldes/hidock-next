@@ -26,6 +26,12 @@ const appCopy = join(appRoot, 'node_modules', 'better-sqlite3')
 // The @hidock/database workspace copy — built for the Node ABI; what the
 // scoped test shim (src/test/setup-db.ts) redirects DB-backed tests to.
 const nodeCopy = join(repoRoot, 'packages', 'database', 'node_modules', 'better-sqlite3')
+// The @hidock/knowledge-graph workspace copy (F18/CX-T4-2) — Node-ABI, used
+// only by that package's OWN test suite. Its install is optional from this
+// app's perspective (only present after `npm install` in the package), so
+// the version-equality check below is conditional on its presence; the
+// package.json DECLARATION check is not (it needs no node_modules).
+const kgCopy = join(repoRoot, 'packages', 'knowledge-graph', 'node_modules', 'better-sqlite3')
 
 const req = createRequire(import.meta.url)
 
@@ -77,22 +83,46 @@ describe('better-sqlite3 native binding (unmocked)', () => {
     expect(typeof Database).toBe('function')
   })
 
-  it('both installed copies are version-pinned equal (no silent skew)', () => {
+  it('all installed copies are version-pinned equal (no silent skew)', () => {
     const appVersion = readPkg(appCopy).version
     const nodeVersion = readPkg(nodeCopy).version
     // DB-backed tests exercise the Node-ABI copy while production runs the
     // Electron-ABI copy — they must stay the SAME better-sqlite3 version or
     // tests validate a different SQLite/driver than the app ships.
     expect(appVersion).toBe(nodeVersion)
+    // Third workspace copy (F18): @hidock/knowledge-graph's own test harness.
+    // Conditional — the package may not be npm-installed in every checkout,
+    // but when it IS, its copy must not drift either.
+    if (existsSync(join(kgCopy, 'package.json'))) {
+      expect(readPkg(kgCopy).version).toBe(appVersion)
+    }
   })
 
-  it('both package.json dependency declarations pin the same version range', () => {
+  it('all workspace package.json dependency declarations pin the same version range', () => {
     const appPkg = JSON.parse(readFileSync(join(appRoot, 'package.json'), 'utf-8'))
     const dbPkg = JSON.parse(readFileSync(join(repoRoot, 'packages', 'database', 'package.json'), 'utf-8'))
+    const kgPkg = JSON.parse(
+      readFileSync(join(repoRoot, 'packages', 'knowledge-graph', 'package.json'), 'utf-8')
+    )
     const appSpec = appPkg.dependencies?.['better-sqlite3'] ?? appPkg.devDependencies?.['better-sqlite3']
     const dbSpec = dbPkg.devDependencies?.['better-sqlite3'] ?? dbPkg.dependencies?.['better-sqlite3']
+    const kgSpec = kgPkg.devDependencies?.['better-sqlite3'] ?? kgPkg.dependencies?.['better-sqlite3']
     expect(appSpec).toBeTruthy()
     expect(dbSpec).toBeTruthy()
+    expect(kgSpec).toBeTruthy()
     expect(appSpec).toBe(dbSpec)
+    expect(kgSpec).toBe(appSpec)
+  })
+
+  it('knowledge-graph declares a Node engines floor compatible with its better-sqlite3 pin (CX-T4-2)', () => {
+    // better-sqlite3 12.x requires Node >=20; an engines floor of 18 would
+    // advertise a runtime the package's own test harness cannot run on.
+    const kgPkg = JSON.parse(
+      readFileSync(join(repoRoot, 'packages', 'knowledge-graph', 'package.json'), 'utf-8')
+    )
+    const engines: string = kgPkg.engines?.node ?? ''
+    const floor = /(\d+)/.exec(engines)?.[1]
+    expect(floor).toBeTruthy()
+    expect(Number(floor)).toBeGreaterThanOrEqual(20)
   })
 })

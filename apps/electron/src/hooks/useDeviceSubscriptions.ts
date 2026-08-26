@@ -12,6 +12,7 @@ import { useAppStore } from '@/store/useAppStore'
 import { shouldLogQa } from '@/services/qa-monitor'
 import { checkAutoSyncAllowed, waitForConfig, waitForDeviceReady } from '@/utils/autoSyncGuard'
 import { requestScopedDownloads, drainDownloadQueue } from '@/hooks/useDownloadOrchestrator'
+import { handleRecordingStart, handleRecordingStop, periodicCountCheck } from '@/services/device-sync-actions'
 
 /**
  * Defect B (auto-download not triggering on connect): decide whether the auto-sync
@@ -127,6 +128,11 @@ export function useDeviceSubscriptions() {
             return
           }
 
+          // Latch before a file-list request. listRecordings can synchronously publish
+          // status changes while the scan is in flight; those must not schedule a
+          // second auto-sync for the same connection.
+          autoSyncTriggeredRef.current = true
+
           // BUG-007 FIX: File list may not be cached yet after handleConnect (it only
           // gets device info/storage/settings/time). Fetch it now so auto-sync has data.
           let recordings = deviceService.getCachedRecordings()
@@ -138,19 +144,22 @@ export function useDeviceSubscriptions() {
             } catch (listError) {
               console.error('[useDeviceSubscriptions] Failed to fetch file list:', listError)
               deviceService.log('error', 'File list fetch failed', listError instanceof Error ? listError.message : 'Unknown error')
-              return // leave latch false so the next 'ready' retries
+              // HIGH-3: the latch is a re-entrancy guard for an ACTIVE attempt, not a
+              // permanent one-per-connect flag. This attempt failed, so release it —
+              // otherwise a single bad scan disables auto-sync until disconnect.
+              autoSyncTriggeredRef.current = false
+              return
             }
           }
 
-          // Defect B: only latch once we actually hold a real file list (or the device
-          // genuinely has zero files). If the scan hasn't produced data yet, bail WITHOUT
-          // latching so the 'ready' fired after the scan completes can retry.
+          // If the scan has not produced data, stop this connection's sync attempt.
           if (!shouldLatchAutoSync(recordings.length, deviceService.getState().recordingCount)) {
             if (shouldLogQa()) console.log('[useDeviceSubscriptions] File list not ready yet — will retry on next ready')
+            // HIGH-3: unusable list (scan not ready) — release the latch so the next
+            // 'ready' (after the scan completes) can retry, as the log message promises.
+            autoSyncTriggeredRef.current = false
             return
           }
-          autoSyncTriggeredRef.current = true
-
           // Auto-download reconcile — only when the user enabled it.
           if (allowed && recordings.length > 0) {
             // DL-06 FIX: Use proper reconciliation logic from download service instead of simple filename matching
@@ -181,6 +190,11 @@ export function useDeviceSubscriptions() {
                 deviceSyncProgress: { total: toSync.length, current: 0 },
                 deviceFileDownloading: toSync[0]?.filename ?? null
               })
+              // Explicit execution handoff. The state-update listener is still
+              // the normal trigger, but it can observe a transient non-ready
+              // store state after a long file-list reconciliation. Drain again
+              // now that scan + enqueue are complete; its mutex makes this safe.
+              drainDownloadQueue()
             } else {
               deviceService.log('success', 'All files synced', 'No new recordings to download')
             }
@@ -241,7 +255,6 @@ export function useDeviceSubscriptions() {
       // When the component truly unmounts and remounts, React creates a NEW ref(false).
     }
   // SM-M02: Dependencies are stable (deviceService is singleton), refs handle action freshness
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deviceService])
 
   // ---- Live-recording signal (CMD 18 poll → jensen:recording-changed push) ----
@@ -261,6 +274,15 @@ export function useDeviceSubscriptions() {
       if (shouldLogQa()) console.log('[useDeviceSubscriptions] Recording-changed:', filename)
       setDeviceRecording(!!filename)
       setActiveRecordingFilename(filename)
+      // Recording-aware re-sync (2026-07-22): the recording-state poll is the
+      // authoritative dirty signal. Start marks the list dirty once per session
+      // (and syncs any backlog mid-record); stop reconciles after a finalize
+      // delay — even when the file count appears unchanged.
+      if (filename) {
+        void handleRecordingStart()
+      } else {
+        handleRecordingStop()
+      }
     })
 
     const unsubDisc = onDisconnect?.(() => {
@@ -268,9 +290,28 @@ export function useDeviceSubscriptions() {
       setActiveRecordingFilename(null)
     })
 
+    // Reload/HMR mid-record: the start broadcast fired before this subscription
+    // existed, and the store re-initializes empty on a fresh renderer. Pull the
+    // main-process truth once: if a recording is active, seed the indicator and
+    // establish the dirty mark so the coming stop still reconciles.
+    void window.electronAPI?.jensen?.getState?.().then((s) => {
+      const active = s?.recording ?? null
+      if (active) {
+        setDeviceRecording(true)
+        setActiveRecordingFilename(active)
+        void handleRecordingStart()
+      }
+    }).catch(() => { /* pull is best-effort; change broadcasts still apply */ })
+
+    // Safety net: slow count probe picks up files that appeared without a seen
+    // recording session (recorded while disconnected, missed poll). Debounced
+    // to one scan per 90s inside scanAndReconcile.
+    const syncProbeInterval = setInterval(periodicCountCheck, 60_000)
+
     return () => {
       unsubRecording()
       unsubDisc?.()
+      clearInterval(syncProbeInterval)
     }
   }, [setDeviceRecording, setActiveRecordingFilename])
 
@@ -303,6 +344,10 @@ export function useDeviceSubscriptions() {
 
       if (autoSyncTriggeredRef.current) return
 
+      // Claim this connection's auto-sync before listRecordings can publish any
+      // intermediate status updates and re-enter the status-change path.
+      autoSyncTriggeredRef.current = true
+
       if (shouldLogQa()) console.log('[useDeviceSubscriptions] Initial auto-sync check (device pre-connected)')
 
       let recordings = deviceService.getCachedRecordings()
@@ -313,18 +358,21 @@ export function useDeviceSubscriptions() {
           recordings = await deviceService.listRecordings()
         } catch (listError) {
           console.error('[useDeviceSubscriptions] Initial file list fetch failed:', listError)
-          return // leave latch false so a later 'ready' retries
+          // HIGH-3: release the latch on a failed scan so the status-change trigger
+          // (or a later retry) can re-attempt for this connection.
+          autoSyncTriggeredRef.current = false
+          return
         }
       }
 
-      // Defect B: latch only once we hold a real file list (or the device truly has 0 files),
-      // so a premature run before the scan can't permanently suppress auto-download.
+      // Stop if the scan did not produce a usable list for this connection.
       if (!shouldLatchAutoSync(recordings.length, deviceService.getState().recordingCount)) {
         if (shouldLogQa()) console.log('[useDeviceSubscriptions] Initial file list not ready yet — deferring to status-change trigger')
+        // HIGH-3: unusable list — release the latch so the status-change 'ready'
+        // trigger can retry once the scan actually completes.
+        autoSyncTriggeredRef.current = false
         return
       }
-      autoSyncTriggeredRef.current = true
-
       if (recordings.length > 0) {
         // DL-06 FIX: Use proper reconciliation logic from download service instead of simple filename matching
         const reconcileResults = await window.electronAPI.downloadService.getFilesToSync(
@@ -354,6 +402,7 @@ export function useDeviceSubscriptions() {
             deviceSyncProgress: { total: toSync.length, current: 0 },
             deviceFileDownloading: toSync[0]?.filename ?? null
           })
+          drainDownloadQueue()
         } else {
           deviceService.log('success', 'All files synced', 'No new recordings to download')
         }
@@ -372,6 +421,5 @@ export function useDeviceSubscriptions() {
       unsubDeviceDisconnect()
     }
   // SM-M02: Dependencies are stable (deviceService is singleton), refs handle action freshness
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deviceService])
 }

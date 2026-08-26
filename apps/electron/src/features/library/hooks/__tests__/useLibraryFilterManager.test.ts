@@ -61,7 +61,7 @@ describe('useLibraryFilterManager', () => {
     }
 
     // Mock useLibraryStore implementation
-    // @ts-ignore
+    // @ts-expect-error mock method not present on typed import
     useLibraryStore.mockImplementation((selector) => {
       const fullState = { ...storeState, ...storeActions }
       return selector(fullState)

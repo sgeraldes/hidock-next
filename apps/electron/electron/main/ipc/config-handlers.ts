@@ -1,9 +1,15 @@
-import { ipcMain } from 'electron'
+import { ipcMain, shell } from 'electron'
 import { getConfig, saveConfig, updateConfig, AppConfig, RETIRED_GEMINI_MODELS } from '../services/config'
 import { initializeFileStorage } from '../services/file-storage'
 import { listGeminiTranscriptionModels } from '../services/gemini-models'
 import { success, error as errorResult } from '../types/api'
 import { emitActivityLog } from '../services/activity-log'
+import { getResolvedFeatures } from '../services/feature-gate'
+import { reconcileFeatures } from '../services/feature-lifecycle'
+import {
+  checkSpeakerModelAccess,
+  SPEAKER_MODEL_ACCESS_URL
+} from '../services/speaker-model-access'
 
 export function registerConfigHandlers(): void {
   // Get full config
@@ -42,9 +48,16 @@ export function registerConfigHandlers(): void {
     'config:update-section',
     async <K extends keyof AppConfig>(_, section: K, values: Partial<AppConfig[K]>) => {
       try {
+        // Track I: capture the resolved feature state BEFORE the write so the
+        // lifecycle reconciler can diff old→new and start/stop the right loops.
+        const prevFeatures = section === 'features' ? getResolvedFeatures() : null
         await updateConfig(section, values)
         if (section === 'storage') {
           await initializeFileStorage()
+        }
+        if (section === 'features' && prevFeatures) {
+          // Runtime start/stop of toggled features + broadcast to the renderer.
+          await reconcileFeatures(prevFeatures)
         }
         emitActivityLog('info', `Settings updated: ${String(section)}`)
         return success(getConfig())
@@ -72,6 +85,34 @@ export function registerConfigHandlers(): void {
       return errorResult(
         'SERVICE_UNAVAILABLE',
         err instanceof Error ? err.message : 'Failed to list Gemini models',
+        err
+      )
+    }
+  })
+
+  ipcMain.handle('config:checkSpeakerModelAccess', async (_, token?: string) => {
+    try {
+      const savedToken = getConfig().transcription.localAsrHfToken || ''
+      return success(await checkSpeakerModelAccess(typeof token === 'string' ? token : savedToken))
+    } catch (err) {
+      console.error('[config:checkSpeakerModelAccess] Error:', err)
+      return errorResult(
+        'SERVICE_UNAVAILABLE',
+        err instanceof Error ? err.message : 'Failed to check the speaker model access',
+        err
+      )
+    }
+  })
+
+  ipcMain.handle('config:openSpeakerModelAccess', async () => {
+    try {
+      await shell.openExternal(SPEAKER_MODEL_ACCESS_URL)
+      return success({ opened: true })
+    } catch (err) {
+      console.error('[config:openSpeakerModelAccess] Error:', err)
+      return errorResult(
+        'SERVICE_UNAVAILABLE',
+        err instanceof Error ? err.message : 'Failed to open the Community-1 access page',
         err
       )
     }

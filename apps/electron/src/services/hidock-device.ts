@@ -126,6 +126,7 @@ class HiDockDeviceService {
   // Recording list cache - avoid re-fetching from device if count unchanged
   private cachedRecordings: HiDockRecording[] | null = null
   private cachedRecordingCount: number = -1
+  private lastDeleteError: string | null = null
 
   // Auto-connect configuration (loaded from main process config)
   // IMPORTANT: Default to false until config is loaded to prevent unwanted auto-connect
@@ -197,6 +198,14 @@ class HiDockDeviceService {
     this.jensen.ondisconnect = () => {
       this.handleDisconnect()
     }
+
+    // Renderer reload/HMR adoption: the main process can still own a healthy USB
+    // connection while this renderer service is brand new. The IPC client hydrates
+    // its own cache, but a connect event will not be replayed, so this service used
+    // to remain `connected=false` and disabled every Library download control.
+    // Adopt the already-established main state without opening, closing, probing,
+    // or otherwise touching the USB interface.
+    void this.hydrateConnectionState()
 
     // Load saved auto-connect config from main process (async)
     // Store the promise so initAutoConnect can await it
@@ -377,6 +386,7 @@ class HiDockDeviceService {
     }
     this.autoConnectEnabled = false
     this.stopReconnectWatch()
+    this.clearQuickReconnect()
 
     // Clean up USB connect listener to prevent memory leaks
     this.jensen.removeUsbConnectListener()
@@ -664,7 +674,37 @@ class HiDockDeviceService {
   }
 
   isConnected(): boolean {
-    return this.state.connected && this.jensen.isConnected()
+    // Both values mirror the main-process singleton, but their event/pull timing can
+    // differ during renderer reload. Either affirmative signal is sufficient; USB
+    // operations still go through the authoritative main-process IPC gate.
+    return this.state.connected || this.jensen.isConnected()
+  }
+
+  /**
+   * Pull the current connection snapshot from the main process and adopt it into
+   * the renderer service. This is read-only: it never opens/closes the device and
+   * never sends a Jensen command. It exists so renderer reload/HMR cannot strand
+   * the Library in a false "Device not connected" state.
+   */
+  async hydrateConnectionState(): Promise<boolean> {
+    try {
+      const mainState = await window.electronAPI?.jensen?.getState?.()
+      if (!mainState?.connected) return false
+      if (!this.state.connected) {
+        this.state.connected = true
+        this.state.model = (mainState.model || 'unknown') as DeviceModel
+        this.state.serialNumber = mainState.serialNumber ?? null
+        this.state.firmwareVersion = mainState.versionCode ?? null
+        this.initializationComplete = true
+        this.notifyStateChange()
+        this.updateStatus('ready', 'Device ready', 100)
+        this.notifyConnectionChange(true)
+      }
+      return true
+    } catch (error) {
+      console.warn('[HiDockDevice] Could not adopt current main-process connection state:', error)
+      return false
+    }
   }
 
   // Check if device initialization is complete (recordingCount populated)
@@ -675,6 +715,42 @@ class HiDockDeviceService {
   // Get cached recordings list (available even when disconnected)
   getCachedRecordings(): HiDockRecording[] {
     return this.cachedRecordings || []
+  }
+
+  getLastDeleteError(): string | null {
+    return this.lastDeleteError
+  }
+
+  /**
+   * Remove one confirmed-deleted hardware file from the renderer cache without
+   * starting a device scan. The main-process permanent-delete path talks to the
+   * Jensen client directly, so it cannot otherwise update this renderer-owned
+   * cache before useUnifiedRecordings.refreshLocal() rebuilds the Library.
+   */
+  removeCachedRecording(filename: string): boolean {
+    if (!this.cachedRecordings) return false
+
+    const normalizedFilename = filename.toLocaleLowerCase()
+    const nextRecordings = this.cachedRecordings.filter(
+      (recording) => recording.filename.toLocaleLowerCase() !== normalizedFilename
+    )
+    if (nextRecordings.length === this.cachedRecordings.length) return false
+
+    this.cachedRecordings = nextRecordings
+    this.cachedRecordingCount = nextRecordings.length
+    this.state.recordingCount = nextRecordings.length
+    this.persistCacheToStorage()
+    this.notifyStateChange()
+    return true
+  }
+
+  // Force the next listRecordings() to re-scan the device even when the file
+  // count appears unchanged. Needed when a recording session dirtied the list
+  // (owner spec 2026-07-22): the count-based cache would otherwise hide the
+  // new file until disconnect/reconnect.
+  invalidateRecordingsCache(): void {
+    this.cachedRecordings = null
+    this.cachedRecordingCount = -1
   }
 
   // Persist the in-memory cache to database storage (survives app restart)
@@ -915,7 +991,13 @@ class HiDockDeviceService {
 
     this.logActivity('usb-out', 'CMD: Get File Count', 'Requesting recording count')
     const result = await this.jensen.getFileCount()
-    const count = result?.count ?? 0
+    // `null` is a deliberate "USB bus busy" result from the main process. It
+    // must never become a factual count of zero: doing so poisoned the cache and
+    // triggered a second scan while a download still owned the response stream.
+    if (!result || typeof result.count !== 'number') {
+      return this.state.recordingCount
+    }
+    const count = result.count
     this.state.recordingCount = count
     this.logActivity('usb-in', 'File Count Received', `${count} recordings on device`)
     this.notifyStateChange()
@@ -1098,7 +1180,7 @@ class HiDockDeviceService {
         clearTimeout(timeoutId!)
         onProgress?.(result.length, expectedFileCount)
         return result
-      } catch (error) {
+      } catch {
         clearTimeout(timeoutId!)
         // Do NOT clear listRecordingsPromise or listRecordingsLock here.
         // The promise owner (the IIFE at line 849) clears these in its finally block.
@@ -1159,6 +1241,9 @@ class HiDockDeviceService {
 
     // Create and store the promise for concurrent request handling
     this.listRecordingsPromise = (async () => {
+      // C2/HIGH-2: only a fully successful scan may drive the terminal status to
+      // 'ready' in the finally block. Every early return below is a failure path.
+      let scanSucceeded = false
       try {
         const files = await this.jensen.listFiles((filesFound, expectedFiles) => {
           if (filesFound > animationProgress) {
@@ -1223,6 +1308,7 @@ class HiDockDeviceService {
         // from triggering a fresh retry immediately after the backoff window expired)
         this.listRecordingsLastCompleted = Date.now()
 
+        scanSucceeded = true
         return recordings
       } catch (error) {
         animationCancelled = true
@@ -1238,11 +1324,27 @@ class HiDockDeviceService {
 
         return this.cachedRecordings ?? []
       } finally {
-        if (this.state.connected && this.connectionStatus.step === 'counting-files') {
-          this.updateStatus('ready', 'Device ready', 100)
-        }
         this.listRecordingsLock = false
         this.listRecordingsPromise = null
+
+        // C2/HIGH-2: Restore an owning terminal status on EVERY scan exit path. The
+        // scan enters 'counting-files' at the top; without a terminal transition the
+        // UI stays stuck there and useDownloadOrchestrator (which gates on
+        // step === 'ready') never starts queued downloads. Guarded on the step so a
+        // concurrent disconnect that already moved us to 'idle'/'error' isn't
+        // clobbered. Only a SUCCESSFUL scan on a still-connected device becomes
+        // 'ready' — the original C2 concern was a finally that flipped to 'ready'
+        // even on failure; a failed/interrupted scan surfaces an honest state
+        // instead (so downloads don't start against an unhealthy device).
+        if (this.connectionStatus.step === 'counting-files') {
+          if (scanSucceeded && this.isConnected()) {
+            this.updateStatus('ready', 'Device ready', 100)
+          } else if (this.isConnected()) {
+            this.updateStatus('error', 'File scan failed — will retry')
+          } else {
+            this.updateStatus('idle', 'Not connected')
+          }
+        }
       }
     })()
 
@@ -1250,25 +1352,41 @@ class HiDockDeviceService {
   }
 
   async deleteRecording(filename: string): Promise<boolean> {
-    if (!this.isConnected()) return false
+    this.lastDeleteError = null
+    if (!this.isConnected()) {
+      this.lastDeleteError = 'The HiDock disconnected before the erase could start.'
+      return false
+    }
 
     // SECURITY: Validate path to prevent directory traversal attacks
     if (!validateDevicePath(filename)) {
+      this.lastDeleteError = `The device filename is invalid: ${filename}`
       this.logActivity('error', 'Delete rejected', `Invalid filename: ${filename}`)
       throw new Error(`Invalid filename: ${filename}`)
     }
 
     this.logActivity('usb-out', 'CMD: Delete File', `Deleting ${filename}`)
     const result = await this.jensen.deleteFile(filename)
-    if (result?.result === 'success') {
-      this.logActivity('success', 'File deleted', filename)
-      // Invalidate cache since recording count changed
-      this.cachedRecordings = null
-      this.cachedRecordingCount = -1
+    const deleteSatisfied = result?.result === 'success' || result?.result === 'not-exists'
+    if (deleteSatisfied) {
+      this.logActivity(
+        'success',
+        result?.result === 'not-exists' ? 'File already absent' : 'File deleted',
+        filename
+      )
+      // Reconcile the exact row immediately. This keeps cache-only Library
+      // rebuilds honest and preserves every unaffected device recording.
+      if (!this.removeCachedRecording(filename)) {
+        this.cachedRecordings = null
+        this.cachedRecordingCount = -1
+      }
     } else {
-      this.logActivity('error', 'Failed to delete file', filename)
+      this.lastDeleteError = result === null
+        ? 'The HiDock did not confirm the erase. It may have disconnected or rejected the command.'
+        : `The HiDock rejected the erase command (${result.result}).`
+      this.logActivity('error', 'Failed to delete file', `${filename}: ${this.lastDeleteError}`)
     }
-    return result?.result === 'success'
+    return deleteSatisfied
   }
 
   async formatStorage(): Promise<boolean> {
@@ -1508,6 +1626,7 @@ class HiDockDeviceService {
   private async handleConnect(): Promise<void> {
     if (shouldLogQa()) console.log('[HiDockDevice] handleConnect called')
     this.initAborted = false // Reset abort flag on new connection
+    this.clearQuickReconnect() // a pending quick-recovery attempt is moot now
     this.state.connected = true
     this.state.model = this.jensen.getModel()
     this.notifyStateChange()
@@ -1730,6 +1849,34 @@ class HiDockDeviceService {
     this.logActivity('info', 'USB device disconnected', 'Recording count and cache preserved for quick reconnect')
     this.updateStatus('idle', 'Device disconnected')
     this.notifyConnectionChange(false)
+
+    // Quick recovery (2026-07-22): the HiDock drops USB transiently during normal
+    // use — notably when a recording STOPS (firmware re-enumerates). Waiting for
+    // the 3-minute reconnect watch leaves the post-recording sync hanging for
+    // minutes. Schedule one guarded re-attempt; gentleReattempt carries every
+    // safety check (config off, user-initiated disconnect, busy device, failure
+    // cooldown, device-not-present all no-op), and the 3-minute watch remains
+    // the backstop if it misses. One quick attempt avoids repeated USB reopen
+    // cycles while the device is idle or unstable.
+    if (!this.userInitiatedDisconnect && this.autoConnectConfig.enabled) {
+      this.scheduleQuickReconnect()
+    }
+  }
+
+  private quickReconnectTimers: ReturnType<typeof setTimeout>[] = []
+
+  private scheduleQuickReconnect(): void {
+    this.clearQuickReconnect()
+    this.quickReconnectTimers.push(
+      setTimeout(() => {
+        void this.gentleReattempt('quick-recovery')
+      }, 8_000)
+    )
+  }
+
+  private clearQuickReconnect(): void {
+    for (const t of this.quickReconnectTimers) clearTimeout(t)
+    this.quickReconnectTimers = []
   }
 
   private updateStatus(step: ConnectionStep, message: string, progress?: number): void {

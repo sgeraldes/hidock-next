@@ -40,6 +40,37 @@ vi.mock('../../services/database', () => ({
   updateProjectNote: vi.fn(),
   deleteProjectNote: vi.fn(),
   getActionablesForProject: vi.fn(),
+  addProjectDiscoveryRejection: vi.fn(),
+  // ADV27-1 (round-28) — projects:getAll/getById route through the visible-identity
+  // boundary. Default to all-visible so these mapping/shape assertions are
+  // unaffected; behavioral suppression is covered by the real-temp-DB suites.
+  filterVisibleEntityIds: vi.fn((_kind: string, ids: Iterable<string>) => ({ visible: new Set([...ids]), failClosed: false })),
+  // ADV15 (round-16) — getById topics + getActionables now route through the
+  // shared eligibility boundaries. Default these DB helpers to no-op-eligible so
+  // these mapping/shape assertions are unaffected; behavioral exclusion is covered
+  // by the real-temp-DB projects-handlers.eligibility.test.ts.
+  getEligibleRecordingIds: vi.fn((ids: Iterable<string>) => ({ eligible: new Set([...ids]), failClosed: false })),
+  getExistingCaptureIds: vi.fn((_ids: Iterable<string>) => ({ ids: new Set<string>(), failClosed: false })),
+  getCaptureEligibilityRows: vi.fn((_ids: Iterable<string>) => ({ rows: [], failClosed: false })),
+  dismissDiscoveredProject: vi.fn(),
+  unmergeProjects: vi.fn(),
+  // Real classes so the handlers' `err instanceof` guards work.
+  DismissDiscoveredError: class DismissDiscoveredError extends Error {
+    constructor(public readonly code: 'NOT_FOUND' | 'NOT_DISCOVERED', message: string) {
+      super(message)
+      this.name = 'DismissDiscoveredError'
+    }
+  },
+  MergeOrderConflictError: class MergeOrderConflictError extends Error {
+    constructor(
+      public readonly blockingJournalId: string,
+      public readonly blockingLoserName: string | null,
+      message: string
+    ) {
+      super(message)
+      this.name = 'MergeOrderConflictError'
+    }
+  },
   getDatabase: vi.fn(() => ({
     prepare: vi.fn(() => ({
       bind: vi.fn(),
@@ -48,6 +79,14 @@ vi.mock('../../services/database', () => ({
       free: vi.fn()
     }))
   }))
+}))
+
+// ADV56-3 (round-58) — projects:merge now routes through the graph-aware composite
+// (mergeProjectsWithGraph) so the loser's NAME-KEYED project graph node/edges/provenance
+// fold atomically with the relational merge. Mock it here (the real one pulls in
+// @hidock/knowledge-graph); behavioral coverage lives in context-graph-mutations.test.ts.
+vi.mock('../../services/knowledge-graph-service', () => ({
+  mergeProjectsWithGraph: vi.fn()
 }))
 
 describe('Projects IPC Handlers', () => {
@@ -64,6 +103,27 @@ describe('Projects IPC Handlers', () => {
     expect(ipcMain.handle).toHaveBeenCalledWith('projects:delete', expect.any(Function))
     expect(ipcMain.handle).toHaveBeenCalledWith('projects:tagMeeting', expect.any(Function))
     expect(ipcMain.handle).toHaveBeenCalledWith('projects:untagMeeting', expect.any(Function))
+  })
+
+  const P_KEEPER = '550e8400-e29b-41d4-a716-446655440000'
+  const P_LOSER = '660e8400-e29b-41d4-a716-446655440001'
+
+  it('should merge two projects through the graph-aware composite (projects:merge, ADV56-3)', async () => {
+    const { getProjectById } = await import('../../services/database')
+    const { mergeProjectsWithGraph } = await import('../../services/knowledge-graph-service')
+    vi.mocked(getProjectById).mockReturnValue({ id: P_KEEPER, name: 'K', status: 'active', created_at: '2025-01-01' } as any)
+    vi.mocked(mergeProjectsWithGraph).mockReturnValue({ id: P_KEEPER, name: 'K', status: 'active', created_at: '2025-01-01' } as any)
+
+    registerProjectsHandlers()
+    expect(ipcMain.handle).toHaveBeenCalledWith('projects:merge', expect.any(Function))
+
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(call => call[0] === 'projects:merge')?.[1]
+    const result = await handler?.({} as any, { keeperId: P_KEEPER, loserId: P_LOSER }) as any
+
+    expect(result.success).toBe(true)
+    expect(result.data.id).toBe(P_KEEPER)
+    // Routed through the graph-aware composite (ADV56-3) rather than bare mergeProjects.
+    expect(mergeProjectsWithGraph).toHaveBeenCalledWith(P_KEEPER, P_LOSER)
   })
 
   it('should include status field in mapped project', async () => {
@@ -235,5 +295,74 @@ describe('Projects IPC Handlers', () => {
 
     expect(result.success).toBe(false)
     expect(result.error.code).toBe('VALIDATION_ERROR')
+  })
+
+  // v41: dismissing a discovered project records the tombstone BEFORE deleting,
+  // with the source meeting id, so re-analysis cannot silently re-create it.
+  it('dismissDiscovered delegates to the provenance-enforcing DB function and returns success', async () => {
+    // Provenance check + tombstone + delete are now one atomic DB-layer call
+    // (unit-tested in project-discovery-rejection.test.ts). The handler just
+    // delegates and maps typed failures.
+    const { dismissDiscoveredProject } = await import('../../services/database')
+    vi.mocked(dismissDiscoveredProject).mockReturnValue(undefined)
+
+    registerProjectsHandlers()
+    const handler = getHandler('projects:dismissDiscovered')
+    const result = await handler?.({} as any, PROJECT_ID) as any
+
+    expect(result.success).toBe(true)
+    expect(dismissDiscoveredProject).toHaveBeenCalledWith(PROJECT_ID)
+  })
+
+  it('dismissDiscovered REJECTS a non-discovered (manual/legacy) project server-side with a VALIDATION_ERROR', async () => {
+    // The core provenance guard at the IPC boundary: a NOT_DISCOVERED failure
+    // from the DB layer must surface as a validation error, never a delete.
+    const { dismissDiscoveredProject, DismissDiscoveredError } = await import('../../services/database')
+    vi.mocked(dismissDiscoveredProject).mockImplementation(() => {
+      throw new DismissDiscoveredError('NOT_DISCOVERED', 'Only auto-discovered projects can be dismissed.')
+    })
+
+    registerProjectsHandlers()
+    const handler = getHandler('projects:dismissDiscovered')
+    const result = await handler?.({} as any, PROJECT_ID) as any
+
+    expect(result.success).toBe(false)
+    expect(result.error.code).toBe('VALIDATION_ERROR')
+  })
+
+  it('dismissDiscovered maps a NOT_FOUND failure to a NOT_FOUND result', async () => {
+    const { dismissDiscoveredProject, DismissDiscoveredError } = await import('../../services/database')
+    vi.mocked(dismissDiscoveredProject).mockImplementation(() => {
+      throw new DismissDiscoveredError('NOT_FOUND', `Project with ID ${PROJECT_ID} not found`)
+    })
+
+    registerProjectsHandlers()
+    const handler = getHandler('projects:dismissDiscovered')
+    const result = await handler?.({} as any, PROJECT_ID) as any
+
+    expect(result.success).toBe(false)
+    expect(result.error.code).toBe('NOT_FOUND')
+  })
+
+  it('unmerge maps an ordering rejection to MERGE_ORDER_CONFLICT with the blocking journal in details', async () => {
+    const { unmergeProjects, MergeOrderConflictError } = await import('../../services/database')
+    vi.mocked(unmergeProjects).mockImplementation(() => {
+      throw new (MergeOrderConflictError as any)(
+        'j-newer',
+        'Delta Hub',
+        'Merges must be undone newest-first: undo the newer merge of "Delta Hub" (j-newer) before this one'
+      )
+    })
+
+    registerProjectsHandlers()
+    const handler = getHandler('projects:unmerge')
+    const result = await handler?.({} as any, PROJECT_ID) as any
+
+    expect(result.success).toBe(false)
+    // Distinct code (NOT the generic DATABASE_ERROR) + structured details so
+    // the undo UI can point at the exact blocking merge.
+    expect(result.error.code).toBe('MERGE_ORDER_CONFLICT')
+    expect(result.error.message).toMatch(/undo the newer merge of "Delta Hub"/)
+    expect(result.error.details).toMatchObject({ blockingJournalId: 'j-newer', blockingLoserName: 'Delta Hub' })
   })
 })

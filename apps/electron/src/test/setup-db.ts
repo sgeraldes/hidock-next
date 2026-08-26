@@ -18,8 +18,14 @@
  *
  * Version skew between the two copies is guarded by the version-pin test in
  * better-sqlite3-binding.smoke.test.ts.
+ *
+ * The shim also wraps the constructor with trackDatabases() and sweeps in an
+ * afterAll: DB-backed suites mint fresh temp SQLite files per test and never
+ * deleted them (8000+ hidock-*-test-*.sqlite files piled up in %TEMP%), so
+ * every handle is tracked and its tmpdir()-hosted files are removed once the
+ * test file is done — see temp-db-tracker.ts.
  */
-import { vi } from 'vitest'
+import { vi, afterAll } from 'vitest'
 
 vi.mock('better-sqlite3', async () => {
   const { createRequire } = await import('module')
@@ -30,5 +36,17 @@ vi.mock('better-sqlite3', async () => {
   // setup-db.ts lives at apps/electron/src/test/ → repo root is four levels up.
   const nodeAbiCopy = resolve(here, '../../../../packages/database/node_modules/better-sqlite3')
   const Database = req(nodeAbiCopy)
-  return { default: Database }
+  const { trackDatabases } = await import('./temp-db-tracker')
+  return { default: trackDatabases(Database) }
+})
+
+// Temp-DB hygiene: this setup module is evaluated once per test FILE, so this
+// afterAll runs after each file's own hooks finish. The one-macrotask defer
+// keeps the sweep after a file's own synchronous afterAll cleanup regardless
+// of vitest's hook ordering, so suites that close/delete their DB themselves
+// always get to run first.
+afterAll(async () => {
+  await new Promise((tick) => setImmediate(tick))
+  const { sweepTempDbs } = await import('./temp-db-tracker')
+  sweepTempDbs()
 })

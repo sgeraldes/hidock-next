@@ -87,6 +87,28 @@ export type ErrorCode =
   | 'INTERNAL_ERROR'
   | 'UNAUTHORIZED'
   | 'RATE_LIMITED'
+  // ADV25-3 (round-26) — an identity merge suggestion whose supporting evidence
+  // became excluded/deleted between surfacing and accept (accept-time TOCTOU guard).
+  | 'SUGGESTION_STALE'
+  // ADV27-4 (round-28) — a bucket-mention resolve targeting a recording that became
+  // ineligible (excluded/deleted/hard-purged) between load and click (accept-time recheck).
+  | 'RECORDING_INELIGIBLE'
+  // ADV36-2 (round-38) — an entity merge refused because one/both sides are not
+  // visible on the non-owner identity boundary (would launder a suppressed entity).
+  | 'MERGE_NOT_ALLOWED'
+  // ADV36-3 (round-38) — a duplicate-name visibility check could not be evaluated
+  // (transient failure); the create is refused RETRYABLY rather than minting a twin.
+  | 'RETRYABLE_ERROR'
+  // ADV37 (round-39) — a bucket-mention resolve targeting a contact that is SUPPRESSED
+  // on the non-owner identity boundary (linking it would reanimate the hidden entity).
+  | 'CONTACT_INELIGIBLE'
+  // ADV38-1 (round-40) — a mutation (actionItems:setAssignee) on an action item whose
+  // SOURCE capture/recording is excluded (personal/deleted/value-excluded/hard-purged)
+  // or cannot be verified; refused so the excluded derivative's content is not
+  // read/updated/returned.
+  | 'ACTIONABLE_INELIGIBLE'
+  /** Unmerge rejected: a newer open merge depends on this journal's entities (undo it first). */
+  | 'MERGE_ORDER_CONFLICT'
 
 // =============================================================================
 // RAG Filter Types
@@ -112,11 +134,23 @@ export interface RAGChatRequest {
 }
 
 /**
- * RAG chat response with sources
+ * RAG chat response — CONTENT-FREE (ADV22-1, round-23).
+ *
+ * The RAG chat IPC returns ONLY a generation id + a non-content status. The
+ * generated answer TEXT and its source excerpts stay in main's PendingGeneration
+ * (keyed by `generationId`) and reach the renderer through EXACTLY ONE sanitized
+ * path — assistant:addMessage(generationId) — which revalidates provenance at
+ * persist time and redacts via the shared read boundary. Releasing the raw answer
+ * here would bypass that final revalidation (a recording/capture can be excluded
+ * DURING the provider await, after the pre-call eligibility check).
  */
 export interface RAGChatResponse {
-  answer: string
-  sources: RAGSource[]
+  /** ADV19-4 — unique id bound to this answer's provenance; pass to assistant:addMessage. */
+  generationId?: string
+  /** Generation outcome. Answer content is released ONLY via assistant:addMessage. */
+  status: 'ok' | 'error'
+  /** Non-content status/error message for a failed generation (never answer text or sources). */
+  error?: string
 }
 
 /**
@@ -128,6 +162,10 @@ export interface RAGSource {
   subject?: string
   timestamp?: string
   score: number
+  /** Non-transcript origin of the chunk, e.g. 'image' for a screenshot capture. */
+  sourceType?: string
+  /** knowledge_capture id backing a non-meeting source, so the renderer can link it. */
+  captureId?: string
 }
 
 // =============================================================================
@@ -140,6 +178,7 @@ export interface RAGSource {
 export interface GetContactsRequest {
   search?: string
   type?: 'team' | 'candidate' | 'customer' | 'external' | 'unknown' | 'all'
+  sortBy?: 'name' | 'lastSeen' | 'interactions'
   limit?: number
   offset?: number
 }
@@ -328,13 +367,35 @@ export interface ArtifactSummary {
 export interface ArtifactImportSummary extends ArtifactSummary {
   deduped: boolean
   indexedChunks: number
+  /** Set when THIS file's import failed (batch continues past it). */
+  error?: string
+}
+
+/** Full content of one artifact for in-app preview (text or base64 blob). */
+export interface ArtifactContent {
+  kind: string
+  mime: string | null
+  storagePath: string | null
+  textContent: string | null
+  blobBase64?: string
+}
+
+/** Renderer-safe projection of one code/add-on registered artifact type. */
+export interface ArtifactTypeDescriptor {
+  id: string
+  label: string
+  pluralLabel: string
+  extensions: string[]
+  capabilities: Array<'timed' | 'conversation' | 'rateable' | 'transcribable' | 'device-backed' | 'previewable'>
 }
 
 /** Artifacts namespace for electronAPI */
 export interface ArtifactsAPI {
+  listTypes: () => Promise<Result<ArtifactTypeDescriptor[]>>
   import: (filePaths: string[]) => Promise<Result<ArtifactImportSummary[]>>
   pickAndImport: () => Promise<Result<ArtifactImportSummary[]>>
   getForCapture: (knowledgeCaptureId: string) => Promise<Result<ArtifactSummary[]>>
+  getContent: (id: string) => Promise<Result<ArtifactContent>>
   openInFolder: (id: string) => Promise<Result<void>>
 }
 
@@ -406,4 +467,21 @@ export interface RAGStatus {
   documentCount: number
   meetingCount: number
   ready: boolean
+  /**
+   * The ACTIVE embedding provider partition (2026-07 provider partitions).
+   * Retrieval searches ONLY this partition — `embedDocumentCount` is the
+   * honest "chunks the assistant can actually search" number, and `ready`
+   * requires it to be > 0 (a just-switched provider with a pending reindex
+   * shows 0 ⇒ not ready, instead of claiming the whole library is searchable).
+   */
+  embedProvider: string | null
+  /** Badge-friendly short label ('Gemini', 'Ollama', 'Nemotron Local'). */
+  embedProviderLabel: string | null
+  /** Eligible chunks in the ACTIVE provider's partition. */
+  embedDocumentCount: number
+  /** Explicit lifecycle so queued/loading is never mislabeled as an empty corpus. */
+  indexState: 'idle' | 'queued' | 'loading' | 'ready' | 'failed'
+  indexLoaded: number
+  indexTotal: number
+  indexError: string | null
 }

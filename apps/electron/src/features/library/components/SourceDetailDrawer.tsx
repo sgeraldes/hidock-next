@@ -106,7 +106,8 @@ export function SourceDetailDrawer({
   const canPlay = hasLocalPath(source)
   const needsDownload = isDeviceOnly(source)
   const needsTranscription =
-    hasLocalPath(source) && (source.transcriptionStatus === 'none' || source.transcriptionStatus === 'error')
+    hasLocalPath(source) &&
+    (source.transcriptionStatus === 'none' || source.transcriptionStatus === 'no_speech' || source.transcriptionStatus === 'error')
 
   const handleRetry = () => {
     if (!source) return
@@ -462,7 +463,7 @@ export function SourceDetailDrawer({
             ) : needsTranscription ? (
               <div className="text-center py-8 text-muted-foreground">
                 <Wand2 className="h-12 w-12 mx-auto mb-4 opacity-50" />
-                <p className="text-sm">This capture hasn't been transcribed yet.</p>
+                <p className="text-sm">This capture hasn&apos;t been transcribed yet.</p>
                 <Button variant="outline" size="sm" onClick={onTranscribe} className="mt-4">
                   Start Transcription
                 </Button>

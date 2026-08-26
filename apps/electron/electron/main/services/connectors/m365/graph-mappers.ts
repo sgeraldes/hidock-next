@@ -41,12 +41,12 @@ export function mapEmailAddress(email?: GraphEmailAddress): ExternalPerson {
 }
 
 export function mapGraphEvent(ev: Record<string, any>): ExternalMeeting {
-  const attendees: ExternalPerson[] = Array.isArray(ev.attendees)
+  const attendees: ExternalPerson[] | undefined = Array.isArray(ev.attendees)
     ? ev.attendees.map((a: any) => ({
         ...mapEmailAddress(a?.emailAddress),
         metadata: { attendeeType: a?.type, response: a?.status?.response },
       }))
-    : []
+    : undefined
   return {
     externalId: String(ev.id ?? ''),
     title: ev.subject?.trim() || '(no subject)',

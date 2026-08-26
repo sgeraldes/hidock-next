@@ -25,6 +25,8 @@ async function loadService() {
       getLockHolder: vi.fn(() => null),
       tryConnect: tryConnectMock,
       removeUsbConnectListener: vi.fn(),
+      getModel: vi.fn(() => 'hidock-h1e'),
+      disconnect: vi.fn().mockResolvedValue(undefined),
       onconnect: null,
       ondisconnect: null
     })),
@@ -117,6 +119,79 @@ describe('HiDockDeviceService — gentle reconnect', () => {
     await s.gentleReattempt('test')
 
     expect(spy).not.toHaveBeenCalled()
+  })
+})
+
+describe('HiDockDeviceService — quick recovery after an unexpected drop (2026-07-22)', () => {
+  // The HiDock drops USB transiently in normal use — notably when a recording
+  // STOPS (firmware re-enumerates). The 3-minute watch is too slow for the
+  // post-recording sync; handleDisconnect must schedule guarded re-attempts
+  // within seconds.
+
+  it('schedules exactly one guarded re-attempt at +8s after handleDisconnect', async () => {
+    vi.useFakeTimers()
+    try {
+      const Service = await loadService()
+      const s = new Service() as any
+      s.autoConnectConfig.enabled = true
+      s.userInitiatedDisconnect = false
+      s.state.connected = true
+      const spy = vi.spyOn(s, 'tryConnectSilent').mockResolvedValue(true)
+
+      s.handleDisconnect()
+      expect(spy).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(8_500)
+      expect(spy).toHaveBeenCalledTimes(1)
+
+      await vi.advanceTimersByTimeAsync(22_000)
+      expect(spy).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does NOT schedule quick recovery after a user-initiated disconnect', async () => {
+    vi.useFakeTimers()
+    try {
+      const Service = await loadService()
+      const s = new Service() as any
+      s.autoConnectConfig.enabled = true
+      s.userInitiatedDisconnect = true // explicit user action — respect it
+      s.state.connected = true
+      const spy = vi.spyOn(s, 'tryConnectSilent').mockResolvedValue(true)
+
+      s.handleDisconnect()
+      await vi.advanceTimersByTimeAsync(40_000)
+
+      expect(spy).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a completed connect cancels the pending quick-recovery attempts', async () => {
+    vi.useFakeTimers()
+    try {
+      const Service = await loadService()
+      const s = new Service() as any
+      s.autoConnectConfig.enabled = true
+      s.userInitiatedDisconnect = false
+      s.state.connected = true
+      const spy = vi.spyOn(s, 'tryConnectSilent').mockResolvedValue(true)
+
+      s.handleDisconnect()
+      // Device reconnects (onconnect → handleConnect) before the timers fire.
+      // handleConnect will fail its init steps against this bare mock — fine,
+      // the timer-clear runs first.
+      await s.handleConnect()
+      spy.mockClear()
+
+      await vi.advanceTimersByTimeAsync(40_000)
+      expect(spy).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

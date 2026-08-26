@@ -45,7 +45,9 @@ export function externalMeetingToRow(connectorId: string, m: ExternalMeeting): M
     location: m.location ?? null,
     organizer_name: m.organizer?.name ?? null,
     organizer_email: m.organizer?.email ?? null,
-    attendees: JSON.stringify(m.attendees.map((a) => ({ name: a.name, email: a.email }))),
+    attendees: m.attendees
+      ? JSON.stringify(m.attendees.map((a) => ({ name: a.name, email: a.email })))
+      : undefined,
     description: m.description ?? null,
     is_recurring: m.metadata?.seriesMasterId ? 1 : 0,
     meeting_url: m.onlineJoinUrl,
@@ -90,7 +92,9 @@ function defaultApplyContact(p: ExternalPerson): 'created' | 'updated' {
     })
     return 'updated'
   }
-  createContact({ name: p.name, email: p.email ?? null, role: p.title ?? null, company: p.company ?? null })
+  // v45/round-28: connector-imported people are structural (calendar/directory),
+  // NOT transcript-extracted ⇒ entity source 'calendar' (always visible).
+  createContact({ name: p.name, email: p.email ?? null, role: p.title ?? null, company: p.company ?? null, source: 'calendar' })
   return 'created'
 }
 
@@ -109,9 +113,9 @@ export class ConnectorIngestionSink implements IngestionSink {
 
     for (const item of items) {
       try {
-        if (item.kind === 'meeting' && item.entity && 'attendees' in item.entity) {
+        if (item.kind === 'meeting' && item.entity) {
           meetingRows.push(externalMeetingToRow(connectorId, item.entity as ExternalMeeting))
-        } else if (item.kind === 'contact' && item.entity && !('attendees' in item.entity)) {
+        } else if (item.kind === 'contact' && item.entity) {
           this.deps.applyContact(item.entity as ExternalPerson)
           outcome.contacts++
         } else {
@@ -147,26 +151,40 @@ export class ConnectorIngestionSink implements IngestionSink {
   /** Stage an artifact item to a temp file; returns the path or null if unfetchable. */
   private async stageArtifact(item: SourceItem): Promise<string | null> {
     const dir = mkdtempSync(join(tmpdir(), 'hidock-conn-'))
+    // The dir exists before we know the item is fetchable — every null return
+    // must discard it or unfetchable items strand hidock-conn-* dirs in TEMP.
+    const discard = (): null => {
+      try {
+        rmSync(dir, { recursive: true, force: true })
+      } catch {
+        /* best-effort temp cleanup */
+      }
+      return null
+    }
     const safeName = (item.externalId || randomUUID()).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64)
     const filePath = join(dir, `${safeName}.${extensionForItem(item)}`)
 
     if (item.text != null) {
-      writeFileSync(filePath, item.text, 'utf-8')
-      return filePath
+      try {
+        writeFileSync(filePath, item.text, 'utf-8')
+        return filePath
+      } catch {
+        return discard()
+      }
     }
     if (item.url) {
       try {
         const headers: Record<string, string> = {}
         if (item.fetchAuthorization) headers.Authorization = item.fetchAuthorization
         const res = await fetch(item.url, { headers })
-        if (!res.ok) return null
+        if (!res.ok) return discard()
         writeFileSync(filePath, Buffer.from(await res.arrayBuffer()))
         return filePath
       } catch {
-        return null
+        return discard()
       }
     }
-    return null
+    return discard()
   }
 }
 

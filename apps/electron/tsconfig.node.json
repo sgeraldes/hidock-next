@@ -3,7 +3,9 @@
   "include": [
     "electron.vite.config.*",
     "electron/**/*",
-    "src/types/**/*"
+    "src/types/**/*",
+    "src/shared/**/*",
+    "src/test/temp-db-tracker.ts"
   ],
   "exclude": [
     "electron/main/services/__tests__/benchmark.test.ts"

@@ -23,7 +23,7 @@ from hidock_device import HiDockJensen
 from .test_ci_skip import device_test_ci_skip
 
 
-def test_reset_with_connected_device():
+def _run_reset_with_connected_device():
     """Test device reset with actual connected device."""
     print("Testing device reset with connected HiDock...")
 
@@ -98,7 +98,7 @@ def test_reset_with_connected_device():
 def test_device_reset_with_connected_device():
     """Pytest wrapper for device reset functionality test."""
     try:
-        success = test_reset_with_connected_device()
+        success = _run_reset_with_connected_device()
         assert success, "Device reset functionality test failed"
     except Exception as e:
         if "Access denied" in str(e) or "permission" in str(e).lower():
@@ -108,7 +108,7 @@ def test_device_reset_with_connected_device():
 
 
 if __name__ == "__main__":
-    success = test_reset_with_connected_device()
+    success = _run_reset_with_connected_device()
     if success:
         print("\n✓ Device reset test passed!")
     else:

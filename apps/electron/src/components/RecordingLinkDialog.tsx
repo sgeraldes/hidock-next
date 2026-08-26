@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Star, Pencil, Check, X, Link2Off } from 'lucide-react'
+import { Star, Pencil, Check, X, Trash2 } from 'lucide-react'
 import {
   Dialog,
   DialogContent,
@@ -60,7 +60,15 @@ export function RecordingLinkDialog({
   const [linkedRecordings, setLinkedRecordings] = useState<Recording[]>([])
   const [unlinkingId, setUnlinkingId] = useState<string | null>(null)
 
-  // Reset state when dialog opens/closes or recording changes
+  // Reset state when dialog opens/closes or recording changes.
+  // Deps are the SCALARS that drive the fetch, NOT the object identities:
+  // callers legitimately build the recording prop inline (`{ id, filename, … }`
+  // per render — e.g. SourceReader), and an identity dep re-fires the fetch on
+  // EVERY parent re-render — the ~3s poll made the dialog cycle list → Loading
+  // forever, making it impossible to pick a meeting (2026-07-23).
+  const recordingId = recording?.id ?? null
+  const recordingDate = recording?.date_recorded ?? null
+  const meetingId = meeting?.id ?? null
   useEffect(() => {
     if (!recording || !open) {
       setCandidates([])
@@ -110,12 +118,16 @@ export function RecordingLinkDialog({
           setLinkedRecordings((meetingRecordings as Recording[]).filter(r => r.id !== recording.id))
         }
 
-        // Pre-select AI's choice if available, otherwise pre-select current meeting
+        // The persisted/manual link is authoritative. AI is only a suggestion
+        // when the recording is not already linked by the user.
+        const confirmedPick = candidatesResult.data.find((c: MeetingCandidate) => c.isUserConfirmed)
         const aiPick = candidatesResult.data.find((c: MeetingCandidate) => c.isAiSelected)
-        if (aiPick) {
-          setSelectedId(aiPick.meetingId)
-        } else if (meeting) {
+        if (meeting) {
           setSelectedId(meeting.id)
+        } else if (confirmedPick) {
+          setSelectedId(confirmedPick.meetingId)
+        } else if (aiPick) {
+          setSelectedId(aiPick.meetingId)
         }
       } catch (err) {
         if (cancelled) return
@@ -128,7 +140,11 @@ export function RecordingLinkDialog({
     loadData()
 
     return () => { cancelled = true }
-  }, [recording, open, meeting])
+    // recording/meeting objects are read from the closure — the fetch inputs
+    // are the scalars below, so an inline-rebuilt prop object with the SAME id
+    // must not refetch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recordingId, recordingDate, open, meetingId])
 
   // Sync meeting edit drafts when meeting changes
   useEffect(() => {
@@ -262,7 +278,17 @@ export function RecordingLinkDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="flex-1 overflow-y-auto py-2 space-y-4">
+        <div
+          className="flex-1 overflow-y-auto py-2 space-y-4 pr-2"
+          style={{
+            // The overlay scrollbar covers the candidate cards' right edges and
+            // the viewport clips the last card mid-height — both read as broken
+            // layout (2026-07-24). Padding keeps the scrollbar off the cards;
+            // the bottom fade makes the clip point look intentional.
+            maskImage: 'linear-gradient(to bottom, black 93%, transparent)',
+            WebkitMaskImage: 'linear-gradient(to bottom, black 93%, transparent)'
+          }}
+        >
           {/* ── Section 1: Edit meeting details (only when linked) ── */}
           {meeting && (
             <div className="space-y-2">
@@ -367,11 +393,12 @@ export function RecordingLinkDialog({
                       variant="ghost"
                       size="icon"
                       className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
-                      title="Unlink this recording from the meeting"
+                      title="Remove meeting link (meeting is not deleted)"
+                      aria-label={`Remove meeting link for ${(r as any).title || r.filename}`}
                       disabled={unlinkingId === r.id}
                       onClick={() => handleUnlinkOther(r.id)}
                     >
-                      <Link2Off className="h-3.5 w-3.5" />
+                      <Trash2 className="h-3.5 w-3.5" />
                     </Button>
                   </div>
                 ))}

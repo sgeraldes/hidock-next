@@ -18,6 +18,14 @@
 # (b) accept the model + pyannote/segmentation-3.0 user conditions on huggingface.co once.
 # The harness reads the token from HF_TOKEN, or falls back to config.localAsrHfToken.
 
+# SECURITY NOTE (verified 2026-08-25): Dependabot flags torch 2.8.0 (1 medium,
+# 2 low). It CANNOT be bumped here. whisperx 3.8.6 is the latest release on
+# PyPI and hard-constrains `torch~=2.8.0` (i.e. >=2.8.0,<2.9.0); the fixes
+# land in 2.9.1 / 2.10.0 / 2.13.0. Moving torch means dropping or forking
+# whisperx. Scope is bounded: this is a one-off spike harness
+# (docs/experiments/diarization-spike.md), never installed by CI, the app, or
+# the shipped speaker-linking worker (resources/speaker-linking/requirements.txt).
+# Re-check when whisperx > 3.8.6 ships.
 torch==2.8.0            # +cu126 build from the pytorch index
 torchaudio==2.8.0       # +cu126
 torchvision==0.23.0     # +cu126

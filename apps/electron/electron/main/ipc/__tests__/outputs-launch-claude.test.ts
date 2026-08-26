@@ -66,12 +66,12 @@ vi.mock('crypto', async () => {
 })
 
 describe('outputs:launchClaudeCode', () => {
-  let handlers: Record<string, Function> = {}
+  let handlers: Record<string, (...args: any[]) => any> = {}
 
   beforeEach(async () => {
     vi.clearAllMocks()
     handlers = {}
-    vi.mocked(ipcMain.handle).mockImplementation((channel: string, handler: Function) => {
+    vi.mocked(ipcMain.handle).mockImplementation((channel: string, handler: (...args: any[]) => any) => {
       handlers[channel] = handler
       return undefined as any
     })

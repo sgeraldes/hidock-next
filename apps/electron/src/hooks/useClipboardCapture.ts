@@ -27,6 +27,14 @@ interface ClipboardCaptureResult {
   error?: string
 }
 
+/** Result of artifacts:import for pasted files. */
+interface ArtifactImportSummary {
+  title?: string
+  kind?: string
+  deduped?: boolean
+  error?: string
+}
+
 /** Trigger the same Library refresh path downloads use, so the new row shows up. */
 function refreshLibrary(): void {
   window.dispatchEvent(new Event('hidock:downloads-completed'))
@@ -67,10 +75,48 @@ export function useClipboardCapture(): void {
     if (!api) return
 
     const onPaste = (e: ClipboardEvent): void => {
+      // FILES first (a Ctrl+C on files in Explorer — pdf/image/md/txt…):
+      // resolve each pasted File to its disk path and run the artifact import
+      // pipeline (extract → capture → embeddings; images also get PixelRAG).
+      const files = e.clipboardData?.files ? Array.from(e.clipboardData.files) : []
+      if (files.length > 0) {
+        const paths = files
+          .map((f) => {
+            try {
+              return api.getPathForFile(f)
+            } catch {
+              return ''
+            }
+          })
+          .filter((p) => !!p)
+        if (paths.length > 0) {
+          e.preventDefault()
+          void importPastedFiles(paths)
+          return
+        }
+      }
+      // Screenshot / copied-image-content paste (no file on disk — the main
+      // process reads the bitmap from the clipboard directly).
       if (!pasteHasImage(e)) return
       // We are handling this image paste — stop the browser's default handling.
       e.preventDefault()
       void api.captureImage().then((result) => handleResult(result, 'paste'))
+    }
+
+    async function importPastedFiles(paths: string[]): Promise<void> {
+      try {
+        const res = (await window.electronAPI.artifacts.import(paths)) as { success?: boolean; data?: ArtifactImportSummary[] }
+        const items = res?.data ?? []
+        const added = items.filter((i) => !i.deduped && !i.error).length
+        const dupes = items.filter((i) => i.deduped).length
+        const failed = items.filter((i) => i.error).length
+        if (added > 0) toast.success(added === 1 ? 'File added to your library' : `${added} files added to your library`)
+        if (dupes > 0) toast.info(dupes === 1 ? '1 file was already in your library' : `${dupes} files were already in your library`)
+        if (failed > 0) toast.error(failed === 1 ? '1 file could not be added' : `${failed} files could not be added`)
+        if (added > 0 || dupes > 0) refreshLibrary()
+      } catch (err) {
+        toast.error('Could not add pasted files', err instanceof Error ? err.message : String(err))
+      }
     }
 
     document.addEventListener('paste', onPaste)

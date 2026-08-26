@@ -1,7 +1,16 @@
 import { ipcMain, app, BrowserWindow } from 'electron'
 import { is } from '@electron-toolkit/utils'
+import { setQaLogsEnabled } from '../services/qa-logs'
 
 export function registerAppHandlers(): void {
+  // QA Logs toggle bridge. The toggle is renderer state (Zustand + localStorage)
+  // and the main process cannot read it, so the renderer pushes it here: once on
+  // mount and again on every change. See services/qa-logs.ts.
+  ipcMain.handle('qa:set-logs-enabled', async (_event, enabled: unknown) => {
+    setQaLogsEnabled(enabled === true)
+    return { success: true }
+  })
+
   // Restart the app (useful for development)
   ipcMain.handle('app:restart', async () => {
     // In development mode, just reload the window

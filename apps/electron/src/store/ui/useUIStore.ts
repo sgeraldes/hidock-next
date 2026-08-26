@@ -8,6 +8,23 @@ import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
 import type { UIStore, SidebarContent } from '@/types/stores'
 
+/**
+ * Mirror the QA Logs toggle into the main process.
+ *
+ * QA logs written by main-process services (BootScheduler task timings, etc.)
+ * cannot read this store or localStorage, so the renderer pushes the value to
+ * them: on rehydration (below) and on every toggle. Best-effort by design — the
+ * bridge is absent in tests and in the web build, and a failed push must never
+ * break the toggle.
+ */
+function pushQaLogsToMain(enabled: boolean): void {
+  try {
+    void window.electronAPI?.app?.setQaLogsEnabled?.(enabled)
+  } catch {
+    /* no bridge (tests / non-electron host) — nothing to mirror */
+  }
+}
+
 export const useUIStore = create<UIStore>()(
   persist(
     (set) => ({
@@ -192,6 +209,11 @@ export const useUIStore = create<UIStore>()(
   // QA monitoring actions
   setQaLogsEnabled: (enabled: boolean) => {
     set({ qaLogsEnabled: enabled })
+    // Mirror the toggle into the main process. Main has no localStorage and no
+    // store access, so its QA logs (BootScheduler task timings, etc.) can only
+    // honor this toggle if the renderer pushes it. Best-effort: a failed push
+    // must never break the toggle itself.
+    void pushQaLogsToMain(enabled)
   },
 
   // Clipboard auto-capture toggle
@@ -236,7 +258,14 @@ export const useUIStore = create<UIStore>()(
         // isGeneratingOutput intentionally not persisted - transient
         // outputContent intentionally not persisted - transient
         // sidebarContent intentionally not persisted - start fresh
-      })
+      }),
+      // Teach the main process the persisted toggle as soon as it is known, so
+      // main-process QA logs honor it without waiting for the user to touch the
+      // switch. (Boot logs that fire before this lands are covered by the
+      // HIDOCK_QA_LOGS=1 env override — see electron/main/services/qa-logs.ts.)
+      onRehydrateStorage: () => (state) => {
+        pushQaLogsToMain(state?.qaLogsEnabled ?? false)
+      }
     }
   )
 )

@@ -14,15 +14,25 @@ const panels = {
   rightPanel: <div data-testid="assistant-content">ASSISTANT</div>
 }
 
-function renderLayout() {
+function renderLayout(hasSelection = true) {
   return render(
     <TriPaneLayout
       leftPanel={panels.leftPanel}
       centerPanel={panels.centerPanel}
       rightPanel={panels.rightPanel}
+      hasSelection={hasSelection}
     />
   )
 }
+
+describe('TriPaneLayout — list-first selection model', () => {
+  it('gives the list the full workspace and does not mount an empty reader before selection', () => {
+    renderLayout(false)
+    expect(screen.getByTestId('list-content')).toBeInTheDocument()
+    expect(screen.queryByTestId('reader-content')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(/Collapse the source list/i)).not.toBeInTheDocument()
+  })
+})
 
 beforeEach(() => {
   window.localStorage.clear()

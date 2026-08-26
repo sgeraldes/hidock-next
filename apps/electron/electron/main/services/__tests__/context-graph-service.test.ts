@@ -60,8 +60,12 @@ const FAKE_JSON = JSON.stringify({
 })
 
 async function seedContactAndIngest() {
+  // ADV30-2 (round-32): person-node ingest keying now prefers a VISIBLE same-name
+  // contact and never keys to a suppressed one. A NULL-source contact with no
+  // membership is legitimately suppressed on non-owner surfaces, so stamp a
+  // STRUCTURAL source ('user') to make c-mario genuinely visible/keyable.
   dbRun(
-    'INSERT OR IGNORE INTO contacts (id, name, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?)',
+    "INSERT OR IGNORE INTO contacts (id, name, first_seen_at, last_seen_at, source) VALUES (?, ?, ?, ?, 'user')",
     ['c-mario', 'Mario', '2026-06-01', '2026-06-01']
   )
   dbRun('INSERT OR IGNORE INTO recordings (id, filename, date_recorded, meeting_id) VALUES (?, ?, ?, ?)', [
@@ -142,6 +146,13 @@ describe('Context Graph service', () => {
     store.db.run(
       "INSERT INTO graph_edges (id, source_id, target_id, type, weight, created_at) VALUES ('edge:legacy', 'person:legacy_mario', 'meeting:rec-ctx', 'ATTENDED', 1, '')"
     )
+    // ADV47-1 (round-49): rekey now passes each node through the execution-time
+    // node-visibility boundary, so the legacy node must be VISIBLE (backed by an
+    // eligible recording) to still rekey. Attribute its edge to the live, eligible
+    // rec-ctx so the happy path is preserved.
+    store.db.run(
+      "INSERT INTO graph_edge_sources (edge_id, recording_id, transcript_id, assertion_count, created_at) VALUES ('edge:legacy', 'rec-ctx', 'tx-ctx', 1, '')"
+    )
 
     const before = store.findNodes({ type: 'person' }).length
     const r = rekeyExistingPersonNodes()
@@ -180,7 +191,8 @@ describe('Context Lens service', () => {
   })
 
   async function seedRich() {
-    dbRun('INSERT OR IGNORE INTO contacts (id, name, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?)', [
+    // ADV30-2 (round-32): structural source so c-mario is visible/keyable (see above).
+    dbRun("INSERT OR IGNORE INTO contacts (id, name, first_seen_at, last_seen_at, source) VALUES (?, ?, ?, ?, 'user')", [
       'c-mario',
       'Mario',
       '2026-06-01',

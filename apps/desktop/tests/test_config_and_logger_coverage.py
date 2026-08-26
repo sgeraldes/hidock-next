@@ -10,7 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 # Add the parent directory to sys.path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -31,14 +31,18 @@ class TestConfigAndLogger(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_import_config_and_logger(self):
-        """Test that config_and_logger can be imported."""
+        """Test that config_and_logger exposes its public API."""
         try:
             import config_and_logger
 
             self.assertTrue(hasattr(config_and_logger, "load_config"))
             self.assertTrue(hasattr(config_and_logger, "save_config"))
             self.assertTrue(hasattr(config_and_logger, "get_default_config"))
-            self.assertTrue(hasattr(config_and_logger, "setup_logging"))
+            self.assertTrue(hasattr(config_and_logger, "update_config_settings"))
+            # Logging is provided by the Logger class and the module-level `logger`
+            # singleton, not by a setup_logging() function.
+            self.assertTrue(hasattr(config_and_logger, "Logger"))
+            self.assertTrue(hasattr(config_and_logger, "logger"))
         except ImportError as e:
             self.fail(f"Failed to import config_and_logger: {e}")
 
@@ -60,13 +64,9 @@ class TestConfigAndLogger(unittest.TestCase):
         self.assertIsInstance(default_config["download_directory"], str)
         self.assertIsInstance(default_config["log_level"], str)
 
-    @patch("config_and_logger._CONFIG_FILE_PATH")
-    def test_load_config_file_exists(self, mock_config_path):
+    def test_load_config_file_exists(self):
         """Test load_config when config file exists."""
         from config_and_logger import load_config
-
-        mock_config_path.__str__ = Mock(return_value=self.temp_config_file)
-        mock_config_path.__fspath__ = Mock(return_value=self.temp_config_file)
 
         # Create test config file
         test_config = {"autoconnect": True, "log_level": "DEBUG", "appearance_mode": "Dark"}
@@ -74,63 +74,47 @@ class TestConfigAndLogger(unittest.TestCase):
         with open(self.temp_config_file, "w") as f:
             json.dump(test_config, f)
 
-        with patch("config_and_logger.os.path.exists", return_value=True):
+        with patch("config_and_logger._CONFIG_FILE_PATH", self.temp_config_file):
             result = load_config()
 
         self.assertEqual(result["autoconnect"], True)
         self.assertEqual(result["log_level"], "DEBUG")
         self.assertEqual(result["appearance_mode"], "Dark")
 
-    @patch("config_and_logger._CONFIG_FILE_PATH")
-    def test_load_config_file_not_exists(self, mock_config_path):
+    def test_load_config_file_not_exists(self):
         """Test load_config when config file doesn't exist."""
-        from config_and_logger import load_config
+        from config_and_logger import get_default_config, load_config
 
-        mock_config_path.__str__ = Mock(return_value=self.temp_config_file)
-        mock_config_path.__fspath__ = Mock(return_value=self.temp_config_file)
+        missing_path = os.path.join(self.temp_dir, "does_not_exist.json")
 
-        with patch("config_and_logger.os.path.exists", return_value=False):
+        with patch("config_and_logger._CONFIG_FILE_PATH", missing_path):
             result = load_config()
 
-        # Should return default config
-        self.assertIn("autoconnect", result)
-        self.assertIn("log_level", result)
+        # Should return the default config verbatim
+        self.assertEqual(result, get_default_config())
 
-    @patch("config_and_logger._CONFIG_FILE_PATH")
-    def test_load_config_invalid_json(self, mock_config_path):
+    def test_load_config_invalid_json(self):
         """Test load_config with invalid JSON file."""
-        from config_and_logger import load_config
-
-        mock_config_path.__str__ = Mock(return_value=self.temp_config_file)
-        mock_config_path.__fspath__ = Mock(return_value=self.temp_config_file)
+        from config_and_logger import get_default_config, load_config
 
         # Create invalid JSON file
         with open(self.temp_config_file, "w") as f:
             f.write("invalid json content")
 
-        with patch("config_and_logger.os.path.exists", return_value=True):
+        with patch("config_and_logger._CONFIG_FILE_PATH", self.temp_config_file):
             result = load_config()
 
         # Should return default config on JSON parse error
-        self.assertIn("autoconnect", result)
-        self.assertIn("log_level", result)
+        self.assertEqual(result, get_default_config())
 
-    @patch("config_and_logger._CONFIG_FILE_PATH")
-    def test_save_config_success(self, mock_config_path):
+    def test_save_config_success(self):
         """Test successful config saving."""
         from config_and_logger import save_config
 
-        mock_config_path.__str__ = Mock(return_value=self.temp_config_file)
-        mock_config_path.__fspath__ = Mock(return_value=self.temp_config_file)
-
         test_config = {"autoconnect": False, "log_level": "INFO", "custom_setting": "test_value"}
 
-        # Ensure parent directory exists
-        os.makedirs(os.path.dirname(self.temp_config_file), exist_ok=True)
-
-        result = save_config(test_config)
-
-        self.assertTrue(result)
+        with patch("config_and_logger._CONFIG_FILE_PATH", self.temp_config_file):
+            save_config(test_config)
 
         # Verify file was written
         self.assertTrue(os.path.exists(self.temp_config_file))
@@ -143,78 +127,95 @@ class TestConfigAndLogger(unittest.TestCase):
         self.assertEqual(saved_config["log_level"], "INFO")
         self.assertEqual(saved_config["custom_setting"], "test_value")
 
-    @patch("config_and_logger._CONFIG_FILE_PATH")
-    def test_save_config_permission_error(self, mock_config_path):
-        """Test save_config with permission error."""
+    def test_save_config_creates_missing_directory(self):
+        """save_config creates the config directory rather than failing the write."""
         from config_and_logger import save_config
 
-        # Use a path that would cause permission error
-        mock_config_path.__str__ = Mock(return_value="/root/readonly/config.json")
-        mock_config_path.__fspath__ = Mock(return_value="/root/readonly/config.json")
+        nested_path = os.path.join(self.temp_dir, "nested", "config", "hidock_config.json")
 
-        test_config = {"test": "value"}
+        with patch("config_and_logger._CONFIG_FILE_PATH", nested_path):
+            save_config({"autoconnect": True})
 
-        result = save_config(test_config)
+        self.assertTrue(os.path.exists(nested_path))
+        with open(nested_path, "r") as f:
+            self.assertEqual(json.load(f)["autoconnect"], True)
 
-        # Should return False on error
-        self.assertFalse(result)
+    def test_save_config_write_error_is_reported_not_raised(self):
+        """An unwritable config path must be logged, not raised, and must not write."""
+        from config_and_logger import save_config
 
-    def test_update_config_settings_basic(self):
-        """Test update_config_settings with basic operation."""
+        # Occupy the parent directory slot with a regular file so both makedirs and the
+        # write fail. This is portable, unlike relying on a privileged absolute path.
+        blocker = os.path.join(self.temp_dir, "blocker")
+        with open(blocker, "w") as f:
+            f.write("not a directory")
+        unwritable = os.path.join(blocker, "hidock_config.json")
+
+        with patch("config_and_logger._CONFIG_FILE_PATH", unwritable):
+            with patch("config_and_logger.logger") as mock_logger:
+                save_config({"test": "value"})
+
+        mock_logger.error.assert_called()
+        self.assertFalse(os.path.exists(unwritable))
+
+    def test_update_config_settings_merges_into_existing_file(self):
+        """update_config_settings writes only the changed keys and preserves the rest."""
         from config_and_logger import update_config_settings
 
-        with patch("config_and_logger.load_config") as mock_load, patch("config_and_logger.save_config") as mock_save:
-            mock_load.return_value = {"existing_setting": "old_value", "keep_this": "unchanged"}
-            mock_save.return_value = True
+        with open(self.temp_config_file, "w") as f:
+            json.dump({"existing_setting": "old_value", "keep_this": "unchanged"}, f)
 
-            new_settings = {"existing_setting": "new_value", "new_setting": "new_value"}
+        new_settings = {"existing_setting": "new_value", "new_setting": "new_value"}
 
-            result = update_config_settings(new_settings)
+        with patch("config_and_logger._CONFIG_FILE_PATH", self.temp_config_file):
+            update_config_settings(new_settings)
 
-            self.assertTrue(result)
-            mock_load.assert_called_once()
-            mock_save.assert_called_once()
+        with open(self.temp_config_file, "r") as f:
+            saved_config = json.load(f)
 
-            # Check that save was called with merged config
-            saved_config = mock_save.call_args[0][0]
-            self.assertEqual(saved_config["existing_setting"], "new_value")
-            self.assertEqual(saved_config["new_setting"], "new_value")
-            self.assertEqual(saved_config["keep_this"], "unchanged")
+        self.assertEqual(saved_config["existing_setting"], "new_value")
+        self.assertEqual(saved_config["new_setting"], "new_value")
+        self.assertEqual(saved_config["keep_this"], "unchanged")
+
+    def test_update_config_settings_refreshes_the_logger(self):
+        """update_config_settings also pushes the new settings into the live logger."""
+        from config_and_logger import update_config_settings
+
+        with patch("config_and_logger._CONFIG_FILE_PATH", self.temp_config_file):
+            with patch("config_and_logger.logger") as mock_logger:
+                update_config_settings({"log_level": "DEBUG"})
+
+        mock_logger.update_config.assert_called_once_with({"log_level": "DEBUG"})
 
     def test_update_config_settings_empty(self):
-        """Test update_config_settings with empty settings."""
+        """An empty update is a no-op that still leaves the existing config intact."""
         from config_and_logger import update_config_settings
 
-        result = update_config_settings({})
+        with open(self.temp_config_file, "w") as f:
+            json.dump({"keep_this": "unchanged"}, f)
 
-        # Should return True (no-op success)
-        self.assertTrue(result)
+        with patch("config_and_logger._CONFIG_FILE_PATH", self.temp_config_file):
+            update_config_settings({})
 
-    def test_setup_logging_basic(self):
-        """Test basic setup_logging functionality."""
-        from config_and_logger import setup_logging
+        with open(self.temp_config_file, "r") as f:
+            self.assertEqual(json.load(f)["keep_this"], "unchanged")
 
-        with patch("config_and_logger.logging") as mock_logging:
-            mock_logger = Mock()
-            mock_logging.getLogger.return_value = mock_logger
+    def test_logger_configures_level_from_initial_config(self):
+        """A Logger picks up log_level from the config it is constructed with."""
+        from config_and_logger import Logger
 
-            setup_logging("DEBUG")
+        log = Logger(initial_config={"log_level": "DEBUG", "enable_file_logging": False})
 
-            mock_logging.getLogger.assert_called_with("HiDock")
-            mock_logger.setLevel.assert_called()
+        self.assertEqual(log.level, Logger.LEVELS["DEBUG"])
 
-    def test_setup_logging_invalid_level(self):
-        """Test setup_logging with invalid log level."""
-        from config_and_logger import setup_logging
+    def test_logger_invalid_level_falls_back_to_info(self):
+        """An unrecognised level name must not raise; it falls back to INFO."""
+        from config_and_logger import Logger
 
-        with patch("config_and_logger.logging") as mock_logging:
-            mock_logger = Mock()
-            mock_logging.getLogger.return_value = mock_logger
+        log = Logger(initial_config={"enable_file_logging": False})
+        log.set_level("INVALID_LEVEL")
 
-            # Should handle invalid log level gracefully
-            setup_logging("INVALID_LEVEL")
-
-            mock_logging.getLogger.assert_called_with("HiDock")
+        self.assertEqual(log.level, Logger.LEVELS["INFO"])
 
     def test_logger_singleton_behavior(self):
         """Test that logger instance is singleton."""
@@ -251,13 +252,9 @@ class TestConfigAndLogger(unittest.TestCase):
             for key in default_config:
                 self.assertIn(key, config)
 
-    @patch("config_and_logger._CONFIG_FILE_PATH")
-    def test_config_partial_file(self, mock_config_path):
+    def test_config_partial_file(self):
         """Test loading config file with only partial settings."""
         from config_and_logger import load_config
-
-        mock_config_path.__str__ = Mock(return_value=self.temp_config_file)
-        mock_config_path.__fspath__ = Mock(return_value=self.temp_config_file)
 
         # Create partial config file (missing some default keys)
         partial_config = {
@@ -269,7 +266,7 @@ class TestConfigAndLogger(unittest.TestCase):
         with open(self.temp_config_file, "w") as f:
             json.dump(partial_config, f)
 
-        with patch("config_and_logger.os.path.exists", return_value=True):
+        with patch("config_and_logger._CONFIG_FILE_PATH", self.temp_config_file):
             result = load_config()
 
         # Should have loaded values
@@ -297,49 +294,29 @@ class TestConfigAndLogger(unittest.TestCase):
 
     @patch("config_and_logger.logger")
     def test_logging_integration(self, mock_logger):
-        """Test logging integration in config operations."""
+        """A successful save reports the specific settings it wrote."""
         from config_and_logger import save_config
 
-        with patch("config_and_logger._CONFIG_FILE_PATH") as mock_path:
-            mock_path.__str__ = Mock(return_value=self.temp_config_file)
-            mock_path.__fspath__ = Mock(return_value=self.temp_config_file)
+        with patch("config_and_logger._CONFIG_FILE_PATH", self.temp_config_file):
+            save_config({"test": "value"})
 
-            test_config = {"test": "value"}
+        mock_logger.info.assert_called()
+        logged_message = mock_logger.info.call_args[0][2]
+        self.assertIn("test=value", logged_message)
 
-            # Ensure directory exists
-            os.makedirs(os.path.dirname(self.temp_config_file), exist_ok=True)
-
-            save_config(test_config)
-
-            # Logger should have been used
-            mock_logger.info.assert_called()
-
-    def test_config_file_atomic_write(self):
-        """Test that config file writes are atomic (don't corrupt existing file)."""
+    def test_config_file_repeated_writes_preserve_earlier_settings(self):
+        """A second save must merge with, not clobber, the settings already on disk."""
         from config_and_logger import save_config
 
-        with patch("config_and_logger._CONFIG_FILE_PATH") as mock_path:
-            mock_path.__str__ = Mock(return_value=self.temp_config_file)
-            mock_path.__fspath__ = Mock(return_value=self.temp_config_file)
+        with patch("config_and_logger._CONFIG_FILE_PATH", self.temp_config_file):
+            save_config({"initial": "value"})
+            save_config({"new": "setting"})
 
-            # Create initial config
-            initial_config = {"initial": "value"}
-            os.makedirs(os.path.dirname(self.temp_config_file), exist_ok=True)
+        with open(self.temp_config_file, "r") as f:
+            final_config = json.load(f)
 
-            result1 = save_config(initial_config)
-            self.assertTrue(result1)
-
-            # Update config
-            updated_config = {"initial": "value", "new": "setting"}
-            result2 = save_config(updated_config)
-            self.assertTrue(result2)
-
-            # Verify final content
-            with open(self.temp_config_file, "r") as f:
-                final_config = json.load(f)
-
-            self.assertEqual(final_config["initial"], "value")
-            self.assertEqual(final_config["new"], "setting")
+        self.assertEqual(final_config["initial"], "value")
+        self.assertEqual(final_config["new"], "setting")
 
 
 class TestConfigConstants(unittest.TestCase):
@@ -407,22 +384,18 @@ class TestLoggerFunctionality(unittest.TestCase):
         self.assertTrue(hasattr(logger, "warning"))
         self.assertTrue(hasattr(logger, "error"))
 
-    @patch("config_and_logger.logging")
-    def test_setup_logging_levels(self, mock_logging):
-        """Test setup_logging with different levels."""
-        from config_and_logger import setup_logging
+    def test_set_level_accepts_every_supported_level(self):
+        """set_level maps every documented level name, case-insensitively."""
+        from config_and_logger import Logger
 
-        mock_logger = Mock()
-        mock_logging.getLogger.return_value = mock_logger
-        mock_logging.DEBUG = 10
-        mock_logging.INFO = 20
-        mock_logging.WARNING = 30
-        mock_logging.ERROR = 40
+        log = Logger(initial_config={"enable_file_logging": False})
 
-        # Test different log levels
-        for level in ["DEBUG", "INFO", "WARNING", "ERROR"]:
-            setup_logging(level)
-            mock_logger.setLevel.assert_called()
+        for level in ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]:
+            log.set_level(level)
+            self.assertEqual(log.level, Logger.LEVELS[level])
+
+            log.set_level(level.lower())
+            self.assertEqual(log.level, Logger.LEVELS[level])
 
     def test_logger_instance_consistency(self):
         """Test that logger instance is consistent across imports."""
@@ -432,6 +405,53 @@ class TestLoggerFunctionality(unittest.TestCase):
 
         # Should be the same instance
         self.assertIs(logger1, logger2)
+
+    def test_file_logging_creates_the_missing_log_directory(self):
+        """File logging must create logs/ instead of silently disabling itself.
+
+        logs/ is git-ignored, so it does not exist in a fresh checkout. Without the
+        makedirs in _setup_file_logging, open() raises FileNotFoundError, the
+        `except IOError` branch swallows it into a printed warning, and file logging is
+        off even though enable_file_logging defaults to True. Nothing else in the suite
+        exercises this path, so the defect would regress unnoticed.
+        """
+        import shutil
+
+        from config_and_logger import Logger
+
+        temp_root = tempfile.mkdtemp()
+        # Stand in for a clean checkout: the app root itself does not exist yet, so both
+        # it and its logs/ subdirectory have to be created.
+        app_root = os.path.join(temp_root, "fresh_checkout")
+        log = None
+
+        try:
+            with patch("config_and_logger._APP_ROOT_DIR", app_root):
+                log = Logger(
+                    initial_config={
+                        "enable_file_logging": True,
+                        # Relative, so it resolves to <app_root>/logs/hidock.log
+                        "log_file_path": "hidock.log",
+                        "log_level": "INFO",
+                    }
+                )
+
+            expected_path = os.path.join(app_root, "logs", "hidock.log")
+
+            self.assertIsNotNone(log.log_file, "file logging was silently disabled")
+            self.assertTrue(os.path.isdir(os.path.join(app_root, "logs")), "logs/ was not created")
+            self.assertTrue(os.path.exists(expected_path), "log file was not created")
+
+            # And the logger actually writes through to it.
+            log.info("TestModule", "test_procedure", "regression marker line")
+
+            with open(expected_path, "r", encoding="utf-8") as f:
+                contents = f.read()
+            self.assertIn("regression marker line", contents)
+        finally:
+            if log is not None and log.log_file:
+                log.log_file.close()
+            shutil.rmtree(temp_root, ignore_errors=True)
 
 
 if __name__ == "__main__":
