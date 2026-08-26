@@ -208,7 +208,15 @@ export function startBootScheduler(options: BootSchedulerOptions = {}): Promise<
       let ok = true
       let error: string | undefined
       try {
-        log(`running "${task.name}"...`)
+        // ALWAYS printed, not QA-gated. `timings` below is the evidence surface
+        // for a task that merely runs SLOW, but it lives in memory: a task that
+        // aborts the process outright (V8 OOM, a native crash) takes the whole
+        // record with it and leaves no trace of which task was running. That is
+        // not hypothetical — an OOM abort in this drain went unattributed for
+        // seven days because the last durable line came from the previous task,
+        // making the NEXT task look innocent. One line per boot task (there are
+        // ~8) is the price of every future startup crash naming its own culprit.
+        console.log(`[BootScheduler] starting "${task.name}"`)
         await task.run()
       } catch (e) {
         // Best-effort: one failing task must never abort the rest (this matches
