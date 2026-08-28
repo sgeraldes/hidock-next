@@ -6,6 +6,7 @@
 .venv/
 venv/
 ENV/
+!scripts/env/
 apps/desktop/.venv/
 apps/web/node_modules/
 apps/audio-insights/node_modules/
