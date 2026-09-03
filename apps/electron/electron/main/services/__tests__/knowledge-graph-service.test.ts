@@ -110,6 +110,7 @@ beforeEach(async () => {
 
 import {
   ingestFromDbTranscripts,
+  ingestFromHiNotesArtifacts,
   ingestFromFolder,
   getKnowledgeGraphStore,
   queryStats,
@@ -118,6 +119,7 @@ import {
   queryTopSkill,
   queryPersonProfile,
   queryMeetingGraph,
+  queryContextGraph,
 } from '../knowledge-graph-service'
 
 // ---------------------------------------------------------------------------
@@ -220,6 +222,95 @@ describe('knowledge-graph-service', () => {
       const weights = store.db.queryAll<{ weight: number }>('SELECT weight FROM graph_edges')
       expect(weights.length).toBeGreaterThan(0)
       expect(Math.max(...weights.map((w) => w.weight))).toBe(1)
+    })
+  })
+
+  // =========================================================================
+  // ingestFromHiNotesArtifacts()
+  // =========================================================================
+  describe('ingestFromHiNotesArtifacts()', () => {
+    function seedHiNotesArtifact(hash = 'hash-1'): void {
+      dbRun(
+        `INSERT INTO knowledge_captures
+           (id, title, category, status, quality_rating, captured_at)
+         VALUES (?, ?, 'meeting', 'ready', 'unrated', ?)`,
+        ['cap-hinotes-1', 'HiNotes planning', '2026-08-27T10:00:00.000Z']
+      )
+      dbRun(
+        `INSERT INTO artifacts
+           (id, knowledge_capture_id, kind, extracted_text, content_hash,
+            source_connector_id, source_ref, created_at)
+         VALUES (?, ?, 'md', ?, ?, 'hinotes', ?, ?)`,
+        [
+          'artifact-hinotes-1',
+          'cap-hinotes-1',
+          '# HiNotes planning\n\n## Summary\nAlice discussed Project Alpha.',
+          hash,
+          'note-1',
+          '2026-08-27T10:00:00.000Z',
+        ]
+      )
+    }
+
+    it('ingests an eligible HiNotes artifact with visible capture provenance', async () => {
+      seedHiNotesArtifact()
+
+      const result = await ingestFromHiNotesArtifacts()
+
+      expect(result).toMatchObject({ ingested: 1, errors: [] })
+      const graph = queryContextGraph(200)
+      expect(graph.nodes.length).toBeGreaterThan(0)
+      expect(graph.edges.length).toBeGreaterThan(0)
+
+      const store = getKnowledgeGraphStore()
+      const sources = store.db.queryAll<{ recording_id: string }>(
+        'SELECT DISTINCT recording_id FROM graph_edge_sources'
+      )
+      expect(sources.map((row) => row.recording_id)).toEqual(['capture:cap-hinotes-1'])
+    })
+
+    it('skips an unchanged artifact and replaces changed provenance without duplicate meetings', async () => {
+      seedHiNotesArtifact()
+      expect((await ingestFromHiNotesArtifacts()).ingested).toBe(1)
+      expect((await ingestFromHiNotesArtifacts()).ingested).toBe(0)
+
+      dbRun(
+        `UPDATE artifacts SET extracted_text = ?, content_hash = ? WHERE id = ?`,
+        [
+          '# HiNotes planning\n\n## Summary\nAlice approved the updated plan.',
+          'hash-2',
+          'artifact-hinotes-1',
+        ]
+      )
+      expect((await ingestFromHiNotesArtifacts()).ingested).toBe(1)
+
+      const store = getKnowledgeGraphStore()
+      const meetingCount = store.db.queryOne<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM graph_nodes
+          WHERE type = 'meeting' AND norm_key = 'meeting:hinotes:note-1'`
+      )
+      expect(meetingCount?.count).toBe(1)
+      const marker = store.db.queryOne<{ content_hash: string }>(
+        'SELECT content_hash FROM graph_ingested_artifacts WHERE artifact_id = ?',
+        ['artifact-hinotes-1']
+      )
+      expect(marker?.content_hash).toBe('hash-2')
+    })
+
+    it('retracts graph provenance when the owning capture becomes ineligible', async () => {
+      seedHiNotesArtifact()
+      expect((await ingestFromHiNotesArtifacts()).ingested).toBe(1)
+      dbRun(`UPDATE knowledge_captures SET quality_rating = 'garbage' WHERE id = ?`, ['cap-hinotes-1'])
+
+      const result = await ingestFromHiNotesArtifacts()
+
+      expect(result.errors).toHaveLength(0)
+      expect(queryContextGraph(200)).toMatchObject({ nodes: [], edges: [] })
+      const marker = getKnowledgeGraphStore().db.queryOne(
+        'SELECT artifact_id FROM graph_ingested_artifacts WHERE artifact_id = ?',
+        ['artifact-hinotes-1']
+      )
+      expect(marker).toBeUndefined()
     })
   })
 

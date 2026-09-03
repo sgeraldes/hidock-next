@@ -20,6 +20,10 @@ import {
   getExistingCaptureIds,
   getCaptureEligibilityRows
 } from './database'
+import {
+  CAPTURE_VALUE_EXCLUDED_RATINGS,
+  evaluateCaptureEligibility,
+} from '@hidock/database'
 
 export interface EligibilityResult {
   /** The subset of the input ids that are eligible to surface. Empty when failClosed. */
@@ -109,7 +113,7 @@ export function isRecordingEligible(recordingId: string): boolean {
  * re-declare (and drift on) the excluded set. Keep 'valuable' | 'archived' |
  * null/unrated.
  */
-export const CAPTURE_VALUE_EXCLUDED_RATINGS: ReadonlySet<string> = new Set(['garbage', 'low-value'])
+export { CAPTURE_VALUE_EXCLUDED_RATINGS }
 
 /**
  * ADV15 (round-16) — THE shared, central capture-eligibility boundary. Exactly
@@ -149,24 +153,12 @@ export function filterEligibleCaptureIds(captureIds: Iterable<string>): Eligibil
     const { rows, failClosed } = getCaptureEligibilityRows(unique)
     if (failClosed) return { eligible: new Set<string>(), failClosed: true }
 
-    // Only non-soft-deleted captures can be eligible.
-    const live = rows.filter((r) => r.deleted_at == null)
-
-    // Recording-derived captures delegate to the recording allowlist. A recording
-    // sub-lookup failure drops ONLY recording-derived captures (conservative), not
-    // standalone ones.
-    const sourceIds = live.map((r) => r.source_recording_id).filter((id): id is string => !!id)
+    const sourceIds = rows.map((r) => r.source_recording_id).filter((id): id is string => !!id)
     const { eligible: eligibleRecs, failClosed: recFailClosed } = filterEligibleRecordingIds(sourceIds)
-
-    const eligible = new Set<string>()
-    for (const r of live) {
-      if (r.source_recording_id) {
-        if (!recFailClosed && eligibleRecs.has(r.source_recording_id)) eligible.add(r.id)
-      } else if (!CAPTURE_VALUE_EXCLUDED_RATINGS.has(r.quality_rating ?? '')) {
-        eligible.add(r.id)
-      }
-    }
-    return { eligible, failClosed: false }
+    return evaluateCaptureEligibility(
+      { rows, failClosed: false },
+      { eligible: eligibleRecs, failClosed: recFailClosed }
+    )
   } catch (e) {
     console.error('[Eligibility] filterEligibleCaptureIds threw — failing closed:', e)
     return { eligible: new Set<string>(), failClosed: true }

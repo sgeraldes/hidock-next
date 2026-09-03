@@ -31,12 +31,15 @@ export function OperationController() {
   // Calendar sync - thin enough to remain inline
   const { loadMeetings } = useAppStore()
   const config = useConfigStore((s) => s.config)
+  const calendarConfigured = config?.calendar?.source === 'local-file'
+    ? Boolean(config.calendar.localFilePath)
+    : Boolean(config?.calendar?.icsUrl)
 
   useEffect(() => {
-    if (config?.calendar?.icsUrl && config?.calendar?.syncEnabled) {
+    if (calendarConfigured && config?.calendar?.syncEnabled) {
       loadMeetings()
     }
-  }, [config?.calendar?.icsUrl, config?.calendar?.syncEnabled, loadMeetings])
+  }, [calendarConfigured, config?.calendar?.syncEnabled, loadMeetings])
 
   useEffect(() => {
     if (shouldLogQa()) console.log('[QA-MONITOR][OperationController] Mounted (decomposed)')

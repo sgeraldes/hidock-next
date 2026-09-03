@@ -14,8 +14,7 @@ import type { ProviderConfig } from '@hidock/ai-providers'
 
 /**
  * Resolve the AI provider config for the app's shared complete() seam, from
- * user Settings. Returns null when no usable provider is configured (no
- * Gemini API key, or chat.provider isn't 'gemini').
+ * user Settings. Returns null when no usable provider is configured.
  */
 export function getProviderConfigFromSettings(): ProviderConfig | null {
   const cfg = getConfig()
@@ -26,6 +25,18 @@ export function getProviderConfigFromSettings(): ProviderConfig | null {
       provider: 'google',
       model: cfg.chat.geminiModel || 'gemini-3.5-flash',
       apiKey: cfg.transcription.geminiApiKey,
+    }
+  }
+
+  // Local Ollama is a first-class completion provider. The shared provider
+  // expects its base URL to include `/api`, while Settings stores the server
+  // root used by the rest of the Electron app.
+  if (cfg.chat.provider === 'ollama' && cfg.chat.ollamaModel) {
+    const root = (cfg.embeddings?.ollamaBaseUrl || 'http://localhost:11434').replace(/\/+$/, '')
+    return {
+      provider: 'ollama',
+      model: cfg.chat.ollamaModel,
+      baseURL: root.endsWith('/api') ? root : `${root}/api`,
     }
   }
 

@@ -13,6 +13,7 @@ import { ConnectorHost } from '@hidock/connectors'
 import { getConnectorStore } from './connector-store'
 import { createIngestionSink } from './ingestion'
 import { m365Descriptor, createM365Connector } from './m365/m365-connector'
+import { hinotesDescriptor, createHiNotesConnector } from './hinotes/hinotes-connector'
 
 let host: ConnectorHost | null = null
 
@@ -31,6 +32,9 @@ function buildHost(): ConnectorHost {
 
   // C3 — Microsoft 365 (native, device-code).
   h.register(m365Descriptor, (ctx) => createM365Connector(ctx))
+
+  // Local HiNotes Shortcut bridge — Markdown exports become indexed artifacts.
+  h.register(hinotesDescriptor, (ctx) => createHiNotesConnector(ctx))
 
   // C2 — Slack (from its own package). Defensive: never let a load error here
   // break the rest of the connector host.
@@ -72,6 +76,12 @@ export async function initConnectors(): Promise<void> {
         // A silent connect: M365 no-ops to auth-needed if no cached token;
         // Slack validates its token. Errors are swallowed (best-effort).
         await h.connect(instanceId).catch(() => {})
+      }
+      if (instanceId === 'hinotes' && h.getStatus(instanceId).state === 'connected') {
+        // The shortcut may run while the app is open. Keep the folder bridge
+        // fresh without requiring the user to press Sync in Settings.
+        h.scheduleSync(instanceId, 1)
+        await h.syncNow(instanceId).catch(() => {})
       }
     } catch {
       /* best-effort */

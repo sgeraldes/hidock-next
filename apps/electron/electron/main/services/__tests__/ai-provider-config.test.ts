@@ -76,10 +76,26 @@ describe('getProviderConfigFromSettings', () => {
     expect(getProviderConfigFromSettings()).toBeNull()
   })
 
-  it('returns null when chat.provider is not gemini (e.g. ollama)', async () => {
+  it('returns an Ollama ProviderConfig for the configured local model', async () => {
     mockGetConfig.mockReturnValue({
       chat: { provider: 'ollama', geminiModel: 'gemini-3.5-flash', ollamaModel: 'llama3.2' },
-      transcription: { geminiApiKey: 'test-key-123' } // pragma: allowlist secret
+      transcription: { geminiApiKey: 'test-key-123' }, // pragma: allowlist secret
+      embeddings: { ollamaBaseUrl: 'http://localhost:11434/' },
+    })
+
+    const { getProviderConfigFromSettings } = await import('../ai-provider-config')
+    expect(getProviderConfigFromSettings()).toEqual({
+      provider: 'ollama',
+      model: 'llama3.2',
+      baseURL: 'http://localhost:11434/api',
+    })
+  })
+
+  it('returns null when Ollama has no configured chat model', async () => {
+    mockGetConfig.mockReturnValue({
+      chat: { provider: 'ollama', ollamaModel: '' },
+      transcription: { geminiApiKey: '' },
+      embeddings: { ollamaBaseUrl: 'http://localhost:11434' },
     })
 
     const { getProviderConfigFromSettings } = await import('../ai-provider-config')

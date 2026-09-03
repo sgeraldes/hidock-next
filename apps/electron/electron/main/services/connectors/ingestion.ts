@@ -78,7 +78,10 @@ export interface IngestionDeps {
   upsertMeetings: (rows: MeetingRow[]) => void
   /** Apply a standalone external contact; returns whether it was created/updated. */
   applyContact: (p: ExternalPerson) => 'created' | 'updated'
-  importArtifactFile: (filePath: string, opts: { sourceConnectorId: string; sourceRef: string }) => Promise<unknown>
+  importArtifactFile: (
+    filePath: string,
+    opts: { sourceConnectorId: string; sourceRef: string; title?: string }
+  ) => Promise<unknown>
 }
 
 /** Default contact apply: enrich an email-matched contact, else create a fresh one. */
@@ -125,7 +128,11 @@ export class ConnectorIngestionSink implements IngestionSink {
             continue
           }
           try {
-            await this.deps.importArtifactFile(staged, { sourceConnectorId: connectorId, sourceRef: item.externalId })
+            await this.deps.importArtifactFile(staged, {
+              sourceConnectorId: connectorId,
+              sourceRef: item.externalId,
+              title: item.title,
+            })
             outcome.artifacts++
           } finally {
             try {

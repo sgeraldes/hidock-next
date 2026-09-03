@@ -276,14 +276,17 @@ export function Layout({ children }: LayoutProps) {
     prevStatusStepRef.current = connectionStatus.step
   }, [connectionStatus.step, connectionStatus.message])
 
-  // Initial calendar sync if URL is configured
+  // Initial calendar sync if either supported source is configured.
+  const calendarSourceKey = config?.calendar.source === 'local-file'
+    ? config.calendar.localFilePath
+    : config?.calendar.icsUrl
   useEffect(() => {
-    if (config?.calendar.icsUrl && !lastCalendarSync) {
+    if (calendarSourceKey && !lastCalendarSync) {
       // App-initiated startup sync (not a user click) — keeps the full boot gate.
       syncCalendar('mount')
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- initial sync only; keyed on icsUrl so it does not re-run when lastCalendarSync updates
-  }, [config?.calendar.icsUrl])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- initial sync only; keyed on source so it does not re-run when lastCalendarSync updates
+  }, [calendarSourceKey])
 
   return (
     <div className="flex h-screen flex-col bg-background">

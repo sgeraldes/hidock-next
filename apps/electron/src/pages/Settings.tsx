@@ -15,7 +15,8 @@ import {
   ExternalLink,
   KeyRound,
   LoaderCircle,
-  TriangleAlert
+  TriangleAlert,
+  Smartphone
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -90,9 +91,12 @@ export function Settings() {
 
   // Local form state
   const [icsUrl, setIcsUrl] = useState('')
+  const [calendarSource, setCalendarSource] = useState<'ics' | 'local-file'>('ics')
+  const [calendarLocalFilePath, setCalendarLocalFilePath] = useState('')
   const [syncEnabled, setSyncEnabled] = useState(true)
   const [syncInterval, setSyncInterval] = useState(15)
   const [transcriptionProvider, setTranscriptionProvider] = useState<'gemini' | 'local-asr' | 'vibevoice'>('gemini')
+  const [localAsrEngine, setLocalAsrEngine] = useState<'whisper-cpp' | 'asr-mcp'>('whisper-cpp')
   const [geminiApiKey, setGeminiApiKey] = useState('')
   const [geminiModel, setGeminiModel] = useState('gemini-3.5-flash')
   const [localAsrPath, setLocalAsrPath] = useState('G:\\Code\\claude-plugins\\plugins\\mcp-asr')
@@ -100,6 +104,9 @@ export function Settings() {
   const [localAsrVocabularyFile, setLocalAsrVocabularyFile] = useState('vocabulary.json')
   const [localAsrDiarize, setLocalAsrDiarize] = useState(true)
   const [localAsrNumBeams, setLocalAsrNumBeams] = useState(5)
+  const [whisperBinaryPath, setWhisperBinaryPath] = useState('/opt/homebrew/bin/whisper-cli')
+  const [whisperModelPath, setWhisperModelPath] = useState('/Users/kellypearson/HiDock/models/whisper/ggml-large-v3-turbo-q5_0.bin')
+  const [whisperThreads, setWhisperThreads] = useState(8)
   const [chatProvider, setChatProvider] = useState<'gemini' | 'ollama'>('gemini')
   const [ollamaUrl, setOllamaUrl] = useState('http://localhost:11434')
   const [showApiKey, setShowApiKey] = useState(false)
@@ -208,17 +215,23 @@ export function Settings() {
     // Transcription settings validation
     if (updates.transcription) {
       if (
-        (updates.transcription.provider === 'local-asr' || updates.transcription.provider === 'vibevoice') &&
+        (updates.transcription.provider === 'vibevoice' ||
+          (updates.transcription.provider === 'local-asr' && updates.transcription.localAsrEngine === 'asr-mcp')) &&
         !updates.transcription.localAsrPath?.trim()
       ) {
         return 'ASR MCP path is required'
       }
       if (
         updates.transcription.provider === 'local-asr' &&
+        updates.transcription.localAsrEngine === 'asr-mcp' &&
         updates.transcription.localAsrDiarize !== false &&
         !updates.transcription.localAsrHfToken?.trim()
       ) {
         return 'Hugging Face token is required for Local ASR speaker diarization'
+      }
+      if (updates.transcription.provider === 'local-asr' && updates.transcription.localAsrEngine === 'whisper-cpp') {
+        if (!updates.transcription.whisperBinaryPath?.trim()) return 'Whisper CLI path is required'
+        if (!updates.transcription.whisperModelPath?.trim()) return 'Whisper model path is required'
       }
       if (
         updates.transcription.localAsrNumBeams !== undefined &&
@@ -231,14 +244,14 @@ export function Settings() {
         if (apiKey && apiKey.length < 10) {
           return 'API key must be at least 10 characters'
         }
-        if (apiKey && !apiKey.startsWith('AIza')) {
-          return 'Gemini API keys should start with "AIza". Please verify your key.'
-        }
       }
     }
 
     // Calendar settings validation
     if (updates.calendar) {
+      if (updates.calendar.source === 'local-file' && !updates.calendar.localFilePath?.trim()) {
+        return 'Choose the calendar file created by your iPhone Shortcut'
+      }
       if (updates.calendar.icsUrl !== undefined) {
         const url = updates.calendar.icsUrl.trim()
         if (url && !url.startsWith('http')) {
@@ -271,24 +284,30 @@ export function Settings() {
     if (!config) return false
     return (
       icsUrl !== config.calendar.icsUrl ||
+      calendarSource !== (config.calendar.source || 'ics') ||
+      calendarLocalFilePath !== (config.calendar.localFilePath || '') ||
       syncEnabled !== config.calendar.syncEnabled ||
       syncInterval !== config.calendar.syncIntervalMinutes
     )
-  }, [config, icsUrl, syncEnabled, syncInterval])
+  }, [calendarLocalFilePath, calendarSource, config, icsUrl, syncEnabled, syncInterval])
 
   const isTranscriptionDirty = useMemo(() => {
     if (!config) return false
     return (
       transcriptionProvider !== (config.transcription.provider || 'gemini') ||
+      localAsrEngine !== (config.transcription.localAsrEngine || 'whisper-cpp') ||
       geminiApiKey !== config.transcription.geminiApiKey ||
       geminiModel !== (config.transcription.geminiModel || 'gemini-2.5-flash') ||
       localAsrPath !== (config.transcription.localAsrPath || 'G:\\Code\\claude-plugins\\plugins\\mcp-asr') ||
       localAsrHfToken !== (config.transcription.localAsrHfToken || '') ||
       localAsrVocabularyFile !== (config.transcription.localAsrVocabularyFile || 'vocabulary.json') ||
       localAsrDiarize !== (config.transcription.localAsrDiarize ?? true) ||
-      localAsrNumBeams !== (config.transcription.localAsrNumBeams || 5)
+      localAsrNumBeams !== (config.transcription.localAsrNumBeams || 5) ||
+      whisperBinaryPath !== (config.transcription.whisperBinaryPath || '/opt/homebrew/bin/whisper-cli') ||
+      whisperModelPath !== (config.transcription.whisperModelPath || '') ||
+      whisperThreads !== (config.transcription.whisperThreads || 8)
     )
-  }, [config, transcriptionProvider, geminiApiKey, geminiModel, localAsrPath, localAsrHfToken, localAsrVocabularyFile, localAsrDiarize, localAsrNumBeams])
+  }, [config, transcriptionProvider, localAsrEngine, geminiApiKey, geminiModel, localAsrPath, localAsrHfToken, localAsrVocabularyFile, localAsrDiarize, localAsrNumBeams, whisperBinaryPath, whisperModelPath, whisperThreads])
 
   const isSpeakerTokenDirty = useMemo(
     () => !!config && localAsrHfToken !== (config.transcription.localAsrHfToken || ''),
@@ -324,9 +343,12 @@ export function Settings() {
   useEffect(() => {
     if (config) {
       setIcsUrl(config.calendar.icsUrl)
+      setCalendarSource(config.calendar.source || 'ics')
+      setCalendarLocalFilePath(config.calendar.localFilePath || '')
       setSyncEnabled(config.calendar.syncEnabled)
       setSyncInterval(config.calendar.syncIntervalMinutes)
       setTranscriptionProvider(config.transcription.provider || 'gemini')
+      setLocalAsrEngine(config.transcription.localAsrEngine || 'whisper-cpp')
       setGeminiApiKey(config.transcription.geminiApiKey)
       setGeminiModel(config.transcription.geminiModel || 'gemini-2.5-flash')
       setLocalAsrPath(config.transcription.localAsrPath || 'G:\\Code\\claude-plugins\\plugins\\mcp-asr')
@@ -334,6 +356,9 @@ export function Settings() {
       setLocalAsrVocabularyFile(config.transcription.localAsrVocabularyFile || 'vocabulary.json')
       setLocalAsrDiarize(config.transcription.localAsrDiarize ?? true)
       setLocalAsrNumBeams(config.transcription.localAsrNumBeams || 5)
+      setWhisperBinaryPath(config.transcription.whisperBinaryPath || '/opt/homebrew/bin/whisper-cli')
+      setWhisperModelPath(config.transcription.whisperModelPath || '')
+      setWhisperThreads(config.transcription.whisperThreads || 8)
       setChatProvider(config.chat.provider)
       setOllamaUrl(config.embeddings.ollamaBaseUrl)
       // C-CHAT: Load RAG context window size
@@ -389,11 +414,15 @@ export function Settings() {
 
     // Store previous values for rollback
     const previousIcsUrl = config?.calendar.icsUrl || ''
+    const previousSource = config?.calendar.source || 'ics'
+    const previousLocalFilePath = config?.calendar.localFilePath || ''
     const previousSyncEnabled = config?.calendar.syncEnabled ?? true
     const previousSyncInterval = config?.calendar.syncIntervalMinutes || 15
 
     const updates = {
+      source: calendarSource,
       icsUrl,
+      localFilePath: calendarLocalFilePath,
       syncEnabled,
       syncIntervalMinutes: syncInterval
     }
@@ -413,6 +442,8 @@ export function Settings() {
     } catch (error) {
       // Rollback on error
       setIcsUrl(previousIcsUrl)
+      setCalendarSource(previousSource)
+      setCalendarLocalFilePath(previousLocalFilePath)
       setSyncEnabled(previousSyncEnabled)
       setSyncInterval(previousSyncInterval)
 
@@ -421,6 +452,22 @@ export function Settings() {
       console.error('Failed to save calendar settings:', error)
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleChooseCalendarFile = async () => {
+    try {
+      const result = await window.electronAPI.calendar.selectFile()
+      if (!result.success) throw new Error(result.error || 'Could not choose calendar file')
+      if (result.data) {
+        setCalendarLocalFilePath(result.data)
+        setCalendarSource('local-file')
+      }
+    } catch (error) {
+      toast.error(
+        'Could not choose calendar file',
+        error instanceof Error ? error.message : 'Please try again'
+      )
     }
   }
 
@@ -434,21 +481,29 @@ export function Settings() {
     const previousApiKey = config?.transcription.geminiApiKey || ''
     const previousModel = config?.transcription.geminiModel || 'gemini-2.5-flash'
     const previousProvider = config?.transcription.provider || 'gemini'
+    const previousLocalAsrEngine = config?.transcription.localAsrEngine || 'whisper-cpp'
     const previousLocalAsrPath = config?.transcription.localAsrPath || 'G:\\Code\\claude-plugins\\plugins\\mcp-asr'
     const previousLocalAsrHfToken = config?.transcription.localAsrHfToken || ''
     const previousLocalAsrVocabularyFile = config?.transcription.localAsrVocabularyFile || 'vocabulary.json'
     const previousLocalAsrDiarize = config?.transcription.localAsrDiarize ?? true
     const previousLocalAsrNumBeams = config?.transcription.localAsrNumBeams || 5
+    const previousWhisperBinaryPath = config?.transcription.whisperBinaryPath || '/opt/homebrew/bin/whisper-cli'
+    const previousWhisperModelPath = config?.transcription.whisperModelPath || ''
+    const previousWhisperThreads = config?.transcription.whisperThreads || 8
 
     const updates = {
       provider: transcriptionProvider,
+      localAsrEngine,
       geminiApiKey,
       geminiModel,
       localAsrPath,
       localAsrHfToken,
       localAsrVocabularyFile,
       localAsrDiarize,
-      localAsrNumBeams
+      localAsrNumBeams,
+      whisperBinaryPath,
+      whisperModelPath,
+      whisperThreads
     }
 
     // Validate before save
@@ -465,12 +520,13 @@ export function Settings() {
       toast.success(
         'Settings Saved',
         transcriptionProvider === 'local-asr'
-          ? 'Transcription provider set to Local ASR'
+          ? 'Transcription provider set to Local Whisper'
           : `Transcription provider set to ${geminiModel}`
       )
     } catch (error) {
       // Rollback on error
       setTranscriptionProvider(previousProvider)
+      setLocalAsrEngine(previousLocalAsrEngine)
       setGeminiApiKey(previousApiKey)
       setGeminiModel(previousModel)
       setLocalAsrPath(previousLocalAsrPath)
@@ -478,6 +534,9 @@ export function Settings() {
       setLocalAsrVocabularyFile(previousLocalAsrVocabularyFile)
       setLocalAsrDiarize(previousLocalAsrDiarize)
       setLocalAsrNumBeams(previousLocalAsrNumBeams)
+      setWhisperBinaryPath(previousWhisperBinaryPath)
+      setWhisperModelPath(previousWhisperModelPath)
+      setWhisperThreads(previousWhisperThreads)
 
       const message = error instanceof Error ? error.message : 'Failed to save transcription settings'
       toast.error('Save Failed', message)
@@ -827,27 +886,75 @@ export function Settings() {
           <Card>
             <CardHeader>
               <CardTitle>Calendar</CardTitle>
-              <CardDescription>Configure calendar sync from Outlook</CardDescription>
+              <CardDescription>Bring meetings in from a published calendar or your iPhone</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div>
-                <label htmlFor="icsUrl" className="text-sm font-medium">ICS Calendar URL</label>
-                <Input
-                  id="icsUrl"
-                  type="url"
-                  placeholder="https://outlook.office365.com/owa/calendar/.../calendar.ics"
-                  value={icsUrl}
-                  onChange={(e) => setIcsUrl(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleSaveCalendar()}
-                  disabled={saving}
-                  aria-label="ICS Calendar URL"
-                  aria-describedby="icsUrl-description"
-                  className="mt-1"
-                />
-                <p id="icsUrl-description" className="text-xs text-muted-foreground mt-1">
-                  Publish your Outlook calendar and paste the ICS link here
-                </p>
+                <div className="flex gap-2" role="group" aria-label="Calendar source">
+                  <Button
+                    type="button"
+                    variant={calendarSource === 'local-file' ? 'default' : 'outline'}
+                    onClick={() => setCalendarSource('local-file')}
+                    aria-pressed={calendarSource === 'local-file'}
+                  >
+                    <Smartphone className="h-4 w-4 mr-2" aria-hidden="true" />
+                    iPhone Shortcut
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={calendarSource === 'ics' ? 'default' : 'outline'}
+                    onClick={() => setCalendarSource('ics')}
+                    aria-pressed={calendarSource === 'ics'}
+                  >
+                    Published calendar
+                  </Button>
+                </div>
               </div>
+
+              {calendarSource === 'ics' ? (
+                <div>
+                  <label htmlFor="icsUrl" className="text-sm font-medium">ICS Calendar URL</label>
+                  <Input
+                    id="icsUrl"
+                    type="url"
+                    placeholder="https://outlook.office365.com/owa/calendar/.../calendar.ics"
+                    value={icsUrl}
+                    onChange={(e) => setIcsUrl(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleSaveCalendar()}
+                    disabled={saving}
+                    aria-label="ICS Calendar URL"
+                    aria-describedby="icsUrl-description"
+                    className="mt-1"
+                  />
+                  <p id="icsUrl-description" className="text-xs text-muted-foreground mt-1">
+                    Published calendars may hide meeting names when your company shares only free/busy information.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <label htmlFor="calendarLocalFilePath" className="text-sm font-medium">
+                    iPhone calendar export
+                  </label>
+                  <div className="flex gap-2">
+                    <Input
+                      id="calendarLocalFilePath"
+                      value={calendarLocalFilePath}
+                      readOnly
+                      placeholder="Choose work-calendar.txt from iCloud Drive"
+                      aria-label="iPhone calendar export file"
+                      className="font-mono text-xs"
+                    />
+                    <Button type="button" variant="outline" onClick={handleChooseCalendarFile} disabled={saving}>
+                      <FolderOpen className="h-4 w-4 mr-2" aria-hidden="true" />
+                      Choose file
+                    </Button>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    HiDock reads this file locally. Only use personal iCloud if your organisation permits work-calendar
+                    details there.
+                  </p>
+                </div>
+              )}
 
               <div className="flex items-center gap-4">
                 <div className="flex items-center gap-2">
@@ -925,7 +1032,7 @@ export function Settings() {
           <Card>
             <CardHeader>
               <CardTitle>Transcription</CardTitle>
-              <CardDescription>Choose cloud Gemini or local ASR for meeting transcripts</CardDescription>
+              <CardDescription>Choose cloud Gemini or private, local Whisper for meeting transcripts</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div>
@@ -942,12 +1049,15 @@ export function Settings() {
                   </Button>
                   <Button
                     variant={transcriptionProvider === 'local-asr' ? 'default' : 'outline'}
-                    onClick={() => setTranscriptionProvider('local-asr')}
+                    onClick={() => {
+                      setTranscriptionProvider('local-asr')
+                      setLocalAsrEngine('whisper-cpp')
+                    }}
                     disabled={saving}
                     aria-label="Use local ASR transcription provider"
                     aria-pressed={transcriptionProvider === 'local-asr'}
                   >
-                    Local ASR
+                    Local Whisper
                   </Button>
                   <Button
                     variant={transcriptionProvider === 'vibevoice' ? 'default' : 'outline'}
@@ -1162,6 +1272,50 @@ export function Settings() {
                           ? 'Live list from your Gemini API key (audio-capable models only).'
                           : 'Showing built-in defaults — add/verify your API key to load the live model list.'}
                     </p>
+                  </div>
+                </>
+              ) : transcriptionProvider === 'local-asr' ? (
+                <>
+                  <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-3 text-sm">
+                    Whisper runs entirely on this Mac. Recordings are not uploaded and there is no per-meeting API charge.
+                  </div>
+                  <div>
+                    <label htmlFor="whisperBinaryPath" className="text-sm font-medium">Whisper CLI</label>
+                    <Input
+                      id="whisperBinaryPath"
+                      value={whisperBinaryPath}
+                      onChange={(e) => setWhisperBinaryPath(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleSaveTranscription()}
+                      disabled={saving}
+                      aria-label="Whisper CLI path"
+                      className="mt-1 font-mono text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="whisperModelPath" className="text-sm font-medium">Whisper Model</label>
+                    <Input
+                      id="whisperModelPath"
+                      value={whisperModelPath}
+                      onChange={(e) => setWhisperModelPath(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleSaveTranscription()}
+                      disabled={saving}
+                      aria-label="Whisper model path"
+                      className="mt-1 font-mono text-xs"
+                    />
+                    <p className="mt-1 text-xs text-muted-foreground">Large v3 Turbo, quantized for fast Apple Silicon transcription.</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <label htmlFor="whisperThreads" className="text-sm">CPU threads</label>
+                    <Input
+                      id="whisperThreads"
+                      type="number"
+                      min={1}
+                      max={16}
+                      value={whisperThreads}
+                      onChange={(e) => setWhisperThreads(Math.min(16, Math.max(1, Number(e.target.value) || 8)))}
+                      disabled={saving}
+                      className="w-20"
+                    />
                   </div>
                 </>
               ) : (

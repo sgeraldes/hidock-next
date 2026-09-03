@@ -96,7 +96,7 @@ describe('ConnectorIngestionSink routing', () => {
 
     expect(deps.upserted[0].id).toBe('m365:evt1')
     expect(deps.contacts[0].email).toBe('c@x.com')
-    expect(deps.imported[0].opts).toEqual({ sourceConnectorId: 'm365', sourceRef: 'msg-1' })
+    expect(deps.imported[0].opts).toEqual({ sourceConnectorId: 'm365', sourceRef: 'msg-1', title: undefined })
   })
 
   it('skips artifact items with neither text nor url', async () => {

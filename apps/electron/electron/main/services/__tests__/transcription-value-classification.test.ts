@@ -238,6 +238,19 @@ vi.mock('child_process', () => ({
 // also consults it before building its prompt).
 vi.mock('../brains', () => ({
   getBrainRegistry: () => ({ get: () => ({ generate: (...args: any[]) => mockBrainGenerate(...args) }) }),
+  getBrainRouter: () => ({
+    resolve: async (task: string) => ({
+      id: 'gemini-api',
+      generate: async (messages: Array<{ content: string }>, ...args: any[]) => {
+        if (task === 'suggestions') return mockBrainGenerate(messages, ...args)
+        const prompt = messages.map((message) => message.content).join('\n')
+        const result = await mockGenerateContent({
+          contents: [{ role: 'user', parts: [{ text: prompt }] }]
+        })
+        return result?.response?.text?.() ?? ''
+      }
+    })
+  }),
   resolveGeminiApiKey: () => 'test-api-key' // pragma: allowlist secret
 }))
 

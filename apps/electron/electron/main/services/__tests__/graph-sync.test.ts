@@ -15,7 +15,7 @@ import { KnowledgeGraphStore } from '@hidock/knowledge-graph'
 // subscriptions and emissions so the debounced-ingest emission can be verified.
 vi.mock('../knowledge-graph-service', () => ({
   getKnowledgeGraphStore: vi.fn(),
-  ingestFromDbTranscripts: vi.fn()
+  ingestAllGraphSources: vi.fn()
 }))
 const busHandlers = new Map<string, Array<(event: unknown) => void>>()
 const mockEmitDomainEvent = vi.fn()
@@ -33,7 +33,7 @@ vi.mock('../event-bus', () => ({
 
 import { removeRecordingProvenance } from '@hidock/knowledge-graph'
 import { renameOrMergePersonNode, startGraphSync } from '../graph-sync'
-import { ingestFromDbTranscripts } from '../knowledge-graph-service'
+import { ingestAllGraphSources } from '../knowledge-graph-service'
 
 function rowsFrom(result: any[]): any[] {
   if (!result || result.length === 0) return []
@@ -165,11 +165,16 @@ describe('startGraphSync — graph:ingested emission (post-commit invalidation s
       h({ type: 'entity:transcript-ready', timestamp: new Date().toISOString(), payload: {} })
     }
   }
+  const fireArtifactReady = (): void => {
+    for (const h of busHandlers.get('entity:artifact-ready') ?? []) {
+      h({ type: 'entity:artifact-ready', timestamp: new Date().toISOString(), payload: {} })
+    }
+  }
 
   beforeEach(() => {
     vi.useFakeTimers()
     mockEmitDomainEvent.mockClear()
-    vi.mocked(ingestFromDbTranscripts).mockReset()
+    vi.mocked(ingestAllGraphSources).mockReset()
     startGraphSync() // idempotent; handlers persist across tests
   })
 
@@ -178,7 +183,7 @@ describe('startGraphSync — graph:ingested emission (post-commit invalidation s
   })
 
   it('emits graph:ingested AFTER the debounced ingest commits — never on transcript-ready itself', async () => {
-    vi.mocked(ingestFromDbTranscripts).mockResolvedValue({ ingested: 2, skipped: 0, errors: [] })
+    vi.mocked(ingestAllGraphSources).mockResolvedValue({ ingested: 2, skipped: 0, errors: [] })
 
     fireTranscriptReady()
     // Before the debounce elapses the graph has NOT changed — no emission.
@@ -186,24 +191,36 @@ describe('startGraphSync — graph:ingested emission (post-commit invalidation s
 
     await vi.advanceTimersByTimeAsync(60_000)
 
-    expect(ingestFromDbTranscripts).toHaveBeenCalledTimes(1)
+    expect(ingestAllGraphSources).toHaveBeenCalledTimes(1)
     expect(mockEmitDomainEvent).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'graph:ingested', payload: { ingested: 2 } })
     )
   })
 
   it('does NOT emit when the ingest found nothing new', async () => {
-    vi.mocked(ingestFromDbTranscripts).mockResolvedValue({ ingested: 0, skipped: 3, errors: [] })
+    vi.mocked(ingestAllGraphSources).mockResolvedValue({ ingested: 0, skipped: 3, errors: [] })
 
     fireTranscriptReady()
     await vi.advanceTimersByTimeAsync(60_000)
 
-    expect(ingestFromDbTranscripts).toHaveBeenCalledTimes(1)
+    expect(ingestAllGraphSources).toHaveBeenCalledTimes(1)
     expect(mockEmitDomainEvent).not.toHaveBeenCalled()
   })
 
+  it('schedules the same incremental graph ingest for artifact-ready events', async () => {
+    vi.mocked(ingestAllGraphSources).mockResolvedValue({ ingested: 1, skipped: 0, errors: [] })
+
+    fireArtifactReady()
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    expect(ingestAllGraphSources).toHaveBeenCalledTimes(1)
+    expect(mockEmitDomainEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'graph:ingested', payload: { ingested: 1 } })
+    )
+  })
+
   it('does NOT emit when the ingest fails (missing provider)', async () => {
-    vi.mocked(ingestFromDbTranscripts).mockRejectedValue(new Error('No AI provider configured'))
+    vi.mocked(ingestAllGraphSources).mockRejectedValue(new Error('No AI provider configured'))
 
     fireTranscriptReady()
     await vi.advanceTimersByTimeAsync(60_000)

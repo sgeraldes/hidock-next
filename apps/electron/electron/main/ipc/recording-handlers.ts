@@ -68,6 +68,7 @@ import {
 } from '../services/recording-split'
 import { getQueueItems, getActionableQueueItems, addToQueue, updateQueueItem } from '../services/database'
 import { getConfig } from '../services/config'
+import { validateWhisperConfiguration } from '../services/whisper-cpp'
 import {
   GetRecordingByIdSchema,
   LinkRecordingToMeetingSchema,
@@ -245,9 +246,13 @@ export function registerRecordingHandlers(): void {
         throw new Error('Transcription API key not configured. Please add your API key in Settings.')
       }
       if (config.transcription.provider === 'local-asr') {
-        const runnerPath = join(config.transcription.localAsrPath || '', 'mcp_runner.py')
-        if (!config.transcription.localAsrPath || !existsSync(runnerPath)) {
-          throw new Error('Local ASR runner not found. Check the ASR MCP path in Settings.')
+        if (config.transcription.localAsrEngine === 'whisper-cpp') {
+          validateWhisperConfiguration(config.transcription.whisperBinaryPath, config.transcription.whisperModelPath)
+        } else {
+          const runnerPath = join(config.transcription.localAsrPath || '', 'mcp_runner.py')
+          if (!config.transcription.localAsrPath || !existsSync(runnerPath)) {
+            throw new Error('Local ASR runner not found. Check the ASR MCP path in Settings.')
+          }
         }
       }
 
@@ -682,12 +687,17 @@ export function registerRecordingHandlers(): void {
         }
       }
       if (config.transcription.provider === 'local-asr') {
-        const runnerPath = join(config.transcription.localAsrPath || '', 'mcp_runner.py')
-        if (!config.transcription.localAsrPath || !existsSync(runnerPath)) {
-          return {
-            success: false,
-            error: `Local ASR runner not found. Check the ASR MCP path in Settings.`
+        try {
+          if (config.transcription.localAsrEngine === 'whisper-cpp') {
+            validateWhisperConfiguration(config.transcription.whisperBinaryPath, config.transcription.whisperModelPath)
+          } else {
+            const runnerPath = join(config.transcription.localAsrPath || '', 'mcp_runner.py')
+            if (!config.transcription.localAsrPath || !existsSync(runnerPath)) {
+              throw new Error('Local ASR runner not found. Check the ASR MCP path in Settings.')
+            }
           }
+        } catch (error) {
+          return { success: false, error: error instanceof Error ? error.message : String(error) }
         }
       }
 
@@ -735,7 +745,13 @@ export function registerRecordingHandlers(): void {
             error: 'Gemini API key not configured. Please add your API key in Settings.'
           }
         }
-        if (provider === 'local-asr' || provider === 'vibevoice') {
+        if (provider === 'local-asr' && config.transcription.localAsrEngine === 'whisper-cpp') {
+          try {
+            validateWhisperConfiguration(config.transcription.whisperBinaryPath, config.transcription.whisperModelPath)
+          } catch (error) {
+            return { success: false, error: error instanceof Error ? error.message : String(error) }
+          }
+        } else if (provider === 'local-asr' || provider === 'vibevoice') {
           const runnerPath = join(config.transcription.localAsrPath || '', 'mcp_runner.py')
           if (!config.transcription.localAsrPath || !existsSync(runnerPath)) {
             return {

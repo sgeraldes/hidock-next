@@ -66,6 +66,7 @@ import {
   deleteProjectNote,
   getActionablesForProject,
   getMeetingById,
+  clearAllMeetings,
   upsertMeetingsBatch,
   activateCalendarSyncToken,
   createProcessingRun,
@@ -104,6 +105,7 @@ const DATA_TABLES = [
   'project_notes',
   'meeting_projects',
   'knowledge_projects',
+  'follow_ups',
   'knowledge_captures',
   'quality_assessments',
   'recording_preassignments',
@@ -973,6 +975,43 @@ describe('Database Service', () => {
       upsertMeetingsBatch([{ ...meeting, attendees: '[]' }])
 
       expect(getMeetingById(meeting.id)?.attendees).toBe('[]')
+    })
+  })
+
+  describe('clearAllMeetings()', () => {
+    it('allows the explicit bulk reset without disabling the global mass-delete tripwire', () => {
+      for (let i = 0; i < 25; i++) seedMeeting(`meeting-clear-${i}`)
+      seedRecording('recording-clear-link', { meeting_id: 'meeting-clear-0' })
+      seedKnowledgeCapture('capture-clear-link')
+      run(
+        `UPDATE knowledge_captures
+         SET meeting_id = ?, correlation_confidence = 0.9, correlation_method = 'time-overlap'
+         WHERE id = ?`,
+        ['meeting-clear-1', 'capture-clear-link']
+      )
+      run(
+        `INSERT INTO follow_ups (id, knowledge_capture_id, content, scheduled_meeting_id)
+         VALUES (?, ?, ?, ?)`,
+        ['follow-up-clear-link', 'capture-clear-link', 'Keep this follow-up', 'meeting-clear-2']
+      )
+
+      expect(queryOne<{ count: number }>('SELECT COUNT(*) AS count FROM meetings')?.count).toBe(25)
+
+      expect(() => clearAllMeetings()).not.toThrow()
+      expect(queryOne<{ count: number }>('SELECT COUNT(*) AS count FROM meetings')?.count).toBe(0)
+      expect(getRecordingById('recording-clear-link')?.meeting_id).toBeNull()
+      expect(
+        queryOne<{ meeting_id: string | null; correlation_confidence: number | null }>(
+          'SELECT meeting_id, correlation_confidence FROM knowledge_captures WHERE id = ?',
+          ['capture-clear-link']
+        )
+      ).toEqual({ meeting_id: null, correlation_confidence: null })
+      expect(
+        queryOne<{ scheduled_meeting_id: string | null }>(
+          'SELECT scheduled_meeting_id FROM follow_ups WHERE id = ?',
+          ['follow-up-clear-link']
+        )
+      ).toEqual({ scheduled_meeting_id: null })
     })
   })
 

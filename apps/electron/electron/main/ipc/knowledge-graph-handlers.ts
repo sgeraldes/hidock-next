@@ -14,7 +14,7 @@
 import { ipcMain } from 'electron'
 import {
   queryStats,
-  ingestFromDbTranscripts,
+  ingestAllGraphSources,
   ingestFromFolder,
   queryTopAttendees,
   queryTopSkill,
@@ -51,7 +51,7 @@ export function registerKnowledgeGraphHandlers(): void {
 
   ipcMain.handle('graph:ingestAll', async () => {
     try {
-      const result = await ingestFromDbTranscripts()
+      const result = await ingestAllGraphSources()
       return { success: true, data: result }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)

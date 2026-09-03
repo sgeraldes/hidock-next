@@ -282,7 +282,9 @@ export function registerBriefingHandlers(): void {
           todayRecordingsPending,
           pendingActionables,
           calendar: {
-            configured: Boolean(config.calendar.icsUrl),
+            configured: config.calendar.source === 'local-file'
+              ? Boolean(config.calendar.localFilePath)
+              : Boolean(config.calendar.icsUrl),
             syncEnabled: config.calendar.syncEnabled,
             lastSyncAt: config.calendar.lastSyncAt
           },

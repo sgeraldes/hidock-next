@@ -7,16 +7,20 @@
  *  - entity:contact-changed (rename/merge): direct, LLM-free node surgery —
  *    rename a person node's label/norm_key, or fold one person node into another
  *    and repoint its edges.
- *  - entity:transcript-ready: debounced (60s) auto-ingest of only the new
- *    transcripts (ingestFromDbTranscripts already skips ingested ones), and only
- *    when an AI provider is configured (it throws otherwise — swallowed + logged).
+ *  - entity:transcript-ready / entity:artifact-ready: debounced (60s)
+ *    incremental ingest across transcripts and supported knowledge artifacts.
  *
  * Every handler is guarded so a graph failure never breaks the pipeline.
  */
 
 import { mergeNodes, type KnowledgeGraphStore } from '@hidock/knowledge-graph'
-import { getEventBus, type ContactChangedEvent, type TranscriptReadyEvent } from './event-bus'
-import { getKnowledgeGraphStore, ingestFromDbTranscripts } from './knowledge-graph-service'
+import {
+  getEventBus,
+  type ArtifactReadyEvent,
+  type ContactChangedEvent,
+  type TranscriptReadyEvent,
+} from './event-bus'
+import { getKnowledgeGraphStore, ingestAllGraphSources } from './knowledge-graph-service'
 import { normalizeName } from './entity-normalize'
 
 interface GraphNodeRow {
@@ -98,7 +102,7 @@ function scheduleIngest(): void {
   if (ingestTimer) clearTimeout(ingestTimer)
   ingestTimer = setTimeout(() => {
     ingestTimer = null
-    ingestFromDbTranscripts()
+    ingestAllGraphSources()
       .then((r) => {
         if (r.ingested > 0) {
           console.log(`[GraphSync] Auto-ingested ${r.ingested} new transcript(s) into the graph`)
@@ -147,6 +151,19 @@ export function startGraphSync(): void {
           }
         } catch (e) {
           console.warn('[GraphSync] contact-changed surgery failed:', e)
+        }
+      }
+    )
+  )
+
+  unsubscribers.push(
+    bus.onDomainEvent<ArtifactReadyEvent>(
+      'entity:artifact-ready',
+      () => {
+        try {
+          scheduleIngest()
+        } catch (e) {
+          console.warn('[GraphSync] artifact-ready scheduling failed:', e)
         }
       }
     )

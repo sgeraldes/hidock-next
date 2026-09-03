@@ -166,7 +166,9 @@ export interface StorageInfo {
 }
 
 export interface CalendarSettings {
+  source?: 'ics' | 'local-file'
   icsUrl: string
+  localFilePath?: string
   syncEnabled: boolean
   syncIntervalMinutes: number
   lastSyncAt: string | null
@@ -207,6 +209,7 @@ export interface AppConfig {
   calendar: CalendarSettings
   transcription: {
     provider: 'gemini' | 'local-asr' | 'vibevoice'
+    localAsrEngine: 'whisper-cpp' | 'asr-mcp'
     geminiApiKey: string
     geminiModel: string
     localAsrPath: string
@@ -214,6 +217,9 @@ export interface AppConfig {
     localAsrVocabularyFile: string
     localAsrDiarize: boolean
     localAsrNumBeams: number
+    whisperBinaryPath: string
+    whisperModelPath: string
+    whisperThreads: number
     speakerLinkingEnabled: boolean
     speakerLinkingPythonPath: string
     speakerLinkingWorkerPath: string

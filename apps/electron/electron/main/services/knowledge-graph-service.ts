@@ -41,6 +41,7 @@ import type {
   AttendeeResult,
   SkillDemonstratorResult,
   GraphNode,
+  ExtractionResult,
   SubGraph,
   LensGraph,
   Provenance,
@@ -53,7 +54,6 @@ import {
   queryAll,
   queryOne,
   getValueExcludedRecordingIds,
-  getEligibleRecordingIds,
   getRecordingsForMeeting,
   isRecordingGraphIngestable,
   getContactById,
@@ -79,6 +79,7 @@ import {
 import type { Contact, Project, IdentitySuggestion, AcceptSuggestionResult, MergeKind } from './database'
 import { getEventBus } from './event-bus'
 import { resolveContact } from './entity-resolver'
+import { filterEligibleCaptureIds, filterEligibleRecordingIds } from './recording-eligibility'
 
 // ---------------------------------------------------------------------------
 // GraphDb adapter — bridges the app's database exports to the GraphDb interface
@@ -131,9 +132,51 @@ function _ensureIngestTrackingTable(): void {
         ingested_at TEXT NOT NULL
       )`
     )
+    run(
+      `CREATE TABLE IF NOT EXISTS graph_ingested_artifacts (
+        artifact_id TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL,
+        meeting_id TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        ingested_at TEXT NOT NULL
+      )`
+    )
   } catch (e) {
-    console.warn('[KnowledgeGraph] Could not create graph_ingested_transcripts table:', e)
+    console.warn('[KnowledgeGraph] Could not create graph ingest tracking tables:', e)
   }
+}
+
+// Graph provenance historically names its source column `recording_id`. Keep
+// that stable schema while admitting positively-verified standalone captures by
+// namespacing them. Every read boundary below resolves these ids through the
+// matching eligibility allowlist; an unknown id remains ineligible.
+const CAPTURE_GRAPH_SOURCE_PREFIX = 'capture:'
+
+function captureGraphSourceId(captureId: string): string {
+  return `${CAPTURE_GRAPH_SOURCE_PREFIX}${captureId}`
+}
+
+function getEligibleGraphSourceIds(candidateIds: Iterable<string>): {
+  eligible: Set<string>
+  failClosed: boolean
+} {
+  const unique = [...new Set([...candidateIds].filter((id): id is string => !!id))]
+  const recordingIds = unique.filter((id) => !id.startsWith(CAPTURE_GRAPH_SOURCE_PREFIX))
+  const capturePairs = unique
+    .filter((id) => id.startsWith(CAPTURE_GRAPH_SOURCE_PREFIX))
+    .map((sourceId) => ({ sourceId, captureId: sourceId.slice(CAPTURE_GRAPH_SOURCE_PREFIX.length) }))
+
+  const recordings = filterEligibleRecordingIds(recordingIds)
+  const captures = filterEligibleCaptureIds(capturePairs.map((pair) => pair.captureId))
+  if (recordings.failClosed || captures.failClosed) {
+    return { eligible: new Set<string>(), failClosed: true }
+  }
+
+  const eligible = new Set(recordings.eligible)
+  for (const pair of capturePairs) {
+    if (captures.eligible.has(pair.captureId)) eligible.add(pair.sourceId)
+  }
+  return { eligible, failClosed: false }
 }
 
 /**
@@ -403,6 +446,230 @@ export async function ingestFromDbTranscripts(): Promise<IngestResult> {
   }
 
   return result
+}
+
+// ---------------------------------------------------------------------------
+// Ingestion from HiNotes connector artifacts
+// ---------------------------------------------------------------------------
+
+interface HiNotesArtifactRow {
+  artifact_id: string
+  capture_id: string
+  content_hash: string
+  extracted_text: string
+  source_ref: string | null
+  title: string
+  captured_at: string
+}
+
+interface IngestedArtifactRow {
+  artifact_id: string
+  source_id: string
+  meeting_id: string
+  content_hash: string
+}
+
+/** Keep graph extraction bounded for very long meetings while retaining the
+ * complete HiNotes summary plus enough transcript context to resolve speakers
+ * and named entities. The full artifact remains available to Library/RAG. */
+function graphTextFromHiNotes(markdown: string): string {
+  const MAX_GRAPH_TEXT = 24_000
+  const summary = markdown.match(/## Summary\s*\n([\s\S]*?)(?=\n## Transcript|$)/i)?.[1]?.trim() ?? ''
+  if (summary) {
+    const speakers = [...markdown.matchAll(/^\*\*([^*\n]{1,100})\*\*\s*$/gm)]
+      .map((match) => match[1].trim())
+      .filter((name, index, all) => !!name && all.indexOf(name) === index)
+    const speakerLine = speakers.length > 0 ? `\n\nSpeakers mentioned: ${speakers.join(', ')}` : ''
+    return `## Summary\n${summary}${speakerLine}`.slice(0, MAX_GRAPH_TEXT)
+  }
+
+  // Older/imported artifacts without the standard section still get a bounded
+  // fallback rather than becoming permanently ungraphable.
+  return markdown.slice(0, MAX_GRAPH_TEXT)
+}
+
+/** Fast, non-speculative baseline for a large historical backfill. Speaker
+ * labels are explicit source data, so they are safe to graph without an LLM;
+ * the meeting node itself is always created by ingestExtraction. */
+function deterministicHiNotesExtraction(markdown: string): ExtractionResult {
+  const speakers = [...markdown.matchAll(/^\*\*([^*\n]{1,100})\*\*\s*$/gm)]
+    .map((match) => match[1].trim())
+    .filter((name, index, all) => !!name && all.indexOf(name) === index)
+  return {
+    people: speakers.map((name) => ({ name, skills: [] })),
+    topics: [],
+    projects: [],
+    decisions: [],
+    action_items: [],
+    risks: [],
+    next_steps: [],
+  }
+}
+
+function hiNotesArtifactRows(): HiNotesArtifactRow[] {
+  return queryAll<HiNotesArtifactRow>(`
+    SELECT
+      a.id AS artifact_id,
+      a.knowledge_capture_id AS capture_id,
+      COALESCE(a.content_hash, '') AS content_hash,
+      a.extracted_text,
+      a.source_ref,
+      k.title,
+      k.captured_at
+    FROM artifacts a
+    JOIN knowledge_captures k ON k.id = a.knowledge_capture_id
+    WHERE a.source_connector_id = 'hinotes'
+      AND a.knowledge_capture_id IS NOT NULL
+      AND a.extracted_text IS NOT NULL
+      AND TRIM(a.extracted_text) <> ''
+  `)
+}
+
+/**
+ * Incrementally ingest HiNotes artifacts into Context Graph. Capture-backed
+ * provenance is namespaced in graph_edge_sources and resolved through the same
+ * fail-closed capture eligibility boundary used by Library and RAG.
+ *
+ * A changed artifact is extracted before any write, then its old provenance is
+ * removed and the replacement extraction committed atomically with the marker.
+ * Missing or newly-ineligible artifacts are retracted on the next pass.
+ */
+export async function ingestFromHiNotesArtifacts(): Promise<IngestResult> {
+  const { getProviderConfigFromSettings } = await import('./ai-provider-config')
+  const providerConfig = getProviderConfigFromSettings()
+
+  const store = getKnowledgeGraphStore()
+  const llm: LlmExtractor | null = providerConfig
+    ? (prompt: string) => complete(prompt, providerConfig)
+    : null
+  const rows = hiNotesArtifactRows()
+  const captureEligibility = filterEligibleCaptureIds(rows.map((row) => row.capture_id))
+  if (captureEligibility.failClosed) {
+    throw new Error('Could not verify HiNotes capture eligibility. Graph ingestion stopped safely.')
+  }
+
+  const eligibleRows = rows.filter((row) => captureEligibility.eligible.has(row.capture_id))
+  const eligibleArtifactIds = new Set(eligibleRows.map((row) => row.artifact_id))
+  const result: IngestResult = { ingested: 0, skipped: rows.length - eligibleRows.length, errors: [] }
+
+  // Retract graph facts whose artifact disappeared or whose capture is no
+  // longer eligible. Each marker + provenance removal is one transaction.
+  const tracked = queryAll<IngestedArtifactRow>('SELECT * FROM graph_ingested_artifacts')
+  for (const marker of tracked) {
+    if (eligibleArtifactIds.has(marker.artifact_id)) continue
+    try {
+      runInTransaction(() => {
+        removeRecordingProvenance(store, marker.source_id, { meetingId: marker.meeting_id })
+        run('DELETE FROM graph_ingested_artifacts WHERE artifact_id = ?', [marker.artifact_id])
+      })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      result.errors.push({ transcriptId: marker.artifact_id, error: msg })
+    }
+  }
+
+  const trackedHashes = new Map(tracked.map((marker) => [marker.artifact_id, marker.content_hash]))
+  const pendingCount = eligibleRows.filter(
+    (row) => trackedHashes.get(row.artifact_id) !== row.content_hash
+  ).length
+  // A large historical backlog gets the explicit speaker/meeting baseline in
+  // one fast pass. Small ongoing batches can afford richer local/provider LLM
+  // extraction. This is decided once per run so an interrupted backlog resumes
+  // consistently instead of switching modes halfway through.
+  const enrichWithLlm = !!llm && pendingCount <= 25
+
+  for (const row of eligibleRows) {
+    const existing = queryOne<IngestedArtifactRow>(
+      'SELECT * FROM graph_ingested_artifacts WHERE artifact_id = ?',
+      [row.artifact_id]
+    )
+    if (existing?.content_hash === row.content_hash) {
+      result.skipped++
+      continue
+    }
+
+    const sourceId = captureGraphSourceId(row.capture_id)
+    const meetingId = `hinotes:${row.source_ref || row.artifact_id}`
+    const meta = { meetingId, title: row.title || undefined, date: row.captured_at || undefined }
+
+    try {
+      // Provider work stays outside the transaction. Historical backfills use
+      // the deterministic baseline; new/changed small batches get enrichment.
+      const extraction = enrichWithLlm && llm
+        ? await extractGraphFromTranscript(graphTextFromHiNotes(row.extracted_text), meta, llm)
+        : deterministicHiNotesExtraction(row.extracted_text)
+
+      const ingestedNow = runInTransaction(() => {
+        // Re-read both artifact identity/hash and capture eligibility after the
+        // awaited extraction. A deletion, update, or value downgrade wins.
+        const fresh = queryOne<HiNotesArtifactRow>(`
+          SELECT a.id AS artifact_id, a.knowledge_capture_id AS capture_id,
+                 COALESCE(a.content_hash, '') AS content_hash, a.extracted_text,
+                 a.source_ref, k.title, k.captured_at
+            FROM artifacts a
+            JOIN knowledge_captures k ON k.id = a.knowledge_capture_id
+           WHERE a.id = ? AND a.source_connector_id = 'hinotes'
+        `, [row.artifact_id])
+        const eligibility = filterEligibleCaptureIds([row.capture_id])
+        if (
+          !fresh ||
+          fresh.capture_id !== row.capture_id ||
+          fresh.content_hash !== row.content_hash ||
+          eligibility.failClosed ||
+          !eligibility.eligible.has(row.capture_id)
+        ) return false
+
+        const claimed = queryOne<IngestedArtifactRow>(
+          'SELECT * FROM graph_ingested_artifacts WHERE artifact_id = ?',
+          [row.artifact_id]
+        )
+        if (claimed?.content_hash === row.content_hash) return false
+        if (claimed) {
+          removeRecordingProvenance(store, claimed.source_id, { meetingId: claimed.meeting_id })
+        }
+
+        ingestExtraction(store, extraction, meta, {
+          now: new Date().toISOString(),
+          resolvePerson: makePersonResolver(),
+          recordingId: sourceId,
+          transcriptId: `artifact:${row.artifact_id}`,
+        })
+        run(
+          `INSERT INTO graph_ingested_artifacts
+             (artifact_id, source_id, meeting_id, content_hash, ingested_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(artifact_id) DO UPDATE SET
+             source_id = excluded.source_id,
+             meeting_id = excluded.meeting_id,
+             content_hash = excluded.content_hash,
+             ingested_at = excluded.ingested_at`,
+          [row.artifact_id, sourceId, meetingId, row.content_hash, new Date().toISOString()]
+        )
+        return true
+      })
+
+      if (ingestedNow) result.ingested++
+      else result.skipped++
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      result.errors.push({ transcriptId: row.artifact_id, error: msg })
+      console.error(`[KnowledgeGraph] Failed to ingest HiNotes artifact ${row.artifact_id}:`, e)
+    }
+  }
+
+  return result
+}
+
+/** Manual/automatic entry point used by Context Graph: all supported sources,
+ * reported as one incremental result for the existing renderer contract. */
+export async function ingestAllGraphSources(): Promise<IngestResult> {
+  const transcripts = await ingestFromDbTranscripts()
+  const artifacts = await ingestFromHiNotesArtifacts()
+  return {
+    ingested: transcripts.ingested + artifacts.ingested,
+    skipped: transcripts.skipped + artifacts.skipped,
+    errors: [...transcripts.errors, ...artifacts.errors],
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1445,7 +1712,7 @@ function computeExcludedOnlyNodeIds(
   }
   const { eligible: eligibleIsolatedSources, failClosed: isolatedFailClosed } =
     isolatedDerivedSourceIds.size > 0
-      ? getEligibleRecordingIds(isolatedDerivedSourceIds)
+      ? getEligibleGraphSourceIds(isolatedDerivedSourceIds)
       : { eligible: new Set<string>(), failClosed: false }
   const sourceEligible = (recId: string): boolean =>
     !isolatedFailClosed && eligibleIsolatedSources.has(recId)
@@ -1528,12 +1795,22 @@ export function getGroundingExclusionSet(suppressZeroProvenance = false): Ground
     // the suppression set. Every downstream consumer (provenanceSuppressedEdgeIds,
     // node visibility, center-reachability) keeps working unchanged.
     const store = getKnowledgeGraphStore()
-    const provRows = store.db.queryAll<{ recording_id: string }>(
-      'SELECT DISTINCT recording_id FROM graph_edge_sources WHERE recording_id IS NOT NULL'
-    )
+    // Include BOTH edge and node provenance. After precise source cleanup an
+    // entity shared with another source can legitimately remain as an isolated
+    // derived node; omitting node sources here made an empty edge-source set look
+    // like a no-op and exposed that orphan without its eligibility check.
+    const provRows = store.db.queryAll<{ recording_id: string }>(`
+      SELECT DISTINCT recording_id
+        FROM graph_edge_sources
+       WHERE recording_id IS NOT NULL
+      UNION
+      SELECT DISTINCT source_recording_id AS recording_id
+        FROM graph_nodes
+       WHERE origin = 'derived' AND source_recording_id IS NOT NULL
+    `)
     const provIds = provRows.map((r) => r.recording_id).filter((x): x is string => !!x)
     if (provIds.length === 0) return { ids: new Set<string>(), failClosed: false, suppressZeroProvenance }
-    const { eligible, failClosed } = getEligibleRecordingIds(provIds)
+    const { eligible, failClosed } = getEligibleGraphSourceIds(provIds)
     if (failClosed) return { ids: new Set<string>(), failClosed: true, suppressZeroProvenance }
     const ids = new Set<string>()
     for (const id of provIds) if (!eligible.has(id)) ids.add(id)
@@ -1684,7 +1961,7 @@ function legacyNodeBackingVisible(row: LegacyBackingRow, projectIndex?: Map<stri
       console.error('[KnowledgeGraph] legacy meeting backing lookup failed — fail-closed:', e)
       return false
     }
-    const { eligible, failClosed } = getEligibleRecordingIds(recIds)
+    const { eligible, failClosed } = getEligibleGraphSourceIds(recIds)
     return !failClosed && eligible.size > 0
   }
   if (row.type === 'project') {
@@ -1749,7 +2026,7 @@ function isIsolatedNodeVisible(
     row,
     exclusion,
     (recId) => {
-      const { eligible, failClosed } = getEligibleRecordingIds([recId])
+      const { eligible, failClosed } = getEligibleGraphSourceIds([recId])
       return !failClosed && eligible.has(recId)
     },
     () => legacyNodeBackingVisible(row)
@@ -1842,13 +2119,12 @@ function suppressExcludedFromView<
     edges: Array<{ id: string; source: string; target: string }>
   }
 >(data: T, exclusion: GroundingExclusion): T {
-  if (exclusionIsNoop(exclusion) || data.edges.length === 0) return data
+  if (exclusionIsNoop(exclusion)) return data
   const suppressed = provenanceSuppressedEdgeIds(
     getKnowledgeGraphStore(),
     data.edges.map((e) => e.id),
     exclusion
   )
-  if (suppressed.size === 0) return data
 
   const keptEdges = data.edges.filter((e) => !suppressed.has(e.id))
   const incidentToKept = new Set<string>()

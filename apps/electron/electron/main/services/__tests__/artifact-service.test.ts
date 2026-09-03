@@ -209,6 +209,29 @@ describe('artifact service', () => {
     expect(count!.n).toBe(1)
   })
 
+  it('updates a connector item in place when its stable source reference changes content', async () => {
+    const filePath = join(srcDir, 'hinotes-note.md')
+    const opts = { sourceConnectorId: 'hinotes', sourceRef: 'note-123', title: 'Weekly review' }
+    writeFileSync(filePath, '# Weekly review\n\nOriginal transcript', 'utf-8')
+
+    const first = await importArtifact(filePath, opts)
+    writeFileSync(filePath, '# Weekly review\n\nCorrected transcript', 'utf-8')
+    const updated = await importArtifact(filePath, opts)
+
+    expect(updated.deduped).toBe(false)
+    expect(updated.artifact.id).toBe(first.artifact.id)
+    expect(updated.knowledgeCaptureId).toBe(first.knowledgeCaptureId)
+    expect(updated.artifact.extracted_text).toContain('Corrected transcript')
+    expect(updated.artifact.source_connector_id).toBe('hinotes')
+    expect(updated.artifact.source_ref).toBe('note-123')
+
+    const count = queryOne<{ n: number }>(
+      'SELECT COUNT(*) as n FROM artifacts WHERE source_connector_id = ? AND source_ref = ?',
+      ['hinotes', 'note-123']
+    )
+    expect(count!.n).toBe(1)
+  })
+
   it('getArtifactsForCapture returns the capture-owned artifacts', async () => {
     const filePath = join(srcDir, 'attached.txt')
     writeFileSync(filePath, 'attached to an existing capture', 'utf-8')

@@ -27,6 +27,7 @@ import {
   filterEligibleCaptureIds,
   filterEligibleRecordingIds
 } from './recording-eligibility'
+import { evaluateActionableEligibility } from '@hidock/database'
 
 export function filterEligibleActionableRows<T>(
   rows: T[],
@@ -39,20 +40,14 @@ export function filterEligibleActionableRows<T>(
 
   // Classify each skid: a live capture id vs a legacy recording id.
   const capExist = existingCaptures(skids)
-  if (capExist.failClosed) {
-    // Can't classify → drop every recording/capture-backed row; keep standalone.
-    return rows.filter((r) => !skidOf(r))
-  }
   const captureSkids = skids.filter((id) => capExist.ids.has(id))
   const recordingSkids = skids.filter((id) => !capExist.ids.has(id))
 
   const capElig = filterEligibleCaptureIds(captureSkids)
   const recElig = filterEligibleRecordingIds(recordingSkids)
-
-  return rows.filter((row) => {
-    const skid = skidOf(row)
-    if (!skid) return true // standalone actionable → keep
-    if (capExist.ids.has(skid)) return !capElig.failClosed && capElig.eligible.has(skid)
-    return !recElig.failClosed && recElig.eligible.has(skid)
+  return evaluateActionableEligibility(rows, skidOf, {
+    existingCaptures: capExist,
+    captureEligibility: capElig,
+    recordingEligibility: recElig,
   })
 }

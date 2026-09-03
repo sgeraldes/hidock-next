@@ -7326,17 +7326,33 @@ export function clearDeviceFilesCache(): void {
  * Also clears recording→meeting links to prevent orphaned foreign keys.
  */
 export function clearAllMeetings(): void {
-  runInTransaction(() => {
-    // Clear meeting-contact links (has ON DELETE CASCADE but explicit is safer)
-    runNoSave('DELETE FROM meeting_contacts')
-    // Clear recording-meeting candidates (has ON DELETE CASCADE)
-    runNoSave('DELETE FROM recording_meeting_candidates')
-    // Clear recording→meeting links to prevent orphaned FKs
-    // This preserves the recordings but removes their meeting association
-    runNoSave('UPDATE recordings SET meeting_id = NULL, correlation_confidence = NULL, correlation_method = NULL WHERE meeting_id IS NOT NULL')
-    // Finally clear meetings
-    runNoSave('DELETE FROM meetings')
-  })
+  // This is the explicit, user-initiated "clear and resync" operation. Keep the
+  // mass-delete tripwire enabled globally, but scope its override to this one
+  // known transaction so an accidental DELETE elsewhere is still refused.
+  runWithMassDeleteAllowed(() =>
+    runInTransaction(() => {
+      // Clear meeting-contact links (has ON DELETE CASCADE but explicit is safer)
+      runNoSave('DELETE FROM meeting_contacts')
+      // Clear recording-meeting candidates (has ON DELETE CASCADE)
+      runNoSave('DELETE FROM recording_meeting_candidates')
+      // Preserve knowledge captures and follow-ups while detaching their
+      // calendar references. These foreign keys intentionally use NO ACTION,
+      // so leaving either populated makes the final meeting delete fail.
+      runNoSave(
+        `UPDATE knowledge_captures
+         SET meeting_id = NULL, correlation_confidence = NULL, correlation_method = NULL
+         WHERE meeting_id IS NOT NULL`
+      )
+      runNoSave(
+        'UPDATE follow_ups SET scheduled_meeting_id = NULL WHERE scheduled_meeting_id IS NOT NULL'
+      )
+      // Clear recording→meeting links to prevent orphaned FKs
+      // This preserves the recordings but removes their meeting association
+      runNoSave('UPDATE recordings SET meeting_id = NULL, correlation_confidence = NULL, correlation_method = NULL WHERE meeting_id IS NOT NULL')
+      // Finally clear meetings
+      runNoSave('DELETE FROM meetings')
+    })
+  )
   console.log('[Database] Cleared all meetings and associated links')
 }
 

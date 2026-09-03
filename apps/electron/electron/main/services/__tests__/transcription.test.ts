@@ -126,6 +126,7 @@ vi.mock('../database', () => ({
   updateQueueProgress: (...args: any[]) => mockUpdateQueueProgress(...args),
   getMeetingById: vi.fn(),
   findCandidateMeetingsForRecording: vi.fn(() => []),
+  queryAll: vi.fn(() => []),
   addRecordingMeetingCandidate: vi.fn(),
   linkRecordingToMeeting: vi.fn(),
   updateKnowledgeCaptureTitle: vi.fn(),
@@ -182,6 +183,23 @@ vi.mock('electron', () => ({
 // Mock config
 vi.mock('../config', () => ({
   getConfig: vi.fn(() => mockConfig)
+}))
+
+// Transcript analysis now routes through the provider-neutral brain seam. Keep
+// these orchestration tests deterministic without probing a real local Ollama.
+vi.mock('../brains', () => ({
+  resolveGeminiApiKey: () => mockConfig.transcription.geminiApiKey || '',
+  getBrainRouter: () => ({
+    resolve: async () => mockConfig.transcription.geminiApiKey
+      ? {
+          id: 'gemini-api',
+          generate: async (...args: unknown[]) => {
+            const result = await mockGenerateContent(...args) as any
+            return result?.response?.text?.() ?? ''
+          }
+        }
+      : null
+  })
 }))
 
 // Mock google generative AI - make it fail

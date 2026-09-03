@@ -770,6 +770,7 @@ export interface ElectronAPI {
     clearAndSync: () => Promise<any>
     getLastSync: () => Promise<string | null>
     setUrl: (url: string) => Promise<any>
+    selectFile: () => Promise<{ success: boolean; data?: string | null; error?: string }>
     toggleAutoSync: (enabled: boolean) => Promise<any>
     setInterval: (minutes: number) => Promise<any>
     getSettings: () => Promise<any>
@@ -1612,6 +1613,7 @@ const electronAPI: ElectronAPI = {
     clearAndSync: () => callIPC('calendar:clear-and-sync'),
     getLastSync: () => callIPC('calendar:get-last-sync'),
     setUrl: (url) => callIPC('calendar:set-url', url),
+    selectFile: () => callIPC('calendar:select-file'),
     toggleAutoSync: (enabled) => callIPC('calendar:toggle-auto-sync', enabled),
     setInterval: (minutes) => callIPC('calendar:set-interval', minutes),
     getSettings: () => callIPC('calendar:get-settings')

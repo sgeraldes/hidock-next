@@ -27,117 +27,17 @@
 import { getDatabase, queryAll } from './database'
 import { filterEligibleActionableRows } from './actionable-eligibility'
 import { filterEligibleRecordingIds, filterEligibleCaptureIds } from './recording-eligibility'
+import {
+  dateGroundingPart,
+  detectIntent,
+  inRange,
+  resolveTemporalRange,
+  type RetrievalIntent,
+  type TemporalRange,
+} from '@hidock/database'
 
-// ── Intent ──────────────────────────────────────────────────────────────────
-
-export type RetrievalIntent = 'actions' | 'topics' | 'report' | 'general'
-
-const ACTIONS_RE =
-  /\b(action items?|actions?|to-?dos?|tasks?|commitments?|compromisos?|acciones?|tareas?|pendientes?|follow.?ups?|assigned|deadlines?|deliverables?|next steps?|pr[óo]ximos pasos)\b/i
-const REPORT_RE =
-  /\b(report|reporte|informe|deep.?dive|complete (?:summary|analysis)|full (?:summary|report|analysis)|prepar[ae](?:r)?\b.*\b(?:report|informe|resumen)|top \d+|most discussed|m[áa]s discutid)/i
-const TOPICS_RE =
-  /\b(topics?|subjects?|themes?|temas?|main points?|talked about|discussed|discussi[óo]n|what happened|qu[ée] pas[óo]|overview|resumen|summary|summarize)\b/i
-
-/**
- * Classify the user's message. Order matters: 'actions' beats 'report' ("what
- * actions do I have… a report?" is actions-first); 'report' beats 'topics'
- * (a report request may mention "most discussed TOPIC").
- */
-export function detectIntent(message: string): RetrievalIntent {
-  if (ACTIONS_RE.test(message)) return 'actions'
-  if (REPORT_RE.test(message)) return 'report'
-  if (TOPICS_RE.test(message)) return 'topics'
-  return 'general'
-}
-
-// ── Temporal grounding ──────────────────────────────────────────────────────
-
-export interface TemporalRange {
-  /** ISO date (YYYY-MM-DD), inclusive. */
-  start: string
-  /** ISO date (YYYY-MM-DD), inclusive. */
-  end: string
-  /** Human label injected into the prompt ('this week (Jul 20 – Jul 26, 2026)'). */
-  label: string
-}
-
-const iso = (d: Date): string => d.toISOString().slice(0, 10)
-const DAY = 24 * 60 * 60 * 1000
-
-/** Monday-start week bounds (matches business usage in both EN and ES). */
-function weekBounds(now: Date, weekOffset: number): { start: Date; end: Date } {
-  const day = now.getDay() // 0=Sun
-  const mondayOffset = day === 0 ? -6 : 1 - day
-  const monday = new Date(now.getTime() + (mondayOffset + weekOffset * 7) * DAY)
-  const sunday = new Date(monday.getTime() + 6 * DAY)
-  return { start: monday, end: sunday }
-}
-
-function monthBounds(now: Date, monthOffset: number): { start: Date; end: Date } {
-  const start = new Date(now.getFullYear(), now.getMonth() + monthOffset, 1)
-  const end = new Date(now.getFullYear(), now.getMonth() + monthOffset + 1, 0)
-  return { start, end }
-}
-
-const fmt = (d: Date): string =>
-  d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-
-/**
- * Resolve the FIRST relative-date expression in the message to a concrete
- * range. Returns null when the question has no temporal anchor (retrieval
- * then stays undated — no fabricated recency).
- */
-export function resolveTemporalRange(message: string, now: Date = new Date()): TemporalRange | null {
-  const m = message.toLowerCase()
-
-  if (/\b(this week|esta semana)\b/.test(m)) {
-    const { start, end } = weekBounds(now, 0)
-    return { start: iso(start), end: iso(end), label: `this week (${fmt(start)} – ${fmt(end)})` }
-  }
-  if (/\b(last week|past week|la semana pasada|la última semana|última semana)\b/.test(m)) {
-    const { start, end } = weekBounds(now, -1)
-    return { start: iso(start), end: iso(end), label: `last week (${fmt(start)} – ${fmt(end)})` }
-  }
-  if (/\b(this month|este mes)\b/.test(m)) {
-    const { start, end } = monthBounds(now, 0)
-    return { start: iso(start), end: iso(end), label: `this month (${fmt(start)} – ${fmt(end)})` }
-  }
-  if (/\b(last month|el mes pasado|último mes)\b/.test(m)) {
-    const { start, end } = monthBounds(now, -1)
-    return { start: iso(start), end: iso(end), label: `last month (${fmt(start)} – ${fmt(end)})` }
-  }
-  if (/\b(today|hoy)\b/.test(m)) {
-    return { start: iso(now), end: iso(now), label: `today (${fmt(now)})` }
-  }
-  if (/\b(yesterday|ayer)\b/.test(m)) {
-    const y = new Date(now.getTime() - DAY)
-    return { start: iso(y), end: iso(y), label: `yesterday (${fmt(y)})` }
-  }
-  return null
-}
-
-/**
- * The ALWAYS-INJECTED date line. Without it the model cannot reason about
- * "this week" at all (its training date is months/years stale).
- */
-export function dateGroundingPart(now: Date = new Date(), range: TemporalRange | null = null): string {
-  const today = now.toLocaleDateString('en-US', {
-    weekday: 'long',
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-  })
-  const rangeLine = range ? ` The user is asking about ${range.label} (dates ${range.start} to ${range.end}, inclusive).` : ''
-  return `[DATE GROUNDING: Today is ${today}.${rangeLine} Resolve every relative date in the question against this before answering.]`
-}
-
-/** Is an ISO-ish timestamp inside the range (inclusive)? Tolerant of full ISO datetimes. */
-export function inRange(timestamp: string | undefined, range: TemporalRange | null): boolean {
-  if (!range || !timestamp) return false
-  const day = timestamp.slice(0, 10)
-  return day >= range.start && day <= range.end
-}
+export { dateGroundingPart, detectIntent, inRange, resolveTemporalRange }
+export type { RetrievalIntent, TemporalRange }
 
 // ── Structured context: actionables ─────────────────────────────────────────
 

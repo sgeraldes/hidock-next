@@ -89,13 +89,16 @@ export interface AppConfig {
     maxRecordingsGB: number
   }
   calendar: {
+    source?: 'ics' | 'local-file'
     icsUrl: string
+    localFilePath?: string
     syncEnabled: boolean
     syncIntervalMinutes: number
     lastSyncAt: string | null
   }
   transcription: {
     provider: 'gemini' | 'local-asr' | 'vibevoice'
+    localAsrEngine: 'whisper-cpp' | 'asr-mcp'
     geminiApiKey: string
     geminiModel: string
     localAsrPath: string
@@ -103,6 +106,9 @@ export interface AppConfig {
     localAsrVocabularyFile: string
     localAsrDiarize: boolean
     localAsrNumBeams: number
+    whisperBinaryPath: string
+    whisperModelPath: string
+    whisperThreads: number
     // Persistent acoustic speaker linking. This is not authentication and does
     // not require a dedicated enrollment recording: validated diarized speech
     // builds an anonymous voice memory opportunistically across recordings.
@@ -189,13 +195,16 @@ const DEFAULT_CONFIG: AppConfig = {
     maxRecordingsGB: 50
   },
   calendar: {
+    source: 'ics',
     icsUrl: '',
+    localFilePath: '',
     syncEnabled: true,
     syncIntervalMinutes: 15,
     lastSyncAt: null
   },
   transcription: {
     provider: 'gemini',
+    localAsrEngine: 'whisper-cpp',
     geminiApiKey: '',
     geminiModel: 'gemini-3.5-flash', // current flash model (2.0/2.5-flash retired); audio-capable for transcription
     localAsrPath: process.env.ASR_MCP_PATH || 'G:\\Code\\claude-plugins\\plugins\\mcp-asr',
@@ -203,6 +212,9 @@ const DEFAULT_CONFIG: AppConfig = {
     localAsrVocabularyFile: 'vocabulary.json',
     localAsrDiarize: true,
     localAsrNumBeams: 5,
+    whisperBinaryPath: process.env.WHISPER_CPP_BIN || (process.platform === 'darwin' ? '/opt/homebrew/bin/whisper-cli' : 'whisper-cli'),
+    whisperModelPath: process.env.WHISPER_CPP_MODEL || join(app.getPath('home'), 'HiDock', 'models', 'whisper', 'ggml-large-v3-turbo-q5_0.bin'),
+    whisperThreads: 8,
     speakerLinkingEnabled: true,
     speakerLinkingPythonPath: process.env.SPEAKER_LINKING_PYTHON || (process.platform === 'win32' ? 'py' : 'python3'),
     speakerLinkingWorkerPath: process.env.SPEAKER_LINKING_WORKER || '',

@@ -53,7 +53,15 @@ export class OllamaBrain implements AIBrain {
       .map((m) => m.content)
       .join('\n\n')
     const systemPrompt = opts.systemPrompt ?? messages.find((m) => m.role === 'system')?.content
-    return getOllamaService().generate(prompt, systemPrompt)
+    return getOllamaService().generate(prompt, {
+      systemPrompt,
+      temperature: opts.temperature,
+      maxTokens: opts.maxTokens,
+      model: opts.model,
+      json: opts.json,
+      disableThinking: opts.disableThinking,
+      signal: opts.signal,
+    })
   }
 
   async chat(messages: BrainMessage[], opts: GenerateOptions = {}): Promise<string | null> {
@@ -61,6 +69,9 @@ export class OllamaBrain implements AIBrain {
       systemPrompt: opts.systemPrompt,
       temperature: opts.temperature,
       maxTokens: opts.maxTokens,
+      model: opts.model,
+      json: opts.json,
+      disableThinking: opts.disableThinking,
       signal: opts.signal,
     })
   }

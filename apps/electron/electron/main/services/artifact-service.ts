@@ -77,9 +77,9 @@ function imageCaption(kind: string, metadata: Record<string, unknown>): string |
 }
 
 /**
- * Import a file as an artifact. Idempotent by content: a file whose bytes were
- * already imported returns the existing artifact (deduped: true) without copying,
- * re-extracting, or re-indexing.
+ * Import a file as an artifact. Manual imports are idempotent by content.
+ * Connector imports are idempotent by stable source identity and update the
+ * existing artifact/capture in place when external content changes.
  */
 export async function importArtifact(
   filePath: string,
@@ -92,8 +92,33 @@ export async function importArtifact(
   const buffer = readFileSync(filePath)
   const contentHash = createHash('sha256').update(buffer).digest('hex')
 
+  // Connector identity is stronger than byte identity. A stable
+  // (source_connector_id, source_ref) pair represents one living external item:
+  // return it unchanged when the bytes match, or update it in place below when
+  // the source content changed. This prevents edited HiNotes transcripts from
+  // creating duplicate captures.
+  const hasSourceIdentity = Boolean(opts.sourceConnectorId && opts.sourceRef)
+  const sourceExisting = hasSourceIdentity
+    ? queryOne<ArtifactRow>(
+        'SELECT * FROM artifacts WHERE source_connector_id = ? AND source_ref = ? ORDER BY created_at ASC LIMIT 1',
+        [opts.sourceConnectorId, opts.sourceRef]
+      )
+    : undefined
+  if (sourceExisting?.content_hash === contentHash) {
+    return {
+      artifact: sourceExisting,
+      deduped: true,
+      knowledgeCaptureId: sourceExisting.knowledge_capture_id ?? '',
+      indexedChunks: 0
+    }
+  }
+
   // Dedup by content hash — return the existing artifact untouched.
-  const existing = queryOne<ArtifactRow>('SELECT * FROM artifacts WHERE content_hash = ?', [contentHash])
+  // Connector-fed imports deliberately skip this global shortcut: two external
+  // notes may have identical text but still need distinct provenance/captures.
+  const existing = hasSourceIdentity
+    ? undefined
+    : queryOne<ArtifactRow>('SELECT * FROM artifacts WHERE content_hash = ?', [contentHash])
   if (existing) {
     return {
       artifact: existing,
@@ -106,12 +131,12 @@ export async function importArtifact(
   const ext = extname(filePath).replace(/^\./, '').toLowerCase()
   const type = resolveType(filePath)
   const kind = type?.kind ?? 'unknown'
-  const id = randomUUID()
+  const id = sourceExisting?.id ?? randomUUID()
 
   // Copy into <dataRoot>/artifacts/<kind>/<hash-prefix>/<id>.<ext>
   const destDir = join(getArtifactsPath(), kind, contentHash.slice(0, 2))
   mkdirSync(destDir, { recursive: true })
-  const destPath = join(destDir, ext ? `${id}.${ext}` : id)
+  const destPath = sourceExisting?.storage_path ?? join(destDir, ext ? `${id}.${ext}` : id)
   copyFileSync(filePath, destPath)
 
   // Type-dispatched extraction (+ optional enrichment). Failures are recorded on
@@ -148,7 +173,7 @@ export async function importArtifact(
   const filename = basename(filePath)
 
   // Insert artifact + (optionally) a capture atomically.
-  let knowledgeCaptureId = opts.knowledgeCaptureId
+  let knowledgeCaptureId = opts.knowledgeCaptureId ?? sourceExisting?.knowledge_capture_id ?? undefined
   runInTransaction(() => {
     if (!knowledgeCaptureId) {
       knowledgeCaptureId = randomUUID()
@@ -159,26 +184,48 @@ export async function importArtifact(
       )
     }
 
-    run(
-      `INSERT INTO artifacts
-         (id, knowledge_capture_id, kind, mime, storage_path, size, content_hash,
-          extracted_text, metadata, source_connector_id, source_ref, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        id,
-        knowledgeCaptureId,
-        kind,
-        mime,
-        destPath,
-        buffer.length,
-        contentHash,
-        extractedText,
-        JSON.stringify(metadata),
-        opts.sourceConnectorId ?? null,
-        opts.sourceRef ?? null,
-        now
-      ]
-    )
+    if (sourceExisting) {
+      run(
+        `UPDATE artifacts
+         SET knowledge_capture_id = ?, kind = ?, mime = ?, storage_path = ?, size = ?,
+             content_hash = ?, extracted_text = ?, metadata = ?, source_connector_id = ?, source_ref = ?
+         WHERE id = ?`,
+        [
+          knowledgeCaptureId,
+          kind,
+          mime,
+          destPath,
+          buffer.length,
+          contentHash,
+          extractedText,
+          JSON.stringify(metadata),
+          opts.sourceConnectorId ?? null,
+          opts.sourceRef ?? null,
+          id
+        ]
+      )
+    } else {
+      run(
+        `INSERT INTO artifacts
+           (id, knowledge_capture_id, kind, mime, storage_path, size, content_hash,
+            extracted_text, metadata, source_connector_id, source_ref, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          knowledgeCaptureId,
+          kind,
+          mime,
+          destPath,
+          buffer.length,
+          contentHash,
+          extractedText,
+          JSON.stringify(metadata),
+          opts.sourceConnectorId ?? null,
+          opts.sourceRef ?? null,
+          now
+        ]
+      )
+    }
   })
 
   // F5 (PixelRAG): persist a screenshot/image's vision description onto the
@@ -203,10 +250,11 @@ export async function importArtifact(
   // (sourceType) and owning capture id so RAG can label + cite them — e.g. an
   // image capture surfaces as "[Screenshot: <description>]". No-op without text.
   let indexedChunks = 0
-  if (extractedText && extractedText.trim().length > 0) {
-    try {
-      const store = getVectorStore()
-      store.ensureSchema()
+  try {
+    const store = getVectorStore()
+    store.ensureSchema()
+    if (sourceExisting) await store.deleteByRecording(id)
+    if (extractedText && extractedText.trim().length > 0) {
       indexedChunks = await store.indexTranscript(extractedText, {
         recordingId: id,
         timestamp: now,
@@ -214,9 +262,9 @@ export async function importArtifact(
         sourceType: kind,
         captureId: knowledgeCaptureId
       })
-    } catch (e) {
-      console.error('[ArtifactService] Failed to index artifact embeddings:', e)
     }
+  } catch (e) {
+    console.error('[ArtifactService] Failed to index artifact embeddings:', e)
   }
 
   const artifact = queryOne<ArtifactRow>('SELECT * FROM artifacts WHERE id = ?', [id])

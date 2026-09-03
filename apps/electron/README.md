@@ -10,7 +10,7 @@ This is the **integrated vision** that unifies all previous HiDock Next iteratio
 
 ### Knowledge Extraction & Management
 - **Device Management** - Sync recordings from HiDock H1/H1E/P1 devices (integrates Desktop app capabilities)
-- **AI Transcription** - Automatic transcription with Google Gemini (integrates Web app capabilities)
+- **AI Transcription** - Automatic cloud transcription with Gemini or private local transcription with whisper.cpp
 - **Unified Library** - Browse and manage all recordings with advanced filtering and search (integrates Audio Insights capabilities)
 - **Auto-Refresh** - Real-time detection and updates when new recordings are added
 - **Waveform Visualization** - Immediate audio visualization on selection
@@ -55,7 +55,7 @@ This is not just an "audio app" - it's the foundation of a universal knowledge e
 
 - Node.js 18+
 - Ollama (for RAG chat) - [Install Ollama](https://ollama.ai)
-- Google Gemini API key (for transcription)
+- Google Gemini API key (optional when using Local Whisper + Ollama)
 
 ### Installation
 

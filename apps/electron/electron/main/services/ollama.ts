@@ -158,6 +158,9 @@ class OllamaService {
       temperature?: number
       maxTokens?: number
       systemPrompt?: string
+      model?: string
+      json?: boolean
+      disableThinking?: boolean
       signal?: AbortSignal // B-CHAT-005: Support request cancellation
     } = {}
   ): Promise<string | null> {
@@ -171,9 +174,11 @@ class OllamaService {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: this.chatModel,
+          model: options.model || this.chatModel,
           messages: fullMessages,
           stream: false,
+          ...(options.json ? { format: 'json' } : {}),
+          ...(options.disableThinking ? { think: false } : {}),
           options: {
             temperature: options.temperature ?? 0.7,
             num_predict: options.maxTokens ?? 1024
@@ -205,8 +210,19 @@ class OllamaService {
     }
   }
 
-  async generate(prompt: string, systemPrompt?: string): Promise<string | null> {
-    return this.chat([{ role: 'user', content: prompt }], { systemPrompt })
+  async generate(
+    prompt: string,
+    options: {
+      systemPrompt?: string
+      temperature?: number
+      maxTokens?: number
+      model?: string
+      json?: boolean
+      disableThinking?: boolean
+      signal?: AbortSignal
+    } = {}
+  ): Promise<string | null> {
+    return this.chat([{ role: 'user', content: prompt }], options)
   }
 }
 

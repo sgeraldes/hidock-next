@@ -584,8 +584,8 @@ export function ConnectorsSettings() {
       <CardHeader>
         <CardTitle>Connectors</CardTitle>
         <CardDescription>
-          Connect external systems — Microsoft 365 (calendar + contacts) and Slack — to feed meetings, people, and
-          knowledge into your library. Microsoft 365 supports multiple accounts (e.g. personal + work).
+          Connect HiNotes, Microsoft 365, and Slack to feed meetings, people, and knowledge into your library.
+          Microsoft 365 supports multiple accounts (e.g. personal + work).
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">

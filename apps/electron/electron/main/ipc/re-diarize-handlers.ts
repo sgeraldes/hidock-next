@@ -15,6 +15,7 @@ import { join } from 'path'
 import { resolveRecordingId } from '../services/database'
 import { getConfig } from '../services/config'
 import { reDiarizeRecording, ClearedAutoBindings } from '../services/re-diarize'
+import { validateWhisperConfiguration } from '../services/whisper-cpp'
 
 interface ReDiarizeResponse {
   success: boolean
@@ -54,7 +55,13 @@ export function registerReDiarizeHandlers(): void {
           error: 'Transcription API key not configured. Please add your API key in Settings.'
         }
       }
-      if (provider === 'local-asr' || provider === 'vibevoice') {
+      if (provider === 'local-asr' && config.transcription.localAsrEngine === 'whisper-cpp') {
+        try {
+          validateWhisperConfiguration(config.transcription.whisperBinaryPath, config.transcription.whisperModelPath)
+        } catch (error) {
+          return { success: false, error: error instanceof Error ? error.message : String(error) }
+        }
+      } else if (provider === 'local-asr' || provider === 'vibevoice') {
         const runnerPath = join(config.transcription.localAsrPath || '', 'mcp_runner.py')
         if (!config.transcription.localAsrPath || !existsSync(runnerPath)) {
           return {

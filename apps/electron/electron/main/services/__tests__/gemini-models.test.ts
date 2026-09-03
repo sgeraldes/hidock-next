@@ -1,7 +1,13 @@
-import { describe, it, expect } from 'vitest'
-import { filterTranscriptionModels, FALLBACK_GEMINI_MODELS } from '../gemini-models'
+import { afterEach, describe, it, expect, vi } from 'vitest'
+import {
+  filterTranscriptionModels,
+  FALLBACK_GEMINI_MODELS,
+  listGeminiTranscriptionModels,
+} from '../gemini-models'
 
 const gc = ['generateContent']
+
+afterEach(() => vi.unstubAllGlobals())
 
 describe('filterTranscriptionModels', () => {
   it('keeps current audio-capable Gemini models and drops non-transcription ones', () => {
@@ -71,5 +77,22 @@ describe('filterTranscriptionModels', () => {
   it('handles empty/undefined input', () => {
     expect(filterTranscriptionModels(undefined)).toEqual([])
     expect(filterTranscriptionModels([])).toEqual([])
+  })
+
+  it('authenticates model discovery with the current Google API key header', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        models: [{ name: 'models/gemini-3.5-flash', supportedGenerationMethods: gc }],
+      }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await listGeminiTranscriptionModels('current-auth-key-example')
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://generativelanguage.googleapis.com/v1beta/models?pageSize=200',
+      { headers: { 'x-goog-api-key': 'current-auth-key-example' } }
+    )
   })
 })

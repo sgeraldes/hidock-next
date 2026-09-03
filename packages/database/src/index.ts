@@ -26,3 +26,19 @@ export type {
   BetterSqlite3Database,
   BetterSqlite3Statement,
 } from './engine.js'
+
+export {
+  CAPTURE_VALUE_EXCLUDED_RATINGS,
+  evaluateActionableEligibility,
+  evaluateCaptureEligibility,
+} from './eligibility.js'
+
+export { dateGroundingPart, detectIntent, inRange, resolveTemporalRange } from './retrieval.js'
+export type { RetrievalIntent, TemporalRange } from './retrieval.js'
+export type {
+  ActionableEligibilityInputs,
+  CaptureEligibilityRow,
+  CaptureEligibilityRowsResult,
+  EligibilityResult,
+  ExistenceResult,
+} from './eligibility.js'

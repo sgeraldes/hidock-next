@@ -1,10 +1,10 @@
 import { GeminiEngine, NoSpeechDetectedError, TranscriptionCancelledError } from '@hidock/transcription'
-import { GoogleGenerativeAI } from '@google/generative-ai'
-import { getBrainRegistry, resolveGeminiApiKey } from './brains'
+import { getBrainRouter, resolveGeminiApiKey, type AIBrain } from './brains'
 import { readFile, existsSync } from 'fs'
 import { promisify } from 'util'
 import { spawn } from 'child_process'
-import { join, isAbsolute } from 'path'
+import { basename, join, isAbsolute } from 'path'
+import { transcribeWithWhisperCpp, validateWhisperConfiguration } from './whisper-cpp'
 
 const readFileAsync = promisify(readFile)
 
@@ -432,6 +432,22 @@ async function processQueue(): Promise<void> {
       }
 
       return
+    } else if (provider === 'local-asr' && config.transcription.localAsrEngine === 'whisper-cpp') {
+      try {
+        validateWhisperConfiguration(
+          config.transcription.whisperBinaryPath,
+          config.transcription.whisperModelPath
+        )
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        console.error(`[Transcription] Cannot process queue: ${message}`)
+        for (const item of [...getQueueItems('pending'), ...getQueueItems('processing')]) {
+          updateQueueItem(item.id, 'failed', message)
+          updateRecordingTranscriptionStatus(item.recording_id, 'error')
+          notifyRenderer('transcription:failed', { queueItemId: item.id, recordingId: item.recording_id, error: message })
+        }
+        return
+      }
     } else if (provider === 'local-asr' || provider === 'vibevoice') {
       const asrPath = config.transcription.localAsrPath
       const runnerPath = asrPath ? join(asrPath, 'mcp_runner.py') : ''
@@ -736,11 +752,6 @@ async function detectActionables(
   knowledgeCaptureId: string,
   metadata: { title?: string; questions?: string[] }
 ): Promise<ActionableDetection[]> {
-  if (!resolveGeminiApiKey()) {
-    console.log('[Actionable Detection] Gemini API key not configured, skipping')
-    return []
-  }
-
   // Skip very short transcripts
   const wordCount = transcriptText.split(/\s+/).filter(w => w.length > 0).length
   if (wordCount < 100) {
@@ -786,16 +797,14 @@ Return as JSON array. If no actionables detected, return empty array [].
 Only include detections with confidence >= 0.6.`
 
   try {
-    // Delegate to the Gemini brain — same model (config.transcription.geminiModel),
-    // JSON-forced, thinking disabled. Behaviour is identical to the previous
-    // inline @google/generative-ai call.
-    const brain = getBrainRegistry().get('gemini-api')
+    const brain = await getBrainRouter().resolve('suggestions', 'generate')
     if (!brain) return []
     const responseText =
       (await brain.generate([{ role: 'user', content: prompt }], {
         maxTokens: 8192,
         json: true,
-        disableThinking: true
+        disableThinking: true,
+        model: getConfig().brains?.models?.[brain.id]
       })) ?? ''
 
     // Extract JSON from response (might be wrapped in markdown code blocks)
@@ -969,6 +978,28 @@ async function transcribeWithLocalAsr(
   progressCallback?: (stage: string, progress: number) => void
 ): Promise<RawTranscriptionResult> {
   const config = getConfig()
+  if (config.transcription.localAsrEngine === 'whisper-cpp') {
+    progressCallback?.('local_whisper_starting', 5)
+    const result = await transcribeWithWhisperCpp(filePath, {
+      binaryPath: config.transcription.whisperBinaryPath,
+      modelPath: config.transcription.whisperModelPath,
+      language: config.transcription.language || 'auto',
+      threads: config.transcription.whisperThreads || 8,
+      initialPrompt: metadataContext,
+      onProgress: (progress) => progressCallback?.('local_whisper_transcribing', Math.min(95, progress))
+    })
+    if (!result.fullText) {
+      throw new NoSpeechDetectedError('Local Whisper returned no intelligible speech')
+    }
+    return {
+      fullText: result.fullText,
+      provider: 'local-asr',
+      model: basename(config.transcription.whisperModelPath).replace(/^ggml-/, '').replace(/\.bin$/, ''),
+      language: result.language,
+      speakers: result.segments.length > 0 ? JSON.stringify(result.segments) : undefined
+    }
+  }
+
   const asrPath = config.transcription.localAsrPath || process.env.ASR_MCP_PATH
   if (!asrPath) {
     throw new Error('Local ASR path not configured')
@@ -1193,28 +1224,23 @@ async function transcribeWithVibeVoice(
   }
 }
 
-async function analyzeTranscriptWithGemini(
+async function analyzeTranscript(
   fullText: string,
   candidateMeetings: ReturnType<typeof findCandidateMeetingsForRecording>,
-  shouldGenerate?: () => boolean
+  shouldGenerate?: () => boolean,
+  selectedBrain?: AIBrain | null
 ): Promise<TranscriptAnalysis> {
   const config = getConfig()
-  if (!resolveGeminiApiKey()) {
+  const brain = selectedBrain ?? await getBrainRouter().resolve('transcribeAnalyze', 'generate')
+  if (!brain) {
     return {
-      summary: 'Local ASR transcript created. Configure Gemini to generate AI summary, action items, and meeting matching.',
+      summary: 'Local transcript created. Start Ollama or configure an enabled AI brain to generate the summary and meeting insights.',
       action_items: [],
       topics: [],
       key_points: [],
       language: config.transcription.language || 'unknown'
     }
   }
-
-  // Key resolves via the brain credential store (falls back to the plaintext
-  // config key). The two-attempt strategy + response-object diagnostics below
-  // don't fit the string-returning AIBrain.generate contract, so this analysis
-  // path keeps its direct SDK usage — full delegation is deferred to a later phase.
-  const genAI = new GoogleGenerativeAI(resolveGeminiApiKey())
-  const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-3.5-flash' })
 
   let meetingSelectionSection = ''
   if (candidateMeetings.length > 1) {
@@ -1330,34 +1356,12 @@ Respond in JSON format:
   "selection_reason": "..."` : ''}${valueJsonTemplate}
 }`
 
-  // Two-attempt strategy (both disable thinking: the thinking model intermittently
-  // burns its output budget on reasoning and returns junk — observed: analysis titled
-  // "Transcripción no proporcionada" for a complete 7.5k-word transcript).
-  //
-  // Order: plain-text FIRST, json-mime second. A full day of live evidence showed the
-  // json-mime attempt fails to parse on essentially every real Spanish transcript
-  // (multiple malformation classes — unescaped inner quotes, raw control chars, and
-  // splice-corruption that the repair pass cannot recover), after which the plain-text
-  // attempt reliably succeeds — so leading with json-mime cost one wasted API call per
-  // analysis. Plain-text (fenced or brace-matched block, run through the same repair
-  // pass) is now the primary. json-mime is kept as a second attempt: it still wins
-  // occasionally on short English prompts and remains a cheap safety net.
-  const attempts: Array<{ label: string; generationConfig: Record<string, unknown> }> = [
-    {
-      label: 'plain-text',
-      generationConfig: {
-        maxOutputTokens: 8192,
-        thinkingConfig: { thinkingBudget: 0 }
-      }
-    },
-    {
-      label: 'json-mime-fallback',
-      generationConfig: {
-        maxOutputTokens: 8192,
-        responseMimeType: 'application/json',
-        thinkingConfig: { thinkingBudget: 0 }
-      }
-    }
+  // A plain response first and provider-native JSON mode second works for both
+  // Gemini and local Ollama models. Both pass through the same defensive repair
+  // parser because meeting transcripts often contain quotes and control chars.
+  const attempts = [
+    { label: 'plain-text', json: false },
+    { label: 'json-mode-fallback', json: true }
   ]
 
   for (const attempt of attempts) {
@@ -1367,31 +1371,29 @@ Respond in JSON format:
     // provider call — no await between here and generateContent. The caller's
     // pre-call gate covers the first attempt; this covers every re-invocation.
     if (shouldGenerate && !shouldGenerate()) {
-      console.log('[Analysis] recording became ineligible between attempts — aborting analysis (no further provider call)')
+      console.log('[Analysis] recording became ineligible between attempts — aborting analysis')
       return { summary: 'Analysis failed', language: 'unknown' }
     }
     try {
-      const analysisResult = await model.generateContent({
-        contents: [{ role: 'user', parts: [{ text: analysisPrompt }] }],
-        generationConfig: attempt.generationConfig as never
-      })
-      const response = analysisResult.response
-      let analysisText = ''
-      try {
-        analysisText = response.text()
-      } catch {
-        // .text() throws when the candidate carries no text part (e.g. blocked
-        // or MAX_TOKENS with no content) — treat as empty and log diagnostics.
-        analysisText = ''
-      }
+      const analysisText = (await brain.generate(
+        [{ role: 'user', content: analysisPrompt }],
+        {
+          maxTokens: 8192,
+          json: attempt.json,
+          disableThinking: true,
+          model: config.brains?.models?.[brain.id],
+          shouldGenerate
+        }
+      )) ?? ''
 
       const parsed = extractAnalysisJson(analysisText)
       if (parsed) return parsed
-
-      // Parse miss — surface why so the failure isn't invisible.
-      logAnalysisFailure(attempt.label, response, analysisText)
+      console.warn(
+        `[Analysis] ${brain.id} returned unparseable output (${attempt.label}): ` +
+          describeJsonParseError(analysisText)
+      )
     } catch (e) {
-      console.warn(`[Analysis] Gemini call failed (${attempt.label}):`, e instanceof Error ? e.message : e)
+      console.warn(`[Analysis] ${brain.id} call failed (${attempt.label}):`, e instanceof Error ? e.message : e)
     }
   }
 
@@ -1586,40 +1588,17 @@ function describeJsonParseError(text: string): string {
 }
 
 /**
- * Log the diagnostics that make an otherwise-silent analysis failure
- * debuggable: the model's finishReason, token usage, and the head of the
- * response body (the three things missing when a real transcript produced
- * `{ summary: 'Analysis failed' }`).
- */
-function logAnalysisFailure(label: string, response: unknown, text: string): void {
-  const r = response as {
-    candidates?: Array<{ finishReason?: string }>
-    usageMetadata?: unknown
-  }
-  const finishReason = r?.candidates?.[0]?.finishReason ?? 'unknown'
-  const usage = r?.usageMetadata ? JSON.stringify(r.usageMetadata) : 'n/a'
-  console.warn(
-    `[Analysis] Failed to parse Gemini analysis (${label}): finishReason=${finishReason}, ` +
-    `usage=${usage}, parseError=${describeJsonParseError(text)}, ` +
-    `text[0:300]=${JSON.stringify((text || '').slice(0, 300))}`
-  )
-}
-
-/**
  * Self-healing backfill: find transcripts whose analysis never completed — the
  * 'Analysis failed' sentinel, or a NULL summary/title from an older build — and
- * re-run the Gemini analysis on the stored full_text. Analysis normally runs
+ * re-run analysis with the configured AI brain on the stored full_text. Analysis normally runs
  * only once, at transcription time, so without this a transient Gemini failure
  * leaves a transcript with junk analysis (filename-slug wiki titles, skipped
  * actionables) forever. Bounded to `limit` rows per run to keep API cost
  * predictable. Returns the number of transcripts actually healed.
  */
 export async function reanalyzeFailedTranscripts(limit = 3): Promise<number> {
-  if (!resolveGeminiApiKey()) {
-    // No Gemini key → re-analysis can't produce anything better; skip rather
-    // than churn the same rows every run.
-    return 0
-  }
+  const analysisBrain = await getBrainRouter().resolve('transcribeAnalyze', 'generate')
+  if (!analysisBrain) return 0
 
   // RE-2 / INC-3 / P1 (round-3): the eligibility (soft-deleted + personal +
   // value-excluded) is now baked INTO the query (getFailedTranscriptsForRe-
@@ -1659,19 +1638,22 @@ export async function reanalyzeFailedTranscripts(limit = 3): Promise<number> {
       // ADV42-1 sweep (round-44) — gate the two-attempt retry inside analyze so a
       // mid-analysis exclusion stops the second Gemini send for this row.
       const reanalysisConfig = getConfig()
-      const reanalysisHasGemini = !!resolveGeminiApiKey()
       const summaryRun = createProcessingRun({
         recordingId: row.recording_id,
         stage: 'summary',
-        provider: reanalysisHasGemini ? 'gemini' : 'hidock-next',
-        tool: reanalysisHasGemini ? 'gemini-analysis' : 'local-fallback',
-        model: reanalysisHasGemini ? (reanalysisConfig.transcription.geminiModel || 'gemini-3.5-flash') : null,
-        execution: reanalysisHasGemini ? 'cloud' : 'local'
+        provider: analysisBrain.id,
+        tool: `${analysisBrain.id}-analysis`,
+        model: reanalysisConfig.brains?.models?.[analysisBrain.id] ||
+          (analysisBrain.id === 'ollama' ? reanalysisConfig.chat?.ollamaModel : reanalysisConfig.transcription.geminiModel),
+        execution: analysisBrain.id === 'gemini-api' ? 'cloud' : 'local'
       })
       let analysis: TranscriptAnalysis
       try {
-        analysis = await analyzeTranscriptWithGemini(row.full_text, [], () =>
-          isRecordingEligible(row.recording_id)
+        analysis = await analyzeTranscript(
+          row.full_text,
+          [],
+          () => isRecordingEligible(row.recording_id),
+          analysisBrain
         )
       } catch (error) {
         failProcessingRun(summaryRun.id, error instanceof Error ? error.message : String(error))
@@ -1705,10 +1687,11 @@ export async function reanalyzeFailedTranscripts(limit = 3): Promise<number> {
       const titleRun = createProcessingRun({
         recordingId: row.recording_id,
         stage: 'title',
-        provider: reanalysisHasGemini ? 'gemini' : 'hidock-next',
-        tool: reanalysisHasGemini ? 'gemini-analysis' : 'local-fallback',
-        model: reanalysisHasGemini ? (reanalysisConfig.transcription.geminiModel || 'gemini-3.5-flash') : null,
-        execution: reanalysisHasGemini ? 'cloud' : 'local',
+        provider: analysisBrain.id,
+        tool: `${analysisBrain.id}-analysis`,
+        model: reanalysisConfig.brains?.models?.[analysisBrain.id] ||
+          (analysisBrain.id === 'ollama' ? reanalysisConfig.chat?.ollamaModel : reanalysisConfig.transcription.geminiModel),
+        execution: analysisBrain.id === 'gemini-api' ? 'cloud' : 'local',
         parentRunIds: [summaryRun.id]
       })
       completeProcessingRun(titleRun.id, {
@@ -1941,7 +1924,9 @@ Meeting ${i + 1}: "${m.subject}"
   const config = getConfig()
   const transcriptionProvider = providerOverride || config.transcription.provider || 'gemini'
   const transcriptionModel = transcriptionProvider === 'local-asr'
-    ? 'CohereLabs/cohere-transcribe-03-2026'
+    ? config.transcription.localAsrEngine === 'whisper-cpp'
+      ? basename(config.transcription.whisperModelPath).replace(/^ggml-/, '').replace(/\.bin$/, '')
+      : 'CohereLabs/cohere-transcribe-03-2026'
     : transcriptionProvider === 'vibevoice'
       ? 'microsoft/VibeVoice-ASR'
       : config.transcription.geminiModel || 'gemini-3.5-flash'
@@ -2096,7 +2081,9 @@ Do not create speaker turns outside these intervals except for up to 1.5 seconds
     recordingId,
     stage: 'transcription',
     provider: transcriptionProvider,
-    tool: transcriptionProvider === 'local-asr' ? 'asr-mcp' : transcriptionProvider,
+    tool: transcriptionProvider === 'local-asr'
+      ? (config.transcription.localAsrEngine || 'asr-mcp')
+      : transcriptionProvider,
     model: transcriptionModel,
     execution,
     parentRunIds: [vadRun.id, diarizationRun.id, voiceIdRun.id]
@@ -2175,37 +2162,46 @@ Do not create speaker turns outside these intervals except for up to 1.5 seconds
   // ADV42-1 (round-44, HIGH) — SECOND-STAGE eligibility recheck. The up-front
   // gate ran before audio transcription; that transcription is an await, so the
   // owner could have trashed / marked personal / value-excluded this recording
-  // WHILE it was in flight. analyzeTranscriptWithGemini is a FRESH provider call
-  // (Gemini analysis) — sending the transcript to it after exclusion is a NEW
-  // disclosure to an external LLM that the later persist-time stillProcessable()
-  // checks cannot undo. Re-check SYNCHRONOUSLY here, adjacent to the analysis
-  // call (no await between), and return the cancelled outcome WITHOUT invoking
-  // the analysis provider when ineligible or the lookup fails closed.
+  // WHILE it was in flight. Transcript analysis is a FRESH provider call — local
+  // or cloud depending on routing. Re-check synchronously here so an excluded
+  // recording is never sent into that next stage and no derivatives persist.
   if (!isRecordingEligible(recordingId)) {
     console.log(
       `[Transcription] Recording ${recordingId} became ineligible during audio transcription ` +
-        '— skipping Gemini analysis; no transcript sent to any external LLM for analysis'
+        '— skipping transcript analysis; no transcript sent to an AI provider'
     )
     return { status: 'cancelled' }
   }
 
   progressCallback?.('analyzing', 50) // spec-014: progress reporting
-  const hasGeminiAnalysis = !!resolveGeminiApiKey()
-  const analysisProvider = hasGeminiAnalysis ? 'gemini' : 'hidock-next'
-  const analysisModel = hasGeminiAnalysis ? (config.transcription.geminiModel || 'gemini-3.5-flash') : null
+  const analysisBrain = await getBrainRouter().resolve('transcribeAnalyze', 'generate')
+  // Provider resolution may await a local health check. Revalidate immediately
+  // before the transcript can be sent to whichever brain was selected.
+  if (!isRecordingEligible(recordingId)) {
+    console.log(`[Transcription] Recording ${recordingId} became ineligible during analysis provider resolution`)
+    return { status: 'cancelled' }
+  }
+  const analysisProvider = analysisBrain?.id || 'hidock-next'
+  const analysisModel = analysisBrain
+    ? config.brains?.models?.[analysisBrain.id] ||
+      (analysisBrain.id === 'ollama' ? config.chat?.ollamaModel : config.transcription.geminiModel)
+    : null
   const summaryRun = createProcessingRun({
     recordingId,
     stage: 'summary',
     provider: analysisProvider,
-    tool: hasGeminiAnalysis ? 'gemini-analysis' : 'local-fallback',
+    tool: analysisBrain ? `${analysisBrain.id}-analysis` : 'local-fallback',
     model: analysisModel,
-    execution: hasGeminiAnalysis ? 'cloud' : 'local',
+    execution: analysisBrain?.id === 'gemini-api' ? 'cloud' : 'local',
     parentRunIds: [transcriptionRun.id, diarizationRun.id]
   })
   let analysis: TranscriptAnalysis
   try {
-    analysis = await analyzeTranscriptWithGemini(fullText, candidateMeetings, () =>
-      isRecordingEligible(recordingId)
+    analysis = await analyzeTranscript(
+      fullText,
+      candidateMeetings,
+      () => isRecordingEligible(recordingId),
+      analysisBrain
     )
     completeProcessingRun(summaryRun.id, { outputRefs: { summary: `trans_${recordingId}.summary` } })
   } catch (error) {
@@ -2216,9 +2212,9 @@ Do not create speaker turns outside these intervals except for up to 1.5 seconds
     recordingId,
     stage: 'title',
     provider: analysisProvider,
-    tool: hasGeminiAnalysis ? 'gemini-analysis' : 'local-fallback',
+    tool: analysisBrain ? `${analysisBrain.id}-analysis` : 'local-fallback',
     model: analysisModel,
-    execution: hasGeminiAnalysis ? 'cloud' : 'local',
+    execution: analysisBrain?.id === 'gemini-api' ? 'cloud' : 'local',
     parentRunIds: [summaryRun.id]
   })
   completeProcessingRun(titleRun.id, { outputRefs: { titleSuggestion: `trans_${recordingId}.title_suggestion` } })
@@ -2226,9 +2222,9 @@ Do not create speaker turns outside these intervals except for up to 1.5 seconds
     recordingId,
     stage: 'meeting-resolution',
     provider: analysisProvider,
-    tool: hasGeminiAnalysis ? 'gemini-analysis' : 'calendar-overlap-scorer',
+    tool: analysisBrain ? `${analysisBrain.id}-analysis` : 'calendar-overlap-scorer',
     model: analysisModel,
-    execution: hasGeminiAnalysis ? 'cloud' : 'local',
+    execution: analysisBrain?.id === 'gemini-api' ? 'cloud' : 'local',
     parentRunIds: [summaryRun.id]
   })
   completeProcessingRun(meetingResolutionRun.id, {

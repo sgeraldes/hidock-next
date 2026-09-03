@@ -1,6 +1,6 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { Settings } from '../Settings'
 
 const mockLoadConfig = vi.fn()
@@ -183,6 +183,44 @@ describe('Settings Page', () => {
 
     // Should be hidden again
     expect(apiKeyInput.type).toBe('password')
+  })
+
+  it('accepts current Gemini authorization keys without the legacy AIza prefix', async () => {
+    const { useConfigStore } = await import('@/store/domain/useConfigStore')
+    const mockedUseConfigStore = vi.mocked(useConfigStore)
+    const originalImpl = mockedUseConfigStore.getMockImplementation()
+    const stableState = {
+      config: {
+        calendar: { icsUrl: '', syncEnabled: true, syncIntervalMinutes: 15 },
+        transcription: { geminiApiKey: 'AIzaTestKey12345', geminiModel: 'gemini-3-pro-preview' },
+        chat: { provider: 'gemini' as const },
+        embeddings: { ollamaBaseUrl: 'http://localhost:11434' }
+      },
+      loadConfig: mockLoadConfig,
+      updateConfig: mockUpdateConfig,
+      configLoading: false
+    }
+    mockedUseConfigStore.mockImplementation((selector?: any) =>
+      typeof selector === 'function' ? selector(stableState) : stableState
+    )
+
+    try {
+      render(<Settings />)
+
+      const authKey = 'gemini-auth-key-example-1234567890'
+      const input = screen.getByLabelText('Gemini API Key')
+      fireEvent.change(input, { target: { value: authKey } })
+      fireEvent.click(screen.getByLabelText('Save transcription settings'))
+
+      await waitFor(() => {
+        expect(mockUpdateConfig).toHaveBeenCalledWith(
+          'transcription',
+          expect.objectContaining({ geminiApiKey: authKey })
+        )
+      })
+    } finally {
+      if (originalImpl) mockedUseConfigStore.mockImplementation(originalImpl)
+    }
   })
 
   // C-006: Sync interval clamping - HTML attributes enforce valid range

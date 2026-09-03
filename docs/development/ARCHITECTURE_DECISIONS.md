@@ -37,6 +37,72 @@
 
 ## Core Architecture Decisions
 
+### CAD-004: Context Graph Uses Namespaced Capture Provenance for Imported Knowledge
+**Status:** Accepted
+**Date:** 2026-08-28
+**Deciders:** Kelly Pearson / HiDock Next
+
+**Context:** Context Graph historically accepts only device transcript rows and attributes every graph assertion to a
+recording ID. HiNotes meetings arrive through the artifact/capture pipeline, so treating artifact IDs as recordings
+would fail the graph's positive recording allowlist, while unattributed folder-style edges are deliberately hidden on
+non-owner graph surfaces.
+
+**Decision:** HiNotes graph assertions use `capture:<knowledge_capture_id>` as a namespaced graph source and retain the
+artifact ID as their transcript-like assertion ID. The graph visibility boundary partitions recording and capture
+sources, resolves each through its existing fail-closed eligibility allowlist, and recombines only positively verified
+sources. A dedicated artifact marker stores the content hash and meeting identity for incremental replacement and
+retraction.
+
+**Options considered:**
+
+| Option | Privacy boundary | Updates/deletion | Compatibility | Decision |
+|---|---:|---:|---:|---|
+| Create synthetic recording rows | Misleading | Strong | High coupling | Rejected |
+| Ingest as unattributed folder edges | Hidden in Context Graph | Weak | Simple | Rejected |
+| Add a parallel artifact-edge table | Strong | Strong | Broad schema change | Deferred |
+| Namespaced capture provenance | Strong | Strong | Reuses graph cleanup | Accepted |
+
+**Consequences:**
+- Library, RAG, and Context Graph apply the same standalone-capture deletion and value-rating rules.
+- Changed HiNotes artifacts replace their prior graph assertions without inflating shared edge weights.
+- Deleted or newly ineligible captures retract their graph provenance on the next ingest pass.
+- Local Ollama is supported by the shared completion-provider resolver, so graph extraction does not require Gemini.
+- New `entity:artifact-ready` events schedule the same debounced graph refresh used for transcripts.
+
+### CAD-003: HiNotes Shortcut Bridge Uses the Connector Ingestion Pipeline
+**Status:** Accepted
+**Date:** 2026-08-27
+**Deciders:** Kelly Pearson / HiDock Next
+
+**Context:** The existing macOS HiNotes Sync shortcut already authenticates to HiNotes and exports cloud summaries and
+speaker-labelled transcripts to Mem. HiNotes Next needs the same knowledge, but its database may be open while the
+shortcut runs and must not be modified by an external script.
+
+**Decision:** The shortcut writes one Markdown file per stable HiNotes note ID to `~/HiDock/HiNotes Inbox`. A native
+`hinotes` connector incrementally reads that folder and routes each file through `artifact-service`, preserving source
+provenance, extraction, embeddings, capture creation, and event emission. Connector items update in place by
+`(source_connector_id, source_ref)` when their content changes.
+
+**Options considered:**
+
+| Option | Complexity | Data safety | Incremental updates | Decision |
+|---|---:|---:|---:|---|
+| Shortcut writes directly to `hidock.db` | Low | Poor | Fragile | Rejected |
+| Shortcut calls an ad-hoc localhost API | Medium | Good | Good | Deferred |
+| Export folder + native connector | Medium | Strong | Strong | Accepted |
+
+**Consequences:**
+- The Mem destination remains independent and can fail without blocking HiNotes Next.
+- The shortcut owns HiNotes web authentication; HiNotes Next never stores the cloud session token.
+- Imports remain safe while the app is running and automatically gain Ollama indexing.
+- The app schedules the folder connector every minute; changes may take up to one minute to appear.
+- The hand-off format is intentionally inspectable Markdown rather than a private database contract.
+
+**Action items:**
+1. Add the native HiNotes connector and connector-source upsert semantics.
+2. Add a shortcut-side exporter with its own state file and stable note filenames.
+3. Cover connector cursoring and source update behavior with offline tests.
+
 ### CAD-002: Inline Row Expansion with Virtualizer
 **Date:** 2026-01-12
 **Context:** Phase 2 - Inline Row Expansion

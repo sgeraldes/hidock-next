@@ -94,7 +94,8 @@ export async function listGeminiTranscriptionModels(
   if (!key) return { ok: false, models: FALLBACK_GEMINI_MODELS, reason: 'no-key' }
   try {
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}&pageSize=200`
+      'https://generativelanguage.googleapis.com/v1beta/models?pageSize=200',
+      { headers: { 'x-goog-api-key': key } }
     )
     if (!res.ok) return { ok: false, models: FALLBACK_GEMINI_MODELS, reason: `http-${res.status}` }
     const data = (await res.json()) as { models?: RawModel[] }

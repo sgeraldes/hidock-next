@@ -45,10 +45,17 @@ describe('OllamaBrain', () => {
     expect((await brain.authStatus()).configured).toBe(false)
   })
 
-  it('generate() forwards a single-prompt + systemPrompt to OllamaService.generate', async () => {
-    const out = await brain.generate([{ role: 'user', content: 'the prompt' }], { systemPrompt: 'sys' })
+  it('generate() forwards structured-output and model options to OllamaService.generate', async () => {
+    const signal = new AbortController().signal
+    const out = await brain.generate([{ role: 'user', content: 'the prompt' }], {
+      systemPrompt: 'sys', temperature: 0.1, maxTokens: 8192, model: 'gemma3:12b',
+      json: true, disableThinking: true, signal
+    })
     expect(out).toBe('ollama gen')
-    expect(mockGenerate).toHaveBeenCalledWith('the prompt', 'sys')
+    expect(mockGenerate).toHaveBeenCalledWith('the prompt', {
+      systemPrompt: 'sys', temperature: 0.1, maxTokens: 8192, model: 'gemma3:12b',
+      json: true, disableThinking: true, signal
+    })
     expect(mockChat).not.toHaveBeenCalled()
   })
 
@@ -63,7 +70,10 @@ describe('OllamaBrain', () => {
     expect(out).toBe('ollama chat')
     expect(mockChat).toHaveBeenCalledWith(
       [{ role: 'user', content: 'hi' }],
-      { systemPrompt: 'sys', temperature: 0.2, maxTokens: 50, signal }
+      {
+        systemPrompt: 'sys', temperature: 0.2, maxTokens: 50,
+        model: undefined, json: undefined, disableThinking: undefined, signal
+      }
     )
   })
 

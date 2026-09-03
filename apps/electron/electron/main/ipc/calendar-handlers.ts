@@ -1,4 +1,4 @@
-import { ipcMain } from 'electron'
+import { BrowserWindow, dialog, ipcMain } from 'electron'
 import { getConfig, updateConfig } from '../services/config'
 import { emitActivityLog } from '../services/activity-log'
 import {
@@ -7,6 +7,7 @@ import {
   isCalendarSyncActive,
   CalendarSyncResult
 } from '../services/calendar-sync'
+import { isCalendarFileSyncActive, syncCalendarFile } from '../services/calendar-file-sync'
 import { clearAllMeetings } from '../services/database'
 import { whenBootTasksSettled, areBootTasksSettled } from '../services/boot-scheduler'
 import {
@@ -31,16 +32,40 @@ type CalendarSyncTrigger = 'manual' | 'mount'
  */
 const MANUAL_BOOT_WAIT_MS = 2500
 
+function isCalendarConfigured(config: ReturnType<typeof getConfig>): boolean {
+  return config.calendar.source === 'local-file'
+    ? Boolean(config.calendar.localFilePath)
+    : Boolean(config.calendar.icsUrl)
+}
+
+function syncConfiguredCalendar(
+  config: ReturnType<typeof getConfig>,
+  options?: Parameters<typeof syncCalendar>[1]
+): Promise<CalendarSyncResult> {
+  if (config.calendar.source === 'local-file') {
+    return options
+      ? syncCalendarFile(config.calendar.localFilePath ?? '', options)
+      : syncCalendarFile(config.calendar.localFilePath ?? '')
+  }
+  return options ? syncCalendar(config.calendar.icsUrl, options) : syncCalendar(config.calendar.icsUrl)
+}
+
+function missingCalendarSourceError(config: ReturnType<typeof getConfig>): string {
+  return config.calendar.source === 'local-file'
+    ? 'No iPhone calendar file configured'
+    : 'No calendar URL configured'
+}
+
 export function registerCalendarHandlers(): void {
   // Sync calendar now
   // AUD2-010: Verify sync result and catch unexpected errors at the IPC boundary
   ipcMain.handle('calendar:sync', async (_event, rawTrigger: unknown): Promise<CalendarSyncResult> => {
     const config = getConfig()
 
-    if (!config.calendar.icsUrl) {
+    if (!isCalendarConfigured(config)) {
       return {
         success: false,
-        error: 'No calendar URL configured',
+        error: missingCalendarSourceError(config),
         meetingsCount: 0
       }
     }
@@ -60,7 +85,7 @@ export function registerCalendarHandlers(): void {
         if (!areBootTasksSettled()) {
           // Still busy. Start the sync behind the full gate and answer NOW, so
           // the control is not silently unresponsive for the whole boot window.
-          void syncCalendar(config.calendar.icsUrl).catch((e) =>
+          void syncConfiguredCalendar(config).catch((e) =>
             console.error('[calendar:sync] queued sync failed:', e)
           )
           emitActivityLog(
@@ -78,8 +103,8 @@ export function registerCalendarHandlers(): void {
       }
 
       // A manual sync that got here has already done its waiting.
-      const result = await syncCalendar(
-        config.calendar.icsUrl,
+      const result = await syncConfiguredCalendar(
+        config,
         trigger === 'manual' ? { waitForBootMs: 0 } : {}
       )
       // AUD2-010: Verify result is well-formed before returning to renderer
@@ -101,10 +126,10 @@ export function registerCalendarHandlers(): void {
   ipcMain.handle('calendar:clear-and-sync', async (): Promise<CalendarSyncResult> => {
     const config = getConfig()
 
-    if (!config.calendar.icsUrl) {
+    if (!isCalendarConfigured(config)) {
       return {
         success: false,
-        error: 'No calendar URL configured',
+        error: missingCalendarSourceError(config),
         meetingsCount: 0
       }
     }
@@ -112,7 +137,7 @@ export function registerCalendarHandlers(): void {
     try {
       clearAllMeetings()
       // `fresh`: must not join a sync that started before the clear.
-      const result = await syncCalendar(config.calendar.icsUrl, { fresh: true })
+      const result = await syncConfiguredCalendar(config, { fresh: true })
       if (!result || typeof result.success !== 'boolean') {
         console.error('[calendar:clear-and-sync] syncCalendar returned malformed result:', result)
         return { success: false, error: 'Sync returned an invalid result', meetingsCount: 0 }
@@ -143,6 +168,23 @@ export function registerCalendarHandlers(): void {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error'
       return { success: false, error: message }
+    }
+  })
+
+  ipcMain.handle('calendar:select-file', async () => {
+    try {
+      const focusedWindow = BrowserWindow.getFocusedWindow()
+      const options: Electron.OpenDialogOptions = {
+        title: 'Choose the iPhone calendar export',
+        properties: ['openFile'],
+        filters: [{ name: 'Calendar export', extensions: ['tsv', 'txt'] }]
+      }
+      const result = focusedWindow
+        ? await dialog.showOpenDialog(focusedWindow, options)
+        : await dialog.showOpenDialog(options)
+      return { success: true, data: result.canceled ? null : (result.filePaths[0] ?? null) }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Could not choose calendar file' }
     }
   })
 
@@ -207,7 +249,7 @@ export function registerCalendarHandlers(): void {
  */
 export function initializeCalendarAutoSync(): void {
   const config = getConfig()
-  if (config.calendar.syncEnabled && config.calendar.icsUrl) {
+  if (config.calendar.syncEnabled && isCalendarConfigured(config)) {
     startAutoSync()
   }
 }
@@ -233,7 +275,7 @@ let autoSyncGeneration = 0
  * nothing else.
  */
 async function runScheduledSync(generation: number, reason: 'startup' | 'periodic'): Promise<void> {
-  if (reason === 'periodic' && isCalendarSyncActive()) {
+  if (reason === 'periodic' && (isCalendarSyncActive() || isCalendarFileSyncActive())) {
     // A previous pass is still going (slow feed, or parked behind boot tasks).
     // Stacking another achieves nothing — the next tick will pick it up.
     console.log('Skipping periodic calendar sync: a sync is already in progress')
@@ -241,10 +283,10 @@ async function runScheduledSync(generation: number, reason: 'startup' | 'periodi
   }
 
   const currentConfig = getConfig()
-  if (!currentConfig.calendar.icsUrl) return
+  if (!isCalendarConfigured(currentConfig)) return
 
   try {
-    const result = await syncCalendar(currentConfig.calendar.icsUrl, {
+    const result = await syncConfiguredCalendar(currentConfig, {
       isStillWanted: () => generation === autoSyncGeneration
     })
     // The schedule may have been stopped while this was waiting on boot tasks.
@@ -272,7 +314,7 @@ function startAutoSync(): void {
 
   // Sync on start. This does NOT run now: syncCalendar defers it until the boot
   // tasks have drained (F15), so it no longer competes with them.
-  if (config.calendar.icsUrl) {
+  if (isCalendarConfigured(config)) {
     void runScheduledSync(generation, 'startup')
   }
 

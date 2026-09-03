@@ -22,7 +22,7 @@ vi.mock('electron', () => ({
 // Mock the knowledge-graph service
 vi.mock('../../services/knowledge-graph-service', () => ({
   queryStats: vi.fn(),
-  ingestFromDbTranscripts: vi.fn(),
+  ingestAllGraphSources: vi.fn(),
   ingestFromFolder: vi.fn(),
   queryTopAttendees: vi.fn(),
   queryTopSkill: vi.fn(),
@@ -32,7 +32,7 @@ vi.mock('../../services/knowledge-graph-service', () => ({
 
 import {
   queryStats,
-  ingestFromDbTranscripts,
+  ingestAllGraphSources,
   ingestFromFolder,
   queryTopAttendees,
   queryTopSkill,
@@ -117,14 +117,14 @@ describe('knowledge-graph IPC handlers', () => {
   describe('graph:ingestAll', () => {
     it('returns success with ingest result', async () => {
       const mockResult = { ingested: 5, skipped: 2, errors: [] }
-      ;(ingestFromDbTranscripts as any).mockResolvedValue(mockResult)
+      ;(ingestAllGraphSources as any).mockResolvedValue(mockResult)
 
       const result = await handlers['graph:ingestAll']({})
       expect(result).toEqual({ success: true, data: mockResult })
     })
 
     it('returns error when no provider configured', async () => {
-      ;(ingestFromDbTranscripts as any).mockRejectedValue(new Error('No AI provider configured'))
+      ;(ingestAllGraphSources as any).mockRejectedValue(new Error('No AI provider configured'))
       const result = await handlers['graph:ingestAll']({})
       expect(result.success).toBe(false)
       expect(result.error).toContain('No AI provider configured')

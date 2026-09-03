@@ -976,7 +976,7 @@ export function Today() {
               <Sun className="h-4 w-4" />
               {new Date().toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' })}
             </div>
-            <h1 className="mt-1 text-4xl font-bold tracking-tight">{greeting()}, Sebastián</h1>
+            <h1 className="mt-1 text-4xl font-bold tracking-tight">{greeting()}, Kelly</h1>
             {data && (
               <p className="mt-2 text-sm text-foreground/70">
                 <span className="font-semibold text-foreground">{data.stats.transcribedCount}</span> meetings in your
