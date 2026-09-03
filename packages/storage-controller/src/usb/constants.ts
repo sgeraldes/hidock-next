@@ -8,6 +8,7 @@ export const USB_VENDOR_IDS: number[] = [0x10d6, 0x3887]
 // Product IDs
 export const USB_PRODUCT_IDS = {
   H1: 0xaf0c,
+  H1_NEW: 0xb00c,
   H1E_OLD: 0xaf0d,
   H1E: 0xb00d,
   P1_OLD: 0xaf0e,
@@ -24,6 +25,7 @@ export const USB_PRODUCT_IDS = {
 // Product ID to model name mapping
 export const PRODUCT_ID_MODEL_MAP: Record<number, DeviceModel> = {
   0xaf0c: 'hidock-h1',
+  0xb00c: 'hidock-h1',
   0x0100: 'hidock-h1',
   0x0102: 'hidock-h1',
   0xaf0d: 'hidock-h1e',

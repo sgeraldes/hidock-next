@@ -670,6 +670,7 @@ def detect_device_model(vendor_id: int, product_id: int) -> DeviceModel:
     """
     model_map = {
         0xAF0C: DeviceModel.H1,
+        0xB00C: DeviceModel.H1,  # H1 (newer PID)
         0x0100: DeviceModel.H1,  # H1 alt
         0x0102: DeviceModel.H1,  # H1 alt
         0xAF0D: DeviceModel.H1E,

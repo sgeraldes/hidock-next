@@ -296,6 +296,7 @@ class EnhancedDeviceSelector(ctk.CTkFrame):
         # HiDock device VID/PID combinations
         hidock_devices = [
             (0x10D6, 0xAF0C),  # H1
+            (0x10D6, 0xB00C),  # H1 (newer PID)
             (0x10D6, 0xAF0D),  # H1E variant
             (0x10D6, 0xAF0E),  # P1
             (0x10D6, 0xB00E),  # P1 variant
@@ -307,6 +308,7 @@ class EnhancedDeviceSelector(ctk.CTkFrame):
         """Get HiDock model name from product ID."""
         model_map = {
             0xAF0C: "H1",
+            0xB00C: "H1",
             0xAF0D: "Device",  # H1E variant
             0xAF0E: "P1",
             0xB00E: "P1 Variant",

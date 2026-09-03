@@ -34,6 +34,13 @@ class TestConstants:
         # entry in the canonical product-ID list defined in constants.py.
         assert constants.DEFAULT_PRODUCT_ID == 0xAF0C
 
+    def test_h1_newer_product_id_recognized(self):
+        """H1 units report 0xB00C (45068) — the primary H1 PID in official jensen.js."""
+        assert 0xB00C in constants.HIDOCK_PRODUCT_IDS
+        assert constants.PRODUCT_ID_MODEL_MAP[0xB00C] == "hidock-h1"
+        # 0xAF0C is the older H1 PID (44812), still supported
+        assert constants.PRODUCT_ID_MODEL_MAP[0xAF0C] == "hidock-h1"
+
     def test_endpoint_constants(self):
         """Test endpoint address constants."""
         import constants

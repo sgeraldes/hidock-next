@@ -20,7 +20,8 @@ ALL_VENDOR_IDS = [DEFAULT_VENDOR_ID, ALTERNATE_VENDOR_ID]
 # Source: Official HiDock HiNotes jensen.js (December 2025)
 HIDOCK_PRODUCT_IDS = [
     # Original product IDs
-    0xAF0C,  # H1 (45068 decimal)
+    0xAF0C,  # H1 (44812 decimal, older PID)
+    0xB00C,  # H1 (45068 decimal, newer PID)
     0xAF0D,  # H1E (45069 decimal, older PID)
     0xB00D,  # H1E (newer PID)
     0xAF0E,  # P1 (45070 decimal, older PID)
@@ -38,6 +39,7 @@ HIDOCK_PRODUCT_IDS = [
 # Product ID to model name mapping
 PRODUCT_ID_MODEL_MAP = {
     0xAF0C: "hidock-h1",
+    0xB00C: "hidock-h1",
     0x0100: "hidock-h1",
     0x0102: "hidock-h1",
     0xAF0D: "hidock-h1e",

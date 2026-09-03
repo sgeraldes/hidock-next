@@ -106,6 +106,7 @@ export const USB_VENDOR_IDS: number[] = [0x10d6, 0x3887]
 
 export const USB_PRODUCT_IDS = {
   H1: 0xaf0c,
+  H1_NEW: 0xb00c,
   H1E_OLD: 0xaf0d,
   H1E: 0xb00d,
   P1_OLD: 0xaf0e,
@@ -1076,6 +1077,7 @@ export class JensenDevice {
   private detectModel(productId: number): DeviceModel {
     switch (productId) {
       case USB_PRODUCT_IDS.H1:
+      case USB_PRODUCT_IDS.H1_NEW:
       case USB_PRODUCT_IDS.H1_ALT1:
       case USB_PRODUCT_IDS.H1_ALT2:
         return 'hidock-h1'

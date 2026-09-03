@@ -42,6 +42,7 @@ import usb.util  # noqa: E402
 USB_VENDOR_IDS = [0x10D6, 0x3887]
 PRODUCT_ID_MODEL = {
     0xAF0C: "H1",
+    0xB00C: "H1",
     0xAF0D: "H1E",
     0xB00D: "H1E",
     0xAF0E: "P1",

@@ -19,7 +19,8 @@ export const HIDOCK_VENDOR_IDS = [
 // Source: Official HiDock HiNotes jensen.js (December 2025)
 export const HIDOCK_PRODUCT_IDS = {
   // H1 devices
-  H1: 0xAF0C,           // 45068 decimal
+  H1: 0xAF0C,           // 44812 decimal (older PID)
+  H1_NEW: 0xB00C,       // 45068 decimal (newer PID)
   H1_ALT_1: 0x0100,     // 256 decimal (alt)
   H1_ALT_2: 0x0102,     // 258 decimal (alt)
   // H1E devices
@@ -41,6 +42,7 @@ export const HIDOCK_PRODUCT_IDS = {
 // All Product IDs as an array for device filtering
 export const ALL_HIDOCK_PRODUCT_IDS = [
   HIDOCK_PRODUCT_IDS.H1,
+  HIDOCK_PRODUCT_IDS.H1_NEW,
   HIDOCK_PRODUCT_IDS.H1_ALT_1,
   HIDOCK_PRODUCT_IDS.H1_ALT_2,
   HIDOCK_PRODUCT_IDS.H1E,
