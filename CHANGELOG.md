@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Device detection**: Added product ID `0xB00C` (45068) for the HiDock H1 to every device map (desktop, web, jensen-protocol, storage-controller). It is the primary H1 PID in the official HiNotes jensen.js; H1 units reporting it were not recognized. Corrected the `0xAF0C` comments, which claimed 45068 decimal (it is 44812).
 - **Database**: Fixed critical initialization crash on fresh installs by re-ordering `SCHEMA` to satisfy foreign key constraints.
 - **Database**: Automated V11 migration logic to correctly apply schema changes (`knowledge_captures`, `audio_sources`, etc.) and migration columns to existing databases.
 - **Database**: Added missing migration tracking columns (`migrated_to_capture_id`, `migration_status`, `migrated_at`) to the base `recordings` table definition.

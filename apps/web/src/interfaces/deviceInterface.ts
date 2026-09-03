@@ -524,7 +524,8 @@ export class DeviceManager {
 export function detectDeviceModel(_vendorId: number, productId: number): DeviceModel {
     const modelMap: Record<number, DeviceModel> = {
         // H1 devices
-        0xAF0C: DeviceModel.H1,   // 45068 decimal
+        0xAF0C: DeviceModel.H1,   // 44812 decimal (older PID)
+        0xB00C: DeviceModel.H1,   // 45068 decimal (newer PID)
         0x0100: DeviceModel.H1,   // 256 decimal (alt)
         0x0102: DeviceModel.H1,   // 258 decimal (alt)
         // H1E devices
