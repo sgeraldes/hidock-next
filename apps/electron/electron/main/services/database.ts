@@ -13,7 +13,7 @@ import { getEventBus } from './event-bus'
 import { isCancelledMeetingSubject, scoreMeetingCandidates } from './recording-match-scoring'
 import type { QualityRating } from '@/types/knowledge'
 
-const SCHEMA_VERSION = 55
+const SCHEMA_VERSION = 56
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -190,6 +190,15 @@ CREATE TABLE IF NOT EXISTS action_items (
     extracted_from TEXT,
     confidence REAL,
 
+    -- Knowledge status (v56): epistemic certainty of the underlying claim,
+    -- distinct from the numeric confidence above (the extractor's numeric
+    -- certainty that this IS an action item at all). NOT NULL-enforced by
+    -- CHECK at the SQL level (see MIGRATIONS[56] comment) -- validated and
+    -- normalized in upsertConnectorKnowledgeItem instead. Allowed values:
+    -- confirmed | proposed | assumed | superseded.
+    certainty TEXT DEFAULT 'confirmed',
+    evidence TEXT, -- original source reference/quote this was derived from
+
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
 
@@ -214,10 +223,16 @@ CREATE TABLE IF NOT EXISTS decisions (
     confidence REAL,
     decided_at TEXT,
 
+    -- Knowledge status (v56): see action_items.certainty comment above.
+    certainty TEXT DEFAULT 'confirmed',
+    evidence TEXT, -- original source reference/quote this was derived from
+    superseded_by TEXT, -- id of the decisions row that supersedes this one, if any
+
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
 
-    FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE
+    FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE,
+    FOREIGN KEY (superseded_by) REFERENCES decisions(id) ON DELETE SET NULL
 );
 
 -- =============================================================================
@@ -243,6 +258,10 @@ CREATE TABLE IF NOT EXISTS risks (
     extracted_from TEXT,
     confidence REAL,
     identified_at TEXT,
+
+    -- Knowledge status (v56): see action_items.certainty comment above.
+    certainty TEXT DEFAULT 'confirmed',
+    evidence TEXT, -- original source reference/quote this was derived from
 
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -272,6 +291,10 @@ CREATE TABLE IF NOT EXISTS questions (
     confidence REAL,
     raised_at TEXT,
     answered_at TEXT,
+
+    -- Knowledge status (v56): see action_items.certainty comment above.
+    certainty TEXT DEFAULT 'confirmed',
+    evidence TEXT, -- original source reference/quote this was derived from
 
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -836,6 +859,7 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_captures_source
   ON knowledge_captures(source_connector_id, source_ref) WHERE source_connector_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_risks_capture ON risks(knowledge_capture_id);
 CREATE INDEX IF NOT EXISTS idx_questions_capture ON questions(knowledge_capture_id);
+CREATE INDEX IF NOT EXISTS idx_decisions_superseded_by ON decisions(superseded_by) WHERE superseded_by IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_quality_recording ON quality_assessments(recording_id);
 CREATE INDEX IF NOT EXISTS idx_quality_level ON quality_assessments(quality);
 
@@ -3097,6 +3121,31 @@ const MIGRATIONS: Record<number, () => void> = {
       CREATE INDEX IF NOT EXISTS idx_questions_capture ON questions(knowledge_capture_id);
     `)
     console.log('Migration v55 complete')
+  },
+  56: () => {
+    // v56: certainty (confirmed|proposed|assumed|superseded) + evidence on
+    // decisions/action_items/risks/questions, and superseded_by on decisions.
+    // Not CHECK-constrained at the SQL level (unlike severity/status above) —
+    // upsertConnectorKnowledgeItem normalizes/validates the value in code and
+    // falls back to 'confirmed' for anything unrecognized, so a bad value from
+    // a connector can never silently become an unconstrained free-text status.
+    console.log('Running migration to schema v56: certainty + evidence + decision supersession')
+    const database = getDatabase()
+    const addColumnIfMissing = (table: string, column: string, ddl: string) => {
+      const columns = getTableColumns(database, table)
+      if (!columns.includes(column)) {
+        database.run(`ALTER TABLE ${table} ADD COLUMN ${ddl}`)
+      }
+    }
+    for (const table of ['decisions', 'action_items', 'risks', 'questions']) {
+      addColumnIfMissing(table, 'certainty', "certainty TEXT DEFAULT 'confirmed'")
+      addColumnIfMissing(table, 'evidence', 'evidence TEXT')
+    }
+    addColumnIfMissing('decisions', 'superseded_by', 'superseded_by TEXT')
+    database.run(`
+      CREATE INDEX IF NOT EXISTS idx_decisions_superseded_by ON decisions(superseded_by) WHERE superseded_by IS NOT NULL;
+    `)
+    console.log('Migration v56 complete')
   },
 }
 
@@ -11550,6 +11599,20 @@ export function promoteExtractionToFirstClassTables(
  * decisions/action_items) — so unlike the transcript path, a re-sync of the
  * same (connectorId, sourceRef) UPDATES that one row instead of appending.
  */
+export const KNOWLEDGE_CERTAINTY_VALUES = ['confirmed', 'proposed', 'assumed', 'superseded'] as const
+export type KnowledgeCertainty = (typeof KNOWLEDGE_CERTAINTY_VALUES)[number]
+
+/** Fail-closed normalize: anything not in KNOWLEDGE_CERTAINTY_VALUES becomes 'confirmed'
+ * (the pre-v56 default for all existing rows), never silently stored verbatim. */
+function normalizeCertainty(value: unknown): KnowledgeCertainty {
+  // String(...) rather than a direct .trim() call: a connector payload is
+  // externally-sourced JSON, so `value` can be a number/boolean/object at
+  // runtime despite the TS type — never throw on an unexpected shape, just
+  // fail closed to 'confirmed' like any other unrecognized value.
+  const v = String(value ?? '').trim().toLowerCase()
+  return (KNOWLEDGE_CERTAINTY_VALUES as readonly string[]).includes(v) ? (v as KnowledgeCertainty) : 'confirmed'
+}
+
 export interface ConnectorKnowledgeItem {
   kind: 'decision' | 'action_item' | 'risk' | 'question'
   title: string
@@ -11572,6 +11635,14 @@ export interface ConnectorKnowledgeItem {
   answer?: string | null
   raisedAt?: string | null
   answeredAt?: string | null
+  /** Epistemic status of the underlying claim (v56) — see KnowledgeCertainty.
+   * Distinct from `confidence` above (the extractor's numeric certainty that
+   * this item exists at all, not whether the claim itself is settled). */
+  certainty?: KnowledgeCertainty | string | null
+  /** Original source reference/quote this was derived from (v56). */
+  evidence?: string | null
+  /** id of the decisions row that supersedes this one, if any (v56, decision-only). */
+  supersededBy?: string | null
 }
 
 export interface ConnectorKnowledgeItemResult {
@@ -11636,59 +11707,63 @@ export function upsertConnectorKnowledgeItem(
 
     if (item.kind === 'decision') {
       const participants = item.participants ? JSON.stringify(item.participants) : null
+      const certainty = normalizeCertainty(item.certainty)
       if (existingItem) {
         runNoSave(
           `UPDATE decisions SET content = ?, context = ?, participants = ?, extracted_from = ?,
-             confidence = ?, decided_at = ?, updated_at = ? WHERE id = ?`,
-          [item.content, item.context ?? null, participants, item.extractedFrom ?? null, item.confidence ?? null, item.decidedAt ?? null, now, itemId]
+             confidence = ?, decided_at = ?, certainty = ?, evidence = ?, superseded_by = ?, updated_at = ? WHERE id = ?`,
+          [item.content, item.context ?? null, participants, item.extractedFrom ?? null, item.confidence ?? null, item.decidedAt ?? null, certainty, item.evidence ?? null, item.supersededBy ?? null, now, itemId]
         )
       } else {
         runNoSave(
-          `INSERT INTO decisions (id, knowledge_capture_id, content, context, participants, extracted_from, confidence, decided_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [itemId, captureId, item.content, item.context ?? null, participants, item.extractedFrom ?? null, item.confidence ?? null, item.decidedAt ?? null, now, now]
+          `INSERT INTO decisions (id, knowledge_capture_id, content, context, participants, extracted_from, confidence, decided_at, certainty, evidence, superseded_by, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [itemId, captureId, item.content, item.context ?? null, participants, item.extractedFrom ?? null, item.confidence ?? null, item.decidedAt ?? null, certainty, item.evidence ?? null, item.supersededBy ?? null, now, now]
         )
       }
     } else if (item.kind === 'action_item') {
+      const certainty = normalizeCertainty(item.certainty)
       if (existingItem) {
         runNoSave(
           `UPDATE action_items SET content = ?, assignee = ?, due_date = ?, priority = COALESCE(?, priority),
-             status = COALESCE(?, status), extracted_from = ?, confidence = ?, updated_at = ? WHERE id = ?`,
-          [item.content, item.assignee ?? null, item.dueDate ?? null, item.priority ?? null, item.status ?? null, item.extractedFrom ?? null, item.confidence ?? null, now, itemId]
+             status = COALESCE(?, status), extracted_from = ?, confidence = ?, certainty = ?, evidence = ?, updated_at = ? WHERE id = ?`,
+          [item.content, item.assignee ?? null, item.dueDate ?? null, item.priority ?? null, item.status ?? null, item.extractedFrom ?? null, item.confidence ?? null, certainty, item.evidence ?? null, now, itemId]
         )
       } else {
         runNoSave(
-          `INSERT INTO action_items (id, knowledge_capture_id, content, assignee, due_date, priority, status, extracted_from, confidence, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, COALESCE(?, 'medium'), COALESCE(?, 'pending'), ?, ?, ?, ?)`,
-          [itemId, captureId, item.content, item.assignee ?? null, item.dueDate ?? null, item.priority ?? null, item.status ?? null, item.extractedFrom ?? null, item.confidence ?? null, now, now]
+          `INSERT INTO action_items (id, knowledge_capture_id, content, assignee, due_date, priority, status, extracted_from, confidence, certainty, evidence, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, COALESCE(?, 'medium'), COALESCE(?, 'pending'), ?, ?, ?, ?, ?, ?)`,
+          [itemId, captureId, item.content, item.assignee ?? null, item.dueDate ?? null, item.priority ?? null, item.status ?? null, item.extractedFrom ?? null, item.confidence ?? null, certainty, item.evidence ?? null, now, now]
         )
       }
     } else if (item.kind === 'risk') {
+      const certainty = normalizeCertainty(item.certainty)
       if (existingItem) {
         runNoSave(
           `UPDATE risks SET content = ?, context = ?, owner = ?, mitigation = ?, severity = COALESCE(?, severity),
-             likelihood = ?, status = COALESCE(?, status), extracted_from = ?, confidence = ?, identified_at = ?, updated_at = ? WHERE id = ?`,
-          [item.content, item.context ?? null, item.owner ?? null, item.mitigation ?? null, item.severity ?? null, item.likelihood ?? null, item.status ?? null, item.extractedFrom ?? null, item.confidence ?? null, item.identifiedAt ?? null, now, itemId]
+             likelihood = ?, status = COALESCE(?, status), extracted_from = ?, confidence = ?, identified_at = ?, certainty = ?, evidence = ?, updated_at = ? WHERE id = ?`,
+          [item.content, item.context ?? null, item.owner ?? null, item.mitigation ?? null, item.severity ?? null, item.likelihood ?? null, item.status ?? null, item.extractedFrom ?? null, item.confidence ?? null, item.identifiedAt ?? null, certainty, item.evidence ?? null, now, itemId]
         )
       } else {
         runNoSave(
-          `INSERT INTO risks (id, knowledge_capture_id, content, context, owner, mitigation, severity, likelihood, status, extracted_from, confidence, identified_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 'medium'), ?, COALESCE(?, 'open'), ?, ?, ?, ?, ?)`,
-          [itemId, captureId, item.content, item.context ?? null, item.owner ?? null, item.mitigation ?? null, item.severity ?? null, item.likelihood ?? null, item.status ?? null, item.extractedFrom ?? null, item.confidence ?? null, item.identifiedAt ?? null, now, now]
+          `INSERT INTO risks (id, knowledge_capture_id, content, context, owner, mitigation, severity, likelihood, status, extracted_from, confidence, identified_at, certainty, evidence, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 'medium'), ?, COALESCE(?, 'open'), ?, ?, ?, ?, ?, ?, ?)`,
+          [itemId, captureId, item.content, item.context ?? null, item.owner ?? null, item.mitigation ?? null, item.severity ?? null, item.likelihood ?? null, item.status ?? null, item.extractedFrom ?? null, item.confidence ?? null, item.identifiedAt ?? null, certainty, item.evidence ?? null, now, now]
         )
       }
     } else {
+      const certainty = normalizeCertainty(item.certainty)
       if (existingItem) {
         runNoSave(
           `UPDATE questions SET content = ?, context = ?, raised_by = ?, answer = ?, status = COALESCE(?, status),
-             extracted_from = ?, confidence = ?, raised_at = ?, answered_at = ?, updated_at = ? WHERE id = ?`,
-          [item.content, item.context ?? null, item.raisedBy ?? null, item.answer ?? null, item.status ?? null, item.extractedFrom ?? null, item.confidence ?? null, item.raisedAt ?? null, item.answeredAt ?? null, now, itemId]
+             extracted_from = ?, confidence = ?, raised_at = ?, answered_at = ?, certainty = ?, evidence = ?, updated_at = ? WHERE id = ?`,
+          [item.content, item.context ?? null, item.raisedBy ?? null, item.answer ?? null, item.status ?? null, item.extractedFrom ?? null, item.confidence ?? null, item.raisedAt ?? null, item.answeredAt ?? null, certainty, item.evidence ?? null, now, itemId]
         )
       } else {
         runNoSave(
-          `INSERT INTO questions (id, knowledge_capture_id, content, context, raised_by, answer, status, extracted_from, confidence, raised_at, answered_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 'open'), ?, ?, ?, ?, ?, ?)`,
-          [itemId, captureId, item.content, item.context ?? null, item.raisedBy ?? null, item.answer ?? null, item.status ?? null, item.extractedFrom ?? null, item.confidence ?? null, item.raisedAt ?? null, item.answeredAt ?? null, now, now]
+          `INSERT INTO questions (id, knowledge_capture_id, content, context, raised_by, answer, status, extracted_from, confidence, raised_at, answered_at, certainty, evidence, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 'open'), ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [itemId, captureId, item.content, item.context ?? null, item.raisedBy ?? null, item.answer ?? null, item.status ?? null, item.extractedFrom ?? null, item.confidence ?? null, item.raisedAt ?? null, item.answeredAt ?? null, certainty, item.evidence ?? null, now, now]
         )
       }
     }

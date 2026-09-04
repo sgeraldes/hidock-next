@@ -199,4 +199,70 @@ describe('sourceItemToConnectorKnowledgeItem', () => {
     expect(mapped.title).toBe('Who owns the migration cutover date?')
     expect(mapped.raisedBy).toBe('Kelly')
   })
+
+  // v56 — certainty/evidence passthrough
+  it('passes certainty and evidence through for a decision', () => {
+    const item: SourceItem = {
+      externalId: 'd-1',
+      kind: 'decision',
+      mime: 'application/json',
+      title: 'Ollama switch',
+      createdAt: '2026-09-04T00:00:00Z',
+      entity: {
+        content: 'Switch to Ollama',
+        certainty: 'proposed',
+        evidence: 'Slack thread #eng, msg 1699',
+        supersededBy: null,
+      },
+    }
+    const mapped = sourceItemToConnectorKnowledgeItem(item)
+    expect(mapped.certainty).toBe('proposed')
+    expect(mapped.evidence).toBe('Slack thread #eng, msg 1699')
+    expect(mapped.supersededBy).toBeNull()
+  })
+
+  it('defaults certainty and evidence to null when the source omits them, for every kind', () => {
+    const decision = sourceItemToConnectorKnowledgeItem({
+      externalId: 'd-2', kind: 'decision', mime: 'application/json', createdAt: '2026-09-04T00:00:00Z',
+      entity: { content: 'A decision' },
+    })
+    const action = sourceItemToConnectorKnowledgeItem({
+      externalId: 'a-1', kind: 'action_item', mime: 'application/json', createdAt: '2026-09-04T00:00:00Z',
+      entity: { content: 'An action' },
+    })
+    const risk = sourceItemToConnectorKnowledgeItem({
+      externalId: 'r-2', kind: 'risk', mime: 'application/json', createdAt: '2026-09-04T00:00:00Z',
+      entity: { content: 'A risk' },
+    })
+    const question = sourceItemToConnectorKnowledgeItem({
+      externalId: 'q-3', kind: 'question', mime: 'application/json', createdAt: '2026-09-04T00:00:00Z',
+      entity: { content: 'A question' },
+    })
+    for (const mapped of [decision, action, risk, question]) {
+      expect(mapped.certainty ?? null).toBeNull()
+      expect(mapped.evidence ?? null).toBeNull()
+    }
+  })
+
+  it('passes certainty and evidence through for a risk and a question', () => {
+    const risk = sourceItemToConnectorKnowledgeItem({
+      externalId: 'r-1',
+      kind: 'risk',
+      mime: 'application/json',
+      createdAt: '2026-09-04T00:00:00Z',
+      entity: { content: 'Vendor SLA may slip', severity: 'high', certainty: 'assumed', evidence: 'Vendor email 2026-09-01' },
+    })
+    expect(risk.certainty).toBe('assumed')
+    expect(risk.evidence).toBe('Vendor email 2026-09-01')
+
+    const question = sourceItemToConnectorKnowledgeItem({
+      externalId: 'q-2',
+      kind: 'question',
+      mime: 'application/json',
+      createdAt: '2026-09-04T00:00:00Z',
+      entity: { content: 'Who owns cutover date?', certainty: 'confirmed', evidence: 'Meeting transcript, 14:02' },
+    })
+    expect(question.certainty).toBe('confirmed')
+    expect(question.evidence).toBe('Meeting transcript, 14:02')
+  })
 })

@@ -77,6 +77,9 @@ export function sourceItemToConnectorKnowledgeItem(item: SourceItem): ConnectorK
       context: d.context ?? null,
       participants: d.participants ?? null,
       decidedAt: d.decidedAt ?? null,
+      certainty: d.certainty ?? null,
+      evidence: d.evidence ?? null,
+      supersededBy: d.supersededBy ?? null,
     }
   }
   if (kind === 'action_item') {
@@ -87,6 +90,8 @@ export function sourceItemToConnectorKnowledgeItem(item: SourceItem): ConnectorK
       dueDate: a.dueDate ?? null,
       priority: a.priority ?? null,
       status: a.status ?? null,
+      certainty: a.certainty ?? null,
+      evidence: a.evidence ?? null,
     }
   }
   if (kind === 'risk') {
@@ -100,6 +105,8 @@ export function sourceItemToConnectorKnowledgeItem(item: SourceItem): ConnectorK
       likelihood: r.likelihood ?? null,
       status: r.status ?? null,
       identifiedAt: r.identifiedAt ?? null,
+      certainty: r.certainty ?? null,
+      evidence: r.evidence ?? null,
     }
   }
   const q = entity as ExternalQuestion
@@ -111,6 +118,8 @@ export function sourceItemToConnectorKnowledgeItem(item: SourceItem): ConnectorK
     status: q.status ?? null,
     raisedAt: q.raisedAt ?? null,
     answeredAt: q.answeredAt ?? null,
+    certainty: q.certainty ?? null,
+    evidence: q.evidence ?? null,
   }
 }
 

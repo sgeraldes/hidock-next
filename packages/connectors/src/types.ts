@@ -128,11 +128,24 @@ export interface ExternalMeeting {
 // externalId UPDATES the existing pair instead of duplicating it.
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** Epistemic status of a knowledge claim (v56) — confirmed/proposed/assumed are
+ * a source's own framing of how settled the claim is; superseded marks a
+ * decision explicitly replaced by a later one (pair with supersededBy on
+ * ExternalDecision). Anything else is normalized to 'confirmed' fail-closed
+ * by upsertConnectorKnowledgeItem — never stored verbatim if unrecognized. */
+export type KnowledgeCertainty = 'confirmed' | 'proposed' | 'assumed' | 'superseded'
+
 export interface ExternalDecision {
   content: string
   context?: string
   participants?: string[]
   decidedAt?: string
+  /** See KnowledgeCertainty. Defaults to 'confirmed' if omitted. */
+  certainty?: KnowledgeCertainty
+  /** Original source reference/quote this was derived from. */
+  evidence?: string
+  /** id of the decisions row (in HiDock's DB) that supersedes this one, if known. */
+  supersededBy?: string
 }
 
 export interface ExternalActionItem {
@@ -141,6 +154,8 @@ export interface ExternalActionItem {
   dueDate?: string
   priority?: 'low' | 'medium' | 'high' | 'urgent'
   status?: 'pending' | 'in_progress' | 'completed' | 'cancelled'
+  certainty?: KnowledgeCertainty
+  evidence?: string
 }
 
 export interface ExternalRisk {
@@ -152,6 +167,8 @@ export interface ExternalRisk {
   likelihood?: 'low' | 'medium' | 'high'
   status?: 'open' | 'mitigated' | 'accepted' | 'closed'
   identifiedAt?: string
+  certainty?: KnowledgeCertainty
+  evidence?: string
 }
 
 export interface ExternalQuestion {
@@ -162,6 +179,8 @@ export interface ExternalQuestion {
   status?: 'open' | 'answered' | 'closed'
   raisedAt?: string
   answeredAt?: string
+  certainty?: KnowledgeCertainty
+  evidence?: string
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
