@@ -62,10 +62,10 @@ Return ONLY a valid JSON object (no markdown, no prose, no code fences) with exa
   "people": [{ "name": <full name as spoken>, "skills": [<skill or expertise shown>] }],
   "topics": [<subject discussed>],
   "projects": [<named project / workstream / system>],
-  "decisions": [<a decision the group settled on, as a full standalone sentence>],
-  "action_items": [{ "text": <a task someone will do, as a full standalone sentence>, "owner": <person responsible, if explicitly named> }],
-  "risks": [{ "text": <a risk, blocker, or concern>, "raised_by": <person, if named> }],
-  "next_steps": [<a planned follow-up that is not yet an assigned task>]
+  "decisions": [{ "text": <a decision the group settled on, as a full standalone sentence>, "category": <"work" or "personal"> }],
+  "action_items": [{ "text": <a task someone will do, as a full standalone sentence>, "owner": <person responsible, if explicitly named>, "category": <"work" or "personal"> }],
+  "risks": [{ "text": <a risk, blocker, or concern>, "raised_by": <person, if named>, "category": <"work" or "personal"> }],
+  "next_steps": [{ "text": <a planned follow-up that is not yet an assigned task>, "category": <"work" or "personal"> }]
 }
 
 DEFINITIONS (decisions and action_items are different):
@@ -80,11 +80,17 @@ GROUNDING — THIS IS THE MOST IMPORTANT RULE:
 - Do NOT carry over content from these instructions or from any other meeting. Only this transcript.
 - When in doubt, omit. Fewer faithful items beat more invented ones.
 
+PERSONAL vs WORK — tag every decision, action_item, risk, and next_step with a "category":
+- "personal" = anything about someone's private life rather than work: health or medical matters (symptoms, appointments, surgery, diagnoses, medication, therapy), family or relationships, personal finances, housing, personal legal matters, or any other private life-admin. A meeting can mix work and personal content; judge EACH item on its own.
+- "work" = the meeting's professional/project substance: delivery, tickets, architecture, planning, team, product, operations.
+- If you are unsure whether an item is personal, tag it "personal". Erring toward "personal" is always the safe choice — a work item wrongly hidden is a minor loss; a personal item wrongly exposed is not.
+
 WRITING THE ITEMS:
 - Make each item self-contained: include the subject/object, not a bare verb phrase, BUT only using words and facts grounded in this transcript. If the transcript only supports a short phrase, keep it short — do not pad it into a full sentence by adding unstated detail.
 - owner / raised_by: include ONLY when a specific person is explicitly named for that item; otherwise omit the field. Never guess.
 - people: real named individuals only; skip generic roles like "the team" or "everyone".
 - Never output the literal word "string" or any placeholder.
+- Every decision, action_item, risk, and next_step MUST include its "category" ("work" or "personal").
 - Return ONLY the JSON object.`
 }
 
@@ -163,6 +169,35 @@ function dedupBy<T>(items: T[], keyOf: (t: T) => string): T[] {
   return out
 }
 
+/**
+ * Item category, tagged per-item by the extraction prompt. Only "work" items are
+ * kept; "personal" — and, deliberately, ANYTHING that is not explicitly "work"
+ * (missing, unknown, malformed) — is DROPPED. Erring toward personal is the
+ * privacy-safe default: a work item wrongly hidden is a minor loss; a personal
+ * item wrongly surfaced (into graph_nodes, queryable via hidock_search /
+ * topAttendees / meetingGraph, and into the first-class decisions/action_items
+ * tables) is a privacy leak. The drop happens HERE, at the parse boundary, so
+ * neither ingestExtraction nor the first-class-table promote ever receives a
+ * personal item. See eval/personal-content-2026-09.
+ */
+function isWorkCategory(value: unknown): boolean {
+  return typeof value === 'string' && value.trim().toLowerCase() === 'work'
+}
+
+/**
+ * Read one content item that MAY be an object `{ text, category, owner?/raised_by? }`
+ * (new schema) — returns the trimmed text ONLY when the item is explicitly
+ * category "work"; otherwise null (dropped). A bare string, or a missing/other
+ * category, is treated as non-work and dropped (privacy-safe default).
+ */
+function workText(item: unknown): string | null {
+  const o = asObj(item)
+  if (!o) return null // bare string / non-object → no explicit work tag → drop
+  if (!isWorkCategory(o['category'])) return null
+  const text = typeof o['text'] === 'string' ? o['text'].trim() : ''
+  return text || null
+}
+
 /** Defensively parse LLM output into ExtractionResult */
 function parseExtractionOutput(raw: string): ExtractionResult {
   const cleaned = stripCodeFences(raw)
@@ -197,6 +232,7 @@ function parseExtractionOutput(raw: string): ExtractionResult {
     for (const item of obj['action_items'] as unknown[]) {
       const a = asObj(item)
       if (!a) continue
+      if (!isWorkCategory(a['category'])) continue // drop personal / untagged
       const text = typeof a['text'] === 'string' ? a['text'].trim() : ''
       if (!text) continue
       const owner = typeof a['owner'] === 'string' ? a['owner'].trim() : undefined
@@ -209,6 +245,7 @@ function parseExtractionOutput(raw: string): ExtractionResult {
     for (const item of obj['risks'] as unknown[]) {
       const r = asObj(item)
       if (!r) continue
+      if (!isWorkCategory(r['category'])) continue // drop personal / untagged
       const text = typeof r['text'] === 'string' ? r['text'].trim() : ''
       if (!text) continue
       const raised_by = typeof r['raised_by'] === 'string' ? r['raised_by'].trim() : undefined
@@ -219,14 +256,25 @@ function parseExtractionOutput(raw: string): ExtractionResult {
   // De-duplicate every list within THIS meeting's result before returning, so a
   // model that repeats the same item several times does not create duplicate
   // graph nodes or duplicate first-class decision/action rows downstream.
+  // decisions and next_steps are now object arrays ({ text, category }); keep
+  // only explicitly-"work" items' text. topics/projects carry no category and
+  // are not item-level personal content, so they pass through as before.
+  const decisions = Array.isArray(obj['decisions'])
+    ? (obj['decisions'] as unknown[]).map(workText).filter((t): t is string => t !== null)
+    : []
+  const next_steps = Array.isArray(obj['next_steps'])
+    ? (obj['next_steps'] as unknown[]).map(workText).filter((t): t is string => t !== null)
+    : []
+
+  // De-duplicate every list within THIS meeting's result before returning.
   return {
     people: dedupBy(people, (p) => p.name),
     topics: dedupStrings(asStringArray(obj['topics'])),
     projects: dedupStrings(asStringArray(obj['projects'])),
-    decisions: dedupStrings(asStringArray(obj['decisions'])),
+    decisions: dedupStrings(decisions),
     action_items: dedupBy(action_items, (a) => a.text),
     risks: dedupBy(risks, (r) => r.text),
-    next_steps: dedupStrings(asStringArray(obj['next_steps'])),
+    next_steps: dedupStrings(next_steps),
   }
 }
 

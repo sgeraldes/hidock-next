@@ -11,10 +11,10 @@ const CLEAN_JSON = JSON.stringify({
   ],
   topics: ['Architecture', 'Performance'],
   projects: ['Project Phoenix'],
-  decisions: ['Move to microservices'],
-  action_items: [{ text: 'Write ADR', owner: 'Alice' }],
-  risks: [{ text: 'Timeline risk', raised_by: 'Bob' }],
-  next_steps: ['Schedule follow-up'],
+  decisions: [{ text: 'Move to microservices', category: 'work' }],
+  action_items: [{ text: 'Write ADR', owner: 'Alice', category: 'work' }],
+  risks: [{ text: 'Timeline risk', raised_by: 'Bob', category: 'work' }],
+  next_steps: [{ text: 'Schedule follow-up', category: 'work' }],
 })
 
 const CODE_FENCED_JSON = `\`\`\`json\n${CLEAN_JSON}\n\`\`\``
@@ -124,13 +124,13 @@ describe('extractGraphFromTranscript', () => {
       topics: ['Auth', 'auth', 'AUTH'],
       projects: [],
       decisions: [
-        'Move ticket 9529 to done',
-        'move ticket 9529 to done',
-        'Move ticket 9529 to done!',
+        { text: 'Move ticket 9529 to done', category: 'work' },
+        { text: 'move ticket 9529 to done', category: 'work' },
+        { text: 'Move ticket 9529 to done!', category: 'work' },
       ],
       action_items: [
-        { text: 'Reassign the ticket to Kelly', owner: 'Kelly' },
-        { text: 'reassign the ticket to kelly', owner: 'Kelly' },
+        { text: 'Reassign the ticket to Kelly', owner: 'Kelly', category: 'work' },
+        { text: 'reassign the ticket to kelly', owner: 'Kelly', category: 'work' },
       ],
       risks: [],
       next_steps: [],
@@ -150,8 +150,8 @@ describe('extractGraphFromTranscript', () => {
   it('keeps a decision and an action that share the same text (different lists)', async () => {
     const json = JSON.stringify({
       people: [], topics: [], projects: [],
-      decisions: ['Move to Sev-3', 'Move to Sev-3'],
-      action_items: [{ text: 'Move to Sev-3' }, { text: 'Move to Sev-3' }],
+      decisions: [{ text: 'Move to Sev-3', category: 'work' }, { text: 'Move to Sev-3', category: 'work' }],
+      action_items: [{ text: 'Move to Sev-3', category: 'work' }, { text: 'Move to Sev-3', category: 'work' }],
       risks: [], next_steps: [],
     })
     const result = await extractGraphFromTranscript(
@@ -162,5 +162,87 @@ describe('extractGraphFromTranscript', () => {
     expect(result.decisions).toEqual(['Move to Sev-3'])
     expect(result.action_items).toHaveLength(1)
     expect(result.action_items[0].text).toBe('Move to Sev-3')
+  })
+
+  // -------------------------------------------------------------------------
+  // Personal-content full-drop at the parse boundary (privacy)
+  // -------------------------------------------------------------------------
+  describe('personal-content filtering', () => {
+    it('drops personal-tagged decisions/actions/risks/next_steps, keeps work ones', async () => {
+      const json = JSON.stringify({
+        people: [], topics: [], projects: [],
+        decisions: [
+          { text: 'Ship EVA25 behind a flag', category: 'work' },
+          { text: 'Proceed with surgery on the 30th', category: 'personal' },
+        ],
+        action_items: [
+          { text: 'Kelly to update the Jira board', owner: 'Kelly', category: 'work' },
+          { text: 'Ask GP about anesthesia type', owner: 'Kelly', category: 'personal' },
+        ],
+        risks: [
+          { text: 'Timeline risk on the release', raised_by: 'Bob', category: 'work' },
+          { text: 'Recovery time may affect availability', raised_by: 'Kelly', category: 'personal' },
+        ],
+        next_steps: [
+          { text: 'Book the sprint review', category: 'work' },
+          { text: 'Book the hospital pre-op', category: 'personal' },
+        ],
+      })
+      const result = await extractGraphFromTranscript('t', { meetingId: 'mixed-1' }, fakeLlm(json))
+      expect(result.decisions).toEqual(['Ship EVA25 behind a flag'])
+      expect(result.action_items).toEqual([{ text: 'Kelly to update the Jira board', owner: 'Kelly' }])
+      expect(result.risks).toEqual([{ text: 'Timeline risk on the release', raised_by: 'Bob' }])
+      expect(result.next_steps).toEqual(['Book the sprint review'])
+      // No personal text survives anywhere.
+      const blob = JSON.stringify(result).toLowerCase()
+      expect(blob).not.toContain('surgery')
+      expect(blob).not.toContain('anesthesia')
+      expect(blob).not.toContain('hospital')
+      expect(blob).not.toContain('recovery')
+    })
+
+    it('treats a MISSING category as personal and drops it (privacy-safe default)', async () => {
+      const json = JSON.stringify({
+        people: [], topics: [], projects: [],
+        decisions: [
+          { text: 'Tagged work decision', category: 'work' },
+          { text: 'Untagged decision' }, // no category → dropped
+        ],
+        action_items: [{ text: 'Untagged action', owner: 'X' }], // no category → dropped
+        risks: [], next_steps: [],
+      })
+      const result = await extractGraphFromTranscript('t', { meetingId: 'missing-cat' }, fakeLlm(json))
+      expect(result.decisions).toEqual(['Tagged work decision'])
+      expect(result.action_items).toEqual([])
+    })
+
+    it('treats an UNKNOWN/other category as personal and drops it', async () => {
+      const json = JSON.stringify({
+        people: [], topics: [], projects: [],
+        decisions: [
+          { text: 'Real work item', category: 'work' },
+          { text: 'Weird category item', category: 'confidential' },
+          { text: 'Case check', category: 'WORK' }, // case-insensitive → kept
+        ],
+        action_items: [], risks: [], next_steps: [],
+      })
+      const result = await extractGraphFromTranscript('t', { meetingId: 'unknown-cat' }, fakeLlm(json))
+      expect(result.decisions).toEqual(['Real work item', 'Case check'])
+    })
+
+    it('a fully-personal meeting yields empty work lists', async () => {
+      const json = JSON.stringify({
+        people: [{ name: 'Kelly' }], topics: ['health'], projects: [],
+        decisions: [{ text: 'Start physio next week', category: 'personal' }],
+        action_items: [{ text: 'Call the clinic', owner: 'Kelly', category: 'personal' }],
+        risks: [], next_steps: [{ text: 'Follow up on results', category: 'personal' }],
+      })
+      const result = await extractGraphFromTranscript('t', { meetingId: 'all-personal' }, fakeLlm(json))
+      expect(result.decisions).toEqual([])
+      expect(result.action_items).toEqual([])
+      expect(result.next_steps).toEqual([])
+      // topics/projects/people are not item-level personal content and pass through
+      expect(result.topics).toEqual(['health'])
+    })
   })
 })
