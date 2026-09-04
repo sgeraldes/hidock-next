@@ -28,6 +28,14 @@ vi.mock('../../services/knowledge-graph-service', () => ({
   queryTopSkill: vi.fn(),
   queryPersonProfile: vi.fn(),
   queryMeetingGraph: vi.fn(),
+  removeRecordingProvenanceCore: vi.fn(),
+}))
+
+// Mock the database module the reingest handler lazy-imports.
+vi.mock('../../services/database', () => ({
+  run: vi.fn(),
+  queryAll: vi.fn(),
+  runInTransaction: vi.fn((fn: () => unknown) => fn()), // execute the txn body inline
 }))
 
 import {
@@ -38,7 +46,9 @@ import {
   queryTopSkill,
   queryPersonProfile,
   queryMeetingGraph,
+  removeRecordingProvenanceCore,
 } from '../../services/knowledge-graph-service'
+import { run, queryAll, runInTransaction } from '../../services/database'
 
 import { registerKnowledgeGraphHandlers } from '../knowledge-graph-handlers'
 
@@ -57,10 +67,11 @@ describe('knowledge-graph IPC handlers', () => {
   // -------------------------------------------------------------------------
   // Registration
   // -------------------------------------------------------------------------
-  it('registers all 7 channels', () => {
+  it('registers all 8 channels', () => {
     const expectedChannels = [
       'graph:stats',
       'graph:ingestAll',
+      'graph:reingestRecordings',
       'graph:ingestFolder',
       'graph:topAttendees',
       'graph:topSkill',
@@ -247,4 +258,95 @@ describe('knowledge-graph IPC handlers', () => {
     })
   })
 
+
+  // -------------------------------------------------------------------------
+  // graph:reingestRecordings — the surgical re-ingest REMOVAL half (destructive)
+  // -------------------------------------------------------------------------
+  describe('graph:reingestRecordings', () => {
+    // Two recordings in scope: rec-1 has a capture with B1 rows; rec-2 has NO
+    // matching capture_id (must not error, must not attempt a B1 delete).
+    const SCOPE = [
+      { recording_id: 'rec-1', capture_id: 'cap-1' },
+      { recording_id: 'rec-2', capture_id: null },
+    ]
+
+    function primeMocks() {
+      // queryAll is used for: (1) the scope query, then per rec-1 the two COUNT
+      // queries (decisions, action_items). rec-2 has no capture so no counts.
+      ;(queryAll as any).mockImplementation((sql: string) => {
+        if (/FROM graph_ingested_transcripts/i.test(sql)) return SCOPE
+        if (/FROM decisions WHERE knowledge_capture_id/i.test(sql)) return [{ n: 2 }]
+        if (/FROM action_items WHERE knowledge_capture_id/i.test(sql)) return [{ n: 3 }]
+        return []
+      })
+      ;(removeRecordingProvenanceCore as any).mockImplementation((rid: string, opts: any) => ({
+        ok: true, recordingId: rid, dryRun: !!opts?.dryRun,
+        markersRemoved: 1, edgesRemoved: 4, edgeSourceRowsRemoved: 5,
+        meetingNodesRemoved: 1, orphanNodesRemoved: 2, orphanNodesByType: {},
+        sharedEdgesKept: 1, unattributedResidueKept: 0,
+      }))
+    }
+
+    beforeEach(() => {
+      primeMocks()
+    })
+
+    it('dry-run writes NOTHING but still reports scope + counts', async () => {
+      const result = await handlers['graph:reingestRecordings']({}, { dryRun: true })
+      expect(result.success).toBe(true)
+      expect(result.data.dryRun).toBe(true)
+      expect(result.data.recordingsInScope).toBe(2)
+      expect(result.data.recordingIds).toEqual(['rec-1', 'rec-2'])
+      // removeRecordingProvenanceCore called with dryRun:true for each recording
+      expect(removeRecordingProvenanceCore).toHaveBeenCalledTimes(2)
+      expect(removeRecordingProvenanceCore).toHaveBeenCalledWith('rec-1', { dryRun: true })
+      expect(removeRecordingProvenanceCore).toHaveBeenCalledWith('rec-2', { dryRun: true })
+      // NO writes: no B1 deletes, no transaction opened
+      expect(run).not.toHaveBeenCalled()
+      expect(runInTransaction).not.toHaveBeenCalled()
+      // counts still aggregated (rec-1: 2 decisions / 3 actions; markers 1+1)
+      expect(result.data.totals.markersRemoved).toBe(2)
+      expect(result.data.totals.decisionsRemoved).toBe(2)
+      expect(result.data.totals.actionItemsRemoved).toBe(3)
+    })
+
+    it('real-run deletes B1 rows AND calls removeRecordingProvenanceCore per in-scope recording, atomically', async () => {
+      const result = await handlers['graph:reingestRecordings']({}, { dryRun: false })
+      expect(result.success).toBe(true)
+      expect(result.data.dryRun).toBe(false)
+      // provenance removal invoked per recording with dryRun:false
+      expect(removeRecordingProvenanceCore).toHaveBeenCalledWith('rec-1', { dryRun: false })
+      expect(removeRecordingProvenanceCore).toHaveBeenCalledWith('rec-2', { dryRun: false })
+      // each recording wrapped in its own transaction (2 recordings → 2 txns)
+      expect(runInTransaction).toHaveBeenCalledTimes(2)
+      // B1 deletes fired ONLY for the capture-backed recording (rec-1): 2 deletes
+      const deleteCalls = (run as any).mock.calls.filter((c: any[]) => /DELETE FROM (decisions|action_items)/i.test(c[0]))
+      expect(deleteCalls).toHaveLength(2)
+      expect(deleteCalls.some((c: any[]) => /decisions/.test(c[0]) && c[1][0] === 'cap-1')).toBe(true)
+      expect(deleteCalls.some((c: any[]) => /action_items/.test(c[0]) && c[1][0] === 'cap-1')).toBe(true)
+    })
+
+    it('a recording with no matching capture_id does not error and skips the B1 delete', async () => {
+      // Scope with ONLY the capture-less recording.
+      ;(queryAll as any).mockImplementation((sql: string) =>
+        /FROM graph_ingested_transcripts/i.test(sql) ? [{ recording_id: 'rec-2', capture_id: null }] : []
+      )
+      const result = await handlers['graph:reingestRecordings']({}, { dryRun: false })
+      expect(result.success).toBe(true)
+      expect(result.data.recordingsInScope).toBe(1)
+      expect(removeRecordingProvenanceCore).toHaveBeenCalledWith('rec-2', { dryRun: false })
+      // No B1 delete attempted (no capture)
+      const deleteCalls = (run as any).mock.calls.filter((c: any[]) => /DELETE FROM/i.test(c[0]))
+      expect(deleteCalls).toHaveLength(0)
+      expect(result.data.totals.decisionsRemoved).toBe(0)
+      expect(result.data.totals.actionItemsRemoved).toBe(0)
+    })
+
+    it('returns { success:false, error } if removal throws', async () => {
+      ;(removeRecordingProvenanceCore as any).mockImplementation(() => { throw new Error('provenance boom') })
+      const result = await handlers['graph:reingestRecordings']({}, { dryRun: false })
+      expect(result.success).toBe(false)
+      expect(result.error).toContain('provenance boom')
+    })
+  })
 })
