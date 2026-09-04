@@ -86,6 +86,46 @@ import { filterEligibleCaptureIds, filterEligibleRecordingIds } from './recordin
 // GraphDb adapter — bridges the app's database exports to the GraphDb interface
 // ---------------------------------------------------------------------------
 
+/**
+ * Transient-error retry around the extraction LLM call.
+ *
+ * Large transcripts (observed 29k-67k chars) intermittently drop the local
+ * Ollama HTTP request mid-generation with `TypeError: fetch failed` — a
+ * transport hiccup, not a bad prompt or a bad response. Without a retry, one
+ * such blip skips that transcript for the whole ingest pass (it stays unmarked
+ * and only re-tries on a future pass), and a bulk re-ingest / backfill reports
+ * it as an error. This retries ONLY transient fetch/network failures, with a
+ * short backoff; a parse failure or any non-transient error is NOT retried
+ * (extractGraphFromTranscript already degrades a bad response to an empty
+ * result — that is not our concern here).
+ *
+ * @param prompt  the extraction prompt
+ * @param cfg     resolved provider config (extraction model)
+ * @param attempts max attempts (default 3)
+ */
+const TRANSIENT_FETCH = /fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|socket hang up|network|EPIPE/i
+async function completeWithRetry(
+  prompt: string,
+  cfg: Parameters<typeof complete>[1],
+  attempts = 3
+): Promise<string> {
+  let lastErr: unknown
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      return await complete(prompt, cfg)
+    } catch (e) {
+      lastErr = e
+      const msg = e instanceof Error ? e.message : String(e)
+      const transient = TRANSIENT_FETCH.test(msg)
+      if (!transient || i === attempts) throw e
+      const backoffMs = 1500 * i
+      console.warn(`[KnowledgeGraph] extraction fetch failed (attempt ${i}/${attempts}), retrying in ${backoffMs}ms: ${msg}`)
+      await new Promise((r) => setTimeout(r, backoffMs))
+    }
+  }
+  throw lastErr
+}
+
 const graphDbAdapter: GraphDb = {
   run(sql: string, params?: unknown[]) {
     run(sql, (params ?? []) as any[])
@@ -269,7 +309,7 @@ export async function ingestFromDbTranscripts(): Promise<IngestResult> {
   }
 
   const store = getKnowledgeGraphStore()
-  const llm: LlmExtractor = (prompt: string) => complete(prompt, providerConfig)
+  const llm: LlmExtractor = (prompt: string) => completeWithRetry(prompt, providerConfig)
 
   // Get all transcripts with recording + meeting meta
   // Cross-reference (/simplify S-5, database.ts's getExcludedRecordingIds):
@@ -552,7 +592,7 @@ export async function ingestFromHiNotesArtifacts(): Promise<IngestResult> {
 
   const store = getKnowledgeGraphStore()
   const llm: LlmExtractor | null = providerConfig
-    ? (prompt: string) => complete(prompt, providerConfig)
+    ? (prompt: string) => completeWithRetry(prompt, providerConfig)
     : null
   const rows = hiNotesArtifactRows()
   const captureEligibility = filterEligibleCaptureIds(rows.map((row) => row.capture_id))
@@ -717,7 +757,7 @@ export async function ingestFromFolder(folderPath: string): Promise<IngestResult
   }
 
   const store = getKnowledgeGraphStore()
-  const llm: LlmExtractor = (prompt: string) => complete(prompt, providerConfig)
+  const llm: LlmExtractor = (prompt: string) => completeWithRetry(prompt, providerConfig)
 
   const files = readdirSync(resolved).filter((f) => {
     const ext = extname(f).toLowerCase()
