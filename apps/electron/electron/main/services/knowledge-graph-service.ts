@@ -53,6 +53,7 @@ import {
   runInTransaction,
   queryAll,
   queryOne,
+  promoteExtractionToFirstClassTables,
   getValueExcludedRecordingIds,
   getRecordingsForMeeting,
   isRecordingGraphIngestable,
@@ -261,8 +262,8 @@ export async function ingestFromDbTranscripts(): Promise<IngestResult> {
   // which reads app.getPath('home') at MODULE LOAD. Keeping it lazy lets the graph
   // service be imported in a plain Node context without an Electron `app` mock, while
   // ingestion (which needs the provider) still resolves it here.
-  const { getProviderConfigFromSettings } = await import('./ai-provider-config')
-  const providerConfig = getProviderConfigFromSettings()
+  const { getExtractionProviderConfig } = await import('./ai-provider-config')
+  const providerConfig = getExtractionProviderConfig()
   if (!providerConfig) {
     throw new Error('No AI provider configured. Please set a provider API key in Settings.')
   }
@@ -408,6 +409,17 @@ export async function ingestFromDbTranscripts(): Promise<IngestResult> {
           transcriptId: row.id,
         })
 
+        // Promote the SAME extraction's decisions/action_items into the
+        // first-class relational tables the hidock-mcp server reads. Runs in
+        // this transaction (atomic with the graph ingest + marker below), so a
+        // rollback drops all three together and the marker guarantees one
+        // promote per transcript. Fresh (non-migrated) recordings only ever get
+        // their decisions/actions into those tables via this call.
+        promoteExtractionToFirstClassTables(row.recording_id, extraction, {
+          meetingDate: row.date_recorded ?? null,
+          extractedFrom: `transcript:${row.id}`,
+        })
+
         // Mark as ingested
         run(
           'INSERT INTO graph_ingested_transcripts (transcript_id, ingested_at) VALUES (?, ?)',
@@ -535,8 +547,8 @@ function hiNotesArtifactRows(): HiNotesArtifactRow[] {
  * Missing or newly-ineligible artifacts are retracted on the next pass.
  */
 export async function ingestFromHiNotesArtifacts(): Promise<IngestResult> {
-  const { getProviderConfigFromSettings } = await import('./ai-provider-config')
-  const providerConfig = getProviderConfigFromSettings()
+  const { getExtractionProviderConfig } = await import('./ai-provider-config')
+  const providerConfig = getExtractionProviderConfig()
 
   const store = getKnowledgeGraphStore()
   const llm: LlmExtractor | null = providerConfig
@@ -698,8 +710,8 @@ export async function ingestFromFolder(folderPath: string): Promise<IngestResult
   }
 
   // Lazy-load — see ingestFromDbTranscripts (ADV55-1): avoids an eager config.ts load.
-  const { getProviderConfigFromSettings } = await import('./ai-provider-config')
-  const providerConfig = getProviderConfigFromSettings()
+  const { getExtractionProviderConfig } = await import('./ai-provider-config')
+  const providerConfig = getExtractionProviderConfig()
   if (!providerConfig) {
     throw new Error('No AI provider configured. Please set a provider API key in Settings.')
   }

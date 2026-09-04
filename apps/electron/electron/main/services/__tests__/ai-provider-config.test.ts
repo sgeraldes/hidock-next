@@ -102,3 +102,56 @@ describe('getProviderConfigFromSettings', () => {
     expect(getProviderConfigFromSettings()).toBeNull()
   })
 })
+
+describe('getExtractionProviderConfig', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('overrides the Ollama model with chat.extractionOllamaModel', async () => {
+    mockGetConfig.mockReturnValue({
+      chat: { provider: 'ollama', ollamaModel: 'llama3.2', extractionOllamaModel: 'gemma3:12b' },
+      transcription: { geminiApiKey: '' },
+      embeddings: { ollamaBaseUrl: 'http://localhost:11434' },
+    })
+    const { getExtractionProviderConfig } = await import('../ai-provider-config')
+    expect(getExtractionProviderConfig()).toEqual({
+      provider: 'ollama',
+      model: 'gemma3:12b',            // extraction model, NOT the chat model
+      baseURL: 'http://localhost:11434/api',
+    })
+  })
+
+  it('falls back to chat.ollamaModel when no extraction model is set', async () => {
+    mockGetConfig.mockReturnValue({
+      chat: { provider: 'ollama', ollamaModel: 'llama3.2' },  // no extractionOllamaModel
+      transcription: { geminiApiKey: '' },
+      embeddings: { ollamaBaseUrl: 'http://localhost:11434' },
+    })
+    const { getExtractionProviderConfig } = await import('../ai-provider-config')
+    expect(getExtractionProviderConfig()?.model).toBe('llama3.2')
+  })
+
+  it('leaves the Gemini path unchanged (no extraction override on cloud)', async () => {
+    mockGetConfig.mockReturnValue({
+      chat: { provider: 'gemini', geminiModel: 'gemini-3.5-flash', extractionOllamaModel: 'gemma3:12b' },
+      transcription: { geminiApiKey: 'test-key-123' }, // pragma: allowlist secret
+    })
+    const { getExtractionProviderConfig } = await import('../ai-provider-config')
+    expect(getExtractionProviderConfig()).toEqual({
+      provider: 'google',
+      model: 'gemini-3.5-flash',
+      apiKey: 'test-key-123', // pragma: allowlist secret
+    })
+  })
+
+  it('returns null when no provider is configured', async () => {
+    mockGetConfig.mockReturnValue({
+      chat: { provider: 'ollama', ollamaModel: '' },
+      transcription: { geminiApiKey: '' },
+      embeddings: { ollamaBaseUrl: 'http://localhost:11434' },
+    })
+    const { getExtractionProviderConfig } = await import('../ai-provider-config')
+    expect(getExtractionProviderConfig()).toBeNull()
+  })
+})

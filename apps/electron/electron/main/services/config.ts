@@ -153,6 +153,12 @@ export interface AppConfig {
     provider: 'gemini' | 'ollama'
     geminiModel: string
     ollamaModel: string
+    // Dedicated Ollama model for knowledge-graph EXTRACTION only (decisions /
+    // action_items / entities). Separate from `ollamaModel` (the assistant/chat
+    // + value-classification model) so extraction can run a stronger local model
+    // WITHOUT changing the assistant or the eligibility classifier. Optional;
+    // when unset, extraction falls back to `ollamaModel`.
+    extractionOllamaModel?: string
     maxContextChunks: number
   }
   device: {
@@ -245,6 +251,10 @@ const DEFAULT_CONFIG: AppConfig = {
     provider: 'gemini',
     geminiModel: 'gemini-3.5-flash',
     ollamaModel: 'llama3.2',
+    // Extraction uses a stronger local model than chat: gemma3:12b was validated
+    // (eval/extraction-prompt-2026-09) to be faithful + non-hallucinating where
+    // llama3.2 produced fragments and, with a richer prompt, fabrications.
+    extractionOllamaModel: 'gemma3:12b',
     maxContextChunks: 10
   },
   device: {

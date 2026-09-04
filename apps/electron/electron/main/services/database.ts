@@ -11255,6 +11255,133 @@ export function getDecisionsForCaptureIds(captureIds: string[]): DecisionRow[] {
 }
 
 /**
+ * Content-normalization for first-class-table dedup. Mirrors the normalize()
+ * used by timeline-analysis so a row promoted here and the same item read from
+ * transcript JSON collapse to one marker downstream.
+ */
+function normalizeFirstClassContent(s: string): string {
+  return s
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** Result of a promote pass (for logging/tests). */
+export interface PromoteExtractionResult {
+  decisionsInserted: number
+  actionItemsInserted: number
+  decisionsSkipped: number
+  actionItemsSkipped: number
+}
+
+/**
+ * Promote a knowledge-graph extraction's decisions/action_items into the
+ * first-class `decisions` / `action_items` tables that the hidock-mcp server
+ * reads. This is the ONGOING equivalent of the one-time migration path
+ * (migration-handlers.ts): a device-first library never runs migration, so
+ * without this the first-class tables stay empty and the MCP bridge sees
+ * nothing even though extraction populated graph_nodes.
+ *
+ * Keyed by knowledge_capture_id, resolved from the recording's
+ * source_recording_id (the same key the MCP eligibility filter + timeline use).
+ * When no capture row exists yet the promotion is skipped (nothing for the MCP
+ * server to attach to).
+ *
+ * Honesty over enrichment (project rule: never invent provenance): the
+ * extractor yields decisions as plain strings and action_items as {text, owner}.
+ * Only the fields we actually have are written — content, assignee (from owner),
+ * extracted_from, and decided_at (from the meeting date when present). confidence,
+ * context, participants, due_date, priority/status defaults are left NULL/default,
+ * never fabricated.
+ *
+ * Dedup: within a capture, an item whose normalized content already exists in
+ * the target table is skipped, so re-ingest or overlap with a migrated row does
+ * not double-insert. Intended to be called INSIDE the same transaction as the
+ * graph ingest + graph_ingested_transcripts marker (atomic + race-free on the
+ * single better-sqlite3 connection).
+ *
+ * @param recordingId  the recording whose capture receives the rows
+ * @param extraction   the ExtractionResult (decisions[], action_items[{text,owner?}])
+ * @param opts         optional meetingDate (→ decided_at) + extractedFrom label
+ */
+export function promoteExtractionToFirstClassTables(
+  recordingId: string,
+  extraction: {
+    decisions?: string[]
+    action_items?: Array<{ text: string; owner?: string }>
+  },
+  opts: { meetingDate?: string | null; extractedFrom?: string | null } = {}
+): PromoteExtractionResult {
+  const result: PromoteExtractionResult = {
+    decisionsInserted: 0,
+    actionItemsInserted: 0,
+    decisionsSkipped: 0,
+    actionItemsSkipped: 0,
+  }
+
+  // Resolve the capture that MCP reads through. No capture ⇒ nothing to attach.
+  const capture = queryOne<{ id: string }>(
+    'SELECT id FROM knowledge_captures WHERE source_recording_id = ?',
+    [recordingId]
+  )
+  if (!capture?.id) return result
+  const captureId = capture.id
+
+  const now = new Date().toISOString()
+  const decidedAt = opts.meetingDate ?? null
+  const extractedFrom = opts.extractedFrom ?? 'knowledge-graph'
+
+  // Existing content (normalized) so we never double-insert against a prior
+  // promote or a migrated row.
+  const seenDecisions = new Set(
+    queryAll<{ content: string }>(
+      'SELECT content FROM decisions WHERE knowledge_capture_id = ?',
+      [captureId]
+    ).map((r) => normalizeFirstClassContent(r.content))
+  )
+  const seenActions = new Set(
+    queryAll<{ content: string }>(
+      'SELECT content FROM action_items WHERE knowledge_capture_id = ?',
+      [captureId]
+    ).map((r) => normalizeFirstClassContent(r.content))
+  )
+
+  for (const raw of extraction.decisions ?? []) {
+    const content = (raw ?? '').trim()
+    if (!content) { result.decisionsSkipped++; continue }
+    const key = normalizeFirstClassContent(content)
+    if (!key || seenDecisions.has(key)) { result.decisionsSkipped++; continue }
+    seenDecisions.add(key)
+    run(
+      `INSERT INTO decisions (id, knowledge_capture_id, content, context, participants, extracted_from, confidence, decided_at, created_at, updated_at)
+       VALUES (?, ?, ?, NULL, NULL, ?, NULL, ?, ?, ?)`,
+      [randomUUID(), captureId, content, extractedFrom, decidedAt, now, now]
+    )
+    result.decisionsInserted++
+  }
+
+  for (const ai of extraction.action_items ?? []) {
+    const content = (ai?.text ?? '').trim()
+    if (!content) { result.actionItemsSkipped++; continue }
+    const key = normalizeFirstClassContent(content)
+    if (!key || seenActions.has(key)) { result.actionItemsSkipped++; continue }
+    seenActions.add(key)
+    const assignee = ai.owner?.trim() ? ai.owner.trim() : null
+    run(
+      `INSERT INTO action_items (id, knowledge_capture_id, content, assignee, extracted_from, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [randomUUID(), captureId, content, assignee, extractedFrom, now, now]
+    )
+    result.actionItemsInserted++
+  }
+
+  return result
+}
+
+/**
  * Resolve a contact by case-insensitive exact name (v26). Backs graph:resolvePerson
  * so the renderer's name-based resolution has a direct path instead of scanning
  * the full contact roster. Returns the first match or undefined.

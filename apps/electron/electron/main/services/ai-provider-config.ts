@@ -43,3 +43,24 @@ export function getProviderConfigFromSettings(): ProviderConfig | null {
   // No valid provider configured
   return null
 }
+
+/**
+ * Provider config for knowledge-graph EXTRACTION (decisions / action_items /
+ * entities). Identical to getProviderConfigFromSettings() EXCEPT that, when the
+ * resolved provider is Ollama, the model is overridden with
+ * `chat.extractionOllamaModel` (default gemma3:12b). This keeps extraction on a
+ * stronger local model without changing the assistant/chat or the value
+ * classifier, which both continue to use getProviderConfigFromSettings().
+ *
+ * When the extraction model is unset, or the provider is Gemini (a capable
+ * cloud model already), this returns the base config unchanged.
+ */
+export function getExtractionProviderConfig(): ProviderConfig | null {
+  const base = getProviderConfigFromSettings()
+  if (!base) return null
+  if (base.provider !== 'ollama') return base // Gemini path: no override needed
+  const cfg = getConfig()
+  const extractionModel = cfg.chat.extractionOllamaModel?.trim()
+  if (!extractionModel || extractionModel === base.model) return base
+  return { ...base, model: extractionModel }
+}

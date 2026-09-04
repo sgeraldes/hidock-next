@@ -117,4 +117,50 @@ describe('extractGraphFromTranscript', () => {
     expect(result.people).toHaveLength(1)
     expect(result.people[0].name).toBe('Valid Person')
   })
+
+  it('de-duplicates repeated items within one meeting result', async () => {
+    const json = JSON.stringify({
+      people: [{ name: 'Alice' }, { name: 'Alice' }],
+      topics: ['Auth', 'auth', 'AUTH'],
+      projects: [],
+      decisions: [
+        'Move ticket 9529 to done',
+        'move ticket 9529 to done',
+        'Move ticket 9529 to done!',
+      ],
+      action_items: [
+        { text: 'Reassign the ticket to Kelly', owner: 'Kelly' },
+        { text: 'reassign the ticket to kelly', owner: 'Kelly' },
+      ],
+      risks: [],
+      next_steps: [],
+    })
+    const result = await extractGraphFromTranscript(
+      'transcript',
+      { meetingId: 'dedup-1' },
+      fakeLlm(json)
+    )
+    expect(result.decisions).toEqual(['Move ticket 9529 to done'])
+    expect(result.action_items).toHaveLength(1)
+    expect(result.action_items[0].text).toBe('Reassign the ticket to Kelly')
+    expect(result.topics).toEqual(['Auth'])
+    expect(result.people).toHaveLength(1)
+  })
+
+  it('keeps a decision and an action that share the same text (different lists)', async () => {
+    const json = JSON.stringify({
+      people: [], topics: [], projects: [],
+      decisions: ['Move to Sev-3', 'Move to Sev-3'],
+      action_items: [{ text: 'Move to Sev-3' }, { text: 'Move to Sev-3' }],
+      risks: [], next_steps: [],
+    })
+    const result = await extractGraphFromTranscript(
+      'transcript',
+      { meetingId: 'dedup-2' },
+      fakeLlm(json)
+    )
+    expect(result.decisions).toEqual(['Move to Sev-3'])
+    expect(result.action_items).toHaveLength(1)
+    expect(result.action_items[0].text).toBe('Move to Sev-3')
+  })
 })

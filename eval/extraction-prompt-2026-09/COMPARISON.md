@@ -12,12 +12,25 @@ verbatim exemplars (fixes the bleed) plus an explicit anti-hallucination groundi
 
 ## Aggregate
 
-| | decisions | actions |
+Two figures per arm: **raw** = items as the model emitted them; **after dedup** =
+after the within-result de-duplication added to `parseExtractionOutput` (collapses
+the same item repeated several times in one meeting). The **after-dedup** figure is
+what actually reaches the DB (graph nodes + first-class decisions/action_items).
+
+| | decisions (raw → dedup) | actions (raw → dedup) |
 |---|---|---|
-| Arm A (llama3.2) | 41 | 45 |  _(excludes Sprint Planning: llama3.2 fetch-failed x5 on that 29k transcript)_
-| Arm C (gemma3:12b) | 78 | 99 |
+| Arm A (llama3.2) | 41 → 31 | 45 → 34 |  _(excludes Sprint Planning: llama3.2 fetch-failed x5 on that 29k transcript)_
+| Arm C (gemma3:12b) | 78 → 74 | 99 → 99 |
+
+Dedup removed arm A's 3x/5x repeats in "Event Driven Data Collect Health Review"
+(10 decisions, 11 actions) and arm C's 4x/2x ticket-9529 repeats in "[Halo] Sprint
+Planning" (4 decisions). Arm C remains substantially richer than arm A and is now
+free of within-meeting repetition.
 
 Example-bleed in arm C: 0/18. Hallucination markers (NICE/breast cancer/NHS/private healthcare) in arm C: 0/18.
+
+NOTE: the per-meeting output below shows RAW model output (pre-dedup), so repeated
+items are still visible there as evidence of the failure the dedup fixes.
 
 ## Per-meeting output
 
