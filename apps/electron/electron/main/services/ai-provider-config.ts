@@ -45,22 +45,49 @@ export function getProviderConfigFromSettings(): ProviderConfig | null {
 }
 
 /**
- * Provider config for knowledge-graph EXTRACTION (decisions / action_items /
- * entities). Identical to getProviderConfigFromSettings() EXCEPT that, when the
- * resolved provider is Ollama, the model is overridden with
- * `chat.extractionOllamaModel` (default gemma3:12b). This keeps extraction on a
- * stronger local model without changing the assistant/chat or the value
- * classifier, which both continue to use getProviderConfigFromSettings().
+ * Provider_Config_Resolver — the single resolver used by knowledge-graph
+ * EXTRACTION (decisions / action_items / entities). This function is the
+ * authoritative graph-extraction resolver and MUST remain so (Req 6.1).
  *
- * When the extraction model is unset, or the provider is Gemini (a capable
- * cloud model already), this returns the base config unchanged.
+ * Model isolation (Req 6):
+ * - Graph extraction resolves its Ollama model from `chat.extractionOllamaModel`
+ *   (`gemma3:12b` in the live config) (Req 6.2). The stronger local model keeps
+ *   extraction faithful without touching the assistant/chat model.
+ * - The assistant / RAG chat resolves from `chat.ollamaModel` (`llama3.2`) via
+ *   getProviderConfigFromSettings() and is NOT touched here (Req 6.3).
+ * - The value-classification path also keeps using getProviderConfigFromSettings()
+ *   (its existing configuration path) and is unaffected by this resolver (Req 6.4).
+ * - Because extraction reads `chat.extractionOllamaModel` and chat reads
+ *   `chat.ollamaModel` from separate keys, changing the extraction model never
+ *   alters the chat model, and vice versa (Req 6.5).
+ *
+ * Documented fallback (Req 6.6): when `chat.extractionOllamaModel` is absent or
+ * blank, extraction falls back to the base Ollama model (`chat.ollamaModel`) —
+ * exactly the fallback documented on the config field. We intentionally do NOT
+ * fabricate a hard-coded extraction default here; the base config's model is the
+ * documented fallback so a single source of truth governs the chat model.
+ *
+ * Documented Gemini branch (Req 6.7): when the configured provider is Gemini, the
+ * base resolver already returns a capable cloud model (`chat.geminiModel`), so
+ * extraction applies no Ollama override and returns the base config unchanged.
+ * This is the explicit, documented Gemini behaviour — extraction and chat share
+ * the same Gemini model because there is no separate Gemini extraction key.
+ *
+ * Pure function of getConfig(); no side effects. Returns null when no usable
+ * provider is configured (mirrors getProviderConfigFromSettings()).
  */
 export function getExtractionProviderConfig(): ProviderConfig | null {
   const base = getProviderConfigFromSettings()
   if (!base) return null
-  if (base.provider !== 'ollama') return base // Gemini path: no override needed
+  // Gemini branch (Req 6.7): no Ollama extraction override on the cloud path.
+  if (base.provider !== 'ollama') return base
   const cfg = getConfig()
   const extractionModel = cfg.chat.extractionOllamaModel?.trim()
+  // Documented fallback (Req 6.6): absent/blank extraction model → base
+  // `chat.ollamaModel`. Also no-op when the extraction model equals the base
+  // model, so the returned config is identical to chat's in that case.
   if (!extractionModel || extractionModel === base.model) return base
+  // Graph-extraction override (Req 6.2, 6.5): swap ONLY the model; the base
+  // provider/baseURL (and thus the chat resolution) are left untouched.
   return { ...base, model: extractionModel }
 }

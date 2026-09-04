@@ -4,7 +4,19 @@ export type { NodeType, EdgeType } from './schema.js'
 export { KnowledgeGraphStore, deleteEdgesCleanly, runInGraphTransaction } from './graph-store.js'
 export type { GraphDb, GraphNode, GraphEdge, UpsertNodeInput, UpsertEdgeInput } from './graph-store.js'
 
-export { extractGraphFromTranscript } from './extract.js'
+export {
+  extractGraphFromTranscript,
+  isRetained,
+  Category,
+  ExtractionError,
+  SchemaError,
+  DEFAULT_SCHEMA_REPAIR_POLICY,
+  EXTRACTION_SCHEMA_VERSION,
+  EXTRACTION_PARSER_VERSION,
+  EXTRACTION_PROMPT_VERSION,
+  computeCurrentPromptHash,
+  getCurrentExtractionProvenance,
+} from './extract.js'
 export type {
   LlmExtractor,
   ExtractionResult,
@@ -12,6 +24,11 @@ export type {
   PersonEntity,
   ActionItemEntity,
   RiskEntity,
+  EntityType,
+  ClassifiedEntity,
+  ExtractionErrorCategory,
+  SchemaRepairPolicy,
+  CurrentExtractionProvenance,
 } from './extract.js'
 
 export { ingestExtraction } from './ingest.js'

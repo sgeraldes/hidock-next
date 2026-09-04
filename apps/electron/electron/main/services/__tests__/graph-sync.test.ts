@@ -183,7 +183,7 @@ describe('startGraphSync — graph:ingested emission (post-commit invalidation s
   })
 
   it('emits graph:ingested AFTER the debounced ingest commits — never on transcript-ready itself', async () => {
-    vi.mocked(ingestAllGraphSources).mockResolvedValue({ ingested: 2, skipped: 0, errors: [] })
+    vi.mocked(ingestAllGraphSources).mockResolvedValue({ ingested: 2, skipped: 0, extractionFailures: 0, errors: [], results: [] })
 
     fireTranscriptReady()
     // Before the debounce elapses the graph has NOT changed — no emission.
@@ -198,7 +198,7 @@ describe('startGraphSync — graph:ingested emission (post-commit invalidation s
   })
 
   it('does NOT emit when the ingest found nothing new', async () => {
-    vi.mocked(ingestAllGraphSources).mockResolvedValue({ ingested: 0, skipped: 3, errors: [] })
+    vi.mocked(ingestAllGraphSources).mockResolvedValue({ ingested: 0, skipped: 3, extractionFailures: 0, errors: [], results: [] })
 
     fireTranscriptReady()
     await vi.advanceTimersByTimeAsync(60_000)
@@ -208,7 +208,7 @@ describe('startGraphSync — graph:ingested emission (post-commit invalidation s
   })
 
   it('schedules the same incremental graph ingest for artifact-ready events', async () => {
-    vi.mocked(ingestAllGraphSources).mockResolvedValue({ ingested: 1, skipped: 0, errors: [] })
+    vi.mocked(ingestAllGraphSources).mockResolvedValue({ ingested: 1, skipped: 0, extractionFailures: 0, errors: [], results: [] })
 
     fireArtifactReady()
     await vi.advanceTimersByTimeAsync(60_000)

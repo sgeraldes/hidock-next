@@ -18,8 +18,10 @@ import {
   getEligibleRecordingIds,
   getExistingRecordingIds,
   getExistingCaptureIds,
-  getCaptureEligibilityRows
+  getCaptureEligibilityRows,
+  classifyRecordingGraphEligibility
 } from './database'
+import type { RecordingIneligibleReason } from './database'
 import {
   CAPTURE_VALUE_EXCLUDED_RATINGS,
   evaluateCaptureEligibility,
@@ -86,6 +88,43 @@ export function existingCaptures(candidateIds: Iterable<string>): ExistenceResul
   } catch (e) {
     console.error('[Eligibility] existingCaptures threw — failing closed:', e)
     return { ids: new Set<string>(), failClosed: true }
+  }
+}
+
+/**
+ * Spec hidock-graph-extraction-hardening, Task 2.4 — the AUTHORITATIVE
+ * recording-level gate for graph extraction (design §1 Recording_Level_Gate,
+ * §3 eligibility guard). This is the single eligibility-predicate SEAM every
+ * graph-extraction entry point routes a recording id through at fetch time,
+ * BEFORE any provider call or promotion, so an ineligible recording is never
+ * extracted or persisted (Req 1.4). It returns a structured status so a caller
+ * can report a precise `privacy_blocked` reason distinct from a fetch/transport
+ * error (Req 3.3), and it is deliberately shaped as the `isEligible(recordingId)`
+ * predicate the design specifies so Task 5.1 can build the per-attempt recheck
+ * loop (initial + every retry) on THIS same function without re-deriving policy.
+ *
+ * FAIL-CLOSED: if the underlying classification throws (transient DB error), the
+ * recording is reported `privacy_blocked` with reason `purged` rather than
+ * leaking content — nothing eligible ever slips through on an error.
+ */
+export type RecordingEligibilityStatus =
+  | { kind: 'eligible' }
+  | { kind: 'privacy_blocked'; reason: RecordingIneligibleReason }
+  | { kind: 'lookup_error'; error: string }
+
+export function isEligible(recordingId: string): RecordingEligibilityStatus {
+  try {
+    const verdict = classifyRecordingGraphEligibility(recordingId)
+    return verdict.eligible ? { kind: 'eligible' } : { kind: 'privacy_blocked', reason: verdict.reason }
+  } catch (e) {
+    // Fail-closed for the KEEP/SKIP decision either way (a `lookup_error` is
+    // NOT `eligible`, so the caller never extracts on it). The distinct kind
+    // lets the caller separate a genuine PRIVACY exclusion (a legitimate,
+    // expected skip) from an OPERATIONAL lookup failure (a DB error worth
+    // surfacing/collecting as an error rather than a silent privacy skip).
+    const error = e instanceof Error ? e.message : String(e)
+    console.error('[Eligibility] isEligible lookup threw — failing closed (lookup_error):', e)
+    return { kind: 'lookup_error', error }
   }
 }
 

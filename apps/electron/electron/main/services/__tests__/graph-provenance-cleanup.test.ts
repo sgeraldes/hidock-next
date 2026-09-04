@@ -70,9 +70,11 @@ import {
   removeRecordingProvenanceCore,
 } from '../knowledge-graph-service'
 
+// hidock-graph-extraction-hardening Task 2.4 — item-level classification is
+// fail-closed; tag every item "work" so it survives the parse boundary.
 const FAKE_JSON = JSON.stringify({
-  people: [{ name: 'Alice', skills: [] }],
-  topics: ['Roadmap'],
+  people: [{ name: 'Alice', skills: [], category: 'work' }],
+  topics: [{ text: 'Roadmap', category: 'work' }],
   projects: [],
   decisions: [],
   action_items: [],

@@ -10,11 +10,17 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { existsSync, rmSync } from 'fs'
-import Database from 'better-sqlite3'
+import { createRequire } from 'node:module'
 import { DatabaseEngine } from '@hidock/database'
 import { KnowledgeGraphStore } from '../src/graph-store.js'
 import { mergeNodes } from '../src/mutations.js'
 import { removeRecordingProvenance, pruneOrphanEdgeSources } from '../src/recording-provenance.js'
+
+// The engine requires the app-owned better-sqlite3 native module. Resolve the
+// database package's OWN copy (the one CI's "npm rebuild better-sqlite3"
+// Node-ABI restore step targets) so resolution never depends on hoisting.
+const requireFromDatabase = createRequire(new URL('../../database/package.json', import.meta.url))
+const BetterSqlite3 = requireFromDatabase('better-sqlite3')
 
 function tempPath(name: string) {
   return join(tmpdir(), `hidock-kg-prov-${name}-${Date.now()}-${Math.random().toString(36).slice(2)}.sqlite`)
@@ -29,7 +35,7 @@ const engines: DatabaseEngine[] = []
 async function makeStore(name: string) {
   const dbPath = tempPath(name)
   const engine = new DatabaseEngine({
-    betterSqlite3: Database,
+    betterSqlite3: BetterSqlite3,
     dbPathProvider: () => dbPath,
     schemaVersion: 1,
     schema: 'CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)',

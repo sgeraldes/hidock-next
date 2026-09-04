@@ -49,12 +49,15 @@ import {
   queryProvenance,
 } from '../knowledge-graph-service'
 
+// hidock-graph-extraction-hardening Task 2.4 — every extraction list is now
+// item-level classified fail-closed; tag every item "work" so it survives the
+// parse boundary.
 const FAKE_JSON = JSON.stringify({
-  people: [{ name: 'Mario', skills: ['SQL'] }],
-  topics: ['Roadmap'],
-  projects: ['Phoenix'],
+  people: [{ name: 'Mario', skills: ['SQL'], category: 'work' }],
+  topics: [{ text: 'Roadmap', category: 'work' }],
+  projects: [{ text: 'Phoenix', category: 'work' }],
   decisions: [],
-  action_items: [{ text: 'Ship v1', owner: 'Mario' }],
+  action_items: [{ text: 'Ship v1', owner: 'Mario', category: 'work' }],
   risks: [],
   next_steps: [],
 })
@@ -181,13 +184,13 @@ describe('Context Graph service', () => {
 
 describe('Context Lens service', () => {
   const RICH_JSON = JSON.stringify({
-    people: [{ name: 'Mario', skills: ['SQL'] }],
-    topics: ['Roadmap'],
-    projects: ['Phoenix'],
-    decisions: ['Adopt weekly releases'],
-    action_items: [{ text: 'Ship v1', owner: 'Mario' }],
-    risks: [{ text: 'Timeline tight', raised_by: 'Mario' }],
-    next_steps: ['Book the retro'],
+    people: [{ name: 'Mario', skills: ['SQL'], category: 'work' }],
+    topics: [{ text: 'Roadmap', category: 'work' }],
+    projects: [{ text: 'Phoenix', category: 'work' }],
+    decisions: [{ text: 'Adopt weekly releases', category: 'work' }],
+    action_items: [{ text: 'Ship v1', owner: 'Mario', category: 'work' }],
+    risks: [{ text: 'Timeline tight', raised_by: 'Mario', category: 'work' }],
+    next_steps: [{ text: 'Book the retro', category: 'work' }],
   })
 
   async function seedRich() {

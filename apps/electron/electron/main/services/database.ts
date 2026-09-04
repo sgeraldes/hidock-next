@@ -4492,6 +4492,43 @@ export function isRecordingGraphIngestable(recordingId: string): boolean {
 }
 
 /**
+ * Spec hidock-graph-extraction-hardening, Task 2.4 — the REASON-returning form
+ * of {@link isRecordingGraphIngestable}. Same authoritative fetch-time predicate
+ * (exists AND not soft-deleted AND not personal AND not value-excluded), but
+ * instead of a bare boolean it classifies WHY a recording is ineligible so the
+ * caller can report a precise privacy-blocked reason distinct from a fetch
+ * error (design §3, Req 3.3). This is the shared eligibility-predicate SEAM the
+ * recording-level gate is built on and that Task 5.1's per-attempt recheck loop
+ * will reuse verbatim, so the gate and the recheck can never diverge.
+ *
+ * A single point-read decides existence/soft-delete/personal in one row so the
+ * three states are distinguishable:
+ *   • no row at all      → 'purged'   (hard-purged / unknown id)
+ *   • deleted_at set     → 'deleted'
+ *   • personal = 1       → 'personal'
+ *   • else value-check   → 'value_excluded' when a value-excluding capture exists
+ *   • otherwise          → eligible
+ * The precedence (purged → deleted → personal → value_excluded) is arbitrary
+ * among simultaneously-true reasons; every one of them is fail-closed ineligible,
+ * so the reason is diagnostic only and never changes the keep/skip decision.
+ */
+export type RecordingIneligibleReason = 'personal' | 'deleted' | 'purged' | 'value_excluded'
+
+export function classifyRecordingGraphEligibility(
+  recordingId: string
+): { eligible: true } | { eligible: false; reason: RecordingIneligibleReason } {
+  const rec = queryOne<{ id: string; deleted_at: string | null; personal: number | null }>(
+    'SELECT id, deleted_at, COALESCE(personal, 0) AS personal FROM recordings WHERE id = ?',
+    [recordingId]
+  )
+  if (!rec) return { eligible: false, reason: 'purged' }
+  if (rec.deleted_at != null) return { eligible: false, reason: 'deleted' }
+  if (rec.personal) return { eligible: false, reason: 'personal' }
+  if (isValueExcludedRecording(recordingId)) return { eligible: false, reason: 'value_excluded' }
+  return { eligible: true }
+}
+
+/**
  * ARF-3 (Codex adversarial FINAL review) — cheap point-read: may the
  * transcription pipeline still persist post-analysis derivatives (timeline,
  * title, org-reconcile, identity, transcript-ready emit, wiki export, vector
