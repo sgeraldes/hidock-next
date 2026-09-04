@@ -14,6 +14,7 @@ import { getConnectorStore } from './connector-store'
 import { createIngestionSink } from './ingestion'
 import { m365Descriptor, createM365Connector } from './m365/m365-connector'
 import { hinotesDescriptor, createHiNotesConnector } from './hinotes/hinotes-connector'
+import { littlebirdRelayDescriptor, createLittlebirdRelayConnector } from './littlebird-relay/littlebird-relay-connector'
 
 let host: ConnectorHost | null = null
 
@@ -35,6 +36,10 @@ function buildHost(): ConnectorHost {
 
   // Local HiNotes Shortcut bridge — Markdown exports become indexed artifacts.
   h.register(hinotesDescriptor, (ctx) => createHiNotesConnector(ctx))
+
+  // Littlebird relay — polls Supabase staging table a Littlebird Routine
+  // writes to via the workbrain-relay Vercel MCP server.
+  h.register(littlebirdRelayDescriptor, (ctx) => createLittlebirdRelayConnector(ctx))
 
   // C2 — Slack (from its own package). Defensive: never let a load error here
   // break the rest of the connector host.
@@ -81,6 +86,13 @@ export async function initConnectors(): Promise<void> {
         // The shortcut may run while the app is open. Keep the folder bridge
         // fresh without requiring the user to press Sync in Settings.
         h.scheduleSync(instanceId, 1)
+        await h.syncNow(instanceId).catch(() => {})
+      }
+      if (instanceId === 'littlebird-relay' && h.getStatus(instanceId).state === 'connected') {
+        // Poll the Supabase staging table regularly so decisions/action items/
+        // risks/questions logged via a Littlebird Routine show up without a
+        // manual Sync click.
+        h.scheduleSync(instanceId, 5)
         await h.syncNow(instanceId).catch(() => {})
       }
     } catch {
