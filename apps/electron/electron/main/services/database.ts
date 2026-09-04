@@ -13,7 +13,7 @@ import { getEventBus } from './event-bus'
 import { isCancelledMeetingSubject, scoreMeetingCandidates } from './recording-match-scoring'
 import type { QualityRating } from '@/types/knowledge'
 
-const SCHEMA_VERSION = 54
+const SCHEMA_VERSION = 55
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -120,6 +120,14 @@ CREATE TABLE IF NOT EXISTS knowledge_captures (
     -- Source tracking (migration from recordings)
     source_recording_id TEXT,
 
+    -- External source tracking (v55). Identifies "one living external item"
+    -- for connector-pushed captures (decisions/risks/questions/action items
+    -- from e.g. the Littlebird relay), mirroring the (source_connector_id,
+    -- source_ref) dedup convention artifact-service already uses. NULL for
+    -- meeting-derived captures.
+    source_connector_id TEXT,
+    source_ref TEXT,
+
     -- Timestamps
     captured_at TEXT NOT NULL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -205,6 +213,65 @@ CREATE TABLE IF NOT EXISTS decisions (
     extracted_from TEXT,
     confidence REAL,
     decided_at TEXT,
+
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE
+);
+
+-- =============================================================================
+-- First-Class Risks (v55)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS risks (
+    id TEXT PRIMARY KEY,
+    knowledge_capture_id TEXT NOT NULL,
+
+    -- Risk content
+    content TEXT NOT NULL,
+    context TEXT,
+    owner TEXT,
+    mitigation TEXT,
+
+    -- Severity and status
+    severity TEXT CHECK(severity IN ('low', 'medium', 'high', 'critical')) DEFAULT 'medium',
+    likelihood TEXT CHECK(likelihood IN ('low', 'medium', 'high')),
+    status TEXT CHECK(status IN ('open', 'mitigated', 'accepted', 'closed')) DEFAULT 'open',
+
+    -- Extraction metadata
+    extracted_from TEXT,
+    confidence REAL,
+    identified_at TEXT,
+
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE
+);
+
+-- =============================================================================
+-- First-Class Questions (v55)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS questions (
+    id TEXT PRIMARY KEY,
+    knowledge_capture_id TEXT NOT NULL,
+
+    -- Question content
+    content TEXT NOT NULL,
+    context TEXT,
+    raised_by TEXT,
+    answer TEXT,
+
+    -- Status
+    status TEXT CHECK(status IN ('open', 'answered', 'closed')) DEFAULT 'open',
+
+    -- Extraction metadata
+    extracted_from TEXT,
+    confidence REAL,
+    raised_at TEXT,
+    answered_at TEXT,
 
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -765,6 +832,10 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_captures_status ON knowledge_captures(s
 CREATE INDEX IF NOT EXISTS idx_knowledge_captures_category ON knowledge_captures(category);
 CREATE INDEX IF NOT EXISTS idx_knowledge_title ON knowledge_captures(title);
 CREATE INDEX IF NOT EXISTS idx_knowledge_summary ON knowledge_captures(summary);
+CREATE INDEX IF NOT EXISTS idx_knowledge_captures_source
+  ON knowledge_captures(source_connector_id, source_ref) WHERE source_connector_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_risks_capture ON risks(knowledge_capture_id);
+CREATE INDEX IF NOT EXISTS idx_questions_capture ON questions(knowledge_capture_id);
 CREATE INDEX IF NOT EXISTS idx_quality_recording ON quality_assessments(recording_id);
 CREATE INDEX IF NOT EXISTS idx_quality_level ON quality_assessments(quality);
 
@@ -2975,6 +3046,57 @@ const MIGRATIONS: Record<number, () => void> = {
       )
     }
     console.log('Migration v54 complete')
+  },
+  55: () => {
+    console.log('Running migration to schema v55: risks + questions tables, connector source tracking')
+    const database = getDatabase()
+    const captureColumns = getTableColumns(database, 'knowledge_captures')
+    if (!captureColumns.includes('source_connector_id')) {
+      database.run('ALTER TABLE knowledge_captures ADD COLUMN source_connector_id TEXT')
+    }
+    if (!captureColumns.includes('source_ref')) {
+      database.run('ALTER TABLE knowledge_captures ADD COLUMN source_ref TEXT')
+    }
+    database.run(`
+      CREATE TABLE IF NOT EXISTS risks (
+          id TEXT PRIMARY KEY,
+          knowledge_capture_id TEXT NOT NULL,
+          content TEXT NOT NULL,
+          context TEXT,
+          owner TEXT,
+          mitigation TEXT,
+          severity TEXT CHECK(severity IN ('low', 'medium', 'high', 'critical')) DEFAULT 'medium',
+          likelihood TEXT CHECK(likelihood IN ('low', 'medium', 'high')),
+          status TEXT CHECK(status IN ('open', 'mitigated', 'accepted', 'closed')) DEFAULT 'open',
+          extracted_from TEXT,
+          confidence REAL,
+          identified_at TEXT,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS questions (
+          id TEXT PRIMARY KEY,
+          knowledge_capture_id TEXT NOT NULL,
+          content TEXT NOT NULL,
+          context TEXT,
+          raised_by TEXT,
+          answer TEXT,
+          status TEXT CHECK(status IN ('open', 'answered', 'closed')) DEFAULT 'open',
+          extracted_from TEXT,
+          confidence REAL,
+          raised_at TEXT,
+          answered_at TEXT,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_knowledge_captures_source
+        ON knowledge_captures(source_connector_id, source_ref) WHERE source_connector_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_risks_capture ON risks(knowledge_capture_id);
+      CREATE INDEX IF NOT EXISTS idx_questions_capture ON questions(knowledge_capture_id);
+    `)
+    console.log('Migration v55 complete')
   },
 }
 
