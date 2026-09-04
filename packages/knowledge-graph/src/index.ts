@@ -97,3 +97,33 @@ export type {
   DeleteNodeResult,
   NodeGraphStats,
 } from './mutations.js'
+
+export {
+  createLittlebirdSourceAdapter,
+  createFailClosedClassifier,
+} from './littlebird-adapter.js'
+export type {
+  CanonicalCaptureModel,
+  LittlebirdSource,
+  PrivateReason,
+  AdapterResult,
+  AdapterMappingContext,
+  LittlebirdSourceAdapter,
+} from './littlebird-adapter.js'
+
+export {
+  evaluateDedup,
+  assertExplicitEquivalence,
+  retractEquivalence,
+  isActiveEquivalence,
+  DEFAULT_DEDUP_CONFIG,
+} from './littlebird-dedup.js'
+export type {
+  MatchedRule,
+  CanonicalRecordRef,
+  Evidence,
+  AssertedBy,
+  EquivalenceRecord,
+  DedupConfig,
+  CalendarAnchor,
+} from './littlebird-dedup.js'
