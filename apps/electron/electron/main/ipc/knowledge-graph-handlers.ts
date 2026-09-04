@@ -4,6 +4,7 @@
  * Channels:
  *   graph:stats          — node/edge counts by type
  *   graph:ingestAll      — ingest all DB transcripts (incremental)
+ *   graph:reingestRecordings — remove graph+B1 rows for all marker-ingested recordings (dryRun supported); pair with graph:ingestAll to re-extract
  *   graph:ingestFolder   — ingest *.txt/*.md from a folder path
  *   graph:topAttendees   — top attendees for a topic/project name
  *   graph:topSkill       — top skill demonstrators
@@ -36,6 +37,7 @@ import {
   mergeGraphPreview,
   mergeGraphNodes,
   deleteGraphNode,
+  removeRecordingProvenanceCore,
 } from '../services/knowledge-graph-service'
 
 export function registerKnowledgeGraphHandlers(): void {
@@ -56,6 +58,112 @@ export function registerKnowledgeGraphHandlers(): void {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       console.error('[graph:ingestAll] Error:', e)
+      return { success: false, error: msg }
+    }
+  })
+
+  // graph:reingestRecordings — REMOVAL half of a re-ingest. For every recording
+  // whose transcript currently carries a graph_ingested_transcripts marker
+  // (scope derived live, never hardcoded), it:
+  //   1. runs removeRecordingProvenanceCore(rid) — the tested surgical graph
+  //      removal (protects shared edges, GCs orphan nodes by type, scrubs
+  //      merge-journal snapshots). Markers included.
+  //   2. deletes that recording's capture's rows from the first-class
+  //      decisions / action_items tables (B1 promote output — NOT touched by
+  //      removeRecordingProvenanceCore, which predates B1).
+  // Each recording's two steps run in one transaction. With dryRun:true nothing
+  // is written and the same scope + per-recording counts are reported (the
+  // provenance core's own dryRun estimate). Re-extraction is a SEPARATE explicit
+  // graph:ingestAll call, so the caller can verify the cleaned state in between.
+  ipcMain.handle('graph:reingestRecordings', async (_event, arg: unknown) => {
+    try {
+      // Lazy import: pulling database.ts at module load drags config.ts ->
+      // app.getPath() in, which some unit tests' electron mock doesn't provide.
+      const { run, queryAll, runInTransaction } = await import('../services/database')
+      const dryRun = !!(arg && typeof arg === 'object' && (arg as { dryRun?: unknown }).dryRun)
+
+      // Scope: recordings with a live ingest marker (via their transcript).
+      const scope = queryAll<{ recording_id: string; capture_id: string | null }>(
+        `SELECT DISTINCT t.recording_id AS recording_id, kc.id AS capture_id
+           FROM graph_ingested_transcripts git
+           JOIN transcripts t ON t.id = git.transcript_id
+           LEFT JOIN knowledge_captures kc ON kc.source_recording_id = t.recording_id
+          ORDER BY t.recording_id`,
+        []
+      )
+
+      let markersRemoved = 0
+      let graphEdgesRemoved = 0
+      let edgeSourceRowsRemoved = 0
+      let orphanNodesRemoved = 0
+      let sharedEdgesKept = 0
+      let decisionsRemoved = 0
+      let actionItemsRemoved = 0
+      const perRecording: Array<Record<string, unknown>> = []
+
+      for (const rec of scope) {
+        const rid = rec.recording_id
+        const captureId = rec.capture_id
+
+        // Count B1 rows (both dry-run and real need the count for reporting).
+        const decCount = captureId
+          ? (queryAll<{ n: number }>('SELECT COUNT(*) AS n FROM decisions WHERE knowledge_capture_id = ?', [captureId])[0]?.n ?? 0)
+          : 0
+        const actCount = captureId
+          ? (queryAll<{ n: number }>('SELECT COUNT(*) AS n FROM action_items WHERE knowledge_capture_id = ?', [captureId])[0]?.n ?? 0)
+          : 0
+
+        const apply = (): ReturnType<typeof removeRecordingProvenanceCore> => {
+          const removal = removeRecordingProvenanceCore(rid, { dryRun })
+          if (!dryRun && captureId) {
+            run('DELETE FROM decisions WHERE knowledge_capture_id = ?', [captureId])
+            run('DELETE FROM action_items WHERE knowledge_capture_id = ?', [captureId])
+          }
+          return removal
+        }
+        // Real run: removal + B1 delete atomic per recording. Dry run: no txn needed.
+        const removal = dryRun ? apply() : runInTransaction(apply)
+
+        markersRemoved += removal.markersRemoved
+        graphEdgesRemoved += removal.edgesRemoved
+        edgeSourceRowsRemoved += removal.edgeSourceRowsRemoved
+        orphanNodesRemoved += removal.orphanNodesRemoved
+        sharedEdgesKept += removal.sharedEdgesKept
+        decisionsRemoved += decCount
+        actionItemsRemoved += actCount
+        perRecording.push({
+          recordingId: rid,
+          captureId,
+          markersRemoved: removal.markersRemoved,
+          edgesRemoved: removal.edgesRemoved,
+          orphanNodesRemoved: removal.orphanNodesRemoved,
+          sharedEdgesKept: removal.sharedEdgesKept,
+          decisionsRemoved: decCount,
+          actionItemsRemoved: actCount,
+        })
+      }
+
+      return {
+        success: true,
+        data: {
+          dryRun,
+          recordingsInScope: scope.length,
+          recordingIds: scope.map((r) => r.recording_id),
+          totals: {
+            markersRemoved,
+            graphEdgesRemoved,
+            edgeSourceRowsRemoved,
+            orphanNodesRemoved,
+            sharedEdgesKept,
+            decisionsRemoved,
+            actionItemsRemoved,
+          },
+          perRecording,
+        },
+      }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('[graph:reingestRecordings] Error:', e)
       return { success: false, error: msg }
     }
   })

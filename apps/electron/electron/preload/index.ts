@@ -1168,6 +1168,7 @@ export interface ElectronAPI {
   graph: {
     stats: () => Promise<{ success: boolean; data?: { nodes: number; edges: number; nodesByType: Record<string, number> }; error?: string }>
     ingestAll: () => Promise<{ success: boolean; data?: { ingested: number; skipped: number; errors: Array<{ transcriptId: string; error: string }> }; error?: string }>
+    reingestRecordings: (opts?: { dryRun?: boolean }) => Promise<{ success: boolean; data?: { dryRun: boolean; recordingsInScope: number; recordingIds: string[]; totals: { markersRemoved: number; graphEdgesRemoved: number; edgeSourceRowsRemoved: number; orphanNodesRemoved: number; sharedEdgesKept: number; decisionsRemoved: number; actionItemsRemoved: number }; perRecording: Array<Record<string, unknown>> }; error?: string }>
     ingestFolder: (folderPath: string) => Promise<{ success: boolean; data?: { ingested: number; skipped: number; errors: Array<{ transcriptId: string; error: string }> }; error?: string }>
     topAttendees: (name: string) => Promise<{ success: boolean; data?: Array<{ person: string; personId: string; meetings: number }>; error?: string }>
     topSkill: (skill: string) => Promise<{ success: boolean; data?: Array<{ person: string; personId: string; weight: number }>; error?: string }>
@@ -1953,6 +1954,7 @@ const electronAPI: ElectronAPI = {
   graph: {
     stats: () => callIPC('graph:stats'),
     ingestAll: () => callIPC('graph:ingestAll'),
+    reingestRecordings: (opts?: { dryRun?: boolean }) => callIPC('graph:reingestRecordings', opts ?? {}),
     ingestFolder: (folderPath: string) => callIPC('graph:ingestFolder', folderPath),
     topAttendees: (name: string) => callIPC('graph:topAttendees', name),
     topSkill: (skill: string) => callIPC('graph:topSkill', skill),
