@@ -2,12 +2,27 @@
  * Ingestion sink — routes connector-emitted SourceItems into the EXISTING
  * pipelines (CONNECTORS.md Layer 2 → Layer 1/3):
  *
- *   kind 'meeting'  → calendar-sync meeting upsert (upsertMeetingsBatch, which
- *                     also auto-extracts People from organizer + attendees).
- *   kind 'contact'  → contacts (+ the resolver via email match).
- *   everything else → artifact-service.importArtifact (text/binary staged to a
- *                     temp file), carrying source_connector_id + source_ref for
- *                     dedup + incremental replace.
+ *   kind 'meeting'                              → calendar-sync meeting upsert
+ *                                                  (upsertMeetingsBatch, which
+ *                                                  also auto-extracts People
+ *                                                  from organizer + attendees).
+ *   kind 'contact'                               → contacts (+ the resolver
+ *                                                  via email match).
+ *   kind 'decision' | 'action_item' | 'risk' |
+ *   'question' (with `entity` set)               → the matching first-class
+ *                                                  table (decisions/
+ *                                                  action_items/risks/
+ *                                                  questions), via a
+ *                                                  knowledge_captures row
+ *                                                  deduped on
+ *                                                  (source_connector_id,
+ *                                                  source_ref) (v55).
+ *   everything else                              → artifact-service.importArtifact
+ *                                                  (text/binary staged to a
+ *                                                  temp file), carrying
+ *                                                  source_connector_id +
+ *                                                  source_ref for dedup +
+ *                                                  incremental replace.
  *
  * Pure mappers are exported for unit testing; the db/artifact dependencies are
  * injectable so routing can be tested without a live database.
@@ -17,8 +32,12 @@ import { writeFileSync, rmSync, mkdtempSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import type {
+  ExternalActionItem,
+  ExternalDecision,
   ExternalMeeting,
   ExternalPerson,
+  ExternalQuestion,
+  ExternalRisk,
   IngestionOutcome,
   IngestionSink,
   SourceContainer,
@@ -29,9 +48,71 @@ import {
   getContactByEmail,
   createContact,
   updateContact,
+  upsertConnectorKnowledgeItem,
   type Meeting,
+  type ConnectorKnowledgeItem,
+  type ConnectorKnowledgeItemResult,
 } from '../database'
 import { importArtifact } from '../artifact-service'
+
+const STRUCTURED_KNOWLEDGE_KINDS = new Set(['decision', 'action_item', 'risk', 'question'])
+
+/**
+ * Pure: map a structured SourceItem (kind 'decision' | 'action_item' | 'risk' |
+ * 'question', with `entity` set) onto the payload upsertConnectorKnowledgeItem
+ * expects. `item.title` falls back to a truncated `content` so a capture
+ * without an explicit title still gets a sensible one.
+ */
+export function sourceItemToConnectorKnowledgeItem(item: SourceItem): ConnectorKnowledgeItem {
+  const kind = item.kind as ConnectorKnowledgeItem['kind']
+  const entity = item.entity as ExternalDecision | ExternalActionItem | ExternalRisk | ExternalQuestion
+  const content = entity.content
+  const title = item.title || content.slice(0, 120)
+  const extractedFrom = (item.metadata?.extractedFrom as string | undefined) ?? null
+
+  if (kind === 'decision') {
+    const d = entity as ExternalDecision
+    return {
+      kind, title, content, extractedFrom,
+      context: d.context ?? null,
+      participants: d.participants ?? null,
+      decidedAt: d.decidedAt ?? null,
+    }
+  }
+  if (kind === 'action_item') {
+    const a = entity as ExternalActionItem
+    return {
+      kind, title, content, extractedFrom,
+      assignee: a.assignee ?? null,
+      dueDate: a.dueDate ?? null,
+      priority: a.priority ?? null,
+      status: a.status ?? null,
+    }
+  }
+  if (kind === 'risk') {
+    const r = entity as ExternalRisk
+    return {
+      kind, title, content, extractedFrom,
+      context: r.context ?? null,
+      owner: r.owner ?? null,
+      mitigation: r.mitigation ?? null,
+      severity: r.severity ?? null,
+      likelihood: r.likelihood ?? null,
+      status: r.status ?? null,
+      identifiedAt: r.identifiedAt ?? null,
+    }
+  }
+  const q = entity as ExternalQuestion
+  return {
+    kind, title, content, extractedFrom,
+    context: q.context ?? null,
+    raisedBy: q.raisedBy ?? null,
+    answer: q.answer ?? null,
+    status: q.status ?? null,
+    raisedAt: q.raisedAt ?? null,
+    answeredAt: q.answeredAt ?? null,
+  }
+}
 
 type MeetingRow = Omit<Meeting, 'created_at' | 'updated_at'>
 
@@ -82,6 +163,12 @@ export interface IngestionDeps {
     filePath: string,
     opts: { sourceConnectorId: string; sourceRef: string; title?: string }
   ) => Promise<unknown>
+  /** Upsert a structured decision/action_item/risk/question (v55). */
+  applyConnectorKnowledgeItem: (
+    connectorId: string,
+    sourceRef: string,
+    item: ConnectorKnowledgeItem
+  ) => ConnectorKnowledgeItemResult
 }
 
 /** Default contact apply: enrich an email-matched contact, else create a fresh one. */
@@ -105,13 +192,15 @@ const DEFAULT_DEPS: IngestionDeps = {
   upsertMeetings: (rows) => upsertMeetingsBatch(rows),
   applyContact: defaultApplyContact,
   importArtifactFile: (filePath, opts) => importArtifact(filePath, opts),
+  applyConnectorKnowledgeItem: (connectorId, sourceRef, item) =>
+    upsertConnectorKnowledgeItem(connectorId, sourceRef, item),
 }
 
 export class ConnectorIngestionSink implements IngestionSink {
   constructor(private readonly deps: IngestionDeps = DEFAULT_DEPS) {}
 
   async ingest(connectorId: string, _container: SourceContainer, items: SourceItem[]): Promise<IngestionOutcome> {
-    const outcome: IngestionOutcome = { meetings: 0, contacts: 0, artifacts: 0, skipped: 0 }
+    const outcome: IngestionOutcome = { meetings: 0, contacts: 0, artifacts: 0, knowledgeItems: 0, skipped: 0 }
     const meetingRows: MeetingRow[] = []
 
     for (const item of items) {
@@ -121,6 +210,13 @@ export class ConnectorIngestionSink implements IngestionSink {
         } else if (item.kind === 'contact' && item.entity) {
           this.deps.applyContact(item.entity as ExternalPerson)
           outcome.contacts++
+        } else if (STRUCTURED_KNOWLEDGE_KINDS.has(item.kind) && item.entity) {
+          this.deps.applyConnectorKnowledgeItem(
+            connectorId,
+            item.externalId,
+            sourceItemToConnectorKnowledgeItem(item)
+          )
+          outcome.knowledgeItems++
         } else {
           const staged = await this.stageArtifact(item)
           if (!staged) {

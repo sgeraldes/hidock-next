@@ -10,11 +10,18 @@ vi.mock('../../database', () => ({
   getContactByEmail: vi.fn(),
   createContact: vi.fn(),
   updateContact: vi.fn(),
+  upsertConnectorKnowledgeItem: vi.fn(),
 }))
 vi.mock('../../artifact-service', () => ({ importArtifact: vi.fn() }))
 
-import { externalMeetingToRow, extensionForItem, ConnectorIngestionSink, type IngestionDeps } from '../ingestion'
-import type { ExternalMeeting, ExternalPerson, SourceContainer, SourceItem } from '@hidock/connectors'
+import {
+  externalMeetingToRow,
+  extensionForItem,
+  sourceItemToConnectorKnowledgeItem,
+  ConnectorIngestionSink,
+  type IngestionDeps,
+} from '../ingestion'
+import type { ExternalMeeting, ExternalPerson, ExternalRisk, SourceContainer, SourceItem } from '@hidock/connectors'
 
 const container: SourceContainer = { externalId: 'calendar', name: 'Calendar', kind: 'calendar' }
 
@@ -31,14 +38,21 @@ const meeting: ExternalMeeting = {
 
 const person: ExternalPerson = { externalId: 'c@x.com', name: 'Carol', email: 'c@x.com', title: 'PM', company: 'Contoso' }
 
-function fakeDeps(): IngestionDeps & { upserted: any[]; contacts: ExternalPerson[]; imported: any[] } {
+function fakeDeps(): IngestionDeps & {
+  upserted: any[]
+  contacts: ExternalPerson[]
+  imported: any[]
+  knowledgeItems: any[]
+} {
   const upserted: any[] = []
   const contacts: ExternalPerson[] = []
   const imported: any[] = []
+  const knowledgeItems: any[] = []
   return {
     upserted,
     contacts,
     imported,
+    knowledgeItems,
     upsertMeetings: (rows) => upserted.push(...rows),
     applyContact: (p) => {
       contacts.push(p)
@@ -47,6 +61,10 @@ function fakeDeps(): IngestionDeps & { upserted: any[]; contacts: ExternalPerson
     importArtifactFile: async (filePath, opts) => {
       imported.push({ filePath, opts })
       return { deduped: false }
+    },
+    applyConnectorKnowledgeItem: (connectorId, sourceRef, item) => {
+      knowledgeItems.push({ connectorId, sourceRef, item })
+      return { captureId: 'kc-fake', itemId: 'item-fake', action: 'created' }
     },
   }
 }
@@ -92,6 +110,7 @@ describe('ConnectorIngestionSink routing', () => {
     expect(outcome.meetings).toBe(1)
     expect(outcome.contacts).toBe(1)
     expect(outcome.artifacts).toBe(1)
+    expect(outcome.knowledgeItems).toBe(0)
     expect(outcome.skipped).toBe(0)
 
     expect(deps.upserted[0].id).toBe('m365:evt1')
@@ -127,5 +146,57 @@ describe('ConnectorIngestionSink routing', () => {
     expect(outcome.meetings).toBe(2)
     expect(spy).toHaveBeenCalledTimes(1)
     expect(spy.mock.calls[0][0]).toHaveLength(2)
+  })
+})
+
+describe('ConnectorIngestionSink structured knowledge routing (v55)', () => {
+  it('routes decision/action_item/risk/question kinds to applyConnectorKnowledgeItem, keyed on externalId', async () => {
+    const deps = fakeDeps()
+    const sink = new ConnectorIngestionSink(deps)
+    const risk: ExternalRisk = { content: 'Vendor SLA may slip', severity: 'high', owner: 'Kelly' }
+    const items: SourceItem[] = [
+      {
+        externalId: 'risk-1',
+        kind: 'risk',
+        mime: 'application/json',
+        createdAt: '2026-07-09T00:00:00Z',
+        entity: risk,
+      },
+    ]
+
+    const outcome = await sink.ingest('littlebird-relay', container, items)
+    expect(outcome.knowledgeItems).toBe(1)
+    expect(outcome.skipped).toBe(0)
+    expect(deps.knowledgeItems[0].connectorId).toBe('littlebird-relay')
+    expect(deps.knowledgeItems[0].sourceRef).toBe('risk-1')
+    expect(deps.knowledgeItems[0].item).toEqual({
+      kind: 'risk',
+      title: 'Vendor SLA may slip',
+      content: 'Vendor SLA may slip',
+      extractedFrom: null,
+      context: null,
+      owner: 'Kelly',
+      mitigation: null,
+      severity: 'high',
+      likelihood: null,
+      status: null,
+      identifiedAt: null,
+    })
+  })
+})
+
+describe('sourceItemToConnectorKnowledgeItem', () => {
+  it('falls back to a truncated content as title when the item has none', () => {
+    const item: SourceItem = {
+      externalId: 'q-1',
+      kind: 'question',
+      mime: 'application/json',
+      createdAt: '2026-07-09T00:00:00Z',
+      entity: { content: 'Who owns the migration cutover date?', raisedBy: 'Kelly' },
+    }
+    const mapped = sourceItemToConnectorKnowledgeItem(item)
+    expect(mapped.kind).toBe('question')
+    expect(mapped.title).toBe('Who owns the migration cutover date?')
+    expect(mapped.raisedBy).toBe('Kelly')
   })
 })

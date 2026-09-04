@@ -395,7 +395,7 @@ export class ConnectorHost {
     inst: Connector,
     container: SourceContainer
   ): Promise<IngestionOutcome> {
-    const outcome: IngestionOutcome = { meetings: 0, contacts: 0, artifacts: 0, skipped: 0 }
+    const outcome: IngestionOutcome = { meetings: 0, contacts: 0, artifacts: 0, knowledgeItems: 0, skipped: 0 }
     const sources = inst.capabilities.sources
     if (!sources) return outcome
     const sourceState = this.store.getSourceState(id, container.externalId)
@@ -407,6 +407,7 @@ export class ConnectorHost {
         outcome.meetings += partial.meetings
         outcome.contacts += partial.contacts
         outcome.artifacts += partial.artifacts
+        outcome.knowledgeItems += partial.knowledgeItems
         outcome.skipped += partial.skipped
       }
       if (result.cursor !== undefined) cursor = result.cursor
@@ -422,7 +423,7 @@ export class ConnectorHost {
   /** Sync one container (if id given) or all enabled containers. */
   async syncNow(id: string, containerId?: string): Promise<IngestionOutcome> {
     const inst = this.instance(id)
-    const total: IngestionOutcome = { meetings: 0, contacts: 0, artifacts: 0, skipped: 0 }
+    const total: IngestionOutcome = { meetings: 0, contacts: 0, artifacts: 0, knowledgeItems: 0, skipped: 0 }
     if (!inst.capabilities.sources) return total
     this.patchStatus(id, { state: 'syncing', message: 'Syncing…' })
     try {
@@ -435,6 +436,7 @@ export class ConnectorHost {
         total.meetings += partial.meetings
         total.contacts += partial.contacts
         total.artifacts += partial.artifacts
+        total.knowledgeItems += partial.knowledgeItems
         total.skipped += partial.skipped
       }
       const nowIso = new Date().toISOString()

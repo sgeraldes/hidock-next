@@ -120,6 +120,51 @@ export interface ExternalMeeting {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Structured knowledge items (additive — for connectors that push already-
+// extracted decisions/actions/risks/questions rather than raw text, e.g. a
+// Littlebird Routine relay). Each maps 1:1 onto a knowledge_captures row plus
+// one child-table row (decisions/action_items/risks/questions), deduped by
+// (source_connector_id, source_ref) on the capture — a re-sync of the same
+// externalId UPDATES the existing pair instead of duplicating it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface ExternalDecision {
+  content: string
+  context?: string
+  participants?: string[]
+  decidedAt?: string
+}
+
+export interface ExternalActionItem {
+  content: string
+  assignee?: string
+  dueDate?: string
+  priority?: 'low' | 'medium' | 'high' | 'urgent'
+  status?: 'pending' | 'in_progress' | 'completed' | 'cancelled'
+}
+
+export interface ExternalRisk {
+  content: string
+  context?: string
+  owner?: string
+  mitigation?: string
+  severity?: 'low' | 'medium' | 'high' | 'critical'
+  likelihood?: 'low' | 'medium' | 'high'
+  status?: 'open' | 'mitigated' | 'accepted' | 'closed'
+  identifiedAt?: string
+}
+
+export interface ExternalQuestion {
+  content: string
+  context?: string
+  raisedBy?: string
+  answer?: string
+  status?: 'open' | 'answered' | 'closed'
+  raisedAt?: string
+  answeredAt?: string
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Sources
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -144,12 +189,15 @@ export interface SourceContainer {
  *
  * For structured canonical entities (kind 'meeting' | 'contact'), the connector
  * ALSO sets `entity`; the host then routes to calendar-sync / contacts+resolver
- * instead of artifact-service.
+ * instead of artifact-service. Likewise kind 'decision' | 'action_item' |
+ * 'risk' | 'question' with `entity` set routes to the matching first-class
+ * table (decisions/action_items/risks/questions), keyed off a knowledge_captures
+ * row deduped by (source_connector_id, source_ref).
  */
 export interface SourceItem {
   /** Stable source reference — unique per item within the container. */
   externalId: string
-  /** Registered entity-type key: 'message' | 'image' | 'md' | 'meeting' | 'contact' | … */
+  /** Registered entity-type key: 'message' | 'image' | 'md' | 'meeting' | 'contact' | 'decision' | 'action_item' | 'risk' | 'question' | … */
   kind: string
   mime: string
   title?: string
@@ -172,7 +220,7 @@ export interface SourceItem {
    * present the host ingests it via calendar-sync / contacts instead of
    * artifact-service.
    */
-  entity?: ExternalMeeting | ExternalPerson
+  entity?: ExternalMeeting | ExternalPerson | ExternalDecision | ExternalActionItem | ExternalRisk | ExternalQuestion
   metadata?: Record<string, unknown>
 }
 
@@ -480,6 +528,8 @@ export interface IngestionOutcome {
   meetings: number
   contacts: number
   artifacts: number
+  /** decisions/action_items/risks/questions upserted via a structured entity (v55). */
+  knowledgeItems: number
   skipped: number
 }
 

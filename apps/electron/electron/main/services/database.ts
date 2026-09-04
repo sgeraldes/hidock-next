@@ -11541,6 +11541,163 @@ export function promoteExtractionToFirstClassTables(
 }
 
 /**
+ * Connector-pushed structured knowledge item (v55): the payload shape for
+ * decision/action_item/risk/question items arriving from a connector that
+ * has already extracted them (e.g. the Littlebird relay), as opposed to
+ * `promoteExtractionToFirstClassTables` above, which promotes items AI-
+ * extracted from a HiDock transcript. Each item is 1:1 with one
+ * knowledge_captures row (unlike a transcript capture, which can hold many
+ * decisions/action_items) — so unlike the transcript path, a re-sync of the
+ * same (connectorId, sourceRef) UPDATES that one row instead of appending.
+ */
+export interface ConnectorKnowledgeItem {
+  kind: 'decision' | 'action_item' | 'risk' | 'question'
+  title: string
+  content: string
+  extractedFrom?: string | null
+  confidence?: number | null
+  context?: string | null
+  participants?: string[] | null
+  decidedAt?: string | null
+  assignee?: string | null
+  dueDate?: string | null
+  priority?: string | null
+  status?: string | null
+  owner?: string | null
+  mitigation?: string | null
+  severity?: string | null
+  likelihood?: string | null
+  identifiedAt?: string | null
+  raisedBy?: string | null
+  answer?: string | null
+  raisedAt?: string | null
+  answeredAt?: string | null
+}
+
+export interface ConnectorKnowledgeItemResult {
+  captureId: string
+  itemId: string
+  action: 'created' | 'updated'
+}
+
+/**
+ * Upsert a connector-pushed knowledge item (decision/action_item/risk/
+ * question), keyed by (connectorId, sourceRef) on knowledge_captures. First
+ * call creates the capture + child row; a later call with the same
+ * (connectorId, sourceRef) UPDATES both in place — this is the dedup
+ * convention artifact-service already uses for artifacts, extended to the
+ * first-class tables (v55).
+ */
+export function upsertConnectorKnowledgeItem(
+  connectorId: string,
+  sourceRef: string,
+  item: ConnectorKnowledgeItem
+): ConnectorKnowledgeItemResult {
+  return runInTransaction(() => {
+    const now = new Date().toISOString()
+
+    const existingCapture = queryOne<{ id: string }>(
+      'SELECT id FROM knowledge_captures WHERE source_connector_id = ? AND source_ref = ?',
+      [connectorId, sourceRef]
+    )
+
+    let captureId: string
+    let action: 'created' | 'updated'
+    if (existingCapture?.id) {
+      captureId = existingCapture.id
+      action = 'updated'
+      runNoSave('UPDATE knowledge_captures SET title = ?, updated_at = ? WHERE id = ?', [
+        item.title,
+        now,
+        captureId,
+      ])
+    } else {
+      captureId = randomUUID()
+      action = 'created'
+      runNoSave(
+        `INSERT INTO knowledge_captures
+           (id, title, category, status, captured_at, source_connector_id, source_ref, created_at, updated_at)
+         VALUES (?, ?, 'other', 'ready', ?, ?, ?, ?, ?)`,
+        [captureId, item.title, now, connectorId, sourceRef, now, now]
+      )
+    }
+
+    const targetTable =
+      item.kind === 'decision' ? 'decisions'
+      : item.kind === 'action_item' ? 'action_items'
+      : item.kind === 'risk' ? 'risks'
+      : 'questions'
+
+    const existingItem = queryOne<{ id: string }>(
+      `SELECT id FROM ${targetTable} WHERE knowledge_capture_id = ?`,
+      [captureId]
+    )
+    const itemId = existingItem?.id ?? randomUUID()
+
+    if (item.kind === 'decision') {
+      const participants = item.participants ? JSON.stringify(item.participants) : null
+      if (existingItem) {
+        runNoSave(
+          `UPDATE decisions SET content = ?, context = ?, participants = ?, extracted_from = ?,
+             confidence = ?, decided_at = ?, updated_at = ? WHERE id = ?`,
+          [item.content, item.context ?? null, participants, item.extractedFrom ?? null, item.confidence ?? null, item.decidedAt ?? null, now, itemId]
+        )
+      } else {
+        runNoSave(
+          `INSERT INTO decisions (id, knowledge_capture_id, content, context, participants, extracted_from, confidence, decided_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [itemId, captureId, item.content, item.context ?? null, participants, item.extractedFrom ?? null, item.confidence ?? null, item.decidedAt ?? null, now, now]
+        )
+      }
+    } else if (item.kind === 'action_item') {
+      if (existingItem) {
+        runNoSave(
+          `UPDATE action_items SET content = ?, assignee = ?, due_date = ?, priority = COALESCE(?, priority),
+             status = COALESCE(?, status), extracted_from = ?, confidence = ?, updated_at = ? WHERE id = ?`,
+          [item.content, item.assignee ?? null, item.dueDate ?? null, item.priority ?? null, item.status ?? null, item.extractedFrom ?? null, item.confidence ?? null, now, itemId]
+        )
+      } else {
+        runNoSave(
+          `INSERT INTO action_items (id, knowledge_capture_id, content, assignee, due_date, priority, status, extracted_from, confidence, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, COALESCE(?, 'medium'), COALESCE(?, 'pending'), ?, ?, ?, ?)`,
+          [itemId, captureId, item.content, item.assignee ?? null, item.dueDate ?? null, item.priority ?? null, item.status ?? null, item.extractedFrom ?? null, item.confidence ?? null, now, now]
+        )
+      }
+    } else if (item.kind === 'risk') {
+      if (existingItem) {
+        runNoSave(
+          `UPDATE risks SET content = ?, context = ?, owner = ?, mitigation = ?, severity = COALESCE(?, severity),
+             likelihood = ?, status = COALESCE(?, status), extracted_from = ?, confidence = ?, identified_at = ?, updated_at = ? WHERE id = ?`,
+          [item.content, item.context ?? null, item.owner ?? null, item.mitigation ?? null, item.severity ?? null, item.likelihood ?? null, item.status ?? null, item.extractedFrom ?? null, item.confidence ?? null, item.identifiedAt ?? null, now, itemId]
+        )
+      } else {
+        runNoSave(
+          `INSERT INTO risks (id, knowledge_capture_id, content, context, owner, mitigation, severity, likelihood, status, extracted_from, confidence, identified_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 'medium'), ?, COALESCE(?, 'open'), ?, ?, ?, ?, ?)`,
+          [itemId, captureId, item.content, item.context ?? null, item.owner ?? null, item.mitigation ?? null, item.severity ?? null, item.likelihood ?? null, item.status ?? null, item.extractedFrom ?? null, item.confidence ?? null, item.identifiedAt ?? null, now, now]
+        )
+      }
+    } else {
+      if (existingItem) {
+        runNoSave(
+          `UPDATE questions SET content = ?, context = ?, raised_by = ?, answer = ?, status = COALESCE(?, status),
+             extracted_from = ?, confidence = ?, raised_at = ?, answered_at = ?, updated_at = ? WHERE id = ?`,
+          [item.content, item.context ?? null, item.raisedBy ?? null, item.answer ?? null, item.status ?? null, item.extractedFrom ?? null, item.confidence ?? null, item.raisedAt ?? null, item.answeredAt ?? null, now, itemId]
+        )
+      } else {
+        runNoSave(
+          `INSERT INTO questions (id, knowledge_capture_id, content, context, raised_by, answer, status, extracted_from, confidence, raised_at, answered_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 'open'), ?, ?, ?, ?, ?, ?)`,
+          [itemId, captureId, item.content, item.context ?? null, item.raisedBy ?? null, item.answer ?? null, item.status ?? null, item.extractedFrom ?? null, item.confidence ?? null, item.raisedAt ?? null, item.answeredAt ?? null, now, now]
+        )
+      }
+    }
+
+    return { captureId, itemId, action }
+  })
+}
+
+/**
  * Resolve a contact by case-insensitive exact name (v26). Backs graph:resolvePerson
  * so the renderer's name-based resolution has a direct path instead of scanning
  * the full contact roster. Returns the first match or undefined.
