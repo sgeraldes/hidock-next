@@ -25,7 +25,7 @@
  * are touched here; this service only consumes the public brains seam.
  */
 import { mkdirSync, writeFileSync, appendFileSync, realpathSync, lstatSync, readFileSync } from 'fs'
-import { join, parse, relative, resolve, sep } from 'path'
+import { basename, dirname, join, parse, relative, resolve, sep } from 'path'
 import { homedir } from 'os'
 import { randomBytes, randomUUID } from 'crypto'
 import {
@@ -207,13 +207,46 @@ function builtinProtectedPaths(env: NodeJS.ProcessEnv = process.env): string[] {
  * on-disk case variants — a target can't dodge a protected check by naming the
  * same directory through a different spelling.
  */
+/**
+ * Canonicalize a path that may not exist yet: walk up to the nearest existing
+ * ancestor, realpath THAT (resolving any symlink in it — e.g. macOS's
+ * /var -> /private/var), then rejoin the still-nonexistent suffix. Plain
+ * `realpathSync` throws ENOENT for the whole path, which would otherwise leave
+ * a not-yet-created protected path's symlinked ancestor unresolved and able to
+ * dodge the containment check below via spelling alone.
+ */
+function realpathOfNearestExistingAncestor(p: string): string {
+  let current = resolve(p)
+  const missingSuffix: string[] = []
+  while (true) {
+    try {
+      const real = realpathSync(current)
+      return missingSuffix.length ? join(real, ...missingSuffix.reverse()) : real
+    } catch {
+      const parent = dirname(current)
+      if (parent === current) throw new Error(`No existing ancestor found for: ${p}`)
+      missingSuffix.push(basename(current))
+      current = parent
+    }
+  }
+}
+
 function protectedForms(p: string): string[] {
   const forms = [comparable(p)]
   try {
     const real = comparable(realpathSync(p))
     if (!forms.includes(real)) forms.push(real)
   } catch {
-    /* protected path doesn't exist on this machine — the resolved form still applies */
+    // Protected path doesn't exist on this machine (or not yet, e.g. app
+    // userData that hasn't been created this run) — still resolve as much of
+    // it as exists, so an ancestor containment check below can't be dodged by
+    // an unresolved symlink earlier in the path.
+    try {
+      const real = comparable(realpathOfNearestExistingAncestor(p))
+      if (!forms.includes(real)) forms.push(real)
+    } catch {
+      /* no existing ancestor either — the resolved (unreal) form still applies */
+    }
   }
   return forms
 }

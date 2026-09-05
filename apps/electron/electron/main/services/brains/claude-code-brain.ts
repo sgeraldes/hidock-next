@@ -46,7 +46,7 @@
  */
 import { statSync } from 'fs'
 import { homedir } from 'os'
-import { join } from 'path'
+import { join, win32 } from 'path'
 import { runCli, foldMessagesToPrompt, type SpawnFn, type CliRunResult } from './cli-runner'
 import { getBrainCredentialStore } from './brain-credential-store'
 import type {
@@ -361,9 +361,16 @@ export async function resolveClaudeCommand(
   //    lowercase is fine, Windows' filesystem match is case-insensitive.
   const nativeExts = ['.exe', '.com']
   const roots = opts.trustedRoots ?? defaultTrustedClaudeRoots()
+  // Trusted roots are Windows paths (this branch only runs when platform ===
+  // 'win32', checked above) — join with path.win32 so a candidate resolves
+  // correctly even when the resolver itself runs on a POSIX host (e.g. a
+  // developer's Mac running the test suite), where the plain `join` above
+  // treats the backslash-separated root as one opaque segment and silently
+  // never matches any real file.
+  const joinTrusted = platform === 'win32' ? win32.join : join
   for (const root of roots) {
     for (const ext of nativeExts) {
-      const candidate = join(root, 'claude' + ext)
+      const candidate = joinTrusted(root, 'claude' + ext)
       if (!fileExists(candidate)) continue
       try {
         if (await verify(candidate)) return candidate
