@@ -52,10 +52,34 @@ vi.mock('@hidock/transcription', () => {
   return { GeminiEngine }
 })
 
-vi.mock('../brains', () => ({
-  getBrainRegistry: () => ({ get: () => ({ generate: vi.fn() }) }),
-  resolveGeminiApiKey: () => 'test-api-key' // pragma: allowlist secret
-}))
+vi.mock('../brains', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../brains')>()
+  return {
+    ...actual,
+    resolveGeminiApiKey: () => 'test-api-key', // pragma: allowlist secret
+  }
+})
+
+// The real BrainRouter (kept real, above, via importOriginal) resolves to
+// 'gemini-api' by default and needs a real GeminiApiBrain so this suite
+// exercises the actual generate()/authStatus() logic it's meant to prove -
+// only the leaf @google/generative-ai SDK call is faked (mockGenerateContent
+// above). BrainRouter reaches the registry via its OWN internal
+// `import { getBrainRegistry } from './brain-registry'`, which resolves to
+// this same mocked module regardless of the barrel ('../brains') mock above.
+vi.mock('../brains/brain-registry', async () => {
+  const { GeminiApiBrain } = await import('../brains/gemini-api-brain')
+  const brain = new GeminiApiBrain()
+  return {
+    getBrainRegistry: () => ({
+      get: (id: string) => (id === 'gemini-api' ? brain : null),
+      list: () => [brain],
+      has: (id: string) => id === 'gemini-api'
+    }),
+    resetBrainRegistry: () => {},
+    BrainRegistry: class {}
+  }
+})
 
 vi.mock('../vector-store', () => ({ getVectorStore: vi.fn(() => null) }))
 

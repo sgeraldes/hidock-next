@@ -181,6 +181,8 @@ describe('ConnectorIngestionSink structured knowledge routing (v55)', () => {
       likelihood: null,
       status: null,
       identifiedAt: null,
+      certainty: null,
+      evidence: null,
     })
   })
 })

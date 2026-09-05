@@ -129,7 +129,13 @@ describe('validateTargetDir', () => {
   })
 
   it('returns the canonical path for a valid directory', () => {
-    expect(validateTargetDir(root).toLowerCase()).toBe(root.toLowerCase())
+    // Compare against realpathSync(root), not the raw mkdtempSync path: on
+    // macOS os.tmpdir() lives under /var, which is itself a symlink to
+    // /private/var, so the raw path and the canonicalized one legitimately
+    // differ. validateTargetDir resolving it is the correct, intended
+    // behavior (see the sibling "project folder INSIDE the profile" test
+    // below, which already compares against realpathSync for the same reason).
+    expect(validateTargetDir(root).toLowerCase()).toBe(realpathSync(root).toLowerCase())
   })
 
   it('rejects a missing directory', () => {

@@ -159,6 +159,10 @@ describe('DownloadService — C5 Phase 0 session/queue/reconciliation gaps', () 
     })
 
     it('fails on byte-size mismatch and does not mark the file synced', async () => {
+      // The recordings dir must appear to already exist, or processDownload's
+      // C-004 pre-check tries a REAL mkdirSync('/mock/recordings') and fails
+      // closed on that instead of ever reaching the byte-size check below.
+      mockExistsSync.mockImplementation((p: string) => p === '/mock/recordings')
       service.queueDownloads([{ filename: 'mismatch.hda', size: 100 }])
 
       const result = await service.processDownload('mismatch.hda', Buffer.alloc(50))
@@ -171,6 +175,8 @@ describe('DownloadService — C5 Phase 0 session/queue/reconciliation gaps', () 
     })
 
     it('marks synced on an exact byte-size match', async () => {
+      // Same C-004 pre-check concern as the mismatch test above.
+      mockExistsSync.mockImplementation((p: string) => p === '/mock/recordings')
       service.queueDownloads([{ filename: 'exact.hda', size: 100 }])
 
       const result = await service.processDownload('exact.hda', Buffer.alloc(100))
