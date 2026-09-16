@@ -76,23 +76,41 @@ export class SpeakerLinkingUnavailableError extends Error {
 }
 
 /**
- * Wall-clock budget for the acoustic worker. pyannote runs roughly 3-4x realtime on this
- * class of machine, so a flat cap silently fails every recording longer than about
- * cap/3.5: on 2026-09-15 a device backlog of 30 recordings was imported at once and the
- * 19 longer than ~34 minutes all died with "timed out after 600 seconds" (the 600 s
- * default) while every shorter one completed. The budget is therefore the configured
- * floor or 1.5x the audio length, whichever is larger; a recording with unknown length
- * keeps the floor.
+ * Wall-clock budget for the acoustic worker. pyannote runs at roughly 3.4x realtime on
+ * this class of machine (expected time ~ duration / 3.4), so a flat cap silently fails
+ * every recording longer than about cap x 3.4: on 2026-09-15 a device backlog of 30
+ * recordings was imported at once and the 19 longer than ~34 minutes all died with
+ * "timed out after 600 seconds" (the 600 s default) while every shorter one completed.
+ * The budget is the configured floor or 0.75x the audio length, whichever is larger:
+ * about 2.5x the expected time, enough for a loaded machine without letting one stuck
+ * recording hold the serialized queue for hours (1.5x would have granted 3.5 h to a
+ * 2h21m file). Unknown, zero, negative or non-finite lengths keep the floor.
  */
+export const SPEAKER_LINKING_BUDGET_PER_AUDIO_SECOND = 0.75
+
 export function speakerLinkingTimeoutMs(
   configuredSeconds: number,
   audioDurationSeconds?: number | null
 ): number {
-  const floor = Math.max(30, configuredSeconds || 0)
-  const scaled = audioDurationSeconds && audioDurationSeconds > 0
-    ? Math.ceil(audioDurationSeconds * 1.5)
+  const floor = Math.max(30, Number.isFinite(configuredSeconds) ? configuredSeconds : 0)
+  const scaled = typeof audioDurationSeconds === 'number' && Number.isFinite(audioDurationSeconds) && audioDurationSeconds > 0
+    ? Math.ceil(audioDurationSeconds * SPEAKER_LINKING_BUDGET_PER_AUDIO_SECOND)
     : 0
   return Math.max(floor, scaled) * 1000
+}
+
+/**
+ * Kill the worker and everything it spawned. On Windows `child.kill()` only ends the
+ * Python process: the FFmpeg it started through subprocess.run() keeps decoding the file
+ * until it notices the broken pipe, outside any lifecycle the queue knows about.
+ */
+function killWorkerTree(child: ReturnType<typeof spawn>): void {
+  if (child.exitCode !== null || child.signalCode !== null) return
+  if (process.platform === 'win32' && child.pid) {
+    spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }).on('error', () => child.kill())
+    return
+  }
+  child.kill('SIGKILL')
 }
 
 export function normalizeEmbedding(values: number[]): number[] {
@@ -205,14 +223,20 @@ function runWorker(
     let stderr = ''
     const cap = 25 * 1024 * 1024
     const timeoutMs = speakerLinkingTimeoutMs(config.speakerLinkingTimeoutSeconds, audioDurationSeconds)
+    // A timeout means the worker could not serve THIS recording in budget, not that the
+    // audio is bad: degrade to provider-managed diarization instead of failing the
+    // transcript (the transcript is the product, voice linking is the enhancement). The
+    // rejection waits for the process tree to be gone, so the provider run never overlaps
+    // a worker still decoding the same file; a grace timer covers a kill that hangs.
+    let timedOut = false
+    let grace: NodeJS.Timeout | null = null
+    const rejectTimedOut = () => reject(new SpeakerLinkingUnavailableError(
+      `speaker-linking timed out after ${Math.round(timeoutMs / 1000)} seconds`
+    ))
     const timeout = setTimeout(() => {
-      child.kill()
-      // A timeout means the worker could not serve THIS recording in budget, not that the
-      // audio is bad: degrade to provider-managed diarization instead of failing the
-      // transcript (the transcript is the product, voice linking is the enhancement).
-      reject(new SpeakerLinkingUnavailableError(
-        `speaker-linking timed out after ${Math.round(timeoutMs / 1000)} seconds`
-      ))
+      timedOut = true
+      killWorkerTree(child)
+      grace = setTimeout(rejectTimedOut, 10_000)
     }, timeoutMs)
     const cancellation = setInterval(() => {
       if (!shouldContinue()) {
@@ -238,6 +262,11 @@ function runWorker(
     child.on('close', (code) => {
       clearTimeout(timeout)
       clearInterval(cancellation)
+      if (timedOut) {
+        if (grace) clearTimeout(grace)
+        rejectTimedOut()
+        return
+      }
       if (code !== 0) {
         const detail = stderr.trim().split('\n').slice(-12).join('\n') || `speaker-linking exited with code ${code}`
         if (/ModuleNotFoundError|No module named|GatedRepo|401|403|not authorized|cannot access gated/i.test(detail)) {
@@ -311,6 +340,16 @@ function removeExistingRecordingEvidence(recordingId: string): void {
       [JSON.stringify(centroid), observations.length, totalWeight, new Date().toISOString(), clusterId]
     )
   }
+}
+
+/**
+ * A degraded run (worker unavailable or out of budget) must not leave the evidence of an
+ * earlier successful run behind: the transcript is about to carry provider labels, and
+ * `recording_voice_clusters` / `voice_cluster_observations` from the old run would keep
+ * exposing a "Voice ABCDEF" that no longer exists in it, and could be re-bound later.
+ */
+export function clearAcousticEvidence(recordingId: string): void {
+  runInTransaction(() => removeExistingRecordingEvidence(recordingId))
 }
 
 function persistMatches(recordingId: string, result: AcousticWorkerResult): VoiceMatch[] {
@@ -427,7 +466,13 @@ export async function runSpeakerLinkingPreflight(
       reason: 'disabled in transcription settings'
     }
   }
-  const result = await runWorker(audioPath, shouldContinue, audioDurationSeconds)
+  let result: AcousticWorkerResult
+  try {
+    result = await runWorker(audioPath, shouldContinue, audioDurationSeconds)
+  } catch (error) {
+    if (error instanceof SpeakerLinkingUnavailableError) clearAcousticEvidence(recordingId)
+    throw error
+  }
   if (!shouldContinue()) throw new Error('speaker-linking cancelled because recording became ineligible')
   const matches = persistMatches(recordingId, result)
   return {

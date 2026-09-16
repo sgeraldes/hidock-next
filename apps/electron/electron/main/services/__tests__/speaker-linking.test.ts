@@ -28,6 +28,7 @@ import {
   cosineSimilarity,
   decideVoiceMatch,
   normalizeEmbedding,
+  clearAcousticEvidence,
   reconcileProviderSpeakers,
   speakerLinkingTimeoutMs,
   updateCentroid,
@@ -60,13 +61,39 @@ afterEach(() => {
 describe('persistent acoustic speaker linking', () => {
   it('budgets the acoustic worker by audio length, never below the configured floor', () => {
     // 2026-09-15: a flat 600 s cap failed the 19 imported recordings longer than ~34 min.
+    // Worker runs ~3.4x realtime; 0.75x the length is ~2.5x the expected time.
     expect(speakerLinkingTimeoutMs(600, 300)).toBe(600_000)
-    expect(speakerLinkingTimeoutMs(600, 2055)).toBe(3_083_000)
-    expect(speakerLinkingTimeoutMs(600, 3444)).toBe(5_166_000)
-    expect(speakerLinkingTimeoutMs(600, 8485)).toBe(12_728_000)
+    expect(speakerLinkingTimeoutMs(600, 2055)).toBe(1_542_000)
+    expect(speakerLinkingTimeoutMs(600, 3444)).toBe(2_583_000)
+    expect(speakerLinkingTimeoutMs(600, 8485)).toBe(6_364_000)
     expect(speakerLinkingTimeoutMs(600, null)).toBe(600_000)
     expect(speakerLinkingTimeoutMs(600, undefined)).toBe(600_000)
+    expect(speakerLinkingTimeoutMs(600, -5)).toBe(600_000)
+    expect(speakerLinkingTimeoutMs(600, Number.POSITIVE_INFINITY)).toBe(600_000)
+    expect(speakerLinkingTimeoutMs(600, Number.NaN)).toBe(600_000)
+    expect(speakerLinkingTimeoutMs(Number.POSITIVE_INFINITY, 100)).toBe(75_000)
     expect(speakerLinkingTimeoutMs(0, 0)).toBe(30_000)
+  })
+
+  it('drops the acoustic evidence of an earlier run when the linking degrades', () => {
+    run(`INSERT INTO recordings (id, filename, date_recorded) VALUES ('rec-degrade', 'a.hda', '2026-09-09T20:00:00Z')`)
+    run(
+      `INSERT INTO voice_clusters (id, model, model_version, embedding_dimension, centroid_json, observation_count, total_speech_seconds)
+       VALUES ('vc-old', 'pyannote/speaker-diarization-community-1', 'v1', 3, '[0,0,1]', 1, 10)`
+    )
+    run(
+      `INSERT INTO voice_cluster_observations (id, voice_cluster_id, recording_id, local_speaker_label, embedding_json, speech_seconds)
+       VALUES ('obs-old', 'vc-old', 'rec-degrade', 'SPEAKER_00', '[0,0,1]', 10)`
+    )
+    run(
+      `INSERT INTO recording_voice_clusters (recording_id, local_speaker_label, voice_cluster_id, match_status, similarity, runner_up_margin)
+       VALUES ('rec-degrade', 'SPEAKER_00', 'vc-old', 'matched', 0.9, 0.2)`
+    )
+    clearAcousticEvidence('rec-degrade')
+    expect(queryOne<{ n: number }>('SELECT COUNT(*) AS n FROM recording_voice_clusters WHERE recording_id = ?', ['rec-degrade'])?.n).toBe(0)
+    expect(queryOne<{ n: number }>('SELECT COUNT(*) AS n FROM voice_cluster_observations WHERE recording_id = ?', ['rec-degrade'])?.n).toBe(0)
+    // the cluster had no other observations left, so it goes too
+    expect(queryOne<{ n: number }>('SELECT COUNT(*) AS n FROM voice_clusters WHERE id = ?', ['vc-old'])?.n).toBe(0)
   })
 
   it('requires an absolute threshold and a winner margin', () => {
