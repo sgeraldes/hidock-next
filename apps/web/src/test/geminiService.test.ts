@@ -9,12 +9,16 @@ interface TestableGeminiService {
 }
 
 // Mock the Google Generative AI
+// vitest 5 honours `new` on a vi.fn(): the implementation has to be constructable, so it is
+// a `function`, not an arrow (an arrow threw "is not a constructor" on every test here).
 vi.mock('@google/generative-ai', () => ({
-    GoogleGenerativeAI: vi.fn().mockImplementation(() => ({
-        getGenerativeModel: vi.fn().mockReturnValue({
-            generateContent: vi.fn()
-        })
-    }))
+    GoogleGenerativeAI: vi.fn(function GoogleGenerativeAI() {
+        return {
+            getGenerativeModel: vi.fn().mockReturnValue({
+                generateContent: vi.fn()
+            })
+        };
+    })
 }));
 
 describe('GeminiService', () => {
