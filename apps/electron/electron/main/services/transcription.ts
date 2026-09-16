@@ -2005,7 +2005,8 @@ Do not create speaker turns outside these intervals except for up to 1.5 seconds
     speakerLinking = await runSpeakerLinkingPreflight(
       recordingId,
       recording.file_path,
-      () => isRecordingEligible(recordingId)
+      () => isRecordingEligible(recordingId),
+      recording.duration_seconds
     )
     completeProcessingRun(acousticDiarizationRun.id, {
       status: speakerLinking.available ? 'completed' : 'degraded',
