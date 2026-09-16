@@ -29,6 +29,7 @@ import {
   decideVoiceMatch,
   normalizeEmbedding,
   reconcileProviderSpeakers,
+  speakerLinkingTimeoutMs,
   updateCentroid,
   type SpeakerLinkingResult
 } from '../speaker-linking'
@@ -57,6 +58,17 @@ afterEach(() => {
 })
 
 describe('persistent acoustic speaker linking', () => {
+  it('budgets the acoustic worker by audio length, never below the configured floor', () => {
+    // 2026-09-15: a flat 600 s cap failed the 19 imported recordings longer than ~34 min.
+    expect(speakerLinkingTimeoutMs(600, 300)).toBe(600_000)
+    expect(speakerLinkingTimeoutMs(600, 2055)).toBe(3_083_000)
+    expect(speakerLinkingTimeoutMs(600, 3444)).toBe(5_166_000)
+    expect(speakerLinkingTimeoutMs(600, 8485)).toBe(12_728_000)
+    expect(speakerLinkingTimeoutMs(600, null)).toBe(600_000)
+    expect(speakerLinkingTimeoutMs(600, undefined)).toBe(600_000)
+    expect(speakerLinkingTimeoutMs(0, 0)).toBe(30_000)
+  })
+
   it('requires an absolute threshold and a winner margin', () => {
     const embedding = normalizeEmbedding([1, 0, 0])
     expect(cosineSimilarity(embedding, [1, 0, 0])).toBeCloseTo(1)

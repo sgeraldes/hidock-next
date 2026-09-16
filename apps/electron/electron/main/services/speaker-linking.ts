@@ -75,6 +75,26 @@ export class SpeakerLinkingUnavailableError extends Error {
   }
 }
 
+/**
+ * Wall-clock budget for the acoustic worker. pyannote runs roughly 3-4x realtime on this
+ * class of machine, so a flat cap silently fails every recording longer than about
+ * cap/3.5: on 2026-09-15 a device backlog of 30 recordings was imported at once and the
+ * 19 longer than ~34 minutes all died with "timed out after 600 seconds" (the 600 s
+ * default) while every shorter one completed. The budget is therefore the configured
+ * floor or 1.5x the audio length, whichever is larger; a recording with unknown length
+ * keeps the floor.
+ */
+export function speakerLinkingTimeoutMs(
+  configuredSeconds: number,
+  audioDurationSeconds?: number | null
+): number {
+  const floor = Math.max(30, configuredSeconds || 0)
+  const scaled = audioDurationSeconds && audioDurationSeconds > 0
+    ? Math.ceil(audioDurationSeconds * 1.5)
+    : 0
+  return Math.max(floor, scaled) * 1000
+}
+
 export function normalizeEmbedding(values: number[]): number[] {
   if (!values.length || values.some((value) => !Number.isFinite(value))) return []
   const magnitude = Math.sqrt(values.reduce((sum, value) => sum + value * value, 0))
@@ -147,7 +167,8 @@ function resolveWorkerPath(configured: string): string {
 
 function runWorker(
   audioPath: string,
-  shouldContinue: () => boolean
+  shouldContinue: () => boolean,
+  audioDurationSeconds?: number | null
 ): Promise<AcousticWorkerResult> {
   const config = getConfig().transcription
   const workerPath = resolveWorkerPath(config.speakerLinkingWorkerPath)
@@ -183,10 +204,15 @@ function runWorker(
     let stdout = ''
     let stderr = ''
     const cap = 25 * 1024 * 1024
-    const timeoutMs = Math.max(30, config.speakerLinkingTimeoutSeconds) * 1000
+    const timeoutMs = speakerLinkingTimeoutMs(config.speakerLinkingTimeoutSeconds, audioDurationSeconds)
     const timeout = setTimeout(() => {
       child.kill()
-      reject(new Error(`speaker-linking timed out after ${Math.round(timeoutMs / 1000)} seconds`))
+      // A timeout means the worker could not serve THIS recording in budget, not that the
+      // audio is bad: degrade to provider-managed diarization instead of failing the
+      // transcript (the transcript is the product, voice linking is the enhancement).
+      reject(new SpeakerLinkingUnavailableError(
+        `speaker-linking timed out after ${Math.round(timeoutMs / 1000)} seconds`
+      ))
     }, timeoutMs)
     const cancellation = setInterval(() => {
       if (!shouldContinue()) {
@@ -386,7 +412,8 @@ function persistMatches(recordingId: string, result: AcousticWorkerResult): Voic
 export async function runSpeakerLinkingPreflight(
   recordingId: string,
   audioPath: string,
-  shouldContinue: () => boolean
+  shouldContinue: () => boolean,
+  audioDurationSeconds?: number | null
 ): Promise<SpeakerLinkingResult> {
   const config = getConfig().transcription
   if (!config.speakerLinkingEnabled) {
@@ -400,7 +427,7 @@ export async function runSpeakerLinkingPreflight(
       reason: 'disabled in transcription settings'
     }
   }
-  const result = await runWorker(audioPath, shouldContinue)
+  const result = await runWorker(audioPath, shouldContinue, audioDurationSeconds)
   if (!shouldContinue()) throw new Error('speaker-linking cancelled because recording became ineligible')
   const matches = persistMatches(recordingId, result)
   return {
