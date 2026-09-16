@@ -1949,6 +1949,9 @@ class HiDockDeviceService {
   async startRealtime(): Promise<boolean> {
     if (!this.isConnected()) return false
     const result = await this.jensen.startRealtime()
+    if (result?.result === 'failed' && 'error' in result && typeof result.error === 'string') {
+      throw new Error(result.error)
+    }
     return result?.result === 'success'
   }
 

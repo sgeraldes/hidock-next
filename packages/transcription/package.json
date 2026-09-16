@@ -24,7 +24,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@google/genai": "^2.0.0"
+    "@google/genai": "^2.19.0"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

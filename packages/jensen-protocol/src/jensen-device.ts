@@ -128,6 +128,19 @@ export const EP_IN = 0x82
 
 export type DeviceModel = 'hidock-h1' | 'hidock-h1e' | 'hidock-p1' | 'hidock-p1-mini' | 'unknown'
 
+/** Firmware gates recovered from the current HiNotes web application. */
+export function supportsRealtimeFirmware(model: DeviceModel, versionNumber: number | null): boolean {
+  if (versionNumber === null) return false
+  if (model === 'hidock-h1') return versionNumber >= 328448
+  if (model === 'hidock-h1e') {
+    // H1E C1 firmware uses a separate version line beginning at 6.10.x.
+    return versionNumber >= 397319 ? versionNumber >= 397568 : versionNumber >= 393984
+  }
+  if (model === 'hidock-p1') return versionNumber >= 66312
+  if (model === 'hidock-p1-mini') return versionNumber >= 131840
+  return false
+}
+
 export interface DeviceInfo {
   versionCode: string
   versionNumber: number
@@ -169,7 +182,22 @@ export interface RealtimeSettings {
 
 export interface RealtimeData {
   rest: number
+  muted: boolean
+  /** Full device payload: 8-byte metadata header followed by stereo PCM16LE. */
   data: Uint8Array
+}
+
+export function parseRealtimePayload(body: Uint8Array): RealtimeData | null {
+  if (body.length < 8) return null
+  const rest = ((((body[0] & 0xff) << 24) |
+    ((body[1] & 0xff) << 16) |
+    ((body[2] & 0xff) << 8) |
+    (body[3] & 0xff)) >>> 0)
+  const mutedValue = ((((body[4] & 0xff) << 24) |
+    ((body[5] & 0xff) << 16) |
+    ((body[6] & 0xff) << 8) |
+    (body[7] & 0xff)) >>> 0)
+  return { rest, muted: mutedValue === 1, data: body.slice() }
 }
 
 export interface BatteryStatus {
@@ -1885,12 +1913,7 @@ export class JensenDevice {
     // REALTIME_TRANSFER (34)
     this.handlers.set(CMD.REALTIME_TRANSFER, (msg) => {
       if (!msg) return null
-      const rest =
-        ((msg.body[0] & 0xff) << 24) |
-        ((msg.body[1] & 0xff) << 16) |
-        ((msg.body[2] & 0xff) << 8) |
-        (msg.body[3] & 0xff)
-      return { rest, data: msg.body.slice(4) }
+      return parseRealtimePayload(msg.body)
     })
 
     // GET_BATTERY_STATUS (4100)
@@ -2638,10 +2661,10 @@ export class JensenDevice {
     }
   }
 
-  async startRealtime(timeout = 5): Promise<{ result: string } | null> {
+  async startRealtime(mode = 2, timeout = 5): Promise<{ result: string } | null> {
     try {
       return await this.sendCommand<{ result: string } | null>(
-        new JensenMessage(CMD.REALTIME_CONTROL).body([0, 0, 0, 0, 0, 0, 0, 1]), timeout, 'startRealtime')
+        new JensenMessage(CMD.REALTIME_CONTROL).body([0, 0, 0, 1, 0, 0, 0, mode & 0x03]), timeout, 'startRealtime')
     } catch {
       return null
     }
@@ -2650,7 +2673,7 @@ export class JensenDevice {
   async pauseRealtime(timeout = 5): Promise<{ result: string } | null> {
     try {
       return await this.sendCommand<{ result: string } | null>(
-        new JensenMessage(CMD.REALTIME_CONTROL).body([0, 0, 0, 1, 0, 0, 0, 1]), timeout, 'pauseRealtime')
+        new JensenMessage(CMD.REALTIME_CONTROL).body([0, 0, 0, 2, 0, 0, 0, 0]), timeout, 'pauseRealtime')
     } catch {
       return null
     }
@@ -2659,18 +2682,16 @@ export class JensenDevice {
   async stopRealtime(timeout = 5): Promise<{ result: string } | null> {
     try {
       return await this.sendCommand<{ result: string } | null>(
-        new JensenMessage(CMD.REALTIME_CONTROL).body([0, 0, 0, 2, 0, 0, 0, 1]), timeout, 'stopRealtime')
+        new JensenMessage(CMD.REALTIME_CONTROL).body([0, 0, 0, 0, 0, 0, 0, 0]), timeout, 'stopRealtime')
     } catch {
       return null
     }
   }
 
-  async getRealtimeData(offset: number, timeout = 5): Promise<RealtimeData | null> {
+  async getRealtimeData(_offset = 0, timeout = 5): Promise<RealtimeData | null> {
     try {
       return await this.sendCommand<RealtimeData | null>(
-        new JensenMessage(CMD.REALTIME_TRANSFER).body([
-          (offset >> 24) & 0xff, (offset >> 16) & 0xff, (offset >> 8) & 0xff, offset & 0xff
-        ]), timeout, 'getRealtimeData')
+        new JensenMessage(CMD.REALTIME_TRANSFER), timeout, 'getRealtimeData')
     } catch {
       return null
     }

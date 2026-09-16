@@ -9,7 +9,17 @@
 import { useCallback, useEffect, useRef, useMemo, useState } from 'react'
 import { TimeAnchor } from './TimeAnchor'
 import { SpeakerAssignPopover, type AssignScope } from './SpeakerAssignPopover'
-import { ChevronDown, ChevronRight, ArrowDownToLine } from 'lucide-react'
+import {
+  ArrowDownToLine,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Loader2,
+  Pencil,
+  RefreshCw,
+  TriangleAlert,
+  X
+} from 'lucide-react'
 import { expandInlineStoredSegments } from '../utils/splitInlineTurns'
 import { useMediaQuery } from '@/hooks/useMediaQuery'
 import { toast } from '@/components/ui/toaster'
@@ -63,6 +73,14 @@ interface TranscriptViewerProps {
    * transcripts (a fabricated action-item time can't map to a real turn → no-op).
    */
   highlightRequest?: { atMs: number; nonce: number } | null
+  /** Mirrors a successful persisted correction into the owning reader state. */
+  onTranscriptUpdated?: (update: TranscriptContentUpdate) => void
+}
+
+export interface TranscriptContentUpdate {
+  fullText: string
+  segments: StoredSegment[]
+  wordCount: number
 }
 
 interface TranscriptSegment {
@@ -281,7 +299,8 @@ export function TranscriptViewer({
   segments: storedSegments,
   recordingId,
   isPlaying,
-  highlightRequest
+  highlightRequest,
+  onTranscriptUpdated
 }: TranscriptViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const activeSegmentRef = useRef<HTMLDivElement | null>(null)
@@ -291,6 +310,12 @@ export function TranscriptViewer({
   const [summaryExpanded, setSummaryExpanded] = useState(true)
   const [actionItemsExpanded, setActionItemsExpanded] = useState(true)
   const [transcriptExpanded, setTranscriptExpanded] = useState(true)
+  const [editingIndex, setEditingIndex] = useState<number | null>(null)
+  const [editDraft, setEditDraft] = useState('')
+  const [editError, setEditError] = useState<string | null>(null)
+  const [savingIndex, setSavingIndex] = useState<number | null>(null)
+  const [ragPending, setRagPending] = useState<string | null>(null)
+  const [retryingRag, setRetryingRag] = useState(false)
 
   // Cross-highlight: the turn briefly pulsed after a timeline marker click.
   // Carries the request's nonce so a rapid repeat click on the SAME turn is a
@@ -501,7 +526,7 @@ export function TranscriptViewer({
 
   // Prefer pre-parsed segments (timestamped speaker turns) when available;
   // otherwise parse the plain transcript string (timestamped or speaker-turn based).
-  const { segments, hasTimestamps } = useMemo(() => {
+  const parsedTranscript = useMemo(() => {
     if (storedSegments && storedSegments.length > 0) {
       const mapped = fromStoredSegments(storedSegments)
       if (mapped.length > 0) {
@@ -510,6 +535,129 @@ export function TranscriptViewer({
     }
     return parseTranscriptSegments(transcript)
   }, [storedSegments, transcript])
+  const [localSegments, setLocalSegments] = useState<TranscriptSegment[] | null>(null)
+  const [persistedFullText, setPersistedFullText] = useState(transcript)
+  const latestTranscriptRef = useRef(transcript)
+  latestTranscriptRef.current = transcript
+  const segments = localSegments ?? parsedTranscript.segments
+  const hasTimestamps = localSegments
+    ? localSegments.some((segment) => segment.startMs > 0)
+    : parsedTranscript.hasTimestamps
+
+  useEffect(() => {
+    setLocalSegments(null)
+    setPersistedFullText(latestTranscriptRef.current)
+    setEditingIndex(null)
+    setEditDraft('')
+    setEditError(null)
+    setRagPending(null)
+  }, [recordingId])
+
+  const editEnabled = Boolean(recordingId && window.electronAPI?.transcripts?.updateContent)
+
+  const startEditing = useCallback((index: number) => {
+    setAutoFollow(false)
+    setEditingIndex(index)
+    setEditDraft(segments[index]?.text ?? '')
+    setEditError(null)
+  }, [segments])
+
+  const cancelEditing = useCallback(() => {
+    if (savingIndex !== null) return
+    setEditingIndex(null)
+    setEditDraft('')
+    setEditError(null)
+  }, [savingIndex])
+
+  const saveCorrection = useCallback(async () => {
+    if (!recordingId || editingIndex === null || savingIndex !== null) return
+    const corrected = editDraft.trim()
+    if (!corrected) {
+      setEditError('A transcript turn cannot be empty.')
+      return
+    }
+    if (corrected === segments[editingIndex]?.text.trim()) {
+      cancelEditing()
+      return
+    }
+
+    const nextSegments = segments.map((segment, index) => ({
+      ...(segment.speaker ? { speaker: segment.speaker } : {}),
+      start: segment.startMs / 1000,
+      ...(segment.endMs !== undefined ? { end: segment.endMs / 1000 } : {}),
+      text: index === editingIndex ? corrected : segment.text
+    }))
+
+    setSavingIndex(editingIndex)
+    setEditError(null)
+    try {
+      const result = await window.electronAPI.transcripts.updateContent({
+        recordingId,
+        expectedFullText: persistedFullText,
+        segments: nextSegments
+      })
+      if (!result.success) {
+        setEditError(result.error.message)
+        toast.error('Could not save transcript correction', result.error.message)
+        return
+      }
+
+      const mapped = fromStoredSegments(result.data.segments)
+      setLocalSegments(mapped)
+      setPersistedFullText(result.data.fullText)
+      setEditingIndex(null)
+      setEditDraft('')
+      onTranscriptUpdated?.({
+        fullText: result.data.fullText,
+        segments: result.data.segments,
+        wordCount: result.data.wordCount
+      })
+
+      if (result.data.ragStatus === 'indexed') {
+        setRagPending(null)
+        toast.success(
+          'Transcript and RAG updated',
+          `${result.data.indexedChunks} search chunk${result.data.indexedChunks === 1 ? '' : 's'} regenerated.`
+        )
+      } else {
+        setRagPending(result.data.ragError ?? 'The embedding provider did not rebuild the search index.')
+        toast.error(
+          'Transcript saved; RAG update pending',
+          result.data.ragError ?? 'Use Retry RAG when the embedding provider is available.'
+        )
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'The correction could not be saved.'
+      setEditError(message)
+      toast.error('Could not save transcript correction', message)
+    } finally {
+      setSavingIndex(null)
+    }
+  }, [cancelEditing, editDraft, editingIndex, onTranscriptUpdated, persistedFullText, recordingId, savingIndex, segments])
+
+  const retryRag = useCallback(async () => {
+    if (!recordingId || retryingRag) return
+    setRetryingRag(true)
+    try {
+      const result = await window.electronAPI.transcripts.reindex({ recordingId })
+      if (!result.success) {
+        setRagPending(result.error.message)
+        toast.error('RAG update still pending', result.error.message)
+        return
+      }
+      setRagPending(null)
+      toast.success(
+        'RAG updated',
+        `${result.data.indexedChunks} search chunk${result.data.indexedChunks === 1 ? '' : 's'} regenerated.`
+      )
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'The RAG index could not be updated.'
+      setRagPending(message)
+      toast.error('RAG update still pending', message)
+    } finally {
+      setRetryingRag(false)
+    }
+  }, [recordingId, retryingRag])
 
   // Find current segment index based on currentTimeMs (only meaningful with timestamps)
   const currentSegmentIndex = useMemo(() => {
@@ -732,7 +880,27 @@ export function TranscriptViewer({
             onWheel={pauseFollowOnManualScroll}
             onTouchMove={pauseFollowOnManualScroll}
           >
-            {hasStructure ? (
+            {ragPending && (
+              <div
+                className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-200"
+                role="status"
+              >
+                <TriangleAlert className="h-4 w-4 shrink-0" aria-hidden="true" />
+                <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">
+                  Transcript saved. RAG search is pending: {ragPending}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void retryRag()}
+                  disabled={retryingRag}
+                  className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 font-semibold text-amber-100 transition-colors hover:bg-amber-500/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 disabled:cursor-wait disabled:opacity-60"
+                >
+                  <RefreshCw className={cn('h-3.5 w-3.5', retryingRag && 'animate-spin')} aria-hidden="true" />
+                  {retryingRag ? 'Updating RAG…' : 'Retry RAG'}
+                </button>
+              </div>
+            )}
+            {hasStructure || editEnabled ? (
               <div className="space-y-1">
                 {segments.map((segment, i) => {
                   // Per-turn identity resolution (v37). base = raw diarization
@@ -763,7 +931,7 @@ export function TranscriptViewer({
                     }}
                     data-testid={i === pulse?.index ? 'transcript-turn-highlighted' : undefined}
                     className={cn(
-                      'text-sm p-2 rounded-md transition-colors',
+                      'group/turn text-sm p-2 rounded-md transition-colors',
                       hasTimestamps && i === currentSegmentIndex && 'bg-primary/10',
                       // Brief cross-highlight pulse from a timeline marker click. The
                       // ring + wash fade out (motion-safe) when the pulse clears; a
@@ -814,7 +982,80 @@ export function TranscriptViewer({
                         )}
                       </div>
                     )}
-                    <p className="whitespace-pre-wrap leading-relaxed">{segment.text}</p>
+                    {editingIndex === i ? (
+                      <div className="space-y-2">
+                        <textarea
+                          autoFocus
+                          value={editDraft}
+                          onChange={(event) => {
+                            setEditDraft(event.target.value)
+                            if (editError) setEditError(null)
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Escape') {
+                              event.preventDefault()
+                              cancelEditing()
+                            } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+                              event.preventDefault()
+                              void saveCorrection()
+                            }
+                          }}
+                          disabled={savingIndex === i}
+                          rows={Math.min(8, Math.max(2, editDraft.split('\n').length + 1))}
+                          aria-label={`Edit transcript turn ${i + 1}`}
+                          aria-describedby={`transcript-edit-hint-${i}${editError ? ` transcript-edit-error-${i}` : ''}`}
+                          className="w-full resize-y rounded-lg border border-primary/50 bg-background px-3 py-2 text-sm leading-relaxed text-foreground shadow-sm outline-none transition-[border-color,box-shadow] placeholder:text-muted-foreground focus:border-primary focus:ring-2 focus:ring-primary/25 disabled:cursor-wait disabled:opacity-70"
+                        />
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span id={`transcript-edit-hint-${i}`} className="mr-auto text-xs text-muted-foreground">
+                            Ctrl+Enter saves and rebuilds RAG. Esc cancels.
+                          </span>
+                          <button
+                            type="button"
+                            onClick={cancelEditing}
+                            disabled={savingIndex === i}
+                            className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-semibold text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-50"
+                          >
+                            <X className="h-3.5 w-3.5" aria-hidden="true" />
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void saveCorrection()}
+                            disabled={savingIndex === i || !editDraft.trim()}
+                            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-2.5 py-1.5 text-xs font-semibold text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-50"
+                          >
+                            {savingIndex === i ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                            ) : (
+                              <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                            )}
+                            {savingIndex === i ? 'Saving + rebuilding RAG…' : 'Save correction'}
+                          </button>
+                        </div>
+                        {editError && (
+                          <p id={`transcript-edit-error-${i}`} className="text-xs text-destructive" role="alert">
+                            {editError}
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="relative min-w-0">
+                        <p className="whitespace-pre-wrap pr-9 leading-relaxed [overflow-wrap:anywhere]">{segment.text}</p>
+                        {editEnabled && (
+                          <button
+                            type="button"
+                            onClick={() => startEditing(i)}
+                            disabled={savingIndex !== null}
+                            className="absolute -top-1 right-0 inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground opacity-40 transition-[color,background-color,opacity] hover:bg-accent hover:text-foreground hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-20 group-hover/turn:opacity-100"
+                            aria-label={`Edit transcript turn ${i + 1}`}
+                            title="Edit this transcript turn"
+                          >
+                            <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
                   )
                 })}

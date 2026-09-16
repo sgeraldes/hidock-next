@@ -101,7 +101,7 @@ beforeEach(() => {
   mockReject.mockResolvedValue({ success: true })
   mockContactGetById.mockResolvedValue({
     success: true,
-    data: { contact: { name: 'Sebastián', role: 'Engineer', email: 'seba@dfx5.com', meeting_count: 4 } }
+    data: { contact: { name: 'Sebastián', role: 'Engineer', email: 'seba@example.invalid', meeting_count: 4 } }
   })
   mockContactUnmerge.mockResolvedValue({ success: true })
   // r6: group Undo goes through ONE atomic backend call; the renderer still
@@ -469,7 +469,7 @@ describe('IdentitySuggestionsSection — project transcript evidence (F1)', () =
     // On the Projects page only the project card is rendered, so its evidence must NOT be
     // queued behind the person lookups (the starvation that produced the blanket error).
     mockGetSuggestions.mockResolvedValue({ success: true, data: [suggestion, projectSuggestion] })
-    mockContactGetById.mockResolvedValue({ success: true, data: { contact: { name: 'Sebastián' } } })
+  mockContactGetById.mockResolvedValue({ success: true, data: { contact: { name: 'Sebastián' } } })
     mockGetMentionSnippets.mockResolvedValue({ success: true, data: { snippets: [], recordingIds: [] } })
 
     renderSection('project')
@@ -479,7 +479,7 @@ describe('IdentitySuggestionsSection — project transcript evidence (F1)', () =
     await waitFor(() => expect(mockGetMentionSnippets).toHaveBeenCalled())
     const namesFetched = mockGetMentionSnippets.mock.calls.map((c) => String(c[0]))
     expect(namesFetched).not.toContain('Sebas')
-    expect(namesFetched).not.toContain('Sebastián')
+  expect(namesFetched).not.toContain('Sebastián')
     expect(namesFetched.some((n) => /HeyGen/i.test(n))).toBe(true)
   })
 

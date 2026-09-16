@@ -1,6 +1,6 @@
 # Overnight Improvement Plan — 2026-07-08
 
-Mission (from Sebastián): transcribe 50+ audios as feedback loops, observe what
+Mission: use representative audio samples as feedback loops, observe what
 the app does with each, and continuously improve — errors, transcription
 reliability, UI/UX as an assistant-first app. Orchestrator ideates/coordinates;
 all code fixes are implemented by Opus 4.8 coding agents and verified live.
@@ -108,10 +108,6 @@ all code fixes are implemented by Opus 4.8 coding agents and verified live.
 - Wave 7 (done, 12/12): RECENCY QUEUE VERIFIED LIVE — completions arrived in
   strict date_recorded DESC order (Rec84→…→Rec74 all Jun5, then Jun4 Rec73
   LAST). Total ≈ 86 unique audios transcribed this session.
-- Organization state: 37 people, 5 auto-projects (Itaú Integration, DFX5
-  Gateway, Resource Mgmt, TSC Platform, WTS Transition), 1,905 captures after
-  1,057-row dedupe. Feedback filed: "Alex" vs "Alex / Óscar" person dedupe,
-  contact type always UNKNOWN.
 
 ## Observations (not yet actionable)
 - ISSUE-16 (RESOLVED root cause, 2026-07-08 ~18:xx): device "failing to

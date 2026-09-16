@@ -41,6 +41,21 @@ def get_hf_token() -> str | None:
         return None
 
 
+def resolve_ffmpeg_path() -> str | None:
+    """Resolve ffmpeg-static in both development and packaged Electron layouts."""
+
+    configured = os.environ.get("FFMPEG_PATH")
+    candidates = [configured, shutil.which("ffmpeg")]
+    if configured:
+        candidates.insert(
+            1,
+            configured.replace("app.asar\\", "app.asar.unpacked\\").replace(
+                "app.asar/", "app.asar.unpacked/"
+            ),
+        )
+    return next((candidate for candidate in candidates if candidate and Path(candidate).is_file()), None)
+
+
 def decode_audio(audio_path: str, torch: Any) -> dict[str, Any]:
     """Decode any app-supported audio without torchcodec.
 
@@ -50,8 +65,8 @@ def decode_audio(audio_path: str, torch: Any) -> dict[str, Any]:
     input contract identical in development and packaged builds.
     """
 
-    ffmpeg = os.environ.get("FFMPEG_PATH") or shutil.which("ffmpeg")
-    if not ffmpeg or not Path(ffmpeg).is_file():
+    ffmpeg = resolve_ffmpeg_path()
+    if not ffmpeg:
         raise RuntimeError("FFmpeg is required for local speaker linking but was not found")
     process = subprocess.run(
         [

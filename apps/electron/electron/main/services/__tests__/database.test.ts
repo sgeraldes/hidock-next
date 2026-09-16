@@ -750,6 +750,8 @@ describe('Database Service', () => {
         quality_status: 'degraded'
       })
       expect(JSON.parse(saved[0].quality_json!)).toEqual({ coverageRatio: 0.42 })
+      expect(saved[0].duration_ms).toEqual(expect.any(Number))
+      expect(saved[0].duration_ms).toBeGreaterThanOrEqual(0)
     })
 
     it('persists every temporal meeting candidate before transcription', () => {
@@ -796,7 +798,7 @@ describe('Database Service', () => {
       upsertMeetingsBatch([
         {
           id: 'stale-intranet',
-          subject: 'DFX5 Intranet',
+          subject: 'Product briefing',
           start_time: '2026-08-24T17:30:00.000Z',
           end_time: '2026-08-24T18:00:00.000Z',
           is_recurring: 1
@@ -805,7 +807,7 @@ describe('Database Service', () => {
       upsertMeetingsBatch([
         {
           id: 'current-interview',
-          subject: 'DFX5 Interview is scheduled',
+          subject: 'Next meeting is scheduled',
           start_time: '2026-08-24T17:15:00.000Z',
           end_time: '2026-08-24T18:15:00.000Z',
           is_recurring: 0

@@ -56,6 +56,9 @@ export function Device() {
   const realtimeIntervalRef = useRef<number | null>(null)
   // DV-09: Ref to track current offset for use in interval callback (avoids stale closure)
   const realtimeDataOffsetRef = useRef(0)
+  const [liveTranscriptionStatus, setLiveTranscriptionStatus] = useState('stopped')
+  const [liveTranscriptionInterim, setLiveTranscriptionInterim] = useState('')
+  const [liveTranscriptionFinal, setLiveTranscriptionFinal] = useState<string[]>([])
 
   // P1-specific state
   const [batteryStatus, setBatteryStatus] = useState<BatteryStatus | null>(null)
@@ -682,6 +685,8 @@ export function Device() {
 
   const handleStartRealtime = async () => {
     setError(null)
+    setLiveTranscriptionInterim('')
+    setLiveTranscriptionFinal([])
     try {
       const success = await deviceService.startRealtime()
       if (success) {
@@ -749,22 +754,47 @@ export function Device() {
     if (realtimeIntervalRef.current) {
       clearInterval(realtimeIntervalRef.current)
     }
-    realtimeIntervalRef.current = window.setInterval(async () => {
+    const poll = async () => {
+      if (realtimeIntervalRef.current === null) return
+      let delay = 100
       try {
-        // DV-09: Read offset from ref to get current value, not stale closure
-        const data = await deviceService.getRealtimeData(realtimeDataOffsetRef.current)
+        // Current firmware treats CMD 34 as a dequeue request and accepts no
+        // offset body. Poll serially so requests can never overlap on USB.
+        const data = await deviceService.getRealtimeData(0)
         if (data && data.data) {
-          // Update both ref (for next poll) and state (for UI)
-          realtimeDataOffsetRef.current += data.data.length
-          setRealtimeDataReceived((prev) => prev + data.data.length)
+          const pcmBytes = Math.max(0, data.data.length - 8)
+          realtimeDataOffsetRef.current += pcmBytes
+          setRealtimeDataReceived((prev) => prev + pcmBytes)
           setRealtimeDataOffset(realtimeDataOffsetRef.current)
-          console.log(`Received ${data.data.length} bytes of realtime audio, rest: ${data.rest}`)
+          delay = data.rest > 1 ? 50 : 100
+          if (shouldLogQa()) {
+            console.log(`[QA-MONITOR] Received ${pcmBytes} realtime PCM bytes, queued packets: ${data.rest}`)
+          }
         }
       } catch (e) {
-        console.error('Error polling realtime data:', e)
+        if (shouldLogQa()) console.error('[QA-MONITOR] Error polling realtime data:', e)
       }
-    }, 100) // Poll every 100ms
+      if (realtimeIntervalRef.current !== null) {
+        realtimeIntervalRef.current = window.setTimeout(poll, delay)
+      }
+    }
+    realtimeIntervalRef.current = window.setTimeout(poll, 0)
   }
+
+  useEffect(() => {
+    const api = window.electronAPI?.jensen
+    if (!api?.onLiveTranscriptionStatus) return
+    const cleanups = [
+      api.onLiveTranscriptionStatus(({ status }) => setLiveTranscriptionStatus(status)),
+      api.onLiveTranscriptionInterim(({ text }) => setLiveTranscriptionInterim(text)),
+      api.onLiveTranscriptionFinal(({ text }) => {
+        setLiveTranscriptionFinal((current) => [...current, text])
+        setLiveTranscriptionInterim('')
+      }),
+      api.onLiveTranscriptionError(({ error: liveError }) => setError(liveError)),
+    ]
+    return () => cleanups.forEach((cleanup) => cleanup())
+  }, [])
 
   const stopRealtimePolling = () => {
     if (realtimeIntervalRef.current) {
@@ -1374,9 +1404,25 @@ export function Device() {
                     </div>
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    Realtime streaming captures audio directly from the device microphone.
-                    Audio data is received via USB at 16kHz 16-bit mono.
+                    HiDock stereo audio is mixed to 16kHz 16-bit mono and transcribed by Gemini 3.5 Flash Live Transcribe.
                   </p>
+                  {(realtimeActive || liveTranscriptionFinal.length > 0) && (
+                    <div className="rounded-lg border bg-muted/30 p-4" aria-live="polite">
+                      <div className="mb-2 flex items-center justify-between gap-3">
+                        <p className="text-sm font-medium">Live transcript</p>
+                        <span className="text-xs capitalize text-muted-foreground">{liveTranscriptionStatus}</span>
+                      </div>
+                      <div className="max-h-56 space-y-2 overflow-y-auto text-sm">
+                        {liveTranscriptionFinal.map((text, index) => <p key={`${index}-${text}`}>{text}</p>)}
+                        {liveTranscriptionInterim && (
+                          <p className="italic text-muted-foreground">{liveTranscriptionInterim}</p>
+                        )}
+                        {liveTranscriptionFinal.length === 0 && !liveTranscriptionInterim && (
+                          <p className="text-muted-foreground">Listening for speech…</p>
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </CardContent>
             </Card>

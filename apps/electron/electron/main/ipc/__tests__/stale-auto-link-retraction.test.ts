@@ -61,7 +61,7 @@ beforeEach(async () => {
   await initializeDatabase()
   run(
     `INSERT INTO meetings (id, subject, start_time, end_time, is_recurring, created_at, updated_at)
-     VALUES (?, 'DFX5 Interview is scheduled', '2026-08-18T17:45:00.000Z',
+     VALUES (?, 'Next meeting is scheduled', '2026-08-18T17:45:00.000Z',
              '2026-08-18T18:45:00.000Z', 0, '2026-01-01', '2026-01-01')`,
     [INTERVIEW]
   )

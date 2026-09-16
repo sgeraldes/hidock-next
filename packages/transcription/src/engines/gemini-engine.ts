@@ -7,7 +7,12 @@ import {
   type Part,
 } from '@google/genai'
 import { extname } from 'node:path'
-import type { TranscriptionEngine, TranscriptSegment, TranscribeOptions } from './engine-interface.js'
+import type {
+  TranscriptionEngine,
+  TranscriptSegment,
+  TranscribeOptions,
+  TranscriptionTraceEvent,
+} from './engine-interface.js'
 import { TurnDeduper } from './dedupe-turns.js'
 import { NoSpeechDetectedError, TranscriptionCancelledError } from './engine-interface.js'
 
@@ -34,6 +39,102 @@ export interface GeminiEngineOptions {
   apiKey: string
   model?: string
   language?: string
+}
+
+interface NativeWordInfo {
+  type?: string
+  text?: string
+  speaker?: string
+  start_offset?: string
+  end_offset?: string
+}
+
+interface NativeTranscriptionInteraction {
+  status: string
+  output_text?: string
+  steps?: Array<{
+    content?: Array<{
+      text?: string
+      annotations?: NativeWordInfo[]
+    }>
+  }>
+}
+
+/** Convert the app's language setting into the BCP-47 hints accepted by STT. */
+export function toGeminiLanguageCodes(language: string | undefined): string[] {
+  const normalized = (language ?? '').trim()
+  if (!normalized || /^(auto|unknown)$/i.test(normalized)) return []
+  if (/^es$/i.test(normalized)) return ['es-419']
+  if (/^en$/i.test(normalized)) return ['en-US']
+  return [normalized]
+}
+
+function offsetSeconds(value: string | undefined): number {
+  if (!value) return 0
+  const parsed = Number.parseFloat(value.replace(/s$/i, ''))
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function joinNativeWord(text: string, word: string): string {
+  const next = word.trim()
+  if (!next) return text
+  if (!text || /^[,.;:!?%\])}»”’]/u.test(next) || /[(\[{«“‘]$/u.test(text)) return `${text}${next}`
+  return `${text} ${next}`
+}
+
+/** Parse word_info annotations and coalesce adjacent words by speaker. */
+export function parseNativeTranscription(
+  interaction: NativeTranscriptionInteraction,
+  chunkStartSec: number,
+  chunkDurationSec: number,
+  defaultSpeaker: string,
+  source: 'mic' | 'system',
+  speakerNames: Map<string, string> = new Map()
+): TranscriptSegment[] {
+  const words = (interaction.steps ?? [])
+    .flatMap((step) => step.content ?? [])
+    .flatMap((content) => content.annotations ?? [])
+    .filter((annotation) => annotation.type === 'word_info' && Boolean(annotation.text?.trim()))
+
+  const segments: TranscriptSegment[] = []
+  for (const word of words) {
+    const providerSpeaker = word.speaker || defaultSpeaker
+    if (!speakerNames.has(providerSpeaker)) {
+      speakerNames.set(
+        providerSpeaker,
+        providerSpeaker === defaultSpeaker ? defaultSpeaker : `Speaker ${speakerNames.size + 1}`
+      )
+    }
+    const speaker = speakerNames.get(providerSpeaker) ?? defaultSpeaker
+    const startTime = chunkStartSec + offsetSeconds(word.start_offset)
+    const endTime = chunkStartSec + offsetSeconds(word.end_offset)
+    const current = segments.at(-1)
+    if (current && current.speaker === speaker) {
+      current.text = joinNativeWord(current.text, word.text ?? '')
+      current.endTime = Math.max(current.endTime, endTime)
+    } else {
+      segments.push({
+        speaker,
+        text: (word.text ?? '').trim(),
+        startTime,
+        endTime: Math.max(startTime, endTime),
+        confidence: 1,
+        source,
+      })
+    }
+  }
+
+  if (segments.length > 0) return segments
+  const fallbackText = (interaction.output_text ?? '').trim()
+  if (!fallbackText) return []
+  return [{
+    speaker: defaultSpeaker,
+    text: fallbackText,
+    startTime: chunkStartSec,
+    endTime: chunkStartSec + Math.max(0, chunkDurationSec),
+    confidence: 1,
+    source,
+  }]
 }
 
 const MIME_TYPES: Record<string, string> = {
@@ -713,13 +814,11 @@ export function hasReliableTurnStructure(text: string): boolean {
 }
 
 /**
- * GeminiEngine transcribes audio using Google Gemini's multimodal API.
- *
- * Long recordings are split into ~10-minute chunks (PCM WAV via
- * splitWavIntoChunks, or MP3 via splitMp3IntoChunks — HiDock records MP3), so
- * each request stays small and never hits the output-token cap. Each chunk is
- * prompted for `[MM:SS] Speaker N: text` turns; timestamps are offset to
- * absolute time and the turns are yielded as individual TranscriptSegments.
+ * GeminiEngine transcribes audio using Google Gemini. The dedicated
+ * gemini-3.5-transcribe path uses native Interactions transcription,
+ * diarization, word timestamps, and 20-minute physical WAV/MP3 chunks (below
+ * the API's 30-minute diarization/timestamp limit). Legacy configured models
+ * retain the older generateContent compatibility path.
  *
  * A chunk that returns empty, or is truncated at MAX_TOKENS after a retry,
  * throws rather than being silently dropped — a truncated transcript must
@@ -752,8 +851,8 @@ export class GeminiEngine implements TranscriptionEngine {
 
   constructor(options: GeminiEngineOptions) {
     this.apiKey = options.apiKey
-    // Keep in sync with CURRENT_GEMINI_MODEL in the electron app's config.ts —
-    // 2.x models are retired and 404 on generateContent.
+    // Electron config supplies the dedicated Transcribe model. Keep the
+    // package fallback compatible for callers that have not migrated yet.
     this.model = options.model ?? 'gemini-3.5-flash'
     this.language = options.language ?? 'unknown'
   }
@@ -787,6 +886,177 @@ export class GeminiEngine implements TranscriptionEngine {
       throw new Error('Gemini Files API: processed file is missing its resource name or URI')
     }
     return { name: file.name, uri: file.uri, mimeType: file.mimeType ?? mimeType }
+  }
+
+  private async uploadAudioChunk(
+    genAI: GoogleGenAI,
+    chunk: AudioChunk,
+    shouldGenerate?: () => boolean
+  ): Promise<{ name: string; uri: string; mimeType: string }> {
+    assertStillEligible(shouldGenerate)
+    const bytes = Uint8Array.from(chunk.data)
+    let file = await genAI.files.upload({
+      file: new Blob([bytes.buffer], { type: chunk.mimeType }),
+      config: { mimeType: chunk.mimeType },
+    })
+    const deadline = Date.now() + 5 * 60 * 1000
+    while (file.state === FileState.PROCESSING) {
+      if (Date.now() > deadline) throw new Error('Gemini Files API: timed out waiting for file processing')
+      await new Promise((resolve) => setTimeout(resolve, 2000))
+      assertStillEligible(shouldGenerate)
+      if (!file.name) throw new Error('Gemini Files API: uploaded file has no resource name')
+      file = await genAI.files.get({ name: file.name })
+    }
+    if (file.state === FileState.FAILED) throw new Error('Gemini Files API: file processing failed')
+    if (!file.name || !file.uri) {
+      throw new Error('Gemini Files API: processed file is missing its resource name or URI')
+    }
+    return { name: file.name, uri: file.uri, mimeType: file.mimeType ?? chunk.mimeType }
+  }
+
+  private async transcribeWithNativeModel(
+    genAI: GoogleGenAI,
+    audio: Buffer,
+    mimeType: string,
+    options: TranscribeOptions
+  ): Promise<TranscriptSegment[]> {
+    const shouldGenerate = options.shouldGenerate
+    const durationSeconds = options.durationSeconds ?? 0
+    const split =
+      splitWavIntoChunks(audio, GeminiEngine.ROLLING_CHUNK_SECONDS) ??
+      splitMp3IntoChunks(audio, GeminiEngine.ROLLING_CHUNK_SECONDS)
+    const chunks = split && split.length > 0
+      ? split
+      : [{ data: audio, mimeType, startSec: 0, durationSec: durationSeconds }]
+
+    // Native diarization/timestamps are documented for at most 30 minutes per
+    // request. Refuse an unsplittable longer container instead of silently
+    // sending an unsupported request or reverting to prompt-based range repair.
+    if (chunks.length === 1 && durationSeconds > 30 * 60) {
+      throw new Error(
+        'Gemini 3.5 Transcribe requires recordings over 30 minutes to be valid WAV or MP3 audio so they can be safely chunked'
+      )
+    }
+
+    const languageCodes = toGeminiLanguageCodes(options.language ?? this.language)
+    const allSegments: TranscriptSegment[] = []
+    const speakerNames = new Map<string, string>()
+    const defaultSpeaker = options.source === 'mic' ? 'you' : 'them'
+
+    const trace = (event: TranscriptionTraceEvent): void => {
+      try {
+        options.onTrace?.(event)
+      } catch {
+        // Diagnostics must never change provider behavior.
+      }
+    }
+
+    for (let index = 0; index < chunks.length; index++) {
+      assertStillEligible(shouldGenerate)
+      const chunk = chunks[index]
+      const common = {
+        chunkIndex: index + 1,
+        chunkCount: chunks.length,
+        audioStartSec: chunk.startSec,
+        audioEndSec: chunk.startSec + chunk.durationSec,
+      }
+      const chunkStartedAt = Date.now()
+      trace({ phase: 'chunk', status: 'started', ...common })
+
+      const uploadStartedAt = Date.now()
+      trace({ phase: 'upload', status: 'started', ...common })
+      let uploaded: { name: string; uri: string; mimeType: string }
+      try {
+        uploaded = await this.uploadAudioChunk(genAI, chunk, shouldGenerate)
+        trace({ phase: 'upload', status: 'completed', elapsedMs: Date.now() - uploadStartedAt, ...common })
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error)
+        trace({ phase: 'upload', status: 'failed', elapsedMs: Date.now() - uploadStartedAt, detail, ...common })
+        trace({ phase: 'chunk', status: 'failed', elapsedMs: Date.now() - chunkStartedAt, detail, ...common })
+        throw error
+      }
+      try {
+        assertStillEligible(shouldGenerate)
+        const providerStartedAt = Date.now()
+        trace({ phase: 'provider-transcription', status: 'started', ...common })
+        let interaction: NativeTranscriptionInteraction
+        try {
+          interaction = await genAI.interactions.create({
+            model: this.model,
+            input: [{ type: 'audio', uri: uploaded.uri, mime_type: uploaded.mimeType }],
+            generation_config: {
+              transcription_config: {
+                language_codes: languageCodes,
+                custom_vocabulary: options.vocabulary?.slice(0, 1000),
+                mode: {
+                  type: 'verbatim',
+                  diarization_mode: options.diarize === false ? undefined : 'speaker',
+                  timestamp_granularities: ['word'],
+                },
+              },
+            },
+          }, {
+            timeout: GeminiEngine.INTERACTION_REQUEST_TIMEOUT_MS,
+            maxRetries: 0,
+          }) as unknown as NativeTranscriptionInteraction
+          trace({
+            phase: 'provider-transcription',
+            status: 'completed',
+            elapsedMs: Date.now() - providerStartedAt,
+            ...common,
+          })
+        } catch (error) {
+          trace({
+            phase: 'provider-transcription',
+            status: 'failed',
+            elapsedMs: Date.now() - providerStartedAt,
+            detail: error instanceof Error ? error.message : String(error),
+            ...common,
+          })
+          throw error
+        }
+
+        if (interaction.status !== 'completed') {
+          throw new Error(`Gemini native transcription ${interaction.status}`)
+        }
+        const parseStartedAt = Date.now()
+        trace({ phase: 'parse', status: 'started', ...common })
+        const segments = parseNativeTranscription(
+          interaction,
+          chunk.startSec,
+          chunk.durationSec,
+          defaultSpeaker,
+          options.source,
+          speakerNames
+        )
+        trace({ phase: 'parse', status: 'completed', elapsedMs: Date.now() - parseStartedAt, ...common })
+        allSegments.push(...segments)
+        options.onProgress?.(index + 1, chunks.length)
+        trace({ phase: 'chunk', status: 'completed', elapsedMs: Date.now() - chunkStartedAt, ...common })
+      } catch (error) {
+        trace({
+          phase: 'chunk',
+          status: 'failed',
+          elapsedMs: Date.now() - chunkStartedAt,
+          detail: error instanceof Error ? error.message : String(error),
+          ...common,
+        })
+        throw error
+      } finally {
+        const cleanupStartedAt = Date.now()
+        trace({ phase: 'cleanup', status: 'started', ...common })
+        try {
+          await genAI.files.delete({ name: uploaded.name })
+          trace({ phase: 'cleanup', status: 'completed', elapsedMs: Date.now() - cleanupStartedAt, ...common })
+        } catch {
+          // Files expire automatically; cleanup failure must not discard a
+          // completed transcript.
+          trace({ phase: 'cleanup', status: 'failed', elapsedMs: Date.now() - cleanupStartedAt, ...common })
+        }
+      }
+    }
+    if (allSegments.length === 0) throw new NoSpeechDetectedError()
+    return allSegments
   }
 
   /**
@@ -1082,6 +1352,12 @@ Calendar and meeting context are spelling hints only; never invent speech from t
     const mimeType = detectAudioMimeType(audio, ext)
 
     const genAI = new GoogleGenAI({ apiKey: this.apiKey })
+
+    if (this.model === 'gemini-3.5-transcribe') {
+      const segments = await this.transcribeWithNativeModel(genAI, audio, mimeType, options)
+      for (const segment of segments) yield segment
+      return
+    }
 
     if (
       /^gemini-(?:3(?:\.|$)|[4-9])/i.test(this.model) &&

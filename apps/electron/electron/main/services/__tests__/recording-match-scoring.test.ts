@@ -25,7 +25,7 @@ const REC46_CANDIDATES: MatchCandidateInput[] = [
   { meetingId: 'almuerzo', subject: 'Almuerzo', startTime: '2026-07-08T13:00:00-05:00', endTime: '2026-07-08T14:00:00-05:00' },
   { meetingId: 'cx', subject: 'CX-Weekly', startTime: '2026-07-08T13:00:00-05:00', endTime: '2026-07-08T14:00:00-05:00' },
   { meetingId: 'retro', subject: 'Retro Belcorp', startTime: '2026-07-08T15:00:00-05:00', endTime: '2026-07-08T15:30:00-05:00' },
-  { meetingId: 'dfx5', subject: 'DFX5 AM3', startTime: '2026-07-08T15:00:00-05:00', endTime: '2026-07-08T16:00:00-05:00' }
+  { meetingId: 'other', subject: 'Other meeting', startTime: '2026-07-08T15:00:00-05:00', endTime: '2026-07-08T16:00:00-05:00' }
 ]
 
 describe('scoreMeetingCandidates — Rec46 reported case', () => {
@@ -36,7 +36,7 @@ describe('scoreMeetingCandidates — Rec46 reported case', () => {
     expect(scored[0].meetingId).toBe('retro')
     expect(byId.retro.isBestMatch).toBe(true)
     // Every other candidate is not flagged.
-    for (const id of ['almuerzo', 'cx', 'dfx5']) {
+    for (const id of ['almuerzo', 'cx', 'other']) {
       expect(byId[id].isBestMatch).toBe(false)
     }
   })
@@ -207,7 +207,7 @@ describe('scoreMeetingCandidates — labels & edges', () => {
     }
     const bufferedNearMiss = {
       meetingId: 'sip-war',
-      subject: 'RE: [EXTERNAL] DFX5 SIP Gateway WAR',
+      subject: 'External meeting',
       startTime: '2026-08-18T22:45:00.000Z',
       endTime: '2026-08-18T23:45:00.000Z'
     }

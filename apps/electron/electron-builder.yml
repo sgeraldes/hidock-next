@@ -5,6 +5,8 @@ directories:
   output: dist
 files:
   - '!**/.vscode/*'
+  - '!**/.venv*/**'
+  - '!node_modules/.ignored/**'
   - '!src/*'
   - '!electron.vite.config.*'
   - '!{.eslintignore,.eslintrc.cjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'

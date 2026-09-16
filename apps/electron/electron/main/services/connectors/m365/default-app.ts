@@ -29,7 +29,7 @@
  *    - Name: e.g. "HiDock Next (Desktop)".
  *    - Supported account types: "Accounts in any organizational directory and
  *      personal Microsoft accounts" (this is what makes tenant 'common' work for
- *      BOTH a personal hotmail.com account AND a work/school dfx5.com account).
+ *      BOTH a personal Microsoft account AND a work/school account).
  * 2. Authentication → Add a platform → "Mobile and desktop applications".
  *    - Add redirect URI: http://localhost   (loopback — the interactive
  *      auth-code flow binds an EPHEMERAL port and Azure matches any port for the
@@ -55,7 +55,7 @@ export const DEFAULT_M365_CLIENT_ID = ''
 
 /**
  * Default authority tenant. 'common' allows BOTH personal Microsoft accounts
- * (hotmail/outlook.com) and work/school accounts (dfx5.com) to sign in.
+ * (hotmail/outlook.com) and work/school accounts to sign in.
  */
 export const DEFAULT_M365_TENANT = 'common'
 

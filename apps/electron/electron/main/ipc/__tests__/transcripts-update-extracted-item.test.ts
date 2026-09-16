@@ -20,7 +20,9 @@ vi.mock('../../services/file-storage', () => ({ getDatabasePath: () => dbPath })
 
 const handlers = new Map<string, (...args: any[]) => any>()
 vi.mock('electron', () => ({
-  ipcMain: { handle: (channel: string, fn: (...args: any[]) => any) => { handlers.set(channel, fn) } }
+  ipcMain: { handle: (channel: string, fn: (...args: any[]) => any) => { handlers.set(channel, fn) } },
+  app: { getPath: () => tmpdir(), getVersion: () => '0.0.0', isPackaged: false },
+  safeStorage: { isEncryptionAvailable: () => false }
 }))
 
 import { initializeDatabase, closeDatabase, run, queryOne } from '../../services/database'

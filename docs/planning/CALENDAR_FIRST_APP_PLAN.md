@@ -557,13 +557,9 @@ apps/electron/
 
 ---
 
-## Calendar URL (Saved)
+## Calendar URL
 
-```
-https://outlook.office365.com/owa/calendar/a2b08d9dc3654277af7af87bcd47fb9a@dfx5.com/e3847de584334362b30d861f590441d212875226637484402060/calendar.ics
-```
-
-This will be stored in config.json on first run or via settings.
+The calendar URL is configured at runtime and is not stored in this plan.
 
 ---
 

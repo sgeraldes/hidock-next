@@ -611,12 +611,25 @@ export interface ElectronAPI {
     assignSpeaker: (request: { recordingId: string; speakerLabel: string; contactId?: string; newName?: string }) => Promise<Result<Contact>>
     getSpeakerMap: (request: { recordingId: string }) => Promise<Result<Array<{ speaker_label: string; contact_id: string; name: string }>>>
     unassignSpeaker: (request: { recordingId: string; speakerLabel: string }) => Promise<Result<void>>
+    updateContent: (request: {
+      recordingId: string
+      expectedFullText: string
+      segments: Array<{ speaker?: string; start: number; end?: number; text: string }>
+    }) => Promise<Result<{
+      fullText: string
+      segments: Array<{ speaker?: string; start: number; end?: number; text: string }>
+      wordCount: number
+      indexedChunks: number
+      ragStatus: 'indexed' | 'pending'
+      ragError?: string
+    }>>
+    reindex: (request: { recordingId: string }) => Promise<Result<{ indexedChunks: number }>>
     updateExtractedItem: (request: { recordingId: string; kind: 'action' | 'decision'; index: number; content: string }) => Promise<Result<{ kind: 'action' | 'decision'; index: number; content: string }>>
     getProcessingRuns: (request: { recordingId: string }) => Promise<Result<Array<{
       id: string
       recording_id: string
       transcript_id: string | null
-      stage: 'metadata' | 'schedule-match' | 'vad' | 'diarization' | 'transcription' | 'summary' | 'title' | 'meeting-resolution' | 'speaker-identity' | 'voice-id'
+      stage: 'metadata' | 'schedule-match' | 'vad' | 'diarization' | 'transcription' | 'summary' | 'title' | 'meeting-resolution' | 'speaker-identity' | 'voice-id' | 'persistence' | 'actionable-detection' | 'timeline-analysis' | 'org-reconciliation' | 'graph-sync' | 'wiki-export' | 'rag-indexing'
       provider: string
       tool: string | null
       model: string | null
@@ -625,6 +638,8 @@ export interface ElectronAPI {
       status: 'pending' | 'running' | 'completed' | 'degraded' | 'failed' | 'cancelled'
       started_at: string
       completed_at: string | null
+      duration_ms: number | null
+      usage_json: string | null
       quality_status: string | null
       quality_json: string | null
       estimated_cost_amount: number | null
@@ -1131,6 +1146,10 @@ export interface ElectronAPI {
     pauseRealtime: () => Promise<any>
     stopRealtime: () => Promise<any>
     getRealtimeData: (offset: number) => Promise<any>
+    onLiveTranscriptionStatus: (callback: (data: { status: string }) => void) => () => void
+    onLiveTranscriptionInterim: (callback: (data: { text: string }) => void) => () => void
+    onLiveTranscriptionFinal: (callback: (data: { text: string }) => void) => () => void
+    onLiveTranscriptionError: (callback: (data: { error: string }) => void) => () => void
     // Battery & Bluetooth
     getBatteryStatus: () => Promise<any>
     startBluetoothScan: (duration?: number) => Promise<any>
@@ -1518,6 +1537,8 @@ const electronAPI: ElectronAPI = {
     assignSpeaker: (request) => callIPC('transcripts:assignSpeaker', request),
     getSpeakerMap: (request) => callIPC('transcripts:getSpeakerMap', request),
     unassignSpeaker: (request) => callIPC('transcripts:unassignSpeaker', request),
+    updateContent: (request) => callIPC('transcripts:updateContent', request),
+    reindex: (request) => callIPC('transcripts:reindex', request),
     updateExtractedItem: (request) => callIPC('transcripts:updateExtractedItem', request),
     getProcessingRuns: (request) => callIPC('transcripts:getProcessingRuns', request)
   },
@@ -1873,6 +1894,26 @@ const electronAPI: ElectronAPI = {
     pauseRealtime: () => callIPC('jensen:pauseRealtime'),
     stopRealtime: () => callIPC('jensen:stopRealtime'),
     getRealtimeData: (offset: number) => callIPC('jensen:getRealtimeData', { offset }),
+    onLiveTranscriptionStatus: (callback: (data: { status: string }) => void) => {
+      const handler = (_event: any, data: { status: string }) => callback(data)
+      ipcRenderer.on('transcription-live:status', handler)
+      return () => ipcRenderer.removeListener('transcription-live:status', handler)
+    },
+    onLiveTranscriptionInterim: (callback: (data: { text: string }) => void) => {
+      const handler = (_event: any, data: { text: string }) => callback(data)
+      ipcRenderer.on('transcription-live:interim', handler)
+      return () => ipcRenderer.removeListener('transcription-live:interim', handler)
+    },
+    onLiveTranscriptionFinal: (callback: (data: { text: string }) => void) => {
+      const handler = (_event: any, data: { text: string }) => callback(data)
+      ipcRenderer.on('transcription-live:final', handler)
+      return () => ipcRenderer.removeListener('transcription-live:final', handler)
+    },
+    onLiveTranscriptionError: (callback: (data: { error: string }) => void) => {
+      const handler = (_event: any, data: { error: string }) => callback(data)
+      ipcRenderer.on('transcription-live:error', handler)
+      return () => ipcRenderer.removeListener('transcription-live:error', handler)
+    },
     // Battery & Bluetooth
     getBatteryStatus: () => callIPC('jensen:getBatteryStatus'),
     startBluetoothScan: (duration?: number) => callIPC('jensen:startBluetoothScan', { duration }),

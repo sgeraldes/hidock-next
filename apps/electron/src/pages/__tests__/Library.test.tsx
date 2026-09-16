@@ -244,6 +244,7 @@ global.window.electronAPI = {
   // ADV13: Library uses the owner-management batch accessor.
   transcripts: { getByRecordingIds: vi.fn().mockResolvedValue({}), getByRecordingIdsOwner: vi.fn().mockResolvedValue({}) },
   meetings: { getByIds: vi.fn().mockResolvedValue({}) },
+  knowledge: { getById: vi.fn().mockResolvedValue(null) },
   storage: { openFolder: vi.fn() },
   recordings: {
     addExternal: vi.fn(),
@@ -254,7 +255,8 @@ global.window.electronAPI = {
     deleteCascade: vi.fn().mockResolvedValue({ success: true, mode: 'soft' }),
     restore: vi.fn().mockResolvedValue({ success: true }),
     // spec-005/F17 T5 — loaded eagerly on mount (for the Trash toggle's count).
-    getTrash: vi.fn().mockResolvedValue([])
+    getTrash: vi.fn().mockResolvedValue([]),
+    getById: vi.fn().mockResolvedValue(null)
   },
   downloadService: {
     queueDownloads: vi.fn()
@@ -305,6 +307,8 @@ describe('Library', () => {
     vi.mocked(window.electronAPI.transcripts.getByRecordingIds).mockResolvedValue({})
     vi.mocked(window.electronAPI.transcripts.getByRecordingIdsOwner).mockResolvedValue({})
     vi.mocked(window.electronAPI.meetings.getByIds).mockResolvedValue({})
+    vi.mocked(window.electronAPI.recordings.getById).mockResolvedValue(null)
+    vi.mocked(window.electronAPI.knowledge.getById).mockResolvedValue(null)
     vi.mocked(useUnifiedRecordings).mockReturnValue({
       recordings: [],
       loading: false,
@@ -542,7 +546,7 @@ describe('Library', () => {
             ...mockRecording,
             id: 'duplicate-parent-id',
             filename: 'part-1.flac',
-            meetingSubject: 'RE: [EXTERNAL] DFX5 SIP Gateway WAR',
+            meetingSubject: 'External meeting',
             dateRecorded: new Date('2026-08-18T18:46:00'),
             duration: 2815
           },
@@ -550,7 +554,7 @@ describe('Library', () => {
             ...mockRecording,
             id: 'duplicate-parent-id',
             filename: 'part-2.flac',
-            meetingSubject: 'RE: [EXTERNAL] DFX5 SIP Gateway WAR',
+            meetingSubject: 'External meeting',
             dateRecorded: new Date('2026-08-18T18:45:00'),
             duration: 2819
           },
@@ -574,7 +578,7 @@ describe('Library', () => {
       )
 
       await waitFor(() => {
-        expect(screen.getAllByText('RE: [EXTERNAL] DFX5 SIP Gateway WAR')).toHaveLength(2)
+        expect(screen.getAllByText('External meeting')).toHaveLength(2)
       })
       expect(virtualizerHarness.options?.getItemKey?.(0)).toBe('duplicate-parent-id::part-1.flac')
       expect(virtualizerHarness.options?.getItemKey?.(1)).toBe('duplicate-parent-id::part-2.flac')
@@ -658,7 +662,7 @@ describe('Library', () => {
   })
 
   describe('Transcription Events', () => {
-    it('refreshes recording metadata and loads the finished transcript after completion', async () => {
+    it('hydrates only the completed recording and transcript instead of rebuilding the whole library', async () => {
       vi.mocked(useUnifiedRecordings).mockReturnValue({
         recordings: [{ ...mockRecording, transcriptionStatus: 'processing' }],
         loading: false,
@@ -679,6 +683,12 @@ describe('Library', () => {
           createdAt: new Date()
         }
       })
+      vi.mocked(window.electronAPI.recordings.getById).mockResolvedValue({
+        id: 'test-123', transcription_status: 'complete', migrated_to_capture_id: 'capture-1'
+      })
+      vi.mocked(window.electronAPI.knowledge.getById).mockResolvedValue({
+        id: 'capture-1', title: 'Completed title', quality: 'valuable'
+      } as any)
 
       renderLibrary()
 
@@ -691,9 +701,11 @@ describe('Library', () => {
       })
 
       await waitFor(() => {
-        expect(mockRefresh).toHaveBeenCalledWith(false)
         expect(window.electronAPI.transcripts.getByRecordingIdsOwner).toHaveBeenCalledWith(['test-123'])
+        expect(window.electronAPI.recordings.getById).toHaveBeenCalledWith('test-123')
+        expect(window.electronAPI.knowledge.getById).toHaveBeenCalledWith('capture-1')
       })
+      expect(mockRefresh).not.toHaveBeenCalled()
     })
   })
 })

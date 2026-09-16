@@ -137,6 +137,17 @@ vi.mock('../../services/jensen', () => ({
   getJensenDevice: () => mockJensen,
 }))
 
+const mockLiveTranscription = vi.hoisted(() => ({
+  start: vi.fn().mockResolvedValue(undefined),
+  pause: vi.fn(),
+  stop: vi.fn().mockResolvedValue(undefined),
+  acceptDevicePacket: vi.fn().mockResolvedValue(undefined),
+}))
+
+vi.mock('../../services/gemini-live-transcription', () => ({
+  geminiLiveTranscription: mockLiveTranscription,
+}))
+
 // ---------------------------------------------------------------------------
 // Import and register handlers under test
 // ---------------------------------------------------------------------------
@@ -164,6 +175,9 @@ describe('registerJensenHandlers', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockRetryPendingFileCleanups.mockResolvedValue({ attempted: 0, cleared: 0, stillPending: {} })
+    mockJensen.getModel.mockReturnValue('unknown')
+    mockJensen.versionNumber = 327714
+    mockJensen.startRealtime.mockResolvedValue(null)
     broadcastSendCalls.length = 0
     broadcastWindowState.destroyed = false
     // Re-register handlers so mockHandlers is fully populated
@@ -374,6 +388,30 @@ describe('registerJensenHandlers', () => {
     mockJensen.getRealtimeData.mockResolvedValue(null)
     await mockHandlers['jensen:getRealtimeData'](makeEvent(), { offset: 0 })
     expect(mockJensen.getRealtimeData).toHaveBeenCalledWith(0)
+  })
+
+  it('starts Gemini Live and sends exactly one device start command in room/call mode', async () => {
+    mockJensen.getModel.mockReturnValue('hidock-h1e')
+    mockJensen.versionNumber = 393984
+    mockJensen.startRealtime.mockResolvedValue({ result: 'success' })
+    const event = makeEvent()
+
+    await expect(mockHandlers['jensen:startRealtime'](event)).resolves.toEqual({ result: 'success' })
+
+    expect(mockLiveTranscription.start).toHaveBeenCalledWith(event.sender)
+    expect(mockJensen.startRealtime).toHaveBeenCalledTimes(1)
+    expect(mockJensen.startRealtime).toHaveBeenCalledWith(2)
+  })
+
+  it('rejects realtime streaming before Gemini or USB when firmware is too old', async () => {
+    mockJensen.getModel.mockReturnValue('hidock-h1e')
+    mockJensen.versionNumber = 393983
+
+    const result = await mockHandlers['jensen:startRealtime'](makeEvent())
+
+    expect(result).toMatchObject({ result: 'failed', error: expect.stringContaining('firmware') })
+    expect(mockLiveTranscription.start).not.toHaveBeenCalled()
+    expect(mockJensen.startRealtime).not.toHaveBeenCalled()
   })
 
   // -------------------------------------------------------------------------

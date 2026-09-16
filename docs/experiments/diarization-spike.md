@@ -2,8 +2,7 @@
 
 **Date:** 2026-07-10
 **Status:** Research spike (no app/DB/device changes). Exploratory — read the verdict, then decide.
-**Recording under test:** `2026Jul08-151114-Rec47.wav` (F:\HiDock-Next-Audios), 52.9 min, Spanish, a
-DFX5 practice meeting (Memo presenting an artifacts framework, Sebastián joins, then a team roll-call).
+**Recording under test:** Private benchmark input; identifying metadata and transcript content are intentionally omitted.
 
 ---
 
@@ -13,7 +12,7 @@ DFX5 practice meeting (Memo presenting an artifacts framework, Sebastián joins,
 flagged failures, and on this machine it is essentially free (fast + local).** Specifically:
 
 - The **2:31 speaker-merge bug is decisively fixed.** WhisperX + pyannote 3.1 places a speaker
-  boundary at **151.1 s → 152.5 s = 2:31**, exactly the Memo→Sebastián handoff. Gemini put the entire
+  boundary at **151.1 s → 152.5 s = 2:31**, exactly the speaker handoff. Gemini put the entire
   **first 10 minutes (0–600 s) into a single "Speaker 1" turn** — the boundary simply does not exist in
   its output.
 - **Word-level timestamps** are real with WhisperX (per-word), vs. Gemini's coarse and often fabricated
@@ -63,21 +62,16 @@ grants (it does **not** have the newer `community-1` grant — see friction log)
 
 ## The Gemini baseline (what's actually in the DB)
 
-Read read-only from the snapshot `F:\HiDock-Next-Data\data\hidock.db.pre-migration-snapshot-2026-07-09-2010`,
-table `transcripts`, recording `9c94a1b4-…` (`2026Jul08-151114-Rec47.wav`), provider `gemini` /
-`gemini-3.5-flash`. The `speakers` JSON:
+The baseline was evaluated from a private input. Identifying paths, recording IDs, and transcript content are intentionally
+omitted. The comparison used the provider's `speakers` JSON:
 
 - **100 segments, 10 distinct labels** across the file.
-- **Segment #1 = `Speaker 1`, start 0, end 600.01** — a single 10-minute turn. Its own text contains the
-  handoff *"…Sí, Sebastián, aquí está Sebastián con nosotros que es el director de la práctica. ¿Qué tal?
-  … pero ¿cómo vamos con la práctica?"* — i.e. **Memo's presentation and Sebastián's interruption are
-  both inside one "Speaker 1" turn.** This is the merge the user flagged, confirmed at the data level.
+- **Segment #1 = `Speaker 1`, start 0, end 600.01** — a single 10-minute turn that merges two speakers.
 - Because that block is one segment, **every word timestamp in the first 10 minutes is effectively
   fabricated** (there is no sub-structure).
 
-Interestingly, Gemini's *roll-call* window (≈15:31–16:21) is not bad — it separated ~7 labels and even
-transcribed the names in text. So Gemini's diarization is **inconsistent**: catastrophic on the long
-opening monologue/interruption, decent on the roll-call. That inconsistency is itself the problem.
+Interestingly, Gemini's second multi-speaker window is not bad — it separated several labels. So Gemini's
+diarization is **inconsistent**: poor on the long opening segment, better on the later window.
 
 ---
 
@@ -122,10 +116,10 @@ Scoring against the flagged facts. Window A = the 2:31 boundary; Window B = the 
 
 | Metric | Gemini (`gemini-3.5-flash`, current) | WhisperX `large-v3` + pyannote 3.1 (local, GPU) |
 |---|---|---|
-| **(A) Boundary at ~2:31 (Memo→Sebastián)** | **FAIL** — 0–600 s is one `Speaker 1` turn; no boundary | **PASS** — turn ends **151.1 s**, next starts **152.5 s** (Δ vs 151 s target = 1.5 s). Holds in both the clip run and the full-file run. |
+| **(A) Boundary case** | **FAIL** — 0–600 s is one `Speaker 1` turn; no boundary | **PASS** — the local engine separates the adjacent speakers near the target boundary. |
 | **(B) Distinct speakers, roll-call window** | ~7 labels in-window (10 total in file) | 5 in the isolated 60 s clip / 7 total in full file; **merged 2 short intros** (Óscar+Santiago) |
 | **(C) Word-level timestamps** | No — segment-level, and fabricated for 0–600 s | **Yes** — true per-word alignment |
-| **Speaker naming (Óscar/Santiago/Emanuel)** | No (labels only; names appear only in text) | No (SPEAKER_xx) — **needs an LLM/enrollment layer either way** |
+| **Speaker naming** | No (labels only) | No (SPEAKER_xx) — **needs an LLM/enrollment layer either way** |
 | **Wall-clock, full 52.9-min file** | cloud call (network-bound; not measured here) | **~90 s** (ASR 33.4 s + align 28.5 s + diarize 28.3 s) |
 | **Real-time factor** | n/a | **0.028×** (clip A 0.10×, clip B 0.30×) |
 | **Peak VRAM** | n/a (cloud) | **2.1 GB** |
@@ -136,36 +130,10 @@ Scoring against the flagged facts. Window A = the 2:31 boundary; Window B = the 
 
 ---
 
-## Sample outputs (eyeball the difference)
+## Sample outputs
 
-### Window A — the 2:31 boundary (Memo → Sebastián)
-
-**Gemini (from DB):**
-```
-[0 – 600] Speaker 1: de de de nuestro framework … este artefacto que yo estoy creando … 
-          … Sí, Sebastián, aquí está Sebastián con nosotros que es el director de la práctica. 
-          ¿Qué tal? … pero ¿cómo vamos con la práctica? …          ← Memo AND Sebastián, one label
-```
-
-**WhisperX + pyannote 3.1 (local):**
-```
-[  0.2 – 151.1] SPEAKER_00: …nuestro framework donde estamos creando o manejando los artefactos…
-[152.5 – 209.2] SPEAKER_01: ¿Cómo le va? Está muy bien esto desde el punto de vista teórico,
-                            pero ¿cómo vamos con la práctica? …          ← boundary at 2:31 ✅
-```
-
-### Window B — the roll-call self-intros (full-file run, ≈15:30–16:35)
-
-```
-[907.5 – 938.0] SPEAKER_06: …Camilo Hernández … ¿Quién más?
-[939.7 – 948.9] SPEAKER_01: Acá no te veía … ¿Quién más?
-[949.0 – 950.4] SPEAKER_06: Oscar Perea también, por favor.          ← Óscar
-[953.9 – 958.0] SPEAKER_02: Y también Emanuel, por favor.            ← Emanuel (separated)
-[959.3 – 962.8] SPEAKER_06: Yo también, Santiago. De La Colina.      ← Santiago merged into SPEAKER_06
-[967.0 – 967.5] SPEAKER_01: Miguel, ¿estás?
-```
-The names are transcribed cleanly (great raw material for an LLM naming pass), but Óscar and Santiago
-share `SPEAKER_06` — the honest limitation on 1–2 s consecutive turns.
+Raw transcript excerpts and identifying speaker names are intentionally omitted. The evaluation compared
+segment boundaries, speaker labels, and word timestamps.
 
 ---
 

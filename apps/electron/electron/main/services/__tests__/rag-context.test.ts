@@ -238,7 +238,7 @@ describe('RAGService Context Injection', () => {
   it('injects a pinned ARTIFACT capture (pdf) extracted text', async () => {
     dbInstance.run(`
       INSERT INTO knowledge_captures (id, title, source_recording_id) VALUES ('kc-pdf', 'Product_Brief.pdf', NULL);
-      INSERT INTO artifacts (id, knowledge_capture_id, kind, extracted_text, created_at) VALUES ('art-1', 'kc-pdf', 'pdf', 'DFX5 Intranet Product Owner Brief — vision and roadmap', '2026-07-20');
+      INSERT INTO artifacts (id, knowledge_capture_id, kind, extracted_text, created_at) VALUES ('art-1', 'kc-pdf', 'pdf', 'Product Owner Brief — vision and roadmap', '2026-07-20');
       INSERT INTO conversation_context (id, conversation_id, knowledge_capture_id) VALUES ('ctx-pdf', 'session-no-pins', 'kc-pdf');
     `)
     const rag = getRAGService()
@@ -249,7 +249,7 @@ describe('RAGService Context Injection', () => {
     const messages = lastCall[0]
     const userMessage = messages[messages.length - 1].content
     expect(userMessage).toContain('PINNED CONTEXT: Product_Brief.pdf')
-    expect(userMessage).toContain('DFX5 Intranet Product Owner Brief')
+    expect(userMessage).toContain('Product Owner Brief — vision and roadmap')
   })
 
   it('keeps the legacy "no transcripts" fallback when nothing is indexed', async () => {

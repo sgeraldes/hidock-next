@@ -51,6 +51,7 @@ import {
 import { resolveContact } from './entity-resolver'
 import { isGenericSpeakerLabel, normalizeName, accentFoldedKey } from './entity-normalize'
 import { isRecordingEligible, filterEligibleRecordingIds } from './recording-eligibility'
+import { consolidateVoiceIdentityForSpeaker } from './voice-identity-consolidation'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -710,6 +711,11 @@ export async function runSelfIdentificationForRecording(
         resolveMention(recordingId, id.name, contact.id, 'self-identification', SELF_ID_CONFIDENCE)
       } catch (e) {
         console.warn('[SelfID] mention-resolution record failed (non-fatal):', e instanceof Error ? e.message : e)
+      }
+      try {
+        consolidateVoiceIdentityForSpeaker(recordingId, id.label, contact.id)
+      } catch (e) {
+        console.warn('[SelfID] voice consolidation failed (non-fatal):', e instanceof Error ? e.message : e)
       }
       bound++
       console.log(`[SelfID] ${recordingId}: bound "${id.label}" → "${contact.name}" (self-identified)`)

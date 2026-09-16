@@ -195,7 +195,7 @@ function isGeneric(token: string): boolean {
 
 /** Positive structural signals that a string is a NAME rather than a phrase. */
 export type NameEvidence =
-  /** An acronym-shaped token: "CRM", "AI", "XR", "DFX5". */
+  /** An acronym-shaped token: "CRM", "AI", or "XR". */
   | 'acronym'
   /** A compact token in a caseless script, where case cannot signal anything. */
   | 'uncased-script'
@@ -237,7 +237,7 @@ export function nameLikeEvidence(raw: string): NameEvidence | null {
       return 'uncased-script'
     }
 
-    // Acronym: all caps/digits, at least two capitals ("AI", "CRM", "DFX5").
+    // Acronym: all caps/digits, at least two capitals ("AI", "CRM", "XR").
     const len = [...token].length
     if (len >= MIN_ACRONYM && len <= MAX_ACRONYM && /^[\p{Lu}\p{N}]+$/u.test(token)) {
       if ((token.match(/\p{Lu}/gu) ?? []).length >= 2) return 'acronym'

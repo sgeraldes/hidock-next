@@ -118,6 +118,24 @@ anonymous stable label, not a person profile.
    centroids first so the same source is not counted twice.
 9. Never force all voices to calendar invitees or known contacts.
 
+### 5.1 Confirmed-identity continuity and duplicate repair
+
+The generic runner-up margin applies to anonymous clustering. It MUST NOT let multiple anonymous fragments of the same
+voice permanently defeat an independently confirmed person anchor:
+
+1. A candidate anchored by manual assignment or accepted first-person identification MAY match despite a close
+   anonymous runner-up only when its similarity meets the stricter confirmed-identity threshold (default `0.90`).
+2. The winner margin for that exception MUST be measured against the best candidate anchored to a *different* contact.
+   Anonymous clusters and multiple clusters already anchored to the same contact do not consume this identity margin.
+3. Two different anchored contacts inside the configured margin remain `needs_review`; the app MUST NOT choose one.
+4. A manual or accepted self-identification assignment MUST propagate through historical same-model duplicate clusters
+   at or above `0.90` only when they never co-occurred with the canonical cluster (or another accepted duplicate) and
+   have no recording-scoped binding or cluster anchor to another contact.
+5. Safe duplicates MUST be consolidated onto one canonical cluster and label, their observations retained, their
+   centroid rebuilt, historical transcript turn labels updated, and recording-scoped person bindings created.
+6. A rejected merge candidate remains an independent inspectable cluster; no evidence is deleted merely because its
+   voice is similar.
+
 Thresholds are conservative defaults, not universal scientific constants. They MUST be configurable and later
 calibrated against HiDock-channel data with false-match/false-reject reporting.
 
@@ -138,6 +156,8 @@ gates still reject ungrounded, zero-duration, non-monotonic, or materially uncov
 - Contextual/calendar/LLM speaker inference may label the current recording but MUST NOT anchor the global cluster.
 - Once anchored, later high-confidence acoustic matches may create a recording-scoped `transcript_speakers` binding to
   that contact.
+- Person selection is not display-only: it anchors the acoustic cluster and invokes the conservative historical
+  duplicate-repair rules in Section 5.1.
 - An existing manual recording-scoped binding always wins.
 - Contact merge repoints anchored voice clusters and unmerge restores the clusters recorded in the merge manifest.
 - Contact deletion clears the contact anchor but preserves the anonymous acoustic cluster.
@@ -190,7 +210,9 @@ logs, and explain that the actual compatible fallback remains visible in process
 | Worker starts but audio/model execution fails | acoustic run `failed`; no provider audio request |
 | Recording becomes ineligible | worker cancelled; no provider audio request or persistence |
 | No speaker has minimum speech | valid empty anonymous result; transcript may proceed |
-| Close best and runner-up matches | `needs_review`; no existing-cluster/contact binding |
+| Close anonymous best and runner-up matches | `needs_review`; no existing-cluster/contact binding |
+| Strong confirmed person plus close anonymous fragments | reuse the confirmed canonical identity per Section 5.1 |
+| Two close candidates anchored to different people | `needs_review`; no automatic person binding |
 | Known cluster has no contact | stable anonymous label only |
 | Known cluster has anchored contact | recording-scoped contact binding after transcript persistence |
 
@@ -203,6 +225,8 @@ logs, and explain that the actual compatible fallback remains visible in process
 - [x] Re-transcription removes old observations and rebuilds centroids before rematching.
 - [x] Provider turns are reconciled by temporal overlap without inventing timestamps.
 - [x] A manual or self-ID anchor can attach a cluster to a real contact.
+- [x] Confirmed identities remain stable when anonymous duplicate clusters would otherwise erase the raw winner margin.
+- [x] Person assignment conservatively consolidates safe historical duplicates and updates their person bindings.
 - [x] Calendar/LLM inference cannot anchor a persistent cluster.
 - [x] Known anchored voices create recording-scoped speaker bindings without overwriting an existing binding.
 - [x] Tool/model/version/execution/status are represented by processing runs and existing provenance chips.
@@ -245,3 +269,12 @@ logs, and explain that the actual compatible fallback remains visible in process
 15. **Granted model access:** both checks succeed; Settings shows `Community-1 ready`.
 16. **Access-check outage:** network failure or timeout yields a retryable, non-blocking unavailable state and never
     exposes the token.
+17. **Confirmed person among anonymous fragments:** the confirmed candidate exceeds `0.90`; two closer anonymous
+    fragments exist, but no competing anchored person exists. Reuse the confirmed person's canonical voice.
+18. **Competing confirmed people:** two different contacts exceed `0.90` inside the configured margin. Return
+    `needs_review`; bind neither person.
+19. **Safe historical consolidation:** a user assigns an anonymous voice to a person; a same-model historical cluster
+    exceeds `0.90`, never co-occurred, and has no conflicting identity. Preserve its observation, repoint it to the
+    canonical cluster, rewrite its turn label, and create the recording-scoped person binding.
+20. **Unsafe historical consolidation:** a similar voice co-occurred in one recording or is bound to another contact.
+    Preserve it as a separate cluster and label.

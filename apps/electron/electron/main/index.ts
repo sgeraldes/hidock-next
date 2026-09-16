@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, session, ipcMain } from 'electron'
+import { app, shell, BrowserWindow, session, ipcMain, dialog } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 
@@ -20,7 +20,7 @@ const USB_PRODUCT_IDS = [
 import { initializeDatabase, closeDatabase, isGraphProvenanceCleanupRegistered } from './services/database'
 import { initializeConfig, getConfig } from './services/config'
 import { setAutoConnectChecker } from './services/jensen'
-import { initializeFileStorage } from './services/file-storage'
+import { initializeStartupStorage } from './storage-startup'
 import { registerIpcHandlers } from './ipc/handlers'
 import { stopAutoSync, initializeCalendarAutoSync } from './ipc/calendar-handlers'
 import {
@@ -135,7 +135,7 @@ function createWindow(): void {
 }
 
 // Initialize services with splash screen progress updates
-async function initializeServices(): Promise<void> {
+async function initializeServices(): Promise<boolean> {
   console.log('Initializing services...')
 
   await updateSplashStatus('Loading configuration...', 10)
@@ -150,7 +150,7 @@ async function initializeServices(): Promise<void> {
   captureBootEffectiveFeatures()
 
   await updateSplashStatus('Setting up storage...', 20)
-  await initializeFileStorage()
+  if (!await initializeStartupStorage(splashWindow, updateSplashStatus)) return false
   console.log('File storage initialized')
 
   await updateSplashStatus('Initializing database...', 30)
@@ -218,6 +218,7 @@ async function initializeServices(): Promise<void> {
     .catch((e) => console.error('[Connectors] startup wiring failed:', e))
 
   await updateSplashStatus('Starting application...', 100)
+  return true
 }
 
 // Single-instance guard — MUST run before any window is created and before the
@@ -340,7 +341,10 @@ app.whenReady().then(async () => {
   })
 
   // Initialize all services before creating window (shows progress in splash)
-  await initializeServices()
+  if (!await initializeServices()) {
+    app.quit()
+    return
+  }
 
   createWindow()
 
@@ -413,6 +417,13 @@ app.whenReady().then(async () => {
   app.on('activate', function () {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
+}).catch((error: unknown) => {
+  console.error('[Startup] Application initialization failed:', error)
+  // The bootstrap import cannot catch rejections from this independent ready callback.
+  // Close the always-on-top splash so it cannot hide the native error dialog.
+  closeSplash()
+  dialog.showErrorBox('HiDock could not start', error instanceof Error ? error.message : String(error))
+  app.quit()
 })
 
 app.on('window-all-closed', () => {

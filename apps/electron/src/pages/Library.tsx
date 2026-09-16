@@ -16,7 +16,7 @@ import { Transcript, Meeting } from '@/types'
 import type { QualityRating } from '@/types/knowledge'
 import { useAudioControls } from '@/components/OperationController'
 import { useUIStore } from '@/store/useUIStore'
-import { useDownloadQueue } from '@/store/useAppStore'
+import { useAppStore, useDownloadQueue } from '@/store/useAppStore'
 import {
   LibraryHeader,
   LibraryFilters,
@@ -182,6 +182,7 @@ export function Library() {
   const audioControls = useAudioControls()
   const currentlyPlayingId = useUIStore((state) => state.currentlyPlayingId)
   const playbackCurrentTime = useUIStore((state) => state.playbackCurrentTime)
+  const qaEnabled = useUIStore((state) => state.qaLogsEnabled)
 
   // SM-03 fix: Use granular selector instead of pulling volatile state
   const downloadQueue = useDownloadQueue()
@@ -523,12 +524,24 @@ export function Library() {
   const [meetings, setMeetings] = useState<Map<string, Meeting>>(new Map())
 
   const refreshCompletedTranscription = useCallback(async (recordingId: string) => {
+    const startedAt = performance.now()
     try {
-      await refresh(false)
-
       // ADV13: owner Library management — owner accessor shows the owner their OWN
       // excluded transcripts (gated getByRecordingIds is for assistant/discovery).
-      const transcriptsObj = await window.electronAPI.transcripts.getByRecordingIdsOwner([recordingId])
+      // Fetch ONLY the completed source. The old path called refresh(false),
+      // transporting and rebuilding every recording/capture/sync/cache row on a
+      // single completion (thousands of rows in a real library), which caused a
+      // visible renderer stall immediately after long transcriptions finished.
+      const targetedFetchStartedAt = performance.now()
+      const [transcriptsObj, databaseRecording] = await Promise.all([
+        window.electronAPI.transcripts.getByRecordingIdsOwner([recordingId]),
+        window.electronAPI.recordings.getById(recordingId)
+      ])
+      const captureId = databaseRecording?.migrated_to_capture_id as string | undefined
+      const capture = captureId
+        ? await window.electronAPI.knowledge.getById(captureId)
+        : null
+      const targetedFetchMs = performance.now() - targetedFetchStartedAt
       const transcript = transcriptsObj?.[recordingId]
       if (!transcript) return
 
@@ -537,10 +550,40 @@ export function Library() {
         next.set(recordingId, transcript)
         return next
       })
+
+      const appState = useAppStore.getState()
+      appState.setUnifiedRecordings(appState.unifiedRecordings.map((recording) => {
+        if (recording.id !== recordingId) return recording
+        return {
+          ...recording,
+          transcriptionStatus: databaseRecording?.transcription_status === 'no_speech' ? 'no_speech' : 'complete',
+          meetingId: databaseRecording?.meeting_id ?? recording.meetingId,
+          knowledgeCaptureId: capture?.id ?? captureId ?? recording.knowledgeCaptureId,
+          userTitle: capture?.userTitle ?? recording.userTitle,
+          title: capture?.title ?? recording.title,
+          quality: capture?.quality ?? recording.quality,
+          qualityReasons: capture?.qualityReasons ?? recording.qualityReasons,
+          qualitySource: capture?.qualitySource ?? recording.qualitySource,
+          category: capture?.category ?? recording.category,
+          status: capture?.status ?? recording.status,
+          summary: capture?.summary ?? recording.summary
+        }
+      }))
+      if (qaEnabled) {
+        const payloadBytes = JSON.stringify(transcript).length
+        requestAnimationFrame(() => {
+          console.log('[QA-MONITOR] Transcription completion renderer timeline', {
+            recordingId,
+            targetedFetchMs: Math.round(targetedFetchMs),
+            firstPaintMs: Math.round(performance.now() - startedAt),
+            transcriptPayloadBytes: payloadBytes
+          })
+        })
+      }
     } catch (e) {
       console.error('[Library] Failed to refresh completed transcription:', e)
     }
-  }, [refresh])
+  }, [qaEnabled])
 
   useEffect(() => {
     const unsubscribers: Array<() => void> = []

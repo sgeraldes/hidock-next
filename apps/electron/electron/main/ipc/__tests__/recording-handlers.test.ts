@@ -150,7 +150,7 @@ vi.mock('../../services/config', () => ({
   getConfig: vi.fn(() => ({
     transcription: {
       provider: 'gemini',
-      geminiApiKey: 'test-api-key',
+      geminiApiKey: 'test-api-key', // pragma: allowlist secret (test fixture)
       geminiModel: 'gemini-3-pro-preview',
       autoTranscribe: true,
       language: 'es'
@@ -646,7 +646,7 @@ describe('Recording IPC Handlers', () => {
         candidates: [
           { id: 'c-almuerzo', recordingId: recId, meetingId: 'almuerzo', subject: 'Almuerzo', startTime: '2026-07-08T13:00:00-05:00', endTime: '2026-07-08T14:00:00-05:00', confidenceScore: 0.1, matchReason: 'Time overlap only', isAiSelected: false, isUserConfirmed: false },
           { id: 'c-retro', recordingId: recId, meetingId: 'retro', subject: 'Retro Belcorp', startTime: '2026-07-08T15:00:00-05:00', endTime: '2026-07-08T15:30:00-05:00', confidenceScore: 0.1, matchReason: 'Time overlap only', isAiSelected: false, isUserConfirmed: false },
-          { id: 'c-dfx5', recordingId: recId, meetingId: 'dfx5', subject: 'DFX5 AM3', startTime: '2026-07-08T15:00:00-05:00', endTime: '2026-07-08T16:00:00-05:00', confidenceScore: 0.1, matchReason: 'Time overlap only', isAiSelected: false, isUserConfirmed: false }
+          { id: 'c-other', recordingId: recId, meetingId: 'other', subject: 'Other meeting', startTime: '2026-07-08T15:00:00-05:00', endTime: '2026-07-08T16:00:00-05:00', confidenceScore: 0.1, matchReason: 'Time overlap only', isAiSelected: false, isUserConfirmed: false }
         ],
         recording: { id: recId, date_recorded: dateRecorded, duration_seconds: 30 * 60 }
       }

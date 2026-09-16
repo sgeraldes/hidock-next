@@ -12,10 +12,12 @@
  */
 
 import { ipcMain, BrowserWindow } from 'electron'
+import { supportsRealtimeFirmware } from '@hidock/jensen-protocol'
 import { getJensenDevice } from '../services/jensen'
 import { retryPendingFileCleanups } from '../services/recording-deletion-service'
 import { serializeDeviceOperation } from '../services/device-operation-serializer'
 import { emitActivityLog } from '../services/activity-log'
+import { geminiLiveTranscription } from '../services/gemini-live-transcription'
 import {
   trackActiveTransfer,
   cancelActiveTransfer,
@@ -257,6 +259,7 @@ export function registerJensenHandlers(): void {
 
   ipcMain.handle('jensen:disconnect', async () => {
     try {
+      await geminiLiveTranscription.stop()
       // Abort an in-flight download so it stops being saved. The device keeps
       // streaming the rest of the file regardless; gracefulCloseDevice then drains
       // that out of the IN FIFO before closing (see below). The 'disconnect' reason
@@ -286,6 +289,7 @@ export function registerJensenHandlers(): void {
 
   ipcMain.handle('jensen:reset', async () => {
     try {
+      await geminiLiveTranscription.stop()
       getJensenDevice().abortInFlight()
       return await serializeDeviceOperation(() => getJensenDevice().reset())
     } catch {
@@ -531,17 +535,27 @@ export function registerJensenHandlers(): void {
     }
   })
 
-  ipcMain.handle('jensen:startRealtime', async () => {
+  ipcMain.handle('jensen:startRealtime', async (event) => {
     try {
-      return await getJensenDevice().startRealtime()
-    } catch {
-      return null
+      const realtimeDevice = getJensenDevice()
+      if (!supportsRealtimeFirmware(realtimeDevice.getModel(), realtimeDevice.versionNumber)) {
+        return { result: 'failed', error: 'This HiDock firmware does not support realtime audio. Update it in HiNotes first.' }
+      }
+      await geminiLiveTranscription.start(event.sender)
+      const result = await realtimeDevice.startRealtime(2)
+      if (!result || result.result !== 'success') await geminiLiveTranscription.stop()
+      return result
+    } catch (error) {
+      await geminiLiveTranscription.stop()
+      return { result: 'failed', error: error instanceof Error ? error.message : String(error) }
     }
   })
 
   ipcMain.handle('jensen:pauseRealtime', async () => {
     try {
-      return await getJensenDevice().pauseRealtime()
+      const result = await getJensenDevice().pauseRealtime()
+      if (result?.result === 'success') geminiLiveTranscription.pause()
+      return result
     } catch {
       return null
     }
@@ -552,6 +566,8 @@ export function registerJensenHandlers(): void {
       return await getJensenDevice().stopRealtime()
     } catch {
       return null
+    } finally {
+      await geminiLiveTranscription.stop()
     }
   })
 
@@ -560,8 +576,10 @@ export function registerJensenHandlers(): void {
       const { offset } = JensenRealtimeDataSchema.parse(args)
       const result = await getJensenDevice().getRealtimeData(offset)
       if (result && !event.sender.isDestroyed()) {
+        await geminiLiveTranscription.acceptDevicePacket(result)
         event.sender.send('jensen:realtime-data', {
           rest: result.rest,
+          muted: result.muted,
           data: Buffer.from(result.data),
         })
       }

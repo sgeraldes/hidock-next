@@ -6694,6 +6694,13 @@ export type ProcessingStage =
   | 'meeting-resolution'
   | 'speaker-identity'
   | 'voice-id'
+  | 'persistence'
+  | 'actionable-detection'
+  | 'timeline-analysis'
+  | 'org-reconciliation'
+  | 'graph-sync'
+  | 'wiki-export'
+  | 'rag-indexing'
 
 export type ProcessingRunStatus = 'pending' | 'running' | 'completed' | 'degraded' | 'failed' | 'cancelled'
 export type DiarizationQualityStatus = 'high' | 'degraded' | 'failed' | 'unavailable'
@@ -6711,6 +6718,7 @@ export interface ProcessingRun {
   status: ProcessingRunStatus
   started_at: string
   completed_at: string | null
+  duration_ms?: number | null
   parent_run_ids: string | null
   output_refs: string | null
   usage_json: string | null
@@ -6810,7 +6818,12 @@ export function failProcessingRun(id: string, message: string, cancelled = false
 
 export function getProcessingRunsForRecording(recordingId: string): ProcessingRun[] {
   return queryAll<ProcessingRun>(
-    `SELECT * FROM processing_runs WHERE recording_id = ? ORDER BY started_at ASC, created_at ASC`,
+    `SELECT *,
+       ROUND((julianday(COALESCE(completed_at, CURRENT_TIMESTAMP)) - julianday(started_at)) * 86400000)
+         AS duration_ms
+     FROM processing_runs
+     WHERE recording_id = ?
+     ORDER BY started_at ASC, created_at ASC`,
     [recordingId]
   )
 }

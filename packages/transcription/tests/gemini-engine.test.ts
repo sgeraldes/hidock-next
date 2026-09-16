@@ -31,6 +31,7 @@ import {
   hasReliableTurnTiming,
   hasReliableTurnStructure,
   normalizeGeminiTranscriptResponse,
+  toGeminiLanguageCodes,
 } from '../src/engines/gemini-engine.js'
 import { NoSpeechDetectedError, TranscriptionCancelledError } from '../src/engines/engine-interface.js'
 
@@ -112,7 +113,7 @@ describe('GeminiEngine', () => {
   })
 
   it('isAvailable returns true when apiKey is non-empty', async () => {
-    expect(await new GeminiEngine({ apiKey: 'my-key' }).isAvailable()).toBe(true)
+    expect(await new GeminiEngine({ apiKey: 'x' }).isAvailable()).toBe(true)
   })
 
   it('isAvailable returns false when apiKey is empty', async () => {
@@ -128,7 +129,7 @@ describe('GeminiEngine', () => {
 
   it('yields a single segment with the transcript text', async () => {
     mockGenerateContentStream.mockResolvedValue(streamResponse('Hello world'))
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const engine = new GeminiEngine({ apiKey: 'x' })
     const segments = await collect(engine.transcribe(oneSecond, { source: 'mic' }))
 
     expect(segments).toHaveLength(1)
@@ -140,7 +141,7 @@ describe('GeminiEngine', () => {
 
   it('maps system source to "them" default speaker', async () => {
     mockGenerateContentStream.mockResolvedValue(streamResponse('System audio text'))
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const engine = new GeminiEngine({ apiKey: 'x' })
     const segments = await collect(engine.transcribe(oneSecond, { source: 'system' }))
     expect(segments[0].speaker).toBe('them')
     expect(segments[0].source).toBe('system')
@@ -150,7 +151,7 @@ describe('GeminiEngine', () => {
     mockGenerateContentStream.mockResolvedValue(
       streamResponse('[00:03] Speaker 1: Hola\n[00:07] Speaker 2: Qué tal'),
     )
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const engine = new GeminiEngine({ apiKey: 'x' })
     const segments = await collect(engine.transcribe(oneSecond, { source: 'mic' }))
     expect(segments).toHaveLength(2)
     expect(segments[0]).toMatchObject({ speaker: 'Speaker 1', text: 'Hola', startTime: 3 })
@@ -159,13 +160,13 @@ describe('GeminiEngine', () => {
 
   it('throws (does not silently drop) when Gemini returns empty text', async () => {
     mockGenerateContentStream.mockResolvedValue(streamResponse('   '))
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const engine = new GeminiEngine({ apiKey: 'x' })
     await expect(collect(engine.transcribe(oneSecond, { source: 'mic' }))).rejects.toThrow(/empty/i)
   })
 
   it('maps the provider no-speech sentinel to a terminal content outcome', async () => {
     mockGenerateContentStream.mockResolvedValue(streamResponse('[NO_SPEECH]'))
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const engine = new GeminiEngine({ apiKey: 'x' })
     await expect(collect(engine.transcribe(oneSecond, { source: 'mic' }))).rejects.toBeInstanceOf(
       NoSpeechDetectedError,
     )
@@ -173,7 +174,7 @@ describe('GeminiEngine', () => {
 
   it('tells Gemini that meeting context is never evidence of speech', async () => {
     mockGenerateContentStream.mockResolvedValue(streamResponse('[00:00] Speaker 1: Hola'))
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const engine = new GeminiEngine({ apiKey: 'x' })
     await collect(engine.transcribe(oneSecond, { source: 'mic', context: 'Meeting: Secret project' }))
 
     const request = mockGenerateContentStream.mock.calls[0][0]
@@ -184,7 +185,7 @@ describe('GeminiEngine', () => {
 
   it('throws when a chunk stays truncated at MAX_TOKENS after retry', async () => {
     mockGenerateContentStream.mockResolvedValue(streamResponse('partial cut off here', 'MAX_TOKENS'))
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const engine = new GeminiEngine({ apiKey: 'x' })
     await expect(collect(engine.transcribe(oneSecond, { source: 'mic' }))).rejects.toThrow(/MAX_TOKENS/)
   })
 
@@ -192,19 +193,87 @@ describe('GeminiEngine', () => {
     mockGenerateContentStream
       .mockResolvedValueOnce(streamResponse('short', 'MAX_TOKENS'))
       .mockResolvedValueOnce(streamResponse('a much longer complete transcription', 'STOP'))
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const engine = new GeminiEngine({ apiKey: 'x' })
     const segments = await collect(engine.transcribe(oneSecond, { source: 'mic' }))
     expect(segments[0].text).toBe('a much longer complete transcription')
   })
 
   it('uses the configured model name', async () => {
-    const engine = new GeminiEngine({ apiKey: 'test-key', model: 'gemini-3.5-flash' })
+    const engine = new GeminiEngine({ apiKey: 'x', model: 'gemini-3.5-flash' })
     await collect(engine.transcribe(oneSecond, { source: 'mic' }))
     expect(mockGenerateContentStream.mock.calls[0][0].model).toBe('gemini-3.5-flash')
   })
 
+  it('uses native Gemini 3.5 Transcribe diarization and word timestamps', async () => {
+    mockFilesUpload.mockResolvedValue({
+      name: 'files/native-1', state: 'ACTIVE', mimeType: 'audio/wav', uri: 'files://native-1',
+    })
+    mockInteractionsCreate.mockResolvedValue({
+      status: 'completed',
+      steps: [{ content: [{ annotations: [
+        { type: 'word_info', text: 'Hola', speaker: 'spk_0', start_offset: '0.10s', end_offset: '0.40s' },
+        { type: 'word_info', text: ',', speaker: 'spk_0', start_offset: '0.40s', end_offset: '0.45s' },
+        { type: 'word_info', text: 'Sebastian', speaker: 'spk_1', start_offset: '0.50s', end_offset: '0.90s' },
+      ] }] }],
+    })
+    const engine = new GeminiEngine({ apiKey: 'x', model: 'gemini-3.5-transcribe', language: 'es' })
+    const segments = await collect(engine.transcribe(oneSecond, {
+      source: 'mic', durationSeconds: 1, vocabulary: ['HiDock'],
+    }))
+
+    expect(mockGenerateContentStream).not.toHaveBeenCalled()
+    expect(mockInteractionsCreate).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'gemini-3.5-transcribe',
+      input: [{ type: 'audio', uri: 'files://native-1', mime_type: 'audio/wav' }],
+      generation_config: { transcription_config: {
+        language_codes: ['es-419'],
+        custom_vocabulary: ['HiDock'],
+        mode: { type: 'verbatim', diarization_mode: 'speaker', timestamp_granularities: ['word'] },
+      } },
+    }), { timeout: GeminiEngine.INTERACTION_REQUEST_TIMEOUT_MS, maxRetries: 0 })
+    expect(segments).toEqual([
+      expect.objectContaining({ speaker: 'Speaker 1', text: 'Hola,', startTime: 0.1, endTime: 0.45 }),
+      expect.objectContaining({ speaker: 'Speaker 2', text: 'Sebastian', startTime: 0.5, endTime: 0.9 }),
+    ])
+    expect(mockFilesDelete).toHaveBeenCalledWith({ name: 'files/native-1' })
+  })
+
+  it('physically chunks long native transcription requests below the 30-minute API limit', async () => {
+    mockFilesUpload.mockImplementation(async () => ({
+      name: `files/chunk-${mockFilesUpload.mock.calls.length}`,
+      state: 'ACTIVE',
+      mimeType: 'audio/wav',
+      uri: `files://chunk-${mockFilesUpload.mock.calls.length}`,
+    }))
+    mockInteractionsCreate.mockImplementation(async () => ({
+      status: 'completed', output_text: `chunk ${mockInteractionsCreate.mock.calls.length}`,
+    }))
+    const progress = vi.fn()
+    const trace = vi.fn()
+    const engine = new GeminiEngine({ apiKey: 'x', model: 'gemini-3.5-transcribe' })
+    const segments = await collect(engine.transcribe(buildWav(3960, 1), {
+      source: 'system', durationSeconds: 3960, onProgress: progress, onTrace: trace,
+    }))
+
+    expect(mockInteractionsCreate).toHaveBeenCalledTimes(4)
+    expect(mockFilesUpload).toHaveBeenCalledTimes(4)
+    expect(segments.map((segment) => segment.startTime)).toEqual([0, 1200, 2400, 3600])
+    expect(progress).toHaveBeenLastCalledWith(4, 4)
+    expect(trace).toHaveBeenCalledWith(expect.objectContaining({
+      phase: 'upload', status: 'completed', chunkIndex: 1, chunkCount: 4,
+      audioStartSec: 0, audioEndSec: 1200, elapsedMs: expect.any(Number),
+    }))
+    expect(trace).toHaveBeenCalledWith(expect.objectContaining({
+      phase: 'provider-transcription', status: 'completed', chunkIndex: 4, chunkCount: 4,
+      audioStartSec: 3600, audioEndSec: 3960, elapsedMs: expect.any(Number),
+    }))
+    expect(trace).toHaveBeenCalledWith(expect.objectContaining({
+      phase: 'cleanup', status: 'completed', chunkIndex: 4, chunkCount: 4,
+    }))
+  })
+
   it('requests a schema-constrained transcript with the full Gemini 3.5 output budget', async () => {
-    const engine = new GeminiEngine({ apiKey: 'test-key', model: 'gemini-3.5-flash' })
+    const engine = new GeminiEngine({ apiKey: 'x', model: 'gemini-3.5-flash' })
     await collect(engine.transcribe(oneSecond, { source: 'mic' }))
 
     const config = mockGenerateContentStream.mock.calls[0][0].config
@@ -225,7 +294,7 @@ describe('GeminiEngine', () => {
       capturedPrompt = req.contents[0].parts.find((p: any) => p.text)?.text ?? ''
       return streamResponse('Transcript with context')
     })
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const engine = new GeminiEngine({ apiKey: 'x' })
     await collect(engine.transcribe(oneSecond, { source: 'mic', context: 'MEETING CONTEXT: Weekly standup' }))
     expect(capturedPrompt).toContain('MEETING CONTEXT: Weekly standup')
   })
@@ -236,7 +305,7 @@ describe('GeminiEngine', () => {
       capturedParts = req.contents[0].parts
       return streamResponse('result')
     })
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const engine = new GeminiEngine({ apiKey: 'x' })
     const audioBuffer = Buffer.from('fake audio data')
     await collect(engine.transcribe(audioBuffer, { source: 'mic' }))
     const inlineDataPart = capturedParts.find((p: any) => p.inlineData)
@@ -252,7 +321,7 @@ describe('GeminiEngine', () => {
       uri: 'https://generativelanguage.googleapis.com/v1beta/files/recording-1',
     })
     mockGenerateContentStream.mockResolvedValue(streamResponse('[00:00] Speaker 1: Hola'))
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const engine = new GeminiEngine({ apiKey: 'x' })
     const audioBuffer = Buffer.alloc(GeminiEngine.INLINE_LIMIT_BYTES + 1)
 
     await collect(engine.transcribe(audioBuffer, { source: 'mic', filePath: 'recording.hda' }))
@@ -291,7 +360,7 @@ describe('GeminiEngine', () => {
         hasSpeech: true,
         segments: [{ timestamp: '20:00', speaker: 'Speaker 1', content: 'segunda parte' }],
       }, 'interaction-2'))
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const engine = new GeminiEngine({ apiKey: 'x' })
 
     const segments = await collect(engine.transcribe(audioBuffer, {
       source: 'mic',
@@ -355,7 +424,7 @@ describe('GeminiEngine', () => {
         hasSpeech: true,
         segments: [{ timestamp: '20:00', speaker: 'Speaker 1', content: 'final' }],
       }, 'range-c'))
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const engine = new GeminiEngine({ apiKey: 'x' })
 
     const segments = await collect(engine.transcribe(buildWav(1201, 1), {
       source: 'mic',
@@ -378,10 +447,19 @@ describe('GeminiEngine', () => {
 
   it('propagates errors thrown by generateContentStream', async () => {
     mockGenerateContentStream.mockRejectedValue(new Error('Rate limit exceeded'))
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const engine = new GeminiEngine({ apiKey: 'x' })
     await expect(collect(engine.transcribe(oneSecond, { source: 'mic' }))).rejects.toThrow(
       'Rate limit exceeded',
     )
+  })
+})
+
+describe('Gemini native transcription language hints', () => {
+  it('uses automatic detection for unknown and maps short locale names to BCP-47', () => {
+    expect(toGeminiLanguageCodes('unknown')).toEqual([])
+    expect(toGeminiLanguageCodes('es')).toEqual(['es-419'])
+    expect(toGeminiLanguageCodes('en')).toEqual(['en-US'])
+    expect(toGeminiLanguageCodes('pt-BR')).toEqual(['pt-BR'])
   })
 })
 
@@ -397,7 +475,7 @@ describe('GeminiEngine shouldGenerate gate (round-45 ADV43-1)', () => {
   })
 
   it('false up front ⇒ aborts before ANY provider call', async () => {
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const engine = new GeminiEngine({ apiKey: 'x' })
     await expect(
       collect(engine.transcribe(oneSecond, { source: 'mic', shouldGenerate: () => false }))
     ).rejects.toThrow(TranscriptionCancelledError)
@@ -405,7 +483,7 @@ describe('GeminiEngine shouldGenerate gate (round-45 ADV43-1)', () => {
   })
 
   it('a shouldGenerate that THROWS is fail-closed ⇒ no provider call', async () => {
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const engine = new GeminiEngine({ apiKey: 'x' })
     await expect(
       collect(
         engine.transcribe(oneSecond, {
@@ -427,7 +505,7 @@ describe('GeminiEngine shouldGenerate gate (round-45 ADV43-1)', () => {
       excluded = true
       return streamResponse('partial cut off', 'MAX_TOKENS')
     })
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const engine = new GeminiEngine({ apiKey: 'x' })
     await expect(
       collect(engine.transcribe(oneSecond, { source: 'mic', shouldGenerate: () => !excluded }))
     ).rejects.toThrow(TranscriptionCancelledError)
@@ -450,7 +528,7 @@ describe('GeminiEngine shouldGenerate gate (round-45 ADV43-1)', () => {
     })
     // Legacy configured models retain the old chunked request path. Gemini 3.5
     // keeps ordinary recordings whole for cross-recording speaker context.
-    const engine = new GeminiEngine({ apiKey: 'test-key', model: 'gemini-2.5-flash' })
+    const engine = new GeminiEngine({ apiKey: 'x', model: 'gemini-2.5-flash' })
     await expect(
       collect(engine.transcribe(mp3, { source: 'mic', shouldGenerate: () => !excluded }))
     ).rejects.toThrow(TranscriptionCancelledError)
@@ -460,7 +538,7 @@ describe('GeminiEngine shouldGenerate gate (round-45 ADV43-1)', () => {
 
   it('control: a gate that stays true transcribes normally', async () => {
     mockGenerateContentStream.mockResolvedValue(streamResponse('[00:03] Speaker 1: hola'))
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const engine = new GeminiEngine({ apiKey: 'x' })
     const segments = await collect(
       engine.transcribe(oneSecond, { source: 'mic', shouldGenerate: () => true })
     )
@@ -470,7 +548,7 @@ describe('GeminiEngine shouldGenerate gate (round-45 ADV43-1)', () => {
 
   it('no gate configured (undefined) ⇒ unchanged legacy behaviour', async () => {
     mockGenerateContentStream.mockResolvedValue(streamResponse('[00:03] Speaker 1: hola'))
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const engine = new GeminiEngine({ apiKey: 'x' })
     const segments = await collect(engine.transcribe(oneSecond, { source: 'mic' }))
     expect(segments).toHaveLength(1)
     expect(mockGenerateContentStream).toHaveBeenCalledTimes(1)
@@ -787,7 +865,7 @@ describe('GeminiEngine diarization prompt + end-to-end recovery', () => {
       capturedPrompt = req.contents[0].parts.find((p: any) => p.text)?.text ?? ''
       return streamResponse('[00:00] Speaker 1: hola')
     })
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const engine = new GeminiEngine({ apiKey: 'x' })
     await collect(engine.transcribe(oneSecond, { source: 'mic' }))
     expect(capturedPrompt.toLowerCase()).toContain('distinct')
     expect(capturedPrompt).toContain('formatted MM:SS')
@@ -802,7 +880,7 @@ describe('GeminiEngine diarization prompt + end-to-end recovery', () => {
       .mockResolvedValueOnce(
         streamResponse('[00:00] Speaker 1: buenos días a todos [00:02] Speaker 2: gracias, empecemos [00:04] Speaker 1: perfecto')
       )
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const engine = new GeminiEngine({ apiKey: 'x' })
     const segments = await collect(engine.transcribe(oneSecond, { source: 'mic' }))
     expect(segments).toHaveLength(3)
     expect(segments.map((s) => s.speaker)).toEqual(['Speaker 1', 'Speaker 2', 'Speaker 1'])
@@ -814,7 +892,7 @@ describe('GeminiEngine diarization prompt + end-to-end recovery', () => {
     mockGenerateContentStream.mockResolvedValue(
       streamResponse('Speaker 1: uno Speaker 2: dos Speaker 1: tres')
     )
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const engine = new GeminiEngine({ apiKey: 'x' })
     await expect(collect(engine.transcribe(oneSecond, { source: 'mic' })))
       .rejects.toThrow(/without reliable speaker-turn timing and structure/)
   })
@@ -827,7 +905,7 @@ describe('GeminiEngine diarization prompt + end-to-end recovery', () => {
         '[00:22] Speaker 1: primera intervención [00:28] Speaker 2: respuesta [00:32] Speaker 1: seguimiento'
       ))
 
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const engine = new GeminiEngine({ apiKey: 'x' })
     const segments = await collect(engine.transcribe(oneSecond, { source: 'mic' }))
 
     expect(mockGenerateContentStream).toHaveBeenCalledTimes(2)

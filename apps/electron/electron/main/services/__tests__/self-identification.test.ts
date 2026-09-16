@@ -21,6 +21,9 @@ const mockResolveMention = vi.fn()
 const mockGetSpeakerMap = vi.fn((_id: string) => [] as Array<{ speaker_label: string }>)
 const mockGetRecordingById = vi.fn((_id: string) => ({ meeting_id: null }) as { meeting_id: string | null })
 const mockResolveContact = vi.fn()
+const mockConsolidateVoiceIdentity = vi.fn((_recordingId: string, _label: string, _contactId: string) => ({
+  canonicalClusterId: 'voice-1', mergedClusterIds: [], updatedRecordingIds: []
+}))
 
 // queryOne dispatches on the SQL text: config lookups miss (not scanned), the
 // transcript lookup returns whatever `currentSpeakers` is set to for the test.
@@ -63,6 +66,11 @@ vi.mock('../entity-resolver', () => ({
 
 vi.mock('../chat-llm', () => ({
   getChatLLMService: () => ({ generate: vi.fn(async () => '[]') })
+}))
+
+vi.mock('../voice-identity-consolidation', () => ({
+  consolidateVoiceIdentityForSpeaker: (recordingId: string, label: string, contactId: string) =>
+    mockConsolidateVoiceIdentity(recordingId, label, contactId)
 }))
 
 import {
@@ -396,6 +404,7 @@ describe('runSelfIdentificationForRecording — binding', () => {
       'self-identification',
       SELF_ID_CONFIDENCE
     )
+    expect(mockConsolidateVoiceIdentity).toHaveBeenCalledWith('rec-1', 'Speaker 7', 'contact-123')
   })
 
   it('P2 (round-3) — shouldPersist()=false persists no bindings/markers and sends nothing to the LLM', async () => {

@@ -41,13 +41,13 @@ describe('ConnectorStore — multi-instance surface', () => {
   it('namespaces config + secrets per instance and survives reload from disk', () => {
     const store = new ConnectorStore(file)
     store.setInstanceMeta('m365', { type: 'm365', label: 'Work' })
-    store.setConfig('m365', { tenant: 'dfx5.com' })
+    store.setConfig('m365', { tenant: 'example.com' })
     store.setSecret('m365', 'msalCache', 'work-token')
     store.setConfig('m365:p', { tenant: 'common' })
     store.setSecret('m365:p', 'msalCache', 'personal-token')
 
     const reopened = new ConnectorStore(file)
-    expect(reopened.getConfig('m365').tenant).toBe('dfx5.com')
+    expect(reopened.getConfig('m365').tenant).toBe('example.com')
     expect(reopened.getSecret('m365', 'msalCache')).toBe('work-token')
     expect(reopened.getConfig('m365:p').tenant).toBe('common')
     expect(reopened.getSecret('m365:p', 'msalCache')).toBe('personal-token')

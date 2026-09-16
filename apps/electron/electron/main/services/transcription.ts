@@ -1,4 +1,9 @@
-import { GeminiEngine, NoSpeechDetectedError, TranscriptionCancelledError } from '@hidock/transcription'
+import {
+  GeminiEngine,
+  NoSpeechDetectedError,
+  TranscriptionCancelledError,
+  type TranscriptionTraceEvent
+} from '@hidock/transcription'
 import { GoogleGenerativeAI } from '@google/generative-ai'
 import { getBrainRegistry, resolveGeminiApiKey } from './brains'
 import { readFile, existsSync } from 'fs'
@@ -786,7 +791,8 @@ Return as JSON array. If no actionables detected, return empty array [].
 Only include detections with confidence >= 0.6.`
 
   try {
-    // Delegate to the Gemini brain — same model (config.transcription.geminiModel),
+    // Delegate analysis to the configured chat model; the dedicated Transcribe
+    // model is speech-to-text only.
     // JSON-forced, thinking disabled. Behaviour is identical to the previous
     // inline @google/generative-ai call.
     const brain = getBrainRegistry().get('gemini-api')
@@ -838,6 +844,7 @@ interface RawTranscriptionResult {
   model: string
   language: string
   speakers?: string
+  providerTimeline?: TranscriptionTraceEvent[]
 }
 
 interface TranscriptAnalysis {
@@ -890,7 +897,7 @@ async function transcribeWithGemini(
   progressCallback?.('reading_file', 5)
   const audioBuffer = await readFileAsync(filePath)
 
-  const modelName = config.transcription.geminiModel || 'gemini-3.5-flash'
+  const modelName = config.transcription.geminiModel || 'gemini-3.5-transcribe'
   const engine = new GeminiEngine({
     // Key resolves via the brain credential store (falls back to the plaintext
     // config key), so the one-time migration is honoured here too. Audio still
@@ -908,6 +915,7 @@ async function transcribeWithGemini(
   // We pass filePath via the extended options so the engine can detect the MIME
   // type, and meetingContext via options.context for prompt enrichment.
   const segments: Array<{ speaker: string; start: number; end: number; text: string }> = []
+  const providerTimeline: TranscriptionTraceEvent[] = []
   for await (const segment of engine.transcribe(audioBuffer, {
     source: 'mic',
     language: config.transcription.language,
@@ -921,7 +929,8 @@ async function transcribeWithGemini(
     // are transcribed in inline-safe slices; ordinary meetings remain one call.
     onProgress: (done: number, total: number) => {
       progressCallback?.('transcribing', Math.min(45, 20 + Math.round((done / total) * 25)))
-    }
+    },
+    onTrace: (event: TranscriptionTraceEvent) => providerTimeline.push(event)
   } as Parameters<typeof engine.transcribe>[1] & { filePath: string })) {
     const text = segment.text?.trim()
     if (text) {
@@ -955,7 +964,8 @@ async function transcribeWithGemini(
     provider: 'gemini',
     model: modelName,
     language: config.transcription.language || 'unknown',
-    speakers: JSON.stringify(segments)
+    speakers: JSON.stringify(segments),
+    providerTimeline
   }
 }
 
@@ -1214,7 +1224,7 @@ async function analyzeTranscriptWithGemini(
   // don't fit the string-returning AIBrain.generate contract, so this analysis
   // path keeps its direct SDK usage — full delegation is deferred to a later phase.
   const genAI = new GoogleGenerativeAI(resolveGeminiApiKey())
-  const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-3.5-flash' })
+  const model = genAI.getGenerativeModel({ model: config.chat?.geminiModel || 'gemini-3.5-flash' })
 
   let meetingSelectionSection = ''
   if (candidateMeetings.length > 1) {
@@ -1305,7 +1315,7 @@ ${candidateMeetings.map((m, i) => `   ${i + 1}. "${m.subject}" (ID: ${m.id})`).j
    invent people; only include names actually appearing in the conversation.
 8. Project: which project/initiative this meeting belongs to.
    ${existingProjects.length > 0 ? `Existing projects (match one of these EXACTLY if it fits): ${existingProjects.join(' | ')}` : 'No projects exist yet.'}
-   If none fits, propose a short new project name (2-5 words, e.g. "DFX5 Gateway" or client name) and set is_new true.
+   If none fits, propose a short new project name (2-5 words) and set is_new true.
    If the call is personal or clearly not project work, omit the project field.${valuePromptSection}
 
 IMPORTANT: Respond in the SAME LANGUAGE as the transcript. If the transcript is in Spanish, write the summary, action items, topics, key points, title, and questions in Spanish. If English, respond in English.
@@ -1665,7 +1675,7 @@ export async function reanalyzeFailedTranscripts(limit = 3): Promise<number> {
         stage: 'summary',
         provider: reanalysisHasGemini ? 'gemini' : 'hidock-next',
         tool: reanalysisHasGemini ? 'gemini-analysis' : 'local-fallback',
-        model: reanalysisHasGemini ? (reanalysisConfig.transcription.geminiModel || 'gemini-3.5-flash') : null,
+        model: reanalysisHasGemini ? (reanalysisConfig.chat?.geminiModel || 'gemini-3.5-flash') : null,
         execution: reanalysisHasGemini ? 'cloud' : 'local'
       })
       let analysis: TranscriptAnalysis
@@ -1707,7 +1717,7 @@ export async function reanalyzeFailedTranscripts(limit = 3): Promise<number> {
         stage: 'title',
         provider: reanalysisHasGemini ? 'gemini' : 'hidock-next',
         tool: reanalysisHasGemini ? 'gemini-analysis' : 'local-fallback',
-        model: reanalysisHasGemini ? (reanalysisConfig.transcription.geminiModel || 'gemini-3.5-flash') : null,
+        model: reanalysisHasGemini ? (reanalysisConfig.chat?.geminiModel || 'gemini-3.5-flash') : null,
         execution: reanalysisHasGemini ? 'cloud' : 'local',
         parentRunIds: [summaryRun.id]
       })
@@ -1944,7 +1954,7 @@ Meeting ${i + 1}: "${m.subject}"
     ? 'CohereLabs/cohere-transcribe-03-2026'
     : transcriptionProvider === 'vibevoice'
       ? 'microsoft/VibeVoice-ASR'
-      : config.transcription.geminiModel || 'gemini-3.5-flash'
+      : config.transcription.geminiModel || 'gemini-3.5-transcribe'
   const execution = transcriptionProvider === 'gemini' ? 'cloud' : 'local'
   // SPEC-009 / CHANGE-2026-08-14-001: this provider-independent local safety
   // gate MUST complete before diarization, ASR, summarization, meeting
@@ -2161,7 +2171,13 @@ Do not create speaker turns outside these intervals except for up to 1.5 seconds
     throw new Error(message)
   }
   completeProcessingRun(transcriptionRun.id, {
-    outputRefs: { fullText: `trans_${recordingId}.full_text`, speakers: `trans_${recordingId}.speakers` }
+    outputRefs: { fullText: `trans_${recordingId}.full_text`, speakers: `trans_${recordingId}.speakers` },
+    usage: rawTranscript.providerTimeline?.length
+      ? {
+          providerTimeline: rawTranscript.providerTimeline,
+          chunkCount: Math.max(...rawTranscript.providerTimeline.map((event) => event.chunkCount))
+        }
+      : undefined
   })
   if (!speakerLinking.available) {
     completeProcessingRun(diarizationRun.id, {
@@ -2192,7 +2208,7 @@ Do not create speaker turns outside these intervals except for up to 1.5 seconds
   progressCallback?.('analyzing', 50) // spec-014: progress reporting
   const hasGeminiAnalysis = !!resolveGeminiApiKey()
   const analysisProvider = hasGeminiAnalysis ? 'gemini' : 'hidock-next'
-  const analysisModel = hasGeminiAnalysis ? (config.transcription.geminiModel || 'gemini-3.5-flash') : null
+  const analysisModel = hasGeminiAnalysis ? (config.chat?.geminiModel || 'gemini-3.5-flash') : null
   const summaryRun = createProcessingRun({
     recordingId,
     stage: 'summary',
@@ -2450,6 +2466,17 @@ Do not create speaker turns outside these intervals except for up to 1.5 seconds
 
   progressCallback?.('detecting_actionables', 75) // spec-014: progress reporting
 
+  const actionableRun = createProcessingRun({
+    recordingId,
+    transcriptId: `trans_${recordingId}`,
+    stage: 'actionable-detection',
+    provider: resolveGeminiApiKey() ? 'gemini' : 'hidock-next',
+    tool: resolveGeminiApiKey() ? 'gemini-analysis' : 'eligibility-gate',
+    model: resolveGeminiApiKey() ? (config.chat?.geminiModel || 'gemini-3.5-flash') : null,
+    execution: resolveGeminiApiKey() ? 'cloud' : 'local',
+    parentRunIds: [summaryRun.id]
+  })
+
   // Detect actionables from transcript.
   // F16/spec-002 (T2): gated on an INDEPENDENT fresh read (Codex adversarial
   // review AR-3/A3 — do NOT reuse T1's block-scoped apply-result variable
@@ -2462,10 +2489,15 @@ Do not create speaker turns outside these intervals except for up to 1.5 seconds
   if (!stillProcessable()) {
     // ARF-3 — trashed/personal mid-analysis: skip actionable extraction too
     // (value-exclusion alone did NOT cover soft-delete/personal).
+    completeProcessingRun(actionableRun.id, {
+      status: 'cancelled',
+      outputRefs: { skipped: 'recording-ineligible' }
+    })
   } else if (isValueExcludedRecording(recordingId)) {
     console.log(
       `[Actionable Detection] Skipped value-excluded recording ${recordingId} (no actionables extracted)`
     )
+    completeProcessingRun(actionableRun.id, { outputRefs: { skipped: 'value-excluded', detected: 0 } })
   } else {
     try {
       const knowledgeCapture = queryOne<{ id: string }>(
@@ -2524,9 +2556,19 @@ Do not create speaker turns outside these intervals except for up to 1.5 seconds
         if (detections.length > 0) {
           console.log(`[Actionable Detection] Created ${detections.length} actionables for ${recordingId}`)
         }
+        completeProcessingRun(actionableRun.id, {
+          outputRefs: { detected: detections.length, persisted: detections.length }
+        })
+      }
+      if (!stillProcessable() || isValueExcludedRecording(recordingId)) {
+        completeProcessingRun(actionableRun.id, {
+          status: 'cancelled',
+          outputRefs: { skipped: 'recording-became-ineligible', detected: detections.length }
+        })
       }
     } catch (error) {
       console.error('[Actionable Detection] Failed to create actionables:', error)
+      failProcessingRun(actionableRun.id, error instanceof Error ? error.message : String(error))
       // Don't fail the transcription if actionable detection fails
     }
   }
@@ -2536,6 +2578,16 @@ Do not create speaker turns outside these intervals except for up to 1.5 seconds
   // without a manual analyzeTimeline() call. Dynamic import avoids a static
   // cycle (timeline-analysis is otherwise a leaf). Non-fatal — the transcript is
   // already persisted; a timeline failure must not fail the transcription.
+  const timelineRun = createProcessingRun({
+    recordingId,
+    transcriptId: `trans_${recordingId}`,
+    stage: 'timeline-analysis',
+    provider: resolveGeminiApiKey() ? 'gemini' : 'hidock-next',
+    tool: resolveGeminiApiKey() ? 'sentiment+local-markers' : 'local-markers',
+    model: resolveGeminiApiKey() ? (config.chat?.geminiModel || 'gemini-3.5-flash') : null,
+    execution: resolveGeminiApiKey() ? 'provider-managed' : 'local',
+    parentRunIds: [summaryRun.id, actionableRun.id]
+  })
   try {
     const { analyzeTimeline } = await import('./timeline-analysis')
     // RE-1 — re-check AFTER the import await, adjacent to the write.
@@ -2549,15 +2601,36 @@ Do not create speaker turns outside these intervals except for up to 1.5 seconds
         `[Timeline] Recording ${recordingId}: ${timeline.sentimentSegments.length} sentiment segment(s), ` +
           `${timeline.eventMarkers.length} event marker(s)`
       )
+      completeProcessingRun(timelineRun.id, {
+        outputRefs: {
+          sentimentSegments: timeline.sentimentSegments.length,
+          eventMarkers: timeline.eventMarkers.length
+        }
+      })
+    } else {
+      completeProcessingRun(timelineRun.id, {
+        status: 'cancelled',
+        outputRefs: { skipped: 'recording-ineligible' }
+      })
     }
   } catch (e) {
     console.error('[Timeline] Timeline analysis failed (non-fatal):', e instanceof Error ? e.message : e)
+    failProcessingRun(timelineRun.id, e instanceof Error ? e.message : String(e))
   }
 
   // Persist the project extracted from the conversation. Mentioned names are
   // stored separately on the transcript and MUST NOT become meeting contacts:
   // mention is not evidence of attendance. Actual speakers come only from
   // diarization + explicit speaker resolution/self-identification.
+  const orgRun = createProcessingRun({
+    recordingId,
+    transcriptId: `trans_${recordingId}`,
+    stage: 'org-reconciliation',
+    provider: 'hidock-next',
+    tool: 'org-reconciler',
+    execution: 'local',
+    parentRunIds: [summaryRun.id]
+  })
   try {
     const { applyTranscriptEntities } = await import('./org-reconciler')
     // RE-1 — re-check AFTER the import await; applyTranscriptEntities is a
@@ -2578,9 +2651,18 @@ Do not create speaker turns outside these intervals except for up to 1.5 seconds
           `[OrgReconciler] Transcript entities: +${applied.contacts} people${applied.projectLinked ? ', project linked' : ''}`
         )
       }
+      completeProcessingRun(orgRun.id, {
+        outputRefs: { contacts: applied.contacts, projectLinked: applied.projectLinked }
+      })
+    } else {
+      completeProcessingRun(orgRun.id, {
+        status: 'cancelled',
+        outputRefs: { skipped: 'recording-ineligible' }
+      })
     }
   } catch (e) {
     console.error('[OrgReconciler] Transcript entity extraction failed:', e)
+    failProcessingRun(orgRun.id, e instanceof Error ? e.message : String(e))
   }
 
   // Self-identification: bind speaker labels to the names people state for
@@ -2660,6 +2742,15 @@ Do not create speaker turns outside these intervals except for up to 1.5 seconds
   // trashed/personal recording never even triggers the debounced graph ingest
   // (isRecordingGraphIngestable is the ultimate backstop at ingest time, but
   // not emitting is cheaper and clearer).
+  const graphRun = createProcessingRun({
+    recordingId,
+    transcriptId: `trans_${recordingId}`,
+    stage: 'graph-sync',
+    provider: 'hidock-next',
+    tool: 'event-dispatch',
+    execution: 'local',
+    parentRunIds: [summaryRun.id, speakerIdentityRun.id]
+  })
   try {
     const { getEventBus } = await import('./event-bus')
     // RE-1 — re-check AFTER the import await; the emit is synchronous, so this
@@ -2670,13 +2761,29 @@ Do not create speaker turns outside these intervals except for up to 1.5 seconds
         timestamp: new Date().toISOString(),
         payload: { transcriptId: `trans_${recordingId}`, recordingId }
       })
+      completeProcessingRun(graphRun.id, { outputRefs: { scheduled: true } })
+    } else {
+      completeProcessingRun(graphRun.id, {
+        status: 'cancelled',
+        outputRefs: { skipped: 'recording-ineligible' }
+      })
     }
   } catch (e) {
     console.warn('[GraphSync] transcript-ready emit failed:', e)
+    failProcessingRun(graphRun.id, e instanceof Error ? e.message : String(e))
   }
 
   // Export the per-meeting wiki page (plain markdown knowledge base readable
   // by the user and by external agents like Claude Code). Non-fatal.
+  const wikiRun = createProcessingRun({
+    recordingId,
+    transcriptId: `trans_${recordingId}`,
+    stage: 'wiki-export',
+    provider: 'hidock-next',
+    tool: 'meeting-wiki',
+    execution: 'local',
+    parentRunIds: [summaryRun.id]
+  })
   try {
     const { exportMeetingWiki } = await import('./meeting-wiki')
     // RE-1 — re-check AFTER the import await; exportMeetingWiki is a synchronous
@@ -2684,9 +2791,16 @@ Do not create speaker turns outside these intervals except for up to 1.5 seconds
     if (stillProcessable()) {
       const wikiPath = exportMeetingWiki(recordingId)
       if (wikiPath) console.log(`[MeetingWiki] Exported ${wikiPath}`)
+      completeProcessingRun(wikiRun.id, { outputRefs: { path: wikiPath ?? null } })
+    } else {
+      completeProcessingRun(wikiRun.id, {
+        status: 'cancelled',
+        outputRefs: { skipped: 'recording-ineligible' }
+      })
     }
   } catch (e) {
     console.error('[MeetingWiki] Export failed:', e)
+    failProcessingRun(wikiRun.id, e instanceof Error ? e.message : String(e))
   }
 
   progressCallback?.('indexing', 85) // spec-014: progress reporting
@@ -2695,33 +2809,64 @@ Do not create speaker turns outside these intervals except for up to 1.5 seconds
   // personal recording must not be indexed into the assistant's retrieval
   // store (the exclusion set filters SEARCH results, but not indexing new
   // ones for an in-flight transcription; skip it outright here).
-  if (stillProcessable()) try {
-    const vectorStore = getVectorStore()
-    // Use the AI-linked meeting ID if available, otherwise fall back to the original
-    const meetingId = analysis.selected_meeting_id || recording.meeting_id
-    let meetingSubject: string | undefined
-
-    if (meetingId) {
-      const meeting = getMeetingById(meetingId)
-      meetingSubject = meeting?.subject
+  if (stillProcessable()) {
+    let embeddingProvider = 'not-configured'
+    try {
+      const { getEmbeddingsService } = await import('./embeddings')
+      embeddingProvider = (await getEmbeddingsService().activeProviderId()) ?? 'not-configured'
+    } catch {
+      // The indexing attempt below owns the actual failure; provenance still
+      // records that provider selection itself did not resolve.
     }
-
-    const indexedCount = await vectorStore.indexTranscript(fullText, {
-      meetingId: meetingId || undefined,
+    const embeddingModel = embeddingProvider === 'local-onnx-embed'
+      ? 'nemotron-3-embed-1b'
+      : embeddingProvider === 'gemini-api'
+        ? 'gemini-embedding-001'
+        : null
+    const ragRun = createProcessingRun({
       recordingId,
-      timestamp: recording.created_at,
-      subject: meetingSubject,
-      // RE-1 — indexTranscript's embeddings generation is an async await; a
-      // hard purge landing DURING it would otherwise let the synchronous write
-      // loop persist orphaned vector rows. This callback is re-checked INSIDE
-      // indexTranscript, immediately before the write loop, so the chunks are
-      // dropped if the recording became ineligible while embeddings ran.
-      shouldPersist: () => isRecordingProcessable(recordingId)
+      transcriptId: `trans_${recordingId}`,
+      stage: 'rag-indexing',
+      provider: embeddingProvider,
+      tool: 'vector-store',
+      model: embeddingModel,
+      execution: embeddingProvider === 'gemini-api'
+        ? 'cloud'
+        : embeddingProvider === 'not-configured'
+          ? 'provider-managed'
+          : 'local',
+      parentRunIds: [transcriptionRun.id, summaryRun.id]
     })
+    try {
+      const vectorStore = getVectorStore()
+      // Use the AI-linked meeting ID if available, otherwise fall back to the original
+      const meetingId = analysis.selected_meeting_id || recording.meeting_id
+      let meetingSubject: string | undefined
 
-    console.log(`Indexed ${indexedCount} chunks into vector store`)
-  } catch (e) {
-    console.warn('Failed to index transcript into vector store:', e)
+      if (meetingId) {
+        const meeting = getMeetingById(meetingId)
+        meetingSubject = meeting?.subject
+      }
+
+      const indexedCount = await vectorStore.indexTranscript(fullText, {
+        meetingId: meetingId || undefined,
+        recordingId,
+        timestamp: recording.created_at,
+        subject: meetingSubject,
+        // RE-1 — indexTranscript's embeddings generation is an async await; a
+        // hard purge landing DURING it would otherwise let the synchronous write
+        // loop persist orphaned vector rows. This callback is re-checked INSIDE
+        // indexTranscript, immediately before the write loop, so the chunks are
+        // dropped if the recording became ineligible while embeddings ran.
+        shouldPersist: () => isRecordingProcessable(recordingId)
+      })
+
+      console.log(`Indexed ${indexedCount} chunks into vector store`)
+      completeProcessingRun(ragRun.id, { outputRefs: { indexedChunks: indexedCount } })
+    } catch (e) {
+      console.warn('Failed to index transcript into vector store:', e)
+      failProcessingRun(ragRun.id, e instanceof Error ? e.message : String(e))
+    }
   }
 
   // RE4-4 / C (round-4) + INC3/INC4 (round-5) — report 'cancelled' if ANY

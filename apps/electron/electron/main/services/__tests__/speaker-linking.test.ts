@@ -27,11 +27,14 @@ vi.mock('../config', () => ({
 import {
   cosineSimilarity,
   decideVoiceMatch,
+  isSpeakerLinkingUnavailableDetail,
   normalizeEmbedding,
   reconcileProviderSpeakers,
+  resolveSpeakerLinkingFfmpegPath,
   updateCentroid,
   type SpeakerLinkingResult
 } from '../speaker-linking'
+import { consolidateVoiceIdentityForSpeaker } from '../voice-identity-consolidation'
 import {
   assignSpeaker,
   closeDatabase,
@@ -57,6 +60,27 @@ afterEach(() => {
 })
 
 describe('persistent acoustic speaker linking', () => {
+  it('degrades on optional runtime dependency failures instead of blocking transcription', () => {
+    expect(isSpeakerLinkingUnavailableDetail(
+      'ImportError: tokenizers>=0.22.0,<=0.23.0 is required for a normal functioning of this module, ' +
+      'but found tokenizers==0.23.1.'
+    )).toBe(true)
+    expect(isSpeakerLinkingUnavailableDetail('ModuleNotFoundError: No module named \'pyannote\'')).toBe(true)
+    expect(isSpeakerLinkingUnavailableDetail(
+      'RuntimeError: FFmpeg is required for local speaker linking but was not found'
+    )).toBe(true)
+    expect(isSpeakerLinkingUnavailableDetail('speaker-linking failed: CUDA out of memory')).toBe(false)
+  })
+
+  it('resolves electron-builder native executables from app.asar.unpacked', () => {
+    expect(resolveSpeakerLinkingFfmpegPath(
+      'G:\\app\\resources\\app.asar\\node_modules\\ffmpeg-static\\ffmpeg.exe'
+    )).toBe('G:\\app\\resources\\app.asar.unpacked\\node_modules\\ffmpeg-static\\ffmpeg.exe')
+    expect(resolveSpeakerLinkingFfmpegPath('G:\\repo\\node_modules\\ffmpeg-static\\ffmpeg.exe'))
+      .toBe('G:\\repo\\node_modules\\ffmpeg-static\\ffmpeg.exe')
+    expect(resolveSpeakerLinkingFfmpegPath(null)).toBeUndefined()
+  })
+
   it('requires an absolute threshold and a winner margin', () => {
     const embedding = normalizeEmbedding([1, 0, 0])
     expect(cosineSimilarity(embedding, [1, 0, 0])).toBeCloseTo(1)
@@ -71,6 +95,22 @@ describe('persistent acoustic speaker linking', () => {
     ], 0.72, 0.08)
     expect(ambiguous.clusterId).toBeNull()
     expect(ambiguous.status).toBe('needs_review')
+  })
+
+  it('lets a strong confirmed identity outrank its anonymous duplicate fragments', () => {
+    const embedding = normalizeEmbedding([1, 0, 0])
+    const decision = decideVoiceMatch(embedding, [
+      { id: 'anonymous-best', centroid: normalizeEmbedding([1, 0.01, 0]) },
+      { id: 'confirmed', centroid: normalizeEmbedding([1, 0.04, 0]), contactId: 'sebastian' },
+      { id: 'anonymous-runner-up', centroid: normalizeEmbedding([1, 0.05, 0]) }
+    ], 0.72, 0.08)
+    expect(decision).toMatchObject({ clusterId: 'confirmed', status: 'matched' })
+
+    const competingPeople = decideVoiceMatch(embedding, [
+      { id: 'confirmed', centroid: normalizeEmbedding([1, 0.04, 0]), contactId: 'sebastian' },
+      { id: 'other-person', centroid: normalizeEmbedding([1, 0.05, 0]), contactId: 'arturo' }
+    ], 0.72, 0.08)
+    expect(competingPeople).toMatchObject({ clusterId: null, status: 'needs_review' })
   })
 
   it('updates a normalized, speech-duration-weighted centroid', () => {
@@ -135,6 +175,78 @@ describe('persistent acoustic speaker linking', () => {
     expect(queryOne<{ contact_id: string; contact_link_method: string }>(
       'SELECT contact_id, contact_link_method FROM voice_clusters WHERE id = ?', ['voice']
     )).toEqual({ contact_id: 'person', contact_link_method: 'manual' })
+  })
+
+  it('propagates a confirmed person through safe historical duplicate voice clusters', () => {
+    for (const id of ['anchor-rec', 'duplicate-rec', 'different-rec']) {
+      run('INSERT INTO recordings (id, filename, date_recorded) VALUES (?, ?, ?)', [
+        id, `${id}.wav`, '2026-08-27T10:00:00Z'
+      ])
+    }
+    run(`INSERT INTO contacts
+      (id, name, type, first_seen_at, last_seen_at, source)
+      VALUES ('person', 'Sebastian', 'unknown', '2026-08-27T10:00:00Z', '2026-08-27T10:00:00Z', 'user')`)
+    const clusters = [
+      ['aaaaaaaa-0000-0000-0000-000000000000', '[1,0,0]', 'anchor-rec', 'Voice AAAAAA'],
+      ['bbbbbbbb-0000-0000-0000-000000000000', '[0.99,0.05,0]', 'duplicate-rec', 'Voice BBBBBB'],
+      ['cccccccc-0000-0000-0000-000000000000', '[0,1,0]', 'different-rec', 'Voice CCCCCC']
+    ]
+    for (const [clusterId, embedding, recordingId, stableLabel] of clusters) {
+      run(`INSERT INTO voice_clusters
+        (id, model, model_version, embedding_dimension, centroid_json, observation_count, total_speech_seconds)
+        VALUES (?, 'community-1', '4.0.0', 3, ?, 1, 20)`, [clusterId, embedding])
+      run(`INSERT INTO voice_cluster_observations
+        (id, voice_cluster_id, recording_id, local_speaker_label, embedding_json, speech_seconds)
+        VALUES (?, ?, ?, 'SPEAKER_00', ?, 20)`, [`obs-${recordingId}`, clusterId, recordingId, embedding])
+      run(`INSERT INTO recording_voice_clusters
+        (recording_id, local_speaker_label, transcript_speaker_label, voice_cluster_id, match_status)
+        VALUES (?, 'SPEAKER_00', ?, ?, 'new')`, [recordingId, stableLabel, clusterId])
+      run(`INSERT INTO transcripts (id, recording_id, full_text, speakers)
+        VALUES (?, ?, 'hello', ?)`, [
+        `transcript-${recordingId}`,
+        recordingId,
+        JSON.stringify([{ start: 0, end: 2, speaker: stableLabel, text: 'hello' }])
+      ])
+    }
+    run(`INSERT INTO voice_clusters
+      (id, model, model_version, embedding_dimension, centroid_json, observation_count, total_speech_seconds)
+      VALUES ('dddddddd-0000-0000-0000-000000000000', 'community-1', '4.0.0', 3, '[0.99,0.03,0]', 1, 8)`)
+    run(`INSERT INTO voice_cluster_observations
+      (id, voice_cluster_id, recording_id, local_speaker_label, embedding_json, speech_seconds)
+      VALUES ('obs-co-speaker', 'dddddddd-0000-0000-0000-000000000000', 'anchor-rec',
+              'SPEAKER_01', '[0.99,0.03,0]', 8)`)
+    run(`INSERT INTO recording_voice_clusters
+      (recording_id, local_speaker_label, transcript_speaker_label, voice_cluster_id, match_status)
+      VALUES ('anchor-rec', 'SPEAKER_01', 'Voice DDDDDD',
+              'dddddddd-0000-0000-0000-000000000000', 'new')`)
+
+    assignSpeaker('anchor-rec', 'Voice AAAAAA', {
+      contactId: 'person',
+      voiceAnchor: { method: 'manual', confidence: 1 }
+    })
+    const result = consolidateVoiceIdentityForSpeaker('anchor-rec', 'Voice AAAAAA', 'person')
+
+    expect(result.mergedClusterIds).toEqual(['bbbbbbbb-0000-0000-0000-000000000000'])
+    expect(queryOne('SELECT id FROM voice_clusters WHERE id = ?', [result.mergedClusterIds[0]])).toBeUndefined()
+    expect(queryOne<{ voice_cluster_id: string; transcript_speaker_label: string }>(
+      'SELECT voice_cluster_id, transcript_speaker_label FROM recording_voice_clusters WHERE recording_id = ?',
+      ['duplicate-rec']
+    )).toEqual({
+      voice_cluster_id: 'aaaaaaaa-0000-0000-0000-000000000000',
+      transcript_speaker_label: 'Voice AAAAAA'
+    })
+    expect(queryOne<{ contact_id: string }>(
+      'SELECT contact_id FROM transcript_speakers WHERE recording_id = ? AND speaker_label = ?',
+      ['duplicate-rec', 'Voice AAAAAA']
+    )).toEqual({ contact_id: 'person' })
+    const transcript = queryOne<{ speakers: string }>('SELECT speakers FROM transcripts WHERE recording_id = ?', [
+      'duplicate-rec'
+    ])!
+    expect(JSON.parse(transcript.speakers)[0].speaker).toBe('Voice AAAAAA')
+    expect(queryOne('SELECT id FROM voice_clusters WHERE id = ?', [clusters[2][0]])).toBeTruthy()
+    expect(queryOne('SELECT id FROM voice_clusters WHERE id = ?', [
+      'dddddddd-0000-0000-0000-000000000000'
+    ])).toBeTruthy()
   })
 
   it('removes acoustic evidence immediately when a source becomes personal or trashed', () => {

@@ -1,6 +1,18 @@
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, unlinkSync, utimesSync, renameSync } from 'fs'
 import { join, basename, extname, resolve, normalize } from 'path'
 import { getConfig, getDataPath } from './config'
+import type { AppConfig } from './config'
+
+export class StorageInitializationError extends Error {
+  constructor(
+    readonly setting: 'dataPath' | 'recordingsPath' | 'transcriptsPath',
+    readonly directory: string,
+    cause: unknown
+  ) {
+    super(`Cannot access storage folder "${directory}": ${cause instanceof Error ? cause.message : String(cause)}`)
+    this.name = 'StorageInitializationError'
+  }
+}
 
 /**
  * Validate that a path stays within the allowed base directory.
@@ -53,21 +65,26 @@ export interface StorageInfo {
   recordingsCount: number
 }
 
-export async function initializeFileStorage(): Promise<void> {
-  const dataPath = getDataPath()
+export async function initializeFileStorage(storage: AppConfig['storage'] = getConfig().storage): Promise<void> {
+  const dataPath = storage.dataPath || getDataPath()
 
-  const directories = [
-    dataPath,
-    join(dataPath, 'data'),
-    getRecordingsPath(),
-    getTranscriptsPath(),
-    join(dataPath, 'cache')
+  const directories: [StorageInitializationError['setting'], string][] = [
+    ['dataPath', dataPath],
+    ['dataPath', join(dataPath, 'data')],
+    [storage.recordingsPath ? 'recordingsPath' : 'dataPath', storage.recordingsPath || join(dataPath, 'recordings')],
+    [storage.transcriptsPath ? 'transcriptsPath' : 'dataPath', storage.transcriptsPath || join(dataPath, 'transcripts')],
+    ['dataPath', join(dataPath, 'cache')]
   ]
 
-  for (const dir of directories) {
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true })
-      console.log(`Created directory: ${dir}`)
+  for (const [setting, dir] of directories) {
+    try {
+      if (!existsSync(dir)) {
+        mkdirSync(dir, { recursive: true })
+        console.log(`Created directory: ${dir}`)
+      }
+      if (!statSync(dir).isDirectory()) throw new Error('Path is not a directory')
+    } catch (error) {
+      throw new StorageInitializationError(setting, dir, error)
     }
   }
 }

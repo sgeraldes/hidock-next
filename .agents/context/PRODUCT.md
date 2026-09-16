@@ -4,16 +4,6 @@
 
 product
 
-## Users
-
-Sebastián — a delivery/technical executive at DFX5 running many concurrent client
-projects across LATAM (Seguros Bolívar, Belcorp, Itaú, Grupo Aval…). His day is
-back-to-back meetings captured on a HiDock USB recorder, plus Outlook calendar,
-Slack, and repos on disk. Context when using the app: between meetings or first
-thing in the morning, asking "what happened, what do I owe, what's next?" He is
-technical and impatient with busywork; he expects the app to act, not to present
-lists.
-
 ## Product Purpose
 
 An assistant for daily work, not a recordings manager. It transcribes everything

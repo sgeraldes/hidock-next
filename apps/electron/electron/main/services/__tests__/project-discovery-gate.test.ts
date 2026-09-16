@@ -210,7 +210,7 @@ describe('false NEGATIVES — short and non-Latin names must defer, never drop',
     ['XR', 'acronym'],
     ['CRM', 'acronym'],
     ['SAP', 'acronym'],
-    ['DFX5', 'acronym'],
+    ['ABC', 'acronym'],
     ['研究', 'uncased-script'],
     ['プロジェクト', 'uncased-script'],
     ['개발', 'uncased-script']
@@ -245,7 +245,7 @@ describe('false NEGATIVES — short and non-Latin names must defer, never drop',
 describe('auto-create requires DISTINCTIVE name structure', () => {
   it.each([
     ['HiDock Firmware', 'distinctive-orthography'],
-    ['DFX5 Gateway', 'acronym'],
+    ['ABC Gateway', 'acronym'],
     ['CRM', 'acronym'],
     ['MeridianOps', 'distinctive-orthography'],
     ['研究 Alpha', 'uncased-script']

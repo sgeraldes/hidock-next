@@ -126,6 +126,8 @@ describe('TranscriptViewer speaker assignment (recordingId)', () => {
   const mockMergeSplit = vi.fn()
   const mockAssignFromHere = vi.fn()
   const mockGetMergeHints = vi.fn()
+  const mockUpdateContent = vi.fn()
+  const mockReindex = vi.fn()
 
   const segments = [{ speaker: 'Speaker 1', start: 0, end: 5, text: 'Hello there, everyone.' }]
 
@@ -185,11 +187,24 @@ describe('TranscriptViewer speaker assignment (recordingId)', () => {
     })
     mockAssignSpeaker.mockResolvedValue({ success: true, data: { id: 'c1', name: 'Alice' } })
     mockUnassignSpeaker.mockResolvedValue({ success: true })
+    mockUpdateContent.mockResolvedValue({
+      success: true,
+      data: {
+        fullText: 'Speaker 1: Corrected text.',
+        segments: [{ speaker: 'Speaker 1', start: 0, end: 5, text: 'Corrected text.' }],
+        wordCount: 4,
+        indexedChunks: 2,
+        ragStatus: 'indexed'
+      }
+    })
+    mockReindex.mockResolvedValue({ success: true, data: { indexedChunks: 2 } })
     ;(window as any).electronAPI = {
       transcripts: {
         getSpeakerMap: mockGetSpeakerMap,
         assignSpeaker: mockAssignSpeaker,
-        unassignSpeaker: mockUnassignSpeaker
+        unassignSpeaker: mockUnassignSpeaker,
+        updateContent: mockUpdateContent,
+        reindex: mockReindex
       },
       turnSpeakers: {
         getOverrides: mockGetOverrides,
@@ -209,6 +224,71 @@ describe('TranscriptViewer speaker assignment (recordingId)', () => {
     renderViewer()
     await waitFor(() => expect(mockGetSpeakerMap).toHaveBeenCalledWith({ recordingId: 'rec1' }))
     expect(screen.getByRole('button', { name: /Assign speaker Speaker 1/i })).toBeInTheDocument()
+  })
+
+  it('edits a transcript turn in place and requests a full RAG rebuild', async () => {
+    const onTranscriptUpdated = vi.fn()
+    renderViewer({ transcript: 'Speaker 1: Hello there, everyone.', onTranscriptUpdated })
+    await waitFor(() => expect(mockGetSpeakerMap).toHaveBeenCalled())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit transcript turn 1' }))
+    const editor = screen.getByRole('textbox', { name: 'Edit transcript turn 1' })
+    fireEvent.change(editor, { target: { value: 'Aló Aló, Sorry recién te leo' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save correction' }))
+
+    await waitFor(() => expect(mockUpdateContent).toHaveBeenCalledWith({
+      recordingId: 'rec1',
+      expectedFullText: 'Speaker 1: Hello there, everyone.',
+      segments: [{ speaker: 'Speaker 1', start: 0, end: 5, text: 'Aló Aló, Sorry recién te leo' }]
+    }))
+    expect(await screen.findByText('Corrected text.')).toBeInTheDocument()
+    expect(onTranscriptUpdated).toHaveBeenCalledWith({
+      fullText: 'Speaker 1: Corrected text.',
+      segments: [{ speaker: 'Speaker 1', start: 0, end: 5, text: 'Corrected text.' }],
+      wordCount: 4
+    })
+  })
+
+  it('keeps an honest RAG-pending state and lets the user retry', async () => {
+    mockUpdateContent.mockResolvedValueOnce({
+      success: true,
+      data: {
+        fullText: 'Speaker 1: Corrected text.',
+        segments: [{ speaker: 'Speaker 1', start: 0, end: 5, text: 'Corrected text.' }],
+        wordCount: 4,
+        indexedChunks: 0,
+        ragStatus: 'pending',
+        ragError: 'Embedding provider unavailable'
+      }
+    })
+    renderViewer({ transcript: 'Speaker 1: Hello there, everyone.' })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit transcript turn 1' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Edit transcript turn 1' }), {
+      target: { value: 'Corrected text.' }
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save correction' }))
+
+    expect(await screen.findByText(/Transcript saved\. RAG search is pending/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry RAG' }))
+    await waitFor(() => expect(mockReindex).toHaveBeenCalledWith({ recordingId: 'rec1' }))
+    await waitFor(() => expect(screen.queryByText(/RAG search is pending/)).not.toBeInTheDocument())
+  })
+
+  it('preserves the correction draft when saving fails', async () => {
+    mockUpdateContent.mockResolvedValueOnce({
+      success: false,
+      error: { code: 'RETRYABLE_ERROR', message: 'The transcript changed while you were editing.' }
+    })
+    renderViewer({ transcript: 'Speaker 1: Hello there, everyone.' })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit transcript turn 1' }))
+    const editor = screen.getByRole('textbox', { name: 'Edit transcript turn 1' })
+    fireEvent.change(editor, { target: { value: 'My unsaved correction' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save correction' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The transcript changed while you were editing.')
+    expect(screen.getByRole('textbox', { name: 'Edit transcript turn 1' })).toHaveValue('My unsaved correction')
   })
 
   it('assigns an existing contact when picked from the popover', async () => {

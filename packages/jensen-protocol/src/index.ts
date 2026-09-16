@@ -16,6 +16,8 @@ export {
   USB_PRODUCT_IDS,
   EP_OUT,
   EP_IN,
+  parseRealtimePayload,
+  supportsRealtimeFirmware,
 } from './jensen-device.js'
 
 export type {

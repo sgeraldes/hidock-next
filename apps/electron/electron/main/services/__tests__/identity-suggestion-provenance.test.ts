@@ -478,9 +478,9 @@ function seedMentions(prefix: string, text: string, n: number, opts: Parameters<
 // bearers classified 'normal' so the transcript-mention COUNT drives rarity.
 function seedEmailPair(): void {
   contact('c-al', 'Ana Lima', {})
-  run(`UPDATE contacts SET email = 'a.lima@dfx5.com', meeting_count = 5 WHERE id = 'c-al'`)
+  run(`UPDATE contacts SET email = 'shared@example.invalid', meeting_count = 5 WHERE id = 'c-al'`)
   contact('c-al2', 'Ane Lima', {})
-  run(`UPDATE contacts SET email = 'a.lima@dfx5.com', meeting_count = 1 WHERE id = 'c-al2'`)
+  run(`UPDATE contacts SET email = 'shared@example.invalid', meeting_count = 1 WHERE id = 'c-al2'`)
 }
 function paired(): any {
   const rows = getIdentitySuggestions('pending')
@@ -816,11 +816,11 @@ describe('discovery role evidence — field-provenance sanitize + recompute (ADV
     valueExclude('rec-bad')
     run(
       `INSERT INTO contacts (id, name, email, type, role, role_source_recording_id, source, first_seen_at, last_seen_at, meeting_count, created_at)
-       VALUES ('c-r1', 'Marco Vela', 'm.vela@dfx5.com', 'team', 'Project Manager', 'rec-bad', 'calendar', '2026-01-01', '2026-01-01', 5, '2026-01-01T00:00:00Z')`
+       VALUES ('c-r1', 'Person One', 'shared@example.invalid', 'team', 'Project Manager', 'rec-bad', 'calendar', '2026-01-01', '2026-01-01', 5, '2026-01-01T00:00:00Z')`
     )
     run(
       `INSERT INTO contacts (id, name, email, type, role, role_source_recording_id, source, first_seen_at, last_seen_at, meeting_count, created_at)
-       VALUES ('c-r2', 'Marc Vela', 'm.vela@dfx5.com', 'team', 'Project Manager', 'rec-bad', 'calendar', '2026-01-01', '2026-01-01', 1, '2026-01-01T00:00:00Z')`
+       VALUES ('c-r2', 'Person Two', 'shared@example.invalid', 'team', 'Project Manager', 'rec-bad', 'calendar', '2026-01-01', '2026-01-01', 1, '2026-01-01T00:00:00Z')`
     )
     const res = discoverContactMerges()
     expect(res.suggestionsCreated).toBe(1)

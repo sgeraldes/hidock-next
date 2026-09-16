@@ -1021,17 +1021,27 @@ class VectorStore {
   }
 
   async deleteByRecording(recordingId: string): Promise<number> {
-    let deleted = 0
+    const deleted = this.dropByRecordingFromMemory(recordingId)
     const db = getDatabase()
-
-    for (const [id, doc] of this.documents.entries()) {
-      if (doc.metadata.recordingId === recordingId) {
-        this.documents.delete(id)
-        deleted++
-      }
-    }
-
     db.run('DELETE FROM vector_embeddings WHERE recording_id = ?', [recordingId])
+    return deleted
+  }
+
+  /**
+   * Remove one recording's vectors from the live in-memory search corpus only.
+   *
+   * Transcript editing deletes the persisted rows in the same transaction as
+   * the corrected source text, then calls this method after commit. Keeping the
+   * memory mutation separate prevents a rolled-back database edit from leaving
+   * the running assistant with a different corpus than SQLite.
+   */
+  dropByRecordingFromMemory(recordingId: string): number {
+    let deleted = 0
+    for (const [id, doc] of this.documents.entries()) {
+      if (doc.metadata.recordingId !== recordingId) continue
+      this.documents.delete(id)
+      deleted++
+    }
     return deleted
   }
 

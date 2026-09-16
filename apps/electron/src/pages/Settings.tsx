@@ -94,7 +94,7 @@ export function Settings() {
   const [syncInterval, setSyncInterval] = useState(15)
   const [transcriptionProvider, setTranscriptionProvider] = useState<'gemini' | 'local-asr' | 'vibevoice'>('gemini')
   const [geminiApiKey, setGeminiApiKey] = useState('')
-  const [geminiModel, setGeminiModel] = useState('gemini-3.5-flash')
+  const [geminiModel, setGeminiModel] = useState('gemini-3.5-transcribe')
   const [localAsrPath, setLocalAsrPath] = useState('G:\\Code\\claude-plugins\\plugins\\mcp-asr')
   const [localAsrHfToken, setLocalAsrHfToken] = useState('')
   const [localAsrVocabularyFile, setLocalAsrVocabularyFile] = useState('vocabulary.json')
@@ -115,16 +115,10 @@ export function Settings() {
   const [showHfToken, setShowHfToken] = useState(false)
 
   // Transcription models are loaded LIVE from the Gemini API (config:listGeminiModels)
-  // and filtered to audio-capable models, so the picker never drifts out of sync
-  // with the API (the old hand-maintained list wrongly offered TTS/Image/retired
-  // models). This concrete fallback — preferring the rolling `-latest` aliases —
-  // shows before the live list resolves or when offline / no key.
+  // and filtered to the dedicated non-streaming transcription model. The
+  // concrete fallback shows before the live list resolves or when offline.
   const [geminiModels, setGeminiModels] = useState<{ value: string; label: string }[]>([
-    { value: 'gemini-flash-latest', label: 'Gemini Flash (latest)' },
-    { value: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash' },
-    { value: 'gemini-flash-lite-latest', label: 'Gemini Flash-Lite (latest)' },
-    { value: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite' },
-    { value: 'gemini-pro-latest', label: 'Gemini Pro (latest)' },
+    { value: 'gemini-3.5-transcribe', label: 'Gemini 3.5 Flash Transcribe' },
   ])
   const [modelsLive, setModelsLive] = useState(false)
   const [modelsLoading, setModelsLoading] = useState(false)
@@ -281,7 +275,7 @@ export function Settings() {
     return (
       transcriptionProvider !== (config.transcription.provider || 'gemini') ||
       geminiApiKey !== config.transcription.geminiApiKey ||
-      geminiModel !== (config.transcription.geminiModel || 'gemini-2.5-flash') ||
+      geminiModel !== (config.transcription.geminiModel || 'gemini-3.5-transcribe') ||
       localAsrPath !== (config.transcription.localAsrPath || 'G:\\Code\\claude-plugins\\plugins\\mcp-asr') ||
       localAsrHfToken !== (config.transcription.localAsrHfToken || '') ||
       localAsrVocabularyFile !== (config.transcription.localAsrVocabularyFile || 'vocabulary.json') ||
@@ -328,7 +322,7 @@ export function Settings() {
       setSyncInterval(config.calendar.syncIntervalMinutes)
       setTranscriptionProvider(config.transcription.provider || 'gemini')
       setGeminiApiKey(config.transcription.geminiApiKey)
-      setGeminiModel(config.transcription.geminiModel || 'gemini-2.5-flash')
+      setGeminiModel(config.transcription.geminiModel || 'gemini-3.5-transcribe')
       setLocalAsrPath(config.transcription.localAsrPath || 'G:\\Code\\claude-plugins\\plugins\\mcp-asr')
       setLocalAsrHfToken(config.transcription.localAsrHfToken || '')
       setLocalAsrVocabularyFile(config.transcription.localAsrVocabularyFile || 'vocabulary.json')
@@ -432,7 +426,7 @@ export function Settings() {
 
     // Store previous values for rollback
     const previousApiKey = config?.transcription.geminiApiKey || ''
-    const previousModel = config?.transcription.geminiModel || 'gemini-2.5-flash'
+    const previousModel = config?.transcription.geminiModel || 'gemini-3.5-transcribe'
     const previousProvider = config?.transcription.provider || 'gemini'
     const previousLocalAsrPath = config?.transcription.localAsrPath || 'G:\\Code\\claude-plugins\\plugins\\mcp-asr'
     const previousLocalAsrHfToken = config?.transcription.localAsrHfToken || ''

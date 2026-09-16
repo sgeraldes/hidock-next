@@ -19,7 +19,7 @@
 
 import { useState, useEffect, useCallback, useMemo, useRef, useLayoutEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { TranscriptViewer, type StoredSegment } from './TranscriptViewer'
+import { TranscriptViewer, type StoredSegment, type TranscriptContentUpdate } from './TranscriptViewer'
 import { TranscriptionStatusBadge } from './TranscriptionStatusBadge'
 import { StatusIcon } from './StatusIcon'
 import { WaveformPlayer, type TimelineEvent, type TimelineEventDetail, type TimelineEventPatch, type SentimentScorePoint, type WaveformPlayerMode } from './WaveformPlayer'
@@ -114,13 +114,17 @@ interface TimelineData {
 
 interface ReaderProcessingRun {
   id: string
-  stage: 'metadata' | 'schedule-match' | 'vad' | 'diarization' | 'transcription' | 'summary' | 'title' | 'meeting-resolution' | 'speaker-identity' | 'voice-id'
+  stage: 'metadata' | 'schedule-match' | 'vad' | 'diarization' | 'transcription' | 'summary' | 'title' | 'meeting-resolution' | 'speaker-identity' | 'voice-id' | 'persistence' | 'actionable-detection' | 'timeline-analysis' | 'org-reconciliation' | 'graph-sync' | 'wiki-export' | 'rag-indexing'
   provider: string
   tool: string | null
   model: string | null
   version: string | null
   execution: 'local' | 'cloud' | 'provider-managed' | null
   status: 'pending' | 'running' | 'completed' | 'degraded' | 'failed' | 'cancelled'
+  started_at?: string
+  completed_at?: string | null
+  duration_ms?: number | null
+  usage_json?: string | null
   quality_status: string | null
   quality_json: string | null
   estimated_cost_amount: number | null
@@ -419,7 +423,11 @@ export function SourceReader({
   // transcript directly as a fallback so the transcript + per-speaker colors render
   // on first paint, regardless of how the recording was selected.
   const [fallbackTranscript, setFallbackTranscript] = useState<Transcript | undefined>(undefined)
-  const effectiveTranscript = transcript ?? fallbackTranscript
+  // A manual correction must render immediately even when the Library parent is
+  // still refreshing its transcript map. It stays scoped to this recording and
+  // is cleared when another source is selected.
+  const [editedTranscript, setEditedTranscript] = useState<Transcript | undefined>(undefined)
+  const effectiveTranscript = editedTranscript ?? transcript ?? fallbackTranscript
   const [processingRuns, setProcessingRuns] = useState<ReaderProcessingRun[]>([])
   const [meetingCandidates, setMeetingCandidates] = useState<ReaderMeetingCandidate[]>([])
   const recordingId = recording?.id
@@ -437,10 +445,36 @@ export function SourceReader({
     setPendingTranscribe(null)
     setReDiarizing(false)
     setFallbackTranscript(undefined)
+    setEditedTranscript(undefined)
     setProcessingRuns([])
     setMeetingCandidates([])
     setTranscriptHighlight(null)
   }, [recording?.id])
+
+  // A completed re-transcription replaces the transcript row and therefore its
+  // creation revision. Drop the local manual-edit mirror at that boundary so it
+  // can never mask the newly generated transcript. Ordinary Library refreshes
+  // keep the same revision and preserve the correction without a flicker.
+  useEffect(() => {
+    setEditedTranscript(undefined)
+  }, [recording?.id, transcript?.created_at])
+
+  const handleTranscriptUpdated = useCallback((update: TranscriptContentUpdate) => {
+    setEditedTranscript((current) => {
+      const base = current ?? transcript ?? fallbackTranscript
+      if (!base) return current
+      return {
+        ...base,
+        full_text: update.fullText,
+        speakers: JSON.stringify(update.segments),
+        word_count: update.wordCount
+      }
+    })
+    // A re-transcription would replace the user's correction, so reuse the
+    // existing overwrite warning that already protects user-edited metadata.
+    setMetadataEdited(true)
+    onMetadataEdited?.()
+  }, [fallbackTranscript, onMetadataEdited, transcript])
 
   // H6: Fetch the transcript directly when the parent didn't supply one but the
   // recording is transcribed (e.g. selection arrived via the sidebar Library nav
@@ -1900,6 +1934,7 @@ export function SourceReader({
                           /* H3: action items live in ONE home — the timeline event-list above. */
                           showActionItems={false}
                           actionItems={actionItems}
+                          onTranscriptUpdated={handleTranscriptUpdated}
                         />
                       </div>
                     )}
@@ -1983,7 +2018,9 @@ export function SourceReader({
 }
 
 const VISIBLE_PROCESSING_STAGES = new Set<ReaderProcessingRun['stage']>([
-  'transcription', 'diarization', 'summary', 'title', 'meeting-resolution', 'speaker-identity', 'voice-id'
+  'transcription', 'diarization', 'summary', 'title', 'meeting-resolution', 'speaker-identity', 'voice-id',
+  'persistence', 'actionable-detection', 'timeline-analysis', 'org-reconciliation', 'graph-sync',
+  'wiki-export', 'rag-indexing'
 ])
 
 function processingStageLabel(stage: ReaderProcessingRun['stage']): string {
@@ -1991,8 +2028,23 @@ function processingStageLabel(stage: ReaderProcessingRun['stage']): string {
     case 'meeting-resolution': return 'Meeting match'
     case 'speaker-identity': return 'Speaker identity'
     case 'voice-id': return 'Voice ID'
+    case 'actionable-detection': return 'Actionables'
+    case 'timeline-analysis': return 'Timeline'
+    case 'org-reconciliation': return 'Entity linking'
+    case 'graph-sync': return 'Knowledge graph'
+    case 'wiki-export': return 'Wiki export'
+    case 'rag-indexing': return 'RAG indexing'
     default: return stage.charAt(0).toUpperCase() + stage.slice(1)
   }
+}
+
+function formatProcessingDuration(durationMs: number | null | undefined): string | null {
+  if (durationMs == null || !Number.isFinite(durationMs) || durationMs < 0) return null
+  if (durationMs < 1000) return `${Math.round(durationMs)} ms`
+  if (durationMs < 60_000) return `${(durationMs / 1000).toFixed(durationMs < 10_000 ? 1 : 0)} s`
+  const minutes = Math.floor(durationMs / 60_000)
+  const seconds = Math.round((durationMs % 60_000) / 1000)
+  return `${minutes}m ${seconds}s`
 }
 
 function processingProviderLabel(run: ReaderProcessingRun): string {
@@ -2003,6 +2055,49 @@ function processingProviderLabel(run: ReaderProcessingRun): string {
   return run.provider.charAt(0).toUpperCase() + run.provider.slice(1)
 }
 
+interface ProviderTimelineEvent {
+  phase?: string
+  status?: string
+  elapsedMs?: number
+  chunkIndex?: number
+  chunkCount?: number
+  audioStartSec?: number
+  audioEndSec?: number
+  detail?: string
+}
+
+function formatAudioOffset(seconds: number): string {
+  const wholeSeconds = Math.max(0, Math.round(seconds))
+  const minutes = Math.floor(wholeSeconds / 60)
+  const remainder = wholeSeconds % 60
+  return `${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`
+}
+
+function formatProviderTimeline(usageJson: string | null | undefined): string[] {
+  if (!usageJson) return []
+  try {
+    const parsed = JSON.parse(usageJson) as { providerTimeline?: ProviderTimelineEvent[] }
+    const events = parsed.providerTimeline
+    if (!Array.isArray(events) || events.length === 0) return []
+    return events
+      .filter((event) => event.status !== 'started')
+      .map((event) => {
+        const chunk = event.chunkIndex && event.chunkCount
+          ? `Chunk ${event.chunkIndex}/${event.chunkCount}`
+          : 'Provider'
+        const bounds = Number.isFinite(event.audioStartSec) && Number.isFinite(event.audioEndSec)
+          ? ` (${formatAudioOffset(event.audioStartSec!)}-${formatAudioOffset(event.audioEndSec!)})`
+          : ''
+        const phase = (event.phase || 'request').replaceAll('-', ' ')
+        const duration = formatProcessingDuration(event.elapsedMs)
+        const status = event.status === 'failed' ? 'failed' : duration
+        return `${chunk}${bounds} ${phase}: ${status || 'duration not reported'}${event.detail ? ` - ${event.detail}` : ''}`
+      })
+  } catch {
+    return ['Provider request timeline: invalid persisted diagnostics']
+  }
+}
+
 /** Compact, evidence-backed stage attribution. Every chip is backed by an
  * immutable processing_runs row; absent cost/version stays honestly unknown. */
 function ProcessingRunChips({ runs }: { runs: ReaderProcessingRun[] }) {
@@ -2010,9 +2105,11 @@ function ProcessingRunChips({ runs }: { runs: ReaderProcessingRun[] }) {
   if (visible.length === 0) return null
   return (
     <div className="flex flex-wrap items-center gap-1.5 px-4 pt-2" data-testid="processing-provenance">
-      <span className="mr-0.5 text-[11px] font-medium text-muted-foreground">Tools</span>
+      <span className="mr-0.5 text-[11px] font-medium text-muted-foreground">Processing timeline</span>
       {visible.map((run) => {
         const provider = processingProviderLabel(run)
+        const duration = formatProcessingDuration(run.duration_ms)
+        const providerTimeline = run.stage === 'transcription' ? formatProviderTimeline(run.usage_json) : []
         const blocked = run.quality_status === 'blocked'
         const statusSuffix = !blocked && (run.status === 'degraded' || run.status === 'failed')
           ? ` · ${run.status}`
@@ -2024,6 +2121,9 @@ function ProcessingRunChips({ runs }: { runs: ReaderProcessingRun[] }) {
           run.version ? `Version: ${run.version}` : 'Version: not reported',
           `Execution: ${run.execution || 'not reported'}`,
           run.quality_status ? `Quality: ${run.quality_status}` : null,
+          duration ? `Duration: ${duration}` : 'Duration: not reported',
+          run.started_at ? `Started: ${run.started_at}` : null,
+          providerTimeline.length > 0 ? `Provider request timeline:\n${providerTimeline.join('\n')}` : null,
           run.estimated_cost_amount != null
             ? `Estimated cost: ${run.estimated_cost_currency || ''} ${run.estimated_cost_amount}`.trim()
             : 'Cost: not reported'
@@ -2041,7 +2141,7 @@ function ProcessingRunChips({ runs }: { runs: ReaderProcessingRun[] }) {
             data-provider={run.provider}
           >
             {run.execution === 'local' ? <Cpu className="h-3 w-3" /> : <Cloud className="h-3 w-3" />}
-            {processingStageLabel(run.stage)} · {blocked ? 'blocked' : provider}{statusSuffix}
+            {processingStageLabel(run.stage)} · {blocked ? 'blocked' : provider}{duration ? ` · ${duration}` : ''}{statusSuffix}
           </span>
         )
       })}

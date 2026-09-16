@@ -14,6 +14,18 @@ vi.mock('../../services/database', () => ({
   unassignSpeaker: vi.fn()
 }))
 
+vi.mock('../../services/vector-store', () => ({
+  getVectorStore: vi.fn()
+}))
+
+vi.mock('../../services/voice-identity-consolidation', () => ({
+  consolidateVoiceIdentityForSpeaker: vi.fn(() => ({
+    canonicalClusterId: 'voice-1',
+    mergedClusterIds: [],
+    updatedRecordingIds: []
+  }))
+}))
+
 function handlerFor(channel: string) {
   return vi.mocked(ipcMain.handle).mock.calls.find((call) => call[0] === channel)?.[1]
 }
@@ -32,6 +44,7 @@ describe('Transcripts IPC Handlers', () => {
 
   it('assignSpeaker delegates with newName and returns the contact', async () => {
     const { assignSpeaker } = await import('../../services/database')
+    const { consolidateVoiceIdentityForSpeaker } = await import('../../services/voice-identity-consolidation')
     vi.mocked(assignSpeaker).mockReturnValue({ id: 'c1', name: 'Alice' } as any)
 
     registerTranscriptsHandlers()
@@ -48,6 +61,7 @@ describe('Transcripts IPC Handlers', () => {
       newName: 'Alice',
       voiceAnchor: { method: 'manual', confidence: 1 }
     })
+    expect(consolidateVoiceIdentityForSpeaker).toHaveBeenCalledWith('rec-1', 'Speaker 1', 'c1')
   })
 
   it('assignSpeaker rejects when neither contactId nor newName is given', async () => {

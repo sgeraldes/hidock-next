@@ -197,7 +197,7 @@ const DEFAULT_CONFIG: AppConfig = {
   transcription: {
     provider: 'gemini',
     geminiApiKey: '',
-    geminiModel: 'gemini-3.5-flash', // current flash model (2.0/2.5-flash retired); audio-capable for transcription
+    geminiModel: 'gemini-3.5-transcribe',
     localAsrPath: process.env.ASR_MCP_PATH || 'G:\\Code\\claude-plugins\\plugins\\mcp-asr',
     localAsrHfToken: process.env.HF_TOKEN || '',
     localAsrVocabularyFile: 'vocabulary.json',
@@ -291,17 +291,30 @@ export const RETIRED_GEMINI_MODELS = new Set([
   'gemini-2.5-flash',
   'gemini-3-pro-preview',
 ])
-export const CURRENT_GEMINI_MODEL = 'gemini-3.5-flash'
+export const CURRENT_GEMINI_TRANSCRIPTION_MODEL = 'gemini-3.5-transcribe'
+export const CURRENT_GEMINI_CHAT_MODEL = 'gemini-3.5-flash'
+/** Backward-compatible alias used by general Gemini analysis code. */
+export const CURRENT_GEMINI_MODEL = CURRENT_GEMINI_CHAT_MODEL
+
+const LEGACY_GEMINI_TRANSCRIPTION_MODELS = new Set([
+  ...RETIRED_GEMINI_MODELS,
+  'gemini-3.5-flash',
+  'gemini-flash-latest',
+  'gemini-flash-lite-latest',
+  'gemini-3.1-flash-lite',
+  'gemini-pro-latest',
+])
 
 /** Upgrade any retired geminiModel values in-place. Returns true if changed. */
 function migrateRetiredGeminiModels(cfg: AppConfig): boolean {
   let changed = false
-  for (const section of ['transcription', 'chat'] as const) {
-    const sec = cfg[section] as { geminiModel?: string } | undefined
-    if (sec && sec.geminiModel && RETIRED_GEMINI_MODELS.has(sec.geminiModel)) {
-      sec.geminiModel = CURRENT_GEMINI_MODEL
-      changed = true
-    }
+  if (cfg.transcription?.geminiModel && LEGACY_GEMINI_TRANSCRIPTION_MODELS.has(cfg.transcription.geminiModel)) {
+    cfg.transcription.geminiModel = CURRENT_GEMINI_TRANSCRIPTION_MODEL
+    changed = true
+  }
+  if (cfg.chat?.geminiModel && RETIRED_GEMINI_MODELS.has(cfg.chat.geminiModel)) {
+    cfg.chat.geminiModel = CURRENT_GEMINI_CHAT_MODEL
+    changed = true
   }
   return changed
 }

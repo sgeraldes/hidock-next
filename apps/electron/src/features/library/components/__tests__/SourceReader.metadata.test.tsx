@@ -236,7 +236,14 @@ describe('SourceReader — metadata editing', () => {
     vi.mocked(window.electronAPI.transcripts.getProcessingRuns).mockResolvedValueOnce({
       success: true,
       data: [
-        { id: 'run-tx', stage: 'transcription', provider: 'gemini', tool: 'gemini', model: 'gemini-3.5-flash', execution: 'cloud', status: 'completed' },
+        {
+          id: 'run-tx', stage: 'transcription', provider: 'gemini', tool: 'gemini',
+          model: 'gemini-3.5-transcribe', execution: 'cloud', status: 'completed', duration_ms: 109396,
+          usage_json: JSON.stringify({ providerTimeline: [
+            { phase: 'upload', status: 'completed', elapsedMs: 3331, chunkIndex: 1, chunkCount: 2, audioStartSec: 0, audioEndSec: 1200 },
+            { phase: 'provider-transcription', status: 'completed', elapsedMs: 43689, chunkIndex: 1, chunkCount: 2, audioStartSec: 0, audioEndSec: 1200 }
+          ] })
+        },
         { id: 'run-dia', stage: 'diarization', provider: 'local-asr', tool: 'pyannote', model: null, execution: 'local', status: 'degraded', quality_status: 'degraded' },
         { id: 'run-sum', stage: 'summary', provider: 'gemini', tool: 'gemini-analysis', model: 'gemini-3.5-flash', execution: 'cloud', status: 'completed' },
       ]
@@ -245,9 +252,13 @@ describe('SourceReader — metadata editing', () => {
     render(<SourceReader recording={rec} transcript={{ id: 'tx-runs', recording_id: rec.id, full_text: 'hello' } as any} />)
 
     const provenance = await screen.findByTestId('processing-provenance')
-    expect(provenance).toHaveTextContent('Transcription · Gemini')
+    expect(provenance).toHaveTextContent('Transcription · Gemini · 1m 49s')
     expect(provenance).toHaveTextContent('Diarization · pyannote')
     expect(provenance).toHaveTextContent('Summary · Gemini')
+    const transcriptionChip = provenance.querySelector('[data-stage="transcription"]')
+    expect(transcriptionChip).toHaveAttribute('title', expect.stringContaining('Model: gemini-3.5-transcribe'))
+    expect(transcriptionChip).toHaveAttribute('title', expect.stringContaining('Chunk 1/2 (00:00-20:00) upload: 3.3 s'))
+    expect(transcriptionChip).toHaveAttribute('title', expect.stringContaining('provider transcription: 44 s'))
   })
 
   it('shows blocked speaker identity as blocked instead of claiming successful resolution', async () => {

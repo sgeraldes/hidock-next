@@ -19,7 +19,7 @@ const DURATION = 4815 // 17:25:05 -> 18:45:20
 
 const MEETINGS: SplitMeetingWindow[] = [
   { subject: 'Delivery Framework 1:1', startTime: '2026-08-18T17:00:00.000Z', endTime: '2026-08-18T17:45:00.000Z' },
-  { subject: 'DFX5 Interview is scheduled', startTime: '2026-08-18T17:45:00.000Z', endTime: '2026-08-18T18:45:00.000Z' }
+  { subject: 'Next meeting is scheduled', startTime: '2026-08-18T17:45:00.000Z', endTime: '2026-08-18T18:45:00.000Z' }
 ]
 
 describe('suggestMeetingBoundarySplits', () => {
@@ -29,7 +29,7 @@ describe('suggestMeetingBoundarySplits', () => {
     expect(out[0].reason).toBe('meeting-boundary')
     expect(out[0].timeSec).toBeCloseTo(1195, 0) // 17:45:00 is 1195s in
     expect(out[0].endingMeetingSubject).toBe('Delivery Framework 1:1')
-    expect(out[0].startingMeetingSubject).toBe('DFX5 Interview is scheduled')
+    expect(out[0].startingMeetingSubject).toBe('Next meeting is scheduled')
   })
 
   it('snaps onto nearby silence so the cut is not mid-word', () => {

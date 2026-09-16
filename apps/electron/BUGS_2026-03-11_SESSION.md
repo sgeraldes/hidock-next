@@ -1,10 +1,8 @@
 # Bug Report: HiDock Electron App - Session 2026-03-11
 
-**Reporter**: Sebastian Geraldes
 **Date**: 2026-03-11
 **App Version**: dev (electron-vite)
-**Device**: HiDock H1E (SN: HD1E243505435, FW: 6.2.5)
-**Files on Device**: 1326 recordings
+**Device**: HiDock H1E
 
 ---
 
@@ -152,11 +150,11 @@ The 2-second debounce in `useUnifiedRecordings.ts` doesn't help because the even
 ## BUG-009: Wrong Meeting Linked to Recording (AI Matching Error)
 **Severity**: P1 - High
 **Subsystem**: Meeting-Recording Linking
-**Observed**: Recording made during "Technical Interview - DFX5" (Wed Mar 11, ~6:30-7:30 PM) was linked to "Antamina MAP 2024 - Daily interno" with AI confidence 0.95. Calendar clearly shows the correct meeting was the Technical Interview. Antamina meeting was on a DIFFERENT DAY (Thursday).
+**Observed**: A recording was linked to the wrong calendar meeting despite a high AI confidence score.
 **Expected**: Recording should link to the correct meeting based on time overlap and content.
 
 **Root Cause (Two-Stage Matching)**:
-1. **Stage 1** (time-based): Finds candidate meetings within +/-30 min of recording time. Only 1 candidate was found (confidence 0.5545), suggesting only "Antamina" was in the database for that time window. The actual meeting ("Technical Interview") may not have been synced from calendar yet.
+1. **Stage 1** (time-based): Finds candidate meetings within +/-30 min of recording time. Only 1 candidate was found (confidence 0.5545), suggesting the intended meeting was not synced from calendar yet.
 2. **Stage 2** (AI content): Gemini analyzes transcript and selects from candidates. With only 1 candidate, it confirmed the wrong match with 0.95 confidence.
 
 **Key Issue**: If only 1 candidate is found, the AI has no choice — it confirms the wrong meeting. The system does NOT validate that the candidate's time actually overlaps well. No attendee matching is performed.
@@ -170,7 +168,7 @@ The 2-second debounce in `useUnifiedRecordings.ts` doesn't help because the even
 ## BUG-010: "Invalid Recording ID" Error When Changing Linked Meeting
 **Severity**: P0 - Critical
 **Subsystem**: Recording ID Schema
-**Observed**: Clicking pencil icon to change linked meeting shows "Invalid recording ID" error. Console shows Zod validation: `rec_2026Mar11_185933_Rec71_wav` doesn't match UUID format.
+**Observed**: Clicking pencil icon to change linked meeting shows "Invalid recording ID" error. Console shows Zod validation: a recording identifier doesn't match UUID format.
 **Expected**: Dialog should open and allow meeting change.
 
 **Root Cause**: Recording IDs are generated in `rec_xxx` format by `recording-watcher.ts` (line 124-127: `rec_${filename.replace(/[^a-zA-Z0-9]/g, '_')}`), but the `recordings:getCandidates` IPC handler validates with `z.string().uuid()` which requires UUID format. The formats are fundamentally incompatible.
@@ -276,7 +274,7 @@ Both render the same `transcript.summary` data.
 ## BUG-016: Selection Model Inconsistency (Checkbox vs Click)
 **Severity**: P2 - Medium
 **Subsystem**: UI / Selection UX
-**Observed**: Clicking a row opens it in the center panel (click-to-view). Checkboxes select rows for bulk operations. These are independent — user can have Rec71 checkbox-selected while viewing Rec70 in the center panel. "1 of 1333 selected" refers to checkboxes, not the viewed item. This creates confusion about what "selected" means.
+**Observed**: Clicking a row opens it in the center panel (click-to-view). Checkboxes select rows for bulk operations. These are independent — a checked row can differ from the item viewed in the center panel. The count refers to checkboxes, not the viewed item. This creates confusion about what "selected" means.
 **Expected**: Clear mental model — either:
 - **Option A**: Click anywhere on row = select (single) + view in center panel. Checkboxes only for multi-select/bulk.
 - **Option B**: Checkboxes for selection, click row body for viewing. But make the distinction visually obvious.

@@ -7,6 +7,19 @@ export interface TranscriptSegment {
   source: 'mic' | 'system'
 }
 
+export type TranscriptionTracePhase = 'chunk' | 'upload' | 'provider-transcription' | 'parse' | 'cleanup'
+
+export interface TranscriptionTraceEvent {
+  phase: TranscriptionTracePhase
+  status: 'started' | 'completed' | 'failed'
+  chunkIndex: number
+  chunkCount: number
+  audioStartSec: number
+  audioEndSec: number
+  elapsedMs?: number
+  detail?: string
+}
+
 export interface TranscribeOptions {
   source: 'mic' | 'system'
   language?: string
@@ -17,6 +30,8 @@ export interface TranscribeOptions {
   durationSeconds?: number
   /** Reports completion of bounded provider ranges/chunks. */
   onProgress?: (done: number, total: number) => void
+  /** Structured provider-boundary timing for diagnostics. */
+  onTrace?: (event: TranscriptionTraceEvent) => void
   /** Optional free-text context passed to the engine's prompt (e.g. meeting context for Gemini). */
   context?: string
   /**

@@ -8,8 +8,8 @@
 # transcription task and keeps every approach on identical audio.
 #
 # 3 source recordings of DIFFERENT length + speaker count; 1–2 clips each:
-#   A  long, multi-speaker, Spanish (DFX5 practice mtg)  2026Jul08-151114-Rec47.wav  (52.9 min)
-#        A1 140–230s  Memo->Sebastián handoff (2 speakers; the 2:31 boundary case)
+#   A  long, multi-speaker, Spanish practice meeting  (52.9 min)
+#        A1 140–230s  speaker handoff (2 speakers; the 2:31 boundary case)
 #        A2 900–985s  roll-call region (rapid multi-speaker self-intros)
 #   B  mid, 256 kbps                                      2025Aug06-163052-Rec22.wav  (15.8 min)
 #        B1 300–390s

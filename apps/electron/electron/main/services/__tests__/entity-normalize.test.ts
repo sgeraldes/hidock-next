@@ -59,7 +59,7 @@ describe('stripDiacritics / accentFoldedKey', () => {
 describe('looksLikeEmail', () => {
   it('accepts real emails, rejects names', () => {
     expect(looksLikeEmail('a@b.com')).toBe(true)
-    expect(looksLikeEmail('sebastian.geraldes@dfx5.com')).toBe(true)
+    expect(looksLikeEmail('test.person@example.invalid')).toBe(true)
     expect(looksLikeEmail('Sebastián')).toBe(false)
     expect(looksLikeEmail('a@b')).toBe(false)
   })

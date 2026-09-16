@@ -156,7 +156,7 @@ visible restore strip. The persisted vertical resize handle allocates space betw
 summary/transcript workspace. Scrolling never changes a section mode. Maximizing collapses the source list to its labelled
 rail and provides **Return to reader**, restoring the exact prior list state.
 
-Live testing on the real 46m 35s DFX5 Intranet source found two additional failures that the component test did not expose:
+Live testing found two additional failures that the component test did not expose:
 SourceReader was remounted when the source list collapsed, which discarded component-local maximize state, and TanStack
 Virtual retained the removed list scroll element, leaving a blank source list after return. Maximize intent now lives in
 the Library store so it survives the pane remount, and the virtualizer observes the replacement scroll element. The

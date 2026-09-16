@@ -569,7 +569,7 @@ export const geminiWindowScorer: WindowScorer = async (windows, shouldGenerate) 
   if (!eligibleToGenerate(shouldGenerate)) return new Map()
 
   const genAI = new GoogleGenerativeAI(apiKey)
-  const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-3.5-flash' })
+  const model = genAI.getGenerativeModel({ model: config.chat?.geminiModel || 'gemini-3.5-flash' })
 
   const windowBlock = windows
     .map((w) => `#${w.index} [${formatClock(w.startSec)}-${formatClock(w.endSec)}]\n${w.text}`)

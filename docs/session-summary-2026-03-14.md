@@ -57,7 +57,7 @@ The USB communication protocol (`jensen.ts`) was fully rewritten in TypeScript.
 
 ### What Happened
 
-Sebastian ran the Electron app with a real HiDock H1E device (SN: HD1E243505435, FW: 6.2.5, 1326 recordings on device). A cascade of bugs was encountered and reported with screenshots + terminal logs. All were investigated with parallel background agents and direct code analysis.
+A live-device session exposed a cascade of bugs, which were investigated with screenshots, terminal logs, and direct code analysis.
 
 ### Bugs Documented
 
@@ -69,9 +69,9 @@ Sebastian ran the Electron app with a real HiDock H1E device (SN: HD1E243505435,
 | BUG-02 | **File list download blocks all other operations** — queued download sat ~1 min with zero UI feedback | `DownloadService` processes sequentially; device fetches file list (takes ~95s for 1326 files) before any download starts; no progress indicator during this phase |
 | BUG-03 | **Download/transcription status icons don't update** — download icon stuck as spinning arrow after completion | IPC events `download:complete`, `recording:updated` not triggering UI re-render of row state |
 | BUG-04 | **Transcription status stuck at "Processing" after completion** — `transcriptionStatus` field in DB not propagated back to renderer after background service completes | `recording:updated` IPC event not emitted or not handled in `useUnifiedRecordings` |
-| BUG-05 | **Wrong meeting linked** — "Antamina MAP 2024 - Daily interno" matched instead of "Technical Interview - DFX5" | Initial link (confidence 0.55) fires before transcription; post-transcription AI re-match (confidence 0.95) overwrites to the wrong meeting |
-| BUG-06 | **Invalid recording ID on `getCandidates`** — `rec_2026Mar11_185933_Rec71_wav` fails UUID validation | IPC handler schema requires UUID; recordings use `rec_<filename>` format. Zod schema mismatch |
-| BUG-07 | **Transcript truncated** — ends ~10 min before meeting end ("encontrar que fue lo que pasó") | Likely Gemini API token limit or chunking boundary issue in `transcription.ts` |
+| BUG-05 | **Wrong meeting linked** — a recording was matched to the wrong calendar event | Initial link (confidence 0.55) fires before transcription; post-transcription AI re-match (confidence 0.95) overwrites to the wrong meeting |
+| BUG-06 | **Invalid recording ID on `getCandidates`** — a recording identifier fails UUID validation | IPC handler schema requires UUID; recordings use `rec_<filename>` format. Zod schema mismatch |
+| BUG-07 | **Transcript truncated** — ends before the recording ends | Likely Gemini API token limit or chunking boundary issue in `transcription.ts` |
 
 #### 🟠 HIGH — Broken UX
 
@@ -84,7 +84,7 @@ Sebastian ran the Electron app with a real HiDock H1E device (SN: HD1E243505435,
 | BUG-12 | **Selection model inconsistency** — checkbox-selected rows and click-focused row are independent, creating two conflicting states in the UI | No unified selection model; `selectedRecordings` (batch checkbox) and `activeRecording` (detail view) are separate with no link |
 | BUG-13 | **Duration shows "Unknown"** | Jensen protocol returns file size; duration is not stored in DB from device file list; no audio metadata extraction run at download time |
 | BUG-14 | **Summary generated in English despite Spanish transcription** | Output generator prompt likely hardcoded to English; no language detection or pass-through |
-| BUG-15 | **AI-generated title not applied** — recording still named "Antamina MAP 2024 - Daily interno" after transcription | `output-generator.ts` generates title but `recordings` table `title` field not updated |
+| BUG-15 | **AI-generated title not applied** — recording title remains unchanged after transcription | `output-generator.ts` generates title but `recordings` table `title` field not updated |
 | BUG-16 | **No way to open source file or reveal in Finder/Explorer** | No "Open file" / "Show in folder" button in `SourceReader.tsx` or `SourceRow.tsx` |
 
 #### 🟡 MEDIUM — Missing/Incomplete

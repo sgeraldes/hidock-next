@@ -179,8 +179,8 @@ describe('identity-discovery — contacts', () => {
   })
 
   it('marks same-email stragglers autoMergeable even with divergent display names', () => {
-    addContact('c-a', 'Eduardo Ruiz', { email: 'e.ruiz@dfx5.com', meetings: 5 })
-    addContact('c-b', 'E. Ruiz', { email: 'e.ruiz@dfx5.com', meetings: 1 })
+    addContact('c-a', 'Person One', { email: 'shared@example.invalid', meetings: 5 })
+    addContact('c-b', 'P. One', { email: 'shared@example.invalid', meetings: 1 })
 
     const res = discoverContactMerges()
     expect(res.suggestionsCreated).toBe(1)
@@ -204,8 +204,8 @@ describe('identity-discovery — contacts', () => {
   })
 
   it('still suggests an opposite-gender pair when a shared email corroborates it', () => {
-    addContact('c-fo', 'Fernando', { email: 'f.pair@dfx5.com', meetings: 2 })
-    addContact('c-fa', 'Fernanda', { email: 'f.pair@dfx5.com', meetings: 1 })
+    addContact('c-fo', 'Fernando', { email: 'pair@example.invalid', meetings: 2 })
+    addContact('c-fa', 'Fernanda', { email: 'pair@example.invalid', meetings: 1 })
 
     const res = discoverContactMerges()
     expect(res.suggestionsCreated).toBe(1)

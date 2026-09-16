@@ -62,7 +62,7 @@ describe('entity-resolver', () => {
       CREATE TABLE meeting_projects (meeting_id TEXT, project_id TEXT, source TEXT, source_recording_id TEXT);
 
       INSERT INTO contacts (id, name, email) VALUES
-        ('c-seb', 'Sebastián Geraldes', 'sebastian.geraldes@dfx5.com'),
+        ('c-test', 'Test Contact', 'test.contact@example.invalid'),
         ('c-oscar', 'Oscar Ruiz', NULL),
         ('c-edu', 'Eduardo Vera', NULL);
       INSERT INTO projects (id, name) VALUES
@@ -77,21 +77,21 @@ describe('entity-resolver', () => {
   })
 
   it('resolves an exact email at 1.0', () => {
-    const r = resolveContact('sebastian.geraldes@dfx5.com')
-    expect(r).toEqual({ id: 'c-seb', confidence: 1.0, method: 'email' })
+    const r = resolveContact('test.contact@example.invalid')
+    expect(r).toEqual({ id: 'c-test', confidence: 1.0, method: 'email' })
   })
 
   it('resolves an exact case-insensitive name at 0.95', () => {
-    const r = resolveContact('sebastián geraldes')
-    expect(r.id).toBe('c-seb')
+    const r = resolveContact('test contact')
+    expect(r.id).toBe('c-test')
     expect(r.confidence).toBe(0.95)
     expect(r.method).toBe('exact-name')
   })
 
   it('resolves via the alias table using the stored confidence', () => {
-    dbInstance.run("INSERT INTO contact_aliases (id, alias_norm, contact_id, source, confidence) VALUES ('a1', 'sebas', 'c-seb', 'merge', 1.0)")
-    const r = resolveContact('Sebas')
-    expect(r.id).toBe('c-seb')
+    dbInstance.run("INSERT INTO contact_aliases (id, alias_norm, contact_id, source, confidence) VALUES ('a1', 'test', 'c-test', 'merge', 1.0)")
+    const r = resolveContact('Test')
+    expect(r.id).toBe('c-test')
     expect(r.confidence).toBe(1.0)
     expect(r.method).toBe('alias')
   })
@@ -104,24 +104,24 @@ describe('entity-resolver', () => {
   })
 
   it('fuzzy match without context stays in the suggestion band', () => {
-    const r = resolveContact('Sebastan Geraldes') // lev 1 vs "Sebastián Geraldes"
-    expect(r.id).toBe('c-seb')
+    const r = resolveContact('Tst Contact') // lev 1 vs "Test Contact"
+    expect(r.id).toBe('c-test')
     expect(r.method).toBe('fuzzy')
     expect(r.confidence).toBeGreaterThanOrEqual(0.6)
     expect(r.confidence).toBeLessThan(0.8)
   })
 
   it('context co-occurrence boosts a fuzzy match into auto-link range', () => {
-    dbInstance.run("INSERT INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES ('m1', 'c-seb', 'attendee', 'calendar')")
-    const r = resolveContact('Sebastan Geraldes', { meetingId: 'm1' })
-    expect(r.id).toBe('c-seb')
+    dbInstance.run("INSERT INTO meeting_contacts (meeting_id, contact_id, role, source) VALUES ('m1', 'c-test', 'attendee', 'calendar')")
+    const r = resolveContact('Tst Contact', { meetingId: 'm1' })
+    expect(r.id).toBe('c-test')
     expect(r.method).toBe('fuzzy-context')
     expect(r.confidence).toBeGreaterThanOrEqual(0.8)
   })
 
   it('a rejected alias blocks resolving that name to the paired contact', () => {
-    dbInstance.run("INSERT INTO contact_aliases (id, alias_norm, contact_id, source, confidence) VALUES ('r1', 'sebas', 'c-seb', 'rejected', 0)")
-    const r = resolveContact('Sebas') // would otherwise prefix-fuzzy to c-seb
+    dbInstance.run("INSERT INTO contact_aliases (id, alias_norm, contact_id, source, confidence) VALUES ('r1', 'test', 'c-test', 'rejected', 0)")
+    const r = resolveContact('Test') // would otherwise prefix-fuzzy to c-test
     expect(r.id).toBeNull()
     expect(r.method).toBe('none')
   })

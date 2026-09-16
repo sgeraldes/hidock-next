@@ -173,10 +173,7 @@ ELECTRON ABI (the running app holds it). So:
 ### PENDING USER DECISIONS (on the ops dashboard as clickable items):
 - ASR pipeline direction — awaits WER spike results (keep Gemini / hybrid /
   local model). Then: pilot re-transcribe ~20 → maybe full ~1,900 archive.
-- Entra app client ID for M365 (register in DFX5 tenant; personal-account reg
-  is deprecated by Microsoft) → paste to me → I bake into default-app.ts.
-- Rec46→Retro Belcorp confirm; backlog routing; 5 flagged re-transcriptions;
-  delete merged worktree branches.
+- Confirm the remaining backlog routing and clean up merged worktree branches.
 
 ### SHIPPED THIS SESSION (2026-07-09/10, all pushed):
 Context Graph v2 (lens/strata/provenance/budgets), connector platform
@@ -185,8 +182,7 @@ single-instance lock, waveform-play fix, ambiguous-name per-recording
 resolution + signal-tiers, **attribution scorer** (all-day bridge 1.00→0.11),
 **reader/meeting UX** (clickable timestamped speakers in MeetingDetail,
 auto-scroll, contrast, past-meeting Join hidden, none→Not-transcribed),
-**self-ID pass** (roll-call self-intros→named speakers, v0.97 tier, Rec47
-yields Santiago de la Colina/Óscar Pereda), **per-turn/split speaker
+**self-ID pass** (roll-call self-intros→named speakers, v0.97 tier), **per-turn/split speaker
 correction** (v37 — the Memo-at-0:00 fix), **source deletion cascade** (v38 —
 mark-personal + soft/hard delete of all derived data + audio file).
 
@@ -345,9 +341,8 @@ Hurtado) — normal merge-flow candidates.
   (~1.1GB) — lazy/Float32Array retention next; sibling apps (meeting-
   assistant/recorder) need npm install for better-sqlite3.
 Also today: consumer-grade M365 auth (1861b792 — loopback popup flow,
-shipped-default client id plumbing, multi-account instances) awaiting the
-user's Entra registration (DFX5 tenant; personal-account registration was
-deprecated by Microsoft).
+shipped-default client id plumbing, multi-account instances) awaiting final
+configuration.
 
 Backlog: ~1,200 queued, draining again post-migration. NOTHING in flight.
 Pushed through 29d38e0b.

@@ -3,6 +3,39 @@
 This append-only registry records behavior changes that amend a specification or close a production incident. Each
 entry names the governing spec, implementation boundary, tests, and known remaining work.
 
+## CHANGE-2026-08-27-001 — Stable confirmed Voice IDs across calls
+
+- **Date:** 2026-08-27
+- **Status:** Implemented and validated without device access
+- **Governing spec:** `spec/SPEC-011-persistent-acoustic-speaker-linking.md`
+
+### Production finding
+
+The global tables and manual person anchor existed, but the matcher compared a confirmed person against every anonymous
+duplicate UUID. Real production vectors for the same speaker were highly similar (`0.93–0.96`), yet their tiny raw
+runner-up margins produced `needs_review`; persistence then minted another UUID. Each false split therefore made the
+next call more ambiguous. Selecting a person anchored only that one cluster and did not repair earlier duplicates.
+
+### Decision and implementation
+
+- Keep the generic threshold-plus-margin rule for anonymous clustering.
+- Permit a stricter (`0.90`) confirmed-person match to ignore anonymous fragments while still requiring separation from
+  every *different* confirmed contact.
+- On manual or accepted self-identification assignment, consolidate same-model historical duplicates only when they do
+  not co-occur and carry no conflicting person evidence.
+- Preserve and repoint observations, rebuild the duration-weighted centroid, rewrite historical transcript speaker
+  labels, and create the recording-scoped person bindings.
+- Leave co-occurring, differently anchored, or differently bound candidates untouched and inspectable.
+
+### Verification
+
+- Focused Voice ID, transcript-handler, and self-identification suites: 49 tests passed.
+- Node typecheck passed.
+- Regression coverage includes the anonymous-fragment loop, competing confirmed contacts, historical relabeling/person
+  propagation, and the same-recording non-merge guard.
+- Production evidence was inspected read-only; no live database mutation, application launch, audio processing, or USB
+  access was performed.
+
 ## CHANGE-2026-08-24-002 — Honest Community-1 access diagnosis in Settings
 
 - **Date:** 2026-08-24

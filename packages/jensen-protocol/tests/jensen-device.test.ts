@@ -10,7 +10,13 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { EventEmitter } from 'events'
-import { JensenDevice, USB_PRODUCT_IDS, CMD } from '../src/index.js'
+import {
+  JensenDevice,
+  USB_PRODUCT_IDS,
+  CMD,
+  parseRealtimePayload,
+  supportsRealtimeFirmware,
+} from '../src/index.js'
 
 // A minimal WebUSB backend stand-in: no devices, rejecting picker.
 function makeFakeUsb(overrides: Partial<USB> = {}): USB {
@@ -84,6 +90,38 @@ describe('JensenDevice (transport-agnostic core)', () => {
 
   it('getModel() returns "unknown" before connection', () => {
     expect(new JensenDevice(makeFakeUsb()).getModel()).toBe('unknown')
+  })
+
+  it('builds the current HiNotes realtime control and dequeue commands', async () => {
+    const device = new JensenDevice(makeFakeUsb())
+    const sendCommand = vi.fn().mockResolvedValue({ result: 'success' })
+    ;(device as unknown as { sendCommand: typeof sendCommand }).sendCommand = sendCommand
+
+    await device.startRealtime(2)
+    await device.pauseRealtime()
+    await device.stopRealtime()
+    await device.getRealtimeData(999)
+
+    const packets = sendCommand.mock.calls.map((call) => call[0].make() as Uint8Array)
+    expect(Array.from(packets[0].subarray(12))).toEqual([0, 0, 0, 1, 0, 0, 0, 2])
+    expect(Array.from(packets[1].subarray(12))).toEqual([0, 0, 0, 2, 0, 0, 0, 0])
+    expect(Array.from(packets[2].subarray(12))).toEqual([0, 0, 0, 0, 0, 0, 0, 0])
+    expect((packets[3][2] << 8) | packets[3][3]).toBe(CMD.REALTIME_TRANSFER)
+    expect(packets[3].length).toBe(12)
+  })
+
+  it('keeps the realtime metadata header and decodes queue depth and mute state', () => {
+    const body = new Uint8Array([0, 0, 0, 3, 0, 0, 0, 1, 0x34, 0x12, 0x78, 0x56])
+    expect(parseRealtimePayload(body)).toEqual({ rest: 3, muted: true, data: body })
+    expect(parseRealtimePayload(new Uint8Array(7))).toBeNull()
+  })
+
+  it('applies the HiNotes realtime firmware gates, including the H1E C1 branch', () => {
+    expect(supportsRealtimeFirmware('hidock-h1e', 393984)).toBe(true) // 6.3.0
+    expect(supportsRealtimeFirmware('hidock-h1e', 397319)).toBe(false) // early C1
+    expect(supportsRealtimeFirmware('hidock-h1e', 397568)).toBe(true) // C1 live minimum
+    expect(supportsRealtimeFirmware('hidock-h1', 328447)).toBe(false)
+    expect(supportsRealtimeFirmware('hidock-h1', 328448)).toBe(true)
   })
 
   it('bounds a stalled download, resolves false, and quarantines the connection', async () => {

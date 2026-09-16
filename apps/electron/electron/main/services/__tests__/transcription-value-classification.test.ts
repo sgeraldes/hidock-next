@@ -363,7 +363,7 @@ describe('transcription.valueClassificationEnabled — analysis prompt kill-swit
    invent people; only include names actually appearing in the conversation.
 8. Project: which project/initiative this meeting belongs to.
    No projects exist yet.
-   If none fits, propose a short new project name (2-5 words, e.g. "DFX5 Gateway" or client name) and set is_new true.
+   If none fits, propose a short new project name (2-5 words) and set is_new true.
    If the call is personal or clearly not project work, omit the project field.
 
 IMPORTANT: Respond in the SAME LANGUAGE as the transcript. If the transcript is in Spanish, write the summary, action items, topics, key points, title, and questions in Spanish. If English, respond in English.

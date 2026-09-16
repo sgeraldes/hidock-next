@@ -1,5 +1,11 @@
 // Engine interface
-export type { TranscriptSegment, TranscribeOptions, TranscriptionEngine } from './engines/engine-interface.js'
+export type {
+  TranscriptSegment,
+  TranscribeOptions,
+  TranscriptionEngine,
+  TranscriptionTraceEvent,
+  TranscriptionTracePhase,
+} from './engines/engine-interface.js'
 export { NoSpeechDetectedError, TranscriptionCancelledError } from './engines/engine-interface.js'
 
 // Engines

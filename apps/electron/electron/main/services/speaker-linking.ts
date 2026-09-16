@@ -68,11 +68,48 @@ export interface MatchDecision {
   status: 'matched' | 'new' | 'needs_review'
 }
 
+export interface VoiceMatchCandidate {
+  id: string
+  centroid: number[]
+  /** Present only after independent manual/self-identification evidence. */
+  contactId?: string | null
+}
+
+/**
+ * An independently confirmed person anchor needs a deliberately stricter
+ * absolute gate than an anonymous-cluster match. Anonymous near-duplicates of
+ * that same person must not erase the identity by consuming the raw runner-up
+ * margin, but a competing DIFFERENT anchored person still must.
+ */
+export const ANCHORED_VOICE_MATCH_THRESHOLD = 0.9
+
 export class SpeakerLinkingUnavailableError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'SpeakerLinkingUnavailableError'
   }
+}
+
+/**
+ * Local speaker linking is an optional enrichment stage. Environment/setup
+ * failures must degrade to provider-managed diarization instead of preventing
+ * the configured transcription provider from running.
+ */
+export function isSpeakerLinkingUnavailableDetail(detail: string): boolean {
+  const unavailablePatterns = [
+    /ModuleNotFoundError|No module named/i,
+    /ImportError:|is required for a normal functioning/i,
+    /FFmpeg is required .* not found/i,
+    /GatedRepo|401|403|not authorized|cannot access gated/i
+  ]
+  return unavailablePatterns.some((pattern) => pattern.test(detail))
+}
+
+export function resolveSpeakerLinkingFfmpegPath(path: string | null): string | undefined {
+  if (!path) return undefined
+  // electron-builder unpacks native executables beside app.asar. Development
+  // paths do not contain app.asar, so the replacement is harmless there.
+  return path.replace(/app\.asar([\\/])/, 'app.asar.unpacked$1')
 }
 
 export function normalizeEmbedding(values: number[]): number[] {
@@ -92,7 +129,7 @@ export function cosineSimilarity(left: number[], right: number[]): number {
 
 export function decideVoiceMatch(
   embedding: number[],
-  candidates: Array<{ id: string; centroid: number[] }>,
+  candidates: VoiceMatchCandidate[],
   threshold: number,
   requiredMargin: number,
   excludedClusterIds: ReadonlySet<string> = new Set()
@@ -109,6 +146,34 @@ export function decideVoiceMatch(
   const margin = best.similarity - (ranked[1]?.similarity ?? -1)
   if (best.similarity >= threshold && margin >= requiredMargin) {
     return { clusterId: best.id, similarity: best.similarity, runnerUpMargin: margin, status: 'matched' }
+  }
+
+  // Once a voice has independent person evidence, compare its ambiguity
+  // against OTHER known people rather than anonymous fragments. The previous
+  // policy compared every near-duplicate UUID, so one false split made all
+  // later observations ambiguous and minted another UUID on every call.
+  const contactByCluster = new Map(candidates.map((candidate) => [candidate.id, candidate.contactId ?? null]))
+  const bestByContact = new Map<string, { id: string; similarity: number }>()
+  for (const candidate of ranked) {
+    const contactId = contactByCluster.get(candidate.id)
+    if (!contactId || bestByContact.has(contactId)) continue
+    bestByContact.set(contactId, candidate)
+  }
+  const anchored = [...bestByContact.values()].sort((a, b) => b.similarity - a.similarity)
+  const anchoredBest = anchored[0]
+  if (anchoredBest) {
+    const anchoredMargin = anchoredBest.similarity - (anchored[1]?.similarity ?? -1)
+    if (
+      anchoredBest.similarity >= Math.max(threshold, ANCHORED_VOICE_MATCH_THRESHOLD) &&
+      anchoredMargin >= requiredMargin
+    ) {
+      return {
+        clusterId: anchoredBest.id,
+        similarity: anchoredBest.similarity,
+        runnerUpMargin: anchoredMargin,
+        status: 'matched'
+      }
+    }
   }
   return {
     clusterId: null,
@@ -175,7 +240,7 @@ function runWorker(
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        FFMPEG_PATH: ffmpegPath || process.env.FFMPEG_PATH,
+        FFMPEG_PATH: resolveSpeakerLinkingFfmpegPath(ffmpegPath) || process.env.FFMPEG_PATH,
         HF_TOKEN: config.localAsrHfToken || process.env.HF_TOKEN,
         HUGGINGFACE_HUB_TOKEN: config.localAsrHfToken || process.env.HUGGINGFACE_HUB_TOKEN
       }
@@ -214,7 +279,7 @@ function runWorker(
       clearInterval(cancellation)
       if (code !== 0) {
         const detail = stderr.trim().split('\n').slice(-12).join('\n') || `speaker-linking exited with code ${code}`
-        if (/ModuleNotFoundError|No module named|GatedRepo|401|403|not authorized|cannot access gated/i.test(detail)) {
+        if (isSpeakerLinkingUnavailableDetail(detail)) {
           reject(new SpeakerLinkingUnavailableError(detail))
         } else {
           reject(new Error(detail))
@@ -299,7 +364,11 @@ function persistMatches(recordingId: string, result: AcousticWorkerResult): Voic
        WHERE vc.model = ? AND vc.model_version = ? AND vc.embedding_dimension = ?`,
       [result.model, result.modelVersion, dimension]
     )
-    const candidates = clusters.map((cluster) => ({ id: cluster.id, centroid: parseCentroid(cluster) }))
+    const candidates: VoiceMatchCandidate[] = clusters.map((cluster) => ({
+      id: cluster.id,
+      centroid: parseCentroid(cluster),
+      contactId: cluster.contact_id
+    }))
     const rowsById = new Map(clusters.map((cluster) => [cluster.id, cluster]))
     const used = new Set<string>()
     const matches: VoiceMatch[] = []
@@ -346,7 +415,7 @@ function persistMatches(recordingId: string, result: AcousticWorkerResult): Voic
           contact_name: null
         }
         rowsById.set(clusterId, row)
-        candidates.push({ id: clusterId, centroid: embedding })
+        candidates.push({ id: clusterId, centroid: embedding, contactId: null })
       }
       used.add(clusterId)
       const stableLabel = stableVoiceLabel(clusterId)
