@@ -1,2 +1,0 @@
-I queues three files individually for download, I saw all three starting from the nowledge library's selection. The overall progress even shows 33%, but it stayed there, no changes after the first file was downloaded. There is no "continue button or anything". It just stopped.![](.wave/images/2026-02-23-hbnxxdql.png)
-![](.wave/images/2026-02-23-1kwjx9p0.png)
